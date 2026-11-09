@@ -255,7 +255,7 @@ Status InputController::Focus(bool focused) {
   if (focused && (owner_.lifecycle_->lifecycle_uncertain_ || !owner_.contents() ||
                   !owner_.execution_->visible_ || !RootWidget(owner_.contents()) ||
                   !RootView(owner_.contents())))
-    return Fail(ErrorCode::unavailable, "Visible renderer view required for focus");
+    return Fail(ErrorCode::kConflict, "Visible renderer view required for focus");
   if (!focused) {
     editable_target_.reset();
     auto previous = input_widget_;
@@ -315,48 +315,48 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
       client_gesture->sequence_id != owner_.touch_->client_touch_sequence_;
   if (!expired_long_press && !owner_.touch_->StartsNewSequence(input) &&
       owner_.touch_->AdmissionPending())
-    return Fail(ErrorCode::busy,
+    return Fail(ErrorCode::kBusy,
                 "Resolving/draining touch; retry this input with the same sequence");
   if (!input_commit_navigations_.empty())
-    return Fail(ErrorCode::unavailable, "Document commit is in progress");
+    return Fail(ErrorCode::kConflict, "Document commit is in progress");
   if (owner_.lifecycle_->lifecycle_uncertain_)
-    return Fail(ErrorCode::unavailable, "Browser lifecycle state uncertain; unload required");
+    return Fail(ErrorCode::kConflict, "Browser lifecycle state uncertain; unload required");
   if (input.token.view != owner_.view_ || input.token.session != owner_.session_)
-    return Fail(ErrorCode::stale_identity, "Input targets another WebView/session");
+    return Fail(ErrorCode::kConflict, "Input targets another WebView/session");
   const bool hover = IsHoverInput(input.payload);
   auto* root = RootWidget(owner_.contents());
   auto* host = hover ? root : FocusedWidget();
   auto* root_view = RootView(owner_.contents());
   if (!host || !root || !root_view)
-    return Fail(ErrorCode::unavailable, "Renderer widget required");
+    return Fail(ErrorCode::kUnavailable, "Renderer widget required");
   auto valid = ValidateInput(input.payload);
   if (!valid)
     return valid;
   if (hover &&
       (!owner_.execution_->visible_ || !InputFrameReady(owner_.contents()->GetPrimaryMainFrame())))
-    return Fail(ErrorCode::unavailable, "Hover requires a visible live WebView");
+    return Fail(ErrorCode::kConflict, "Hover requires a visible live WebView");
   if (hover && !held_pointers_.empty()) {
     const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
     if (!model || !model->focused)
-      return Fail(ErrorCode::unavailable, "Mouse drag requires focus");
+      return Fail(ErrorCode::kConflict, "Mouse drag requires focus");
   }
   if (const auto* mouse = std::get_if<MouseInput>(&input.payload);
       mouse && mouse->pen && mouse->action == MouseInput::Action::down &&
       held_pointers_.size() >= 16 && !held_pointers_.contains(mouse->pen->id))
-    return Fail(ErrorCode::resource_limit, "Too many active pointers");
+    return Fail(ErrorCode::kLimitExceeded, "Too many active pointers");
   const bool routed = std::holds_alternative<MouseInput>(input.payload) ||
                       std::holds_alternative<WheelInput>(input.payload) ||
                       std::holds_alternative<TouchInput>(input.payload) ||
                       std::holds_alternative<GestureInput>(input.payload);
   auto* router = root->GetInputEventRouter();
   if (routed && !router)
-    return Fail(ErrorCode::unavailable, "Input routing unavailable");
+    return Fail(ErrorCode::kUnavailable, "Input routing unavailable");
   auto* wheel_phase_handler =
       std::holds_alternative<WheelInput>(input.payload)
           ? static_cast<content::RenderWidgetHostViewAura*>(root_view)->GetMouseWheelPhaseHandler()
           : nullptr;
   if (std::holds_alternative<WheelInput>(input.payload) && !wheel_phase_handler)
-    return Fail(ErrorCode::unavailable, "Mouse wheel phase handling unavailable");
+    return Fail(ErrorCode::kUnavailable, "Mouse wheel phase handling unavailable");
   if (const auto status = owner_.touch_->PrepareInput(input))
     return *status;
   auto representable = std::visit(
@@ -378,14 +378,14 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
       },
       input.payload);
   if (!representable)
-    return Fail(ErrorCode::invalid_request, "Input exceeds Blink representation");
+    return Fail(ErrorCode::kInvalidRequest, "Input exceeds Blink representation");
   if (input.editable_target && routed)
-    return Fail(ErrorCode::invalid_request, "Editable target requires keyboard or IME input");
+    return Fail(ErrorCode::kInvalidRequest, "Editable target requires keyboard or IME input");
   std::uint64_t actual_editable_target = 0;
   if (!routed && UpdateEditableTarget(text_input_observation_.GetSource()))
     actual_editable_target = last_editable_target_id_;
   if (input.editable_target && input.editable_target != actual_editable_target)
-    return Fail(ErrorCode::stale_identity, "Editable input target changed");
+    return Fail(ErrorCode::kConflict, "Editable input target changed");
   auto accepted = owner_.model_->AcceptInput(owner_.session_, input);
   if (!accepted)
     return accepted;

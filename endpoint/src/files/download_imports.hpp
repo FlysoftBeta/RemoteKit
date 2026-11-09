@@ -1,6 +1,8 @@
 #pragma once
 #include "persistence/session_store.hpp"
 #include "util/result_macros.hpp"
+#include "util/error_policy.hpp"
+#include "util/wire_error.hpp"
 #include <algorithm>
 #include <functional>
 #include <set>
@@ -67,6 +69,11 @@ class DownloadImports {
         continue;
       const auto& download = row.at("download");
       if (!row.contains("result")) {
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+        if (row.value("retryAt", int64_t(0)) > now)
+          continue;
         if (!import_)
           return Error{ErrorCode::kUnavailable, "download_import_unavailable"};
         const auto imported = import_(download);
@@ -80,16 +87,20 @@ class DownloadImports {
                          {"size", download.at("size")}});
         } else {
           const auto& error = imported.error();
-          std::string reason = "io_error";
-          if (error.code == ErrorCode::kNotFound)
-            reason = "file_missing";
-          else if (error.code == ErrorCode::kLimitExceeded)
-            reason = error.message == "file_too_large" ? "file_too_large" : "quota_exceeded";
-          else if (error.code == ErrorCode::kInvalidRequest)
-            reason = "invalid_download";
-          else if (error.code == ErrorCode::kConflict)
-            reason = "conflict";
-          result.update({{"type", "download.failed"}, {"reason", reason}});
+          const auto attempt = row.value("attempt", 0u);
+          auto delay = RetryDelay(error, attempt);
+          if (delay || error.code == ErrorCode::kOutcomeUnknown) {
+            row["attempt"] = attempt + 1;
+            row["error"] = WireError(error);
+            // Import derives the same immutable object identity from the Browser
+            // file; re-reading reconciles a lost object commit reply.
+            row["retryAt"] = now + (delay ? delay->count() : 1000);
+            auto next = state_;
+            next["records"][index] = row;
+            RK_RETURN_IF_ERROR(Save(std::move(next)));
+            continue;
+          }
+          result.update({{"type", "download.failed"}, {"error", WireError(error)}});
         }
         row["result"] = std::move(result);
         auto next = state_;

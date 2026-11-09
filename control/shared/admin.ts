@@ -21,10 +21,11 @@ export interface AdminNode {
   peerAddress: string;
   buildId: string | null;
   pressure: number | null;
+  headroom: number | null;
   underPressure: boolean;
   diskDraining: boolean;
   sessions: number;
-  maxSessions: number;
+  maxSessions: number | null;
   users: string[];
   replicaBytes: number;
   metrics: AdminNodeMetrics | null;
@@ -45,14 +46,14 @@ export interface AdminUser {
   lastLoginAt: number | null;
   session: AdminSessionState;
   secondFactors: { pin: boolean; face: boolean };
-  storage: { bytes: number; quotaBytes: number };
+  storage: { bytes: number; quotaBytes: number | null };
 }
 export interface AdminUserStorage {
   username: string;
   libraryFiles: number;
   objects: number;
   bytes: number;
-  quotaBytes: number;
+  quotaBytes: number | null;
   checkpoints: number;
   latestCheckpointBytes: number;
   latestCheckpointAt: number | null;
@@ -72,7 +73,12 @@ export interface AdminOverview {
   nodes: { total: number; ready: number; mismatched: number };
   users: { total: number; online: number; disabled: number };
   sessions: { active: number; hibernated: number };
-  storage: { bytes: number; underReplicated: number; pendingSessionDeletions: number };
+  storage: {
+    bytes: number;
+    underReplicated: number;
+    pendingSessionDeletions: number;
+    deletionFailures?: { sessionId: string; nodeId: string; error: import('./errors').WireError }[];
+  };
   diagnostics: number;
   sessionImport: MailboxStatus;
 }

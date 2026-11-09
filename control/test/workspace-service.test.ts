@@ -105,7 +105,10 @@ test('workspace WS routes preserve bounded local state and split settings while 
     assert.deepEqual(f.store.workspaces.workspace(f.user.tenantId).windows[0].state, {
       partitionId: 'photos',
     });
-    for (const state of [[], null, { text: '界'.repeat(2800) }])
+    await assert.rejects(f.request('window.state', { windowId, state: { text: '界'.repeat(2800) } }), {
+      code: 'limit_exceeded',
+    });
+    for (const state of [[], null])
       await assert.rejects(f.request('window.state', { windowId, state }), { code: 'invalid_request' });
     await f.request('action', {
       type: 'settings.update',
@@ -400,7 +403,7 @@ for (const target of ['space', 'app'] as const) {
             : { type: 'app.uninstall', appId },
       };
       const receipt = await f.control.operations.submitOperation(f.user.tenantId, operation, 'lease');
-      assert.equal(receipt.status, 'rejected');
+      assert.equal(receipt.status, 'failed');
       state = f.store.workspaces.workspace(f.user.tenantId);
       assert.deepEqual(
         state.windows.map((window) => window.id),
@@ -421,7 +424,7 @@ for (const target of ['space', 'app'] as const) {
         [second.windowId],
       );
       if (target === 'app') assert.equal(state.apps.length, 1);
-      assert.equal(f.control.operations.operationStatus(f.user.tenantId, operation).status, 'rejected');
+      assert.equal(f.control.operations.operationStatus(f.user.tenantId, operation).status, 'failed');
     } finally {
       await f.close();
     }
@@ -598,7 +601,7 @@ test('space close and App uninstall stop at beforeunload, preserve cancelled tar
     assert.equal(state.pendingClose, null);
     assert.equal(state.pendingWindowCloseId, null);
     assert.equal(state.windows.length, 1);
-    assert.equal(f.control.operations.operationStatus(f.user.tenantId, closeSpace).status, 'rejected');
+    assert.equal(f.control.operations.operationStatus(f.user.tenantId, closeSpace).status, 'failed');
     f.endpoint.pendingClose.clear();
     await f.action({ type: 'space.close', spaceId: state.spaces[0].id });
     const installed = await f.action({
@@ -630,7 +633,7 @@ test('space close and App uninstall stop at beforeunload, preserve cancelled tar
     assert.equal(state.apps.length, 1);
     assert.equal(state.pendingAppUninstallId, undefined);
     assert.equal(state.pendingWindowCloseIds, undefined);
-    assert.equal(f.control.operations.operationStatus(f.user.tenantId, uninstall).status, 'rejected');
+    assert.equal(f.control.operations.operationStatus(f.user.tenantId, uninstall).status, 'failed');
     f.endpoint.pendingClose.clear();
     await submit({ type: 'app.uninstall', appId });
     state = f.store.workspaces.workspace(f.user.tenantId);
@@ -679,7 +682,10 @@ test('page previews share normalized usage keys, reject invalid images, and serv
       'data:image/jpeg;base64,' + Buffer.alloc(512 * 1024, 0xff).toString('base64'),
     ])
       await assert.rejects(f.request('page.preview', { url: 'https://preview.test/', image: invalid }), {
-        code: 'invalid_request',
+        code:
+          invalid.length > 'data:image/jpeg;base64,'.length + 32 * 1024
+            ? 'limit_exceeded'
+            : 'invalid_request',
       });
     const exact = Buffer.alloc(24 * 1024, 0xff);
     exact[1] = 0xd8;

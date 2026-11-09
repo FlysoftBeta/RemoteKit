@@ -180,7 +180,7 @@ export async function instrumentViewer(context, evidence, name) {
       );
       await until('action ' + action.type, async () => {
         const receipt = await call('operation.status', { operationId, operationGeneration });
-        assert(!['rejected', 'expired'].includes(receipt.status), JSON.stringify(receipt));
+        assert(receipt.status !== 'failed', JSON.stringify(receipt));
         return receipt.status === 'committed';
       });
     },

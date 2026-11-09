@@ -1,3 +1,4 @@
+import { retryDelay, errorHandling } from '../../shared/error-policy';
 import { RemoteKitError } from '../../shared/errors';
 import type { LibraryMethods, LibrarySnapshot } from '../../shared/file-library';
 import { FILE_LIMITS } from '../../shared/product';
@@ -20,6 +21,7 @@ interface ImportState {
   remaining: number;
   busy: boolean;
   error?: string;
+  retryable?: boolean;
 }
 interface ImportServices {
   rpc: Pick<FileChannel, 'uploadAsset'>;
@@ -71,7 +73,7 @@ export class ImportQueue extends Store<ImportState> {
   };
   upload = async () => {
     const batch = this.batch;
-    if (!batch || this.controller || !this.online) return;
+    if (!batch || this.controller || !this.online || this.getSnapshot().retryable === false) return;
     const abort = new AbortController();
     this.controller = abort;
     this.publish({ ...this.getSnapshot(), busy: true, error: undefined });
@@ -102,7 +104,15 @@ export class ImportQueue extends Store<ImportState> {
       if (this.batch === batch && !batch.jobs.length) this.discard();
     } catch (error) {
       if (!abort.signal.aborted && this.batch === batch)
-        this.publish({ ...this.getSnapshot(), error: formatError(error) });
+        this.publish({
+          ...this.getSnapshot(),
+          error: formatError(error),
+          retryable:
+            error instanceof RemoteKitError &&
+            (retryDelay(error, 0) !== undefined ||
+              error.code === 'limit_exceeded' ||
+              (errorHandling(error.code) === 'reconcile' && !!batch.jobs[0]?.assetId)),
+        });
     } finally {
       this.controller = undefined;
       if (this.batch === batch) this.publish({ ...this.getSnapshot(), busy: false });

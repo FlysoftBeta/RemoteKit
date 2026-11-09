@@ -169,10 +169,24 @@ export class LibraryRepository {
       .run(JSON.stringify(manifest), tenant, manifest.selectionId);
     syncObjectReferences(this.db);
   }
+  recordDownloadFailure(
+    tenant: string,
+    event: Extract<import('../endpoint/types').DownloadEvent, { type: 'download.failed' }>,
+  ) {
+    this.db
+      .prepare('INSERT INTO download_import_failures VALUES (?,?,?,?,?,?)')
+      .run(tenant, event.eventId, event.name, event.origin, JSON.stringify(event.error), Date.now());
+    this.db
+      .prepare(
+        'DELETE FROM download_import_failures WHERE tenant=? AND event_id NOT IN (SELECT event_id FROM download_import_failures WHERE tenant=? ORDER BY at DESC,rowid DESC LIMIT 1024)',
+      )
+      .run(tenant, tenant);
+  }
   entryCount(tenant: string) {
     return this.snapshot(tenant).entries.length;
   }
   deleteTenant(tenant: string) {
+    this.db.prepare('DELETE FROM download_import_failures WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM file_library WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM file_library_operations WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM file_library_selections WHERE tenant=?').run(tenant);

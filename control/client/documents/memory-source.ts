@@ -8,13 +8,13 @@ export class MemoryDocumentSource implements DocumentSource {
   ) {}
 
   async open(signal: AbortSignal, options?: DocumentOpenOptions): Promise<DocumentInfo> {
-    if (signal.aborted) throw new DOMException('请求已取消', 'AbortError');
+    if (signal.aborted) throw new RemoteKitError('canceled', '');
     options?.onStatus?.('ready');
     return this.info;
   }
 
   async resource(contentId: string, signal: AbortSignal): Promise<DocumentResource> {
-    if (signal.aborted) throw new DOMException('请求已取消', 'AbortError');
+    if (signal.aborted) throw new RemoteKitError('canceled', '');
     const resource = this.resources.get(contentId);
     if (!resource) throw new RemoteKitError('not_found', '文档资源不存在');
     return resource;

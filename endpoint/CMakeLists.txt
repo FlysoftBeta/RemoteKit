@@ -1,7 +1,7 @@
 if(WIN32)
   add_library(remotekit_cluster STATIC src/cluster/noise.cpp src/cluster/frames.cpp
     src/cluster/channel.cpp src/cluster/node_files.cpp src/cluster/tcp.cpp)
-  target_include_directories(remotekit_cluster PUBLIC src ${RK_DEPS})
+  target_include_directories(remotekit_cluster PUBLIC ${PROJECT_SOURCE_DIR} src ${RK_DEPS})
   target_compile_features(remotekit_cluster PUBLIC cxx_std_20)
   target_compile_definitions(remotekit_cluster PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
   target_compile_options(remotekit_cluster PRIVATE /W4 /utf-8)
@@ -333,3 +333,11 @@ if(BUILD_TESTING)
 endif()
 
 include(documents.cmake)
+
+if(WIN32 AND BUILD_TESTING)
+  add_executable(endpoint_error_contract_tests tests/error_contract_tests.cpp)
+  target_include_directories(endpoint_error_contract_tests PRIVATE src ${PROJECT_SOURCE_DIR} ${RK_DEPS} ${PROJECT_SOURCE_DIR}/sdk/include)
+  target_compile_features(endpoint_error_contract_tests PRIVATE cxx_std_20)
+  target_compile_definitions(endpoint_error_contract_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  add_test(NAME endpoint_error_contract COMMAND endpoint_error_contract_tests)
+endif()

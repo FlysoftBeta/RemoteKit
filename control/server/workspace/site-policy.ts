@@ -117,7 +117,7 @@ export class SitePolicy {
     if (!force && previous?.encoded === encoded && previous.applied) return;
     runtime.policy.media = { encoded, applied: false, browserPid };
     const result = await this.context.endpoint.mediaPolicy(tenant, requested);
-    if (result?.accepted !== true) throw new RemoteKitError('rejected', 'Endpoint未接受媒体质量策略');
+    if (result?.accepted !== true) throw new RemoteKitError('outcome_unknown', 'Endpoint未接受媒体质量策略');
     runtime.policy.media = { encoded, applied: result.applied === true, browserPid };
   }
   async applySites(tenant: string, state: ProductWorkspace, force = false, browserPid?: number) {
@@ -128,7 +128,7 @@ export class SitePolicy {
     if (!force && previous?.encoded === encoded && previous.applied) return;
     runtime.policy.site = { encoded, applied: false, browserPid };
     const result = await this.context.endpoint.sitePreferences(tenant, { sites });
-    if (result?.accepted !== true) throw new RemoteKitError('rejected', 'Endpoint未接受站点身份设置');
+    if (result?.accepted !== true) throw new RemoteKitError('outcome_unknown', 'Endpoint未接受站点身份设置');
     runtime.policy.site = { encoded, applied: result.applied === true, browserPid };
   }
 }

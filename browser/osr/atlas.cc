@@ -1,3 +1,4 @@
+#include "browser/control_response.h"
 #include "remotekit/browser/osr/generation.h"
 #include "remotekit/browser/osr/cache_policy.h"
 #include "base/check.h"
@@ -23,8 +24,8 @@ void Publish(volatile LONG64* sequence,
   InterlockedIncrement64(sequence);
 }
 namespace {
-base::DictValue Failure(const std::string& error) {
-  return base::DictValue().Set("ok", false).Set("error", error);
+base::DictValue Failure(protocol::ErrorCode code, const std::string& message) {
+  return ControlResult::Failure(0, code, message);
 }
 }  // namespace
 
@@ -257,28 +258,23 @@ void Atlas::PublishLayout() {
 
 base::DictValue Atlas::Describe(uint32_t pid) {
   if (owner_.failed_ || owner_.retirement_.stopping_)
-    return Failure(owner_.error_.empty() ? "OSR stopped" : owner_.error_)
-        .Set("code", static_cast<int>(ErrorCode::unavailable))
-        .Set("reason", owner_.failed_ ? "hardware_output_unavailable" : "output_stopped")
-        .Set("retryable", false)
-        .Set("detail",
-             "当前会话没有可用的硬件 GPU 输出（RDP 会话默认使用 Microsoft Basic Render Driver）：" +
-                 owner_.error_);
+    return Failure(protocol::ErrorCode::kUnavailable,
+                   owner_.error_.empty() ? "OSR stopped" : owner_.error_);
   if (consumer_) {
     if (consumer_->pid == pid) {
       if (render_endpoint_delivered_)
-        return Failure("render endpoint already delivered");
+        return Failure(protocol::ErrorCode::kConflict, "render endpoint already delivered");
       return owner_.Description();
     }
-    return Failure("one consumer per generation");
+    return Failure(protocol::ErrorCode::kConflict, "one consumer per generation");
   }
   if (!pid)
-    return Failure("invalid consumer pid");
+    return Failure(protocol::ErrorCode::kInvalidRequest, "invalid consumer pid");
   auto consumer = std::make_unique<Consumer>();
   consumer->pid = pid;
   consumer->process.Set(OpenProcess(PROCESS_DUP_HANDLE | SYNCHRONIZE, FALSE, pid));
   if (!consumer->process.is_valid())
-    return Failure("OpenProcess consumer failed");
+    return Failure(protocol::ErrorCode::kUnavailable, "OpenProcess consumer failed");
   std::array<HANDLE, 1 + 3 * kRenderSlotCount> handles{};
   handles[0] = mapping_handle_.Get();
   for (size_t i = 0; i < slots_.size(); ++i) {
@@ -303,7 +299,7 @@ base::DictValue Atlas::Describe(uint32_t pid) {
                           DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS))
         CloseHandle(local);
     }
-    return Failure("DuplicateHandle consumer failed");
+    return Failure(protocol::ErrorCode::kInternal, "DuplicateHandle consumer failed");
   }
   consumer_ = std::move(consumer);
   return owner_.Description();

@@ -14,7 +14,7 @@
 namespace remotekit::browser {
 namespace {
 Status InvalidStorageImport() {
-  return {ErrorCode::invalid_request, "Invalid storage import payload"};
+  return {ErrorCode::kInvalidRequest, "Invalid storage import payload"};
 }
 
 Result<ImportedCookie> DecodeCookie(const base::Value& wire) {
@@ -84,6 +84,7 @@ Result<StorageImportRequest> DecodeStorageImport(const base::DictValue& wire,
   StorageImportRequest request;
   static_cast<RequestEnvelope&>(request) = envelope;
   RequestDecoder decoder(wire);
+  request.view = decoder.Optional<uint64_t>("view").value_or(0);
   auto cookies = decoder.Optional<base::ListValue>("cookies");
   auto local_storage = decoder.Optional<base::ListValue>("localStorage");
   if (!cookies || !local_storage || cookies->size() > 4096 || local_storage->size() > 256)
@@ -132,9 +133,10 @@ Result<StorageImportStatusRequest> DecodeStorageImportStatus(const base::DictVal
   static_cast<RequestEnvelope&>(request) = envelope;
   RequestDecoder decoder(wire);
   const auto job = decoder.Optional<uint64_t>("job");
-  if (!job)
-    return {{}, {ErrorCode::invalid_request, "Invalid storage import job"}};
-  request.job = *job;
+  request.view = decoder.Optional<uint64_t>("view").value_or(0);
+  if (request.method == "storage.import.cancel" && (!job || !*job))
+    return {{}, {ErrorCode::kInvalidRequest, "Storage import cancellation requires a job"}};
+  request.job = job.value_or(0);
   return decoder.Finish(std::move(request));
 }
 
@@ -156,19 +158,27 @@ ControlResult ControlDispatcher::HandleIdentity(const IdentityRequest& request) 
 }
 
 ControlResult ControlDispatcher::HandleStorageImport(const StorageImportRequest& request) {
+  if (request.view && !runtime_.views.Find(runtime_.session_id, request.view))
+    return ControlResult::Failure(request.id, ErrorCode::kNotFound,
+                                  "Storage import view not found");
   auto job = runtime_.storage_import_jobs.Begin(
-      runtime_.contexts.front()->GetDefaultStoragePartition(), request.data);
+      runtime_.contexts.front()->GetDefaultStoragePartition(), request.data, request.view);
   if (!job)
-    return ControlResult::Failure(request.id, job.status.error, job.status.message);
+    return ControlResult::Failure(request.id, *job.status.error, job.status.message);
   return ControlResult::Success(request.id,
                                 base::DictValue().Set("job", base::NumberToString(job.value)));
 }
 
 ControlResult ControlDispatcher::HandleStorageImportStatus(
     const StorageImportStatusRequest& request) {
-  auto status = runtime_.storage_import_jobs.Poll(request.job);
+  if (request.method == "storage.import.cancel") {
+    runtime_.storage_import_jobs.Cancel(request.job);
+    return ControlResult::Success(request.id);
+  }
+  auto status = request.job ? runtime_.storage_import_jobs.Poll(request.job)
+                            : runtime_.storage_import_jobs.Latest(request.view);
   if (!status)
-    return ControlResult::Failure(request.id, status.status.error, status.status.message);
+    return ControlResult::Failure(request.id, *status.status.error, status.status.message);
   return ControlResult::Success(request.id, std::move(status.value));
 }
 }  // namespace remotekit::browser

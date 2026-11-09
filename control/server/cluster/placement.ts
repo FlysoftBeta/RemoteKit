@@ -1,3 +1,4 @@
+import { diskFloor } from './disk';
 import { randomBytes } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type { ControlDatabase } from '../persistence/database';
@@ -12,11 +13,12 @@ export interface SessionPlacement {
   nodeId: string;
   placementEpoch: number;
   keyCiphertext: string;
-  state: 'active' | 'hibernated';
+  state: 'active' | 'hibernating' | 'hibernated';
   checkpointId: number | null;
   checkpoint: string | null;
 }
 export class Placement {
+  reconcileHibernation?: (tenant: string) => Promise<number>;
   constructor(
     private readonly store: ControlDatabase,
     private readonly nodes: NodeRegistry,
@@ -26,7 +28,7 @@ export class Placement {
         store.db
           .prepare(
             `SELECT tenant AS tenantId, session_id AS sessionId,
-      placement_epoch AS placementEpoch FROM session_placements WHERE node_id=? AND state='active'`,
+      placement_epoch AS placementEpoch FROM session_placements WHERE node_id=? AND state IN ('active','hibernating')`,
           )
           .all(nodeId) as { tenantId: string; sessionId: string; placementEpoch: bigint }[]
       ).map((row) => ({ ...row, placementEpoch: Number(row.placementEpoch) }));
@@ -58,7 +60,9 @@ export class Placement {
   }
   activeSessions(nodeId: string) {
     const row = this.store.db
-      .prepare("SELECT count(*) AS count FROM session_placements WHERE node_id=? AND state='active'")
+      .prepare(
+        "SELECT count(*) AS count FROM session_placements WHERE node_id=? AND state IN ('active','hibernating')",
+      )
       .get(nodeId) as { count: bigint };
     return Number(row.count);
   }
@@ -103,38 +107,46 @@ export class Placement {
   resolve(tenant: string): SessionPlacement {
     return this.store.transaction(() => {
       const existing = this.peek(tenant);
+      if (existing?.state === 'hibernating') {
+        void this.reconcileHibernation?.(tenant).catch(() => {});
+        throw new RemoteKitError('unavailable', '正在保存会话，请稍候');
+      }
       if (existing?.state === 'active') {
         if (this.nodes.get(existing.nodeId)?.state.state !== 'ready')
-          throw new RemoteKitError('unavailable', 'Placed node is offline');
+          throw new RemoteKitError('unavailable', '会话节点离线', { detail: 'Placed node is offline' });
         return existing;
       }
-      const candidates = this.nodes.all().filter((node) => {
-        const sample = node.metrics.latest();
-        return (
+      const now = Date.now();
+      const candidates = this.nodes.all().flatMap((node) => {
+        const sample = node.metrics.latest(now);
+        const eligible =
           node.state.state === 'ready' &&
           !node.diskDraining &&
           !this.nodes.isRemoved(node.nodeId) &&
           sample &&
-          Math.max(this.activeSessions(node.nodeId), sample.value.sessions) < node.config.maxSessions &&
-          sample.value.disk.free >= node.config.diskReserveBytes &&
-          sample.value.memory.available >= node.config.sessionMemoryBytes
-        );
+          (node.config.maxSessions === null ||
+            Math.max(this.activeSessions(node.nodeId), sample.value.sessions) < node.config.maxSessions) &&
+          sample.value.disk.free >= diskFloor(node, sample) &&
+          (node.config.sessionMemoryBytes === null ||
+            sample.value.memory.available >= node.config.sessionMemoryBytes);
+        if (!eligible) return [];
+        const predicted = node.metrics.predicted(now)!;
+        const warm =
+          predicted < 0.85 &&
+          existing?.checkpoint &&
+          this.store.db
+            .prepare(
+              'SELECT 1 FROM warm_session_copies WHERE tenant=? AND node_id=? AND manifest_id=? AND created_at>=?',
+            )
+            .get(tenant, node.nodeId, existing.checkpoint, now - 7 * 86400000);
+        return [{ node, predicted, score: predicted - (warm ? 0.15 : 0) }];
       });
-      const healthy = candidates.filter((node) => !node.metrics.underPressure());
-      const score = (node: (typeof candidates)[number]) =>
-        node.metrics.latest()!.pressure -
-        (existing?.checkpoint &&
-        this.store.db
-          .prepare(
-            'SELECT 1 FROM warm_session_copies WHERE tenant=? AND node_id=? AND manifest_id=? AND created_at>=?',
-          )
-          .get(tenant, node.nodeId, existing.checkpoint, Date.now() - 7 * 86400000)
-          ? 0.15
-          : 0);
-      const node = (healthy.length ? healthy : candidates).sort(
-        (a, b) => score(a) - score(b) || a.nodeId.localeCompare(b.nodeId),
+      const winner = candidates.sort(
+        (a, b) => a.score - b.score || a.node.nodeId.localeCompare(b.node.nodeId),
       )[0];
-      if (!node) throw new RemoteKitError('unavailable', 'No ready node has capacity');
+      if (!winner) throw new RemoteKitError('unavailable', '没有可用的节点');
+      const { node, predicted } = winner;
+      if (predicted >= 0.85) node.reliefRequestedAt = now;
       const placement: SessionPlacement = existing
         ? {
             ...existing,
@@ -178,28 +190,53 @@ export class Placement {
   keys(placement: SessionPlacement) {
     return tenantKeys(this.store.atRestKey.open(placement.tenant, placement.keyCiphertext));
   }
+  beginHibernation(tenant: string) {
+    return this.store.transaction(() => {
+      const placement = this.peek(tenant);
+      if (!placement || placement.state === 'hibernated')
+        throw new RemoteKitError('conflict', '会话当前未运行', { detail: 'Session is not active' });
+      this.store.db.prepare("UPDATE session_placements SET state='hibernating' WHERE tenant=?").run(tenant);
+      return { ...placement, state: 'hibernating' as const };
+    });
+  }
+  settleHibernation(placement: SessionPlacement, state: 'active' | 'hibernated') {
+    return (
+      this.store.db
+        .prepare(
+          `UPDATE session_placements SET state=?
+      WHERE tenant=? AND node_id=? AND placement_epoch=? AND state='hibernating'`,
+        )
+        .run(state, placement.tenant, placement.nodeId, placement.placementEpoch).changes > 0
+    );
+  }
   commitCheckpoint(placement: SessionPlacement, manifestId: string, objects: string[], buildId: string) {
     return this.store.transaction(() => {
       const current = this.peek(placement.tenant);
       if (
-        current?.state !== 'active' ||
+        current?.state !== 'hibernating' ||
         current.nodeId !== placement.nodeId ||
         current.placementEpoch !== placement.placementEpoch
       )
-        throw new RemoteKitError('conflict', 'Placement changed during hibernation');
+        throw new RemoteKitError('conflict', '会话位置在保存期间改变', {
+          detail: 'Placement changed during hibernation',
+        });
       if (
         !/^[a-f0-9]{64}$/.test(manifestId) ||
         !Array.isArray(objects) ||
+        typeof buildId !== 'string' ||
+        !buildId ||
         !objects.includes(manifestId) ||
         objects.some((id) => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id))
       )
-        throw new RemoteKitError('rejected', 'Invalid checkpoint');
+        throw new RemoteKitError('rejected', '会话检查点无效', { detail: 'Invalid checkpoint' });
       for (const id of objects) {
         if (
           retiringObjects(this.store).has(id) ||
           !tenantObjects(this.store.db).get(placement.tenant)?.has(id)
         )
-          throw new RemoteKitError('conflict', 'Checkpoint object is not committed');
+          throw new RemoteKitError('conflict', '会话检查点尚未提交', {
+            detail: 'Checkpoint object is not committed',
+          });
       }
       const row = this.store.db
         .prepare('SELECT coalesce(max(id),0)+1 AS id FROM checkpoints WHERE tenant=?')
@@ -210,7 +247,7 @@ export class Placement {
         .run(placement.tenant, id, placement.placementEpoch, manifestId, buildId, Date.now());
       for (const objectId of new Set(objects))
         this.store.db
-          .prepare('INSERT INTO checkpoint_objects VALUES (?,?,?)')
+          .prepare('INSERT OR IGNORE INTO checkpoint_objects VALUES (?,?,?)')
           .run(placement.tenant, manifestId, objectId);
       this.store.db
         .prepare(

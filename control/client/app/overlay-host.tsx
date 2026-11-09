@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../../shared/errors';
 import React, { useEffect, useState } from 'react';
 import { Button, Dialog, DialogActions, DialogContent, DialogTitle } from '@mui/material';
 import {
@@ -75,7 +76,7 @@ export async function openLauncherItem({
   const singleton =
     !!item.appId && isSingletonApp(item.appId) && workspace.windows.some((win) => win.appId === item.appId);
   if (workspace.windows.length >= 16 && !singleton && !reuseExisting)
-    throw new Error('窗口已满，请先关闭一些窗口');
+    throw new RemoteKitError('limit_exceeded', '窗口已满，请先关闭一些窗口');
   const wasFull =
     !placement && !reuseExisting && !singleton && activeSpace && activeSpace.windowIds.length >= 3;
   const commands = launcherActions(workspace, item, placement, reuseExisting);

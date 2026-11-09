@@ -15,7 +15,7 @@ Result<ProfileCommandRequest> DecodeProfileCommand(const base::DictValue& wire,
   request.command = decoder.Optional<base::DictValue>("command");
   request.session = decoder.Optional<uint64_t>("session");
   if (!request.session)
-    return {{}, {ErrorCode::invalid_request, "Session required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session required"}};
   return decoder.Finish(std::move(request));
 }
 
@@ -37,7 +37,7 @@ Result<PageControlRequest> DecodePageRequest(const base::DictValue& wire,
     return {{}, operation.status};
   request.operation = std::move(operation.value);
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
@@ -51,14 +51,14 @@ Result<ExitFullscreenRequest> DecodeExitFullscreen(const base::DictValue& wire,
   request.session = decoder.Optional<uint64_t>("session");
   request.view = decoder.Optional<uint64_t>("view");
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
 ControlResult ControlDispatcher::HandleProfileCommand(const ProfileCommandRequest& request) {
   const int id = request.id;
   if (request.session != runtime_.session_id || !request.command)
-    return ControlResult::Failure(id, ErrorCode::invalid_request, "Session and command required");
+    return ControlResult::Failure(id, ErrorCode::kInvalidRequest, "Session and command required");
   auto result = runtime_.contexts.front()->DownloadsCommand(*request.command);
   result.Set("version", protocol::kControlVersion);
   result.Set("id", id);
@@ -69,14 +69,14 @@ ControlResult ControlDispatcher::HandlePageRequest(const PageControlRequest& req
   const int id = request.id;
   const auto* method = &request.method;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
   const auto session = request.session.value_or(0);
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view))
-    return ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session");
+    return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
 
   if (*method == "page.contextMenu") {
@@ -84,10 +84,10 @@ ControlResult ControlDispatcher::HandlePageRequest(const PageControlRequest& req
     const auto* text = request.payload.FindString("menu");
     if (!text || !base::StringToUint64(*text, &menu) || !menu ||
         *text != base::NumberToString(menu))
-      return ControlResult::Failure(id, ErrorCode::invalid_request, "Menu required");
+      return ControlResult::Failure(id, ErrorCode::kInvalidRequest, "Menu required");
     auto details = runtime_.context_menu->Details(session, view, menu);
     if (!details)
-      return ControlResult::Failure(id, details.status.error, details.status.message);
+      return ControlResult::Failure(id, *details.status.error, details.status.message);
     reply.Set("menu", std::move(details.value));
     return reply;
   }
@@ -96,10 +96,10 @@ ControlResult ControlDispatcher::HandlePageRequest(const PageControlRequest& req
   bool terminal_only = false;
   if (*method == "page.reply" || *method == "page.fileStatus") {
     if (request.instance && *request.instance != token.instance)
-      return error("stale_page_request_target");
+      return error(ErrorCode::kConflict, "stale_page_request_target");
     if (request.document && *request.document != token.document) {
       if (*method != "page.fileStatus" || !request.instance || !request.selection_id)
-        return error("stale_page_request_target");
+        return error(ErrorCode::kConflict, "stale_page_request_target");
       binding.document = *request.document;
       terminal_only = true;
     }
@@ -108,7 +108,7 @@ ControlResult ControlDispatcher::HandlePageRequest(const PageControlRequest& req
   if (*method == "page.fileStatus") {
     const auto* key = Ptr(request.request);
     if (!key)
-      return error("file_request_required");
+      return error(ErrorCode::kInvalidRequest, "file_request_required");
     auto result =
         record->requests->FileStatus(*key, Ptr(request.selection_id), binding, terminal_only);
     result.Set("version", 1);
@@ -125,7 +125,7 @@ ControlResult ControlDispatcher::HandlePageRequest(const PageControlRequest& req
       result.Set("accepted", static_cast<bool>(status));
       result.Set("state", "submitted");
       if (!status)
-        return ControlResult::Failure(id, status.error, status.message, std::move(result));
+        return ControlResult::Failure(id, *status.error, status.message, std::move(result));
       return result;
     }
   }
@@ -151,23 +151,23 @@ ControlResult ControlDispatcher::HandlePageRequest(const PageControlRequest& req
 ControlResult ControlDispatcher::HandleExitFullscreen(const ExitFullscreenRequest& request) {
   const int id = request.id;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
   const auto session = request.session.value_or(0);
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view))
-    return ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session");
+    return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
   if (record->requests->close_state() == "closing")
-    return ControlResult::Failure(id, "view_closing");
+    return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   const auto token = runtime_.view_model.Token(session, view).value;
   uint64_t instance = 0, document = 0;
   if (!Assign(request.instance, &instance) || !Assign(request.document, &document) ||
       instance != token.instance || document != token.document || !adapter.contents())
-    return error("stale_page_request_target");
+    return error(ErrorCode::kConflict, "stale_page_request_target");
   if (record->requests->fullscreen())
     adapter.contents()->ExitFullscreen(/*will_cause_resize=*/false);
   reply.Set("ok", true);

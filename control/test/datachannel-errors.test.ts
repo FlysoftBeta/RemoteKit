@@ -13,7 +13,6 @@ const failures = [
   },
   { type: 'focus', focusRequestId: '1', layoutEpoch: '2', ok: false },
   { type: 'files.result', version: 1, requestId: '1', ok: false },
-  { type: 'product.result', version: 1, operationId: '1', operationGeneration: '2', ok: false },
 ];
 
 test('DataChannel failures require a known error code and string message', () => {
@@ -36,17 +35,21 @@ test('DataChannel failures require a known error code and string message', () =>
   }
   assert.equal(decodeIncoming({ type: 'error', message: 'legacy' }).type, 'decode-error');
   assert.equal(httpStatus.busy, 503);
-  assert.notEqual(formatError(new RemoteKitError('busy', 'public detail')), 'public detail');
+  assert.equal(formatError(new RemoteKitError('busy', 'public detail')), 'public detail');
 });
 
-test('product receipt error descriptions remain domain strings', () => {
+test('product receipts require structured errors', () => {
   const packet = {
     type: 'product.result',
     version: 1,
     operationId: '1',
     operationGeneration: '2',
-    ok: false,
-    result: { operationId: '1', operationGeneration: '2', status: 'rejected', error: 'domain description' },
+    result: {
+      operationId: '1',
+      operationGeneration: '2',
+      status: 'failed',
+      error: { code: 'forbidden', message: '无权执行' },
+    },
   };
   assert.deepEqual(decodeIncoming(packet), packet);
 });

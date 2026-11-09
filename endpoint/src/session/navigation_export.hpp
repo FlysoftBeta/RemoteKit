@@ -117,10 +117,11 @@ class NavigationExport {
       const auto size = begin.at("size").template get<std::string>();
       const auto [end, error] = std::from_chars(size.data(), size.data() + size.size(), task.size);
       if (error != std::errc{} || end != size.data() + size.size())
-        return fail(Error{ErrorCode::kRejected, "invalid navigation export size"});
-      if (!task.size || task.size > 64 * 1024 * 1024 ||
-          begin.at("navigationRevision") != task.identity.revision)
-        return fail(Error{ErrorCode::kRejected, "navigation export size/revision changed"});
+        return fail(Error{ErrorCode::kInternal, "invalid navigation export size"});
+      if (!task.size || task.size > 64 * 1024 * 1024)
+        return fail(Error{ErrorCode::kInternal, "Invalid navigation export size"});
+      if (begin.at("navigationRevision") != task.identity.revision)
+        return fail(Error{ErrorCode::kConflict, "Navigation export revision changed"});
       return {};
     }
     if (task.offset < task.size) {
@@ -134,7 +135,7 @@ class NavigationExport {
       auto chunk = std::move(response).value();
       const auto data = chunk.at("data").template get<std::string>();
       if (decoded_size(data) != count)
-        return fail(Error{ErrorCode::kRejected, "navigation export chunk length mismatch"});
+        return fail(Error{ErrorCode::kInternal, "navigation export chunk length mismatch"});
       task.chunks.push_back({{"data", data}, {"bytes", count}});
       task.offset += count;
       return {};

@@ -153,12 +153,12 @@ Result<base::DictValue> RemoteContextMenu::Details(SessionId session,
                                                    WebViewId view,
                                                    uint64_t menu) {
   if (StateFor(session, view).menu_id != menu || !menu)
-    return {{}, {ErrorCode::not_found, "Context menu closed"}};
+    return {{}, {ErrorCode::kNotFound, "Context menu closed"}};
   return {open_->details.Clone(), {}};
 }
 Status RemoteContextMenu::Execute(SessionId session, WebViewId view, const ContextCommand& value) {
   if (!value.menu || StateFor(session, view).menu_id != value.menu)
-    return {ErrorCode::stale_identity, "Context menu changed"};
+    return {ErrorCode::kConflict, "Context menu changed"};
   auto* frame = open_->document.AsRenderFrameHostIfValid();
   auto* contents = web_contents();
   using Command = ContextCommand::Command;
@@ -178,7 +178,7 @@ Status RemoteContextMenu::Execute(SessionId session, WebViewId view, const Conte
   }
   if (!enabled) {
     Close();
-    return {ErrorCode::stale_identity, "Context menu command unavailable"};
+    return {ErrorCode::kConflict, "Context menu command unavailable"};
   }
   // Close after execution: Blink's context node is used by CopyImageAt.
   switch (command) {

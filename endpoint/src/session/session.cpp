@@ -320,6 +320,7 @@ Result<void> Session::CloseRuntime(bool graceful) {
 }
 Result<Json> Session::Snapshot(bool output_diagnostics) {
   RK_ASSIGN_OR_RETURN(snapshot, views.Snapshot(output_diagnostics));
+  snapshot["browserRestart"] = browser.RestartState();
   auto blockers = files.Hibernation();
   blockers["unacknowledgedClosedEvents"] = snapshot["events"].size();
   blockers["pendingPageRequests"] = 0;
@@ -382,13 +383,27 @@ Result<Json> Session::Hibernate(objects::ObjectService& objects) {
     if ((value.is_boolean() && value.get<bool>()) ||
         (value.is_number() && value.get<uint64_t>() != 0))
       return Error{ErrorCode::kConflict, "hibernation blocked: " + name};
-  RK_RETURN_IF_ERROR(Shutdown());
-  files.Stop();
-  // No session worker can mutate files after the shutdown boundary.
-  for (const auto* relative :
-       {"uploads", "file-library/drafts", "file-library/incoming", "file-library/staging"})
-    fs::remove_all(config.directory / relative);
-  return Checkpoints(objects, config.object_access)
-      .Create(config.directory, config.tenant, config.options.build_id);
+  auto save = [&]() -> Result<Json> {
+    RK_RETURN_IF_ERROR(Shutdown());
+    files.Stop();
+    // No session worker can mutate files after the shutdown boundary.
+    for (const auto* relative :
+         {"uploads", "file-library/drafts", "file-library/incoming", "file-library/staging"})
+      fs::remove_all(config.directory / relative);
+    RK_ASSIGN_OR_RETURN(checkpoint,
+                        Checkpoints(objects, config.object_access)
+                            .Create(config.directory, config.tenant, config.options.build_id));
+    RK_RETURN_IF_ERROR(Checkpoints::Journal(config.directory, PlacementEpoch(), checkpoint,
+                                            config.options.build_id));
+    return Checkpoints::Hibernation(config.directory);
+  };
+  try {
+    auto saved = save();
+    if (!saved)
+      return Error{ErrorCode::kOutcomeUnknown, saved.error().message};
+    return saved;
+  } catch (const std::exception& error) {
+    return Error{ErrorCode::kOutcomeUnknown, error.what()};
+  }
 }
 }  // namespace remotekit

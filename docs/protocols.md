@@ -24,7 +24,7 @@ POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字
 ```
 请求  {id, method, params}
 成功  {type:"result", id, result}
-失败  {type:"error", id, error:{code, message}}
+失败  {type:"error", id, error:{code, message, retryAfterMs?}}
 推送  {type:"state", revision, state}       产品快照（锁定时不推送）
       {type:"auth", auth}                   锁定状态
       {type:"rtc.signal", connectionId, attemptId, signal}
@@ -55,7 +55,7 @@ POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字
 
 一个 PeerConnection：H.264 视频 track（atlas）、Opus 立体声音频 track（客户端 recvonly），以及两条可靠有序 DataChannel：`remotekit`（JSON）与 `remotekit-auth`（人脸图像）。产品消息双向附带 `authEpoch`，接收和执行时都拒绝旧代次，重试保留原代次。
 
-DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic failures use `{type:"error",error:{code,message}}`, including the auth channel. Operation receipt `status` / `error` descriptions keep their domain format.
+DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`；通用失败为 `{type:"error", error:{…}}`，auth 通道相同。
 
 **Endpoint → Viewer**
 
@@ -70,7 +70,7 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | `input.editable` | revision、页面编辑身份、type/flags/selection/composition/caret、`editable.target` |
 | `input.selection` | revision、页面身份（session/id/instance/document）或 null；`menu`：null 或 {id、根 DIP 锚点 x/y/width/height、handleHeight、commands（cut/copy/paste/selectAll 中可用者，固定顺序）、more} |
 | `input.contextMenu` | revision、页面身份或 null；`menu`：null 或 {id、根 DIP 按下点 x/y、source mouse/touch/keyboard、link {url,text}?、image {src}?、selection?、editable {undo,redo,cut,copy,paste,selectAll}?} |
-| `product.result` | 操作收据 |
+| `product.result` | `{operationId, operationGeneration, connectionId, result:收据}`；失败只在收据里表达（`status:"failed"` + `error`，或 `status:"unknown"`） |
 | `files.result` | 文件 RPC 结果 |
 | `clock.pong` | serverTimeMs、serverMonotonicMs |
 | `stats` | 服务端测量 |
@@ -113,7 +113,7 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 握手      node.hello{role, nodeId, buildId, incarnation}
           → node.ready{connectionEpoch, buildId, config, configHash, sessions, objectKey, objectIdKey} | node.release{release} | node.reject{code, buildId}
 请求      {id, method, tenantId, ...参数}
-回复      {id, ok:true, result} | {id, ok:false, error:{code, message}}
+回复      {id, ok:true, result} | {id, ok:false, error:{code, message, reason?, retryAfterMs?}}
 事件      {event:"rtc.signal" | "client.action" | "clipboard.changed" | "node.metrics", ...}
           {event:"session.events", tenantId, sessionId, browserIncarnation, events:[…]}（自然关闭、下载导入、view.signIn{webviewId, provider, result}）
 反向请求  {id, request:"object.committed" | "object.locate", ...}（Endpoint → Control，回复形状相同）
@@ -155,7 +155,7 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 
 快照中 view 的 `actual/desired`：0 live、1 frozen、2 discarded、3 unloaded。快照的 `hibernation` 字段报告休眠阻塞项（未确认关闭事件、未决原生选择、上传中、页面请求、下载中的计数，以及 RTC 是否连接、生命周期是否不确定）。
 
-**Endpoint ↔ Endpoint**：TCP，u32le 长度帧，同一个 Noise 握手（role `peer`，buildId 必须相同）。`object.get{id, offset}` → BINARY `object.chunk{offset}`（≤1MiB 存储文件字节）… `object.end{size, sha256}`，或 `object.error{code}`。
+**Endpoint ↔ Endpoint**：TCP，u32le 长度帧，同一个 Noise 握手（role `peer`，buildId 必须相同）。`object.get{id, offset}` → BINARY `object.chunk{offset}`（≤1MiB 存储文件字节）… `object.end{size, sha256}`，或 `object.error{code, message, retryAfterMs?}`。
 
 ## Endpoint ↔ Browser
 
@@ -163,10 +163,10 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 
 ```
 请求  {version:1, id, method, ...}
-回复  {version:1, id, ok:true, ...} | {version:1, id, ok:false, code, error, detail}
+回复  {version:1, id, ok:true, ...} | {version:1, id, ok:false, error:{code, message, reason?, retryAfterMs?}}
 ```
 
-`code` 是 `protocol/control.h` 中的 Browser 错误码（busy=6 等）。方法包括 `snapshot`、`shutdown`、`session.sitePreferences`、`view.create/adopt/configure/recreate/close/closed.ack`、`focus`、`visible`、`navigate`、`lifecycle`、`input`、`page.requests/reply/fileStatus/command/exitFullscreen/contextMenu`、`clipboard.read/write`、`profile.downloads`、`navigation.ack`、`navigation.export.begin/chunk`、`navigation.import.begin/chunk/commit`、`navigation.transfer.cancel`、`output.open/describe/configure/status/close`、`audio.open/close`。`profile.downloads` 把参数放在 `command` 对象里，避免与 envelope 的 `id` 冲突。
+`code` 是 `protocol/errors.h` 中错误码的名称。方法包括 `snapshot`、`shutdown`、`session.sitePreferences`、`view.create/adopt/configure/recreate/close/closed.ack`、`focus`、`visible`、`navigate`、`lifecycle`、`input`、`page.requests/reply/fileStatus/command/exitFullscreen/contextMenu`、`clipboard.read/write`、`profile.downloads`、`navigation.ack`、`navigation.export.begin/chunk`、`navigation.import.begin/chunk/commit`、`navigation.transfer.cancel`、`output.open/describe/configure/status/close`、`audio.open/close`。`profile.downloads` 把参数放在 `command` 对象里，避免与 envelope 的 `id` 冲突。
 
 `input` 中的键盘布局以 `{session, event:{type:"keyboard.layout", entries}}` 更新 Session，不携带 view token。其余输入保留原 view token 与顺序门禁。`mouse.pen` 可携带 `{id,pressure,tiltX,tiltY,twist,eraser}`，触点及其历史采样可携带 DIP 单位的 `width`、`height`。
 

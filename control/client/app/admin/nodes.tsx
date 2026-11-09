@@ -146,11 +146,14 @@ function NodeCard({
       <dl className="admin-facts">
         <dt>会话</dt>
         <dd>
-          {node.sessions} / {node.maxSessions}
+          {node.sessions}
+          {node.maxSessions !== null && ` / ${node.maxSessions}`}
           {node.users.length > 0 && ` · ${node.users.join('、')}`}
         </dd>
         <dt>综合压力</dt>
         <dd>{node.pressure === null ? '—' : formatPercent(node.pressure)}</dd>
+        <dt>余量</dt>
+        <dd>{node.headroom === null ? '—' : formatPercent(node.headroom)}</dd>
         <dt>对象副本</dt>
         <dd>{formatBytes(node.replicaBytes)}</dd>
         <dt>版本</dt>

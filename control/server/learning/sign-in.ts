@@ -124,10 +124,14 @@ export class SignIn {
       tabId: flow.tabId,
     });
     const password = flow.password!;
+    const login = await this.accounts.auth.login({ username: flow.username, password, seccode });
+    if ('challenge' in login) {
+      flow.finishing = false;
+      await this.begin(flow);
+      return;
+    }
     delete flow.password;
-    const session = await this.accounts.zhixueAuth.renew(
-      await this.accounts.auth.login({ username: flow.username, password, seccode }),
-    );
+    const session = await this.accounts.zhixueAuth.renew(login);
     if (!this.active(flow)) return;
     this.accounts.save(flow.tenant, 'changyan', session, session.displayName || flow.username, flow.username);
     await this.finish(flow);
@@ -157,7 +161,7 @@ export class SignIn {
         const fields = result as Record<string, unknown>;
         const field = (name: string) => {
           if (typeof fields[name] !== 'string' || !fields[name] || (fields[name] as string).length > 16384)
-            throw new RemoteKitError('rejected', '登录页面未返回完整验证结果');
+            throw new RemoteKitError('internal', '登录页面未返回完整验证结果');
           return fields[name] as string;
         };
         if (provider === 'changyan') {

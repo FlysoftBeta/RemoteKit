@@ -172,7 +172,7 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
         canvas.width = size.width;
         canvas.height = size.height;
         const context = canvas.getContext('2d');
-        if (!context) throw new RemoteKitError('unavailable', 'resize snapshot context unavailable');
+        if (!context) throw new RemoteKitError('unavailable', '无法获取窗口预览画面');
         const rect = source.sourceRect;
         context.drawImage(
           source.image,

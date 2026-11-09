@@ -11,7 +11,7 @@ Result<std::optional<NavigationOperations::Identity>> DecodeNavigationOperation(
   if (!wire.contains("operationId") && !wire.contains("operationGeneration") &&
       !wire.contains("operationSequence")) {
     if (acknowledge)
-      return {{}, {ErrorCode::invalid_request, "Navigation operation identity required"}};
+      return {{}, {ErrorCode::kInvalidRequest, "Navigation operation identity required"}};
     return {};
   }
   const auto* id = wire.FindString("operationId");
@@ -21,7 +21,7 @@ Result<std::optional<NavigationOperations::Identity>> DecodeNavigationOperation(
   if (!id || id->empty() || id->size() > 128 || !generation || generation->empty() ||
       generation->size() > 128 ||
       (!acknowledge && (!sequence || !base::StringToUint64(*sequence, &parsed) || !parsed)))
-    return {{}, {ErrorCode::invalid_request, "Invalid navigation operation identity"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Invalid navigation operation identity"}};
   return {NavigationOperations::Identity{*id, *generation, parsed}, {}};
 }
 
@@ -42,7 +42,7 @@ Result<NavigationTransferRequest> DecodeNavigationTransfer(const base::DictValue
     return {{}, operation.status};
   request.operation = std::move(operation.value);
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
@@ -58,7 +58,7 @@ Result<NavigateRequest> DecodeNavigate(const base::DictValue& wire, RequestEnvel
     return {{}, operation.status};
   request.operation = std::move(operation.value);
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
@@ -67,22 +67,22 @@ ControlResult ControlDispatcher::HandleNavigationTransfer(
   const int id = request.id;
   const auto* method = &request.method;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
   const auto session = request.session.value_or(0);
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view))
-    return ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session");
+    return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
   if (record->requests->close_state() == "closing")
-    return ControlResult::Failure(id, "view_closing");
+    return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   if (*method == "navigation.ack") {
     const auto status = adapter.AcknowledgeNavigation(*request.operation);
     if (!status)
-      return ControlResult::Failure(id, status.error, status.message, std::move(reply));
+      return ControlResult::Failure(id, *status.error, status.message, std::move(reply));
     reply.Set("ok", true);
     return reply;
   }
@@ -90,9 +90,10 @@ ControlResult ControlDispatcher::HandleNavigationTransfer(
   if (*method == "navigation.export.begin") {
     auto saved = adapter.ExportNavigation();
     if (!saved)
-      return ControlResult::Failure(id, saved.status.error, saved.status.message, std::move(reply));
+      return ControlResult::Failure(id, *saved.status.error, saved.status.message,
+                                    std::move(reply));
     if (!runtime_.navigation_transfers.CanReserve(view, saved.value.size()))
-      return error("transfer_memory_limit");
+      return error(ErrorCode::kBusy, "transfer_memory_limit");
     NavigationTransfer::Transfer transfer;
     transfer.id = runtime_.navigation_transfers.NextId();
     transfer.instance = token.instance;
@@ -103,10 +104,14 @@ ControlResult ControlDispatcher::HandleNavigationTransfer(
     runtime_.navigation_transfers.records[view] = std::move(transfer);
   } else if (*method == "navigation.import.begin") {
     uint64_t size = 0;
-    if (!Assign(request.size, &size) || size > 64 * 1024 * 1024 || adapter.contents())
-      return error("import_requires_unloaded_view_and_bounded_size");
+    if (!Assign(request.size, &size) || !size)
+      return error(ErrorCode::kInvalidRequest, "Navigation import size required");
+    if (size > 64 * 1024 * 1024)
+      return error(ErrorCode::kLimitExceeded, "Navigation import exceeds size bound");
+    if (adapter.contents())
+      return error(ErrorCode::kConflict, "Navigation import requires an unloaded view");
     if (!runtime_.navigation_transfers.CanReserve(view, size))
-      return error("transfer_memory_limit");
+      return error(ErrorCode::kBusy, "transfer_memory_limit");
     NavigationTransfer::Transfer transfer;
     transfer.id = runtime_.navigation_transfers.NextId();
     transfer.instance = token.instance;
@@ -117,22 +122,25 @@ ControlResult ControlDispatcher::HandleNavigationTransfer(
   } else {
     uint64_t transfer_id = 0;
     auto found = runtime_.navigation_transfers.records.find(view);
-    if (!Assign(request.transfer, &transfer_id) ||
-        found == runtime_.navigation_transfers.records.end() || found->second.id != transfer_id)
-      return error("transfer_not_found");
+    if (found == runtime_.navigation_transfers.records.end() ||
+        (*method != "navigation.transfer.status" &&
+         (!Assign(request.transfer, &transfer_id) || found->second.id != transfer_id)))
+      return error(ErrorCode::kNotFound, "transfer_not_found");
     auto& transfer = found->second;
     if (*method == "navigation.transfer.cancel") {
       runtime_.navigation_transfers.records.erase(found);
       reply.Set("ok", true);
       return reply;
     }
-    if (*method == "navigation.export.chunk" && !transfer.importing) {
+    if (*method == "navigation.transfer.status") {
+      reply.Set("committed", transfer.committed);
+    } else if (*method == "navigation.export.chunk" && !transfer.importing) {
       const auto* offset_text = Ptr(request.offset);
       uint64_t offset = 0;
       const int length = request.length.value_or(256 * 1024);
       if (!offset_text || !base::StringToUint64(*offset_text, &offset) || offset > transfer.total ||
           length < 1 || length > 256 * 1024)
-        return error("invalid_export_chunk");
+        return error(ErrorCode::kInvalidRequest, "invalid_export_chunk");
       auto chunk = std::string_view(transfer.data).substr(static_cast<size_t>(offset), length);
       reply.Set("data", base::Base64Encode(chunk));
       reply.Set("offset", base::NumberToString(offset));
@@ -145,55 +153,58 @@ ControlResult ControlDispatcher::HandleNavigationTransfer(
           offset != transfer.data.size() || !data || data->size() > 350000 ||
           !base::Base64Decode(*data, &chunk) || chunk.empty() || chunk.size() > 256 * 1024 ||
           chunk.size() > transfer.total - transfer.data.size())
-        return error("invalid_import_chunk");
+        return error(ErrorCode::kInvalidRequest, "invalid_import_chunk");
       transfer.data += chunk;
     } else if (*method == "navigation.import.commit" && transfer.importing) {
       if (transfer.instance != token.instance || transfer.document != token.document ||
           transfer.data.size() != transfer.total)
-        return error("incomplete_or_stale_import");
+        return error(ErrorCode::kConflict, "incomplete_or_stale_import");
       auto imported = adapter.ImportNavigation(transfer.data);
       if (!imported)
-        return ControlResult::Failure(id, imported.error, imported.message, std::move(reply));
-      runtime_.navigation_transfers.records.erase(found);
-      reply.Set("ok", true);
-      return reply;
+        return ControlResult::Failure(id, *imported.error, imported.message, std::move(reply));
+      transfer.committed = true;
+      transfer.data.clear();
     } else
-      return error("invalid_transfer_method");
+      return error(ErrorCode::kInvalidRequest, "invalid_transfer_method");
   }
   const auto& transfer = runtime_.navigation_transfers.records.at(view);
   reply.Set("ok", true);
+  reply.Set("importing", transfer.importing);
+  reply.Set("committed", transfer.committed);
   reply.Set("transfer", base::NumberToString(transfer.id));
   reply.Set("size", base::NumberToString(transfer.total));
-  reply.Set("received", base::NumberToString(transfer.importing ? transfer.data.size() : 0));
+  reply.Set("received", base::NumberToString(transfer.committed   ? transfer.total
+                                             : transfer.importing ? transfer.data.size()
+                                                                  : 0));
   return reply;
 }
 
 ControlResult ControlDispatcher::HandleNavigate(const NavigateRequest& request) {
   const int id = request.id;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
   const auto session = request.session.value_or(0);
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view))
-    return ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session");
+    return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
   if (record->requests->close_state() == "closing")
-    return ControlResult::Failure(id, "view_closing");
+    return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   Status status;
 
   const auto* url = Ptr(request.url);
   if (!url)
-    return error("url_required");
+    return error(ErrorCode::kInvalidRequest, "url_required");
   status = adapter.Navigate(GURL(*url), request.operation);
 
   reply.Set("token", TokenValue(runtime_.view_model.Token(session, view).value));
   runtime_.UpdateOutput();
   if (!status)
-    return ControlResult::Failure(id, status.error, status.message, std::move(reply));
+    return ControlResult::Failure(id, *status.error, status.message, std::move(reply));
   return reply;
 }
 }  // namespace remotekit::browser

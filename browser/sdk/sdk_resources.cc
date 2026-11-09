@@ -127,17 +127,13 @@ uint32_t RemainingMilliseconds(base::TimeTicks deadline) {
   return static_cast<uint32_t>(std::clamp<int64_t>(left.InMillisecondsRoundedUp(), 1, 30000));
 }
 bool Pending(const base::DictValue& reply) {
-  return reply.FindBool("pending") == true &&
-         reply.FindInt("code") == static_cast<int>(remotekit::protocol::ErrorCode::busy);
+  const auto* error = reply.FindDict("error");
+  return reply.FindBool("pending") == true && error && error->FindString("code") &&
+         *error->FindString("code") == "busy";
 }
-// Log the shared error vocabulary without exposing reply payloads or handles.
 void LogRenderOpenFailure(bool opening, const base::DictValue& reply, std::string_view fallback) {
-  const auto code = reply.FindInt("code");
-  const auto name =
-      code ? remotekit::protocol::ErrorName(static_cast<remotekit::protocol::ErrorCode>(*code))
-           : fallback;
   LOG(ERROR) << "RemoteKit SDK " << (opening ? "output.open" : "output.describe")
-             << " failed browser_error=" << name;
+             << " failed: " << fallback;
 }
 bool ParseRender(const base::DictValue& reply, remotekit_sdk_render_setup* setup) {
   const auto* resources = reply.FindDict("resources");
@@ -193,7 +189,10 @@ bool ParseRender(const base::DictValue& reply, remotekit_sdk_render_setup* setup
 int remotekit_sdk_control_open_render(uint64_t handle,
                                       uint32_t consumer_pid,
                                       remotekit_sdk_render_setup* setup,
-                                      uint32_t timeout_ms) {
+                                      uint32_t timeout_ms,
+                                      remotekit_sdk_failure* failure) {
+  if (failure)
+    *failure = {};
   if (!setup || setup->struct_size != sizeof(*setup))
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   *setup = {};
@@ -221,10 +220,13 @@ int remotekit_sdk_control_open_render(uint64_t handle,
     if (control_channel->closed.load(std::memory_order_acquire))
       return REMOTEKIT_SDK_CHANNEL_CLOSED;
   }
-  const auto deadline = base::TimeTicks::Now() + base::Milliseconds(timeout_ms);
+  std::optional<base::TimeTicks> deadline;
   bool opening = true;
+  bool written = false;
   for (;;) {
-    const uint32_t remaining = RemainingMilliseconds(deadline);
+    if (!deadline)
+      deadline = base::TimeTicks::Now() + base::Milliseconds(timeout_ms);
+    const uint32_t remaining = opening ? timeout_ms : RemainingMilliseconds(*deadline);
     if (!remaining)
       return REMOTEKIT_SDK_TIMEOUT;
     const int id = NextRequestId();
@@ -240,13 +242,17 @@ int remotekit_sdk_control_open_render(uint64_t handle,
     std::vector<mojo::ScopedHandle> attachments;
     int status = ExchangeJson(handle, *encoded, remaining, &reply, &attachments);
     if (status != REMOTEKIT_SDK_OK)
-      return status;
+      return written &&
+                     (status == REMOTEKIT_SDK_CHANNEL_CLOSED || status == REMOTEKIT_SDK_MOJO_ERROR)
+                 ? REMOTEKIT_SDK_LOST
+                 : status;
+    written = true;
     ReplyHandles handles(*reply);
     if (reply->FindInt("version") != 1 || reply->FindInt("id") != id) {
       LogRenderOpenFailure(opening, *reply, "invalid_reply_envelope");
       return REMOTEKIT_SDK_DATA_MISMATCH;
     }
-    if (!RemainingMilliseconds(deadline))
+    if (!RemainingMilliseconds(*deadline))
       return REMOTEKIT_SDK_TIMEOUT;
     // Only a successful describe may carry one endpoint. All rejected, pending
     // or opening replies destroy their attachments before returning.
@@ -259,9 +265,7 @@ int remotekit_sdk_control_open_render(uint64_t handle,
                             !reply->Find("error");
       if (!accepted && !Pending(*reply)) {
         LogRenderOpenFailure(true, *reply, "open_not_accepted");
-        return reply->FindInt("code") == remotekit::protocol::kBusyError
-                   ? REMOTEKIT_SDK_BUSY
-                   : REMOTEKIT_SDK_DATA_MISMATCH;
+        return ReplyStatus(*reply, failure);
       }
       opening = false;
     } else if (reply->FindBool("ok") == true) {
@@ -274,7 +278,7 @@ int remotekit_sdk_control_open_render(uint64_t handle,
         LogRenderOpenFailure(false, *reply, "invalid_render_resources");
         return REMOTEKIT_SDK_DATA_MISMATCH;
       }
-      if (!RemainingMilliseconds(deadline))
+      if (!RemainingMilliseconds(*deadline))
         return REMOTEKIT_SDK_TIMEOUT;
       const auto* resources = reply->FindDict("resources");
       const auto& description = resources ? *resources : *reply;
@@ -285,7 +289,7 @@ int remotekit_sdk_control_open_render(uint64_t handle,
         const auto found = state.channels.find(handle);
         if (state.stopping || found == state.channels.end() || found->second != control_channel ||
             control_channel->closed.load(std::memory_order_acquire))
-          return REMOTEKIT_SDK_CHANNEL_CLOSED;
+          return REMOTEKIT_SDK_LOST;
         for (const auto& [other_id, other] : state.channels) {
           if (other != control_channel && other->pending_render.Matches(*token)) {
             LogRenderOpenFailure(false, *reply, "duplicate_render_token");
@@ -296,7 +300,7 @@ int remotekit_sdk_control_open_render(uint64_t handle,
           LogRenderOpenFailure(false, *reply, "invalid_render_endpoint");
           return REMOTEKIT_SDK_DATA_MISMATCH;
         }
-        if (!RemainingMilliseconds(deadline)) {
+        if (!RemainingMilliseconds(*deadline)) {
           control_channel->pending_render.Reset();
           return REMOTEKIT_SDK_TIMEOUT;
         }
@@ -306,11 +310,9 @@ int remotekit_sdk_control_open_render(uint64_t handle,
       return REMOTEKIT_SDK_OK;
     } else if (!Pending(*reply)) {
       LogRenderOpenFailure(false, *reply, "describe_not_accepted");
-      return reply->FindInt("code") == remotekit::protocol::kBusyError
-                 ? REMOTEKIT_SDK_BUSY
-                 : REMOTEKIT_SDK_DATA_MISMATCH;
+      return ReplyStatus(*reply, failure);
     }
-    const uint32_t sleep_ms = RemainingMilliseconds(deadline);
+    const uint32_t sleep_ms = RemainingMilliseconds(*deadline);
     if (!sleep_ms)
       return REMOTEKIT_SDK_TIMEOUT;
     base::PlatformThread::Sleep(base::Milliseconds(std::min<uint32_t>(10, sleep_ms)));

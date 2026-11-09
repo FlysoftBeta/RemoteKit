@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
-import { RemoteKitError, httpStatus, toRemoteKitError } from '../../shared/errors';
+import { RemoteKitError, httpStatus, toRemoteKitError, wireError } from '../../shared/errors';
 import type { ProductState } from '../../shared/product';
 import type { DomainServices } from '../application';
 import { DiagnosticSessions, diagnosticMessageLimit } from '../diagnostics/sessions';
@@ -158,6 +158,7 @@ Object.assign(handlers, {
         bytes: storage.bytes,
         underReplicated: storage.underReplicated,
         pendingSessionDeletions: services.sessionPurge.pending(),
+        deletionFailures: services.sessionPurge.failures(),
       },
       diagnostics: ctx.diagnostics?.sessions
         ? (await ctx.diagnostics.sessions.archives(tenants(ctx))).length
@@ -285,7 +286,7 @@ export function attachViewerSocket(
   helpers: {
     diagnosticSessions?: DiagnosticSessions;
     firstViewer: Map<string, number>;
-    checkOrigin: (req: IncomingMessage) => void;
+    checkOrigin: (origin: string | undefined) => void;
     readToken: (req: IncomingMessage) => string | undefined;
     authenticationIdentity: (token: string) => string;
     track: <T>(promise: Promise<T>) => Promise<T>;
@@ -343,7 +344,7 @@ export function attachViewerSocket(
       if (options.nodes?.handleUpgrade(req, socket, head)) return;
       if (new URL(req.url ?? '/', 'http://localhost').pathname !== '/api/socket')
         throw new RemoteKitError('not_found', '接口不存在');
-      checkOrigin(req);
+      checkOrigin(req.headers.origin);
       const token = readToken(req),
         identity = control.accounts.identity(token);
       if (!identity || !token) throw new RemoteKitError('unauthenticated', '请先登录');
@@ -361,8 +362,8 @@ export function attachViewerSocket(
             lease,
             (reason) => {
               diagnosticSessions?.detachViewer(peer.tenant, lease, 'authorization-changed');
-              send(ws, { type: 'lease', status: 'revoked', reason });
-              ws.close(4001, reason);
+              send(ws, { type: 'lease', outcome: reason === 'logout' ? 'logged_out' : 'replaced' });
+              ws.close(reason === 'logout' ? 4002 : 4001);
             },
             { identity: hash, valid: () => control.accounts.identity(token)?.tenantId === peer.tenant },
             initialUnlocked,
@@ -392,9 +393,7 @@ export function attachViewerSocket(
               typeof request.id !== 'string' ||
               !request.id ||
               request.id.length > 128 ||
-              typeof request.method !== 'string' ||
-              pending.has(request.id) ||
-              pending.size >= 32
+              typeof request.method !== 'string'
             )
               throw new RemoteKitError('invalid_request', '无效的 WebSocket 请求');
           } catch {
@@ -411,6 +410,17 @@ export function attachViewerSocket(
               type: 'error',
               id: request.id,
               error: { code: 'limit_exceeded', message: '诊断请求过大' },
+            });
+            return;
+          }
+          if (pending.has(request.id) || pending.size >= 32) {
+            send(ws, {
+              type: 'error',
+              id: request.id,
+              error: {
+                code: pending.has(request.id) ? 'conflict' : 'busy',
+                message: pending.has(request.id) ? '请求身份正在使用' : '请求处理繁忙，请稍后重试',
+              },
             });
             return;
           }
@@ -446,7 +456,7 @@ export function attachViewerSocket(
                   (!control.viewers.productAllowed(peer.tenant, lease) ||
                     control.viewers.productEpoch(peer.tenant, lease) !== epoch)
                 )
-                  throw new RemoteKitError('locked', 'Viewer 已锁定');
+                  throw new RemoteKitError('outcome_unknown', '授权已改变，操作结果请核对当前状态');
                 send(ws, { type: 'result', id: request.id, result });
               })
               .catch((error) => {
@@ -456,7 +466,7 @@ export function attachViewerSocket(
                 send(ws, {
                   type: 'error',
                   id: request.id,
-                  error: { code: failure.code, message: failure.message },
+                  error: wireError(failure),
                 });
               })
               .finally(() => pending.delete(request.id)),
@@ -473,7 +483,14 @@ export function attachViewerSocket(
         remote: req.socket.remoteAddress,
       });
       const status = httpStatus[failure.code];
-      socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+      const body = JSON.stringify({ error: wireError(failure) });
+      const retryAfter =
+        failure.retryAfterMs === undefined
+          ? ''
+          : 'Retry-After: ' + Math.ceil(failure.retryAfterMs / 1000) + '\r\n';
+      socket.end(
+        `HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Type: application/json; charset=utf-8\r\n${retryAfter}Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+      );
     }
   });
   const facePoll = setInterval(() => {

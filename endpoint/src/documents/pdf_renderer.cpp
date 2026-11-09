@@ -22,7 +22,7 @@ Result<void> PdfRenderer::Render(const std::filesystem::path& input_pdf,
                                0);
     return {};
   } catch (const std::filesystem::filesystem_error&) {
-    return Error{ErrorCode::kRejected, "cannot render PDF"};
+    return Error{ErrorCode::kUnavailable, "cannot render PDF"};
   }
 }
 }  // namespace remotekit::documents

@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../../shared/errors';
 // The Viewer streams at the device's physical resolution, so the H.264 level it declares in its
 // offer has to cover that size at the product frame rate. Browsers offer level 3.1 (about 720p30,
 // 14Mbps) by default; the Endpoint fits its encode geometry and bitrate to whatever is declared.
@@ -100,7 +101,10 @@ export function configureReceiveOffer(
   const changes: { payload: string; original: string; effective: string }[] = [];
   if (profile === 'native') return { sdp, changes };
   if (!supportsConstrainedBaselineMode1(codecs))
-    throw new Error('接收档需要客户端支持 H.264 constrained-baseline / packetization-mode=1。');
+    throw new RemoteKitError(
+      'rejected',
+      '接收档需要客户端支持 H.264 constrained-baseline / packetization-mode=1。',
+    );
   const target = profileLevelId(Number(profile.slice('h264-level'.length)) as H264Level);
   let videoPayloads = new Set<string>();
   const h264Payloads = new Set<string>();
@@ -126,7 +130,8 @@ export function configureReceiveOffer(
     changes.push({ payload: match[1], original: line, effective });
     return effective;
   });
-  if (!changes.length) throw new Error('原始 offer 没有 constrained-baseline / mode1，无法应用此接收档。');
+  if (!changes.length)
+    throw new RemoteKitError('rejected', '原始 offer 没有 constrained-baseline / mode1，无法应用此接收档。');
   return { sdp: lines.join('\r\n'), changes };
 }
 

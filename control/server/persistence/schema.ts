@@ -4,9 +4,68 @@ import { createAnnouncementTables } from './announcements';
 import { createLearningTables } from './learning';
 import { createObjectRenderTables } from './object-renders';
 
-const version = 13;
+const version = 15;
 
+function addErrorColumns(db: Database.Database) {
+  db.exec(`CREATE TABLE download_import_failures (tenant TEXT NOT NULL, event_id TEXT NOT NULL, name TEXT NOT NULL, origin TEXT NOT NULL, error TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(tenant,event_id));
+    ALTER TABLE object_render_failures ADD COLUMN display_reason TEXT;
+    ALTER TABLE learning_downloads ADD COLUMN error_code TEXT;
+    ALTER TABLE learning_downloads ADD COLUMN error_message TEXT;
+    ALTER TABLE learning_downloads ADD COLUMN retry_at INTEGER;
+    ALTER TABLE learning_downloads ADD COLUMN failed_usage INTEGER;
+    ALTER TABLE session_imports ADD COLUMN error_code TEXT;
+    ALTER TABLE session_imports ADD COLUMN retry_at INTEGER;
+    ALTER TABLE session_imports ADD COLUMN storage_job TEXT;
+    ALTER TABLE session_imports ADD COLUMN apply_counts TEXT;
+    ALTER TABLE session_imports ADD COLUMN chunk_index INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE session_deletions ADD COLUMN error_code TEXT;
+    ALTER TABLE session_deletions ADD COLUMN error_message TEXT;`);
+}
 const migrations: Record<number, (db: Database.Database) => void> = {
+  14: (db) => {
+    for (const row of db.prepare('SELECT tenant,id,receipt FROM operation_receipts').all() as {
+      tenant: string;
+      id: string;
+      receipt: string;
+    }[]) {
+      const receipt = JSON.parse(row.receipt);
+      if (receipt.status === 'rejected' || receipt.status === 'expired') {
+        receipt.error = {
+          code: receipt.status === 'expired' ? 'conflict' : 'rejected',
+          message: receipt.error || '操作收据代次已过期，请核对当前工作区',
+        };
+        receipt.status = 'failed';
+      } else if (typeof receipt.error === 'string') {
+        receipt.error = { code: 'outcome_unknown', message: receipt.error };
+      }
+      db.prepare('UPDATE operation_receipts SET receipt=? WHERE tenant=? AND id=?').run(
+        JSON.stringify(receipt),
+        row.tenant,
+        row.id,
+      );
+    }
+    for (const row of db
+      .prepare("SELECT rowid,body FROM session_import_events WHERE type='importFailed'")
+      .all() as { rowid: bigint; body: string }[]) {
+      const event = JSON.parse(row.body);
+      event.retryable = false;
+      db.prepare('UPDATE session_import_events SET body=? WHERE rowid=?').run(
+        JSON.stringify(event),
+        row.rowid,
+      );
+    }
+    addErrorColumns(db);
+  },
+  13: (db) => {
+    db.exec(`ALTER TABLE session_placements RENAME TO session_placements_old;
+      CREATE TABLE session_placements (
+        tenant TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, node_id TEXT NOT NULL,
+        placement_epoch INTEGER NOT NULL, key_ciphertext TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','hibernating','hibernated')),
+        checkpoint_id INTEGER);
+      INSERT INTO session_placements SELECT * FROM session_placements_old;
+      DROP TABLE session_placements_old;`);
+  },
   12: (db) => {
     const settingsRows = db.prepare('SELECT tenant, data FROM user_settings').all() as {
       tenant: string;
@@ -75,11 +134,15 @@ export function createSchema(db: Database.Database) {
   db.transaction(() => {
     if (tableExists(db, 'schema_version')) {
       const rows = db.prepare('SELECT version FROM schema_version').all() as { version: bigint }[];
-      if (rows.length !== 1) throw new RemoteKitError('internal', 'Unsupported database schema');
+      if (rows.length !== 1)
+        throw new RemoteKitError('internal', '数据库版本不受支持', { detail: 'Unsupported database schema' });
       let storedVersion = Number(rows[0].version);
       while (storedVersion !== version) {
         const migrate = migrations[storedVersion];
-        if (!migrate) throw new RemoteKitError('internal', 'Unsupported database schema');
+        if (!migrate)
+          throw new RemoteKitError('internal', '数据库版本不受支持', {
+            detail: 'Unsupported database schema',
+          });
         migrate(db);
         storedVersion++;
       }
@@ -87,7 +150,8 @@ export function createSchema(db: Database.Database) {
       createLearningTables(db);
       return;
     }
-    if (tableExists(db, 'users')) throw new RemoteKitError('internal', 'Unsupported database schema');
+    if (tableExists(db, 'users'))
+      throw new RemoteKitError('internal', '数据库版本不受支持', { detail: 'Unsupported database schema' });
     db.exec(`CREATE TABLE view_ids (id INTEGER PRIMARY KEY AUTOINCREMENT);
       CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, tenant TEXT NOT NULL UNIQUE, salt TEXT NOT NULL, password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, last_login_at INTEGER, disabled_at INTEGER);
       CREATE TABLE auth_tokens (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
@@ -115,7 +179,7 @@ export function createSchema(db: Database.Database) {
     db.exec(`CREATE TABLE session_placements (
   tenant TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, node_id TEXT NOT NULL,
   placement_epoch INTEGER NOT NULL, key_ciphertext TEXT NOT NULL,
-  state TEXT NOT NULL DEFAULT 'active', checkpoint_id INTEGER);
+  state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','hibernating','hibernated')), checkpoint_id INTEGER);
       CREATE TABLE cluster_object_secret (id INTEGER PRIMARY KEY CHECK(id=1), ciphertext TEXT NOT NULL);
       CREATE TABLE objects (
         id TEXT PRIMARY KEY, size INTEGER NOT NULL, stored_size INTEGER NOT NULL,
@@ -173,6 +237,7 @@ export function createSchema(db: Database.Database) {
     createAnnouncementTables(db);
     createLearningTables(db);
     createObjectRenderTables(db);
+    addErrorColumns(db);
     writeVersion(db);
   })();
 }

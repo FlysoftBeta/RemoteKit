@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { AttachmentSave, StudySync as SyncState } from '../../shared/learning';
-import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError, type ErrorCode } from '../../shared/errors';
 import type { ControlDatabase } from '../persistence/database';
 import type { FileLibrary } from '../files/library';
 import type { ObjectIndex } from '../cluster/objects';
 import type { LearningAccounts } from './accounts';
 import type { DownloadItem, StudyService } from './study-service';
+import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { isDocument } from './document-type';
 
 class Slots {
@@ -32,6 +33,10 @@ interface DownloadRow {
   object_id: string | null;
   state: string;
   document: bigint;
+  error_code: ErrorCode | null;
+  error_message: string | null;
+  retry_at: bigint | null;
+  failed_usage: bigint | null;
 }
 type Objects = Pick<ObjectIndex, 'put' | 'render' | 'derived'>;
 const DAY = 86400_000;
@@ -101,7 +106,7 @@ export class StudySync {
       if (row.state === 'saved') this.dismiss(tenant, [row.entry_id]);
     }
     return row?.state === 'failed'
-      ? { state: 'failed', message: '下载失败，下次同步时重试' }
+      ? { state: 'failed', message: row.error_message ?? '下载失败', code: row.error_code ?? 'internal' }
       : { state: 'not_saved' };
   }
   dismiss(tenant: string, ids: string[]) {
@@ -161,13 +166,47 @@ export class StudySync {
         return { entryId: status.entryId };
       }
       if (automatic && this.row(tenant, key)?.state === 'dismissed')
-        throw new RemoteKitError('rejected', '文件已删除');
+        throw new RemoteKitError('not_found', '文件已删除');
+      const previous = this.row(tenant, key);
+      if (automatic && previous?.state === 'failed' && !this.retryDue(tenant, previous))
+        throw new RemoteKitError(previous.error_code ?? 'internal', previous.error_message ?? '下载失败');
+      if (previous?.error_code === 'outcome_unknown') {
+        const entry = previous.entry_id && this.library.entryExists(tenant, previous.entry_id);
+        if (entry) {
+          this.store.db
+            .prepare(
+              "UPDATE learning_downloads SET state='saved',error_code=NULL,error_message=NULL,retry_at=NULL WHERE tenant=? AND key=?",
+            )
+            .run(tenant, key);
+          return { entryId: previous.entry_id! };
+        }
+        if (
+          !previous.object_id ||
+          !this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(previous.object_id)
+        )
+          throw new RemoteKitError('outcome_unknown', '附件导入结果待对账');
+      }
       const item = await this.study(tenant).resolve(key);
       return this.download(tenant, item, runtime);
     });
     runtime.downloads.set(key, task);
     void task.finally(() => runtime.downloads.delete(key)).catch(() => {});
     return task;
+  }
+  private usage(tenant: string) {
+    const row = this.store.db
+      .prepare(
+        "SELECT coalesce(sum(json_extract(value,'$.size')),0) AS bytes FROM file_library,json_each(snapshot,'$.entries') WHERE tenant=?",
+      )
+      .get(tenant) as { bytes: bigint };
+    return Number(row?.bytes ?? 0);
+  }
+  private retryDue(tenant: string, row: DownloadRow) {
+    if (!row.error_code) return false;
+    if (row.error_code === 'limit_exceeded')
+      return row.failed_usage !== null && this.usage(tenant) < Number(row.failed_usage);
+    if (errorHandling(row.error_code) === 'reconcile') return true;
+    return retryDelay({ code: row.error_code }, 0) !== undefined && Number(row.retry_at ?? 0) <= this.now();
   }
   private async download(tenant: string, item: DownloadItem, runtime: ReturnType<StudySync['runtime']>) {
     const generation = this.accounts.generation(tenant, 'changyan');
@@ -178,18 +217,24 @@ export class StudySync {
     };
     try {
       authorize();
-      const download = await this.study(tenant).download(item);
+      const previous = this.row(tenant, item.key);
+      const recovered =
+        previous?.error_code === 'outcome_unknown' && previous.object_id
+          ? (this.store.db.prepare('SELECT id,size FROM objects WHERE id=?').get(previous.object_id) as
+              { id: string; size: bigint } | undefined)
+          : undefined;
+      const download = recovered ? undefined : await this.study(tenant).download(item);
       runtime.progress.set(item.key, {
         state: 'downloading',
         received: 0,
-        total: download.size ?? item.sizeBytes,
+        total: download?.size ?? item.sizeBytes,
       });
       this.changed(tenant);
       let received = 0;
       let prefix = Buffer.alloc(0);
       let pushedAt = this.now();
       const stream = async function* (changed: () => void, now: () => number) {
-        for await (const chunk of download.stream) {
+        for await (const chunk of download!.stream) {
           authorize();
           if (prefix.length < 4096)
             prefix = Buffer.concat([prefix, Buffer.from(chunk.subarray(0, 4096 - prefix.length))]);
@@ -197,7 +242,7 @@ export class StudySync {
           runtime.progress.set(item.key, {
             state: 'downloading',
             received,
-            total: download.size ?? item.sizeBytes,
+            total: download?.size ?? item.sizeBytes,
           });
           if (now() - pushedAt >= 250) {
             pushedAt = now();
@@ -207,20 +252,40 @@ export class StudySync {
         }
         authorize();
       };
-      const object = await this.objects.put(
-        tenant,
-        stream(() => this.changed(tenant), this.now),
-        { maxBytes: 256 * 1024 * 1024, signal: runtime.abort.signal },
-      );
+      const entryId =
+        previous?.state === 'failed' || previous?.state === 'pending'
+          ? (previous.entry_id ?? randomUUID())
+          : randomUUID();
+      const rememberObject = (id: string) => {
+        this.store.db
+          .prepare(
+            `INSERT INTO learning_downloads(tenant,key,published_at,saved_at,entry_id,object_id,state,error_code,error_message) VALUES (?,?,?,0,?,?,'failed','outcome_unknown','附件导入结果待对账') ON CONFLICT(tenant,key) DO UPDATE SET entry_id=excluded.entry_id,object_id=excluded.object_id,state=excluded.state,error_code=excluded.error_code,error_message=excluded.error_message`,
+          )
+          .run(tenant, item.key, item.publishedAt, entryId, id);
+      };
+      const object = recovered
+        ? { id: recovered.id, size: Number(recovered.size) }
+        : await this.objects.put(
+            tenant,
+            stream(() => this.changed(tenant), this.now),
+            { maxBytes: 256 * 1024 * 1024, signal: runtime.abort.signal, onIdentity: rememberObject },
+          );
       authorize();
       const filename = attachmentName(item.name, item.extension);
       const document = isDocument(filename, prefix);
-      const entryId = randomUUID();
+      this.store.db
+        .prepare(
+          `INSERT INTO learning_downloads(tenant,key,published_at,saved_at,entry_id,object_id,state,document) VALUES (?,?,?,0,?,?,'pending',?)
+        ON CONFLICT(tenant,key) DO UPDATE SET entry_id=excluded.entry_id,object_id=excluded.object_id,document=excluded.document`,
+        )
+        .run(tenant, item.key, item.publishedAt, entryId, object.id, Number(document));
       // A put claim holds the object until the catalog transaction acquires its reference.
       await this.library.importFromControl(
         tenant,
         {
-          operationId: randomUUID(),
+          operationId: createHash('sha256')
+            .update(JSON.stringify(['study-import', tenant, item.key, entryId]))
+            .digest('hex'),
           entryId,
           assetId: object.id,
           name: filename,
@@ -235,7 +300,7 @@ export class StudySync {
             .prepare(
               `INSERT INTO learning_downloads (tenant,key,published_at,saved_at,entry_id,object_id,state,document) VALUES (?,?,?,?,?,?,'saved',?)
           ON CONFLICT(tenant,key) DO UPDATE SET published_at=excluded.published_at,saved_at=excluded.saved_at,
-          entry_id=excluded.entry_id,object_id=excluded.object_id,state='saved',document=excluded.document`,
+          entry_id=excluded.entry_id,object_id=excluded.object_id,state='saved',document=excluded.document,error_code=NULL,error_message=NULL,retry_at=NULL,failed_usage=NULL`,
             )
             .run(tenant, item.key, item.publishedAt, this.now(), entryId, object.id, Number(document));
         },
@@ -245,6 +310,7 @@ export class StudySync {
       this.changed(tenant);
       return { entryId };
     } catch (error) {
+      const failure = toRemoteKitError(error);
       if (!runtime.abort.signal.aborted && this.accounts.generation(tenant, 'changyan') === generation) {
         this.store.db
           .prepare(
@@ -252,7 +318,20 @@ export class StudySync {
           ON CONFLICT(tenant,key) DO UPDATE SET state='failed' WHERE state!='dismissed'`,
           )
           .run(tenant, item.key, item.publishedAt);
-        runtime.progress.set(item.key, { state: 'failed', message: toRemoteKitError(error).message });
+        const delay = retryDelay(failure, 0);
+        this.store.db
+          .prepare(
+            'UPDATE learning_downloads SET error_code=?,error_message=?,retry_at=?,failed_usage=? WHERE tenant=? AND key=?',
+          )
+          .run(
+            failure.code,
+            failure.message,
+            delay === undefined ? null : this.now() + Math.max(delay, 30 * 60_000),
+            failure.code === 'limit_exceeded' ? this.usage(tenant) : null,
+            tenant,
+            item.key,
+          );
+        runtime.progress.set(item.key, { state: 'failed', code: failure.code, message: failure.message });
         this.changed(tenant);
       }
       throw error;
@@ -275,9 +354,10 @@ export class StudySync {
         let errorCode: string | undefined;
         for (let index = 0; index < items.length; index += 2) {
           if (runtime.abort.signal.aborted) return;
-          const selected = items
-            .slice(index, index + 2)
-            .filter((item) => this.row(tenant, item.key)?.state !== 'dismissed');
+          const selected = items.slice(index, index + 2).filter((item) => {
+            const row = this.row(tenant, item.key);
+            return row?.state !== 'dismissed' && (row?.state !== 'failed' || this.retryDue(tenant, row));
+          });
           const results = await Promise.allSettled(selected.map((item) => this.save(tenant, item.key, true)));
           for (const result of results)
             if (result.status === 'rejected') errorCode = toRemoteKitError(result.reason).code;
@@ -288,7 +368,7 @@ export class StudySync {
             'INSERT INTO learning_settings(tenant,last_sync_at) VALUES (?,?) ON CONFLICT(tenant) DO UPDATE SET last_sync_at=excluded.last_sync_at',
           )
           .run(tenant, this.now());
-        runtime.error = errorCode ? '部分附件下载失败，下次同步时重试' : undefined;
+        runtime.error = errorCode ? '部分附件下载失败，请查看附件提示' : undefined;
         runtime.diagnostic.errorCode = errorCode;
       } catch (error) {
         runtime.error = toRemoteKitError(error).message;

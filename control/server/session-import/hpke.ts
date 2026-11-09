@@ -13,7 +13,10 @@ const kemSuite = Buffer.from('4b454d0020', 'hex');
 const hpkeSuite = Buffer.from('48504b45002000010002', 'hex');
 const version = Buffer.from('HPKE-v1');
 const empty = Buffer.alloc(0);
-const invalid = () => new RemoteKitError('invalid_request', 'Invalid HPKE ciphertext or key');
+const invalid = () =>
+  new RemoteKitError('invalid_request', '加密导入数据或密钥无效', {
+    detail: 'Invalid HPKE ciphertext or key',
+  });
 
 function extract(salt: Buffer, ikm: Buffer) {
   return createHmac('sha256', salt).update(ikm).digest();

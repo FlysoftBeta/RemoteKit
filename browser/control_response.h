@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string_view>
+#include <cstdint>
+#include <optional>
 #include "remotekit/protocol/control.h"
 
 #include "base/functional/callback.h"
@@ -15,8 +17,9 @@ class ControlResult {
   static base::DictValue Failure(int id,
                                  protocol::ErrorCode,
                                  std::string_view detail,
-                                 base::DictValue fields = {});
-  static base::DictValue Failure(int id, std::string_view detail, base::DictValue fields = {});
+                                 base::DictValue fields = {},
+                                 std::optional<protocol::ErrorReason> reason = {},
+                                 std::optional<uint32_t> retry_after_ms = {});
   static base::DictValue FromFields(int id, base::DictValue fields);
 
  private:

@@ -1,4 +1,5 @@
-﻿import test, { type TestContext } from 'node:test';
+import { RemoteKitError } from '../shared/errors';
+import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { RtcSession, type RtcEvent } from '../client/rtc/rtc-session';
 import { WorkspaceSession } from '../client/control/workspace-session';
@@ -169,12 +170,12 @@ test('RTC retries bounded attempts and manual connect starts a fresh attempt', a
   let offers = 0;
   const rpc: ControlRpc = async () => {
     offers++;
-    throw new Error('offline');
+    throw new RemoteKitError('unavailable', 'offline');
   };
   rtc.setControlRpc(rpc);
   await rtc.connect();
   assert.equal(rtc.getSnapshot().phase, 'retryWait');
-  for (const delay of [2000, 5000, 10000]) {
+  for (const delay of [1000, 2000, 4000]) {
     t.mock.timers.tick(delay);
     await flush();
   }
@@ -269,6 +270,7 @@ test('AV sync restarts immediately once per authoritative change, while audio ch
   workspace.operationsChanged();
   workspace.operationsChanged();
   assert.equal(peers[0].closed, true);
+  await flush();
   assert.equal(peers.length, 2);
   assert.equal(rtc.getSnapshot().phase, 'establishing');
   await flush();
@@ -299,4 +301,15 @@ test('AV sync restarts immediately once per authoritative change, while audio ch
   t.mock.timers.tick(2000);
   await flush();
   assert.equal(offers, 4);
+});
+
+test('RTC cancellation closes the prior attempt without an error or retry', async (t) => {
+  const { rtc, peers, events } = environment(t);
+  rtc.setControlRpc(async (method) => (method === 'rtc.offer' ? answer : {}));
+  await rtc.connect();
+  events.length = 0;
+  rtc.connectionFailed(new RemoteKitError('canceled', ''));
+  assert.equal(peers[0].closed, true);
+  assert.equal(rtc.getSnapshot().phase, 'idle');
+  assert.ok(events.filter((event) => event.type === 'diagnostics').every((event) => !event.change.error));
 });

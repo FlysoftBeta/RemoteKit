@@ -23,7 +23,12 @@ struct ArchiveFailure {
 
 void Require(bool condition, const char* reason) {
   if (!condition)
-    throw ArchiveFailure{{ErrorCode::kRejected, reason}};
+    throw ArchiveFailure{{ErrorCode::kInternal, reason}};
+}
+
+void Bound(bool condition, const char* message) {
+  if (!condition)
+    throw ArchiveFailure{{ErrorCode::kRejected, message, ErrorReason::kDocumentTooComplex}};
 }
 
 uint64_t Number(std::span<const uint8_t> bytes, size_t offset, size_t count) {
@@ -135,8 +140,9 @@ struct RenderArchive::Impl {
     uint64_t count = Number(zip64, 32, 8);
     uint64_t directory_size = Number(zip64, 40, 8);
     uint64_t directory_offset = Number(zip64, 48, 8);
-    Require(count > 0 && count <= 250000 && count == Number(zip64, 24, 8) &&
-                directory_size <= 64 * 1024 * 1024 && directory_offset <= zip64_offset &&
+    Bound(count <= 250000 && directory_size <= 64 * 1024 * 1024,
+          "Document directory exceeds bounds");
+    Require(count > 0 && count == Number(zip64, 24, 8) && directory_offset <= zip64_offset &&
                 directory_size == zip64_offset - directory_offset,
             "invalid ZIP directory bounds");
     auto matches_end = [&](size_t offset, size_t width, uint64_t actual) {
@@ -188,9 +194,10 @@ struct RenderArchive::Impl {
         }
         p += 4 + n;
       }
+      Bound(raw <= kResourceLimit + 1024 * 1024, "Document resource exceeds bounds");
       Require(
           (found_zip64 || (raw != 0xffffffff && compressed != 0xffffffff && local != 0xffffffff)) &&
-              raw == compressed && raw <= kResourceLimit + 1024 * 1024 && local < directory_offset,
+              raw == compressed && local < directory_offset,
           "invalid ZIP entry sizes");
       Entry entry{local, 0, raw, static_cast<uint32_t>(Number(central, position + 16, 4)), flags};
       Require(entries.emplace(name, entry).second, "duplicate ZIP name");
@@ -255,8 +262,8 @@ struct RenderArchive::Impl {
 
   void Manifest() {
     auto manifest = entries.find("manifest.json");
-    Require(manifest != entries.end() && manifest->second.size <= kManifestLimit,
-            "missing or oversized manifest");
+    Require(manifest != entries.end(), "Document manifest missing");
+    Bound(manifest->second.size <= kManifestLimit, "missing or oversized manifest");
     auto bytes = Read(manifest->second.offset, manifest->second.size);
     Json json = Json::parse(bytes);
     Require(json.at("format") == "classapp-render-archive" && Unsigned(json.at("version")) == 2,
@@ -265,7 +272,8 @@ struct RenderArchive::Impl {
     if (has_dictionary) {
       const auto& metadata = json.at("dictionary");
       uint64_t length = Unsigned(metadata.at("size"));
-      Require(metadata.at("path") == "dictionary.zdict" && length > 0 && length <= kDictionaryLimit,
+      Bound(length <= kDictionaryLimit, "Document dictionary exceeds bounds");
+      Require(metadata.at("path") == "dictionary.zdict" && length > 0,
               "invalid document dictionary");
       auto entry = CrossCheck(metadata, length);
       auto data = Read(entry.offset, entry.size);
@@ -273,7 +281,8 @@ struct RenderArchive::Impl {
               "dictionary hash mismatch");
       Require(ZSTD_getDictID_fromDict(data.data(), data.size()) != 0, "invalid zstd dictionary");
       dictionary.reset(ZSTD_createDDict(data.data(), data.size()));
-      Require(dictionary != nullptr, "cannot load zstd dictionary");
+      if (!dictionary)
+        throw ArchiveFailure{{ErrorCode::kUnavailable, "Cannot allocate zstd dictionary"}};
     }
     const auto& resources = json.at("resources");
     Require(resources.is_array(), "invalid manifest resources");
@@ -282,8 +291,9 @@ struct RenderArchive::Impl {
       auto encoding = metadata.at("encoding").get<std::string>();
       uint64_t raw = Unsigned(metadata.at("rawSize"));
       uint64_t stored = Unsigned(metadata.at("storedSize"));
-      Require(ContentId(id) && raw <= kResourceLimit && stored <= kResourceLimit + 1024 * 1024,
-              "invalid resource size or content ID");
+      Bound(raw <= kResourceLimit && stored <= kResourceLimit + 1024 * 1024,
+            "Document resource exceeds bounds");
+      Require(ContentId(id), "invalid resource size or content ID");
       bool identity = encoding == "identity";
       Require(identity || encoding == "zstd" || (encoding == "zstd-dictionary" && dictionary),
               "unsupported resource encoding");
@@ -316,7 +326,8 @@ struct RenderArchive::Impl {
     Require(document.at("sourceMime") == "application/pdf", "invalid document source MIME");
     info.shared = references(document.at("shared"));
     const auto& items = document.at("items");
-    Require(items.is_array() && items.size() <= 20000, "too many document pages");
+    Require(items.is_array(), "Invalid document pages");
+    Bound(items.size() <= 20000, "Too many document pages");
     std::set<std::string> ids;
     for (const auto& page : items) {
       auto id = page.at("id").get<std::string>();
@@ -354,7 +365,7 @@ Result<RenderArchive> RenderArchive::Open(ArchiveRead read, uint64_t size) {
   } catch (const ArchiveFailure& failure) {
     return failure.error;
   } catch (const std::exception&) {
-    return Error{ErrorCode::kRejected, "invalid document archive"};
+    return Error{ErrorCode::kInternal, "invalid document archive"};
   }
 }
 
@@ -362,7 +373,7 @@ Result<RenderArchive> RenderArchive::OpenFile(const std::filesystem::path& path)
   std::error_code error;
   uint64_t size = std::filesystem::file_size(path, error);
   if (error)
-    return Error{ErrorCode::kNotFound, "document archive missing"};
+    return Error{ErrorCode::kUnavailable, "Cannot stat document archive"};
   return Open(
       [path](uint64_t offset, size_t length) -> Result<Bytes> {
         std::ifstream file(path, std::ios::binary);
@@ -370,7 +381,7 @@ Result<RenderArchive> RenderArchive::OpenFile(const std::filesystem::path& path)
         Bytes data(length);
         file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(length));
         if (!file)
-          return Error{ErrorCode::kRejected, "cannot read document archive"};
+          return Error{ErrorCode::kUnavailable, "cannot read document archive"};
         return data;
       },
       size);
@@ -395,7 +406,8 @@ Result<std::pair<std::string, Bytes>> RenderArchive::Resource(const std::string&
               "invalid zstd frame size");
       std::unique_ptr<ZSTD_DCtx, decltype(&ZSTD_freeDCtx)> context(ZSTD_createDCtx(),
                                                                    ZSTD_freeDCtx);
-      Require(context != nullptr, "cannot create zstd decoder");
+      if (!context)
+        throw ArchiveFailure{{ErrorCode::kUnavailable, "Cannot allocate zstd decoder"}};
       Require(!ZSTD_isError(ZSTD_DCtx_setParameter(context.get(), ZSTD_d_windowLogMax, 26)),
               "cannot limit zstd window");
       raw.resize(static_cast<size_t>(object.raw));
@@ -413,7 +425,7 @@ Result<std::pair<std::string, Bytes>> RenderArchive::Resource(const std::string&
   } catch (const ArchiveFailure& failure) {
     return failure.error;
   } catch (const std::exception&) {
-    return Error{ErrorCode::kRejected, "cannot decode document resource"};
+    return Error{ErrorCode::kInternal, "cannot decode document resource"};
   }
 }
 }  // namespace remotekit::documents

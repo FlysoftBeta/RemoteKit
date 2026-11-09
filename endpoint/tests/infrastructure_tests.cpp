@@ -67,6 +67,22 @@ void NumericOptions() {
   config["nodeId"] = "another";
   Check(!Options(config), "node identity mismatch");
   auto options = Options().value();
+  Check(options.max_sessions == 3 && options.disk_reserve_bytes == 10737418240ULL &&
+            options.session_memory_bytes == 2147483648ULL,
+        "numeric node limits");
+  config = TestConfig();
+  for (const auto* field : {"maxSessions", "diskReserveBytes", "sessionMemoryBytes"})
+    config[field] = nullptr;
+  const auto unlimited = Options(config).value();
+  Check(!unlimited.max_sessions && !unlimited.disk_reserve_bytes && !unlimited.session_memory_bytes,
+        "null node limits");
+  for (const auto* field : {"maxSessions", "diskReserveBytes", "sessionMemoryBytes"}) {
+    for (const auto& invalid : {Json(-1), Json(1.5), Json("1"), Json(9007199254740992ULL)}) {
+      config = TestConfig();
+      config[field] = invalid;
+      Check(!Options(config), "invalid node limit");
+    }
+  }
   Check(options.data == fs::current_path() / "data" && options.browser.is_absolute(),
         "paths resolved against node root");
   Check(!options.rtc_port_min && !options.rtc_port_max && options.rtc_address.empty(),
@@ -281,7 +297,11 @@ class FixtureLink final : public ManagementLink {
     replies.push_back(reply);
     return true;
   }
-  bool SendEvent(const Json&, uint64_t) override { return true; }
+  bool SendEvent(const Json&, uint64_t, remotekit::DeliveryFlag delivery = {}) override {
+    if (delivery)
+      delivery->MarkWritten();
+    return true;
+  }
   void OnDisconnect(Disconnect) override {}
   Result<Json> Request(const std::string& method, Json fields) override {
     Check(method == "object.locate" && fields["tenantId"] == "tenant" &&
@@ -294,7 +314,9 @@ void ManagementDispatch() {
   TemporaryDirectory directory;
   SessionStore store(directory.path);
   objects::ObjectStore objects(directory.path);
-  std::istringstream content("warm checkpoint manifest");
+  std::istringstream content(Json{
+      {"version", 2}, {"buildId", "dev"}, {"files", Json::array()}, {"directories", Json::array()}}
+                                 .dump());
   const auto object = objects.Write(objects::Keys{}, content);
   Check(bool(object), "warm manifest object");
   const auto checkpoint = object.value().id;

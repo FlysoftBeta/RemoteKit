@@ -1,6 +1,7 @@
 #include "session/browser_rpc.hpp"
 #include "media/server_trace.hpp"
 #include "protocol/control.h"
+#include "util/wire_error.hpp"
 #include <charconv>
 #include <chrono>
 
@@ -63,7 +64,7 @@ Result<Json> BrowserRpc::Exchange(Json command,
     lock.lock();
   record("input_rpc_lock_acquired");
   if (admitted && !admitted())
-    return Error{ErrorCode::kForbidden, "authorization_changed"};
+    return Error{ErrorCode::kConflict, "Authorization changed before Browser dispatch"};
   if (expected_control && Control() != expected_control)
     return Error{ErrorCode::kConflict, "stale_file_browser"};
   if (!Control())
@@ -87,7 +88,8 @@ Result<Json> BrowserRpc::Exchange(Json command,
                                          response.size(), &count, timeout_ms);
   record("input_rpc_sdk_return", status);
   const auto failed = [&](Error error) -> Result<Json> {
-    if (status == REMOTEKIT_SDK_CHANNEL_CLOSED) {
+    if (status == REMOTEKIT_SDK_CHANNEL_CLOSED || status == REMOTEKIT_SDK_LOST ||
+        status == REMOTEKIT_SDK_MOJO_ERROR) {
       disconnected_ = true;
       if (const auto handle = control_.exchange(0))
         sdk_.remotekit_sdk_control_close(handle);
@@ -104,10 +106,11 @@ Result<Json> BrowserRpc::Exchange(Json command,
   };
   if (status) {
     needs_health_check_ = true;
-    return failed(Error{media::SdkErrorCode(status, true),
+    return failed(Error{media::SdkErrorCode(status),
                         "browser request transport SDK " + std::to_string(status),
-                        status == REMOTEKIT_SDK_CHANNEL_CLOSED ? ErrorReason::kBrowserRestarting
-                                                               : ErrorReason::kNone});
+                        status == REMOTEKIT_SDK_CHANNEL_CLOSED
+                            ? std::optional<ErrorReason>(ErrorReason::kBrowserRestarting)
+                            : std::nullopt});
   }
   if (count > response.size())
     return failed(Error{ErrorCode::kOutcomeUnknown, "browser response exceeds bound"});
@@ -128,57 +131,22 @@ Result<Json> BrowserRpc::Request(Json command,
     return reply;
   if (credentials) {
     if (!reply.value().value("ok", false))
-      return Error{ReplyError(reply.value()).code, "page authentication reply rejected"};
+      return ReplyError(reply.value());
     return Json{{"ok", true}};
   }
   return CheckReply(std::move(reply).value());
 }
 Error BrowserRpc::ReplyError(const Json& reply) {
-  const int browser_code = reply.value("code", 0);
-  ErrorCode code = ErrorCode::kRejected;
-  switch (static_cast<protocol::ErrorCode>(browser_code)) {
-    case protocol::ErrorCode::busy:
-      code = ErrorCode::kBusy;
-      break;
-    case protocol::ErrorCode::not_found:
-      code = ErrorCode::kNotFound;
-      break;
-    case protocol::ErrorCode::stale_identity:
-      code = ErrorCode::kConflict;
-      break;
-    case protocol::ErrorCode::invalid_request:
-      code = ErrorCode::kInvalidRequest;
-      break;
-    case protocol::ErrorCode::unavailable:
-      code = ErrorCode::kUnavailable;
-      break;
-    case protocol::ErrorCode::resource_limit:
-      code = ErrorCode::kLimitExceeded;
-      break;
-    default:
-      break;
-  }
-  auto message = reply.value("detail", std::string());
-  if (message.empty())
-    message = reply.value("error", std::string());
-  return {code, std::move(message)};
+  const auto error = reply.find("error");
+  return ParseWireError(error == reply.end() ? Json() : *error);
 }
 Result<Json> BrowserRpc::CheckReply(Json reply) {
   if (reply.value("ok", false))
     return reply;
-  const auto code = ReplyError(reply).code;
-  const int browser_code = reply.value("code", 0);
-  std::string message = "browser code=" + std::to_string(browser_code);
-  if (reply.contains("error"))
-    message += " error=" + (reply["error"].is_string() ? reply["error"].get<std::string>()
-                                                       : reply["error"].dump());
-  if (reply.contains("detail") && reply["detail"].is_string())
-    message += " detail=" + reply["detail"].get<std::string>();
-  return Error{code, std::move(message)};
+  return ReplyError(reply);
 }
 bool BrowserRpc::IsBusyBeforeAdmission(const Json& reply) {
-  return !reply.value("ok", false) &&
-         reply.value("code", 0) == static_cast<int>(protocol::ErrorCode::busy) &&
+  return !reply.value("ok", false) && ReplyError(reply).code == ErrorCode::kBusy &&
          !reply.value("inputAdmitted", false);
 }
 Result<void> BrowserRpc::OpenRender(remotekit_sdk_render_setup& setup) {
@@ -186,10 +154,12 @@ Result<void> BrowserRpc::OpenRender(remotekit_sdk_render_setup& setup) {
   if (!Control())
     return Error{ErrorCode::kUnavailable, "browser control unavailable"};
   const auto started = std::chrono::steady_clock::now();
-  const int status =
-      sdk_.remotekit_sdk_control_open_render(Control(), GetCurrentProcessId(), &setup, 15000);
+  remotekit_sdk_failure failure{};
+  const int status = sdk_.remotekit_sdk_control_open_render(Control(), GetCurrentProcessId(),
+                                                            &setup, 15000, &failure);
   if (status) {
-    if (status == REMOTEKIT_SDK_CHANNEL_CLOSED) {
+    if (status == REMOTEKIT_SDK_CHANNEL_CLOSED || status == REMOTEKIT_SDK_LOST ||
+        status == REMOTEKIT_SDK_MOJO_ERROR) {
       disconnected_ = true;
       if (const auto handle = control_.exchange(0))
         sdk_.remotekit_sdk_control_close(handle);
@@ -201,17 +171,7 @@ Result<void> BrowserRpc::OpenRender(remotekit_sdk_render_setup& setup) {
                                        std::chrono::steady_clock::now() - started)
                                        .count()),
             status, Control());
-    lock.unlock();
-    if (Control() && status != REMOTEKIT_SDK_TIMEOUT) {
-      auto description = Request({{"method", "output.status"}}, 0, 1000);
-      if (description && description.value().contains("output")) {
-        const auto& output = description.value()["output"];
-        if (!output.value("error", std::string()).empty())
-          return Error{ErrorCode::kUnavailable,
-                       output.value("message", output["error"].get<std::string>())};
-      }
-    }
-    return Error{media::SdkErrorCode(status), "browser render setup SDK " + std::to_string(status)};
+    return media::SdkFailure(status, failure);
   }
   return {};
 }

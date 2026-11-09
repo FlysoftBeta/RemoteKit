@@ -6,7 +6,7 @@
 namespace remotekit {
 Result<void> FileController::RequireFileJob(const FileJob& job) {
   if (!authorization.Stamp() || !file_services.Current(job))
-    return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
+    return Error{ErrorCode::kConflict, "file_transfer_interrupted"};
   return {};
 }
 
@@ -14,7 +14,7 @@ Result<Json> FileController::DirectFileRpc(const FileJob& job, const char* metho
   RK_RETURN_IF_ERROR(RequireFileJob(job));
   const auto token = authorization.Admit();
   if (token.peer != job.peer || !authorization.Current(token))
-    return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
+    return Error{ErrorCode::kConflict, "file_transfer_interrupted"};
   Json command = {{"method", method},
                   {"session", id},
                   {"view", job.binding.view},
@@ -44,7 +44,7 @@ Result<Json> FileController::AuthorizeFiles(const Json& request) {
   std::map<std::string, FileBinding> bindings;
   const auto& requests = request.at("requests");
   if (!requests.is_array() || requests.size() > 64)
-    return Error{ErrorCode::kForbidden, "invalid_file_authorization_count"};
+    return Error{ErrorCode::kInvalidRequest, "invalid_file_authorization_count"};
   for (const auto& item : requests) {
     const auto token = Required(item, "id");
     if (token.size() > 128 || token == "library")
@@ -56,11 +56,11 @@ Result<Json> FileController::AuthorizeFiles(const Json& request) {
     if (binding.browser_incarnation != browser.Incarnation() || !views.Contains(binding.view))
       return Error{ErrorCode::kConflict, "stale_file_request_target"};
     if (!bindings.emplace(token, binding).second)
-      return Error{ErrorCode::kForbidden, "duplicate_file_authorization"};
+      return Error{ErrorCode::kInvalidRequest, "duplicate_file_authorization"};
   }
   auto admission = authorization.LockAdmission();
   if (!authorization.Stamp())
-    return Error{ErrorCode::kForbidden, "authorization_changed"};
+    return Error{ErrorCode::kConflict, "authorization_changed"};
   {
     const auto epoch = request.find("authEpoch");
     if (epoch == request.end() || !epoch->is_number_unsigned() ||
@@ -310,7 +310,7 @@ Result<Json> LibraryController::DirectSelectionCancel(const FileJob& job) {
            files.Current(job);
   };
   if (!current())
-    return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
+    return Error{ErrorCode::kConflict, "file_transfer_interrupted"};
   const auto check = [&] { return files.RequireFileJob(job); };
   RK_ASSIGN_OR_RETURN(state, file_library.CancelPendingSelections(job.binding, check));
   if (state == LibraryState::submitted)
@@ -324,7 +324,7 @@ Result<Json> LibraryController::DirectSelectionCancel(const FileJob& job) {
   if (existing != "pending")
     return Json{{"state", existing}};
   if (!current())
-    return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
+    return Error{ErrorCode::kOutcomeUnknown, "Authorization changed after file operation"};
   auto cancelled = files.DirectFileRpc(job, "page.reply", {{"file_only", true}, {"accept", false}});
   if (!cancelled)
     return cancelled.error();
@@ -482,7 +482,9 @@ Result<Json> PhotoService::Execute(const FileJob& job,
   }
   if (method == "photo.rank") {
     const auto& ids = params.at("assetIds");
-    if (!ids.is_array() || ids.empty() || ids.size() > 6)
+    if (ids.is_array() && ids.size() > 6)
+      return Error{ErrorCode::kLimitExceeded, "Too many photos"};
+    if (!ids.is_array() || ids.empty())
       return Error{ErrorCode::kInvalidRequest, "invalid_photo_count"};
     std::vector<fs::path> paths;
     for (const auto& asset : ids) {

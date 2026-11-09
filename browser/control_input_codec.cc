@@ -18,7 +18,7 @@ std::optional<double> Number(const base::DictValue& object, std::string_view key
   return std::nullopt;
 }
 Result<InputPayload> PayloadError(const char* detail) {
-  return {{}, {ErrorCode::invalid_request, detail}};
+  return {{}, {ErrorCode::kInvalidRequest, detail}};
 }
 Result<InputPayload> DecodeIme(const base::DictValue* event) {
   InputPayload payload;
@@ -358,7 +358,7 @@ Result<InputEvent> DecodeControlInput(const base::DictValue& request,
                                       WebViewId view) {
   InputEvent input;
   auto error = [](const char* detail) -> Result<InputEvent> {
-    return {{}, {ErrorCode::invalid_request, detail}};
+    return {{}, {ErrorCode::kInvalidRequest, detail}};
   };
   input.token.session = session;
   input.token.view = view;

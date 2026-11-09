@@ -148,7 +148,7 @@ test('photo burst admits a 44 KiB sample, rejects oversized analysis data and di
       ['1', '2'],
       signal,
     ),
-    /大小或格式/,
+    { code: 'limit_exceeded' },
   );
   assert.deepEqual(await client.endPhotoBurst(burstId, ['1'], signal), expected);
   await assert.rejects(client.samplePhotoBurst(burstId, '2', jpeg, ['2'], signal), /会话已结束/);
@@ -246,6 +246,9 @@ test('file failures retain the Endpoint code and public message', async () => {
   await assert.rejects(
     client.cancelSelection('chooser'),
     (error: unknown) =>
-      error instanceof RemoteKitError && error.code === 'busy' && error.message === 'file_transfer_busy',
+      error instanceof RemoteKitError &&
+      error.code === 'busy' &&
+      error.message === '服务繁忙，请稍后重试' &&
+      error.detail === 'file_transfer_busy',
   );
 });

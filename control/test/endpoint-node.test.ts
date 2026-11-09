@@ -132,7 +132,7 @@ test('node request cap, timeout, offline certainty and ping/pong', async () => {
     const requests = Array.from({ length: 256 }, () =>
       assert.rejects(link.request('test', 'one'), { code: 'outcome_unknown' }),
     );
-    await assert.rejects(link.request('excess', 'one'), { code: 'unavailable' });
+    await assert.rejects(link.request('excess', 'one'), { code: 'busy' });
     await Promise.all(requests);
     await assert.rejects(link.request('big', 'one', { data: 'x'.repeat(1024 * 1024) }), {
       code: 'limit_exceeded',
@@ -169,18 +169,18 @@ test('sticky balanced placement seals keys, opens per epoch, retries not_found o
     alpha.handler = (request) => {
       if (request.method === 'session.snapshot' && missing) {
         missing = false;
-        throw { code: 'not_found' };
+        throw { code: 'not_found', message: 'View not found' };
       }
       return {};
     };
     const before = alpha.requests.length;
-    await h.gateway.snapshot('one');
+    await assert.rejects(h.gateway.snapshot('one'), { code: 'not_found' });
     assert.deepEqual(
       alpha.requests.slice(before).map((request) => request.method),
-      ['session.snapshot', 'session.open', 'session.snapshot'],
+      ['session.snapshot'],
     );
     alpha.handler = (request) => {
-      if (request.method !== 'session.open') throw { code: 'not_found' };
+      if (request.method !== 'session.open') throw { code: 'not_found', message: 'View not found' };
       return {};
     };
     await assert.rejects(h.gateway.snapshot('one'), { code: 'not_found' });
@@ -371,10 +371,10 @@ test('bidirectional requests share the concurrency cap, timeout errors and JSON 
     const pending = Array.from({ length: 256 }, () =>
       assert.rejects(node.request('fixture.hang', 'tenant'), { code: 'outcome_unknown' }),
     );
-    await assert.rejects(node.request('fixture.hang', 'tenant'), { code: 'unavailable' });
+    await assert.rejects(node.request('fixture.hang', 'tenant'), { code: 'busy' });
     await Promise.all(pending);
     h.registry.handlers.set('fixture.large', () => ({ data: 'x'.repeat(1024 * 1024) }));
-    await assert.rejects(node.request('fixture.large', 'tenant'), { code: 'limit_exceeded' });
+    await assert.rejects(node.request('fixture.large', 'tenant'), { code: 'outcome_unknown' });
   } finally {
     await h.close();
   }
@@ -402,6 +402,7 @@ test('browser status reasons map once at the Endpoint boundary and keep uncertai
         detail,
       });
       const runtime = control.tenants.get('one');
+      runtime.reconciliation.error = undefined;
       runtime.started = true;
       await assert.rejects(control.reconciler.reconcileProduct('one'), { message });
       assert.equal(runtime.lastError, message);
@@ -422,7 +423,7 @@ test('browser status reasons map once at the Endpoint boundary and keep uncertai
     };
     await assert.rejects(h.gateway.command('one', { viewId: '1', command: 'reload' }), {
       code: 'outcome_unknown',
-      message: '浏览器连接中断，操作可能已执行，请查看恢复后的页面',
+      message: '浏览器正在恢复，请稍候…',
       detail,
     });
   } finally {

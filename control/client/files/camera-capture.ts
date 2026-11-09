@@ -1,5 +1,6 @@
+import { RemoteKitError } from '../../shared/errors';
 import { diagnostics } from '../media/diagnostics';
-import { PhotoBurstBackpressureError, type FileChannel, type PhotoBurstDecision } from './file-channel';
+import { type FileChannel, type PhotoBurstDecision } from './file-channel';
 
 export type { PhotoBurstDecision } from './file-channel';
 
@@ -48,7 +49,7 @@ export function photoCoverCrop(
       (value) => !Number.isFinite(value) || value <= 0,
     )
   ) {
-    throw new Error('摄像头尚未准备好');
+    throw new RemoteKitError('unavailable', '摄像头尚未准备好');
   }
   const aspect = viewportWidth / viewportHeight;
   const cropWidth = Math.min(sourceWidth, sourceHeight * aspect);
@@ -98,7 +99,7 @@ function draw(
   height: number,
 ) {
   const context = canvas.getContext('2d', { alpha: false });
-  if (!context) throw new Error('无法拍照');
+  if (!context) throw new RemoteKitError('internal', '无法拍照');
   context.drawImage(source, x, y, width, height, 0, 0, canvas.width, canvas.height);
 }
 
@@ -127,7 +128,7 @@ function validateDecision(decision: PhotoBurstDecision, available: Map<string, S
         !candidate || !Number.isFinite(candidate.score) || !decision.keepFrameIds.includes(candidate.frameId),
     )
   ) {
-    throw new Error('拍照选片结果无效');
+    throw new RemoteKitError('internal', '拍照选片结果无效');
   }
 }
 
@@ -139,7 +140,7 @@ export async function capturePhotoBurst(
   rpc: FileChannel,
   options: CaptureOptions,
 ): Promise<CapturedBurst> {
-  if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+  if (signal.aborted) throw new RemoteKitError('canceled', '');
   const start = performance.now();
   const deadline = start + maxSamplingMs;
   const { videoWidth: sourceWidth, videoHeight: sourceHeight } = video;
@@ -155,7 +156,7 @@ export async function capturePhotoBurst(
   let inFlight: Promise<void> | undefined;
   let cancelFrame: (() => void) | undefined;
   let resolveSampling!: (stats: CaptureStats) => void;
-  let rejectAbort!: (error: DOMException) => void;
+  let rejectAbort!: (error: Error) => void;
   const sampling = new Promise<CaptureStats>((resolve) => {
     resolveSampling = resolve;
   });
@@ -166,7 +167,7 @@ export async function capturePhotoBurst(
   const opening = rpc.beginPhotoBurst(signal).then((result) => {
     if (signal.aborted || retired) {
       void rpc.cancelPhotoBurst(result.burstId).catch((error) => diagnostics.record('camera-capture', error));
-      throw new DOMException('Aborted', 'AbortError');
+      throw new RemoteKitError('canceled', '');
     }
     burstId = result.burstId;
     return burstId;
@@ -196,7 +197,7 @@ export async function capturePhotoBurst(
     analysis = undefined;
   }
   function abort() {
-    rejectAbort(new DOMException('Aborted', 'AbortError'));
+    rejectAbort(new RemoteKitError('canceled', ''));
     releaseSnapshots();
     stop('aborted');
   }
@@ -254,7 +255,7 @@ export async function capturePhotoBurst(
     } catch (error) {
       release(canvas);
       snapshots.delete(frameId);
-      if (error instanceof PhotoBurstBackpressureError || signal.aborted) return;
+      if ((error instanceof RemoteKitError && error.code === 'busy') || signal.aborted) return;
       failure = error;
       stop('error');
     }

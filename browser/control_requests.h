@@ -21,9 +21,11 @@ struct AppInfoRequest : RequestEnvelope {
   WebViewId view = 0;
 };
 struct StorageImportRequest : RequestEnvelope {
+  uint64_t view = 0;
   StorageImportData data;
 };
 struct StorageImportStatusRequest : RequestEnvelope {
+  uint64_t view = 0;
   uint64_t job = 0;
 };
 struct ViewConfiguration {
@@ -227,7 +229,7 @@ class RequestDecoder {
       if (value->is_list())
         return value->GetList().Clone();
     }
-    status_ = {ErrorCode::invalid_request, "Invalid " + std::string(field)};
+    status_ = {ErrorCode::kInvalidRequest, "Invalid " + std::string(field)};
     return std::nullopt;
   }
   template <class T>

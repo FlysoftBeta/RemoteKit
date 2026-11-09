@@ -1,3 +1,5 @@
+import { endpointError } from '../endpoint/gateway';
+import { errorHandling, retryDelay } from '../../shared/error-policy';
 import type { ControlDatabase } from '../persistence/database';
 import type { NodeLink, NodeRegistry } from './node-link';
 
@@ -5,6 +7,8 @@ import type { NodeLink, NodeRegistry } from './node-link';
 export class SessionPurge {
   private readonly flushing = new Map<string, Promise<void>>();
   private closed = false;
+  private readonly retries = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly attempts = new Map<string, number>();
   constructor(
     private readonly store: ControlDatabase,
     private readonly nodes: NodeRegistry,
@@ -12,12 +16,15 @@ export class SessionPurge {
     nodes.on('ready', this.ready);
   }
   private readonly ready = ({ nodeId }: { nodeId: string }) => {
+    clearTimeout(this.retries.get(nodeId));
+    this.retries.delete(nodeId);
+    this.attempts.delete(nodeId);
     void this.flushNode(this.nodes.get(nodeId)!);
   };
   enqueue(sessionId: string) {
     for (const node of this.nodes.all())
       this.store.db
-        .prepare('INSERT OR IGNORE INTO session_deletions VALUES (?,?)')
+        .prepare('INSERT OR IGNORE INTO session_deletions(session_id,node_id) VALUES (?,?)')
         .run(sessionId, node.nodeId);
   }
   pending() {
@@ -29,6 +36,24 @@ export class SessionPurge {
       ).count,
     );
   }
+  failures() {
+    return (
+      this.store.db
+        .prepare(
+          'SELECT session_id,node_id,error_code,error_message FROM session_deletions WHERE error_code IS NOT NULL',
+        )
+        .all() as {
+        session_id: string;
+        node_id: string;
+        error_code: import('../../shared/errors').ErrorCode;
+        error_message: string;
+      }[]
+    ).map((row) => ({
+      sessionId: row.session_id,
+      nodeId: row.node_id,
+      error: { code: row.error_code, message: row.error_message },
+    }));
+  }
   flush() {
     return Promise.all(this.nodes.all().map((node) => this.flushNode(node))).then(() => {});
   }
@@ -39,10 +64,37 @@ export class SessionPurge {
     const work = (async () => {
       for (;;) {
         const row = this.store.db
-          .prepare('SELECT session_id FROM session_deletions WHERE node_id=? LIMIT 1')
+          .prepare(
+            "SELECT session_id FROM session_deletions WHERE node_id=? AND (error_code IS NULL OR error_code IN ('busy','rate_limited','unavailable','outcome_unknown')) LIMIT 1",
+          )
           .get(node.nodeId) as { session_id: string } | undefined;
         if (!row) return;
-        await node.request('session.delete', '', { sessionId: row.session_id });
+        try {
+          await node.request('session.delete', '', { sessionId: row.session_id });
+        } catch (error) {
+          const failure = endpointError(error);
+          this.store.db
+            .prepare(
+              'UPDATE session_deletions SET error_code=?,error_message=? WHERE session_id=? AND node_id=?',
+            )
+            .run(failure.code, failure.message, row.session_id, node.nodeId);
+          const attempt = this.attempts.get(node.nodeId) ?? 0;
+          const wait =
+            retryDelay(failure, attempt) ?? (errorHandling(failure.code) === 'reconcile' ? 1000 : undefined);
+          if (wait !== undefined) {
+            this.attempts.set(node.nodeId, attempt + 1);
+            clearTimeout(this.retries.get(node.nodeId));
+            const timer = setTimeout(() => {
+              this.retries.delete(node.nodeId);
+              void this.flushNode(node);
+            }, wait);
+            timer.unref();
+            this.retries.set(node.nodeId, timer);
+            return;
+          }
+          continue;
+        }
+        this.attempts.delete(node.nodeId);
         this.store.db
           .prepare('DELETE FROM session_deletions WHERE session_id=? AND node_id=?')
           .run(row.session_id, node.nodeId);
@@ -55,6 +107,8 @@ export class SessionPurge {
   }
   async close() {
     this.closed = true;
+    for (const timer of this.retries.values()) clearTimeout(timer);
+    this.retries.clear();
     this.nodes.off('ready', this.ready);
     await Promise.allSettled(this.flushing.values());
   }

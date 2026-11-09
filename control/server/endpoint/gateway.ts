@@ -1,6 +1,6 @@
 import {
   RemoteKitError,
-  httpStatus,
+  parseWireError,
   isRemoteKitError,
   toRemoteKitError,
   type ErrorCode,
@@ -22,7 +22,7 @@ import type {
   ClientActionEvent,
   ClipboardChangedEvent,
   EndpointSnapshot,
-  EndpointErrorReason,
+  NativeErrorReason,
   FaceBinding,
   FaceStatusReply,
   FileAuthorization,
@@ -38,6 +38,18 @@ import type {
   ViewConfiguration,
   ViewAppInfo,
 } from './types';
+export class EndpointSnapshotError extends RemoteKitError {
+  constructor(
+    error: RemoteKitError,
+    readonly browserRestart: EndpointSnapshot['browserRestart'],
+  ) {
+    super(error.code, error.message, {
+      detail: error.detail,
+      reason: error.reason,
+      retryAfterMs: error.retryAfterMs,
+    });
+  }
+}
 export class EndpointGateway {
   private clipboardSource: (tenant: string) => ClipboardValue | undefined = () => undefined;
   setClipboardSource(source: (tenant: string) => ClipboardValue | undefined) {
@@ -91,8 +103,13 @@ export class EndpointGateway {
       | 'activeTenants'
       | 'forgetTenant'
       | 'checkpoints'
+      | 'beginHibernation'
+      | 'settleHibernation'
+      | 'reconcileHibernation'
     >,
-  ) {}
+  ) {
+    placement.reconcileHibernation = (tenant) => this.hibernate(tenant);
+  }
   isReady(tenant: string) {
     const placed = this.placement.peek(tenant);
     return placed?.state === 'active'
@@ -104,7 +121,7 @@ export class EndpointGateway {
   }
   isPlacedOn(tenant: string, nodeId: string) {
     const placement = this.placement.peek(tenant);
-    return placement?.state === 'active' && placement.nodeId === nodeId;
+    return placement !== undefined && placement.state !== 'hibernated' && placement.nodeId === nodeId;
   }
   onSignal(listener: (event: RtcSignal) => void) {
     const unsubscribe = this.nodes.all().map((node) =>
@@ -125,7 +142,8 @@ export class EndpointGateway {
   private async openSession(placement: SessionPlacement) {
     const node = this.nodes.get(placement.nodeId)!;
     const state = node.state;
-    if (state.state !== 'ready') throw new RemoteKitError('unavailable', 'Placed node is offline');
+    if (state.state !== 'ready')
+      throw new RemoteKitError('unavailable', '会话节点离线', { detail: 'Placed node is offline' });
     const previous = this.opened.get(placement.tenant);
     if (previous?.epoch === state.connectionEpoch && previous.placementEpoch === placement.placementEpoch)
       return previous.promise;
@@ -144,7 +162,9 @@ export class EndpointGateway {
       })
       .then(() => {
         if (node.state.state !== 'ready' || node.state.connectionEpoch !== entry.epoch)
-          throw new RemoteKitError('outcome_unknown', 'Node changed during session.open');
+          throw new RemoteKitError('outcome_unknown', '会话启动结果待确认', {
+            detail: 'Node changed during session.open',
+          });
         this.placement.markWarm(placement);
       })
       .catch((error) => {
@@ -156,28 +176,23 @@ export class EndpointGateway {
   }
   private async invoke<T>(method: string, tenant: string, args?: object): Promise<T> {
     try {
-      await this.hibernating.get(tenant);
       const placement = this.placement.resolve(tenant);
       const node = this.nodes.get(placement.nodeId)!;
-      await this.openSession(placement);
-      let reply: unknown;
       try {
-        reply = await node.request(method, tenant, {
-          ...args,
-          ...(method === 'session.ensure' ? this.clipboardParams(tenant) : {}),
-        });
-      } catch (error) {
-        if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'not_found')
-          throw error;
-        this.opened.delete(tenant);
         await this.openSession(placement);
-        reply = await node.request(method, tenant, {
-          ...args,
-          ...(method === 'session.ensure' ? this.clipboardParams(tenant) : {}),
+      } catch (error) {
+        const failure = endpointError(error);
+        throw new RemoteKitError('unavailable', '浏览器会话尚未就绪', {
+          detail: failure.detail ?? failure.message,
+          retryAfterMs: failure.retryAfterMs,
         });
       }
+      const reply = await node.request(method, tenant, {
+        ...args,
+        ...(method === 'session.ensure' ? this.clipboardParams(tenant) : {}),
+      });
       if (reply && typeof reply === 'object' && 'accepted' in reply && reply.accepted === false)
-        throw new RemoteKitError('rejected', 'Endpoint 拒绝请求');
+        throw new RemoteKitError('outcome_unknown', '节点未返回有效确认');
       return reply as T;
     } catch (error) {
       throw endpointError(error);
@@ -192,29 +207,71 @@ export class EndpointGateway {
       })
       .finally(() => {
         this.hibernating.delete(tenant);
-        this.opened.delete(tenant);
       });
     this.hibernating.set(tenant, pending);
     return pending;
   }
   private async hibernateSession(tenant: string) {
-    const placement = this.placement.peek(tenant);
-    if (!placement || placement.state !== 'active')
-      throw new RemoteKitError('conflict', 'Session is not active');
-    const node = this.nodes.get(placement.nodeId)!;
+    const reconciling = this.placement.peek(tenant)?.state === 'hibernating';
+    const placement = this.placement.beginHibernation(tenant);
+    const opening = this.opened.get(tenant)?.promise;
+    await opening;
+    const node = this.nodes.get(placement.nodeId);
+    if (node?.state.state !== 'ready') {
+      if (!reconciling) this.placement.settleHibernation(placement, 'active');
+      throw new RemoteKitError('unavailable', '会话节点离线', { detail: 'Placed node is offline' });
+    }
     const state = node.state;
-    if (state.state !== 'ready') throw new RemoteKitError('unavailable', 'Placed node is offline');
-    const result = await node.request('session.hibernate', tenant, {
-      placementEpoch: placement.placementEpoch,
-    });
+    let result;
+    try {
+      result = await node.request(
+        'session.hibernate',
+        tenant,
+        {
+          placementEpoch: placement.placementEpoch,
+        },
+        180000,
+      );
+    } catch (error) {
+      const failure = endpointError(error);
+      if (failure.code === 'not_found') {
+        if (!this.placement.settleHibernation(placement, 'hibernated'))
+          throw new RemoteKitError('conflict', '会话位置在保存期间改变', {
+            detail: 'Placement changed during hibernation',
+          });
+        this.opened.delete(tenant);
+        console.warn('Hibernation lost before journal commit; retaining checkpoint', {
+          tenant,
+          placementEpoch: placement.placementEpoch,
+          checkpoint: placement.checkpoint,
+        });
+        return placement.checkpointId ?? 0;
+      }
+      if (failure.code === 'conflict' || (!reconciling && ['unavailable', 'busy'].includes(failure.code))) {
+        this.placement.settleHibernation(placement, 'active');
+        throw failure;
+      }
+      throw new RemoteKitError('outcome_unknown', failure.message);
+    }
     this.opened.delete(tenant);
     if (node.state.state !== 'ready' || node.state.connectionEpoch !== state.connectionEpoch)
-      throw new RemoteKitError('outcome_unknown', 'Node changed during hibernation');
-    return this.placement.commitCheckpoint(placement, result.manifestId, result.objects, node.buildId!);
+      throw new RemoteKitError('outcome_unknown', '会话保存结果待确认', {
+        detail: 'Node changed during hibernation',
+      });
+    try {
+      return this.placement.commitCheckpoint(placement, result?.manifestId, result?.objects, result?.buildId);
+    } catch (error) {
+      throw new RemoteKitError('outcome_unknown', '会话检查点提交结果待确认', {
+        detail: endpointError(error).message,
+      });
+    }
   }
   async snapshot(tenant: string, args: { outputDiagnostics?: boolean } = {}): Promise<EndpointSnapshot> {
     const snapshot = await this.invoke<EndpointSnapshot>('session.snapshot', tenant, args);
-    if (snapshot.status) throw endpointError(snapshot.status);
+    if (snapshot.status) {
+      const error = endpointError(snapshot.status);
+      throw new EndpointSnapshotError(error, snapshot.browserRestart);
+    }
     return {
       ...snapshot,
       views: (snapshot.views ?? []).map((view) => {
@@ -342,32 +399,50 @@ export class EndpointGateway {
   }
 }
 
-function endpointError(error: unknown): RemoteKitError {
+const nativeMessages: Record<NativeErrorReason, string> = {
+  browser_crashed: '浏览器异常退出，正在恢复…',
+  browser_restarting: '浏览器正在恢复，请稍候…',
+  output_failed: '浏览器画面输出失败，请稍后重试',
+  document_encrypted: '文档受密码保护，无法转换',
+  document_corrupt: '文档已损坏，无法转换',
+  document_unsupported: '不支持此文档格式',
+  document_too_complex: '文档过于复杂，超出处理限制',
+  file_too_large: '文件大小超过限制',
+  storage_quota_exceeded: '存储空间已满，请释放空间',
+  browser_state_too_large: '浏览器状态超出同步容量',
+  no_document_contour: '照片中未找到文档轮廓，请重新拍摄',
+};
+const codeMessages: Record<ErrorCode, string> = {
+  invalid_request: '请求格式无效',
+  unauthenticated: '请重新登录',
+  forbidden: '没有执行此操作的权限',
+  locked: '浏览器已锁定，请先解锁',
+  not_found: '请求的内容不存在，请刷新状态',
+  conflict: '状态已改变，请刷新后重新决定',
+  limit_exceeded: '超出容量限制，请释放空间或缩小输入',
+  rate_limited: '请求过于频繁，请稍后重试',
+  busy: '服务繁忙，请稍后重试',
+  unavailable: '服务暂时不可用，请稍后重试',
+  rejected: '无法处理此内容',
+  outcome_unknown: '操作结果未知，请核对当前状态',
+  canceled: '',
+  internal: '服务内部错误',
+};
+export function endpointError(error: unknown): RemoteKitError {
   if (isRemoteKitError(error)) return error;
-  if (typeof error === 'string') return new RemoteKitError('rejected', 'Endpoint 拒绝请求', error);
-  if (error && typeof error === 'object' && !(error instanceof Error)) {
-    const wire = error as { code?: string; message?: string; reason?: EndpointErrorReason };
-    const code: ErrorCode =
-      wire.code === 'busy'
-        ? 'unavailable'
-        : wire.code && Object.prototype.hasOwnProperty.call(httpStatus, wire.code)
-          ? (wire.code as ErrorCode)
-          : 'rejected';
-    const messages: Record<EndpointErrorReason, string> = {
-      browser_crashed: '浏览器异常退出，正在恢复…',
-      browser_restarting: '浏览器正在恢复，请稍候…',
-      output_failed: '浏览器画面输出失败，请稍后重试',
-    };
-    const message = wire.reason && messages[wire.reason];
-    if (message) {
-      console.error('Endpoint status', { code, reason: wire.reason, detail: wire.message });
-      return new RemoteKitError(
-        code,
-        code === 'outcome_unknown' ? '浏览器连接中断，操作可能已执行，请查看恢复后的页面' : message,
-        wire.message,
-      );
-    }
-    return new RemoteKitError(code, wire.message ?? 'Endpoint 拒绝请求');
-  }
-  return toRemoteKitError(error);
+  if (error instanceof Error) return toRemoteKitError(error);
+  const parsed = parseWireError(error);
+  const code = parsed?.code ?? 'outcome_unknown';
+  const wire = error && typeof error === 'object' ? (error as Record<string, unknown>) : undefined;
+  const reason =
+    typeof wire?.reason === 'string' && Object.prototype.hasOwnProperty.call(nativeMessages, wire.reason)
+      ? (wire.reason as NativeErrorReason)
+      : undefined;
+  const detail = typeof wire?.message === 'string' ? wire.message : String(error);
+  console.error('Endpoint error', { code, reason, detail });
+  return new RemoteKitError(code, reason ? nativeMessages[reason] : codeMessages[code], {
+    detail,
+    reason,
+    retryAfterMs: parsed?.retryAfterMs,
+  });
 }

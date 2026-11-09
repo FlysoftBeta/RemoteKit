@@ -16,7 +16,8 @@ Result<void> OfficeConverter::Convert(const std::filesystem::path& input,
   if (slot >= slots_.size() || format.type == DocumentType::kUnsupported ||
       format.type == DocumentType::kPdf || detected.type != format.type ||
       detected.extension != format.extension)
-    return Error{ErrorCode::kInvalidRequest, "unsupported Office document"};
+    return Error{ErrorCode::kRejected, "Unsupported Office document",
+                 ErrorReason::kDocumentUnsupported};
   std::lock_guard lock(slots_[slot]);
   try {
     TemporaryDirectory temporary(data_ / "work");
@@ -39,14 +40,16 @@ Result<void> OfficeConverter::Convert(const std::filesystem::path& input,
     std::ifstream file(pdf, std::ios::binary);
     char magic[5]{};
     file.read(magic, sizeof(magic));
-    if (!file || std::string_view(magic, sizeof(magic)) != "%PDF-")
+    if (!file)
+      return Error{ErrorCode::kUnavailable, "Cannot read converted PDF"};
+    if (std::string_view(magic, sizeof(magic)) != "%PDF-")
       return ToolOutputFailure(temporary.path() / "tool.log",
                                tools_ / "libreoffice/program/soffice.com", 0);
     file.close();
     std::filesystem::copy_file(pdf, output_pdf);
     return {};
   } catch (const std::filesystem::filesystem_error&) {
-    return Error{ErrorCode::kRejected, "cannot stage Office document"};
+    return Error{ErrorCode::kUnavailable, "cannot stage Office document"};
   }
 }
 }  // namespace remotekit::documents

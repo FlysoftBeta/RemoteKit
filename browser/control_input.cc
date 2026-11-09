@@ -45,7 +45,7 @@ Result<InputRequest> DecodeInput(const base::DictValue& wire, RequestEnvelope en
     auto layout = DecodeKeyboardLayout(*event);
     if (!request.session || !*request.session || request.view || request.output_generation ||
         !layout)
-      return {{}, {ErrorCode::invalid_request, "Invalid keyboard layout"}};
+      return {{}, {ErrorCode::kInvalidRequest, "Invalid keyboard layout"}};
     request.input = std::move(*layout);
     return decoder.Finish(std::move(request));
   }
@@ -54,30 +54,30 @@ Result<InputRequest> DecodeInput(const base::DictValue& wire, RequestEnvelope en
     return {{}, input.status};
   request.input = std::move(input.value);
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
 ControlResult ControlDispatcher::HandleInput(const InputRequest& request) {
   const int id = request.id;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
   const auto session = request.session.value_or(0);
   if (const auto* layout = std::get_if<InputRequest::KeyboardLayout>(&request.input)) {
     if (session != runtime_.session_id)
-      return ControlResult::Failure(id, ErrorCode::not_found, "Session not found");
+      return ControlResult::Failure(id, ErrorCode::kNotFound, "Session not found");
     OffscreenHost::SetKeyboardLayoutMap(*layout);
     return reply;
   }
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view))
-    return ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session");
+    return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
   if (record->requests->close_state() == "closing")
-    return ControlResult::Failure(id, "view_closing");
+    return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   Status status;
 
@@ -85,7 +85,7 @@ ControlResult ControlDispatcher::HandleInput(const InputRequest& request) {
     uint64_t generation = 0;
     if (!Assign(request.output_generation, &generation) || !runtime_.output ||
         generation != runtime_.output_generation)
-      return error("stale_output_generation");
+      return error(ErrorCode::kConflict, "stale_output_generation");
   }
   const auto& input = std::get<InputEvent>(request.input);
   bool input_admitted = false;
@@ -94,13 +94,14 @@ ControlResult ControlDispatcher::HandleInput(const InputRequest& request) {
   status = adapter.DispatchInput(input, &input_admitted);
   if (runtime_.output)
     runtime_.output->TraceInput("input_browser_dispatch_return", input,
-                                static_cast<int>(status.error));
+                                status.error ? static_cast<int>(*status.error) : 0);
   reply.Set("inputAdmitted", input_admitted);
 
   reply.Set("token", TokenValue(runtime_.view_model.Token(session, view).value));
   runtime_.UpdateOutput();
   if (!status)
-    return ControlResult::Failure(id, status.error, status.message, std::move(reply));
+    return ControlResult::Failure(id, input_admitted ? ErrorCode::kOutcomeUnknown : *status.error,
+                                  status.message, std::move(reply));
   return reply;
 }
 }  // namespace remotekit::browser

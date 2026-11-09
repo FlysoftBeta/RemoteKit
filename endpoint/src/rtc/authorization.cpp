@@ -24,7 +24,7 @@ Result<uint64_t> AuthorizationController::AuthorizationEpoch(const Json& request
   const auto& value = request.at("epoch");
   if (!value.is_number_unsigned() || !value.get<uint64_t>() ||
       value.get<uint64_t>() > 9007199254740991ULL)
-    return Error{ErrorCode::kForbidden, "invalid_authorization_epoch"};
+    return Error{ErrorCode::kInvalidRequest, "invalid_authorization_epoch"};
   return value.get<uint64_t>();
 }
 
@@ -58,11 +58,11 @@ Result<Json> AuthorizationController::Authorize(const Json& request,
   if (decision == Decision::change) {
     management_generation_ = generation;
     if (RevokeProduct() != 0)
-      return Error{ErrorCode::kForbidden, "rtc_media_authorization_failed"};
+      return Error{ErrorCode::kInternal, "RTC media authorization failed"};
     if (unlocked) {
       const auto handle = hooks_.peer();
       if (sdk_.remotekit_rtc_set_media_authorized(handle, 1) != 0)
-        return Error{ErrorCode::kForbidden, "rtc_media_authorization_failed"};
+        return Error{ErrorCode::kInternal, "RTC media authorization failed"};
       {
         auto admission = LockAdmission();
         hooks_.files_opened(handle);
@@ -73,7 +73,7 @@ Result<Json> AuthorizationController::Authorize(const Json& request,
       hooks_.opened(handle);
       if (!management_current()) {
         RevokeProduct();
-        return Error{ErrorCode::kUnavailable, "management_disconnected"};
+        return Error{ErrorCode::kOutcomeUnknown, "management_disconnected"};
       }
     }
     if (!unlocked)

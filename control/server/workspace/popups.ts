@@ -124,7 +124,7 @@ export class Popups {
         provisionalId: popup.provisionalId,
       });
       if (adopted?.accepted !== true || adopted.completed !== true)
-        throw new RemoteKitError('rejected', 'Endpoint尚未完成新页面收养');
+        throw new RemoteKitError('outcome_unknown', 'Endpoint尚未完成新页面收养');
       tab.popup = { provisionalId: popup.provisionalId, status: 'adopted' };
       this.services.operations.saveWorkspace(state);
       return true;

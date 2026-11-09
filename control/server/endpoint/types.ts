@@ -5,8 +5,20 @@ import type {
   ProductOperation,
   SitePreferences,
 } from '../../shared/product';
-import type { ErrorCode } from '../../shared/errors';
-export type EndpointErrorReason = 'browser_crashed' | 'browser_restarting' | 'output_failed';
+import type { ErrorCode, WireError } from '../../shared/errors';
+export type NativeErrorReason =
+  | 'browser_crashed'
+  | 'browser_restarting'
+  | 'output_failed'
+  | 'document_encrypted'
+  | 'document_corrupt'
+  | 'document_unsupported'
+  | 'document_too_complex'
+  | 'file_too_large'
+  | 'storage_quota_exceeded'
+  | 'browser_state_too_large'
+  | 'no_document_contour';
+export type NativeError = WireError & { reason?: NativeErrorReason };
 export type ClipboardChangedEvent = {
   type: 'clipboard.changed';
   tenantId: string;
@@ -22,7 +34,7 @@ export interface RtcSignal {
     | { type: 'answer'; sdp: string }
     | { type: 'ice'; candidate: { candidate: string; sdpMid: string; sdpMLineIndex: number } }
     | { type: 'complete' }
-    | { type: 'error'; message: string };
+    | { type: 'error'; error: NativeError };
 }
 export type ClientActionEvent = ProductOperation & {
   tenantId: string;
@@ -61,7 +73,9 @@ export interface ViewSnapshot {
   close_state?: string;
   lifecycle_uncertain?: boolean;
   lifecycle_generation?: string;
-  recovery?: { pending?: boolean; phase?: string; error?: string };
+  last_lifecycle?: { generation: string; action: number; succeeded: boolean; error?: NativeError };
+  touch_error?: NativeError;
+  recovery?: { pending?: boolean; phase?: string; error?: NativeError };
   pageRequests?: { pending?: Record<string, unknown>[]; fullscreen?: Record<string, unknown> };
   navigationOperations?: Record<string, unknown>[];
   provisional?: boolean;
@@ -84,7 +98,8 @@ export interface LogWindow {
   dumps?: { name: string; size: number }[];
 }
 export interface EndpointSnapshot {
-  status?: { code: ErrorCode; reason: EndpointErrorReason; message: string } | null;
+  status?: NativeError | null;
+  browserRestart?: 'ready' | 'waiting' | 'exhausted';
   hibernation?: {
     unacknowledgedClosedEvents: number;
     pendingNativeSelections: number;
@@ -111,7 +126,7 @@ export type DownloadEvent = {
   origin: string;
 } & (
   | { type: 'download.imported'; assetId: string; mimeType: string; size: string }
-  | { type: 'download.failed'; reason: string }
+  | { type: 'download.failed'; error: NativeError }
 );
 export interface ViewConfiguration {
   viewId: string;
@@ -136,7 +151,8 @@ export interface FaceStatusReply {
   challengeId: string;
   status: string;
   template?: number[];
-  reason?: string;
+  error?: NativeError;
+  outcome?: 'no_matching_face' | 'camera_unavailable';
 }
 
 export interface PageIdentity {
@@ -171,7 +187,6 @@ export interface ActionResult {
   authEpoch?: number;
   operationId: string;
   operationGeneration: string;
-  ok: boolean;
   result: OperationReceipt;
 }
 export interface FileAuthorization {

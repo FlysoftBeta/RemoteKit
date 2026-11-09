@@ -1,4 +1,5 @@
 #include "rtc/peer.hpp"
+#include "util/wire_error.hpp"
 #include "rtc/data_router.hpp"
 #include "media/server_trace.hpp"
 #include "rtc/candidate_address.hpp"
@@ -81,35 +82,52 @@ Result<Json> PeerController::Offer(const Json& request,
   } exit{*this};
   if (status != 0 || !handle)
     return Error{media::SdkErrorCode(status), "RTC create failed"};
-  if (sdk_.remotekit_rtc_set_av_sync(handle, av_sync) != 0)
-    return Error{ErrorCode::kRejected, "RTC AV sync rejected"};
+  const int sync_status = sdk_.remotekit_rtc_set_av_sync(handle, av_sync);
+  if (sync_status)
+    return Error{media::SdkErrorCode(sync_status), "RTC AV sync failed"};
   av_sync_ = av_sync;
   hooks_.bind(handle, generation);
   auto policy = Policy(fps, degradation, audio);
   if (!policy)
     return policy.error();
-  if (sdk_.remotekit_rtc_set_playout_delay(handle, RuntimeOptions::kRtcPlayoutMinMs,
-                                           RuntimeOptions::kRtcPlayoutMaxMs) != 0)
-    return Error{ErrorCode::kRejected, "RTC playout delay rejected"};
-  if (sdk_.remotekit_rtc_set_remote_description(handle, 1, sdp.data(), sdp.size()) != 0)
-    return Error{ErrorCode::kRejected, "RTC remote offer rejected"};
+  const int playout_status = sdk_.remotekit_rtc_set_playout_delay(
+      handle, RuntimeOptions::kRtcPlayoutMinMs, RuntimeOptions::kRtcPlayoutMaxMs);
+  if (playout_status)
+    return Error{media::SdkErrorCode(playout_status), "RTC playout delay failed"};
+  const int offer_status =
+      sdk_.remotekit_rtc_set_remote_description(handle, 1, sdp.data(), sdp.size());
+  if (offer_status)
+    return Error{offer_status == REMOTEKIT_SDK_INVALID_ARGUMENT ? ErrorCode::kRejected
+                                                                : media::SdkErrorCode(offer_status),
+                 "RTC remote offer failed"};
   uint32_t level = 0;
-  if (sdk_.remotekit_rtc_get_receive_level(handle, &level) != 0 || !level)
-    return Error{ErrorCode::kInvalidRequest, "peer has no compatible receiving H264 level"};
+  if (sdk_.remotekit_rtc_get_receive_level(handle, &level) != 0)
+    return Error{ErrorCode::kOutcomeUnknown,
+                 "Cannot inspect receiving H264 level after applying offer"};
+  if (!level)
+    return Error{ErrorCode::kRejected, "peer has no compatible receiving H264 level"};
   receive_level_ = level;
   auto started = hooks_.started(handle, sdp);
   if (!started)
-    return started.error();
+    return Error{ErrorCode::kOutcomeUnknown,
+                 "RTC offer applied before media startup failed: " + started.error().message};
   exit.accepted = true;
   return Json{
       {"accepted", true}, {"pending", true}, {"connectionId", connection}, {"avSync", av_sync}};
 }
 Result<void> PeerController::Policy(uint32_t fps, uint32_t degradation, bool audio) {
   const auto handle = Handle();
-  if (handle && (sdk_.remotekit_rtc_set_degradation_preference(handle, degradation) != 0 ||
-                 sdk_.remotekit_rtc_set_source_max_fps(handle, fps) != 0 ||
-                 sdk_.remotekit_rtc_set_audio_enabled(handle, audio) != 0))
-    return Error{ErrorCode::kRejected, "RTC media policy rejected"};
+  if (!handle)
+    return {};
+  const int degradation_status = sdk_.remotekit_rtc_set_degradation_preference(handle, degradation);
+  if (degradation_status)
+    return Error{degradation_status == REMOTEKIT_SDK_INVALID_ARGUMENT
+                     ? ErrorCode::kInvalidRequest
+                     : media::SdkErrorCode(degradation_status),
+                 "RTC degradation policy failed"};
+  if (sdk_.remotekit_rtc_set_source_max_fps(handle, fps) != 0 ||
+      sdk_.remotekit_rtc_set_audio_enabled(handle, audio) != 0)
+    return Error{ErrorCode::kOutcomeUnknown, "RTC media policy partially applied"};
   return {};
 }
 Result<Json> PeerController::Ice(const Json& request) {
@@ -118,11 +136,19 @@ Result<Json> PeerController::Ice(const Json& request) {
   const auto& ice = request.at("candidate");
   if (ice.is_null())
     return Json::object();
+  if (!ice.is_object() || !ice.contains("candidate") || !ice["candidate"].is_string() ||
+      (ice.contains("sdpMid") && !ice["sdpMid"].is_string()) ||
+      (ice.contains("sdpMLineIndex") &&
+       (!ice["sdpMLineIndex"].is_number_integer() || ice["sdpMLineIndex"] < 0)))
+    return Error{ErrorCode::kInvalidRequest, "Malformed ICE candidate"};
   const auto candidate = ice.value("candidate", std::string());
   const auto mid = ice.value("sdpMid", std::string("0"));
-  if (sdk_.remotekit_rtc_add_ice(Handle(), mid.c_str(), ice.value("sdpMLineIndex", 0),
-                                 candidate.data(), candidate.size()) != 0)
-    return Error{ErrorCode::kRejected, "ICE candidate rejected"};
+  const int status = sdk_.remotekit_rtc_add_ice(
+      Handle(), mid.c_str(), ice.value("sdpMLineIndex", 0), candidate.data(), candidate.size());
+  if (status)
+    return Error{status == REMOTEKIT_SDK_INVALID_ARGUMENT ? ErrorCode::kInvalidRequest
+                                                          : media::SdkErrorCode(status),
+                 "ICE candidate failed"};
   return Json::object();
 }
 void PeerController::Close() {
@@ -191,7 +217,8 @@ void PeerController::OnEvent(uint64_t peer,
       else {
         self.signals_.clear();
         self.signal_overflow_ = true;
-        RtcEvent failure{REMOTEKIT_RTC_ERROR, "RTC signaling queue exceeded bound", "", 0, peer};
+        RtcEvent failure{REMOTEKIT_RTC_ERROR, "RTC signaling queue exceeded bound",
+                         "outcome_unknown", 0, peer};
         failure.management_generation = event.management_generation;
         self.signals_.push_back(std::move(failure));
       }
@@ -222,7 +249,10 @@ void PeerController::FlushSignals() {
     else if (event.type == REMOTEKIT_RTC_ICE_COMPLETE)
       signal = {{"type", "complete"}};
     else if (event.type == REMOTEKIT_RTC_ERROR)
-      signal = {{"type", "error"}, {"message", event.bytes}};
+      signal = {
+          {"type", "error"},
+          {"error", WireError({ParseErrorCode(event.auxiliary).value_or(ErrorCode::kOutcomeUnknown),
+                               event.bytes})}};
     else
       continue;
     hooks_.signal(event.management_generation, signal);

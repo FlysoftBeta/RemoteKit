@@ -45,7 +45,10 @@ class NavigationRecovery : private ControllerContext {
       kFailed
     };
     Phase phase = Phase::kLoad;
-    std::string error, transfer;
+    std::optional<Error> error;
+    std::string transfer;
+    bool reconcile = false;
+    unsigned attempts = 0;
     const char* PhaseName() const;
 
     Json saved;

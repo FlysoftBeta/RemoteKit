@@ -89,7 +89,8 @@ async (hostPage) => {
             if (message.type !== 'product.result' || message.operationId !== operationId) return;
             clearTimeout(timer);
             channel.removeEventListener('message', receive);
-            if (message.result?.status === 'rejected') reject(Error(message.result.error));
+            if (message.result?.status === 'failed')
+              reject(Object.assign(Error(message.result.error.message), { code: message.result.error.code }));
             else resolve(message.result);
           }
           channel.addEventListener('message', receive);

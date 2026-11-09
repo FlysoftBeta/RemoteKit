@@ -20,7 +20,6 @@
   "http": { "listen": "0.0.0.0:3001", "origins": ["https://example.org:3001"], "tls": { "key": "certs/privkey.pem", "cert": "certs/fullchain.pem" } },
   "storage": { "database": "../data/control.db", "diagnostics": "../data/diagnostics" },
   "cluster": { "keyFile": "cluster.key", "controlUrl": "ws://192.168.1.10:3001/api/node" },
-  "nodeDefaults": { "maxSessions": 3 },
   "nodes": {
     "local": { "local": { "root": "../data/node" } },
     "gpu-1": {
@@ -31,9 +30,9 @@
 }
 ```
 
-- `storage`：数据库与诊断归档位置；`quotas.tenantObjectBytes`：每 Tenant 对象字节配额。
+- `storage`：数据库与诊断归档位置；`quotas.tenantObjectBytes`：每 Tenant 对象字节配额，默认不设。
 - `cluster.keyFile`：32 字节集群密钥（base64），缺失时生成。
-- `nodeDefaults` 与 `nodes.<nodeId>`：编码器与码控参数、数据目录、Browser 路径、`maxSessions`、`peer`、`rtc`、`diskReserveBytes`、`sessionMemoryBytes`。节点项是对默认值的部分覆盖。只有一个节点时 `peer.address` 可省略（取 `127.0.0.1:<listen 端口>`），多节点时远端节点必须写。
+- `nodeDefaults` 与 `nodes.<nodeId>`：编码器与码控参数、数据目录、Browser 路径、`maxSessions`、`peer`、`rtc`、`diskReserveBytes`、`sessionMemoryBytes`。节点项是对默认值的部分覆盖。只有一个节点时 `peer.address` 可省略（取 `127.0.0.1:<listen 端口>`），多节点时远端节点必须写。`maxSessions`、`diskReserveBytes`、`sessionMemoryBytes` 默认不设：没有显式上限时集群按实测容量尽力服务（见[指标与放置](#指标与放置)）；设置后是硬上限。
 - 带 `local` 的是**本地节点**：Control 自己启动 Endpoint，经 stdio 通信，`local.root` 是节点根目录。发布包里的可执行文件由 Control 按自身 buildId 定位到 `data/local/runtime/<buildId>/bin/endpoint_service.exe`（`run.cmd` 先安装同一 buildId 的运行时），配置里不出现版本；只有开发构建（buildId `dev`）用 `local.executable` 指向自己编译的 Endpoint。
 - 不带 `local` 的是**远端节点**，主动连接 Control。Control 为每个远端节点写出 `<配置目录>/nodes/<nodeId>/node.json`（`nodeId`、该节点使用的 Control 地址、集群密钥），运维把这个文件原样复制到节点根目录即可；节点从配置中删除后，对应文件也被删除。
 
@@ -105,11 +104,23 @@ Control 包中的 `release/node.tar.zst` 与 `release/node.json` 供本地离线
 2. 优雅关闭 Browser；不干净则 `unavailable`。
 3. 遍历 Session 目录。排除 `browser.log`、名为 `Cache`、`Code Cache`、`GPUCache`、`DawnWebGPUCache`、`DawnGraphiteCache`、`Shared Dictionary`、`VideoDecodeStats` 的目录、LevelDB 的 `LOCK`/`LOG`/`LOG.old`，以及文件库草稿与暂存（休眠时丢弃）。SQLite 的 `-journal`/`-wal` 保留：干净关闭才是一致性的前提，文件名是否存在不是。
 4. 不超过 1MiB 的文件是一个对象，更大的按 1MiB 固定切块（SQLite 原地改页、LevelDB 只追加或整文件新建，固定切块的增量效果最好）。Session 目录之外的本地索引记录每个文件的大小、mtime、文件 ID 与块列表，未变的文件直接复用块 id，不重新读取。
-5. 生成 manifest 对象（相对路径、大小、块列表、目录、sessionId、epoch、buildId），把新对象逐个 `object.committed`，回复 manifest id。Session 关闭，目录保留为热副本并记录对应的 manifest。
+5. 生成 manifest 对象（相对路径、大小、块列表、目录、sessionId、epoch、buildId），把新对象逐个 `object.committed`。
+6. 原子写入休眠日志 `<sessionId>.hibernation.json`（epoch、manifest id、对象列表、buildId），然后回复 manifest id。Session 关闭，目录保留为热副本。
 
-Control 只在 epoch 匹配时提交 checkpoint，并把放置状态改为 `hibernated`。之后任何对该 Tenant 的需要（Viewer 连接、对账）都会重新放置并以该 checkpoint 打开：节点本地的热副本正好对应时直接使用，否则拉取对象物化到 `.restore` 再原子替换。Tab 保留产品状态，经现有的导航恢复流程回到原页面。
+`session.hibernate` 对同一 epoch 幂等：有日志直接返回日志里的结果；同一 Session 的休眠正在进行时加入它、返回同一结果；Session 已不在内存、也没有日志时返回 `not_found`；epoch 不同返回 `conflict`。日志在 Control 以同一 manifest 打开该 Session 时删除；冷副本清理不删有日志的 Session。
 
-**休眠策略**（Control，只在该 Tenant 开启 Memory Saver 时）：没有 Viewer 连接满 10 分钟（节点有压力时 2 分钟），没有处于 applying 的操作，快照报告无阻塞项。有 Viewer 连着的 Session 永远不搬。
+**Control 侧**：放置状态是 `active → hibernating → hibernated`。发请求前先在事务里把放置改为 `hibernating`（epoch 不变），请求超时 180 秒（导航导出 20 秒、进程退出 30 秒、再加 checkpoint）。成功则只在 `hibernating` 且 epoch 匹配时提交 checkpoint，改为 `hibernated`；错误码证明没有执行（阻塞项 `conflict`、送达前的 `unavailable`、`busy`）则回到 `active`；`outcome_unknown`（超时、断开、迟到或无效回复）保持 `hibernating`。处于 `hibernating` 的 Tenant 由对账与任何新需求（Viewer 连接、放置）用**同一 epoch** 重新提交 `session.hibernate` 收敛；收敛前放置返回 `unavailable`（"正在保存会话，请稍候"），绝不打开 Session。Endpoint 回答 `not_found`（休眠完成前崩溃）时，放置改为 `hibernated` 并保留上一个已提交的 checkpoint；节点被移除时按最新已提交的 checkpoint 撤离。
+
+把超时当作失败会造成整个 Profile 丢失：Endpoint 已经生成 checkpoint 并卸载了 Session，Control 却按旧指针（首次休眠时为空）重新打开，Endpoint 用空目录替换了原目录。所以除了上面的对账，Endpoint 还守住两条不变量：Session 有休眠日志而 `session.open` 的 checkpoint 与日志不符时返回 `conflict`、不动目录；新放置总是新的 Session ID，因此以空 checkpoint 打开一个已有非空目录是不变量错误，返回 `conflict` 并记录。
+
+**打开**：之后任何对该 Tenant 的需要（Viewer 连接、对账）都会重新放置并以该 checkpoint 打开。节点本地的热副本对应同一 manifest 时，先按本地索引（大小、mtime、文件 ID）逐个校验文件，缺失或不符的文件从对象重新物化，取不到则以 `unavailable` 失败、不动目录；没有对应热副本时拉取对象物化到 `.restore` 再原子替换。Tab 保留产品状态，经现有的导航恢复流程回到原页面。
+
+**休眠策略**（Control，只在该 Tenant 开启 Memory Saver 时；没有处于 applying 的操作、快照报告无阻塞项）：
+
+- 空闲：没有 Viewer 连接满 10 分钟。
+- 缓解：节点持续有压力，或刚有放置以预测 ≥ 0.85 落在它上面时，按 Viewer 离开最久的顺序休眠该节点上离开 ≥ 60 秒的 Session，每节点同时只有一个休眠在途；每次休眠后等一个更新的指标采样再决定下一个，节点已缓解且没有待缓解的放置时停止。缓解进行中该节点不做普通的空闲休眠（由缓解按顺序处理）。
+- 再平衡（冷迁移）：节点持续有压力、而另一个就绪节点预测 < 0.7 时，同样的规则休眠压力节点上的空闲 Session；它们下次唤醒时按放置规则落到更轻的节点。没有热迁移，有 Viewer 连着的 Session 永远不搬。
+- 每次自动休眠记录一行日志：tenant、节点、原因（idle/relief/rebalance）、压力与预测。
 
 **可搬迁性**（Chromium 157 实测与源码核对）：
 
@@ -124,13 +135,14 @@ Control 只在 epoch 匹配时提交 checkpoint，并把放置状态改为 `hibe
 
 Endpoint 每 5 秒发 `node.metrics`：系统 CPU 忙碌比例、内存总量/可用、每块 GPU 的 3D 与视频编码引擎利用率（PDH `GPU Engine` 按 LUID 汇总）和专用显存（PDH 用量 + DXGI 总量）、数据卷容量/剩余、打开的 Session 数、对象字节。采样在独立线程，不阻塞管理分发。
 
-- 压力 = max(CPU, 1 − 可用/总内存, 最大 3D 利用率, 最大编码利用率, Session/maxSessions, 1 − 剩余/磁盘)；最近 30 秒持续 ≥ 0.85 视为有压力。
-- 放置（新 Tenant 或休眠后唤醒）：候选为就绪、未移除、未在磁盘排空、Session 数未满、磁盘剩余 ≥ `diskReserveBytes`、可用内存 ≥ `sessionMemoryBytes` 且已有指标的节点；优先无压力的节点，都有压力时才放到有压力的节点。得分 = 压力，持有该 Tenant 最新 checkpoint 热副本的节点减 0.15；最低者胜，同分按 nodeId。
-- 磁盘剩余低于保留值：停止向该节点放置，删除冷副本，仍不足 2 倍保留值时把对象副本迁到别处。
+- 利用率按资源分别计算：CPU、1 − 可用/总内存、最大 3D 利用率、最大编码利用率、1 − 剩余/磁盘，设置了 `maxSessions` 时再加 Session/maxSessions。压力 = 各项最大值；最近 30 秒持续 ≥ 0.85 视为有压力，最新一个采样 < 0.85 视为已缓解。
+- **预测**：每个节点在没有 Session 时按 EWMA（α = 0.2）学习各资源的空闲基线；有 Session 时单个 Session 的成本 = (利用率 − 基线) / Session 数（还没有基线时不减，偏保守）；没有 Session 的节点借用其他节点成本的平均值。预测压力 = 各资源"当前 + 一个 Session 的成本"的最大值。管理 App 显示余量 = 1 − 预测。
+- **放置**（新 Tenant 或休眠后唤醒）：候选为就绪、未移除、未在磁盘排空、已有指标、且满足所有**显式设置**的上限（Session 数、`diskReserveBytes`、`sessionMemoryBytes`）的节点。得分 = 预测压力；持有该 Tenant 最新 checkpoint 7 天内热副本、且预测 < 0.85 的节点减 0.15；最低者胜，同分按 nodeId。尽力而为：胜者预测 ≥ 0.85 也照样放置，同时请求该节点的 Memory Saver 腾出容量；没有候选才返回 `unavailable`。显式上限是硬的，满了不放。
+- **磁盘下限**：设置了 `diskReserveBytes` 用它，否则取 max(2 GiB, 卷容量的 5%)。剩余低于下限：停止向该节点放置，删除冷副本，仍不足 2 倍下限时把对象副本迁到别处。
 
 ## 管理 App
 
-"管理 App → 节点"为每个节点显示：状态（在线/连接中/离线/已移除）、Control 托管或外部、对外地址、最近一次指标（CPU、内存、每块 GPU 的 3D/视频编码/显存、磁盘）、综合压力与是否持续高压、是否在腾磁盘、Session 数/上限与其上的用户、对象副本占用、版本、连接或断开时间。`NodeLink` 记录连接历史：连接与断开时间、最近一次握手拒绝（原因与节点自报的 buildId，例如版本不一致时显示节点版本）、托管进程最近一次退出码（3 需要更新、4 配置变更）；成功连接时清空旧的拒绝与退出记录。
+"管理 App → 节点"为每个节点显示：状态（在线/连接中/离线/已移除）、Control 托管或外部、对外地址、最近一次指标（CPU、内存、每块 GPU 的 3D/视频编码/显存、磁盘）、综合压力、预测余量与是否持续高压、是否在腾磁盘、Session 数（设置了上限时显示 数/上限）与其上的用户、对象副本占用、版本、连接或断开时间。`NodeLink` 记录连接历史：连接与断开时间、最近一次握手拒绝（原因与节点自报的 buildId，例如版本不一致时显示节点版本）、托管进程最近一次退出码（3 需要更新、4 配置变更）；成功连接时清空旧的拒绝与退出记录。
 
 ## 节点移除
 

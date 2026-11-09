@@ -2,6 +2,8 @@
 #include "util/file_io.hpp"
 #include "diagnostics/timing.hpp"
 #include "session/views.hpp"
+#include "util/error_policy.hpp"
+#include "util/wire_error.hpp"
 namespace remotekit {
 using ConnectionPhase = ConnectionTiming::ConnectionPhase;
 
@@ -40,7 +42,16 @@ const char* NavigationRecovery::Recovery::PhaseName() const {
 void NavigationRecovery::FailRecovery(const std::string& view, Recovery& task, const Error& error) {
   fprintf(stderr, "session %s view %s navigation recovery: %s\n", id.c_str(), view.c_str(),
           error.message.c_str());
-  task.error = error.message;
+  task.error = error;
+  if (auto delay = RetryDelay(error, task.attempts++)) {
+    task.next_poll = QpcNow() + delay->count() * QpcFrequency() / 1000;
+    return;
+  }
+  if (error.code == ErrorCode::kOutcomeUnknown) {
+    task.reconcile = true;
+    task.next_poll = QpcNow() + QpcFrequency() / 4;
+    return;
+  }
   task.saved = nullptr;
   task.buffer_bytes = 0;
   task.phase = task.phase == Recovery::Phase::kFallback ? Recovery::Phase::kFailed
@@ -53,8 +64,9 @@ bool NavigationRecovery::Recovering(const std::string& view) const {
 }
 
 Json NavigationRecovery::RecoveryStatus(const Recovery& recovery) const {
-  return {
-      {"pending", recovery.Pending()}, {"phase", recovery.PhaseName()}, {"error", recovery.error}};
+  return {{"pending", recovery.Pending()},
+          {"phase", recovery.PhaseName()},
+          {"error", recovery.error ? WireError(*recovery.error) : Json(nullptr)}};
 }
 
 Json NavigationRecovery::RecoverySnapshot() const {
@@ -149,6 +161,77 @@ void NavigationRecovery::MaintainRecovery() {
     return;
   }
   {
+    if (task.reconcile) {
+      const bool transfer_stage = task.phase == Recovery::Phase::kBegin ||
+                                  task.phase == Recovery::Phase::kChunks ||
+                                  task.phase == Recovery::Phase::kCommit;
+      if (transfer_stage) {
+        auto status = browser.Rpc().Request(
+            {{"method", "navigation.transfer.status"}, {"session", id}, {"view", view}});
+        if (!status) {
+          if (status.error().code == ErrorCode::kNotFound) {
+            task.phase = Recovery::Phase::kFailed;
+            task.reconcile = false;
+          } else {
+            task.next_poll = now + QpcFrequency();
+          }
+          return;
+        }
+        const auto& result = status.value();
+        if (!result.value("importing", false) || result.at("size") != task.saved.at("size")) {
+          task.phase = Recovery::Phase::kFailed;
+          task.reconcile = false;
+          return;
+        }
+        const auto received = std::stoull(result.at("received").get<std::string>());
+        task.transfer = result.at("transfer");
+        if (task.phase == Recovery::Phase::kBegin) {
+          task.phase = Recovery::Phase::kChunks;
+        } else if (task.phase == Recovery::Phase::kChunks) {
+          const auto bytes = task.saved.at("chunks").at(task.chunk).at("bytes").get<uint64_t>();
+          if (received == task.offset + bytes) {
+            task.offset += bytes;
+            ++task.chunk;
+          } else if (received != task.offset) {
+            task.phase = Recovery::Phase::kFailed;
+          }
+        } else if (result.value("committed", false)) {
+          task.phase = Recovery::Phase::kRestore;
+          task.saved = nullptr;
+          task.buffer_bytes = 0;
+        } else {
+          task.phase = Recovery::Phase::kFailed;
+        }
+      } else if (task.phase == Recovery::Phase::kUnload ||
+                 task.phase == Recovery::Phase::kRestore ||
+                 task.phase == Recovery::Phase::kFallback) {
+        auto snapshot = browser.Snapshot();
+        if (!snapshot) {
+          task.next_poll = now + QpcFrequency();
+          return;
+        }
+        const Json* current = nullptr;
+        for (const auto& session : snapshot.value().at("sessions"))
+          for (const auto& candidate : session.at("views"))
+            if (candidate.value("view", std::string()) == view)
+              current = &candidate;
+        if (!current || current->value("pending", false)) {
+          task.next_poll = now + QpcFrequency() / 4;
+          return;
+        }
+        if (task.phase == Recovery::Phase::kUnload && current->value("actual", -1) == 3)
+          task.phase = Recovery::Phase::kBegin;
+        else if (task.phase == Recovery::Phase::kRestore && current->value("actual", -1) == 0) {
+          task.phase = Recovery::Phase::kWaiting;
+          task.deadline = now + QpcFrequency() * 11;
+        } else if (task.phase == Recovery::Phase::kFallback && current->value("actual", -1) == 0)
+          task.phase = Recovery::Phase::kFallbackStarted;
+        else
+          task.phase = Recovery::Phase::kFailed;
+      }
+      task.reconcile = false;
+      return;
+    }
     if (task.phase == Recovery::Phase::kLoad) {
       const auto path = directory / fs::path("recovery") / (view + ".json");
       auto size_result = FileSize(path);
@@ -158,7 +241,7 @@ void NavigationRecovery::MaintainRecovery() {
       }
       const auto file_bytes = size_result.value();
       if (file_bytes > 96 * 1024 * 1024) {
-        Error error{ErrorCode::kRejected, "navigation recovery file exceeds bound"};
+        Error error{ErrorCode::kLimitExceeded, "navigation recovery file exceeds bound"};
         FailRecovery(view, task, error);
         return;
       };
@@ -173,7 +256,7 @@ void NavigationRecovery::MaintainRecovery() {
       const auto size = std::stoull(task.saved.at("size").get<std::string>());
       if (!size || size > 64 * 1024 * 1024 || !task.saved.at("chunks").is_array() ||
           task.saved["chunks"].size() > 256) {
-        Error error{ErrorCode::kRejected, "invalid navigation recovery size/chunks"};
+        Error error{ErrorCode::kInternal, "invalid navigation recovery size/chunks"};
         FailRecovery(view, task, error);
         return;
       };
@@ -204,14 +287,13 @@ void NavigationRecovery::MaintainRecovery() {
       } else if (!current->value("pending", true)) {
         const auto last = current->value("last_lifecycle", Json::object());
         if (current->value("actual", -1) != 0 || !last.value("succeeded", false)) {
-          Error error{ErrorCode::kRejected,
-                      last.value("detail", std::string("navigation recovery failed"))};
+          Error error = ParseWireError(last.value("error", Json()));
           FailRecovery(view, task, error);
           return;
         };
         task.phase = Recovery::Phase::kVisible;
       } else if (now >= task.deadline) {
-        Error error{ErrorCode::kRejected, "navigation recovery did not finish"};
+        Error error{ErrorCode::kOutcomeUnknown, "navigation recovery did not finish"};
         FailRecovery(view, task, error);
         return;
       };
@@ -250,7 +332,7 @@ void NavigationRecovery::MaintainRecovery() {
       const auto bytes = chunk.at("bytes").get<uint64_t>();
       if (!bytes || bytes > 256 * 1024 ||
           DecodedSize(chunk.at("data").get<std::string>()) != bytes) {
-        Error error{ErrorCode::kRejected, "invalid navigation recovery chunk"};
+        Error error{ErrorCode::kInternal, "invalid navigation recovery chunk"};
         FailRecovery(view, task, error);
         return;
       };
@@ -306,7 +388,7 @@ void NavigationRecovery::MaintainRecovery() {
           auto reconcile_output_result_3 = views.ReconcileOutput();
           if (!reconcile_output_result_3) {
             const Error error = reconcile_output_result_3.error();
-            task.error = error.message.c_str();
+            task.error = error;
             return;
           }
         }
@@ -335,7 +417,7 @@ void NavigationRecovery::MaintainRecovery() {
           auto reconcile_output_result_4 = views.ReconcileOutput();
           if (!reconcile_output_result_4) {
             const Error error = reconcile_output_result_4.error();
-            task.error += "; output reconciliation: " + std::string(error.message.c_str());
+            task.error = error;
             return;
           }
         }

@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../../shared/errors';
 import { useAutoFocus } from '../editing/local-autofocus';
 import './launcher.css';
 import {
@@ -176,7 +177,7 @@ export function Launcher({
       reuseExisting &&
       state.workspace.windows.some((win) => win.appId === (item?.kind === 'file' ? 'files' : 'browser'));
     if (state.workspace.windows.length >= 16 && !singleton && !reuse)
-      throw new Error('窗口已满，请先关闭一些窗口');
+      throw new RemoteKitError('limit_exceeded', '窗口已满，请先关闭一些窗口');
   };
   const open = (item: LauncherItem, target?: WindowPlacement, reuseExisting = false) =>
     perform(async () => {

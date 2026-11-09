@@ -220,7 +220,7 @@ try {
     const rejectRun = run(rejectRoot);
     await until(async () =>
       (await readFile(path.join(rejectRoot, 'logs/supervisor.log'), 'utf8').catch(() => '')).includes(
-        mode === 'bad-hash' ? 'SHA-256 mismatch' : 'cannot install node runtime: invalid archive or destination',
+        mode === 'bad-hash' ? 'SHA-256 mismatch' : 'Release archive does not contain the promised runtime',
       ),
     );
     assert.equal(await readFile(path.join(rejectRoot, 'current'), 'utf8'), ids[0]);
@@ -247,8 +247,16 @@ try {
   });
   assert.equal(invalid.status, 1);
 } finally {
-  for (const child of children) child.kill();
+  await Promise.all(
+    [...children].map(
+      (child) =>
+        new Promise((resolve) => {
+          child.once('close', resolve);
+          child.kill();
+        }),
+    ),
+  );
   for (const socket of server.clients) socket.terminate();
   await new Promise((resolve) => server.close(resolve));
-  await rm(temporary, { recursive: true, force: true });
+  await rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }

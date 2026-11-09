@@ -290,7 +290,11 @@ void SessionManagementRequests() {
     bool Next(std::string&, uint64_t&, bool&) override { return false; }
     bool Current(uint64_t) override { return true; }
     bool SendReply(uint64_t, const Json&) override { return true; }
-    bool SendEvent(const Json&, uint64_t) override { return true; }
+    bool SendEvent(const Json&, uint64_t, remotekit::DeliveryFlag delivery = {}) override {
+      if (delivery)
+        delivery->MarkWritten();
+      return true;
+    }
     void OnDisconnect(Disconnect) override {}
     Result<Json> Request(const std::string&, Json) override {
       return Error{ErrorCode::kUnavailable, "test Control has no object responder"};
@@ -625,7 +629,9 @@ void OrderedTouchInput() {
               ++input_calls;
               dispatched.push_back(request);
               if (input_calls == 1)
-                return Json{{"ok", false}, {"code", 6}, {"inputAdmitted", false}};
+                return Json{{"ok", false},
+                            {"error", {{"code", "busy"}, {"message", "Input queue full"}}},
+                            {"inputAdmitted", false}};
               return Json{{"ok", true}, {"inputAdmitted", true}};
             },
             .send =

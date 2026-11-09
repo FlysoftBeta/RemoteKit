@@ -83,6 +83,6 @@ export class GatewayClient {
       if (Number(envelope.code) !== 200) serviceError(envelope.code, '畅言');
       if (envelope.data === undefined || envelope.data === null) return malformed();
       return { data: envelope.data as T, session };
-    });
+    }, method === 'GET');
   }
 }

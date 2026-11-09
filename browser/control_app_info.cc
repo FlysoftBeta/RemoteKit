@@ -232,7 +232,7 @@ Result<AppInfoRequest> DecodeAppInfo(const base::DictValue& wire, RequestEnvelop
   request.session = decoder.Optional<uint64_t>("session").value_or(0);
   request.view = decoder.Optional<uint64_t>("view").value_or(0);
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
@@ -240,12 +240,12 @@ void ControlDispatcher::HandleAppInfo(const AppInfoRequest& request, Reply reply
   auto* record = runtime_.views.Find(request.session, request.view);
   if (!record || !runtime_.view_model.FindWebView(request.session, request.view)) {
     std::move(reply).Run(
-        ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session"));
+        ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session"));
     return;
   }
   if (!LiveView(runtime_, request.session, request.view)) {
     std::move(reply).Run(
-        ControlResult::Failure(request.id, ErrorCode::unavailable, "View is not live"));
+        ControlResult::Failure(request.id, ErrorCode::kUnavailable, "View is not live"));
     return;
   }
   auto task = base::MakeRefCounted<AppInfoTask>(
@@ -259,7 +259,7 @@ void ControlDispatcher::HandleAppInfo(const AppInfoRequest& request, Reply reply
           [](int id, Reply reply, base::DictValue info, bool available) {
             if (!available) {
               std::move(reply).Run(
-                  ControlResult::Failure(id, ErrorCode::unavailable, "View is not live"));
+                  ControlResult::Failure(id, ErrorCode::kUnavailable, "View is not live"));
               return;
             }
             base::DictValue fields;

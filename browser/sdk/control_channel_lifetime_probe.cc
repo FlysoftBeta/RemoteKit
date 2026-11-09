@@ -80,6 +80,33 @@ int Request(uint64_t id, uint8_t byte, uint32_t timeout_ms = 5000) {
   return status;
 }
 
+void DeliveryStatuses() {
+  auto unsent = NewChannel();
+  unsent.peer.reset();
+  CHECK_EQ(Request(unsent.id, 1), REMOTEKIT_SDK_CHANNEL_CLOSED);
+  CHECK(unsent.lifetime.expired());
+  auto lost = NewChannel();
+  std::thread disconnect([&] {
+    Read(lost.peer.get());
+    lost.peer.reset();
+  });
+  CHECK_EQ(Request(lost.id, 1), REMOTEKIT_SDK_LOST);
+  disconnect.join();
+  CHECK(lost.lifetime.expired());
+  auto malformed = NewChannel();
+  std::thread invalid([&] {
+    Read(malformed.peer.get());
+    Reply(malformed.peer.get(), {'x'});
+  });
+  CHECK_EQ(Request(malformed.id, 1), REMOTEKIT_SDK_DATA_MISMATCH);
+  invalid.join();
+  CHECK(!malformed.lifetime.expired());
+  std::thread echo([&] { Reply(malformed.peer.get(), Read(malformed.peer.get())); });
+  CHECK_EQ(Request(malformed.id, 2), REMOTEKIT_SDK_OK);
+  echo.join();
+  CHECK_EQ(remotekit_sdk_control_close(malformed.id), REMOTEKIT_SDK_OK);
+}
+
 void ParallelChannelsAndClose() {
   auto slow = NewChannel();
   auto fast = NewChannel();
@@ -95,7 +122,7 @@ void ParallelChannelsAndClose() {
   CHECK(std::chrono::steady_clock::now() - start < 1s);
   CHECK_EQ(remotekit_sdk_control_close(slow.id), REMOTEKIT_SDK_OK);
   pending.join();
-  CHECK_EQ(slow_status, REMOTEKIT_SDK_CHANNEL_CLOSED);
+  CHECK_EQ(slow_status, REMOTEKIT_SDK_LOST);
   CHECK(slow.lifetime.expired());
   CHECK_EQ(Request(slow.id, 3), REMOTEKIT_SDK_CHANNEL_CLOSED);
   CHECK_EQ(remotekit_sdk_control_close(fast.id), REMOTEKIT_SDK_OK);
@@ -135,7 +162,7 @@ void SameChannelSerializationAndQueuedClose() {
   CHECK_EQ(remotekit_sdk_control_close(channel.id), REMOTEKIT_SDK_OK);
   active.join();
   queued.join();
-  CHECK_EQ(first_status, REMOTEKIT_SDK_CHANNEL_CLOSED);
+  CHECK_EQ(first_status, REMOTEKIT_SDK_LOST);
   CHECK_EQ(second_status, REMOTEKIT_SDK_CHANNEL_CLOSED);
   CHECK(channel.lifetime.expired());
 }
@@ -247,8 +274,7 @@ void OpenRenderAttachmentContract(size_t attachment_count) {
     if (attachment_count == 1) {
       accepted.Set("ok", false);
       accepted.Set("pending", true);
-      accepted.Set("code", static_cast<int>(remotekit::protocol::ErrorCode::busy));
-      accepted.Set("error", "busy");
+      accepted.Set("error", base::DictValue().Set("code", "busy").Set("message", "Output pending"));
     }
     std::vector<mojo::ScopedMessagePipeHandle> none;
     ReplyWithEndpoints(control.peer.get(), accepted, &none);
@@ -280,7 +306,7 @@ void OpenRenderAttachmentContract(size_t attachment_count) {
   remotekit_sdk_render_setup setup{};
   setup.struct_size = sizeof(setup);
   const int status =
-      remotekit_sdk_control_open_render(control.id, GetCurrentProcessId(), &setup, 5000);
+      remotekit_sdk_control_open_render(control.id, GetCurrentProcessId(), &setup, 5000, nullptr);
   responder.join();
   std::vector<uint8_t> old_bytes;
   CHECK_EQ(
@@ -334,7 +360,7 @@ void OpenRenderAttachmentContract(size_t attachment_count) {
   }
   CHECK_EQ(remotekit_sdk_control_close(control.id), REMOTEKIT_SDK_OK);
 }
-void NumericRenderFailure(bool opening) {
+void TypedRenderFailure(bool opening) {
   auto control = NewChannel();
   std::thread responder([&] {
     auto request = ReadJsonRequest(control.peer.get());
@@ -352,17 +378,41 @@ void NumericRenderFailure(bool opening) {
     failure.Set("version", 1);
     failure.Set("id", *request.FindInt("id"));
     failure.Set("ok", false);
-    failure.Set("code", static_cast<int>(remotekit::protocol::ErrorCode::busy));
-    failure.Set("error", "busy");
-    failure.Set("detail", "Output is occupied");
+    failure.Set("error", base::DictValue()
+                             .Set("code", "busy")
+                             .Set("message", "Output is occupied")
+                             .Set("retryAfterMs", 400));
     ReplyWithEndpoints(control.peer.get(), failure, &none);
   });
   remotekit_sdk_render_setup setup{};
   setup.struct_size = sizeof(setup);
-  CHECK_EQ(remotekit_sdk_control_open_render(control.id, GetCurrentProcessId(), &setup, 5000),
-           REMOTEKIT_SDK_BUSY);
+  remotekit_sdk_failure failure{};
+  CHECK_EQ(
+      remotekit_sdk_control_open_render(control.id, GetCurrentProcessId(), &setup, 5000, &failure),
+      REMOTEKIT_SDK_REFUSED);
+  CHECK_EQ(std::string(failure.code), "busy");
+  CHECK_EQ(std::string(failure.message), "Output is occupied");
+  CHECK_EQ(failure.has_retry_after, 1u);
+  CHECK_EQ(failure.retry_after_ms, 400u);
   responder.join();
   CHECK_EQ(remotekit_sdk_control_close(control.id), REMOTEKIT_SDK_OK);
+}
+void LostBetweenRenderRequests() {
+  auto control = NewChannel();
+  std::thread responder([&] {
+    const auto open = ReadJsonRequest(control.peer.get());
+    std::vector<mojo::ScopedMessagePipeHandle> none;
+    auto accepted = remotekit::browser::ControlResult::Success(*open.FindInt("id"));
+    accepted.Set("accepted", true);
+    ReplyWithEndpoints(control.peer.get(), accepted, &none);
+    control.peer.reset();
+  });
+  remotekit_sdk_render_setup setup{};
+  setup.struct_size = sizeof(setup);
+  CHECK_EQ(
+      remotekit_sdk_control_open_render(control.id, GetCurrentProcessId(), &setup, 5000, nullptr),
+      REMOTEKIT_SDK_LOST);
+  responder.join();
 }
 void UnclaimedControlClose() {
   auto control = NewChannel();
@@ -445,7 +495,7 @@ void ShutdownDrainsLeases() {
     return State().stopping;
   });
   request.join();
-  CHECK_EQ(request_status, REMOTEKIT_SDK_CHANNEL_CLOSED);
+  CHECK_EQ(request_status, REMOTEKIT_SDK_LOST);
   CHECK(channel.lifetime.expired());
   CHECK(!finished.load());
   CHECK_EQ(RemoteKitSdkBeginRtc(), REMOTEKIT_SDK_INVALID_STATE);
@@ -533,7 +583,7 @@ void ClipboardPayloadBounds() {
   });
   const auto ordinary_json = base::WriteJson(ordinary_read);
   CHECK_EQ(ExchangeJson(invalid_response.id, *ordinary_json, 5000, &reply),
-           REMOTEKIT_SDK_MOJO_ERROR);
+           REMOTEKIT_SDK_DATA_MISMATCH);
   invalid_reader.join();
   CHECK_EQ(remotekit_sdk_control_close(invalid_response.id), REMOTEKIT_SDK_OK);
 }
@@ -541,14 +591,16 @@ void ClipboardPayloadBounds() {
 
 int main() {
   CHECK_EQ(remotekit_sdk_initialize(), REMOTEKIT_SDK_OK);
+  DeliveryStatuses();
   ParallelChannelsAndClose();
   SameChannelSerializationAndQueuedClose();
   PendingEndpointOwnership();
   OpenRenderAttachmentContract(0);
   OpenRenderAttachmentContract(2);
   OpenRenderAttachmentContract(1);
-  NumericRenderFailure(true);
-  NumericRenderFailure(false);
+  TypedRenderFailure(true);
+  TypedRenderFailure(false);
+  LostBetweenRenderRequests();
   UnclaimedControlClose();
   RawControlRejectsAttachments();
   TimeoutDiscardsLateReplyAndAttachments();

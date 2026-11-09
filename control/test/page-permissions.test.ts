@@ -260,7 +260,7 @@ test('auth forwards credentials transiently, strips operation records and diagno
         { type: 'page.reply', dialogId: dialog.id, reply: { kind: 'repost', accept: false } },
         'lease',
       ),
-      { code: 'rejected' },
+      { code: 'conflict' },
     );
     const action: ProductAction = {
       type: 'page.reply',
@@ -456,7 +456,7 @@ test('authentication errors cannot copy credentials into receipts or state', asy
       },
       'lease',
     );
-    assert.equal(receipt.status, 'rejected');
+    assert.equal(receipt.status, 'failed');
     assert.ok(!JSON.stringify(f.store.operations.operation(f.tenant, operationId)).includes('secret'));
     assert.ok(!JSON.stringify(f.control.viewers.productState(f.tenant)).includes('secret'));
   } finally {

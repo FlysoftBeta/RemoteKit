@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/error.hpp"
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -43,10 +44,13 @@ struct FaceChallenge {
   std::optional<FaceTemplate> face_template;
 };
 
+enum class FaceOutcome { none, no_matching_face, camera_unavailable };
+
 struct FaceResult {
   FaceState state = FaceState::pending;
   std::optional<FaceTemplate> face_template;
-  std::string reason;
+  FaceOutcome outcome = FaceOutcome::none;
+  std::optional<remotekit::Error> error;
 };
 
 class Faces {

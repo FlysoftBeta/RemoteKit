@@ -47,7 +47,7 @@ void DownloadImportTests(const fs::path& root,
 
   auto huge = event;
   huge["size"] = "268435457";
-  CHECK(library.ImportDownload(profile, huge).error().message == "file_too_large");
+  CHECK(library.ImportDownload(profile, huge).error().reason == ErrorReason::kFileTooLarge);
   auto missing = event;
   missing["fileReference"] = "downloads/missing.txt";
   CHECK(library.ImportDownload(profile, missing).error().code == ErrorCode::kNotFound);
@@ -55,7 +55,7 @@ void DownloadImportTests(const fs::path& root,
   mismatch["size"] = "7";
   CHECK(!library.ImportDownload(profile, mismatch));
   fs::resize_file(target, 256 * 1024 * 1024 + 1);
-  CHECK(library.ImportDownload(profile, event).error().message == "file_too_large");
+  CHECK(library.ImportDownload(profile, event).error().reason == ErrorReason::kFileTooLarge);
   write();
 
   SessionStore store(directory);
@@ -132,7 +132,7 @@ void DownloadImportTests(const fs::path& root,
     downloads.SetImport(import);
     Take(downloads.Observe("next-incarnation", Json::array({event}), "1", rpc));
     CHECK(imports == 2 && downloads.Events().at(0).at("type") == "download.failed");
-    CHECK(downloads.Events().at(0).at("reason") == "quota_exceeded");
+    CHECK(downloads.Events().at(0).at("error").at("code") == "limit_exceeded");
     CHECK(downloads.Pending() == 0 && !fs::exists(target));
     Take(downloads.Acknowledge({downloads.Events().at(0).at("eventId").get<std::string>()}));
   }
@@ -140,10 +140,10 @@ void DownloadImportTests(const fs::path& root,
   control.reject_code = ErrorCode::kUnavailable;
   unsigned serial = 0;
   for (const auto& [download, reason] :
-       std::vector<std::pair<Json, std::string>>{{missing, "file_missing"},
-                                                 {huge, "file_too_large"},
-                                                 {mismatch, "io_error"},
-                                                 {linked, "file_missing"}}) {
+       std::vector<std::pair<Json, std::string>>{{missing, "not_found"},
+                                                 {huge, "limit_exceeded"},
+                                                 {mismatch, "internal"},
+                                                 {linked, "not_found"}}) {
     write();
     DownloadImports downloads(store);
     downloads.Initialize();
@@ -151,9 +151,26 @@ void DownloadImportTests(const fs::path& root,
     Take(downloads.Observe("failure-" + std::to_string(++serial), Json::array({download}), "1",
                            rpc));
     const auto result = downloads.Events().at(0);
-    CHECK(result.at("type") == "download.failed" && result.at("reason") == reason);
+    CHECK(result.at("type") == "download.failed" && result.at("error").at("code") == reason);
     CHECK(result.size() == 5 && !result.contains("fileReference"));
     CHECK(!fs::exists(target) && downloads.Pending() == 0);
     Take(downloads.Acknowledge({result.at("eventId").get<std::string>()}));
   }
+  write();
+  unsigned attempts = 0, cleanup = 0;
+  DownloadImports retrying(store);
+  retrying.Initialize();
+  retrying.SetImport([&](const Json&) -> Result<Json> {
+    if (++attempts == 1)
+      return Error{ErrorCode::kUnavailable, "Temporary object source failure", {}, 0};
+    return imported.Json();
+  });
+  auto cleanup_rpc = [&](Json) -> Result<Json> {
+    ++cleanup;
+    return Json::object();
+  };
+  Take(retrying.Observe("retry", Json::array({event}), "1", cleanup_rpc));
+  CHECK(attempts == 1 && cleanup == 0 && retrying.Pending() == 1 && fs::exists(target));
+  Take(retrying.Observe("retry", Json::array({event}), "1", cleanup_rpc));
+  CHECK(attempts == 2 && cleanup == 2 && retrying.Pending() == 0);
 }

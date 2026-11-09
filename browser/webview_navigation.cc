@@ -14,10 +14,10 @@ NavigationCoordinator::NavigationCoordinator(WebView& owner) : owner_(owner) {}
 NavigationCoordinator::~NavigationCoordinator() = default;
 Result<std::string> NavigationCoordinator::ExportNavigation() const {
   if (owner_.lifecycle_->lifecycle_request_ || owner_.lifecycle_->lifecycle_uncertain_)
-    return {{}, Fail(ErrorCode::busy, "Navigation state is transitioning or uncertain")};
+    return {{}, Fail(ErrorCode::kBusy, "Navigation state is transitioning or uncertain")};
   const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
   if (!model)
-    return {{}, Fail(ErrorCode::not_found, "WebView model missing")};
+    return {{}, Fail(ErrorCode::kNotFound, "WebView model missing")};
   Result<std::string> payload;
   if (owner_.contents()) {
     auto captured = CaptureNavigationState(*owner_.contents());
@@ -26,7 +26,7 @@ Result<std::string> NavigationCoordinator::ExportNavigation() const {
     payload = ExportNavigationState(captured.value);
   } else {
     if (!owner_.lifecycle_->navigation_state_)
-      return {{}, Fail(ErrorCode::not_found, "No saved navigation state")};
+      return {{}, Fail(ErrorCode::kNotFound, "No saved navigation state")};
     payload = ExportNavigationState(*owner_.lifecycle_->navigation_state_);
   }
   if (!payload)
@@ -39,32 +39,31 @@ Result<std::string> NavigationCoordinator::ExportNavigation() const {
   envelope.WriteString(kNavigationRevision);
   envelope.WriteString(payload.value);
   if (envelope.AsBytes().size() > kMaxOwnedNavigationBytes)
-    return {{}, Fail(ErrorCode::invalid_request, "Owned navigation snapshot exceeds size limit")};
+    return {{}, Fail(ErrorCode::kLimitExceeded, "Owned navigation snapshot exceeds size limit")};
   return {std::string(envelope.AsStringView()), {}};
 }
 Status NavigationCoordinator::ImportNavigation(std::string_view bytes) {
   const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
   if (owner_.contents() || owner_.lifecycle_->lifecycle_request_ || !model ||
       model->actual != Residency::unloaded)
-    return Fail(ErrorCode::unavailable, "Navigation import requires an unloaded WebView");
+    return Fail(ErrorCode::kConflict, "Navigation import requires an unloaded WebView");
   if (bytes.size() < sizeof(std::uint32_t) || bytes.size() > kMaxOwnedNavigationBytes)
-    return Fail(ErrorCode::invalid_request, "Invalid owned navigation size");
+    return Fail(ErrorCode::kInvalidRequest, "Invalid owned navigation size");
   auto input = base::PickleIterator::WithData(base::as_byte_span(bytes));
   if (input.RemainingBytes() != bytes.size() - sizeof(std::uint32_t))
-    return Fail(ErrorCode::invalid_request, "Invalid owned navigation header");
+    return Fail(ErrorCode::kInvalidRequest, "Invalid owned navigation header");
   std::string magic, revision, payload;
   int schema = 0;
   std::uint64_t owner_session = 0, owner_profile = 0;
   if (!input.ReadString(&magic) || magic != kNavigationOwnerMagic || !input.ReadInt(&schema) ||
       schema != 2 || !input.ReadUInt64(&owner_session) || !input.ReadUInt64(&owner_profile) ||
       !input.ReadString(&revision) || revision != kNavigationRevision)
-    return Fail(ErrorCode::invalid_request,
+    return Fail(ErrorCode::kInvalidRequest,
                 "Unsupported owned navigation schema or Chromium revision");
   if (owner_session != owner_.session_ || owner_profile != model->profile)
-    return Fail(ErrorCode::stale_identity,
-                "Navigation snapshot belongs to another Session/Profile");
+    return Fail(ErrorCode::kConflict, "Navigation snapshot belongs to another Session/Profile");
   if (!input.ReadString(&payload) || !input.ReachedEnd())
-    return Fail(ErrorCode::invalid_request, "Invalid owned navigation payload length");
+    return Fail(ErrorCode::kInvalidRequest, "Invalid owned navigation payload length");
   auto imported = ImportNavigationState(payload, owner_.context_);
   if (!imported)
     return imported.status;
@@ -75,14 +74,14 @@ Status NavigationCoordinator::ImportNavigation(std::string_view bytes) {
 Status NavigationCoordinator::Navigate(const GURL& url,
                                        std::optional<NavigationOperations::Identity> operation) {
   if (!url.is_valid())
-    return Fail(ErrorCode::invalid_request, "Invalid navigation URL");
+    return Fail(ErrorCode::kInvalidRequest, "Invalid navigation URL");
   return RunNavigation("navigate", url, operation);
 }
 Status NavigationCoordinator::NavigationCommand(
     const std::string& action,
     std::optional<NavigationOperations::Identity> operation) {
   if (action != "back" && action != "forward" && action != "reload" && action != "stop")
-    return Fail(ErrorCode::invalid_request, "Invalid navigation action");
+    return Fail(ErrorCode::kInvalidRequest, "Invalid navigation action");
   return RunNavigation(action, GURL(), std::move(operation));
 }
 std::optional<Status> NavigationCoordinator::ExistingNavigationOperation(
@@ -96,13 +95,13 @@ std::optional<Status> NavigationCoordinator::ExistingNavigationOperation(
     return std::nullopt;
   if (result == Acceptance::duplicate) {
     const auto* record = navigation_operations_.Find(*operation);
-    return record->admitted ? Status{} : Status{ErrorCode::unavailable, record->error};
+    return record->admitted ? Status{} : Status{record->error_code, record->error};
   }
   if (result == Acceptance::stale)
-    return Fail(ErrorCode::stale_identity, "stale_navigation_operation");
+    return Fail(ErrorCode::kConflict, "stale_navigation_operation");
   if (result == Acceptance::full)
-    return Fail(ErrorCode::busy, "navigation_operation_capacity");
-  return Fail(ErrorCode::invalid_request, "navigation_operation_conflict");
+    return Fail(ErrorCode::kBusy, "navigation_operation_capacity");
+  return Fail(ErrorCode::kInvalidRequest, "navigation_operation_conflict");
 }
 NavigationOperations NavigationCoordinator::ReleaseNavigationOperations() {
   navigation_operations_.Supersede();
@@ -117,7 +116,7 @@ Status NavigationCoordinator::AcknowledgeNavigation(
     const NavigationOperations::Identity& identity) {
   return navigation_operations_.Ack(identity)
              ? Status{}
-             : Fail(ErrorCode::busy, "Navigation operation pending");
+             : Fail(ErrorCode::kBusy, "Navigation operation pending");
 }
 base::ListValue NavigationCoordinator::NavigationOperationSnapshot() const {
   base::ListValue result;
@@ -151,23 +150,25 @@ Status NavigationCoordinator::RunNavigation(
     using Acceptance = NavigationOperations::Acceptance;
     if (accepted == Acceptance::duplicate) {
       const auto* original = navigation_operations_.Find(*identity);
-      return original->admitted ? Status{} : Status{ErrorCode::unavailable, original->error};
+      return original->admitted ? Status{} : Status{original->error_code, original->error};
     }
     if (accepted == Acceptance::full)
-      return Fail(ErrorCode::busy, "navigation_operation_capacity");
+      return Fail(ErrorCode::kBusy, "navigation_operation_capacity");
     if (accepted == Acceptance::stale)
-      return Fail(ErrorCode::stale_identity, "stale_navigation_operation");
+      return Fail(ErrorCode::kConflict, "stale_navigation_operation");
     if (accepted != Acceptance::fresh)
-      return Fail(ErrorCode::invalid_request, "navigation_operation_conflict");
+      return Fail(ErrorCode::kInvalidRequest, "navigation_operation_conflict");
     operation = navigation_operations_.Find(*identity);
     operation->url = SignInNavigationUrl(url);
   }
   const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
   if (owner_.lifecycle_->lifecycle_uncertain_ || !owner_.contents() || !model ||
       model->actual != Residency::live || model->pending) {
-    if (operation)
+    if (operation) {
+      operation->error_code = ErrorCode::kConflict;
       navigation_operations_.Finish(*operation, "failed", "view_unavailable");
-    return Fail(ErrorCode::unavailable, "WebView cannot navigate in this state");
+    }
+    return Fail(ErrorCode::kConflict, "WebView cannot navigate in this state");
   }
   auto& controller = owner_.contents()->GetController();
   const char* invalid = nullptr;
@@ -176,9 +177,11 @@ Status NavigationCoordinator::RunNavigation(
   if (action == "forward" && !controller.CanGoForward())
     invalid = "no_forward_entry";
   if (invalid) {
-    if (operation)
+    if (operation) {
+      operation->error_code = ErrorCode::kConflict;
       navigation_operations_.Finish(*operation, "failed", invalid);
-    return Fail(ErrorCode::unavailable, invalid);
+    }
+    return Fail(ErrorCode::kConflict, invalid);
   }
   if (action == "navigate" && owner_.sign_in_ &&
       !(url.SchemeIs("remotekit-signin") && url.path() == "/done")) {

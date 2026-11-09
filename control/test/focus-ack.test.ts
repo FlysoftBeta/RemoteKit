@@ -101,10 +101,7 @@ test('matched rejected focus drops queued input and reports the rejection', () =
   transport.input.sendInput(a, { type: 'ime_commit', text: 'reject' });
   ack(sent[0], { ok: false, error: { code: 'conflict', message: 'stale_focus' } });
   assert.equal(sent.length, 1);
-  assert.equal(
-    transport.observations.diagnostics.error,
-    formatError(new RemoteKitError('conflict', 'stale_focus')),
-  );
+  assert.equal(transport.observations.diagnostics.error, '状态已改变，请刷新后重新决定');
   transport.input.ensureInputFocus(a);
   assert.equal(sent.length, 2);
   assert.notEqual(sent[1].focusRequestId, sent[0].focusRequestId);

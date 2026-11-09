@@ -10,9 +10,16 @@
 namespace remotekit::updater {
 namespace {
 namespace fs = std::filesystem;
+struct ArchiveFailure {
+  Error error;
+};
 void Require(bool condition, const char* message) {
   if (!condition)
-    throw std::runtime_error(message);
+    throw ArchiveFailure{{ErrorCode::kRejected, message}};
+}
+void RequireIo(bool condition, const char* message) {
+  if (!condition)
+    throw ArchiveFailure{{ErrorCode::kUnavailable, message}};
 }
 void Exact(const ArchiveRead& read, std::span<uint8_t> bytes) {
   while (!bytes.empty()) {
@@ -112,7 +119,7 @@ class ZstdReader {
  public:
   explicit ZstdReader(const fs::path& path)
       : file_(path, std::ios::binary), stream_(ZSTD_createDStream()) {
-    Require(file_.is_open() && stream_, "cannot open zstd archive");
+    RequireIo(file_.is_open() && stream_, "cannot open zstd archive");
     Require(!ZSTD_isError(ZSTD_initDStream(stream_)), "zstd initialization failed");
   }
   ~ZstdReader() { ZSTD_freeDStream(stream_); }
@@ -202,16 +209,16 @@ Result<void> ExtractTar(const ArchiveRead& read, const fs::path& destination) {
         fs::create_directories(path.parent_path());
         HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                                   FILE_ATTRIBUTE_NORMAL, nullptr);
-        Require(file != INVALID_HANDLE_VALUE, "cannot create archive file");
+        RequireIo(file != INVALID_HANDLE_VALUE, "cannot create archive file");
         try {
           uint64_t left = size;
           while (left) {
             size_t n = static_cast<size_t>(std::min<uint64_t>(buffer.size(), left));
             Exact(read, std::span(buffer).first(n));
             DWORD written = 0;
-            Require(WriteFile(file, buffer.data(), static_cast<DWORD>(n), &written, nullptr) &&
-                        written == n,
-                    "archive write failed");
+            RequireIo(WriteFile(file, buffer.data(), static_cast<DWORD>(n), &written, nullptr) &&
+                          written == n,
+                      "archive write failed");
             left -= n;
           }
         } catch (...) {
@@ -222,16 +229,24 @@ Result<void> ExtractTar(const ArchiveRead& read, const fs::path& destination) {
       }
       Padding(read, size);
     }
+  } catch (const ArchiveFailure& failure) {
+    return failure.error;
+  } catch (const fs::filesystem_error& error) {
+    return Error{ErrorCode::kUnavailable, error.what()};
   } catch (const std::exception& error) {
-    return Error{ErrorCode::kInvalidRequest, error.what()};
+    return Error{ErrorCode::kInternal, error.what()};
   }
 }
 Result<void> ExtractArchive(const fs::path& archive, const fs::path& destination) {
   try {
     ZstdReader reader(archive);
     return ExtractTar([&](std::span<uint8_t> bytes) { return reader.Read(bytes); }, destination);
+  } catch (const ArchiveFailure& failure) {
+    return failure.error;
+  } catch (const fs::filesystem_error& error) {
+    return Error{ErrorCode::kUnavailable, error.what()};
   } catch (const std::exception& error) {
-    return Error{ErrorCode::kInvalidRequest, error.what()};
+    return Error{ErrorCode::kInternal, error.what()};
   }
 }
 }  // namespace remotekit::updater

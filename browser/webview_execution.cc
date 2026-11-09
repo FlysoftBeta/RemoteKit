@@ -80,11 +80,11 @@ Status WebViewExecution::SetVisible(bool visible) {
     return {};
   }
   if (!contents_)
-    return Fail(ErrorCode::unavailable, "WebView is unloaded");
+    return Fail(ErrorCode::kConflict, "WebView is unloaded");
   const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
   if (visible && (owner_.lifecycle_->lifecycle_uncertain_ || !model ||
                   model->actual != Residency::live || model->pending))
-    return Fail(ErrorCode::unavailable, "Restore must complete before showing the WebView");
+    return Fail(ErrorCode::kConflict, "Restore must complete before showing the WebView");
   if (!visible) {
     auto status = owner_.input_->Focus(false);
     if (!status)

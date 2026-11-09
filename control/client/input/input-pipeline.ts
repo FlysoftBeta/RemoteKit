@@ -1,3 +1,5 @@
+import { endpointError } from '../../server/endpoint/gateway';
+import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { RemoteKitError } from '../../shared/errors';
 import { formatError } from '../util/format-error';
 import { samePlane } from '../presentation/plane-source';
@@ -76,6 +78,7 @@ export class InputPipeline {
   private inputDrainTimer?: ReturnType<typeof setTimeout>;
 
   private focusTimer?: ReturnType<typeof setTimeout>;
+  private focusRetryTimer?: ReturnType<typeof setTimeout>;
 
   private inputFocus = new Map<string, { token: string; identity: string; focused: boolean }>();
 
@@ -160,6 +163,7 @@ export class InputPipeline {
     generation: string;
     epoch: string;
     events: QueuedInput[];
+    attempts: number;
   } | null = null;
 
   flushFocusedInput() {
@@ -234,7 +238,9 @@ export class InputPipeline {
     const pending = this.pendingFocus;
     if (!pending || pending.requestId !== requestId) return false;
     clearTimeout(this.focusTimer);
+    clearTimeout(this.focusRetryTimer);
     this.focusTimer = undefined;
+    this.focusRetryTimer = undefined;
     if (this.inputFocus.get(pending.view)?.identity === requestId) this.inputFocus.delete(pending.view);
     this.pendingFocus = null;
     this.focusLease = { phase: 'none' };
@@ -249,7 +255,7 @@ export class InputPipeline {
     if (!sent) return;
     this.sentInput.delete(sequence);
     const ok = message.ok;
-    const error = message.error ? new RemoteKitError(message.error.code, message.error.message) : undefined;
+    const error = message.error ? endpointError(message.error) : undefined;
     for (const listener of this.inputResultListeners)
       listener({
         surface: sent.surface,
@@ -259,7 +265,8 @@ export class InputPipeline {
         ok,
         error,
       });
-    if (!ok) this.ports.report({ error: formatError(error) });
+    if (!ok && error && errorHandling(error.code) !== 'canceled')
+      this.ports.report({ error: formatError(error) });
   }
 
   sendInput(surface: Surface, event: Record<string, unknown>) {
@@ -441,31 +448,43 @@ export class InputPipeline {
       generation: this.ports.layout()!.generation,
       epoch: this.ports.layout()!.epoch,
       events: [],
+      attempts: 0,
     };
     this.discardQueuedInput('focus-changed', true);
     this.notify();
+    this.sendPendingFocus();
+  }
+
+  private sendPendingFocus() {
+    const pending = this.pendingFocus;
+    if (!pending) return;
+    this.layoutChanged();
+    if (
+      this.pendingFocus !== pending ||
+      this.ports.scope().locked ||
+      this.ports.channel()?.readyState !== 'open'
+    )
+      return;
+    clearTimeout(this.focusTimer);
+    this.focusLease = { phase: 'requested', id: pending.requestId, deadline: performance.now() + 2000 };
     this.focusTimer = setTimeout(() => {
-      if (
-        this.pendingFocus?.requestId === requestId &&
-        this.focusLease.phase !== 'granted' &&
-        this.cancelPendingFocus(requestId, 'focus-timeout')
-      )
-        this.ports.report({ error: '远程焦点请求超时' });
+      if (this.cancelPendingFocus(pending.requestId, 'focus-timeout'))
+        this.ports.report({ error: '远程焦点请求结果未知' });
     }, 2000);
     try {
       this.ports.send({
         type: 'focus',
-        focusRequestId: requestId,
-        view: current.id,
-        session: current.session,
-        instance: current.instance,
-        document: current.document,
-        focus: current.focus,
-        layoutEpoch: this.ports.layout()!.epoch,
-        focused,
+        focusRequestId: pending.requestId,
+        view: pending.view,
+        session: pending.session,
+        instance: pending.instance,
+        document: pending.document,
+        focus: pending.token,
+        layoutEpoch: pending.epoch,
+        focused: pending.focused,
       });
     } catch {
-      this.cancelPendingFocus(requestId, 'focus-send-failed');
+      this.cancelPendingFocus(pending.requestId, 'focus-send-failed');
       this.ports.report({ error: '远程焦点请求未发送' });
     }
   }
@@ -499,10 +518,18 @@ export class InputPipeline {
           this.ports.layout()!.epoch === pending.epoch &&
           this.ports.layout()!.generation === pending.generation;
         if (matches && message.ok === false) {
-          this.cancelPendingFocus(pending.requestId, 'focus-rejected');
-          this.ports.report({
-            error: formatError(new RemoteKitError(message.error!.code, message.error!.message)),
-          });
+          const error = endpointError(message.error);
+          const delay = retryDelay(error, pending.attempts);
+          if (delay !== undefined && pending.attempts++ < 3) {
+            clearTimeout(this.focusTimer);
+            clearTimeout(this.focusRetryTimer);
+            this.focusRetryTimer = setTimeout(() => {
+              if (this.pendingFocus === pending) this.sendPendingFocus();
+            }, delay);
+          } else {
+            this.cancelPendingFocus(pending.requestId, 'focus-rejected');
+            if (errorHandling(error.code) !== 'canceled') this.ports.report({ error: formatError(error) });
+          }
         }
         if (
           matches &&

@@ -29,16 +29,24 @@ export type RtcConnection =
   | { phase: 'active'; connectionId: string; leaseId: string };
 export type PolicyApplication = { encoded: string; applied: boolean; browserPid?: number };
 export class TenantRuntime {
-  reconciliation: { inflight?: Promise<void> } = {};
+  reconciliation: {
+    inflight?: Promise<void>;
+    key?: string;
+    retryAt?: number;
+    attempts?: number;
+    error?: RemoteKitError;
+  } = {};
   viewer?: ViewerLease;
   viewerAbsentSince: number;
   lastViewport?: ViewerViewport;
   snapshotSequence = 0;
   lastError?: string;
+  lastErrorKey?: 'resource_limit' | 'endpoint' | 'hibernating';
   mediaGeneration?: number;
   pendingRtcCheck = false;
   started = false;
   browserIncarnation?: string;
+  browserRestart?: 'ready' | 'waiting' | 'exhausted';
   rtc: {
     connection: RtcConnection;
     signal?: SignalBinding;
@@ -97,9 +105,14 @@ export class TenantRuntime {
   clearError() {
     const had = this.lastError !== undefined;
     this.lastError = undefined;
+    this.lastErrorKey = undefined;
     return had;
   }
   resetEndpoint() {
+    this.reconciliation.error = undefined;
+    this.reconciliation.key = undefined;
+    this.reconciliation.retryAt = undefined;
+    this.reconciliation.attempts = 0;
     this.closeRtc();
     this.rtc.disconnectedPeer = undefined;
     this.mediaGeneration = undefined;

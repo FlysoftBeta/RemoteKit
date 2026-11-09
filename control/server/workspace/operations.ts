@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
+import { retryDelay } from '../../shared/error-policy';
 import { recordedAction } from '../../shared/recorded-action';
 import type { ViewerAuthority } from '../viewers/viewer-hub';
 import { applyCommand } from './commands';
@@ -50,12 +51,16 @@ export class OperationPipeline {
     operation: { operationId: string; operationGeneration: string },
   ): OperationReceipt {
     if (operation.operationGeneration !== this.context.store.operations.operationGeneration(tenant))
-      return { ...operation, status: 'expired', error: '操作收据代次已过期，请核对当前工作区' };
+      return {
+        ...operation,
+        status: 'failed',
+        error: { code: 'conflict', message: '操作收据代次已过期，请核对当前工作区' },
+      };
     return (
       this.context.store.operations.operation(tenant, operation.operationId)?.receipt ?? {
         ...operation,
         status: 'unknown',
-        error: '尚无操作收据',
+        error: { code: 'outcome_unknown', message: '尚无操作收据' },
       }
     );
   }
@@ -81,8 +86,8 @@ export class OperationPipeline {
       receipt = {
         operationId: event.operationId,
         operationGeneration: event.operationGeneration,
-        status: 'rejected',
-        error: toRemoteKitError(error).message,
+        status: 'failed',
+        error: wireError(toRemoteKitError(error)),
       };
     }
     // A replaced peer never receives a late result from an accepted old operation.
@@ -98,7 +103,6 @@ export class OperationPipeline {
         ...(event.authEpoch !== undefined ? { authEpoch: event.authEpoch } : {}),
         operationId: event.operationId,
         operationGeneration: event.operationGeneration,
-        ok: !['rejected', 'expired'].includes(receipt.status),
         result: receipt,
       })
       .catch(() => {});
@@ -119,24 +123,31 @@ export class OperationPipeline {
         !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
           operation.operationId,
         ) ||
-        !operation.action ||
-        JSON.stringify(operation.action).length > 32768
+        !operation.action
       )
         throw new RemoteKitError('invalid_request', '无效产品操作');
+      if (JSON.stringify(operation.action).length > 32768)
+        throw new RemoteKitError('limit_exceeded', '产品操作超出大小限制');
       if (operation.operationGeneration !== this.context.store.operations.operationGeneration(tenant))
         return {
           operationId: operation.operationId,
           operationGeneration: operation.operationGeneration,
-          status: 'expired',
-          error: '操作收据代次已过期',
+          status: 'failed',
+          error: { code: 'conflict', message: '操作收据代次已过期' },
         };
       const payload = operationPayload(recordedAction(operation.action)),
         existing = this.context.store.operations.operation(tenant, operation.operationId);
       if (existing) {
         if (existing.payload !== payload) throw new RemoteKitError('conflict', '同一操作ID不能用于不同内容');
-        return existing.receipt;
+        if (
+          existing.receipt.status !== 'failed' ||
+          !existing.receipt.error ||
+          retryDelay(existing.receipt.error, 0) === undefined
+        )
+          return existing.receipt;
       }
       const receipt: OperationReceipt = {
+        ...(existing?.receipt ?? {}),
         operationId: operation.operationId,
         operationGeneration: operation.operationGeneration,
         status: 'accepted',
@@ -153,9 +164,13 @@ export class OperationPipeline {
           ? { browserIncarnation: runtime.browserIncarnation }
           : {}),
       };
-      if (!this.context.store.operations.reserveOperation(tenant, payload, receipt)) {
+      if (!existing && !this.context.store.operations.reserveOperation(tenant, payload, receipt)) {
         this.services.viewers.push(tenant);
-        return { ...receipt, status: 'expired', error: '操作收据已轮换，请核对工作区' };
+        return {
+          ...receipt,
+          status: 'failed',
+          error: { code: 'conflict', message: '操作收据已轮换，请核对工作区' },
+        };
       }
       settle(receipt, { status: 'applying' });
       this.context.store.operations.saveOperation(this.context.store.workspaces.workspace(tenant), receipt);
@@ -170,8 +185,8 @@ export class OperationPipeline {
         };
         const result = await this.run(ctx, operation.action);
         const observed = this.context.store.operations.operation(tenant, receipt.operationId)?.receipt;
-        if (observed && ['committed', 'rejected'].includes(observed.status)) settle(receipt, observed);
-        if (!['committed', 'rejected'].includes(receipt.status)) {
+        if (observed && ['committed', 'failed'].includes(observed.status)) settle(receipt, observed);
+        if (!['committed', 'failed'].includes(receipt.status)) {
           settle(receipt, {
             status:
               ['tab.navigate', 'tab.command'].includes(operation.action.type) && result.application
@@ -193,18 +208,19 @@ export class OperationPipeline {
         }
       } catch (error) {
         const durable = this.context.store.operations.operation(tenant, operation.operationId)?.receipt;
-        if (durable && ['committed', 'rejected'].includes(durable.status)) {
+        if (durable && ['committed', 'failed'].includes(durable.status)) {
           settle(receipt, durable);
         } else {
+          const failure = toRemoteKitError(error);
           settle(receipt, {
-            status: toRemoteKitError(error).code === 'outcome_unknown' ? 'unknown' : 'rejected',
+            status: failure.code === 'outcome_unknown' ? 'unknown' : 'failed',
+            error: wireError(failure),
           });
-          receipt.error = toRemoteKitError(error).message;
           const workspace = this.context.store.workspaces.workspace(tenant);
           for (const tab of workspace.tabs)
             if (tab.navigation?.operationId === operation.operationId) {
-              tab.navigation.status = receipt.status === 'rejected' ? 'rejected' : 'unknown';
-              if (receipt.status === 'rejected') {
+              tab.navigation.status = failure.code === 'outcome_unknown' ? 'unknown' : 'rejected';
+              if (failure.code !== 'outcome_unknown') {
                 tab.kind = tab.navigation.previousKind;
                 tab.url = tab.navigation.previousUrl;
                 if (isLocalTab(tab)) tab.loading = false;
@@ -345,14 +361,15 @@ export interface ExecutionContext {
   operationGeneration: string;
   operationSequence: string;
 }
-export type ReceiptOutcome = Pick<
-  OperationReceipt,
-  'status' | 'application' | 'error' | 'resolved' | 'resolution'
->;
+export type ReceiptOutcome = Pick<OperationReceipt, 'application' | 'resolved' | 'resolution'> &
+  (
+    | { status: 'failed'; error: NonNullable<OperationReceipt['error']> }
+    | { status: Exclude<OperationReceipt['status'], 'failed'>; error?: OperationReceipt['error'] }
+  );
 export function settle(receipt: OperationReceipt, outcome: ReceiptOutcome): OperationReceipt {
   receipt.status = outcome.status;
-  if (['committed', 'rejected', 'expired'].includes(outcome.status) || outcome.resolved)
-    delete receipt.application;
+  if (outcome.status !== 'failed' && outcome.status !== 'unknown') delete receipt.error;
+  if (['committed', 'failed'].includes(outcome.status) || outcome.resolved) delete receipt.application;
   for (const [key, value] of Object.entries(outcome)) {
     if (value === undefined) delete (receipt as unknown as Record<string, unknown>)[key];
     else (receipt as unknown as Record<string, unknown>)[key] = value;

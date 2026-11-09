@@ -45,49 +45,49 @@ void LifecycleCoordinator::SynchronizeResidency() {
 }
 Status LifecycleCoordinator::CheckQuiescent() const {
   if (!owner_.contents())
-    return Fail(ErrorCode::unavailable, "WebView is unloaded");
+    return Fail(ErrorCode::kConflict, "WebView is unloaded");
   if (owner_.contents()->GetVisibility() != content::Visibility::HIDDEN)
-    return Fail(ErrorCode::unavailable, "WebView is visible");
+    return Fail(ErrorCode::kConflict, "WebView is visible");
   if (owner_.contents()->IsCurrentlyAudible())
-    return Fail(ErrorCode::unavailable, "WebView is playing audio");
+    return Fail(ErrorCode::kConflict, "WebView is playing audio");
   if (owner_.contents()->IsLoading() ||
       owner_.contents()->HasUncommittedNavigationInPrimaryMainFrame() ||
       owner_.contents()->GetController().GetPendingEntry())
-    return Fail(ErrorCode::unavailable, "Navigation is in progress");
+    return Fail(ErrorCode::kConflict, "Navigation is in progress");
   if (owner_.contents()->IsCrashed())
-    return Fail(ErrorCode::unavailable, "Renderer has crashed");
+    return Fail(ErrorCode::kConflict, "Renderer has crashed");
   if (owner_.contents()->IsBeingDestroyed())
-    return Fail(ErrorCode::unavailable, "WebView is being destroyed");
+    return Fail(ErrorCode::kConflict, "WebView is being destroyed");
   if (!owner_.contents()->GetPrimaryMainFrame())
-    return Fail(ErrorCode::unavailable, "Live main frame required");
+    return Fail(ErrorCode::kConflict, "Live main frame required");
   if (owner_.contents()->GetPrimaryMainFrame()->GetSiteInstance()->GetRelatedActiveContentsCount() >
       1)
-    return Fail(ErrorCode::unavailable, "Related active WebContents prevents lifecycle transition");
+    return Fail(ErrorCode::kConflict, "Related active WebContents prevents lifecycle transition");
   if (owner_.contents()->IsBeingCaptured() || owner_.contents()->HasPictureInPictureVideo() ||
       owner_.contents()->HasPictureInPictureDocument() || owner_.contents()->IsFullscreen() ||
       owner_.contents()->GetCurrentlyPlayingVideoCount() > 0 ||
       owner_.contents()->HasFileSystemAccessHandles() ||
       !owner_.contents()->GetInnerWebContents().empty())
     return Fail(
-        ErrorCode::unavailable,
+        ErrorCode::kConflict,
         "Active capture, media, filesystem, or inner contents prevents lifecycle transition");
   using Capability = content::WebContentsCapabilityType;
   for (auto type :
        {Capability::kUSB, Capability::kBluetoothConnected, Capability::kBluetoothScanning,
         Capability::kHID, Capability::kSerial, Capability::kGeolocation})
     if (owner_.contents()->IsCapabilityActive(type))
-      return Fail(ErrorCode::unavailable, "Active device capability prevents lifecycle transition");
+      return Fail(ErrorCode::kConflict, "Active device capability prevents lifecycle transition");
   auto* impl = static_cast<content::WebContentsImpl*>(owner_.contents());
   if (impl->GetKeyboardLockWidget() || impl->GetPointerLockWidget())
-    return Fail(ErrorCode::unavailable, "Active input lock prevents lifecycle transition");
+    return Fail(ErrorCode::kConflict, "Active input lock prevents lifecycle transition");
   for (auto* node : impl->GetPrimaryFrameTree().Nodes())
     if (node->HasNavigation() || node->HasPendingCommitNavigation() ||
         node->HasPendingCrossDocumentNavigation())
-      return Fail(ErrorCode::unavailable, "Frame navigation prevents lifecycle transition");
+      return Fail(ErrorCode::kConflict, "Frame navigation prevents lifecycle transition");
   bool media_stream = false;
   auto* main = owner_.contents()->GetPrimaryMainFrame();
   if (!main || !main->IsRenderFrameLive())
-    return Fail(ErrorCode::unavailable, "Live main frame required");
+    return Fail(ErrorCode::kConflict, "Live main frame required");
   main->ForEachRenderFrameHost([&](content::RenderFrameHost* frame) {
     auto* frame_impl = static_cast<content::RenderFrameHostImpl*>(frame);
     media_stream |=
@@ -95,36 +95,36 @@ Status LifecycleCoordinator::CheckQuiescent() const {
         frame_impl->HasMediaStreams(content::RenderFrameHostImpl::kPlayingAudioStream);
   });
   return media_stream
-             ? Fail(ErrorCode::unavailable, "Active media stream prevents lifecycle transition")
+             ? Fail(ErrorCode::kConflict, "Active media stream prevents lifecycle transition")
              : Status{};
 }
 Status LifecycleCoordinator::CanDiscard() const {
   if (lifecycle_request_)
-    return Fail(ErrorCode::busy, "Lifecycle transition pending");
+    return Fail(ErrorCode::kBusy, "Lifecycle transition pending");
   if (lifecycle_uncertain_)
-    return Fail(ErrorCode::unavailable, "Browser lifecycle state uncertain; unload required");
+    return Fail(ErrorCode::kConflict, "Browser lifecycle state uncertain; unload required");
   const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
   if (!model)
-    return Fail(ErrorCode::not_found, "WebView model missing");
+    return Fail(ErrorCode::kNotFound, "WebView model missing");
   if (model->pending)
-    return Fail(ErrorCode::busy, "Lifecycle operation pending");
+    return Fail(ErrorCode::kBusy, "Lifecycle operation pending");
   if (model->actual != Residency::live && model->actual != Residency::frozen)
-    return Fail(ErrorCode::invalid_request, "Discard requires live or frozen state");
+    return Fail(ErrorCode::kConflict, "Discard requires live or frozen state");
   if (owner_.touch_->touch_cleanup_pending_ ||
       (owner_.touch_->client_gesture_bridge_ &&
        (!owner_.touch_->touches_.empty() || owner_.touch_->touch_pending_callbacks_)))
-    return Fail(ErrorCode::busy, "Touch cancellation must drain before discard; retry");
+    return Fail(ErrorCode::kBusy, "Touch cancellation must drain before discard; retry");
   if (owner_.touch_->OwnershipUnconfirmed())
-    return Fail(ErrorCode::unavailable, "Touch cleanup uncertain; unload required");
+    return Fail(ErrorCode::kConflict, "Touch cleanup uncertain; unload required");
   if (owner_.contents() && owner_.contents()->NeedToFireBeforeUnloadOrUnloadEvents())
-    return Fail(ErrorCode::unavailable, "Beforeunload or unload handler prevents discard");
+    return Fail(ErrorCode::kConflict, "Beforeunload or unload handler prevents discard");
   auto quiet = CheckQuiescent();
   if (!quiet)
     return quiet;
   if (!base::FeatureList::IsEnabled(::features::kWebContentsDiscard))
-    return Fail(ErrorCode::unsupported, "WebContentsDiscard feature is disabled");
+    return Fail(ErrorCode::kRejected, "WebContentsDiscard feature is disabled");
   if (owner_.contents()->WasDiscarded())
-    return Fail(ErrorCode::unavailable, "WebContents is already marked discarded");
+    return Fail(ErrorCode::kConflict, "WebContents is already marked discarded");
   return CaptureNavigationState(*owner_.contents()).status;
 }
 bool LifecycleCoordinator::UpdateLifecycleViews(bool frozen) {
@@ -197,16 +197,16 @@ void LifecycleCoordinator::StartLifecycleTimer() {
 }
 Status LifecycleCoordinator::CanRecoverLifecycle() const {
   if (lifecycle_request_ || !lifecycle_uncertain_ || !navigation_state_)
-    return Fail(ErrorCode::unavailable, "No stable navigation checkpoint for lifecycle recovery");
+    return Fail(ErrorCode::kConflict, "No stable navigation checkpoint for lifecycle recovery");
   return CheckAutomaticNavigationRestore(*navigation_state_);
 }
 Status LifecycleCoordinator::RequestLifecycle(Lifecycle action,
                                               Completion completion,
                                               bool recover_uncertain) {
   if (lifecycle_request_)
-    return Fail(ErrorCode::busy, "Lifecycle transition pending");
+    return Fail(ErrorCode::kBusy, "Lifecycle transition pending");
   if (lifecycle_uncertain_ && action != Lifecycle::unload)
-    return Fail(ErrorCode::unavailable, "Browser lifecycle state uncertain; unload required");
+    return Fail(ErrorCode::kConflict, "Browser lifecycle state uncertain; unload required");
   if (action == Lifecycle::freeze || action == Lifecycle::discard) {
     // Freezing/discarding before the cancel ACK can strand the old sequence.
     // Reject before creating a lifecycle request; callers may retry after drain.
@@ -214,13 +214,13 @@ Status LifecycleCoordinator::RequestLifecycle(Lifecycle action,
         (!owner_.touch_->touches_.empty() || owner_.touch_->touch_pending_callbacks_))
       owner_.input_->ReleasePointer(true);
     if (owner_.touch_->touch_cleanup_pending_)
-      return Fail(ErrorCode::busy, "Touch cancellation must drain before freeze/discard; retry");
+      return Fail(ErrorCode::kBusy, "Touch cancellation must drain before freeze/discard; retry");
     if (owner_.touch_->OwnershipUnconfirmed())
-      return Fail(ErrorCode::unavailable, "Touch cleanup uncertain; unload required");
+      return Fail(ErrorCode::kConflict, "Touch cleanup uncertain; unload required");
   }
   const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
   if (!model)
-    return Fail(ErrorCode::not_found, "WebView model missing");
+    return Fail(ErrorCode::kNotFound, "WebView model missing");
   if (action == Lifecycle::discard) {
     auto allowed = CanDiscard();
     if (!allowed)
@@ -234,9 +234,9 @@ Status LifecycleCoordinator::RequestLifecycle(Lifecycle action,
       return guard;
     if (action == Lifecycle::discard) {
       if (!base::FeatureList::IsEnabled(::features::kWebContentsDiscard))
-        return Fail(ErrorCode::unsupported, "WebContentsDiscard feature is disabled");
+        return Fail(ErrorCode::kRejected, "WebContentsDiscard feature is disabled");
       if (owner_.contents()->WasDiscarded())
-        return Fail(ErrorCode::unavailable, "WebContents is already marked discarded");
+        return Fail(ErrorCode::kConflict, "WebContents is already marked discarded");
       next_state = ResidencyState::kDiscarding;
     } else
       next_state = ResidencyState::kFreezing;
@@ -245,15 +245,14 @@ Status LifecycleCoordinator::RequestLifecycle(Lifecycle action,
       if (!owner_.contents() || owner_.contents()->IsBeingDestroyed() ||
           owner_.contents()->IsCrashed() ||
           owner_.contents()->GetVisibility() != content::Visibility::HIDDEN)
-        return Fail(ErrorCode::unavailable,
-                    "Thaw requires a hidden WebView with an intact renderer");
+        return Fail(ErrorCode::kConflict, "Thaw requires a hidden WebView with an intact renderer");
       next_state = ResidencyState::kRestoring;
     } else if (previous == Residency::discarded) {
       if (!owner_.contents() || !owner_.contents()->WasDiscarded() ||
           !owner_.contents()->GetController().NeedsReload() ||
           owner_.contents()->HasUncommittedNavigationInPrimaryMainFrame() ||
           owner_.contents()->GetController().GetPendingEntry())
-        return Fail(ErrorCode::unavailable,
+        return Fail(ErrorCode::kConflict,
                     "Discard restore requires its idle retained NavigationController");
       auto captured = CaptureNavigationState(*owner_.contents());
       if (!captured)
@@ -264,21 +263,21 @@ Status LifecycleCoordinator::RequestLifecycle(Lifecycle action,
       next_state = ResidencyState::kRestoring;
     } else if (previous == Residency::unloaded) {
       if (!navigation_state_)
-        return Fail(ErrorCode::not_found, "No saved navigation history is available");
+        return Fail(ErrorCode::kNotFound, "No saved navigation history is available");
       auto allowed = CheckAutomaticNavigationRestore(*navigation_state_);
       if (!allowed)
         return allowed;
       next_state = ResidencyState::kRestoring;
     }
   } else if (action != Lifecycle::unload)
-    return Fail(ErrorCode::invalid_request, "Unknown lifecycle action");
+    return Fail(ErrorCode::kInvalidRequest, "Unknown lifecycle action");
   // Snapshot before modifying the browser/model. A failed discard/freeze can
   // then be safely unloaded using the last stable complete controller state.
   if (recover_uncertain) {
     // The guarded runtime request has checked that the retained checkpoint is
     // automatically restorable before detaching output and page requests.
     if (action != Lifecycle::unload || !lifecycle_uncertain_ || !navigation_state_)
-      return Fail(ErrorCode::unavailable, "Lifecycle recovery checkpoint is no longer available");
+      return Fail(ErrorCode::kConflict, "Lifecycle recovery checkpoint is no longer available");
   } else if (owner_.contents() && (action == Lifecycle::unload || action == Lifecycle::freeze ||
                                    action == Lifecycle::discard)) {
     auto captured = CaptureNavigationState(*owner_.contents());
@@ -348,10 +347,10 @@ Status LifecycleCoordinator::RequestLifecycle(Lifecycle action,
 }
 Status LifecycleCoordinator::FinishLifecycle(bool success, Status status, bool uncertain) {
   if (!lifecycle_request_)
-    return Fail(ErrorCode::stale_identity, "No pending lifecycle operation");
+    return Fail(ErrorCode::kConflict, "No pending lifecycle operation");
   lifecycle_timer_.Stop();
   auto result = owner_.model_->CompleteLifecycle(owner_.session_, *lifecycle_request_, success,
-                                                 status.message);
+                                                 status.message, status.error);
   lifecycle_request_.reset();
   SynchronizeResidency();
   freeze_cancelled_ = false;
@@ -376,7 +375,7 @@ void LifecycleCoordinator::PollLifecycle() {
   const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
   if (!model || !model->pending || model->pending->generation != lifecycle_request_->generation) {
     FinishLifecycle(false,
-                    Fail(ErrorCode::stale_identity, "Lifecycle operation invalidated externally"));
+                    Fail(ErrorCode::kConflict, "Lifecycle operation invalidated externally"));
     return;
   }
   if (residency_ == ResidencyState::kDiscarding && discard_acknowledged_) {
@@ -384,7 +383,7 @@ void LifecycleCoordinator::PollLifecycle() {
         !owner_.contents()->GetController().NeedsReload() ||
         owner_.contents()->HasUncommittedNavigationInPrimaryMainFrame() ||
         owner_.contents()->GetController().GetPendingEntry()) {
-      FinishLifecycle(false, Fail(ErrorCode::unavailable,
+      FinishLifecycle(false, Fail(ErrorCode::kOutcomeUnknown,
                                   "Discard completion did not retain idle reload state"));
       return;
     }
@@ -393,7 +392,7 @@ void LifecycleCoordinator::PollLifecycle() {
   }
   if (base::TimeTicks::Now() >= lifecycle_deadline_) {
     FinishLifecycle(false,
-                    Fail(ErrorCode::unavailable,
+                    Fail(ErrorCode::kOutcomeUnknown,
                          "Lifecycle completion timed out after 10 seconds; unload required"));
     return;
   }
@@ -414,7 +413,7 @@ void LifecycleCoordinator::PollLifecycle() {
   } else if ((residency_ == ResidencyState::kRestoring && !RestoringNavigation()) &&
              UpdateLifecycleViews(false)) {
     if (lifecycle_request_->action == Lifecycle::freeze)
-      FinishLifecycle(false, Fail(ErrorCode::busy, "Freeze cancelled when page became active"),
+      FinishLifecycle(false, Fail(ErrorCode::kConflict, "Freeze cancelled when page became active"),
                       false);
     else
       FinishLifecycle(true, {});
@@ -456,10 +455,10 @@ void LifecycleCoordinator::DidFinishNavigation(content::NavigationHandle* naviga
     const bool success = committed && !navigation->IsErrorPage();
     // Callbacks run last because they may destroy this adapter.
     auto callback = std::move(completion_);
-    auto status = FinishLifecycle(
-        success,
-        success ? Status{}
-                : Fail(ErrorCode::unavailable, "Restore navigation did not commit successfully"));
+    auto status =
+        FinishLifecycle(success, success ? Status{}
+                                         : Fail(ErrorCode::kOutcomeUnknown,
+                                                "Restore navigation did not commit successfully"));
     if (success)
       owner_.model_->CommitDocument(owner_.session_, owner_.view_);
     PostCompletion(std::move(callback), status);
@@ -473,8 +472,8 @@ void LifecycleCoordinator::PrimaryMainFrameRenderProcessGone(base::TerminationSt
   const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
   auto callback = std::move(completion_);
   if (lifecycle_request_)
-    FinishLifecycle(false,
-                    Fail(ErrorCode::unavailable, "Renderer exited during lifecycle transition"));
+    FinishLifecycle(
+        false, Fail(ErrorCode::kOutcomeUnknown, "Renderer exited during lifecycle transition"));
   else if (model && model->actual == Residency::frozen)
     // A frozen renderer can no longer acknowledge thaw. Its pre-freeze
     // checkpoint remains available to the guarded recovery request.
@@ -483,6 +482,6 @@ void LifecycleCoordinator::PrimaryMainFrameRenderProcessGone(base::TerminationSt
     uncertainty_reason_ = "Renderer exited during lifecycle transition";
   owner_.model_->InvalidateInstance(owner_.session_, owner_.view_);
   PostCompletion(std::move(callback),
-                 Fail(ErrorCode::unavailable, "Renderer exited during lifecycle transition"));
+                 Fail(ErrorCode::kOutcomeUnknown, "Renderer exited during lifecycle transition"));
 }
 }  // namespace remotekit::browser

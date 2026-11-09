@@ -180,7 +180,7 @@ test('deterministic failures persist across Control restart and never retry for 
   }
 });
 
-test('transient failures retry after persistent exponential backoff capped at one day', async (t) => {
+test('transient failures retry after persistent exponential backoff with minute-scale saturation delays capped at one hour', async (t) => {
   t.mock.method(console, 'error', () => {});
   const f = fixture();
   f.setWork(async () => {
@@ -190,7 +190,7 @@ test('transient failures retry after persistent exponential backoff capped at on
     f.index.render(source);
     await settle();
     await f.reopen();
-    for (const hours of [1, 2, 4, 8, 16, 24, 24]) {
+    for (const hours of [1, 2, 4, 8, 16, 32, 60].map((minutes) => minutes / 60)) {
       const row = f.failure()!;
       assert.equal(Number(row.retry_at! - row.failed_at), hours * HOUR);
       const count = f.requests.length;

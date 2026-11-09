@@ -85,7 +85,7 @@ async function harness(window = 30) {
     (s) => logs.push(s),
     () => ({
       async sendMail(mail) {
-        if (smtpFailure) throw new Error('SMTP unavailable');
+        if (smtpFailure) throw new RemoteKitError('unavailable', 'SMTP unavailable');
         sent.push(mail);
       },
     }),
@@ -371,7 +371,7 @@ test('import lifecycle applies all chunk counts, repeats current state and clear
     await h.close();
   }
 });
-test('Browser invalid_request fails retryably; retry resets the same id; transient errors remain pending', async () => {
+test('imports stop on final codes, retain unknown begin, and poll the same admitted job', async () => {
   const h = await harness();
   try {
     await h.paired();
@@ -381,28 +381,32 @@ test('Browser invalid_request fails retryably; retry resets the same id; transie
     await h.receive([event]);
     await h.importer.tick();
     assert.equal(h.record(event.id).state, 'failed');
-    assert.equal((last(h.replies()) as any).retryable, true);
+    assert.equal((last(h.replies()) as any).retryable, false);
     h.active = false;
     await h.receive([{ ...event, seq: 3 }]);
-    assert.equal(h.record(event.id).state, 'pending');
-    for (const code of ['outcome_unknown', 'unavailable', 'busy', 'conflict'] as const) {
-      h.failure = code;
-      h.active = true;
-      await h.importer.tick();
-      assert.equal(h.record(event.id).state, 'pending');
-    }
+    h.failure = 'outcome_unknown';
+    h.active = true;
+    await h.importer.tick();
     h.failure = undefined;
-    h.statusFailure = 'conflict';
     await h.importer.tick();
     assert.equal(h.record(event.id).state, 'pending');
+    assert.equal(h.chunks, 0, 'unknown begin without a job identity must never run again');
+    h.importer.discard(h.user.tenantId, event.id);
+    h.active = false;
+    await h.receive([{ ...event, seq: 4 }]);
+    h.active = true;
+    h.statusFailure = 'outcome_unknown';
+    await h.importer.tick();
+    assert.equal(h.chunks, 1);
     h.statusFailure = undefined;
     await h.importer.tick();
     assert.equal(h.record(event.id).state, 'applied');
-    assert.equal((last(h.replies()) as any).ref, 3);
+    assert.equal(h.chunks, 1, 'lost poll response must retain the admitted job');
   } finally {
     await h.close();
   }
 });
+
 test('invalid or old imports fail per event, and id conflicts never overwrite another device', async () => {
   const h = await harness();
   try {
@@ -542,7 +546,7 @@ test('outbox doubles retry backoff to one hour, retains errors and clears pendin
       assert.equal(h.importer.outbox.status().pending, 1);
       assert.equal(h.importer.outbox.status().lastError, 'SMTP unavailable');
       const failedAt = h.clock.wallMs();
-      const delay = Math.min(60000 * 2 ** (attempt - 1), 3600000);
+      const delay = Math.min(1000 * 2 ** (attempt - 1), 300000);
       h.clock.advance(delay - 1);
       await h.importer.outbox.flush();
       assert.equal(h.importer.outbox.status().lastErrorAt, failedAt);
@@ -594,6 +598,7 @@ test('outbox splits at real uncompressed limits and separates seq-zero rejection
     type: 'importFailed',
     ref: 1,
     id: 'bf81f466-e992-48e5-a3d3-6b168556c471',
+
     reason: 'x'.repeat(9 * 1024 * 1024),
     retryable: false,
   }));
@@ -650,10 +655,11 @@ test('mailbox batches attachments, sorts before applying, re-reads gaps and skip
     assert.equal(h.client.calls.filter((c) => c === 'download:1:2.1:true').length, 2);
     assert.equal(h.client.calls.filter((c) => c === 'download:3:2.1:true').length, 1);
     assert.equal(h.client.calls.filter((c) => c === 'download:4:2.1:true').length, 1);
-    h.client.failure = new Error('IMAP closed');
+    h.client.failure = new RemoteKitError('unavailable', 'IMAP closed');
     await h.importer.mailbox.poll();
     assert.equal(h.importer.mailbox.status().lastError, 'IMAP closed');
     h.client.failure = undefined;
+    h.clock.advance(1000);
     await h.importer.mailbox.poll();
     assert.equal(h.importer.mailbox.status().lastError, null);
   } finally {
@@ -767,7 +773,7 @@ test('WS methods require the product lease, deployment is admin-only and overvie
     assert.deepEqual(await call('sessionImport.discard', { id }), { ok: true });
     h.smtpFailure = true;
     await h.importer.outbox.flush();
-    h.client.failure = new Error('IMAP failed');
+    h.client.failure = new RemoteKitError('unavailable', 'IMAP failed');
     await h.importer.mailbox.poll();
     const overview = await call('admin.overview');
     assert.equal(overview.sessionImport.lastError, 'IMAP failed');

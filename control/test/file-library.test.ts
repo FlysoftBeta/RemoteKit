@@ -241,7 +241,7 @@ test('prepared selection retries its immutable manifest and consumes only confir
   const params = { operationId: 'prepare', requestId: 'chooser', entryIds: [draft] };
   await assert.rejects(
     f.run('prepare', { ...params, entryIds: latest.basket }, 'tenant', { ...request, multiple: false }),
-    { code: 'invalid_request' },
+    { code: 'limit_exceeded' },
   );
   await assert.rejects(
     f.run('prepare', { ...params, entryIds: latest.basket }, 'tenant', {
@@ -464,7 +464,7 @@ test('photo metadata validates candidate references and prunes them when an entr
     f.add(ASSETS.photo, 'basket', {
       photo: { mode: 'photo', candidateAssetIds: [ASSETS.draft, ASSETS.extra, ASSETS.original] },
     }),
-    { code: 'invalid_request' },
+    { code: 'limit_exceeded' },
   );
   await assert.rejects(
     f.add(ASSETS.photo, 'basket', { photo: { mode: 'photo', candidateAssetIds: [ASSETS.missing] } }),

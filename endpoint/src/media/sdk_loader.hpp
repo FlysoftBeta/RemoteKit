@@ -6,37 +6,32 @@
 #include <filesystem>
 #include <stdexcept>
 namespace remotekit::media {
-inline ErrorCode SdkErrorCode(int status, bool control_request = false) {
-  if (control_request) {
-    switch (status) {
-      case REMOTEKIT_SDK_INVALID_ARGUMENT:
-      case REMOTEKIT_SDK_INVALID_STATE:
-      case REMOTEKIT_SDK_BUSY:
-        return ErrorCode::kUnavailable;
-      default:
-        return ErrorCode::kOutcomeUnknown;
-    }
-  }
+inline ErrorCode SdkErrorCode(int status) {
   switch (status) {
     case REMOTEKIT_SDK_INVALID_ARGUMENT:
-      return ErrorCode::kInvalidRequest;
+      return ErrorCode::kInternal;
     case REMOTEKIT_SDK_INVALID_STATE:
-      return ErrorCode::kConflict;
     case REMOTEKIT_SDK_MOJO_ERROR:
-      return ErrorCode::kUnavailable;
-    case REMOTEKIT_SDK_DATA_MISMATCH:
-      return ErrorCode::kRejected;
-    case REMOTEKIT_SDK_TIMEOUT:
-      return ErrorCode::kOutcomeUnknown;
-    case REMOTEKIT_SDK_BUFFER_TOO_SMALL:
-      return ErrorCode::kLimitExceeded;
     case REMOTEKIT_SDK_CHANNEL_CLOSED:
       return ErrorCode::kUnavailable;
+    case REMOTEKIT_SDK_DATA_MISMATCH:
+    case REMOTEKIT_SDK_TIMEOUT:
+    case REMOTEKIT_SDK_LOST:
+    case REMOTEKIT_SDK_BUFFER_TOO_SMALL:
+      return ErrorCode::kOutcomeUnknown;
     case REMOTEKIT_SDK_BUSY:
       return ErrorCode::kBusy;
     default:
       return ErrorCode::kInternal;
   }
+}
+inline Error SdkFailure(int status, const remotekit_sdk_failure& failure) {
+  if (status != REMOTEKIT_SDK_REFUSED)
+    return {SdkErrorCode(status), "Browser SDK status " + std::to_string(status)};
+  auto code = ParseErrorCode(failure.code);
+  return {code.value_or(ErrorCode::kOutcomeUnknown), failure.message,
+          ParseErrorReason(failure.reason),
+          failure.has_retry_after ? std::optional<uint32_t>(failure.retry_after_ms) : std::nullopt};
 }
 struct Sdk {
   HMODULE module = nullptr;
@@ -44,6 +39,7 @@ struct Sdk {
   int (*request_stats)(uint64_t) = nullptr;
   decltype(&remotekit_rtc_sample_clock) sample_clock = nullptr;
 #define RK_SDK_FUNCTION(name) decltype(&name) name = nullptr;
+  RK_SDK_FUNCTION(remotekit_sdk_abi_version)
   RK_SDK_FUNCTION(remotekit_sdk_initialize)
   RK_SDK_FUNCTION(remotekit_sdk_shutdown)
   RK_SDK_FUNCTION(remotekit_sdk_control_connect)
@@ -83,6 +79,9 @@ struct Sdk {
   name = reinterpret_cast<decltype(name)>(GetProcAddress(module, #name)); \
   if (!name)                                                              \
     return Error{ErrorCode::kUnavailable, "SDK missing " #name};
+    RK_LOAD(remotekit_sdk_abi_version)
+    if (remotekit_sdk_abi_version() != REMOTEKIT_SDK_ABI_VERSION)
+      return Error{ErrorCode::kUnavailable, "Browser SDK ABI version mismatch"};
     RK_LOAD(remotekit_sdk_initialize)
     RK_LOAD(remotekit_sdk_shutdown)
     RK_LOAD(remotekit_sdk_control_connect)
@@ -94,15 +93,17 @@ struct Sdk {
     RK_LOAD(remotekit_rtc_create)
     RK_LOAD(remotekit_rtc_close)
     RK_LOAD(remotekit_rtc_set_media_authorized)
-    RK_LOAD(remotekit_rtc_set_remote_description) RK_LOAD(remotekit_rtc_add_ice)
-        RK_LOAD(remotekit_rtc_send_data) RK_LOAD(remotekit_rtc_send_auth_data)
-            RK_LOAD(remotekit_rtc_get_receive_level) RK_LOAD(remotekit_sdk_render_connect)
-                RK_LOAD(remotekit_sdk_render_begin) RK_LOAD(remotekit_sdk_render_close)
-                    RK_LOAD(remotekit_sdk_render_observe_signal) RK_LOAD(remotekit_sdk_render_stop)
-                        RK_LOAD(remotekit_rtc_set_source_max_fps) RK_LOAD(remotekit_rtc_adapt_frame)
-                            RK_LOAD(remotekit_rtc_set_degradation_preference)
-                                RK_LOAD(remotekit_rtc_set_playout_delay) RK_LOAD(
-                                    remotekit_rtc_submit_texture) RK_LOAD(remotekit_rtc_encoded)
+    RK_LOAD(remotekit_rtc_set_remote_description)
+    RK_LOAD(remotekit_rtc_add_ice)
+    RK_LOAD(remotekit_rtc_send_data)
+    RK_LOAD(remotekit_rtc_send_auth_data) RK_LOAD(remotekit_rtc_get_receive_level)
+        RK_LOAD(remotekit_sdk_render_connect) RK_LOAD(remotekit_sdk_render_begin)
+            RK_LOAD(remotekit_sdk_render_close) RK_LOAD(remotekit_sdk_render_observe_signal)
+                RK_LOAD(remotekit_sdk_render_stop) RK_LOAD(remotekit_rtc_set_source_max_fps)
+                    RK_LOAD(remotekit_rtc_adapt_frame)
+                        RK_LOAD(remotekit_rtc_set_degradation_preference)
+                            RK_LOAD(remotekit_rtc_set_playout_delay)
+                                RK_LOAD(remotekit_rtc_submit_texture) RK_LOAD(remotekit_rtc_encoded)
                                     RK_LOAD(remotekit_rtc_submit_audio)
 #undef RK_LOAD
                                         sample_clock = reinterpret_cast<decltype(sample_clock)>(

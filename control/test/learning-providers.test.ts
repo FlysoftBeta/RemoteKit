@@ -129,13 +129,14 @@ test('Changyan pre-solved captcha, canonical token rotation and JSON sessions', 
     });
   };
   const auth = new AuthClient({ fetch });
-  await rejectsCode(auth.login({ username: 'test', password: 'test' }), 'rejected');
+  assert.ok('challenge' in (await auth.login({ username: 'test', password: 'test' })));
   assert.equal(forms.length, 1);
   const session = await auth.login({
     username: 'test',
     password: 'test',
     seccode: { captchaOutput: 'output', genTime: '123', lotNumber: 'lot', passToken: 'pass' },
   });
+  assert.ok(!('challenge' in session));
   assert.equal(session.sso.at, 'renewed-at');
   assert.equal(session.changyan.token, 'renewed-token');
   assert.deepEqual(JSON.parse(JSON.stringify(session)), session);
@@ -561,7 +562,7 @@ test('provider rejections log service, path, code and message with request ident
     http.json('https://www.zhixue.com/read?account=private-user', {
       headers: { cookie: 'session=private-cookie' },
     }),
-    'unauthenticated',
+    'forbidden',
   );
   assert.deepEqual(warnings.mock.calls[warnings.mock.calls.length - 1].arguments[1], {
     provider: 'zhixue',
@@ -592,8 +593,8 @@ test('provider rejections log service, path, code and message with request ident
 test('410 means unauthenticated only for Xinjiaoyu', () => {
   for (const [service, code] of [
     ['新教育', 'unauthenticated'],
-    ['畅言', 'rejected'],
-    ['智学', 'rejected'],
+    ['畅言', 'internal'],
+    ['智学', 'internal'],
   ]) {
     assert.throws(
       () => serviceError(410, service),

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { TextDecoder } from 'node:util';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, type ErrorCode } from '../../shared/errors';
 import type { DeviceEvent, ControlEvent, ImportMessage } from '../../shared/session-import';
 import { hpkeOpen, hpkeSeal } from './hpke';
 
@@ -9,16 +9,19 @@ export const MAX_ENVELOPE_BYTES = 16 * 1024 ** 2;
 export const MAX_PAYLOAD_BYTES = 32 * 1024 ** 2;
 const info = Buffer.from('RemoteKit session import v2');
 const invalid = (field: string): never => {
-  throw new RemoteKitError('invalid_request', `Invalid session import: ${field}`);
+  throw new RemoteKitError('invalid_request', '会话导入格式无效', {
+    detail: `Invalid session import: ${field}`,
+  });
 };
 export type ImportEvent = Extract<DeviceEvent, { type: 'import' }>;
 export interface EventResult {
   event: DeviceEvent;
   error: string | null;
+  errorCode?: ErrorCode;
 }
 class ImportLimitError extends RemoteKitError {
   constructor(reason: string) {
-    super('invalid_request', reason);
+    super('limit_exceeded', reason);
   }
 }
 class UnknownKeysError extends RemoteKitError {}
@@ -26,7 +29,9 @@ function object(value: unknown, keys: string[], field: string): Record<string, a
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(field);
   const record = value as Record<string, any>;
   if (Object.keys(record).some((key) => !keys.includes(key)))
-    throw new UnknownKeysError('invalid_request', `Invalid session import: ${field}`);
+    throw new UnknownKeysError('invalid_request', '会话导入含未知字段', {
+      detail: `Invalid session import: ${field}`,
+    });
   return record;
 }
 function string(value: unknown, field: string): asserts value is string {
@@ -139,6 +144,7 @@ export function parseDeviceMessage(json: unknown): {
     if (e.at < 0) invalid('at');
     previous = e.seq;
     let error: string | null = null;
+    let errorCode: ErrorCode | undefined;
     if (e.type === 'pair') {
       object(e, ['seq', 'at', 'type', 'username', 'password', 'code', 'device'], 'pair');
       for (const [field, max] of [
@@ -169,12 +175,14 @@ export function parseDeviceMessage(json: unknown): {
           parseImport(e);
         } catch (failure) {
           if (failure instanceof UnknownKeysError) throw failure;
-          if (failure instanceof RemoteKitError) error = failure.message;
-          else throw failure;
+          if (failure instanceof RemoteKitError) {
+            error = failure.message;
+            errorCode = failure.code;
+          } else throw failure;
         }
       }
     } else invalid('type');
-    results.push({ event: e as DeviceEvent, error });
+    results.push({ event: e as DeviceEvent, error, ...(errorCode ? { errorCode } : {}) });
   }
   return { message: m as ImportMessage<DeviceEvent>, results };
 }

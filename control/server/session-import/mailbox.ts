@@ -1,3 +1,5 @@
+import { mailError } from './mail-error';
+import { retryDelay } from '../../shared/error-policy';
 import { ImapFlow } from 'imapflow';
 import type { Readable } from 'node:stream';
 import type { SessionImportConfig } from '../config';
@@ -72,6 +74,8 @@ export class ImportMailbox {
   private running?: Promise<void>;
   private client?: MailClient;
   private stopped = false;
+  private blocked = false;
+  private retryAt = 0;
   private snapshot: Omit<MailboxStatus, 'outbox'>;
   constructor(
     private readonly config: SessionImportConfig | undefined,
@@ -96,7 +100,7 @@ export class ImportMailbox {
     if (!this.config || this.running || this.timer || this.stopped) return;
     const next = async () => {
       await this.poll();
-      if (!this.stopped) {
+      if (!this.stopped && !this.blocked) {
         this.timer = setTimeout(() => {
           this.timer = undefined;
           void next();
@@ -107,7 +111,7 @@ export class ImportMailbox {
     void next();
   }
   poll(): Promise<void> {
-    if (!this.config || this.stopped) return Promise.resolve();
+    if (!this.config || this.stopped || this.blocked || this.now() < this.retryAt) return Promise.resolve();
     if (this.running) return this.running;
     this.running = this.round().finally(() => {
       this.running = undefined;
@@ -219,7 +223,12 @@ export class ImportMailbox {
       this.snapshot.lastError = null;
     } catch (error) {
       if (!this.stopped) {
-        const message = error instanceof Error ? error.message : String(error);
+        const failure = mailError(error, false);
+        const delay = retryDelay(failure, 0);
+        this.blocked = delay === undefined;
+        this.retryAt = delay === undefined ? Infinity : this.now() + delay;
+        this.snapshot.errorCode = failure.code;
+        const message = failure.message;
         this.snapshot.lastErrorAt = this.now();
         this.snapshot.lastError = message;
         this.log(`Session import mailbox: ${message}`);

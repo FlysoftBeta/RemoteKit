@@ -74,23 +74,18 @@ void ControlContract() {
   clipboard.Set("revision", "0");
   clipboard.Remove("html");
   CHECK(!ValidClipboardWrite(clipboard));
-  auto busy = ControlResult::Failure(19, protocol::ErrorCode::busy, "Page request pending");
-  CHECK(busy.FindBool("ok") == false && busy.FindInt("code") == 6);
-  CHECK(*busy.FindString("error") == "busy" &&
-        *busy.FindString("detail") == "Page request pending");
-  base::DictValue subsystem;
-  subsystem.Set("ok", false);
-  subsystem.Set("error", "page_manager_destroyed");
-  const auto failure = ControlResult::FromFields(20, std::move(subsystem));
-  CHECK(failure.FindBool("ok") == false && failure.FindInt("code").has_value());
-  CHECK(failure.FindString("detail"));
-  auto fields = failure.Clone();
-  fields.Set("id", 20);
-  ControlResult result(std::move(fields));
-  auto normalized = std::move(result).TakeFields();
-  CHECK(normalized.FindInt("id") == 20);
-  CHECK(normalized.FindInt("code") == static_cast<int>(protocol::ErrorCode::internal));
-  CHECK(normalized.FindBool("ok") == false);
+  auto busy = ControlResult::Failure(19, protocol::ErrorCode::kBusy, "Page request pending");
+  CHECK(busy.FindInt("version") == 1 && busy.FindInt("id") == 19);
+  CHECK(busy.FindBool("ok") == false && !busy.contains("code") && !busy.contains("detail"));
+  CHECK(*busy.FindDict("error")->FindString("code") == "busy");
+  CHECK(*busy.FindDict("error")->FindString("message") == "Page request pending");
+  auto explicit_failure =
+      ControlResult::Failure(20, protocol::ErrorCode::kInternal, "queue_full", {}, {}, 123);
+  CHECK(*explicit_failure.FindDict("error")->FindString("code") == "internal");
+  CHECK(*explicit_failure.FindDict("error")->FindString("message") == "queue_full");
+  CHECK(!explicit_failure.FindDict("error")->contains("retryAfterMs"));
+  const auto normalized = ControlResult::FromFields(20, explicit_failure.Clone());
+  CHECK(normalized == explicit_failure);
 
   base::DictValue wire;
   wire.Set("instance", "1");
@@ -221,8 +216,8 @@ void Responses() {
   const auto error = base::JSONReader::ReadDict(wire, base::JSON_PARSE_RFC);
   CHECK(error && error->FindInt("id") == 73 && error->FindInt("version") == 1);
   CHECK(error->FindBool("ok") == false);
-  CHECK(error->FindString("error") && *error->FindString("error") == "resource_limit");
-  CHECK(error->FindString("detail") && !error->FindString("detail")->empty());
+  CHECK(error->FindDict("error"));
+  CHECK(*error->FindDict("error")->FindString("code") == "outcome_unknown");
   // No truncation or mutation of the original reply/operation data.
   CHECK(reply.FindBool("ok") == true && reply.FindString("data")->size() == 1024 * 1024);
   reply.Remove("data");

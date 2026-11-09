@@ -64,13 +64,17 @@ export function AdminStorageSection({ online, call }: { online: boolean; call: A
                     </TableCell>
                     <TableCell>
                       <Box className="admin-usage">
-                        <LinearProgress
-                          variant="determinate"
-                          color={user.bytes / user.quotaBytes >= 0.9 ? 'error' : 'primary'}
-                          value={Math.min(100, (user.bytes / user.quotaBytes) * 100)}
-                        />
+                        {user.quotaBytes !== null && (
+                          <LinearProgress
+                            variant="determinate"
+                            color={user.bytes / user.quotaBytes >= 0.9 ? 'error' : 'primary'}
+                            value={Math.min(100, (user.bytes / user.quotaBytes) * 100)}
+                          />
+                        )}
                         <Typography variant="caption" color="text.secondary" noWrap>
-                          {formatBytes(user.bytes)} / {formatBytes(user.quotaBytes)} · {user.objects} 个对象
+                          {formatBytes(user.bytes)}
+                          {user.quotaBytes !== null && ` / ${formatBytes(user.quotaBytes)}`} · {user.objects}{' '}
+                          个对象
                         </Typography>
                       </Box>
                     </TableCell>

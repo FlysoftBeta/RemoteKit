@@ -1,3 +1,5 @@
+import { endpointError } from '../endpoint/gateway';
+import { wireError } from '../../shared/errors';
 import { randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 
@@ -31,13 +33,16 @@ export class RtcSignaling {
       clearTimeout(binding.timer);
       binding.resolve(event.signal.sdp);
     } else if (event.signal.type === 'error' && !binding.answered)
-      binding.reject(new RemoteKitError('rejected', event.signal.message));
+      binding.reject(endpointError(event.signal.error));
     else
       this.context.events.emit('rtc.signal', event.tenantId, binding.lease, {
         type: 'rtc.signal',
         connectionId: event.connectionId,
         attemptId: binding.attemptId,
-        signal: event.signal,
+        signal:
+          event.signal.type === 'error'
+            ? { type: 'error', error: wireError(endpointError(event.signal.error)) }
+            : event.signal,
       });
   }
   clearSignal(connectionId: string) {
@@ -82,13 +87,9 @@ export class RtcSignaling {
   }
   async offer(tenant: string, body: any, lease: string) {
     const runtime = this.context.tenants.get(tenant);
-    if (
-      body.type !== 'offer' ||
-      typeof body.sdp !== 'string' ||
-      body.sdp.length > 900000 ||
-      !body.sdp.startsWith('v=0')
-    )
+    if (body.type !== 'offer' || typeof body.sdp !== 'string' || !body.sdp.startsWith('v=0'))
       throw new RemoteKitError('invalid_request', '无效的 SDP offer');
+    if (body.sdp.length > 900000) throw new RemoteKitError('limit_exceeded', 'SDP 超出大小限制');
     const receivedAt = this.context.clock.monotonicMs();
     return this.context.tenants.serial(tenant, async () => {
       const timings: Record<string, number> = { queueMs: this.context.clock.monotonicMs() - receivedAt };
@@ -97,11 +98,12 @@ export class RtcSignaling {
       await this.services.reconciler.reconcileProduct(tenant);
       timings.reconcileEndMs = this.context.clock.monotonicMs() - receivedAt;
       const security = runtime.viewer!.security;
-      const previous = runtime.connectionId;
+      const previous = runtime.connectionId ?? runtime.rtc.disconnectedPeer?.connectionId;
       if (previous) {
         this.clearSignal(previous);
         try {
           await this.context.endpoint.closeRtc(tenant, { connectionId: previous });
+          runtime.rtc.disconnectedPeer = undefined;
         } finally {
           runtime.closeRtc();
         }
@@ -143,13 +145,13 @@ export class RtcSignaling {
           accepted.connectionId !== connectionId ||
           typeof accepted.avSync !== 'boolean'
         )
-          throw new RemoteKitError('rejected', 'Endpoint未接受媒体协商');
+          throw new RemoteKitError('outcome_unknown', '媒体协商结果未知');
         const answer = { sdp: await pending };
         timings.answerReadyMs = this.context.clock.monotonicMs() - receivedAt;
         this.services.viewers.assertViewer(tenant, lease);
 
         if (typeof answer?.sdp !== 'string' || !answer.sdp.startsWith('v=0'))
-          throw new RemoteKitError('rejected', 'Endpoint 未返回有效 answer');
+          throw new RemoteKitError('outcome_unknown', '媒体协商回复无效');
         runtime.beginRtc(connectionId, body.attemptId, lease);
         await this.services.security.bind(tenant, security, connectionId);
         this.services.viewers.assertViewer(tenant, lease);
@@ -169,7 +171,9 @@ export class RtcSignaling {
         this.services.security.forgetPeer(tenant, security);
         this.clearSignal(connectionId);
         if (runtime.connectionId === connectionId) runtime.closeRtc();
-        await this.context.endpoint.closeRtc(tenant, { connectionId }).catch(() => {});
+        await this.context.endpoint.closeRtc(tenant, { connectionId }).catch(() => {
+          runtime.rtc.disconnectedPeer = { connectionId, leaseId: lease };
+        });
         throw error;
       }
     });

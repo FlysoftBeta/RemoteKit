@@ -277,6 +277,24 @@ void OutboundRequests() {
   Check(!committed && committed.error().code == ErrorCode::kConflict,
         "Control error routed to caller");
   Check(Take(second.get()).contains("sources"), "out of order replies without dispatcher pumping");
+  for (const auto* code : {"locked", "canceled", "rate_limited", "internal", "future_code"}) {
+    auto request =
+        std::async(std::launch::async, [&] { return link.Request("test", Json::object()); });
+    auto sent = Take(server->Receive(5s)).json;
+    Take(server->Send({{"id", sent["id"]},
+                       {"ok", false},
+                       {"error",
+                        {{"code", code},
+                         {"message", "Control diagnosis"},
+                         {"reason", "file_too_large"},
+                         {"retryAfterMs", 200}}}}));
+    auto result = request.get();
+    Check(
+        !result && result.error().code == ParseErrorCode(code).value_or(ErrorCode::kOutcomeUnknown),
+        "reverse error code preserved");
+    Check(result.error().retry_after_ms.has_value() == (std::string_view(code) == "rate_limited"),
+          "reverse retry hint validated");
+  }
   std::string bytes;
   uint64_t generation = 0;
   bool eof = false;

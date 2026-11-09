@@ -27,6 +27,14 @@ export interface DeviceRow {
 export interface StoredImport extends ImportRecord {
   tenant: string;
   keyId: string;
+  storageJob?: import('../../shared/session-import').StorageImportJob;
+  chunkIndex: number;
+  applyCounts?: {
+    cookies: import('../../shared/session-import').ApplyCounts;
+    localStorage: import('../../shared/session-import').ApplyCounts;
+  };
+  errorCode?: import('../../shared/errors').ErrorCode;
+  retryAt?: number;
 }
 export interface OutgoingEvent {
   rowId: number;
@@ -46,11 +54,25 @@ function record(row: any): StoredImport {
     origins: Number(row.origins),
     rejectedItems: Number(row.rejected_items),
     error: row.error,
+    storageJob: row.storage_job ? JSON.parse(row.storage_job) : undefined,
+    chunkIndex: Number(row.chunk_index ?? 0),
+    applyCounts: row.apply_counts ? JSON.parse(row.apply_counts) : undefined,
+    errorCode: row.error_code ?? undefined,
+    retryAt: row.retry_at === null ? undefined : Number(row.retry_at),
     receivedAt: Number(row.received_at),
     finishedAt: row.finished_at === null ? null : Number(row.finished_at),
   };
 }
-function visibleRecord({ tenant, keyId, ...value }: StoredImport): ImportRecord {
+function visibleRecord({
+  tenant,
+  keyId,
+  storageJob,
+  chunkIndex,
+  applyCounts,
+  errorCode,
+  retryAt,
+  ...value
+}: StoredImport): ImportRecord {
   return value;
 }
 export class SessionImportsRepository {
@@ -281,7 +303,14 @@ export class SessionImportsRepository {
     const row = this.db.prepare('SELECT * FROM session_imports WHERE id=?').get(id) as any;
     return row ? record(row) : undefined;
   }
-  saveImport(tenant: string, keyId: string, event: ImportEvent, now: number, error: string | null) {
+  saveImport(
+    tenant: string,
+    keyId: string,
+    event: ImportEvent,
+    now: number,
+    error: string | null,
+    errorCode?: import('../../shared/errors').ErrorCode,
+  ) {
     const id = event.id.toLowerCase();
     const payload = error
       ? null
@@ -298,7 +327,7 @@ export class SessionImportsRepository {
       : [];
     this.db
       .prepare(
-        `INSERT INTO session_imports VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sites=excluded.sites,state=excluded.state,payload=excluded.payload,cookies=excluded.cookies,origins=excluded.origins,rejected_items=0,error=excluded.error,received_at=excluded.received_at,finished_at=excluded.finished_at`,
+        `INSERT INTO session_imports(id,tenant,key_id,sites,state,payload,cookies,origins,rejected_items,error,error_code,received_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sites=excluded.sites,state=excluded.state,payload=excluded.payload,cookies=excluded.cookies,origins=excluded.origins,rejected_items=0,error=excluded.error,error_code=excluded.error_code,retry_at=NULL,storage_job=NULL,chunk_index=0,apply_counts=NULL,received_at=excluded.received_at,finished_at=excluded.finished_at`,
       )
       .run(
         id,
@@ -311,6 +340,7 @@ export class SessionImportsRepository {
         Array.isArray(event.localStorage) ? event.localStorage.length : 0,
         0,
         error,
+        error ? (errorCode ?? 'invalid_request') : null,
         now,
         error ? now : null,
       );

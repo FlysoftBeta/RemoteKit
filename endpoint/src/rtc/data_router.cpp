@@ -1,4 +1,5 @@
 #include "rtc/data_router.hpp"
+#include <filesystem>
 #include "input/wire_validation.hpp"
 #include "util/wire_error.hpp"
 #include "rtc/dc_services.hpp"
@@ -95,7 +96,9 @@ Result<void> DataRouter::Boundary(const std::function<Result<void>()>& fn) {
     return fn();
   } catch (const Json::exception& error) {
     fprintf(stderr, "data router invalid request: %s\n", error.what());
-    return Error{ErrorCode::kInvalidRequest, "invalid DataChannel JSON"};
+    return Error{ErrorCode::kInternal, "Unexpected DataChannel JSON failure"};
+  } catch (const std::filesystem::filesystem_error& error) {
+    return Error{ErrorCode::kUnavailable, error.what()};
   } catch (const std::exception& error) {
     fprintf(stderr, "data router internal: %s\n", error.what());
     return Error{ErrorCode::kInternal, "internal DataChannel error"};

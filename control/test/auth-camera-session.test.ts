@@ -179,7 +179,7 @@ test('manual presence reports departure only with a live unmuted source and rece
       challengeId: 'challenge',
       purpose: 'presence' as const,
       status: 'absent' as const,
-      reason: 'no-matching-face',
+      outcome: 'no_matching_face' as const,
     },
   };
   f.track.muted = true;
@@ -247,4 +247,28 @@ test('browser camera requests 480 by 360 at five fps without audio', async (t) =
     },
     audio: false,
   });
+});
+
+test('a final face failure stops automatic verification for the same challenge', async (t) => {
+  const f = fixture(t);
+  const options = { ...f.options, allowAutomaticVerification: true };
+  f.session.configure(options);
+  await flush();
+  const pending: AuthState = {
+    ...auth(),
+    face: { ...auth().face, challengeId: 'challenge', purpose: 'verify', status: 'pending' },
+  };
+  f.session.configure({ ...options, auth: pending });
+  await flush();
+  const attempts = f.calls.filter((call) => call.method === 'auth.face.begin').length;
+  f.session.configure({
+    ...options,
+    auth: {
+      ...pending,
+      face: { ...pending.face, status: 'failed', error: { code: 'forbidden', message: '无权验证' } },
+    },
+  });
+  t.mock.timers.tick(60_000);
+  await flush();
+  assert.equal(f.calls.filter((call) => call.method === 'auth.face.begin').length, attempts);
 });

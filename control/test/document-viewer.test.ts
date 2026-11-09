@@ -75,8 +75,8 @@ test('memory source provides decoded blobs and reports missing resources or canc
   await assert.rejects(source.resource('missing', signal()), { code: 'not_found' });
   const aborted = new AbortController();
   aborted.abort();
-  await assert.rejects(source.open(aborted.signal), { name: 'AbortError' });
-  await assert.rejects(source.resource('image', aborted.signal), { name: 'AbortError' });
+  await assert.rejects(source.open(aborted.signal), { code: 'canceled' });
+  await assert.rejects(source.resource('image', aborted.signal), { code: 'canceled' });
 });
 
 function cacheFixture(maxEntries = 2, maxBytes = 100) {
@@ -158,7 +158,7 @@ test('concurrent shared reads retain one URL and late reads cannot recreate URLs
   const pending = delayed.acquire('image', signal());
   delayed.dispose();
   resolve(image());
-  await assert.rejects(pending, { name: 'AbortError' });
+  await assert.rejects(pending, { code: 'canceled' });
 });
 
 test('aborted reads are not admitted to the cache', async () => {
@@ -174,7 +174,7 @@ test('aborted reads are not admitted to the cache', async () => {
   const pending = cache.acquire('image', controller.signal);
   controller.abort();
   resolve(image());
-  await assert.rejects(pending, { name: 'AbortError' });
+  await assert.rejects(pending, { code: 'canceled' });
   assert.equal(created, false);
   cache.dispose();
 });
@@ -262,7 +262,7 @@ test('URL rewriting admits only image bundle slots and same-page fragments, incl
     0,
   );
   assert.throws(() => rewriteAttributes('image', new Map([['data-bundle-ref', 'missing']]), refs), {
-    code: 'rejected',
+    code: 'internal',
   });
 });
 

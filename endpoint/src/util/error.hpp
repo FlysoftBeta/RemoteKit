@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../../../protocol/errors.h"
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -7,74 +9,32 @@
 #include <variant>
 
 namespace remotekit {
-enum class ErrorCode {
-  kInvalidRequest,
-  kUnauthenticated,
-  kForbidden,
-  kLocked,
-  kNotFound,
-  kConflict,
-  kLimitExceeded,
-  kRateLimited,
-  kUnavailable,
-  kRejected,
-  kOutcomeUnknown,
-  kBusy,
-  kInternal
-};
+using protocol::ErrorCode;
+using protocol::ErrorCodeName;
+using protocol::ErrorReason;
+using protocol::ErrorReasonName;
+using protocol::ParseErrorCode;
+using protocol::ParseErrorReason;
 
-inline std::string_view ErrorCodeName(ErrorCode code) {
-  switch (code) {
-    case ErrorCode::kInvalidRequest:
-      return "invalid_request";
-    case ErrorCode::kUnauthenticated:
-      return "unauthenticated";
-    case ErrorCode::kForbidden:
-      return "forbidden";
-    case ErrorCode::kLocked:
-      return "locked";
-    case ErrorCode::kNotFound:
-      return "not_found";
-    case ErrorCode::kConflict:
-      return "conflict";
-    case ErrorCode::kLimitExceeded:
-      return "limit_exceeded";
-    case ErrorCode::kRateLimited:
-      return "rate_limited";
-    case ErrorCode::kUnavailable:
-      return "unavailable";
-    case ErrorCode::kRejected:
-      return "rejected";
-    case ErrorCode::kOutcomeUnknown:
-      return "outcome_unknown";
-    case ErrorCode::kBusy:
-      return "busy";
-    case ErrorCode::kInternal:
-      return "internal";
-  }
-  return "internal";
+inline bool SupportsRetryHint(ErrorCode code) {
+  return code == ErrorCode::kBusy || code == ErrorCode::kRateLimited ||
+         code == ErrorCode::kUnavailable;
 }
-
-enum class ErrorReason { kNone, kBrowserCrashed, kBrowserRestarting, kOutputFailed };
-
-inline std::string_view ErrorReasonName(ErrorReason reason) {
-  switch (reason) {
-    case ErrorReason::kBrowserCrashed:
-      return "browser_crashed";
-    case ErrorReason::kBrowserRestarting:
-      return "browser_restarting";
-    case ErrorReason::kOutputFailed:
-      return "output_failed";
-    case ErrorReason::kNone:
-      return "";
-  }
-  return "";
-}
-
 struct Error {
   ErrorCode code;
   std::string message;
-  ErrorReason reason = ErrorReason::kNone;
+  std::optional<ErrorReason> reason;
+  std::optional<uint32_t> retry_after_ms;
+  Error(ErrorCode code,
+        std::string message,
+        std::optional<ErrorReason> reason = {},
+        std::optional<uint32_t> retry_after_ms = {})
+      : code(code),
+        message(std::move(message)),
+        reason(reason),
+        retry_after_ms(SupportsRetryHint(code) && retry_after_ms && *retry_after_ms <= 86400000
+                           ? retry_after_ms
+                           : std::nullopt) {}
 };
 
 template <class T>

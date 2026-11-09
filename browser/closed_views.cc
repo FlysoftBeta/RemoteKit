@@ -6,7 +6,7 @@ Status ClosedViews::Acknowledge(SessionId session, const std::vector<WebViewId>&
   for (const auto view : ids) {
     const auto found = tombstones.find(view);
     if (found != tombstones.end() && *found->second.FindString("session") != owner)
-      return {ErrorCode::stale_identity, "Closed view belongs to another session"};
+      return {ErrorCode::kConflict, "Closed view belongs to another session"};
   }
   for (const auto view : ids)
     tombstones.erase(view);

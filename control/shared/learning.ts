@@ -1,3 +1,4 @@
+import type { ErrorCode } from './errors';
 // Learning Apps (学习, 题库): account state, browsing models and socket methods shared by the
 // Viewer and Control. Provider HTML is already media-proxied and formula-rendered by Control;
 // the Viewer still sanitizes it before insertion.
@@ -45,7 +46,7 @@ export interface LearningPage<T> {
 export type AttachmentSave =
   | { state: 'saved'; entryId: string }
   | { state: 'downloading'; received: number; total?: number }
-  | { state: 'failed'; message: string }
+  | { state: 'failed'; message: string; code: ErrorCode }
   | { state: 'not_saved' };
 
 export interface StudyAttachment {

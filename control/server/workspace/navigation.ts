@@ -1,3 +1,5 @@
+import { endpointError } from '../endpoint/gateway';
+import { wireError } from '../../shared/errors';
 import { isLocalTab, type ProductTab, type ProductWorkspace } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 import type { CommandEffect } from './commands';
@@ -90,11 +92,11 @@ export class Navigation {
         if (isLocalTab(tab)) tab.loading = false;
         delete tab.pendingUrl;
         const saved = this.context.store.operations.operation(tenant, nav.operationId);
-        if (saved && !['committed', 'rejected'].includes(saved.receipt.status)) {
+        if (saved && !['committed', 'failed'].includes(saved.receipt.status)) {
           settle(saved.receipt, { status: 'unknown' });
           saved.receipt.resolved = true;
           saved.receipt.resolution = 'target-retired';
-          saved.receipt.error = '原页面实例已结束，导航执行结果未知';
+          saved.receipt.error = { code: 'outcome_unknown', message: '原页面实例已结束，导航执行结果未知' };
           delete saved.receipt.application;
           this.context.store.operations.saveOperation(state, saved.receipt);
         }
@@ -131,11 +133,20 @@ export class Navigation {
         delete t.pendingUrl;
         if (!committed) delete t.usageSource;
         if (operation) {
-          settle(operation.receipt, { status: committed ? 'committed' : 'rejected' });
-          delete operation.receipt.application;
-          if (!committed)
-            operation.receipt.error =
-              terminal.state === 'cancelled' ? '导航已取消' : '导航未完成：' + terminal.state;
+          settle(
+            operation.receipt,
+            committed
+              ? { status: 'committed' }
+              : {
+                  status: 'failed',
+                  error: terminal.error
+                    ? wireError(endpointError(terminal.error))
+                    : {
+                        code: terminal.state === 'cancelled' ? 'canceled' : 'conflict',
+                        message: '导航未完成',
+                      },
+                },
+          );
           this.context.store.operations.saveOperation(state, operation.receipt);
         }
       }
@@ -153,11 +164,21 @@ export class Navigation {
           continue;
         const action = JSON.parse(saved.payload);
         if (!['tab.navigate', 'tab.command'].includes(action.type) || action.tabId !== t.id) continue;
-        if (!['committed', 'rejected'].includes(saved.receipt.status)) {
-          settle(saved.receipt, { status: terminal.state === 'committed' ? 'committed' : 'rejected' });
-          delete saved.receipt.application;
-          if (saved.receipt.status === 'rejected')
-            saved.receipt.error = terminal.error ?? '导航未完成：' + terminal.state;
+        if (!['committed', 'failed'].includes(saved.receipt.status)) {
+          settle(
+            saved.receipt,
+            terminal.state === 'committed'
+              ? { status: 'committed' }
+              : {
+                  status: 'failed',
+                  error: terminal.error
+                    ? wireError(endpointError(terminal.error))
+                    : {
+                        code: terminal.state === 'cancelled' ? 'canceled' : 'conflict',
+                        message: '导航未完成',
+                      },
+                },
+          );
           this.context.store.operations.saveOperation(state, saved.receipt);
         }
         await this.context.endpoint

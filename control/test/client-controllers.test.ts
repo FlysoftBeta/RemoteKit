@@ -51,7 +51,83 @@ test('request correlation cleans up synchronous send failure, deadlines and scop
   assert.equal(tracker.size, 0);
 });
 
-for (const status of ['accepted', 'applying', 'committed', 'unknown', 'rejected', 'expired'] as const)
+test('retryable receipts resubmit the same operation identity and status final failures stop polling', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const sent: Extract<Outgoing, { type: 'product.action' }>[] = [];
+  let store: OperationsStore;
+  store = new OperationsStore({
+    ready: () => true,
+    send: (message) => {
+      if (message.type !== 'product.action') return;
+      sent.push(message);
+      queueMicrotask(() =>
+        store.handle({
+          type: 'product.result',
+          version: 1,
+          operationId: message.operationId,
+          operationGeneration: message.operationGeneration,
+          result: {
+            operationId: message.operationId,
+            operationGeneration: message.operationGeneration,
+            ...(sent.length < 3
+              ? { status: 'failed', error: { code: 'busy', message: '繁忙', retryAfterMs: 0 } }
+              : { status: 'committed' }),
+          },
+        }),
+      );
+    },
+    status: async () => {
+      throw new Error('retryable admission must resubmit, not poll');
+    },
+  });
+  t.after(() => store.reset());
+  store.acceptSnapshot(productSnapshot());
+  const result = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+  for (let index = 0; index < 12; index++) {
+    await Promise.resolve();
+    t.mock.timers.tick(0);
+  }
+  assert.equal((await result).status, 'committed');
+  assert.equal(sent.length, 3);
+  assert.deepEqual(sent[0], sent[1]);
+  assert.deepEqual(sent[1], sent[2]);
+  store.reset();
+  let polls = 0;
+  const stopped = new OperationsStore({
+    ready: () => true,
+    send: (message) => {
+      if (message.type === 'product.action')
+        queueMicrotask(() =>
+          stopped.handle({
+            type: 'product.result',
+            version: 1,
+            operationId: message.operationId,
+            operationGeneration: message.operationGeneration,
+            result: {
+              operationId: message.operationId,
+              operationGeneration: message.operationGeneration,
+              status: 'unknown',
+            },
+          }),
+        );
+    },
+    status: async () => {
+      polls++;
+      throw new RemoteKitError('forbidden', '无权查询');
+    },
+  });
+  t.after(() => stopped.reset());
+  stopped.acceptSnapshot(productSnapshot());
+  await assert.rejects(
+    stopped.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
+    { code: 'forbidden' },
+  );
+  t.mock.timers.tick(60_000);
+  assert.equal(polls, 1);
+  assert.equal(stopped.getSnapshot().pending.length, 0);
+});
+
+for (const status of ['accepted', 'applying', 'committed', 'unknown', 'failed'] as const)
   test(`operations preserve ${status} as an execution outcome without replay`, async (t) => {
     const sent: Extract<Outgoing, { type: 'product.action' }>[] = [];
     const store = new OperationsStore({
@@ -59,22 +135,20 @@ for (const status of ['accepted', 'applying', 'committed', 'unknown', 'rejected'
       send: (message) => {
         if (message.type === 'product.action') sent.push(message);
       },
-      status: async () => {
-        throw new Error('offline');
-      },
+      status: async (operation) => ({ ...operation, status: 'unknown' }),
     });
     t.after(() => store.reset());
     store.acceptSnapshot(productSnapshot());
     const result = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
-    const rejection = ['rejected', 'expired'].includes(status)
-      ? assert.rejects(result, { code: 'rejected' })
-      : undefined;
+    const rejection = status === 'failed' ? assert.rejects(result, { code: 'rejected' }) : undefined;
     const operation = sent[0];
     assert.equal('phase' in operation, false);
     const receipt = {
       operationId: operation.operationId,
       operationGeneration: operation.operationGeneration,
-      status,
+      ...(status === 'failed'
+        ? { status, error: { code: 'rejected' as const, message: '操作被拒绝' } }
+        : { status }),
       revision: 2,
     };
     store.handle({
@@ -191,8 +265,8 @@ test('HTTP auth credentials are sent once and never enter pending snapshots thro
       status: 'unknown',
     },
   });
-  assert.equal((await response).status, 'unknown');
-  assert.equal(store.getSnapshot().pending[0].phase, 'unknown');
+  assert.equal((await response).status, 'committed');
+  assert.equal(store.getSnapshot().pending[0].phase, 'committed');
   t.mock.timers.tick(2000);
   for (let i = 0; i < 5; i++) await Promise.resolve();
   assert.equal(store.getSnapshot().pending[0].phase, 'committed');
@@ -236,7 +310,12 @@ test('HTTP auth outcome_unknown queries use only operation identity and never re
     version: 1,
     operationId: sent[0].operationId,
     operationGeneration: sent[0].operationGeneration,
-    error: { code: 'outcome_unknown', message: '回复丢失' },
+    result: {
+      operationId: sent[0].operationId,
+      operationGeneration: sent[0].operationGeneration,
+      status: 'unknown',
+      error: { code: 'outcome_unknown', message: '回复丢失' },
+    },
   });
   assert.equal((await response).status, 'committed');
   assert.deepEqual(queries, [
@@ -411,13 +490,97 @@ test('product transport rejection retains its code without querying an unadmitte
     version: 1,
     operationId: operation.operationId,
     operationGeneration: operation.operationGeneration,
-    error: { code: 'busy', message: 'endpoint_backpressure' },
+    result: {
+      operationId: operation.operationId,
+      operationGeneration: operation.operationGeneration,
+      status: 'failed',
+      error: { code: 'forbidden', message: '无权执行' },
+    },
   });
   await assert.rejects(
     response,
     (error: unknown) =>
-      error instanceof RemoteKitError && error.code === 'busy' && error.message === 'endpoint_backpressure',
+      error instanceof RemoteKitError && error.code === 'forbidden' && error.message === '无权执行',
   );
   assert.equal(store.getSnapshot().pending.length, 0);
-  assert.equal(store.getSnapshot().error?.code, 'busy');
+  assert.equal(store.getSnapshot().error?.code, 'forbidden');
+});
+
+test('a later retryable receipt resubmits the admitted operation with its original identity', async (t) => {
+  const sent: Extract<Outgoing, { type: 'product.action' }>[] = [];
+  let store: OperationsStore;
+  store = new OperationsStore({
+    ready: () => true,
+    send: (message) => {
+      if (message.type !== 'product.action') return;
+      sent.push(message);
+      queueMicrotask(() =>
+        store.handle({
+          type: 'product.result',
+          version: 1,
+          operationId: message.operationId,
+          operationGeneration: message.operationGeneration,
+          result: {
+            operationId: message.operationId,
+            operationGeneration: message.operationGeneration,
+            status: sent.length === 1 ? 'accepted' : 'committed',
+          },
+        }),
+      );
+    },
+    status: async (operation) => ({ ...operation, status: 'unknown' }),
+  });
+  t.after(() => store.reset());
+  store.acceptSnapshot(productSnapshot());
+  assert.equal(
+    (await store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } })).status,
+    'accepted',
+  );
+  store.handle({
+    type: 'product.result',
+    version: 1,
+    operationId: sent[0].operationId,
+    operationGeneration: sent[0].operationGeneration,
+    result: {
+      operationId: sent[0].operationId,
+      operationGeneration: sent[0].operationGeneration,
+      status: 'failed',
+      error: { code: 'busy', message: '繁忙', retryAfterMs: 0 },
+    },
+  });
+  for (let index = 0; index < 10; index++) await Promise.resolve();
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[0], sent[1]);
+  assert.equal(store.getSnapshot().pending[0]?.phase, 'committed');
+});
+
+test('viewport state observations cannot bypass a retry hint', async (t) => {
+  const { ViewportRequests } = await import('../client/control/viewport-requests');
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { fullscreenElement: null } });
+  t.after(() =>
+    descriptor
+      ? Object.defineProperty(globalThis, 'document', descriptor)
+      : Reflect.deleteProperty(globalThis, 'document'),
+  );
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 });
+  let calls = 0;
+  const requests = new ViewportRequests(async () => {
+    calls++;
+    if (calls === 1) throw new RemoteKitError('busy', '繁忙', { retryAfterMs: 2000 });
+  });
+  t.after(() => requests.reset());
+  requests.observe(productSnapshot(), true);
+  requests.measure(800, 600, 1, true);
+  t.mock.timers.tick(100);
+  for (let index = 0; index < 5; index++) await Promise.resolve();
+  assert.equal(calls, 1);
+  requests.observe({ ...productSnapshot(), snapshotSequence: 2 }, true);
+  t.mock.timers.tick(1000);
+  for (let index = 0; index < 5; index++) await Promise.resolve();
+  assert.equal(calls, 1);
+  t.mock.timers.tick(1200);
+  t.mock.timers.tick(100);
+  for (let index = 0; index < 5; index++) await Promise.resolve();
+  assert.equal(calls, 2);
 });

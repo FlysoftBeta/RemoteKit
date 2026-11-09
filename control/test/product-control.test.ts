@@ -637,7 +637,8 @@ test('unconfirmed unload survives Control restart and is retired on Browser inca
     await control.reconciler.tick();
     assert.equal(f.lifecycleCalls().length, 1);
     assert.equal(f.tabState().lifecycleRecovery?.generation, '41');
-    assert.match(f.tabState().lifecycleRecoveryError!, /response lost/);
+    assert.equal(f.tabState().lifecycleRecoveryError, undefined);
+    assert.equal(f.tabState().lifecycleRecovery?.phase, 'unload');
     f.endpoint.browserPid++;
     f.endpoint.views.get(f.tenant)!.clear();
     await control.reconciler.tick();
@@ -758,6 +759,7 @@ test('UA table precedes Browser/view creation; failed application persists desir
     assert.deepEqual(endpoint.calls, []);
     endpoint.failSites = false;
     endpoint.calls = [];
+    control.tenants.get(user.tenantId).reconciliation.retryAt = 0;
     await control.reconciler.tick();
     const applied = endpoint.calls.findIndex((c) => c.method === 'session.sitePreferences'),
       reloaded = endpoint.calls.findIndex((c) => c.method === 'view.command');
@@ -1639,7 +1641,7 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     const replacement = connect(socketUrl, cookieA);
     peers.push(replacement);
     const revoked = await a.wait((m) => m.type === 'lease');
-    assert.equal(revoked.reason, 'another-viewer');
+    assert.equal(revoked.outcome, 'replaced');
     assert.equal((await replacement.wait((m) => m.type === 'auth')).auth.locked, true);
     await replacement.request('unlock', 'auth.verify', { method: 'password', secret: 'password123' });
     await replacement.wait((m) => m.type === 'state');
@@ -1736,7 +1738,7 @@ test('cookie logout/login replacement cannot revoke another token Viewer of the 
       peers.push(sameToken);
       await sameToken.wait((m) => m.type === 'auth');
       await current.wait((m) => m.type === 'lease');
-      const revoked = sameToken.wait((m) => m.type === 'lease' && m.reason === 'logout');
+      const revoked = sameToken.wait((m) => m.type === 'lease' && m.outcome === 'logged_out');
       assert.equal(
         (
           await post(
@@ -1856,7 +1858,7 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
         'lease',
       )
     ).state;
-    assert.match(limited.quality.resourceLimitation!, /minimum DPR/);
+    assert.match(limited.quality.resourceLimitation!, /画面尺寸上限/);
     assert.equal(limited.quality.effectiveDpr, 0.5);
     assert.equal(limited.quality.reason, 'resource-limited');
     assert.ok(limited.endpointError);

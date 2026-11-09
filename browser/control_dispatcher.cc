@@ -15,7 +15,7 @@ base::DictValue Invoke(ControlDispatcher& dispatcher,
                        RequestEnvelope envelope) {
   auto decoded = Decode(wire, envelope);
   if (!decoded)
-    return ControlResult::Failure(envelope.id, decoded.status.error, decoded.status.message);
+    return ControlResult::Failure(envelope.id, *decoded.status.error, decoded.status.message);
   return (dispatcher.*Handle)(decoded.value).TakeFields();
 }
 }  // namespace
@@ -24,19 +24,19 @@ void ControlDispatcher::Dispatch(const base::DictValue& request, Reply reply) {
   const auto* name = request.FindString("method");
   if (runtime_.shutting_down && (!name || *name != protocol::kBrowserShutdown)) {
     std::move(reply).Run(
-        ControlResult::Failure(id, ErrorCode::unavailable, "Browser shutdown started"));
+        ControlResult::Failure(id, ErrorCode::kUnavailable, "Browser shutdown started"));
     return;
   }
   if (id <= 0 || request.FindInt("version") != protocol::kControlVersion || !name) {
     std::move(reply).Run(
-        ControlResult::Failure(id, ErrorCode::invalid_request, "Invalid control envelope"));
+        ControlResult::Failure(id, ErrorCode::kInvalidRequest, "Invalid control envelope"));
     return;
   }
   if (*name == protocol::kSignInEvents) {
     const auto* ids = request.FindList("eventIds");
     if (!ids || ids->size() > 256) {
       std::move(reply).Run(
-          ControlResult::Failure(id, ErrorCode::invalid_request, "Event IDs required"));
+          ControlResult::Failure(id, ErrorCode::kInvalidRequest, "Event IDs required"));
       return;
     }
     base::ListValue events;
@@ -64,7 +64,7 @@ void ControlDispatcher::Dispatch(const base::DictValue& request, Reply reply) {
     auto decoded = DecodeAppInfo(request, {id, protocol::kViewAppInfo});
     if (!decoded) {
       std::move(reply).Run(
-          ControlResult::Failure(id, decoded.status.error, decoded.status.message));
+          ControlResult::Failure(id, *decoded.status.error, decoded.status.message));
       return;
     }
     HandleAppInfo(decoded.value, std::move(reply));
@@ -76,13 +76,13 @@ void ControlDispatcher::Dispatch(const base::DictValue& request, Reply reply) {
     auto decoded = DecodeProfileCommand(request, {id, *name});
     if (!decoded) {
       std::move(reply).Run(
-          ControlResult::Failure(id, decoded.status.error, decoded.status.message));
+          ControlResult::Failure(id, *decoded.status.error, decoded.status.message));
       return;
     }
     const auto* guid = profile_command->FindString("guid");
     if (decoded.value.session != runtime_.session_id || !guid || guid->empty() ||
         guid->size() > 128) {
-      std::move(reply).Run(ControlResult::Failure(id, ErrorCode::invalid_request,
+      std::move(reply).Run(ControlResult::Failure(id, ErrorCode::kInvalidRequest,
                                                   "Session and download GUID required"));
       return;
     }
@@ -106,6 +106,8 @@ void ControlDispatcher::Dispatch(const base::DictValue& request, Reply reply) {
       {protocol::kStorageImportStatus,
        &Invoke<StorageImportStatusRequest, DecodeStorageImportStatus,
                &ControlDispatcher::HandleStorageImportStatus>},
+      {"storage.import.cancel", &Invoke<StorageImportStatusRequest, DecodeStorageImportStatus,
+                                        &ControlDispatcher::HandleStorageImportStatus>},
       {protocol::kBrowserShutdown,
        &Invoke<ShutdownRequest, DecodeShutdown, &ControlDispatcher::HandleShutdown>},
       {protocol::kStorageScavenge, &Invoke<StorageScavengeRequest, DecodeStorageScavenge,
@@ -159,6 +161,8 @@ void ControlDispatcher::Dispatch(const base::DictValue& request, Reply reply) {
                                           &ControlDispatcher::HandleNavigationTransfer>},
       {"navigation.import.begin", &Invoke<NavigationTransferRequest, DecodeNavigationTransfer,
                                           &ControlDispatcher::HandleNavigationTransfer>},
+      {"navigation.transfer.status", &Invoke<NavigationTransferRequest, DecodeNavigationTransfer,
+                                             &ControlDispatcher::HandleNavigationTransfer>},
       {"navigation.transfer.cancel", &Invoke<NavigationTransferRequest, DecodeNavigationTransfer,
                                              &ControlDispatcher::HandleNavigationTransfer>},
       {"navigation.export.chunk", &Invoke<NavigationTransferRequest, DecodeNavigationTransfer,
@@ -181,6 +185,6 @@ void ControlDispatcher::Dispatch(const base::DictValue& request, Reply reply) {
     }
   }
   std::move(reply).Run(
-      ControlResult::Failure(id, ErrorCode::unsupported, "Unknown control method"));
+      ControlResult::Failure(id, ErrorCode::kInvalidRequest, "Unknown control method"));
 }
 }  // namespace remotekit::browser

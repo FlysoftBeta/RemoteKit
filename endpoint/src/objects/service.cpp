@@ -31,7 +31,7 @@ Result<Json> ObjectService::Derivation(const std::string& id, const std::string&
                                                {"params", {{"id", id}, {"kind", "document"}}}}));
   if (!reply.is_null() && (!reply.is_object() || !reply.contains("id") ||
                            !reply["id"].is_string() || !ValidId(reply["id"].get<std::string>())))
-    return Error{ErrorCode::kRejected, "invalid object.derivation reply"};
+    return Error{ErrorCode::kOutcomeUnknown, "invalid object.derivation reply"};
   return reply;
 }
 Result<void> ObjectService::Start(const std::string& listen) {
@@ -57,6 +57,9 @@ Result<ObjectInfo> ObjectService::Fetch(const std::string& id, const Json& sourc
     auto fetched = client_.Fetch(id, source["address"].get<std::string>());
     if (!fetched) {
       last = fetched.error();
+      if (last.code != ErrorCode::kUnavailable && last.code != ErrorCode::kNotFound &&
+          last.code != ErrorCode::kBusy && last.code != ErrorCode::kRateLimited)
+        return last;
       continue;
     }
     RK_RETURN_IF_ERROR(Committed(fetched.value()));
@@ -99,7 +102,7 @@ Result<Json> ObjectService::Locate(const std::string& id, const Json& reference)
   RK_ASSIGN_OR_RETURN(located, control_.Request("object.locate", std::move(fields)));
   if (!located.is_object() || !located.contains("sources") || !located["sources"].is_object() ||
       !located["sources"].contains(id) || !located["sources"][id].is_array())
-    return Error{ErrorCode::kRejected, "invalid object.locate reply"};
+    return Error{ErrorCode::kInternal, "invalid object.locate reply"};
   return located["sources"][id];
 }
 Result<ObjectInfo> ObjectService::EnsureLocal(const std::string& id, const Json& sources) {
@@ -270,7 +273,7 @@ Result<Json> ObjectService::DispatchPut(const Json& request) {
     return *put->error;
   const auto check = [&]() -> Result<void> {
     if (put->cancelled)
-      return Error{ErrorCode::kRejected, "object put cancelled"};
+      return Error{ErrorCode::kCanceled, "Object put canceled"};
     return {};
   };
   RK_RETURN_IF_ERROR(check());

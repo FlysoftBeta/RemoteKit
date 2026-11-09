@@ -43,6 +43,29 @@ Result<Json> Identity(const fs::path& path) {
                      std::to_string((uint64_t(info.nFileIndexHigh) << 32) | info.nFileIndexLow)}};
 }
 }  // namespace
+Result<Json> Checkpoints::Hibernation(const fs::path& directory) {
+  const fs::path path = directory.wstring() + L".hibernation.json";
+  if (!fs::exists(path))
+    return Json();
+  auto journal = Load(path);
+  if (!journal.is_object() || !journal.contains("placementEpoch") ||
+      !journal["placementEpoch"].is_number_unsigned() || journal["placementEpoch"] == 0 ||
+      !journal.contains("manifestId") || !journal["manifestId"].is_string() ||
+      !objects::ValidId(journal["manifestId"].get<std::string>()) || !journal.contains("objects") ||
+      !journal["objects"].is_array() || !journal.contains("buildId") ||
+      !journal["buildId"].is_string())
+    return Error{ErrorCode::kUnavailable, "invalid hibernation journal"};
+  return journal;
+}
+Result<void> Checkpoints::Journal(const fs::path& directory,
+                                  uint64_t epoch,
+                                  const Json& checkpoint,
+                                  const std::string& build) {
+  Json journal = checkpoint;
+  journal["placementEpoch"] = epoch;
+  journal["buildId"] = build;
+  return WriteDurableJson(directory.wstring() + L".hibernation.json", journal);
+}
 bool Checkpoints::Excluded(const fs::path& relative, bool directory) {
   const auto name = relative.filename().wstring();
   if (directory) {
@@ -159,13 +182,20 @@ Result<void> Checkpoints::Restore(const fs::path& directory,
                                   const std::string& build,
                                   const Json& checkpoint) {
   const fs::path marker = directory.wstring() + L".checkpoint";
-  if (!checkpoint.is_null() && fs::is_directory(directory) && Load(marker) == checkpoint) {
-    if (!access_)
-      access_ = std::make_shared<objects::SessionObjects>(objects_, tenant);
-    RK_RETURN_IF_ERROR(access_->Ensure(checkpoint.get<std::string>()));
-    fs::remove(marker);
-    return {};
+  RK_ASSIGN_OR_RETURN(journal, Hibernation(directory));
+  if (!journal.is_null() && checkpoint != journal["manifestId"])
+    return Error{ErrorCode::kConflict,
+                 "uncommitted hibernation: checkpoint does not match journal"};
+  if (checkpoint.is_null() && fs::exists(directory) && !fs::is_empty(directory)) {
+    fprintf(stderr, "null checkpoint over non-empty Session directory: %s\n",
+            Utf8(directory).c_str());
+    return Error{ErrorCode::kConflict, "null checkpoint over non-empty Session directory"};
   }
+  const bool warm =
+      !checkpoint.is_null() && fs::is_directory(directory) && Load(marker) == checkpoint;
+  auto index = warm ? Load(directory.wstring() + L".checkpoint-index.json") : Json();
+  if (!index.is_object())
+    index = Json::object();
   const fs::path restore = directory.wstring() + L".restore";
   const fs::path discard = directory.wstring() + L".discard";
   fs::remove_all(restore);
@@ -192,6 +222,16 @@ Result<void> Checkpoints::Restore(const fs::path& directory,
           !file["chunks"].is_array() || !paths.insert(file["path"].get<std::string>()).second)
         return Error{ErrorCode::kRejected, "invalid checkpoint file"};
       const auto path = restore / Utf8Path(file["path"].get<std::string>());
+      const auto name = file["path"].get<std::string>();
+      if (warm && index.contains(name) && index[name].is_object()) {
+        const auto identity = Identity(directory / Utf8Path(name));
+        if (identity && index[name].value("size", Json()) == identity.value()["size"] &&
+            index[name].value("mtime", Json()) == identity.value()["mtime"] &&
+            index[name].value("fileId", Json()) == identity.value()["fileId"] &&
+            index[name].value("chunks", Json()) == file["chunks"] &&
+            identity.value()["size"] == file["size"])
+          continue;
+      }
       fs::create_directories(path.parent_path());
       std::ofstream output(path, std::ios::binary | std::ios::trunc);
       uint64_t remaining = file["size"].get<uint64_t>();
@@ -200,7 +240,11 @@ Result<void> Checkpoints::Restore(const fs::path& directory,
       for (const auto& chunk : file["chunks"]) {
         if (!chunk.is_string() || !objects::ValidId(chunk.get<std::string>()))
           return Error{ErrorCode::kRejected, "invalid checkpoint chunk"};
-        RK_ASSIGN_OR_RETURN(content, Get(tenant, chunk.get<std::string>()));
+        auto fetched = Get(tenant, chunk.get<std::string>());
+        if (!fetched)
+          return Error{ErrorCode::kUnavailable,
+                       "checkpoint object unavailable: " + fetched.error().message};
+        const auto& content = fetched.value();
         if (content.size() != std::min<uint64_t>(remaining, kChunk))
           return Error{ErrorCode::kRejected, "checkpoint chunk size mismatch"};
         output.write(content.data(), static_cast<std::streamsize>(content.size()));
@@ -211,6 +255,20 @@ Result<void> Checkpoints::Restore(const fs::path& directory,
         return Error{ErrorCode::kUnavailable, "checkpoint materialization failed"};
       RK_RETURN_IF_ERROR(FlushFile(path));
     }
+  }
+  if (warm) {
+    for (const auto& entry : fs::recursive_directory_iterator(restore)) {
+      const auto target = directory / entry.path().lexically_relative(restore);
+      if (entry.is_directory()) {
+        fs::create_directories(target);
+      } else if (!MoveFileExW(entry.path().c_str(), target.c_str(),
+                              MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        return Error{ErrorCode::kUnavailable, "warm checkpoint repair failed"};
+      }
+    }
+    fs::remove_all(restore);
+    fs::remove(marker);
+    return {};
   }
   fs::remove_all(discard);
   const bool had_directory = fs::exists(directory);

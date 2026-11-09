@@ -1,5 +1,6 @@
 #ifndef REMOTEKIT_BROWSER_NAVIGATION_OPERATIONS_H_
 #define REMOTEKIT_BROWSER_NAVIGATION_OPERATIONS_H_
+#include "remotekit/protocol/errors.h"
 #include <cstdint>
 #include <map>
 #include <string>
@@ -19,6 +20,7 @@ class NavigationOperations {
     std::map<std::int64_t, std::string> handles;
     bool collecting = true;
     bool admitted = false;
+    protocol::ErrorCode error_code = protocol::ErrorCode::kInternal;
     // Main-frame document commit is independent of the operation outcome:
     // Chromium can commit an error document while the navigation fails.
     bool document_committed = false;

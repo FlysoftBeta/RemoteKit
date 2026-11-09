@@ -27,7 +27,9 @@ enum remotekit_sdk_status {
   REMOTEKIT_SDK_TIMEOUT = 5,
   REMOTEKIT_SDK_BUFFER_TOO_SMALL = 6,
   REMOTEKIT_SDK_CHANNEL_CLOSED = 7,
-  REMOTEKIT_SDK_BUSY = 8
+  REMOTEKIT_SDK_BUSY = 8,
+  REMOTEKIT_SDK_LOST = 9,
+  REMOTEKIT_SDK_REFUSED = 10
 };
 
 REMOTEKIT_SDK_API uint32_t remotekit_sdk_abi_version(void);
@@ -58,10 +60,15 @@ REMOTEKIT_SDK_API int remotekit_sdk_control_connect(const char* name_utf8, uint6
  * channels may run concurrently. Timeout bounds the active request, not queue
  * time. Close cancels active/queued requests; shutdown rejects new operations
  * and drains operation leases before destroying the SDK runtime.
- * Any error on an existing handle invalidates/closes that connection, including
- * invalid arguments, timeout, oversized response, or insufficient capacity.
- * BUFFER_TOO_SMALL reports the required size in output_size; other errors set
- * it to zero. Reconnect before retrying; replies cannot cross request boundaries.
+ * CHANNEL_CLOSED and MOJO_ERROR mean no request was written; the channel is
+ * retired. INVALID_ARGUMENT, INVALID_STATE and BUSY mean unsent; channel kept.
+ * LOST means written, then disconnected/read failed; the channel is retired.
+ * TIMEOUT means written, no reply by deadline; the channel is kept.
+ * DATA_MISMATCH means written, malformed reply; the channel is kept.
+ * REFUSED means a valid Browser application error; the channel is kept.
+ * BUFFER_TOO_SMALL means written, reply did not fit; channel kept, required
+ * size in output_size. Other failures set output_size to zero.
+ * Sent failures require reconciliation; timeout never authorizes replay.
  * Successful output is bytes only, without an appended NUL. */
 REMOTEKIT_SDK_API int remotekit_sdk_control_request(uint64_t handle,
                                                     const void* input,
@@ -76,7 +83,7 @@ struct remotekit_sdk_token {
   uint64_t session, view, instance, document, focus;
 };
 
-#define REMOTEKIT_SDK_ABI_VERSION 2
+#define REMOTEKIT_SDK_ABI_VERSION 3
 #define REMOTEKIT_SDK_RENDER_SLOT_COUNT 4
 struct remotekit_sdk_render_setup {
   uint32_t struct_size, width, height, mapping_size;
@@ -152,25 +159,28 @@ REMOTEKIT_SDK_API int remotekit_sdk_render_stop(uint64_t handle, uint64_t genera
 /* Local callback barrier only. Does not send Stop or release GPU resources. */
 REMOTEKIT_SDK_API int remotekit_sdk_render_close(uint64_t handle);
 
-/* Worker-only helpers over control_request. JSON remains UTF-8 bytes with an
- * explicit length; the caller supplies the complete version/id envelope.
- * command returns OK iff the decoded reply has boolean ok=true. BUSY means the
- * browser did not accept the operation; retry only within the same valid token
- * and sequence, with a bounded deadline. Resource
- * handles in ignored replies are closed; use open_render to acquire resources.
- * command_token first zeroes token, then copies a valid reply.token even when
- * reply.ok=false (DATA_MISMATCH), allowing a caller to refresh focus generation.
- * A missing token leaves zeroes. Malformed tokens return DATA_MISMATCH.
- * The existing raw request connection-invalidation rules remain in effect. */
+struct remotekit_sdk_failure {
+  char code[32];
+  char reason[48];
+  char message[512];
+  uint32_t retry_after_ms;
+  uint32_t has_retry_after;
+};
+/* Worker-only JSON helpers. Optional failure is zeroed on entry and filled
+ * on REFUSED with the Browser handling code, display key and diagnosis.
+ * command_token also copies a valid token on REFUSED. Malformed tokens or
+ * error envelopes return DATA_MISMATCH. Ignored native handles are closed. */
 REMOTEKIT_SDK_API int remotekit_sdk_control_command(uint64_t handle,
                                                     const char* json,
                                                     size_t size,
-                                                    uint32_t timeout_ms);
+                                                    uint32_t timeout_ms,
+                                                    struct remotekit_sdk_failure* failure);
 REMOTEKIT_SDK_API int remotekit_sdk_control_command_token(uint64_t handle,
                                                           const char* json,
                                                           size_t size,
                                                           uint32_t timeout_ms,
-                                                          struct remotekit_sdk_token* token);
+                                                          struct remotekit_sdk_token* token,
+                                                          struct remotekit_sdk_failure* failure);
 /* Initialize struct_size. consumer_pid must be this process, timeout 1..30000.
  * Opens then polls describe within one budget. All 13 returned Windows handles
  * are caller-owned. Mapping is SharedRenderMapping v5. Endpoint owns pacing.
@@ -181,7 +191,8 @@ REMOTEKIT_SDK_API int remotekit_sdk_control_command_token(uint64_t handle,
 REMOTEKIT_SDK_API int remotekit_sdk_control_open_render(uint64_t handle,
                                                         uint32_t consumer_pid,
                                                         struct remotekit_sdk_render_setup* setup,
-                                                        uint32_t timeout_ms);
+                                                        uint32_t timeout_ms,
+                                                        struct remotekit_sdk_failure* failure);
 /* Windows set-1 native scan code: ordinary 0x00xx, E0-prefixed 0xE0xx
  * (e.g. right Control 0xE01D), not a virtual-key or raw LPARAM. For ordinary
  * keyboard LPARAMs combine bits 16..23 with 0xE000 when extended bit 24 is set.

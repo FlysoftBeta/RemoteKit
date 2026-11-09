@@ -120,7 +120,7 @@ class PhotoBurstSessions {
                               const ServiceJson& params,
                               const PhotoCancelled& cancelled) {
     if (cancelled())
-      return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
+      return Error{ErrorCode::kOutcomeUnknown, "file_transfer_interrupted"};
     const auto now = Clock::now();
     if (method == "photo.burst.begin") {
       if (active_.size() >= 2)
@@ -165,7 +165,7 @@ class PhotoBurstSessions {
         terminal.error = result.error();
       active_.erase(active);
       if (cancelled())
-        return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
+        return Error{ErrorCode::kOutcomeUnknown, "file_transfer_interrupted"};
       if (terminal_.size() >= 32) {
         const auto oldest = std::min_element(
             terminal_.begin(), terminal_.end(),
@@ -189,7 +189,7 @@ class PhotoBurstSessions {
       return Clock::now() >= burst.deadline || cancelled();
     }));
     if (cancelled())
-      return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
+      return Error{ErrorCode::kOutcomeUnknown, "file_transfer_interrupted"};
     if (Clock::now() >= burst.deadline)
       return Error{ErrorCode::kNotFound, "unknown_photo_burst"};
     auto result = WireDecision(decision, available);
@@ -366,7 +366,7 @@ class DcFileServices {
               ServiceJson reply;
               try {
                 Result<ServiceJson> executed =
-                    Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
+                    Error{ErrorCode::kConflict, "file_transfer_interrupted"};
                 if (Current(job))
                   executed = execute(job);
                 reply = executed ? Reply(job.message, true, executed.value())
@@ -374,7 +374,10 @@ class DcFileServices {
               } catch (const ServiceJson::exception& error) {
                 fprintf(stderr, "file router invalid request: %s\n", error.what());
                 reply = Reply(job.message, false,
-                              WireError({ErrorCode::kInvalidRequest, "invalid_request"}));
+                              WireError({ErrorCode::kInternal, "Invalid file worker state"}));
+              } catch (const std::filesystem::filesystem_error& error) {
+                reply =
+                    Reply(job.message, false, WireError({ErrorCode::kUnavailable, error.what()}));
               } catch (const std::exception& error) {
                 fprintf(stderr, "file router internal: %s\n", error.what());
                 reply = Reply(job.message, false, WireError({ErrorCode::kInternal, "internal"}));
@@ -436,7 +439,7 @@ class DcFileServices {
                          bool library = false) {
     std::lock_guard lock(mutex_);
     if (connection != connection_ || !peer_)
-      return Error{ErrorCode::kForbidden, "stale_file_authorization"};
+      return Error{ErrorCode::kConflict, "stale_file_authorization"};
     std::map<std::string, Grant> next;
     const auto add = [&](const std::string& id, const FileUploadStore::Binding& binding) {
       const auto previous = authorized_.find(id);
@@ -498,14 +501,14 @@ class DcFileServices {
     const auto id = message["params"].value("requestId", std::string());
     const auto found = authorized_.find(id);
     if (found == authorized_.end() || ((id == "library") != LibraryFileMethod(message["method"]))) {
-      failure(ErrorCode::kForbidden, "stale_file_request");
+      failure(ErrorCode::kConflict, "stale_file_request");
       return;
     }
     uint64_t library_grant = 0;
     if (message["method"] == "selection.cancel") {
       const auto library = authorized_.find("library");
       if (library == authorized_.end()) {
-        failure(ErrorCode::kForbidden, "stale_library_authorization");
+        failure(ErrorCode::kConflict, "stale_library_authorization");
         return;
       }
       library_grant = library->second.serial;

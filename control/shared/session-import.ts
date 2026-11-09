@@ -78,8 +78,8 @@ export type ControlEvent =
       type: 'importFailed';
       ref: number;
       id: string;
-      reason: string;
       retryable: boolean;
+      reason: string;
     }
   | { seq: number; at: number; type: 'importDiscarded'; ref: number; id: string }
   | { seq: number; at: number; type: 'revoked' };
@@ -140,7 +140,13 @@ export interface MailboxStatus {
   lastSuccessAt: number | null;
   lastErrorAt: number | null;
   lastError: string | null;
-  outbox: { pending: number; lastErrorAt: number | null; lastError: string | null };
+  errorCode?: import('./errors').ErrorCode;
+  outbox: {
+    pending: number;
+    lastErrorAt: number | null;
+    lastError: string | null;
+    errorCode?: import('./errors').ErrorCode;
+  };
 }
 export interface SessionImportSocketMethods {
   'sessionImport.state': { params: Record<string, never>; result: SessionImportState };

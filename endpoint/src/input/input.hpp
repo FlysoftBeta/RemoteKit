@@ -45,7 +45,7 @@ class InputController {
   std::atomic<uint64_t> input_rejected{0}, input_coalesced{0};
   std::atomic<uint64_t> input_busy_retries{0}, input_busy_exhausted{0};
   void ReplyInput(Json reply, const Json& request, uint64_t stamp);
-  void RejectInput(const char* error, const Json& request, const Event& event);
+  void RejectInput(ErrorCode code, const char* error, const Json& request, const Event& event);
   void HandleData(const Event& event);
   void InputLoop();
 };

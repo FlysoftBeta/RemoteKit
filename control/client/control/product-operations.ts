@@ -1,5 +1,5 @@
 import { focusWindow, replaceWindow, placeWindow, windowClosing } from '../../server/workspace/model';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, parseWireError } from '../../shared/errors';
 import {
   isSingletonApp,
   placeTab,
@@ -13,8 +13,8 @@ import {
 /** Product actions return execution receipts, never an authoritative workspace. */
 export type ProductActionHandler = (action: ProductAction) => Promise<OperationReceipt>;
 export function requireAcceptedReceipt(receipt: OperationReceipt): OperationReceipt {
-  if (receipt.status === 'rejected' || receipt.status === 'expired')
-    throw new RemoteKitError('rejected', receipt.error ?? '操作被拒绝');
+  if (receipt.status === 'failed')
+    throw parseWireError(receipt.error) ?? new RemoteKitError('internal', '操作收据缺少错误码');
   return receipt;
 }
 export interface PendingOperation extends ProductOperation {
@@ -47,7 +47,7 @@ export function projectOperations(
   for (const operation of pending) {
     const a = operation.action,
       id = 'pending-' + operation.operationId;
-    if (operation.receipt && ['rejected', 'expired'].includes(operation.receipt.status)) continue;
+    if (operation.receipt && ['failed'].includes(operation.receipt.status)) continue;
     if (
       operation.receipt &&
       ['committed', 'unknown'].includes(operation.receipt.status) &&

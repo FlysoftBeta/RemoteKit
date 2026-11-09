@@ -139,7 +139,12 @@ test('invalid import fields and limits return per-event errors while retaining a
       events: [pairEvent(), { ...p, ...patch }, { seq: 3, at: p.at, type: 'withdraw', id: p.id }],
     });
     assert.equal(results[0].error, null);
-    assert.ok(results[1].error?.includes(reason), reason);
+    assert.ok(results[1].error, reason);
+    assert.equal(
+      results[1].errorCode,
+      patches.findIndex((entry) => entry[0] === patch) < 8 ? 'invalid_request' : 'limit_exceeded',
+      reason,
+    );
     assert.equal(results[2].error, null);
   }
   const entry = ['', 'x'.repeat(256 * 1024 - 7)];

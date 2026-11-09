@@ -352,6 +352,7 @@ export interface ProductState {
   quality: ProductQuality;
   endpointGeneration: number;
   endpointError: string | null;
+  browserRestart?: 'ready' | 'waiting' | 'exhausted';
   viewer: { connected: boolean };
   /** Newest first. */
   announcements: Announcement[];
@@ -411,24 +412,26 @@ export interface ProductActionResult {
   state: ProductState;
   application?: { status: 'pending'; reason: string };
 }
-export type OperationStatus = 'accepted' | 'applying' | 'committed' | 'rejected' | 'unknown' | 'expired';
+export type OperationStatus = 'accepted' | 'applying' | 'committed' | 'failed' | 'unknown';
 export interface ProductOperation {
   operationId: string;
   operationGeneration: string;
   action: ProductAction;
 }
-export interface OperationReceipt {
+interface OperationReceiptFields {
   browserIncarnation?: string;
   resolved?: boolean;
   resolution?: 'target-retired';
   operationSequence?: string;
   operationId: string;
   operationGeneration: string;
-  status: OperationStatus;
   revision?: number;
   application?: ProductActionResult['application'];
-  error?: string;
 }
+export type OperationReceipt = OperationReceiptFields &
+  (
+    { status: 'failed'; error: WireError } | { status: Exclude<OperationStatus, 'failed'>; error?: WireError }
+  );
 export interface SetupStatus {
   setupRequired: boolean;
 }
@@ -488,7 +491,7 @@ export type RtcServerSignal = {
   signal:
     | { type: 'ice'; candidate: RTCIceCandidateInit }
     | { type: 'complete' }
-    | { type: 'error'; message: string };
+    | { type: 'error'; error: WireError };
 };
 export type SocketMessage =
   | AuthMessage
@@ -497,4 +500,4 @@ export type SocketMessage =
   | { type: 'library'; snapshot: import('./file-library').LibrarySnapshot }
   | { type: 'result'; id: string; result: unknown }
   | { type: 'error'; id: string; error: WireError }
-  | { type: 'lease'; status: 'revoked'; reason: 'another-viewer' | 'logout' };
+  | { type: 'lease'; outcome: 'replaced' | 'logged_out' };

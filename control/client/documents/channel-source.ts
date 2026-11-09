@@ -1,3 +1,4 @@
+import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { RemoteKitError } from '../../shared/errors';
 import type { FileChannel } from '../files/file-channel';
 import type { DocumentInfo, DocumentOpenOptions, DocumentSource } from './document-source';
@@ -12,28 +13,34 @@ export class ChannelDocumentSource implements DocumentSource {
   ) {}
 
   async open(signal: AbortSignal, options?: DocumentOpenOptions): Promise<DocumentInfo> {
-    const deadline = Date.now() + 5 * 60_000;
     for (;;) {
-      if (signal.aborted) throw new DOMException('请求已取消', 'AbortError');
-      if (Date.now() >= deadline) throw new RemoteKitError('rejected', '文档转换超时');
-      const result = await this.channel.documentOpen(this.assetId, signal);
-      if (signal.aborted) throw new DOMException('请求已取消', 'AbortError');
-      if (result.state === 'ready') {
+      if (signal.aborted) throw new RemoteKitError('canceled', '');
+      let result;
+      let wait = 1500;
+      try {
+        result = await this.channel.documentOpen(this.assetId, signal);
+      } catch (error) {
+        if (!(error instanceof RemoteKitError)) throw error;
+        const handling = errorHandling(error.code);
+        if (handling !== 'retry-soon' && handling !== 'retry-after') throw error;
+        wait = retryDelay(error, 0)!;
+      }
+      if (signal.aborted) throw new RemoteKitError('canceled', '');
+      if (result?.state === 'ready') {
         options?.onStatus?.('ready');
         this.info = result;
         return result;
       }
       options?.onStatus?.('converting');
-      if (Date.now() >= deadline) throw new RemoteKitError('rejected', '文档转换超时');
       await new Promise<void>((resolve, reject) => {
         const abort = () => {
           clearTimeout(timer);
-          reject(new DOMException('请求已取消', 'AbortError'));
+          reject(new RemoteKitError('canceled', ''));
         };
         const timer = setTimeout(() => {
           signal.removeEventListener('abort', abort);
           resolve();
-        }, 1500);
+        }, wait);
         signal.addEventListener('abort', abort, { once: true });
       });
     }
@@ -49,14 +56,14 @@ export class ChannelDocumentSource implements DocumentSource {
         };
         const abort = () => {
           this.waiting.delete(resume);
-          reject(new DOMException('请求已取消', 'AbortError'));
+          reject(new RemoteKitError('canceled', ''));
         };
         if (signal.aborted) return abort();
         this.waiting.add(resume);
         signal.addEventListener('abort', abort, { once: true });
       });
     }
-    if (signal.aborted) throw new DOMException('请求已取消', 'AbortError');
+    if (signal.aborted) throw new RemoteKitError('canceled', '');
     this.activeResources++;
     try {
       return await this.readResource(contentId, signal);
@@ -74,7 +81,7 @@ export class ChannelDocumentSource implements DocumentSource {
     let mime = '';
     do {
       const part = await this.channel.documentResource(this.info.documentId, contentId, offset, signal);
-      if (signal.aborted) throw new DOMException('请求已取消', 'AbortError');
+      if (signal.aborted) throw new RemoteKitError('canceled', '');
       const bytes = Uint8Array.from(atob(part.data), (char) => char.charCodeAt(0));
       if (
         !Number.isSafeInteger(part.total) ||
@@ -86,7 +93,7 @@ export class ChannelDocumentSource implements DocumentSource {
         bytes.length > 16384 ||
         (mime && mime !== part.mime)
       ) {
-        throw new RemoteKitError('rejected', '文档资源数据无效');
+        throw new RemoteKitError('internal', '文档资源数据无效');
       }
       total = part.total;
       mime = part.mime;

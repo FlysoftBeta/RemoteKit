@@ -26,6 +26,7 @@ export class NodeAdmin {
         peerAddress: node.config.peer.address,
         buildId: node.state.state === 'ready' ? (node.buildId ?? null) : null,
         pressure: sample?.pressure ?? null,
+        headroom: sample ? 1 - node.metrics.predicted()! : null,
         underPressure: node.metrics.underPressure(),
         diskDraining: node.diskDraining,
         sessions: sample?.value.sessions ?? this.placement.activeSessions(node.nodeId),

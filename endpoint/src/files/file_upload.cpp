@@ -76,7 +76,8 @@ Result<std::pair<std::uint64_t, std::uint64_t>> RetainedUsage(const std::filesys
     RK_ASSIGN_OR_RETURN(owners, DirectoryEntries(root));
     for (const auto& owner : owners) {
       if (++visited > 65536)
-        return Error{ErrorCode::kLimitExceeded, "upload_scan_limit"};
+        return Error{ErrorCode::kLimitExceeded, "upload_scan_limit",
+                     ErrorReason::kStorageQuotaExceeded};
       if (!OwnedId(owner.path()))
         continue;
       if (!PlainDirectory(owner.path()))
@@ -102,7 +103,8 @@ Result<std::pair<std::uint64_t, std::uint64_t>> RetainedUsage(const std::filesys
         RK_ASSIGN_OR_RETURN(payloads, DirectoryEntries(batch.path()));
         for (const auto& file : payloads) {
           if (++visited > 65536)
-            return Error{ErrorCode::kLimitExceeded, "upload_scan_limit"};
+            return Error{ErrorCode::kLimitExceeded, "upload_scan_limit",
+                         ErrorReason::kStorageQuotaExceeded};
           if (file.path().filename() == ".reservation")
             continue;
           const auto extension = file.path().extension();
@@ -158,14 +160,17 @@ Result<FileUploadStore::Batch> FileUploadStore::Begin(const Binding& binding,
     if (!ValidName(spec.name) || spec.type.size() > 255)
       return Error{ErrorCode::kInvalidRequest, "invalid_file_name_or_type"};
     if (spec.size > limits_.file_bytes || spec.size > limits_.batch_bytes - bytes)
-      return Error{ErrorCode::kLimitExceeded, "file_upload_quota"};
+      return Error{ErrorCode::kLimitExceeded, "file_upload_quota",
+                   ErrorReason::kStorageQuotaExceeded};
     bytes += spec.size;
   }
   if (bytes > limits_.session_bytes || reserved_bytes_ > limits_.session_bytes - bytes)
-    return Error{ErrorCode::kLimitExceeded, "session_file_quota"};
+    return Error{ErrorCode::kLimitExceeded, "session_file_quota",
+                 ErrorReason::kStorageQuotaExceeded};
   if (specs.size() > limits_.session_files ||
       reserved_files_ > limits_.session_files - specs.size())
-    return Error{ErrorCode::kLimitExceeded, "session_file_count_quota"};
+    return Error{ErrorCode::kLimitExceeded, "session_file_count_quota",
+                 ErrorReason::kStorageQuotaExceeded};
   for (const auto& [key, batch] : batches_)
     if (batch.binding == binding)
       return Error{ErrorCode::kConflict, "file_request_upload_already_exists"};
@@ -202,7 +207,7 @@ Result<FileUploadStore::Batch> FileUploadStore::Begin(const Binding& binding,
     }
     auto [entry, inserted] = batches_.emplace(batch.id, std::move(batch));
     if (!inserted)
-      return Error{ErrorCode::kInvalidRequest, "file_upload_id_collision"};
+      return Error{ErrorCode::kInternal, "file_upload_id_collision"};
     reserved_bytes_ += bytes;
     reserved_files_ += specs.size();
     cleanup.committed = true;
@@ -220,7 +225,7 @@ Result<FileUploadStore::Batch> FileUploadStore::Seal(const std::string& id,
   for (const auto& file : batch.files) {
     RK_ASSIGN_OR_RETURN(size, FileSize(file.path));
     if (!RegularFile(file.path) || size != file.size)
-      return Error{ErrorCode::kInvalidRequest, "incomplete_or_invalid_upload"};
+      return Error{ErrorCode::kConflict, "incomplete_or_invalid_upload"};
   }
   // Same-directory rename is the sealing boundary. Paths never use supplied filenames.
   for (auto& file : batch.files) {

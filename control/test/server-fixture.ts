@@ -46,6 +46,19 @@ export function testGateway(
       profileKey: Buffer.alloc(32).toString('base64'),
     }),
     underPressure: () => false,
+    beginHibernation: (tenant) => {
+      const placement = placements.get(tenant);
+      if (!placement || placement.state === 'hibernated')
+        throw new RemoteKitError('conflict', 'Session is not active');
+      placement.state = 'hibernating';
+      return { ...placement, state: 'hibernating' as const };
+    },
+    settleHibernation: (placement, state) => {
+      const current = placements.get(placement.tenant);
+      if (!current || current.placementEpoch !== placement.placementEpoch) return false;
+      current.state = state;
+      return true;
+    },
     commitCheckpoint: () => 1,
     markWarm: () => {},
     activeSessions: (nodeId) =>

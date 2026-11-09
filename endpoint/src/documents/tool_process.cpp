@@ -128,7 +128,10 @@ Error ToolOutputFailure(const std::filesystem::path& log,
           ? "password-protected document"
           : "corrupt document or conversion failed";
   LogToolFailure(executable, std::to_string(exit_code), log, reason);
-  return {ErrorCode::kRejected, reason};
+  return {ErrorCode::kRejected, reason,
+          output.find("password") != output.npos || output.find("encrypted") != output.npos
+              ? ErrorReason::kDocumentEncrypted
+              : ErrorReason::kDocumentCorrupt};
 }
 
 std::filesystem::path DefaultToolsDirectory() {
@@ -210,6 +213,12 @@ Result<void> RunTool(const std::filesystem::path& executable,
   if (input.value == INVALID_HANDLE_VALUE || output.value == INVALID_HANDLE_VALUE ||
       error_output.value == INVALID_HANDLE_VALUE || !job.value)
     return unavailable("cannot create document tool job");
+  Handle notifications{CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 1)};
+  JOBOBJECT_ASSOCIATE_COMPLETION_PORT association{nullptr, notifications.value};
+  if (!notifications.value ||
+      !SetInformationJobObject(job.value, JobObjectAssociateCompletionPortInformation, &association,
+                               sizeof(association)))
+    return unavailable("Cannot monitor document tool job limits");
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
   limits.BasicLimitInformation.LimitFlags =
       JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY;
@@ -297,11 +306,26 @@ Result<void> RunTool(const std::filesystem::path& executable,
          accounting.ActiveProcesses) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
+  bool memory_exceeded = false;
+  DWORD notification = 0;
+  ULONG_PTR key = 0;
+  LPOVERLAPPED data = nullptr;
+  while (GetQueuedCompletionStatus(notifications.value, &notification, &key, &data, 0))
+    memory_exceeded |= notification == JOB_OBJECT_MSG_JOB_MEMORY_LIMIT;
+  if (memory_exceeded)
+    return Error{ErrorCode::kRejected, "Document conversion exceeded job memory budget",
+                 ErrorReason::kDocumentTooComplex};
   if (waited == WAIT_TIMEOUT) {
     LogToolFailure(executable, std::to_string(code), log, "timeout");
-    return Error{ErrorCode::kRejected, "document conversion timeout"};
+    return Error{ErrorCode::kRejected, "Document conversion exceeded compute budget",
+                 ErrorReason::kDocumentTooComplex};
   }
-  if (waited != WAIT_OBJECT_0 || code != 0)
+  if (waited != WAIT_OBJECT_0)
+    return Error{ErrorCode::kUnavailable, "Cannot wait for document tool"};
+  if (code == STATUS_NO_MEMORY || code == ERROR_NOT_ENOUGH_MEMORY)
+    return Error{ErrorCode::kRejected, "Document conversion exceeded memory budget",
+                 ErrorReason::kDocumentTooComplex};
+  if (code != 0)
     return ToolOutputFailure(log, executable, code);
   return {};
 }

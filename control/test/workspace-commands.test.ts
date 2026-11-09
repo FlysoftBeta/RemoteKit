@@ -60,9 +60,13 @@ test('tab.create query always searches with the current engine and rejects URL/q
       assert.equal(next.tabs[next.tabs.length - 1].kind, 'remote');
     }
     const exactQuery = 'a'.repeat(8192 - prefix.length);
+    for (const query of ['a'.repeat(8193), exactQuery + 'a', '中'.repeat(1000)])
+      assert.throws(() => command(workspace, { type: 'tab.create', windowId, query }), {
+        code: 'limit_exceeded',
+      });
     const exact = command(workspace, { type: 'tab.create', windowId, query: exactQuery }).workspace;
     assert.equal(exact.tabs[exact.tabs.length - 1].url.length, 8192);
-    for (const query of ['', ' ', '\ud800', 'a'.repeat(8193), exactQuery + 'a', '中'.repeat(1000), 42, null])
+    for (const query of ['', ' ', '\ud800', 42, null])
       assert.throws(() => command(workspace, { type: 'tab.create', windowId, query } as ProductAction), {
         code: 'invalid_request',
       });
@@ -115,11 +119,11 @@ test('window limits and per-space limits reject without changing input state', (
         appId: 'files',
         placement: { mode: 'split', besideWindowId, side: 'right' },
       }),
-    /3 windows/,
+    { code: 'limit_exceeded' },
   );
   assert.equal(workspace.windows.length, 3);
   while (workspace.windows.length < 16) workspace = open(workspace, 'files');
-  assert.throws(() => open(workspace), /16 windows/);
+  assert.throws(() => open(workspace), { code: 'limit_exceeded' });
 });
 
 test('settings are a singleton local App and window state is bounded', () => {
@@ -138,7 +142,7 @@ test('settings are a singleton local App and window state is bounded', () => {
     () => command(workspace, { type: 'window.state', windowId: id, state: { text: 'x'.repeat(8192) } }),
     /8 KiB/,
   );
-  assert.throws(() => command(workspace, { type: 'tab.create', windowId: id }), /does not support tabs/);
+  assert.throws(() => command(workspace, { type: 'tab.create', windowId: id }), { code: 'invalid_request' });
 });
 
 test('web Apps carry one remote tab and uninstall uses the close queue', () => {
@@ -152,16 +156,15 @@ test('web Apps carry one remote tab and uninstall uses the close queue', () => {
   workspace = open(workspace, appId);
   assert.equal(workspace.tabs[0].url, 'https://example.com/mail/');
   assert.equal(workspace.apps[0].themeColor, '#aabbcc');
-  assert.throws(
-    () => command(workspace, { type: 'tab.create', windowId: workspace.windows[0].id }),
-    /exactly one tab/,
-  );
+  assert.throws(() => command(workspace, { type: 'tab.create', windowId: workspace.windows[0].id }), {
+    code: 'conflict',
+  });
   const plan = command(workspace, { type: 'app.uninstall', appId });
   assert.equal(plan.workspace.pendingAppUninstallId, workspace.apps[0].id);
   assert.equal(plan.workspace.pendingWindowCloseId, workspace.windows[0].id);
   assert.equal(plan.workspace.apps.length, 1);
   assert.deepEqual(plan.effects, [{ kind: 'closeWindow' }]);
-  assert.throws(() => open(plan.workspace, appId), /being uninstalled/);
+  assert.throws(() => open(plan.workspace, appId), { code: 'conflict' });
 });
 
 test('queued window closures reject tab changes and incoming or outgoing placement', () => {
@@ -170,10 +173,12 @@ test('queued window closures reject tab changes and incoming or outgoing placeme
   workspace.pendingWindowCloseId = closing.id;
   workspace.pendingWindowCloseIds = [queued.id];
   for (const window of [closing, queued]) {
-    assert.throws(() => command(workspace, { type: 'tab.create', windowId: window.id }), /closing/);
+    assert.throws(() => command(workspace, { type: 'tab.create', windowId: window.id }), {
+      code: 'conflict',
+    });
     assert.throws(
       () => command(workspace, { type: 'window.place', windowId: window.id, placement: { mode: 'space' } }),
-      /closing/,
+      { code: 'conflict' },
     );
     assert.throws(
       () =>
@@ -182,7 +187,7 @@ test('queued window closures reject tab changes and incoming or outgoing placeme
           windowId: available.id,
           placement: { mode: 'split', besideWindowId: window.id, side: 'right' },
         }),
-      /closing/,
+      { code: 'conflict' },
     );
     assert.throws(
       () =>
@@ -191,7 +196,7 @@ test('queued window closures reject tab changes and incoming or outgoing placeme
           tabId: workspace.tabs.find((tab) => tab.windowId === available.id)!.id,
           windowId: window.id,
         }),
-      /closing/,
+      { code: 'conflict' },
     );
     assert.throws(
       () =>
@@ -200,7 +205,7 @@ test('queued window closures reject tab changes and incoming or outgoing placeme
           tabId: workspace.tabs.find((tab) => tab.windowId === window.id)!.id,
           windowId: available.id,
         }),
-      /closing/,
+      { code: 'conflict' },
     );
   }
 });
@@ -381,5 +386,22 @@ test('opening a replacement retains slot and weight, preserves the old window, a
         placement: { mode: 'replace', windowId: replaced.id },
       }),
     { code: 'conflict' },
+  );
+});
+
+test('navigation size errors keep their code through workspace commands', () => {
+  const workspace = open(empty());
+  const tabId = workspace.tabs[0].id;
+  assert.throws(() => command(workspace, { type: 'tab.navigate', tabId, url: 'a'.repeat(8193) }), {
+    code: 'limit_exceeded',
+  });
+  assert.throws(
+    () =>
+      command(workspace, {
+        type: 'app.install',
+        name: 'Oversize',
+        startUrl: 'https://example.test/' + '中'.repeat(1000),
+      }),
+    { code: 'limit_exceeded' },
   );
 });

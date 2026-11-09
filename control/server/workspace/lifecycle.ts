@@ -1,3 +1,5 @@
+import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { endpointError } from '../endpoint/gateway';
 import type { EndpointSnapshot } from '../endpoint/types';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import { settle } from './operations';
@@ -6,10 +8,110 @@ import type { ProductTab, ProductWorkspace } from '../../shared/product';
 import { isLocalTab } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 import { systemClock, type Clock } from '../util/clock';
+import type { NodeLink } from '../cluster/node-link';
+
+type HibernationReason = 'idle' | 'relief' | 'rebalance';
+type ReliefState = { waitingAfter?: number; inflight?: Promise<void> };
 
 export class UncertainRecovery {
+  private readonly recoveryRetries = new Map<
+    string,
+    { identity: string; retryAt: number; attempts: number }
+  >();
+  private readonly relief = new Map<string, ReliefState>();
+  private readonly hibernatingNodes = new Set<string>();
+
+  private needsRelief(node: NodeLink) {
+    const sample = node.metrics.latest();
+    if (!sample || node.state.state !== 'ready' || this.context.endpoint.nodes.isRemoved(node.nodeId))
+      return false;
+    if (node.reliefRequestedAt !== undefined && sample.at > node.reliefRequestedAt)
+      node.reliefRequestedAt = undefined;
+    return !node.metrics.relieved() || node.reliefRequestedAt !== undefined;
+  }
+  relieve(): Promise<void> {
+    const jobs: Promise<void>[] = [];
+    const nodes = this.context.endpoint.nodes;
+    for (const node of nodes.all()) {
+      if (node.state.state !== 'ready' || nodes.isRemoved(node.nodeId)) {
+        this.relief.delete(node.nodeId);
+        continue;
+      }
+      const sample = node.metrics.latest();
+      if (!sample) continue;
+      const needed = this.needsRelief(node);
+      let state = this.relief.get(node.nodeId);
+      if (state?.inflight) {
+        jobs.push(state.inflight);
+        continue;
+      }
+      if (state?.waitingAfter !== undefined && sample.at <= state.waitingAfter) continue;
+      if (!needed) {
+        this.relief.delete(node.nodeId);
+        continue;
+      }
+      if (!state && !node.metrics.underPressure() && node.reliefRequestedAt === undefined) continue;
+      if (!state) {
+        state = {};
+        this.relief.set(node.nodeId, state);
+      }
+      const reason: HibernationReason =
+        node.metrics.underPressure() &&
+        nodes
+          .all()
+          .some(
+            (other) =>
+              other !== node &&
+              other.state.state === 'ready' &&
+              !nodes.isRemoved(other.nodeId) &&
+              (other.metrics.predicted() ?? Infinity) < 0.7,
+          )
+          ? 'rebalance'
+          : 'relief';
+      const tracking = state;
+      tracking.inflight = this.relieveNode(node, tracking, reason)
+        .catch((error) =>
+          console.warn('Memory Saver relief failed', node.nodeId, toRemoteKitError(error).message),
+        )
+        .finally(() => {
+          tracking.inflight = undefined;
+        });
+      jobs.push(tracking.inflight);
+    }
+    return Promise.all(jobs).then(() => {});
+  }
+  private async relieveNode(node: NodeLink, state: ReliefState, reason: HibernationReason) {
+    const candidates = this.context.endpoint.placement
+      .activeTenants(node.nodeId)
+      .map((tenant) => this.context.tenants.get(tenant))
+      .filter(
+        (runtime) =>
+          !runtime.viewer &&
+          this.context.clock.monotonicMs() - runtime.viewerAbsentSince >= 60000 &&
+          this.context.store.workspaces.workspace(runtime.tenantId).settings.browser.memorySaverEnabled,
+      )
+      .sort((a, b) => a.viewerAbsentSince - b.viewerAbsentSince || a.tenantId.localeCompare(b.tenantId));
+    for (const runtime of candidates) {
+      if (!this.needsRelief(node)) return;
+      const hibernated = await this.context.tenants.serial(runtime.tenantId, async () => {
+        if (!this.context.endpoint.isPlacedOn(runtime.tenantId, node.nodeId)) return false;
+        const snapshot = await this.context.endpoint.snapshot(runtime.tenantId);
+        if (!this.needsRelief(node)) return false;
+        return this.hibernate(runtime.tenantId, snapshot, false, reason);
+      });
+      if (hibernated) {
+        state.waitingAfter = Date.now();
+        return;
+      }
+    }
+  }
   // An administrator may hibernate at once; automatic hibernation also needs Memory Saver and idle time.
-  hibernationBlocker(tenant: string, snapshot: EndpointSnapshot, immediate: boolean): string | undefined {
+  hibernationBlocker(
+    tenant: string,
+    snapshot: EndpointSnapshot,
+    immediate: boolean,
+    relief = false,
+  ): string | undefined {
     const runtime = this.context.tenants.get(tenant);
     const blockers = snapshot.hibernation;
     if (this.context.endpoint.placement.peek(tenant)?.state !== 'active') return '会话未运行';
@@ -20,8 +122,7 @@ export class UncertainRecovery {
     if (
       !immediate &&
       (!this.context.store.workspaces.workspace(tenant).settings.browser.memorySaverEnabled ||
-        this.context.clock.monotonicMs() - runtime.viewerAbsentSince <
-          (this.context.endpoint.placement.underPressure(tenant) ? 120000 : 600000))
+        this.context.clock.monotonicMs() - runtime.viewerAbsentSince < (relief ? 60000 : 600000))
     )
       return '未到休眠时间';
     if (
@@ -42,15 +143,55 @@ export class UncertainRecovery {
     )
       return '会话状态尚未稳定';
   }
-  async hibernate(tenant: string, snapshot: EndpointSnapshot, immediate = false): Promise<boolean> {
-    const runtime = this.context.tenants.get(tenant);
-    const state = this.context.store.workspaces.workspace(tenant);
-    const blocker = this.hibernationBlocker(tenant, snapshot, immediate);
+  async hibernate(
+    tenant: string,
+    snapshot: EndpointSnapshot,
+    immediate = false,
+    reason: HibernationReason = 'idle',
+  ): Promise<boolean> {
+    const relief = reason !== 'idle';
+    const placement = this.context.endpoint.placement.peek(tenant);
+    const node = placement && this.context.endpoint.nodes.get(placement.nodeId);
+    if (
+      node &&
+      !immediate &&
+      !relief &&
+      (this.relief.has(node.nodeId) || node.reliefRequestedAt !== undefined || node.metrics.underPressure())
+    )
+      return false;
+    if (placement && this.hibernatingNodes.has(placement.nodeId)) {
+      if (immediate) throw new RemoteKitError('conflict', '节点正在休眠其他会话');
+      return false;
+    }
+    const blocker = this.hibernationBlocker(tenant, snapshot, immediate, relief);
     if (blocker) {
       if (immediate) throw new RemoteKitError('conflict', blocker);
       return false;
     }
-    await this.context.endpoint.hibernate(tenant);
+    const sample = node?.metrics.latest();
+    const predicted = node?.metrics.predicted();
+    this.hibernatingNodes.add(placement!.nodeId);
+    try {
+      await this.context.endpoint.hibernate(tenant);
+    } finally {
+      this.hibernatingNodes.delete(placement!.nodeId);
+    }
+    console.info(
+      'Memory Saver hibernate',
+      JSON.stringify({
+        tenant,
+        node: placement!.nodeId,
+        reason,
+        pressure: sample?.pressure ?? null,
+        predicted: predicted ?? null,
+      }),
+    );
+    this.finishHibernation(tenant);
+    return true;
+  }
+  finishHibernation(tenant: string) {
+    const runtime = this.context.tenants.get(tenant);
+    const state = this.context.store.workspaces.workspace(tenant);
     runtime.resetEndpoint();
     for (const tab of state.tabs)
       if (!isLocalTab(tab)) {
@@ -58,12 +199,15 @@ export class UncertainRecovery {
         tab.restoring = false;
       }
     this.services.operations.saveWorkspace(state);
-    return true;
   }
   retain(tenant: string, views: Set<string>) {
+    for (const key of this.recoveryRetries.keys())
+      if (key.startsWith(tenant + '/') && !views.has(key.slice(tenant.length + 1)))
+        this.recoveryRetries.delete(key);
     this.context.tenants.get(tenant).lifecycle.background.retain(tenant, views);
   }
   forget(tenant: string, key: string) {
+    this.recoveryRetries.delete(key);
     this.context.tenants.get(tenant).lifecycle.background.forget(key);
   }
   remove(tenant: string, viewId: string) {
@@ -167,11 +311,12 @@ export class UncertainRecovery {
         last.succeeded === false &&
         last.action === (attempt.phase === 'unloading' ? 2 : 3)
       )
-        reason = this.lifecycleError(last.detail);
-      else if (
-        (attempt.phase === 'unloading' && attempt.evidence === 'unloaded') ||
-        this.context.clock.wallMs() - attempt.submittedAt > 15000
-      )
+        reason = this.lifecycleError(
+          last.error
+            ? endpointError(last.error)
+            : new RemoteKitError('internal', '页面生命周期结果缺少错误码'),
+        );
+      else if (attempt.phase === 'unloading' && attempt.evidence === 'unloaded')
         reason = '无法确认页面恢复结果，请关闭此标签页后重新打开';
       if (reason) transitionRecovery(tab, { phase: 'failed', reason, attempt });
     }
@@ -194,11 +339,11 @@ export class UncertainRecovery {
     tab.url = nav.previousUrl;
     if (isLocalTab(tab)) tab.loading = false;
     const saved = this.context.store.operations.operation(state.tenantId, nav.operationId);
-    if (!saved || ['committed', 'rejected'].includes(saved.receipt.status)) return;
+    if (!saved || ['committed', 'failed'].includes(saved.receipt.status)) return;
     settle(saved.receipt, { status: 'unknown' });
     saved.receipt.resolved = true;
     saved.receipt.resolution = 'target-retired';
-    saved.receipt.error = '原页面实例已结束，导航执行结果未知';
+    saved.receipt.error = { code: 'outcome_unknown', message: '原页面实例已结束，导航执行结果未知' };
     delete saved.receipt.application;
     this.context.store.operations.saveOperation(state, saved.receipt);
   }
@@ -253,6 +398,10 @@ export class UncertainRecovery {
       this.services.operations.saveWorkspace(workspace);
       return;
     }
+    const retryKey = workspace.tenantId + '/' + tab.webviewId;
+    const identity = JSON.stringify([browserIncarnation, generation, action]);
+    const retry = this.recoveryRetries.get(retryKey);
+    if (retry?.identity === identity && retry.retryAt > this.context.clock.monotonicMs()) return;
     const attempt: RecoveryAttempt =
       action === 'unload'
         ? {
@@ -274,9 +423,25 @@ export class UncertainRecovery {
         browserIncarnation,
         lifecycleGeneration: generation,
       });
-      if (result?.accepted !== true) throw new RemoteKitError('rejected', 'Endpoint 未确认请求');
+      if (result?.accepted !== true) throw new RemoteKitError('outcome_unknown', 'Endpoint 未确认请求');
+      this.recoveryRetries.delete(retryKey);
     } catch (error) {
-      transitionRecovery(tab, { phase: 'failed', reason: this.lifecycleError(error), attempt });
+      const failure = toRemoteKitError(error);
+      const attempts = retry?.identity === identity ? retry.attempts : 0;
+      const delay = retryDelay(failure, attempts);
+      if (delay !== undefined) {
+        this.recoveryRetries.set(retryKey, {
+          identity,
+          retryAt: this.context.clock.monotonicMs() + delay,
+          attempts: attempts + 1,
+        });
+        transitionRecovery(tab, previous);
+        tab.restoring = false;
+        this.services.operations.saveWorkspace(workspace);
+        return;
+      }
+      if (errorHandling(failure.code) === 'reconcile') return;
+      transitionRecovery(tab, { phase: 'failed', reason: this.lifecycleError(failure), attempt });
       tab.restoring = false;
       this.services.operations.saveWorkspace(workspace);
     }
@@ -303,6 +468,7 @@ export class UncertainRecovery {
           state.pendingWindowCloseId === tab.windowId,
         current,
         browserIncarnation,
+        this.context.endpoint.placement.underPressure(tenant),
       );
     if (!action) return;
     const attempt = this.context.tenants.get(tenant).lifecycle.transitions.get(key);
@@ -335,6 +501,7 @@ type BackgroundView = {
 };
 
 export interface MemoryObservation {
+  underPressure?: boolean;
   enabled: boolean;
   visible: boolean;
   protectedByProduct: boolean;
@@ -380,9 +547,9 @@ function advanceMemory(
   return {
     entry: next,
     action:
-      next.eligibleMs >= 120000
+      next.eligibleMs >= (observation.underPressure ? 30000 : 120000)
         ? 'discard'
-        : current.actual === 0 && next.eligibleMs >= 30000
+        : current.actual === 0 && next.eligibleMs >= (observation.underPressure ? 10000 : 30000)
           ? 'freeze'
           : null,
   };
@@ -426,13 +593,14 @@ export class MemorySaverViews {
     protectedByProduct: boolean,
     current: BackgroundView | undefined,
     browserIncarnation: unknown,
+    underPressure = false,
   ) {
     let view = this.views.get(key);
     if (!view) {
       view = new MemorySaver(this.clock);
       this.views.set(key, view);
     }
-    return view.observe({ enabled, visible, protectedByProduct, current, browserIncarnation });
+    return view.observe({ enabled, visible, protectedByProduct, current, browserIncarnation, underPressure });
   }
 }
 

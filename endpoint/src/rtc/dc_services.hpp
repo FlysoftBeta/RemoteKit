@@ -1,6 +1,7 @@
 #pragma once
 #include "protocol/shared_render_slots.h"
 #include "util/wire_error.hpp"
+#include "management/link.hpp"
 #include <json.hpp>
 #include <algorithm>
 #include <cmath>
@@ -50,7 +51,8 @@ class DirectServices {
   struct Pending {
     ServiceJson message;
     double since;
-    bool dispatched = false;
+    bool queued = false;
+    DeliveryFlag delivery = std::make_shared<DeliveryState>();
   };
   mutable std::mutex mutex_;
   uint64_t peer_ = 0;
@@ -77,14 +79,12 @@ class DirectServices {
             {"operationId", request.at("operationId")},
             {"connectionId", connection_},
             {"operationGeneration", request.at("operationGeneration")},
-            {"ok", unknown},
-            {"error",
-             WireError({unknown ? ErrorCode::kOutcomeUnknown : ErrorCode::kUnavailable, error})},
             {"result",
              {{"operationId", request.at("operationId")},
               {"operationGeneration", request.at("operationGeneration")},
-              {"status", unknown ? "unknown" : "rejected"},
-              {"error", error}}}};
+              {"status", unknown ? "unknown" : "failed"},
+              {"error", WireError({unknown ? ErrorCode::kOutcomeUnknown : ErrorCode::kUnavailable,
+                                   error})}}}};
   }
 
  public:
@@ -128,22 +128,22 @@ class DirectServices {
       if (now - item.since >= 15000) {
         // Once forwarded, a timeout cannot prove rejection. Return a queryable
         // uncertain receipt; never replay the operation to obtain another reply.
-        results_.push_back(
-            Failure(item.message,
-                    item.dispatched ? "control_result_unknown" : "control_unavailable",
-                    item.dispatched)
-                .dump());
+        const bool dispatched = item.delivery->CancelAndWasWritten();
+        results_.push_back(Failure(item.message,
+                                   dispatched ? "control_result_unknown" : "control_unavailable",
+                                   dispatched)
+                               .dump());
         it = pending_.erase(it);
         continue;
       }
-      if (!item.dispatched && budget) {
+      if (!item.queued && budget) {
         --budget;
-        if (!dispatch(item.message)) {
+        if (!dispatch(item.message, item.delivery)) {
           results_.push_back(Failure(item.message, "control_unavailable").dump());
           it = pending_.erase(it);
           continue;
         }
-        item.dispatched = true;
+        item.queued = true;
       }
       ++it;
     }

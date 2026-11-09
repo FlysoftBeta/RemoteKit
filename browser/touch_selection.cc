@@ -91,7 +91,7 @@ Status RemoteTouchSelectionMenuRunner::Execute(SessionId session,
                                                const SelectionCommand& value) {
   const auto index = static_cast<size_t>(value.command);
   if (!StateFor(session, view).menu_id || open_->menu.menu_id != value.menu)
-    return {ErrorCode::stale_identity, "Selection menu changed"};
+    return {ErrorCode::kConflict, "Selection menu changed"};
   if (value.command == SelectionCommand::Command::context_menu) {
     auto client = open_->client;
     CloseMenu();
@@ -99,11 +99,11 @@ Status RemoteTouchSelectionMenuRunner::Execute(SessionId session,
     return {};
   }
   if (index >= commands.size())
-    return {ErrorCode::stale_identity, "Selection menu changed"};
+    return {ErrorCode::kConflict, "Selection menu changed"};
   const int command = std::to_underlying(commands[index]);
   auto client = open_->client;
   if (!client->IsCommandIdEnabled(command, open_->can_paste))
-    return {ErrorCode::stale_identity, "Selection menu changed"};
+    return {ErrorCode::kConflict, "Selection menu changed"};
   CloseMenu();
   client->ExecuteCommand(command, 0);
   return {};

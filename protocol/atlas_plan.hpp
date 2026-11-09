@@ -31,9 +31,9 @@ struct Atlas {
 };
 struct AtlasPackResult {
   Atlas value;
-  ErrorCode error = ErrorCode::none;
+  std::optional<ErrorCode> error;
   const char* message = "";
-  explicit operator bool() const { return error == ErrorCode::none; }
+  explicit operator bool() const { return !error; }
 };
 namespace atlas_detail {
 inline bool Intersects(const PixelRect& a, const PixelRect& b) {
@@ -57,18 +57,18 @@ inline AtlasPackResult PackAtlas(int width,
                                  int padding,
                                  const std::vector<PackItem>& items) {
   if (width <= 0 || height <= 0 || padding < 0)
-    return {{}, ErrorCode::invalid_request, "Invalid atlas bounds"};
+    return {{}, ErrorCode::kInvalidRequest, "Invalid atlas bounds"};
   Atlas atlas{width, height, padding, {}};
   std::vector<PixelRect> free{{0, 0, width, height}};
   std::set<std::uint64_t> ids;
   for (const auto& item : items) {
     if (!ids.insert(item.view).second || item.width <= 0 || item.height <= 0 ||
         !std::isfinite(item.scale) || item.scale <= 0)
-      return {{}, ErrorCode::invalid_request, "Invalid or duplicate pack item"};
+      return {{}, ErrorCode::kInvalidRequest, "Invalid or duplicate pack item"};
     const auto wide = static_cast<std::int64_t>(item.width) + 2LL * padding,
                high = static_cast<std::int64_t>(item.height) + 2LL * padding;
     if (wide > width || high > height)
-      return {{}, ErrorCode::resource_limit, "Item exceeds atlas bounds"};
+      return {{}, ErrorCode::kLimitExceeded, "Item exceeds atlas bounds"};
     int w = static_cast<int>(wide), h = static_cast<int>(high);
     std::optional<PixelRect> chosen;
     auto best = std::tuple{std::numeric_limits<int>::max(), std::numeric_limits<int>::max(),
@@ -83,7 +83,7 @@ inline AtlasPackResult PackAtlas(int width,
         }
       }
     if (!chosen)
-      return {{}, ErrorCode::resource_limit, "Atlas packing failed"};
+      return {{}, ErrorCode::kLimitExceeded, "Atlas packing failed"};
     const auto used = *chosen;
     std::vector<PixelRect> next;
     for (const auto& f : free) {

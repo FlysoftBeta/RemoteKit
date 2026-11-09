@@ -170,12 +170,12 @@ try {
     assert.ok(imapConnections > 0, 'Bundled ImapFlow client reached the local TCP server');
     assert.equal(state.configured, true);
     assert.ok(state.lastErrorAt);
-    assert.match(state.lastError, /TLS|socket|closed|ECONNRESET/i);
+    assert.equal(state.errorCode, 'unavailable');
     assert.doesNotMatch(state.lastError, /Dynamic require|Cannot find module|not defined/);
     assert.ok(smtpConnections > 0, 'Bundled nodemailer reached the local TCP server');
     assert.equal(state.outbox.pending, 1);
     assert.ok(state.outbox.lastErrorAt);
-    assert.match(state.outbox.lastError, /TLS|socket|closed|ECONNRESET/i);
+    assert.equal(state.outbox.errorCode, 'outcome_unknown');
     assert.doesNotMatch(state.outbox.lastError, /Dynamic require|Cannot find module|not defined/);
   } finally {
     socket.terminate();

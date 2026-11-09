@@ -22,18 +22,15 @@ void InputController::ReplyInput(Json reply, const Json& request, uint64_t stamp
   } else if (request.is_object() && request.contains("sequence")) {
     reply["clientSequence"] = request["sequence"];
   }
-  if (!reply.value("ok", false) && reply.contains("code")) {
-    reply["error"] = WireError(BrowserRpc::ReplyError(reply));
-    reply.erase("code");
-    reply.erase("detail");
-  }
   hooks_.send(reply, stamp);
 }
 
-void InputController::RejectInput(const char* error, const Json& request, const Event& event) {
+void InputController::RejectInput(ErrorCode code,
+                                  const char* error,
+                                  const Json& request,
+                                  const Event& event) {
   ++input_rejected;
-  ReplyInput({{"ok", false}, {"error", WireError({InputRejectionCode(error), error})}}, request,
-             event.authorization);
+  ReplyInput({{"ok", false}, {"error", WireError({code, error})}}, request, event.authorization);
 }
 
 void InputController::HandleData(const Event& event) {
@@ -68,18 +65,18 @@ void InputController::HandleData(const Event& event) {
     return;
   }
   if (!admitted()) {
-    RejectInput("input_not_authorized", request, event);
+    RejectInput(ErrorCode::kForbidden, "input_not_authorized", request, event);
     return;
   }
   const auto request_epoch = hooks_.epoch();
   if (command.value("layoutEpoch", std::string()) != std::to_string(request_epoch)) {
-    RejectInput("stale_layout_epoch", request, event);
+    RejectInput(ErrorCode::kConflict, "stale_layout_epoch", request, event);
     return;
   }
   command.erase("layoutEpoch");
   command.erase("focusRequestId");
   if (command.value("session", std::string()) != session_id_) {
-    RejectInput("wrong_session", request, event);
+    RejectInput(ErrorCode::kForbidden, "wrong_session", request, event);
     return;
   }
   if (type == "input" && command.contains("event") && command["event"].is_object()) {
@@ -87,7 +84,7 @@ void InputController::HandleData(const Event& event) {
     if ((event_type == "mouse" || event_type == "wheel" || event_type == "touch" ||
          event_type == "gesture") &&
         !hooks_.allows(command.value("view", std::string()), request_epoch)) {
-      RejectInput("view_not_ready", request, event);
+      RejectInput(ErrorCode::kConflict, "view_not_ready", request, event);
       return;
     }
   }
@@ -96,7 +93,7 @@ void InputController::HandleData(const Event& event) {
   if (type == "input") {
     const auto sequence = input_sequence.NextBrowser();
     if (!sequence) {
-      RejectInput("input_sequence_exhausted", request, event);
+      RejectInput(ErrorCode::kInternal, "input_sequence_exhausted", request, event);
       return;
     }
     command["sequence"] = std::to_string(*sequence);
@@ -160,7 +157,7 @@ void InputController::QueueInput(const Event& event) {
     return;
   // A Session keyboard layout can arrive before the first input-ready frame.
   if (type != "keyboard.layout" && hooks_.input_stamp() != event.authorization) {
-    RejectInput("input_not_authorized", parsed, event);
+    RejectInput(ErrorCode::kForbidden, "input_not_authorized", parsed, event);
     return;
   }
   // Validate arrival order before move coalescing can replace a newer packet.
@@ -168,7 +165,7 @@ void InputController::QueueInput(const Event& event) {
   if (type == "input" &&
       (!parsed.contains("sequence") || !parsed["sequence"].is_string() ||
        !input_sequence.Admit(event.peer, parsed["sequence"].get<std::string>()))) {
-    RejectInput("stale_client_sequence", parsed, event);
+    RejectInput(ErrorCode::kConflict, "stale_client_sequence", parsed, event);
     return;
   }
   bool move = !parsed.is_discarded() && parsed.value("type", std::string()) == "input" &&
@@ -188,7 +185,7 @@ void InputController::QueueInput(const Event& event) {
     }
   }
   if (input_queue.size() >= 256) {
-    RejectInput("input_queue_busy", parsed, event);
+    RejectInput(ErrorCode::kBusy, "input_queue_busy", parsed, event);
     return;
   }
   if (event.trace_input_sequence) {
@@ -226,11 +223,8 @@ void InputController::InputLoop() {
       });
       if (!handled && hooks_.admitted(*event)) {
         ++input_rejected;
-        ReplyInput({{"ok", false},
-                    {"error",
-                     {{"code", ErrorCodeName(handled.error().code)},
-                      {"message", handled.error().message}}}},
-                   event->message, event->authorization);
+        ReplyInput({{"ok", false}, {"error", WireError(handled.error())}}, event->message,
+                   event->authorization);
       }
     }
   }

@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../../shared/errors';
 import { MAX_CIPHERTEXT, MAX_TRANSPORT } from './noise';
 
 export const MAX_JSON = 1024 * 1024;
@@ -17,13 +18,14 @@ export function jsonObject(bytes: Buffer): Record<string, any> {
 }
 export function encodeJson(value: object): Buffer {
   const json = Buffer.from(JSON.stringify(value));
-  if (json.length > jsonLimit(value as Record<string, unknown>)) throw new Error('JSON frame too large');
+  if (json.length > jsonLimit(value as Record<string, unknown>))
+    throw new RemoteKitError('limit_exceeded', '请求数据超过传输上限', { detail: 'JSON frame too large' });
   return Buffer.concat([Buffer.from([1]), json]);
 }
 export function encodeBinary(header: object, bytes: Buffer): Buffer {
   const json = Buffer.from(JSON.stringify(header));
   if (json.length > MAX_JSON || json.length + bytes.length + 5 > MAX_TRANSPORT)
-    throw new Error('Binary frame too large');
+    throw new RemoteKitError('limit_exceeded', '文件数据超过传输上限', { detail: 'Binary frame too large' });
   const prefix = Buffer.alloc(5);
   prefix[0] = 2;
   prefix.writeUInt32LE(json.length, 1);

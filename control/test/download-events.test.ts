@@ -159,7 +159,7 @@ test('failed downloads only log and acknowledge; a failed catalog commit never a
     eventId: 'failed',
     name: 'report.pdf',
     origin: '',
-    reason: 'quota_exceeded',
+    error: { code: 'limit_exceeded', message: 'Storage quota exceeded', reason: 'storage_quota_exceeded' },
   };
   await f.consume([failed]);
   assert.equal(f.repository.snapshot('tenant').entries.length, 0);

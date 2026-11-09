@@ -237,7 +237,7 @@ def main():
                 old = bytearray(saved[view])
                 magic_length = struct.unpack_from("<I", old, 4)[0]
                 struct.pack_into("<i", old, 8 + ((magic_length + 3) & ~3), 1)
-                assert second.import_state(view, old, ok=False)["code"] == 5
+                assert second.import_state(view, old, ok=False)["error"]["code"] == "invalid_request"
             second.import_state(view, saved[view])
         second.rpc("storage.scavenge")
         for view in saved:

@@ -1,3 +1,4 @@
+import { retryDelay } from '../../../shared/error-policy';
 import { ErrorOutline } from '@mui/icons-material';
 import { ButtonBase, CircularProgress, Tooltip } from '@mui/material';
 import { useState } from 'react';
@@ -23,7 +24,7 @@ function SaveIcon({
   if (error || attachment.save.state === 'failed')
     return (
       <Tooltip
-        title={`${error || (attachment.save.state === 'failed' ? attachment.save.message : '保存失败')} · 点击重试`}
+        title={`${error || (attachment.save.state === 'failed' ? attachment.save.message : '保存失败')} · 请查看错误提示`}
       >
         <ErrorOutline className="learning-error" fontSize="small" />
       </Tooltip>
@@ -109,6 +110,10 @@ export function AttachmentRow({
   const [error, setError] = useState('');
   const [saved, setSaved] = useState<string>();
   const entryId = saved ?? (attachment.save.state === 'saved' ? attachment.save.entryId : undefined);
+  const retryable =
+    attachment.save.state !== 'failed' ||
+    retryDelay({ code: attachment.save.code }, 0) !== undefined ||
+    attachment.save.code === 'limit_exceeded';
   const show = async () => {
     setBusy(true);
     setError('');
@@ -131,7 +136,7 @@ export function AttachmentRow({
       secondary={formatFileSize(attachment.sizeBytes ?? 0)}
       busy={busy}
       error={error}
-      disabled={!library.online || busy}
+      disabled={!library.online || busy || !retryable}
       onClick={() => void show()}
     />
   );

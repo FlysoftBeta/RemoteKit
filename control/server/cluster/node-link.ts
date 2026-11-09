@@ -1,3 +1,4 @@
+import { diskFloor } from './disk';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -8,7 +9,7 @@ import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import { EndpointLog } from './endpoint-log';
 import { MetricsHistory } from './metrics';
-import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError, wireError, parseWireError } from '../../shared/errors';
 import type { ConfiguredNode, NodeConfig } from '../config';
 import { readyTransition, type EndpointLink, type EndpointLinkState } from '../endpoint/link';
 import type { ClipboardChangedEvent, ClientActionEvent, RtcSignal } from '../endpoint/types';
@@ -97,6 +98,7 @@ interface Connection {
   epoch: string;
 }
 interface Pending {
+  delivered: boolean;
   epoch: string;
   resolve(value: unknown): void;
   reject(error: unknown): void;
@@ -125,6 +127,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   readonly metrics: MetricsHistory;
   buildId?: string;
   diskDraining = false;
+  reliefRequestedAt?: number;
   private incoming = 0;
   private current?: Connection;
   private incarnation?: string;
@@ -132,6 +135,8 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   private child?: ChildProcessWithoutNullStreams;
   private retry?: NodeJS.Timeout;
   private stopped = false;
+  private launchFailures = 0;
+  private healthySince?: number;
   constructor(
     readonly nodeId: string,
     readonly configured: ConfiguredNode,
@@ -139,7 +144,12 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   ) {
     super();
     this.config = configured.config;
-    this.metrics = new MetricsHistory(this.config.maxSessions);
+    this.metrics = new MetricsHistory(this.config.maxSessions, () =>
+      this.registry
+        .all()
+        .filter((node) => node.state.state === 'ready' && !this.registry.isRemoved(node.nodeId))
+        .map((node) => node.metrics),
+    );
   }
   onClientAction(listener: (event: ClientActionEvent) => void) {
     this.on('client.action', listener);
@@ -184,7 +194,13 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       if (this.child === child) this.child = undefined;
       this.events = { ...this.events, exited: { code, at: Date.now() } };
       if (!this.current) this.state = { state: 'offline' };
-      if (!this.stopped) this.retry = setTimeout(() => this.start(), code === 4 ? 0 : 1500);
+      if (this.healthySince !== undefined && Date.now() - this.healthySince >= 60_000)
+        this.launchFailures = 0;
+      this.healthySince = undefined;
+      if (!this.stopped && code !== 1 && code !== 3) {
+        const delay = code === 4 ? 0 : Math.min(60_000, 1500 * 2 ** Math.min(this.launchFailures++, 6));
+        this.retry = setTimeout(() => this.start(), delay);
+      }
     };
     child.once('error', () => exited(null));
     child.once('exit', exited);
@@ -203,6 +219,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     this.current = connection;
     this.incarnation = incarnation;
     this.metrics.clear();
+    this.healthySince = Date.now();
     this.buildId = this.registry.options.buildId;
     this.state = transition.state;
     this.events = { connectedAt: Date.now() };
@@ -213,9 +230,11 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     if (message.event === 'node.metrics') {
       const { event, ...metrics } = message;
       this.metrics.record(metrics as any);
-      const free = this.metrics.latest()!.value.disk.free;
-      if (free < this.config.diskReserveBytes) this.diskDraining = true;
-      if (free >= 2 * this.config.diskReserveBytes) this.diskDraining = false;
+      const sample = this.metrics.latest()!;
+      const free = sample.value.disk.free;
+      const floor = diskFloor(this, sample);
+      if (free < floor) this.diskDraining = true;
+      if (free >= 2 * floor) this.diskDraining = false;
       this.registry.emit('metrics', this.nodeId);
       return;
     }
@@ -231,7 +250,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
           bytes = encodeJson({
             id: message.id,
             ok: false,
-            error: { code: 'limit_exceeded', message: 'Node reply too large' },
+            error: { code: 'outcome_unknown', message: 'Node reply could not be encoded after execution' },
           });
         }
         try {
@@ -243,20 +262,26 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         }
       };
       if (this.incoming >= 256 || connection.carrier.bufferedAmount > 2 * MAX_JSON) {
-        respond({ ok: false, error: { code: 'unavailable', message: 'Too many node requests' } });
+        respond({ ok: false, error: { code: 'busy', message: 'Too many node requests' } });
         return;
       }
       this.incoming++;
       let timer: NodeJS.Timeout;
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(
-          () => reject(new RemoteKitError('outcome_unknown', 'Node request timed out')),
+          () =>
+            reject(
+              new RemoteKitError('outcome_unknown', '节点请求结果待确认', {
+                detail: 'Node request timed out',
+              }),
+            ),
           Math.max(1, Math.min(20000, this.registry.options.requestTimeoutMs ?? 20000)),
         );
       });
       void Promise.race([
         Promise.resolve().then(() => {
-          if (this.current !== connection) throw new RemoteKitError('unavailable', 'Node disconnected');
+          if (this.current !== connection)
+            throw new RemoteKitError('unavailable', '节点连接已断开', { detail: 'Node disconnected' });
           return this.registry.dispatch(this, message);
         }),
         timeout,
@@ -265,7 +290,10 @@ export class NodeLink extends EventEmitter implements EndpointLink {
           (result) => respond({ ok: true, result }),
           (error) => {
             const failure = toRemoteKitError(error);
-            respond({ ok: false, error: { code: failure.code, message: failure.message } });
+            respond({
+              ok: false,
+              error: { ...wireError(failure), ...(failure.reason ? { reason: failure.reason } : {}) },
+            });
           },
         )
         .finally(() => {
@@ -316,18 +344,32 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     clearTimeout(pending.timer);
     this.pending.delete(message.id);
     if (message.ok) pending.resolve(message.result);
-    else pending.reject(message.error ?? { code: 'rejected', message: 'Node rejected request' });
+    else
+      pending.reject(
+        parseWireError(message.error)
+          ? message.error
+          : { code: 'outcome_unknown', message: 'Node returned an invalid error envelope' },
+      );
   }
   async sendBinary(header: object, bytes: Buffer, epoch: string) {
     const connection = this.current;
     if (!connection || connection.epoch !== epoch)
-      throw new RemoteKitError('unavailable', 'Node connection changed');
+      throw new RemoteKitError('unavailable', '节点连接已改变', { detail: 'Node connection changed' });
+    if (connection.transport.send.closed) throw new RemoteKitError('unavailable', '节点加密通道已关闭');
+    let encrypted: Buffer;
     try {
-      await connection.carrier.send(connection.transport.send.encrypt(encodeBinary(header, bytes)));
+      encrypted = connection.transport.send.encrypt(encodeBinary(header, bytes));
+    } catch (error) {
+      throw error instanceof RemoteKitError
+        ? error
+        : new RemoteKitError('internal', '文件数据编码失败', { detail: String(error) });
+    }
+    try {
+      await connection.carrier.send(encrypted);
     } catch {
       this.disconnect(connection);
       connection.carrier.close();
-      throw new RemoteKitError('unavailable', 'Object chunk delivery failed');
+      throw new RemoteKitError('unavailable', '文件数据发送失败', { detail: 'Object chunk delivery failed' });
     }
   }
   request(
@@ -338,31 +380,61 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   ): Promise<any> {
     const connection = this.current;
     if (this.stopped || !connection)
-      return Promise.reject(new RemoteKitError('unavailable', 'Node is offline'));
+      return Promise.reject(new RemoteKitError('unavailable', '节点离线', { detail: 'Node is offline' }));
     if (this.pending.size >= 256 || connection.carrier.bufferedAmount > 2 * MAX_JSON)
-      return Promise.reject(new RemoteKitError('unavailable', 'Node has too many requests'));
+      return Promise.reject(new RemoteKitError('busy', '节点请求繁忙'));
     const id = randomUUID();
     let message: Buffer;
     try {
       message = encodeJson({ ...args, id, method, tenantId });
-    } catch {
-      return Promise.reject(new RemoteKitError('limit_exceeded', 'Node request too large'));
+    } catch (error) {
+      return Promise.reject(
+        error instanceof RemoteKitError
+          ? error
+          : new RemoteKitError('internal', '节点请求无法编码', { detail: String(error) }),
+      );
+    }
+    if (connection.transport.send.closed)
+      return Promise.reject(new RemoteKitError('unavailable', '节点加密通道已关闭'));
+    let encrypted: Buffer;
+    try {
+      encrypted = connection.transport.send.encrypt(message);
+    } catch (error) {
+      return Promise.reject(new RemoteKitError('internal', '节点请求编码失败', { detail: String(error) }));
     }
     return new Promise((resolve, reject) => {
+      const pending: Pending = {
+        epoch: connection.epoch,
+        delivered: false,
+        resolve,
+        reject,
+        timer: undefined!,
+      };
       const timer = setTimeout(
         () => {
           this.pending.delete(id);
-          reject(new RemoteKitError('outcome_unknown', 'Node request timed out', method));
+          if (!pending.delivered) {
+            this.disconnect(connection);
+            connection.carrier.close();
+          }
+          reject(
+            new RemoteKitError(pending.delivered ? 'outcome_unknown' : 'unavailable', '节点请求未获确认', {
+              detail: method,
+            }),
+          );
         },
         timeoutMs ?? Math.max(1, Math.min(20000, this.registry.options.requestTimeoutMs ?? 20000)),
       );
-      this.pending.set(id, { epoch: connection.epoch, resolve, reject, timer });
+      pending.timer = timer;
+      this.pending.set(id, pending);
       const failed = () => {
         this.disconnect(connection);
         connection.carrier.close();
       };
       try {
-        void connection.carrier.send(connection.transport.send.encrypt(message)).catch(failed);
+        void connection.carrier.send(encrypted).then(() => {
+          pending.delivered = true;
+        }, failed);
       } catch {
         failed();
       }
@@ -372,11 +444,15 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     if (this.current !== connection) return;
     this.current = undefined;
     this.state = { state: 'offline' };
+    if (this.healthySince !== undefined && Date.now() - this.healthySince >= 60_000) this.launchFailures = 0;
+    this.healthySince = undefined;
     this.events = { ...this.events, disconnectedAt: Date.now() };
     for (const [id, pending] of this.pending) {
       if (pending.epoch !== connection.epoch) continue;
       clearTimeout(pending.timer);
-      pending.reject(new RemoteKitError('outcome_unknown', 'Node disconnected'));
+      pending.reject(
+        new RemoteKitError(pending.delivered ? 'outcome_unknown' : 'unavailable', '节点连接已断开'),
+      );
       this.pending.delete(id);
     }
     this.emit('offline');
@@ -415,7 +491,8 @@ export class NodeRegistry extends EventEmitter {
   readonly handlers = new Map<string, (node: NodeLink, message: Record<string, any>) => unknown>();
   dispatch(node: NodeLink, message: Record<string, any>) {
     const handler = this.handlers.get(message.request);
-    if (!handler) throw new RemoteKitError('invalid_request', 'Unknown node request');
+    if (!handler)
+      throw new RemoteKitError('invalid_request', '不支持的节点请求', { detail: 'Unknown node request' });
     return handler(node, message);
   }
   private readonly links = new Map<string, NodeLink>();
@@ -555,11 +632,39 @@ export class NodeRegistry extends EventEmitter {
             !Number.isSafeInteger(message.offset) ||
             message.offset < 0 ||
             message.offset > release.descriptor.size
-          )
-            throw new Error('Invalid package request');
+          ) {
+            const error = new RemoteKitError(
+              downloading
+                ? 'busy'
+                : message.buildId !== release.descriptor.buildId
+                  ? 'not_found'
+                  : 'invalid_request',
+              downloading ? 'Package transfer is active' : 'Release request cannot be served',
+            );
+            void carrier
+              .send(
+                connection.transport.send.encrypt(
+                  encodeJson({ type: 'package.error', error: wireError(error) }),
+                ),
+              )
+              .catch(() => carrier.close());
+            return;
+          }
           downloading = true;
           void this.sendPackage(connection, message.offset)
-            .catch(() => carrier.close())
+            .catch(async (error) => {
+              const failure =
+                error instanceof RemoteKitError
+                  ? error
+                  : new RemoteKitError('unavailable', '无法读取发布包', { detail: String(error) });
+              await carrier
+                .send(
+                  connection!.transport.send.encrypt(
+                    encodeJson({ type: 'package.error', error: wireError(failure) }),
+                  ),
+                )
+                .catch(() => carrier.close());
+            })
             .finally(() => {
               downloading = false;
             });
@@ -581,7 +686,8 @@ export class NodeRegistry extends EventEmitter {
           Math.min(buffer.length, release.descriptor.size - offset),
           offset,
         );
-        if (!bytesRead) throw new Error('Truncated package');
+        if (!bytesRead)
+          throw new RemoteKitError('internal', '发布包不完整', { detail: 'Release package is truncated' });
         await connection.carrier.send(
           connection.transport.send.encrypt(
             encodeBinary({ type: 'package.chunk', offset }, buffer.subarray(0, bytesRead)),

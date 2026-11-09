@@ -34,15 +34,19 @@ constexpr char kThumbnailOutputError[] = "photo_output_failed";
 constexpr int kSignatureSize = 24;
 
 Result<void> Check(HRESULT result, const char* error = "invalid-photo") {
-  if (FAILED(result))
-    return Error{ErrorCode::kInvalidRequest, error};
+  if (FAILED(result)) {
+    if (result == WINCODEC_ERR_BADIMAGE || result == WINCODEC_ERR_BADHEADER ||
+        result == WINCODEC_ERR_UNKNOWNIMAGEFORMAT || result == WINCODEC_ERR_COMPONENTNOTFOUND)
+      return Error{ErrorCode::kRejected, error};
+    return Error{ErrorCode::kUnavailable, error};
+  }
 
   return {};
 }
 
 Result<void> CheckCancelled(const PhotoCancelled& cancelled) {
   if (cancelled && cancelled())
-    return Error{ErrorCode::kInvalidRequest, "cancelled"};
+    return Error{ErrorCode::kCanceled, "Photo processing canceled"};
 
   return {};
 }
@@ -170,12 +174,12 @@ Result<cv::Mat> DecodeMemory(IWICImagingFactory& factory,
   const char* too_large = thumbnail ? "photo_too_large" : "photo-too-large";
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   if (compressed.size() < 8)
-    return Error{ErrorCode::kInvalidRequest, invalid};
+    return Error{ErrorCode::kRejected, invalid};
   constexpr std::array<BYTE, 8> png_signature{137, 80, 78, 71, 13, 10, 26, 10};
   const bool jpeg = compressed[0] == 0xff && compressed[1] == 0xd8 && compressed[2] == 0xff;
   if (!jpeg &&
       (analysis || !std::equal(png_signature.begin(), png_signature.end(), compressed.begin())))
-    return Error{ErrorCode::kInvalidRequest, invalid};
+    return Error{ErrorCode::kRejected, invalid};
 
   ComPtr<IWICStream> stream;
   ComPtr<IWICBitmapDecoder> decoder;
@@ -185,15 +189,16 @@ Result<cv::Mat> DecodeMemory(IWICImagingFactory& factory,
   RK_RETURN_IF_ERROR(Check(stream->InitializeFromMemory(const_cast<BYTE*>(compressed.data()),
                                                         static_cast<DWORD>(compressed.size())),
                            invalid));
-  Check(factory.CreateDecoder(jpeg ? GUID_ContainerFormatJpeg : GUID_ContainerFormatPng,
-                              &GUID_VendorMicrosoft, &decoder),
-        invalid);
+  RK_RETURN_IF_ERROR(
+      Check(factory.CreateDecoder(jpeg ? GUID_ContainerFormatJpeg : GUID_ContainerFormatPng,
+                                  &GUID_VendorMicrosoft, &decoder),
+            invalid));
   RK_RETURN_IF_ERROR(
       Check(decoder->Initialize(stream.Get(), WICDecodeMetadataCacheOnDemand), invalid));
   UINT frame_count = 0;
   RK_RETURN_IF_ERROR(Check(decoder->GetFrameCount(&frame_count), invalid));
   if (frame_count != 1)
-    return Error{ErrorCode::kInvalidRequest, invalid};
+    return Error{ErrorCode::kRejected, invalid};
   RK_RETURN_IF_ERROR(Check(decoder->GetFrame(0, &frame), invalid));
   UINT width = 0, height = 0;
   RK_RETURN_IF_ERROR(Check(frame->GetSize(&width, &height), invalid));
@@ -204,16 +209,16 @@ Result<cv::Mat> DecodeMemory(IWICImagingFactory& factory,
     return Error{ErrorCode::kLimitExceeded, too_large};
   const UINT min_dimension = thumbnail ? 1 : analysis ? 16 : 32;
   if (width < min_dimension || height < min_dimension)
-    return Error{ErrorCode::kInvalidRequest, invalid};
+    return Error{ErrorCode::kRejected, invalid};
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   ComPtr<IWICFormatConverter> converter;
   const bool flatten_alpha = !jpeg;
   RK_RETURN_IF_ERROR(Check(factory.CreateFormatConverter(&converter), invalid));
-  Check(
+  RK_RETURN_IF_ERROR(Check(
       converter->Initialize(
           frame.Get(), flatten_alpha ? GUID_WICPixelFormat32bppPBGRA : GUID_WICPixelFormat24bppBGR,
           WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom),
-      invalid);
+      invalid));
   IWICBitmapSource* pixels = converter.Get();
   ComPtr<IWICBitmapScaler> scaler;
   const UINT longest = std::max(width, height);
@@ -221,7 +226,8 @@ Result<cv::Mat> DecodeMemory(IWICImagingFactory& factory,
     width = ScaleSide(width, longest, kThumbnailSide);
     height = ScaleSide(height, longest, kThumbnailSide);
     RK_RETURN_IF_ERROR(Check(factory.CreateBitmapScaler(&scaler), invalid));
-    Check(scaler->Initialize(pixels, width, height, WICBitmapInterpolationModeFant), invalid);
+    RK_RETURN_IF_ERROR(
+        Check(scaler->Initialize(pixels, width, height, WICBitmapInterpolationModeFant), invalid));
     pixels = scaler.Get();
   }
   cv::Mat image(static_cast<int>(height), static_cast<int>(width),
@@ -260,15 +266,17 @@ Result<cv::Mat> Decode(IWICImagingFactory& factory,
   const char* invalid = thumbnail ? "invalid_photo" : "invalid-photo";
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   std::ifstream input(path, std::ios::binary | std::ios::ate);
-  if (!input || input.tellg() < 8)
-    return Error{ErrorCode::kInvalidRequest, invalid};
+  if (!input)
+    return Error{ErrorCode::kUnavailable, "Cannot open photo input"};
+  if (input.tellg() < 8)
+    return Error{ErrorCode::kRejected, invalid};
   const std::streamoff bytes = input.tellg();
   if (bytes > kMaxCompressedBytes)
     return Error{ErrorCode::kLimitExceeded, thumbnail ? "photo_too_large" : "photo-too-large"};
   std::vector<BYTE> compressed(static_cast<std::size_t>(bytes));
   input.seekg(0);
   if (!input.read(reinterpret_cast<char*>(compressed.data()), bytes))
-    return Error{ErrorCode::kInvalidRequest, invalid};
+    return Error{ErrorCode::kUnavailable, "Cannot read photo input"};
   return DecodeMemory(factory, compressed, cancelled, thumbnail, false);
 }
 
@@ -282,7 +290,7 @@ Result<void> EncodeJpeg(IWICImagingFactory& factory,
   ComPtr<IPropertyBag2> properties;
   RK_RETURN_IF_ERROR(Check(
       factory.CreateEncoder(GUID_ContainerFormatJpeg, &GUID_VendorMicrosoft, &encoder), error));
-  Check(encoder->Initialize(&stream, WICBitmapEncoderNoCache), error);
+  RK_RETURN_IF_ERROR(Check(encoder->Initialize(&stream, WICBitmapEncoderNoCache), error));
   RK_RETURN_IF_ERROR(Check(encoder->CreateNewFrame(&frame, &properties), error));
   wchar_t quality_name[] = L"ImageQuality";
   PROPBAG2 option{};
@@ -291,17 +299,17 @@ Result<void> EncodeJpeg(IWICImagingFactory& factory,
   quality.vt = VT_R4;
   quality.fltVal = compression_quality;
   RK_RETURN_IF_ERROR(Check(properties->Write(1, &option, &quality), error));
-  Check(frame->Initialize(properties.Get()), error);
+  RK_RETURN_IF_ERROR(Check(frame->Initialize(properties.Get()), error));
   RK_RETURN_IF_ERROR(Check(frame->SetSize(image.cols, image.rows), error));
   WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
   RK_RETURN_IF_ERROR(Check(frame->SetPixelFormat(&format), error));
   if (format != GUID_WICPixelFormat24bppBGR)
-    return Error{ErrorCode::kInvalidRequest, error};
+    return Error{ErrorCode::kInternal, error};
   RK_RETURN_IF_ERROR(
       Check(frame->WritePixels(image.rows, static_cast<UINT>(image.step),
                                static_cast<UINT>(image.total() * image.elemSize()), image.data),
             error));
-  Check(frame->Commit(), error);
+  RK_RETURN_IF_ERROR(Check(frame->Commit(), error));
   RK_RETURN_IF_ERROR(Check(encoder->Commit(), error));
 
   return {};
@@ -314,19 +322,19 @@ Result<void> EncodePng(IWICImagingFactory& factory,
   constexpr char error[] = "photo-output-failed";
   ComPtr<IWICStream> stream;
   RK_RETURN_IF_ERROR(Check(factory.CreateStream(&stream), error));
-  Check(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE), error);
+  RK_RETURN_IF_ERROR(Check(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE), error));
   ComPtr<IWICBitmapEncoder> encoder;
   ComPtr<IWICBitmapFrameEncode> frame;
   RK_RETURN_IF_ERROR(Check(
       factory.CreateEncoder(GUID_ContainerFormatPng, &GUID_VendorMicrosoft, &encoder), error));
-  Check(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache), error);
+  RK_RETURN_IF_ERROR(Check(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache), error));
   RK_RETURN_IF_ERROR(Check(encoder->CreateNewFrame(&frame, nullptr), error));
-  Check(frame->Initialize(nullptr), error);
+  RK_RETURN_IF_ERROR(Check(frame->Initialize(nullptr), error));
   RK_RETURN_IF_ERROR(Check(frame->SetSize(image.cols, image.rows), error));
   auto format = GUID_WICPixelFormat24bppBGR;
   RK_RETURN_IF_ERROR(Check(frame->SetPixelFormat(&format), error));
   if (format != GUID_WICPixelFormat24bppBGR)
-    return Error{ErrorCode::kInvalidRequest, error};
+    return Error{ErrorCode::kInternal, error};
   const auto stride = static_cast<UINT>(image.step);
   for (int y = 0; y < image.rows; y += 64) {
     RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
@@ -334,12 +342,12 @@ Result<void> EncodePng(IWICImagingFactory& factory,
     RK_RETURN_IF_ERROR(Check(
         frame->WritePixels(rows, stride, rows * stride, const_cast<BYTE*>(image.ptr(y))), error));
   }
-  Check(frame->Commit(), error);
+  RK_RETURN_IF_ERROR(Check(frame->Commit(), error));
   RK_RETURN_IF_ERROR(Check(encoder->Commit(), error));
   STATSTG info{};
   RK_RETURN_IF_ERROR(Check(stream->Stat(&info, STATFLAG_NONAME), error));
   if (info.cbSize.QuadPart > kMaxCompressedBytes)
-    return Error{ErrorCode::kInvalidRequest, error};
+    return Error{ErrorCode::kLimitExceeded, error, ErrorReason::kFileTooLarge};
 
   return {};
 }
@@ -378,23 +386,23 @@ Result<void> WriteThumbnail(IWICImagingFactory& factory,
         continue;
       const auto size = static_cast<ULONG>(info.cbSize.QuadPart);
       if (!size)
-        return Error{ErrorCode::kInvalidRequest, kThumbnailOutputError};
+        return Error{ErrorCode::kInternal, kThumbnailOutputError};
       std::vector<char> encoded(size);
       RK_RETURN_IF_ERROR(Check(stream->Seek({}, STREAM_SEEK_SET, nullptr), kThumbnailOutputError));
       ULONG read = 0;
       RK_RETURN_IF_ERROR(Check(stream->Read(encoded.data(), size, &read), kThumbnailOutputError));
       if (read != size)
-        return Error{ErrorCode::kInvalidRequest, kThumbnailOutputError};
+        return Error{ErrorCode::kInternal, kThumbnailOutputError};
       RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
       std::ofstream file(output, std::ios::binary | std::ios::trunc);
       file.write(encoded.data(), size);
       file.close();
       if (!file)
-        return Error{ErrorCode::kInvalidRequest, kThumbnailOutputError};
+        return Error{ErrorCode::kUnavailable, kThumbnailOutputError};
       return {};
     }
   }
-  return Error{ErrorCode::kInvalidRequest, kThumbnailOutputError};
+  return Error{ErrorCode::kLimitExceeded, kThumbnailOutputError, ErrorReason::kFileTooLarge};
 }
 
 double Median(std::vector<double> values) {
@@ -919,13 +927,14 @@ Result<PhotoBurstDecision> PhotoBurstAnalyzer::Observe(const std::string& frame_
                                                        const std::vector<std::string>& available,
                                                        const PhotoCancelled& cancelled) {
   if (impl_->seen.size() >= 20)
-    return Error{ErrorCode::kInvalidRequest, "invalid-photo-count"};
+    return Error{ErrorCode::kLimitExceeded, "invalid-photo-count"};
   if (frame_id.empty() || frame_id.size() > 128 || available.size() > 3 ||
       std::find(available.begin(), available.end(), frame_id) == available.end() ||
       std::find(impl_->seen.begin(), impl_->seen.end(), frame_id) != impl_->seen.end())
     return Error{ErrorCode::kInvalidRequest, "invalid-photo-frame"};
   if (encoded.size() > kMaxAnalysisBytes)
-    return Error{ErrorCode::kInvalidRequest, "photo-too-large"};
+    return Error{ErrorCode::kLimitExceeded, "Photo sample exceeds byte limit",
+                 ErrorReason::kFileTooLarge};
   Imaging imaging;
   RK_RETURN_IF_ERROR(imaging.Open());
   RK_ASSIGN_OR_RETURN(image, DecodeMemory(*imaging.factory.Get(), encoded, cancelled, false, true));
@@ -963,14 +972,16 @@ Result<PhotoBurstDecision> PhotoBurstAnalyzer::Observe(const std::string& frame_
 
 Result<PhotoBurstDecision> PhotoBurstAnalyzer::Finish(const std::vector<std::string>& available) {
   if (available.size() > 3)
-    return Error{ErrorCode::kInvalidRequest, "invalid-photo-frame"};
+    return Error{ErrorCode::kLimitExceeded, "Too many retained photo frames"};
   impl_->Prune(available);
   return impl_->Decide(false);
 }
 
 Result<PhotoRankResult> RankPhotos(std::span<const std::filesystem::path> inputs,
                                    const PhotoCancelled& cancelled) {
-  if (inputs.empty() || inputs.size() > 6)
+  if (inputs.size() > 6)
+    return Error{ErrorCode::kLimitExceeded, "Too many photos"};
+  if (inputs.empty())
     return Error{ErrorCode::kInvalidRequest, "invalid-photo-count"};
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   Imaging imaging;
@@ -1021,7 +1032,7 @@ Result<PhotoProcessResult> ProcessPhoto(const std::filesystem::path& input,
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   std::error_code equivalent_error;
   if (std::filesystem::equivalent(input, output, equivalent_error))
-    return Error{ErrorCode::kUnavailable, "photo-output-failed"};
+    return Error{ErrorCode::kInvalidRequest, "Photo input and output refer to the same file"};
   Imaging imaging;
   RK_RETURN_IF_ERROR(imaging.Open());
   RK_ASSIGN_OR_RETURN(image, Decode(*imaging.factory.Get(), input, cancelled));
@@ -1040,7 +1051,8 @@ Result<PhotoProcessResult> ProcessPhoto(const std::filesystem::path& input,
     image = std::move(rectified);
     geometry = "perspective";
   } else if (mode == PhotoMode::kRectify) {
-    return Error{ErrorCode::kInvalidRequest, "no-document"};
+    return Error{ErrorCode::kRejected, "No document contour found",
+                 ErrorReason::kNoDocumentContour};
   } else {
     RK_ASSIGN_OR_RETURN(deskew_angle, DeskewAngle(image, cancelled));
     angle = deskew_angle;
@@ -1067,7 +1079,7 @@ Result<PhotoProcessResult> CreatePhotoThumbnail(const std::filesystem::path& inp
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   std::error_code equivalent_error;
   if (std::filesystem::equivalent(input, output, equivalent_error))
-    return Error{ErrorCode::kInvalidRequest, kThumbnailOutputError};
+    return Error{ErrorCode::kInternal, kThumbnailOutputError};
   Imaging imaging;
   RK_RETURN_IF_ERROR(imaging.Open("photo_imaging_unavailable"));
   RK_ASSIGN_OR_RETURN(image, Decode(*imaging.factory.Get(), input, cancelled, true));

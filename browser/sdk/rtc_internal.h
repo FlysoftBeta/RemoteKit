@@ -1,3 +1,4 @@
+#include "remotekit/protocol/errors.h"
 #pragma once
 #include "remotekit/sdk/include/remotekit_rtc.h"
 
@@ -177,7 +178,7 @@ class Peer : public webrtc::PeerConnectionObserver,
              size_t size = 0,
              const char* auxiliary = nullptr,
              int32_t value = 0);
-  void Error(const std::string& text);
+  void Error(protocol::ErrorCode code, const std::string& text);
   void Offer(bool offer);
   void AttachData(scoped_refptr<webrtc::DataChannelInterface> channel);
   void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState) override;

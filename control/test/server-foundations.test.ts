@@ -39,16 +39,16 @@ test('gateway normalizes identity and preserves execution certainty across nativ
   for (const code of Object.keys(httpStatus)) {
     failure = { code, message: '拒绝请求' };
     await assert.rejects(gateway.snapshot('tenant'), {
-      code: code === 'busy' ? 'unavailable' : code,
-      message: '拒绝请求',
+      code,
+      detail: '拒绝请求',
     });
   }
   failure = { code: 'busy', message: '繁忙' };
-  await assert.rejects(gateway.snapshot('tenant'), { code: 'unavailable' });
+  await assert.rejects(gateway.snapshot('tenant'), { code: 'busy' });
   failure = { message: '拒绝请求' };
-  await assert.rejects(gateway.snapshot('tenant'), { code: 'rejected' });
+  await assert.rejects(gateway.snapshot('tenant'), { code: 'outcome_unknown' });
   failure = 'native diagnostic';
-  await assert.rejects(gateway.snapshot('tenant'), { code: 'rejected', detail: 'native diagnostic' });
+  await assert.rejects(gateway.snapshot('tenant'), { code: 'outcome_unknown', detail: 'native diagnostic' });
   failure = new Error('local bug');
   await assert.rejects(gateway.snapshot('tenant'), { code: 'internal' });
 });
@@ -112,11 +112,14 @@ test('tenant disposal cancels pending signaling and queues isolate keys after a 
 });
 
 test('HTTP and socket boundaries expose code and message without diagnostic details', async () => {
-  let failure: unknown = new RemoteKitError('forbidden', '需要权限', 'private detail');
+  let failure: unknown = new RemoteKitError('forbidden', '需要权限', { detail: 'private detail' });
   const control = {
     events: new EventEmitter(),
     accounts: {
       setupStatus() {
+        throw failure;
+      },
+      me() {
         throw failure;
       },
       identity: () => ({ tenantId: 'tenant' }),
@@ -143,6 +146,9 @@ test('HTTP and socket boundaries expose code and message without diagnostic deta
   });
   try {
     await once(socket, 'open');
+    const denied = await fetch(base + '/api/socket/check?origin=http://denied.test');
+    assert.equal(denied.status, 403);
+    assert.equal((await denied.json()).error.code, 'forbidden');
     for (const [code, message, status] of [
       ['forbidden', '需要权限', 403],
       ['internal', '服务内部错误', 500],
@@ -159,6 +165,12 @@ test('HTTP and socket boundaries expose code and message without diagnostic deta
       });
       failure = new Error('private local failure');
     }
+    failure = new RemoteKitError('rate_limited', '请求过于频繁', { retryAfterMs: 1500 });
+    const throttled = await fetch(base + '/api/socket/check?origin=http://test.local');
+    assert.equal(throttled.headers.get('Retry-After'), '2');
+    assert.deepEqual(await throttled.json(), {
+      error: { code: 'rate_limited', message: '请求过于频繁', retryAfterMs: 1500 },
+    });
   } finally {
     socket.terminate();
     await server.shutdown();

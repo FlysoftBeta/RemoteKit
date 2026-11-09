@@ -15,7 +15,7 @@ export type FileMethod =
   | 'photo.process'
   | 'selection.cancel'
   | 'selection.commit';
-import { httpStatus, type WireError } from '../../shared/errors';
+import { parseWireError, type WireError } from '../../shared/errors';
 import type { Layout, Surface } from '../presentation/types';
 export interface EditableView {
   session: string;
@@ -140,7 +140,8 @@ export type ProductResult = {
   version: 1;
   operationId: string;
   operationGeneration: string;
-} & ({ result: OperationReceipt; error?: WireError } | { result?: undefined; error: WireError });
+  result: OperationReceipt;
+};
 type CameraBinding = { version: 1; authEpoch: number; challengeId: string };
 export type Incoming = Authorized &
   (
@@ -212,11 +213,7 @@ export type Outgoing = Authorized &
 export type DecodeError = { type: 'decode-error'; reason: string };
 const object = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v);
-const wireError = (v: unknown): v is WireError =>
-  object(v) &&
-  typeof v.code === 'string' &&
-  Object.prototype.hasOwnProperty.call(httpStatus, v.code) &&
-  typeof v.message === 'string';
+const wireError = (v: unknown): v is WireError => parseWireError(v) !== undefined;
 const resultError = (v: Record<string, unknown>) =>
   v.ok === false ? wireError(v.error) : optional(v, 'error', wireError);
 const string = (v: unknown): v is string => typeof v === 'string';
@@ -240,8 +237,8 @@ function receipt(v: unknown) {
   return (
     object(v) &&
     strings(v, ['operationId', 'operationGeneration']) &&
-    ['accepted', 'applying', 'committed', 'rejected', 'unknown', 'expired'].includes(String(v.status)) &&
-    optional(v, 'error', string) &&
+    ['accepted', 'applying', 'committed', 'failed', 'unknown'].includes(String(v.status)) &&
+    (v.status === 'failed' ? wireError(v.error) : optional(v, 'error', wireError)) &&
     optional(v, 'revision', integer) &&
     optional(v, 'resolved', (value) => typeof value === 'boolean')
   );
@@ -389,13 +386,12 @@ function valid(v: Record<string, unknown>): boolean {
       return (
         v.version === 1 &&
         strings(v, ['operationId', 'operationGeneration']) &&
-        optional(v, 'result', receipt) &&
-        (v.result === undefined ||
-          (object(v.result) &&
-            v.result.operationId === v.operationId &&
-            v.result.operationGeneration === v.operationGeneration)) &&
-        (v.result !== undefined || wireError(v.error)) &&
-        optional(v, 'error', wireError)
+        receipt(v.result) &&
+        object(v.result) &&
+        v.result.operationId === v.operationId &&
+        v.result.operationGeneration === v.operationGeneration &&
+        v.ok === undefined &&
+        v.error === undefined
       );
     case 'clock.pong':
       return v.version === 1 && string(v.requestId) && numbers(v, ['serverTimeMs', 'serverMonotonicMs']);

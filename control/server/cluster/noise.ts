@@ -40,6 +40,9 @@ export class CipherState {
   constructor(private readonly key: Buffer) {
     if (key.length !== 32) throw new Error('Invalid Noise key');
   }
+  get closed() {
+    return this.failed || this.nonce >= 0xffffffffffffffffn;
+  }
   private nextNonce() {
     if (this.failed || this.nonce >= 0xffffffffffffffffn) {
       this.failed = true;

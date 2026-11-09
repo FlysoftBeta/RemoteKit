@@ -39,11 +39,14 @@ class StorageImportJobs {
  public:
   StorageImportJobs();
   ~StorageImportJobs();
-  Result<uint64_t> Begin(content::StoragePartition*, const StorageImportData&);
+  Result<uint64_t> Begin(content::StoragePartition*, const StorageImportData&, uint64_t view = 0);
   Result<base::DictValue> Poll(uint64_t job);
+  Result<base::DictValue> Latest(uint64_t view);
+  void Cancel(uint64_t job);
   void Clear();
 
  private:
+  friend class StorageImportJobsProbe;
   struct Job;
   void Start(uint64_t job, StorageImportData data);
   void OnItem(uint64_t job, bool cookie, bool applied);

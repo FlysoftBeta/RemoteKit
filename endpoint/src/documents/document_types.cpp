@@ -82,8 +82,12 @@ DocumentFormat DetectDocument(std::string_view name, std::span<const uint8_t> pr
 
 Result<DocumentFormat> DetectDocumentFile(const std::filesystem::path& path) {
   std::ifstream input(path, std::ios::binary | std::ios::ate);
-  if (!input)
-    return Error{ErrorCode::kRejected, "source document missing"};
+  if (!input) {
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    return Error{!error && !exists ? ErrorCode::kNotFound : ErrorCode::kUnavailable,
+                 "Cannot open source document"};
+  }
   const auto size = static_cast<uint64_t>(input.tellg());
   std::vector<uint8_t> prefix(static_cast<size_t>(std::min<uint64_t>(size, 4096)));
   input.seekg(0);

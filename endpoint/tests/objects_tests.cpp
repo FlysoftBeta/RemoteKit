@@ -63,7 +63,7 @@ void Store(ObjectStore& store, const Keys& keys, const std::string& plain, Objec
     Flip(path, start + 5 + length - 1);
     std::ostringstream output;
     auto corrupt = store.Read(keys, info.id, output);
-    Check(!corrupt && corrupt.error().message == "corrupt object",
+    Check(!corrupt && corrupt.error().code == remotekit::ErrorCode::kInternal,
           "each segment authenticates its tag");
     Flip(path, start + 5 + length - 1);
     file.open(path, std::ios::binary);
@@ -139,7 +139,8 @@ void Peer(ObjectStore& source,
   Check(Read(target, keys, info.id) == plain, "resumed plaintext round trip");
   PeerClient mismatch(target, cluster_key, "target", std::string(64, 'a'));
   auto rejected = mismatch.Fetch(info.id, server.Address());
-  Check(!rejected && rejected.error().message == "build_mismatch", "peer build lock");
+  Check(!rejected && rejected.error().code == remotekit::ErrorCode::kUnavailable,
+        "peer build lock");
   fs::copy_file(Take(source.StoredPath(info.id)), partial);
   Flip(partial, 25);
   Check(!target.Import(info.id, info.stored_size, info.stored_sha256) && !fs::exists(partial),

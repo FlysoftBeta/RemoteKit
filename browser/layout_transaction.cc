@@ -13,25 +13,28 @@ Result<LayoutPlan> LayoutTransaction::Prepare(ViewRegistry::Specifications specs
   plan.height = height ? height : logical_height;
   plan.scale = scale ? scale : output_scale;
   plan.alignment = alignment ? alignment : allocation_alignment;
-  if (plan.width < 16 || plan.width > 16384 || plan.height < 16 || plan.height > 16384 ||
-      !std::isfinite(plan.scale) || plan.scale < .5 || plan.scale > 4 ||
-      (plan.alignment != 1 && plan.alignment != 16))
-    return {{}, {ErrorCode::invalid_request, "Invalid output geometry"}};
+  if (plan.width > 16384 || plan.height > 16384)
+    return {{}, {ErrorCode::kLimitExceeded, "Output geometry exceeds supported bounds"}};
+  if (plan.width < 16 || plan.height < 16 || !std::isfinite(plan.scale) || plan.scale < .5 ||
+      plan.scale > 4 || (plan.alignment != 1 && plan.alignment != 16))
+    return {{}, {ErrorCode::kInvalidRequest, "Invalid output geometry"}};
   std::vector<protocol::PackItem> items;
   for (const auto& [id, spec] : specs) {
-    if (spec.width < 1 || spec.height < 1 || spec.width > 8192 || spec.height > 8192 ||
+    if (spec.width > 8192 || spec.height > 8192)
+      return {{}, {ErrorCode::kLimitExceeded, "View geometry exceeds supported bounds"}};
+    if (spec.width < 1 || spec.height < 1 ||
         (spec.page_dsf != 0 &&
          (!std::isfinite(spec.page_dsf) || spec.page_dsf < .5 || spec.page_dsf > 4)))
-      return {{}, {ErrorCode::invalid_request, "Invalid view geometry"}};
+      return {{}, {ErrorCode::kInvalidRequest, "Invalid view geometry"}};
     const auto found = views_.records.find(id);
     if (found != views_.records.end()) {
       const auto& record = found->second;
       if (record.requests->close_state() == "closing" && spec != record.spec)
-        return {{}, {ErrorCode::busy, "View is closing"}};
+        return {{}, {ErrorCode::kConflict, "View is closing"}};
       if (spec.visible && (spec != record.spec || plan.scale != output_scale ||
                            plan.width != logical_width || plan.height != logical_height)) {
         if (!record.webview->contents() || record.webview->lifecycle_uncertain())
-          return {{}, {ErrorCode::unavailable, "Restore required before showing view"}};
+          return {{}, {ErrorCode::kConflict, "Restore required before showing view"}};
         const auto visible = record.webview->CanShow();
         if (!visible)
           return {{}, visible};
@@ -47,7 +50,7 @@ Result<LayoutPlan> LayoutTransaction::Prepare(ViewRegistry::Specifications specs
   const auto dimensions =
       protocol::AtlasAllocationDimensions(plan.width, plan.height, plan.scale, plan.alignment);
   if (!dimensions)
-    return {{}, {ErrorCode::resource_limit, "Atlas resource budget exceeded"}};
+    return {{}, {ErrorCode::kLimitExceeded, "Atlas resource budget exceeded"}};
   plan.specs = std::move(specs);
   plan.atlas = std::move(atlas.value);
   plan.output_width = dimensions->width;

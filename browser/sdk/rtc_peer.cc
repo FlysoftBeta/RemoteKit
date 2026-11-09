@@ -114,8 +114,9 @@ void Peer::Event(uint32_t type,
     options.event(options.context, id, type, bytes, size, auxiliary, value);
 }
 
-void Peer::Error(const std::string& text) {
-  Event(REMOTEKIT_RTC_ERROR, text.data(), text.size());
+void Peer::Error(remotekit::protocol::ErrorCode code, const std::string& text) {
+  Event(REMOTEKIT_RTC_ERROR, text.data(), text.size(),
+        remotekit::protocol::ErrorCodeName(code).data());
 }
 
 void Peer::AttachData(scoped_refptr<webrtc::DataChannelInterface> channel) {
@@ -181,7 +182,7 @@ class LocalDescriptionObserver : public webrtc::SetLocalDescriptionObserverInter
   void OnSetLocalDescriptionComplete(webrtc::RTCError error) override {
     if (auto p = peer_.lock(); p && !p->closing.load()) {
       if (!error.ok())
-        p->Error(error.message());
+        p->Error(remotekit::protocol::ErrorCode::kOutcomeUnknown, error.message());
       else {
         if (!offer_ && p->video_sender) {
           const auto parameters = p->video_sender->GetParameters();
@@ -219,7 +220,7 @@ class CreateDescriptionObserver : public webrtc::CreateSessionDescriptionObserve
   }
   void OnFailure(webrtc::RTCError error) override {
     if (auto p = peer_.lock())
-      p->Error(error.message());
+      p->Error(remotekit::protocol::ErrorCode::kOutcomeUnknown, error.message());
   }
 
  private:
@@ -231,9 +232,15 @@ class RemoteDescriptionObserver : public webrtc::SetRemoteDescriptionObserverInt
   RemoteDescriptionObserver(std::weak_ptr<Peer> p, bool offer) : peer_(p), offer_(offer) {}
   void OnSetRemoteDescriptionComplete(webrtc::RTCError error) override {
     if (auto p = peer_.lock(); p && !p->closing.load()) {
-      if (!error.ok())
-        p->Error(error.message());
-      else if (offer_)
+      if (!error.ok()) {
+        const bool incompatible = error.type() == webrtc::RTCErrorType::INVALID_PARAMETER ||
+                                  error.type() == webrtc::RTCErrorType::INVALID_RANGE ||
+                                  error.type() == webrtc::RTCErrorType::SYNTAX_ERROR ||
+                                  error.type() == webrtc::RTCErrorType::UNSUPPORTED_PARAMETER;
+        p->Error(incompatible ? remotekit::protocol::ErrorCode::kRejected
+                              : remotekit::protocol::ErrorCode::kOutcomeUnknown,
+                 error.message());
+      } else if (offer_)
         p->Offer(false);
     }
   }
@@ -299,7 +306,7 @@ int Peer::Start() {
     auto result =
         factory->CreatePeerConnectionOrError(config, webrtc::PeerConnectionDependencies(this));
     if (!result.ok()) {
-      Error(result.error().message());
+      Error(remotekit::protocol::ErrorCode::kUnavailable, result.error().message());
       return REMOTEKIT_SDK_INVALID_STATE;
     }
     pc = result.MoveValue();
@@ -484,7 +491,7 @@ int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* byt
         webrtc::CreateSessionDescription(offer ? webrtc::SdpType::kOffer : webrtc::SdpType::kAnswer,
                                          std::string(bytes, size), &error);
     if (!sdp) {
-      p.Error(error.description);
+      p.Error(remotekit::protocol::ErrorCode::kRejected, error.description);
       return REMOTEKIT_SDK_INVALID_ARGUMENT;
     }
     bool receives_audio = false;

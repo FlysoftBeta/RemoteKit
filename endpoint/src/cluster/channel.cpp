@@ -428,12 +428,15 @@ Result<Established> Handshake(std::unique_ptr<Carrier> carrier,
         return sent.error();
       }
     }
-    if (Clock::now() > deadline || !reply.is_object() || !reply.contains("type") ||
-        !reply["type"].is_string() ||
+    if (Clock::now() > deadline) {
+      carrier->Close();
+      return Error{ErrorCode::kUnavailable, "Cluster handshake deadline exceeded"};
+    }
+    if (!reply.is_object() || !reply.contains("type") || !reply["type"].is_string() ||
         (reply["type"] != "node.ready" && reply["type"] != "node.release" &&
          reply["type"] != "node.reject")) {
       carrier->Close();
-      return Error{ErrorCode::kInvalidRequest, "invalid handshake reply or deadline"};
+      return Error{ErrorCode::kInternal, "Invalid cluster handshake reply"};
     }
     auto keys = noise.Split();
     if (!keys) {
@@ -451,10 +454,10 @@ Result<Established> Handshake(std::unique_ptr<Carrier> carrier,
     if (reply["type"] == "node.reject")
       channel->Close();
     return Established{std::move(channel), std::move(reply)};
-  } catch (...) {
+  } catch (const std::exception& error) {
     if (carrier)
       carrier->Close();
-    return Error{ErrorCode::kUnauthenticated, "cluster handshake failed"};
+    return Error{ErrorCode::kInternal, error.what()};
   }
 }
 }  // namespace

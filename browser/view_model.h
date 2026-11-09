@@ -17,9 +17,9 @@ using SessionId = std::uint64_t;
 using ProfileId = std::uint64_t;
 using WebViewId = std::uint64_t;
 struct Status {
-  ErrorCode error{ErrorCode::none};
+  std::optional<ErrorCode> error;
   std::string message;
-  explicit operator bool() const { return error == ErrorCode::none; }
+  explicit operator bool() const { return !error; }
 };
 template <class T>
 struct Result {
@@ -46,6 +46,7 @@ struct LifecycleResult {
   Lifecycle action{};
   bool succeeded{};
   std::string detail;
+  std::optional<ErrorCode> error;
 };
 struct WebView {
   WebViewId id{};
@@ -219,7 +220,8 @@ class ViewModel {
   Status CompleteLifecycle(SessionId,
                            const LifecycleRequest&,
                            bool succeeded,
-                           std::string detail = {});
+                           std::string detail = {},
+                           std::optional<ErrorCode> error = {});
 
  private:
   std::map<SessionId, Session> sessions_;

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError, wireError, parseWireError } from '../../shared/errors';
 import { SITE_PERMISSIONS, type FileRequest, type PageDialogReply } from '../../shared/product';
 import type { DownloadEvent, FileBinding, PageIdentity, PageReplyFields } from '../endpoint/types';
 import { settle } from './operations';
@@ -407,7 +407,7 @@ export class PageRequests {
     });
     if (result.closed === true) this.removeProductTab(state, tab);
     else if (result.accepted || result.pending) state.pendingClose = this.pendingClose(tab, result);
-    else throw new RemoteKitError('conflict', 'Endpoint 尚未确认页面关闭');
+    else throw new RemoteKitError('outcome_unknown', 'Endpoint 尚未确认页面关闭');
   }
   async continueWindowClose(state: ProductWorkspace) {
     const windowIds = new Set([state.pendingWindowCloseId, ...(state.pendingWindowCloseIds ?? [])]);
@@ -432,7 +432,7 @@ export class PageRequests {
             (action.type === 'space.close' && spaceIds.has(action.spaceId)) ||
             (action.type === 'app.uninstall' && action.appId === 'web:' + appId)
           ) {
-            settle(pending.receipt, { status: 'rejected', error: failure.message });
+            settle(pending.receipt, { status: 'failed', error: wireError(failure) });
             this.context.store.operations.saveOperation(state, pending.receipt);
           }
         }
@@ -590,9 +590,12 @@ export class PageRequests {
         if (
           typeof event.eventId !== 'string' ||
           typeof event.name !== 'string' ||
-          typeof event.origin !== 'string'
+          typeof event.origin !== 'string' ||
+          (event.type === 'download.failed' && !parseWireError(event.error))
         )
-          throw new RemoteKitError('rejected', 'Invalid Endpoint download event');
+          throw new RemoteKitError('internal', '节点下载事件格式错误', {
+            detail: 'Invalid Endpoint download event',
+          });
         await this.services.library.consumeDownload(state.tenantId, event as DownloadEvent);
         eventIds.push(event.eventId);
         continue;
@@ -612,7 +615,7 @@ export class PageRequests {
       // Commit product deletion before acknowledging durable Endpoint events.
       this.services.operations.saveWorkspace(state);
       const result = await this.context.endpoint.ackEvents(state.tenantId, { eventIds });
-      if (result?.accepted !== true) throw new RemoteKitError('rejected', 'Endpoint关闭事件尚未确认');
+      if (result?.accepted !== true) throw new RemoteKitError('outcome_unknown', 'Endpoint关闭事件尚未确认');
     }
     return closed;
   }
@@ -630,7 +633,7 @@ export class PageRequests {
     const kind = ['alert', 'confirm', 'prompt', 'beforeunload'].includes(dialog.kind)
       ? 'dialog'
       : dialog.kind;
-    if (kind !== reply.kind) throw new RemoteKitError('rejected', '回复类型与页面请求不匹配');
+    if (kind !== reply.kind) throw new RemoteKitError('conflict', '回复类型与页面请求不匹配');
     if (dialog.kind === 'alert' && reply.kind === 'dialog' && !reply.accept)
       throw new RemoteKitError('invalid_request', '提示对话仅支持确认');
     let changed = false;
@@ -699,7 +702,7 @@ export class PageRequests {
       throw error;
     });
     if (result?.accepted !== true || result?.browser?.ok !== true)
-      throw new RemoteKitError('conflict', 'Endpoint未确认页面对话回复');
+      throw new RemoteKitError('outcome_unknown', 'Endpoint未确认页面对话回复');
     runtime.pageRequests.dialogs = (runtime.pageRequests.dialogs ?? []).filter((d) => d.id !== dialog.id);
     this.services.viewers.push(tenant);
   }
@@ -739,7 +742,7 @@ export class PageRequests {
           (saved.action.type === 'window.close' && saved.action.windowId === windowId) ||
           ['space.close', 'app.uninstall'].includes(saved.action.type)
         ) {
-          settle(saved.receipt, { status: 'rejected', error: '用户取消关闭' });
+          settle(saved.receipt, { status: 'failed', error: { code: 'canceled', message: '用户取消关闭' } });
           this.context.store.operations.saveOperation(state, saved.receipt);
         }
       }

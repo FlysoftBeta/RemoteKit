@@ -19,7 +19,11 @@ class Link final : public ManagementLink {
   bool Next(std::string&, uint64_t&, bool&) override { return false; }
   bool Current(uint64_t generation) override { return generation == 7; }
   bool SendReply(uint64_t, const Json&) override { return true; }
-  bool SendEvent(const Json&, uint64_t) override { return true; }
+  bool SendEvent(const Json&, uint64_t, remotekit::DeliveryFlag delivery = {}) override {
+    if (delivery)
+      delivery->MarkWritten();
+    return true;
+  }
   void OnDisconnect(Disconnect) override {}
   Result<Json> Request(const std::string&, Json) override {
     return Error{ErrorCode::kUnavailable, "test Control has no object responder"};
@@ -71,7 +75,7 @@ int main() {
           "invalid policy preserves typed error");
     DcFileServices::Job stale;
     auto file = session.Files().DirectFileCommand(stale);
-    Check(!file && file.error().code == ErrorCode::kForbidden,
+    Check(!file && file.error().code == ErrorCode::kConflict,
           "retired file work returns an operational error");
     auto snapshot = session.Views().Snapshot();
     Check(bool(snapshot) && !snapshot.value().at("running").get<bool>() &&

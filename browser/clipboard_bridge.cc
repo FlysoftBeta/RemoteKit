@@ -38,7 +38,7 @@ base::DictValue ClipboardBridge::Read(int id) const {
 base::DictValue ClipboardBridge::Write(int id, const base::DictValue& request) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   if (!ValidClipboardWrite(request))
-    return ControlResult::Failure(id, protocol::ErrorCode::invalid_request,
+    return ControlResult::Failure(id, protocol::ErrorCode::kInvalidRequest,
                                   "Invalid clipboard value");
   base::AutoReset<bool> applying(&applying_, true);
   ui::ScopedClipboardWriter writer(ui::ClipboardBuffer::kCopyPaste);

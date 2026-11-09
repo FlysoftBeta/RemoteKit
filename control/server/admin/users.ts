@@ -36,7 +36,7 @@ export class UserAdmin {
   private session(tenant: string): AdminSessionState {
     const placement = this.context.endpoint.placement.peek(tenant);
     if (!placement) return { state: 'none' };
-    if (placement.state === 'active') return { state: 'active', nodeId: placement.nodeId };
+    if (placement.state !== 'hibernated') return { state: 'active', nodeId: placement.nodeId };
     return {
       state: 'hibernated',
       checkpointAt: this.context.endpoint.placement.checkpoints(tenant).latestAt,
@@ -139,6 +139,11 @@ export class UserAdmin {
   async hibernate(username: unknown) {
     const user = this.find(username);
     await this.context.tenants.serial(user.tenant, async () => {
+      if (this.context.endpoint.placement.peek(user.tenant)?.state === 'hibernating') {
+        await this.context.endpoint.hibernate(user.tenant);
+        this.services.lifecycle.finishHibernation(user.tenant);
+        return;
+      }
       if (this.context.endpoint.placement.peek(user.tenant)?.state !== 'active')
         throw new RemoteKitError('conflict', '会话未运行');
       if (this.context.tenants.get(user.tenant).viewer) throw new RemoteKitError('conflict', '用户在线');
@@ -149,12 +154,13 @@ export class UserAdmin {
   }
   async resetSession(username: unknown) {
     const user = this.find(username);
-    if (this.context.endpoint.placement.peek(user.tenant)?.state !== 'active')
+    const placement = this.context.endpoint.placement.peek(user.tenant);
+    if (!placement || placement.state === 'hibernated')
       await this.services.learning.forgetTenant(user.tenant);
     await this.context.tenants.serial(user.tenant, async () => {
       // A running Browser still owns live pages and RTC; reset only discards a hibernated Session.
-      if (this.context.endpoint.placement.peek(user.tenant)?.state === 'active')
-        throw new RemoteKitError('conflict', '需先休眠');
+      const placement = this.context.endpoint.placement.peek(user.tenant);
+      if (placement && placement.state !== 'hibernated') throw new RemoteKitError('conflict', '需先休眠');
       this.context.store.transaction(() => {
         this.context.store.clipboards.clear(user.id);
         const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);

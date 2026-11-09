@@ -1,3 +1,5 @@
+import { EndpointSnapshotError, endpointError } from '../endpoint/gateway';
+import { retryDelay, errorHandling } from '../../shared/error-policy';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import { settle } from './operations';
 import { normalizedUsagePage } from '../navigation-url';
@@ -27,7 +29,18 @@ export class Reconciler {
       | 'learning'
     >,
   ) {}
+  private reconcileHibernation(tenant: string) {
+    return this.context.endpoint.hibernate(tenant).then(() => {
+      if (this.context.endpoint.placement.peek(tenant)?.state === 'hibernated')
+        this.services.lifecycle.finishHibernation(tenant);
+    });
+  }
   async tick() {
+    const hibernating = this.context.store.db
+      .prepare("SELECT tenant FROM session_placements WHERE state='hibernating'")
+      .all() as { tenant: string }[];
+    const saving = hibernating.map(({ tenant }) => this.reconcileHibernation(tenant).catch(() => {}));
+    const relief = this.services.lifecycle.relieve();
     const active = this.context.store.db
       .prepare("SELECT tenant FROM session_placements WHERE state='active'")
       .all() as { tenant: string }[];
@@ -47,7 +60,7 @@ export class Reconciler {
       tracking.inflight = task;
       return task;
     });
-    await Promise.all(work);
+    await Promise.all([...work, relief, ...saving]);
   }
   private runtimesForNode(nodeId?: string) {
     return this.context.tenants.values().filter((runtime) => {
@@ -61,6 +74,7 @@ export class Reconciler {
     for (const runtime of runtimes) {
       this.services.pageRequests.clearAuthorization(runtime.tenantId);
       this.services.policy.reset(runtime.tenantId);
+      runtime.reconciliation.error = undefined;
       if (runtime.connectionId || runtime.rtc.disconnectedPeer) runtime.pendingRtcCheck = true;
     }
     for (const runtime of runtimes.filter((runtime) => runtime.viewer || runtime.started)) {
@@ -106,7 +120,32 @@ export class Reconciler {
   }
   async reconcileProduct(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
+    if (this.context.endpoint.placement.peek(tenant)?.state === 'hibernating') {
+      void this.reconcileHibernation(tenant).catch(() => {});
+      runtime.lastErrorKey = 'hibernating';
+      runtime.lastError = '正在保存会话，请稍候';
+      this.services.viewers.push(tenant);
+      return;
+    }
     if (!(runtime.viewer !== undefined) && !runtime.started) return;
+    const tracking = runtime.reconciliation;
+    const desiredKey = JSON.stringify([
+      this.context.store.workspaces.workspace(tenant).revision,
+      runtime.viewer?.id,
+      runtime.viewer?.viewport,
+      runtime.browserIncarnation,
+    ]);
+    if (
+      tracking.key === desiredKey &&
+      tracking.error &&
+      (tracking.retryAt ?? Infinity) > this.context.clock.monotonicMs()
+    )
+      throw tracking.error;
+    if (tracking.key !== desiredKey) {
+      tracking.attempts = 0;
+      tracking.error = undefined;
+    }
+    tracking.key = desiredKey;
     try {
       if (!(runtime.viewer !== undefined)) {
         await this.observeOffline(tenant);
@@ -154,6 +193,7 @@ export class Reconciler {
             : actual.filter((v) => state.tabs.some((t) => t.webviewId === v.viewId)).map((v) => v.viewId),
         ),
       );
+      runtime.browserRestart = snapshot.browserRestart;
       if (typeof snapshot.browserIncarnation === 'string')
         runtime.browserIncarnation = snapshot.browserIncarnation;
       this.services.navigation.observeRetired(state, snapshot);
@@ -204,6 +244,11 @@ export class Reconciler {
           current,
           snapshot.browserIncarnation,
         );
+        if (current.recovery?.phase === 'failed' && current.recovery.error) {
+          t.lifecycleRecoveryError = this.services.lifecycle.lifecycleError(
+            endpointError(current.recovery.error),
+          );
+        }
         const recovering = current.recovery?.pending === true || lifecycleBlocked;
         if (!recovering) {
           for (const key of ['title', 'loading', 'canGoBack', 'canGoForward'] as const)
@@ -262,7 +307,7 @@ export class Reconciler {
           settle(pending.receipt, { status: 'unknown' });
           pending.receipt.resolved = true;
           pending.receipt.resolution = 'target-retired';
-          pending.receipt.error = '原页面实例已结束，操作执行结果未知';
+          pending.receipt.error = { code: 'outcome_unknown', message: '原页面实例已结束，操作执行结果未知' };
           delete pending.receipt.application;
           this.context.store.operations.saveOperation(state, pending.receipt);
         }
@@ -274,7 +319,7 @@ export class Reconciler {
           settle(pending.receipt, { status: 'unknown' });
           pending.receipt.resolved = true;
           pending.receipt.resolution = 'target-retired';
-          pending.receipt.error = '页面已关闭，之前的导航结果无法确认';
+          pending.receipt.error = { code: 'outcome_unknown', message: '页面已关闭，之前的导航结果无法确认' };
           delete pending.receipt.application;
           this.context.store.operations.saveOperation(state, pending.receipt);
         }
@@ -421,22 +466,42 @@ export class Reconciler {
           await this.context.endpoint.closeView(tenant, { viewId, force: true, orphan: true });
       }
       if (resourceLimitation) {
-        const changed = runtime.lastError !== resourceLimitation;
+        const changed = runtime.lastErrorKey !== 'resource_limit';
+        runtime.lastErrorKey = 'resource_limit';
         runtime.lastError = resourceLimitation;
         if (changed) this.services.viewers.push(tenant);
       } else {
+        tracking.error = undefined;
+        tracking.attempts = 0;
         const previousError = runtime.clearError();
         if (previousError) this.services.viewers.push(tenant);
       }
     } catch (error) {
       this.services.pageRequests.clear(tenant);
-      runtime.lastError = toRemoteKitError(error).message;
+      const failure = toRemoteKitError(error);
+      if (error instanceof EndpointSnapshotError) runtime.browserRestart = error.browserRestart;
+      const wait = retryDelay(failure, tracking.attempts ?? 0);
+      const handling = errorHandling(failure.code);
+      tracking.attempts = (tracking.attempts ?? 0) + 1;
+      tracking.error = failure;
+      tracking.retryAt =
+        wait !== undefined
+          ? this.context.clock.monotonicMs() + wait
+          : handling === 'reconcile' || handling === 'refresh' || handling === 'drop'
+            ? 0
+            : Infinity;
+      runtime.lastErrorKey = 'endpoint';
+      runtime.lastError = failure.message;
       this.services.viewers.push(tenant);
       throw error;
     }
   }
   async observeOffline(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
+    if (this.context.endpoint.placement.peek(tenant)?.state === 'hibernating') {
+      void this.reconcileHibernation(tenant).catch(() => {});
+      return;
+    }
     if (this.context.endpoint.placement.peek(tenant)?.state === 'hibernated') {
       runtime.started = false;
       return;

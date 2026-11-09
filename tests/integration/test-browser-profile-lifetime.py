@@ -212,7 +212,7 @@ def main():
         configs = [dict(session='1', view=str(view), width=360, height=260,
                         device='desktop', device_scale_factor=1, visible=True) for view in (1, 2)]
         rejected = a.rpc('output.configure', ok=False, viewConfigs=configs)
-        assert rejected['error'] == 'unavailable' and rejected['detail'] == 'Restore required before showing view', rejected
+        assert rejected['error']['code'] == 'conflict' and rejected['error']['message'] == 'Restore required before showing view', rejected
         after = a.views()
         fields = ('view', 'width', 'height', 'visible', 'device_scale_factor', 'instance', 'document', 'focus', 'actual', 'pending')
         assert [{k: v.get(k) for k in fields} for v in before] == [{k: v.get(k) for k in fields} for v in after]

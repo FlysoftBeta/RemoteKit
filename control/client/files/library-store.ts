@@ -1,3 +1,4 @@
+import { errorHandling } from '../../shared/error-policy';
 import { diagnostics } from '../media/diagnostics';
 import { Store } from '../util/store';
 import { RemoteKitError } from '../../shared/errors';
@@ -195,7 +196,7 @@ export class LibraryStore extends Store<LibraryState> {
         } catch (error) {
           if (
             error instanceof RemoteKitError &&
-            ['invalid_request', 'not_found', 'conflict', 'limit_exceeded'].includes(error.code) &&
+            ['final', 'refresh', 'drop', 'canceled'].includes(errorHandling(error.code)) &&
             this.checkouts.get(requestId) === transaction
           )
             this.checkouts.delete(requestId);

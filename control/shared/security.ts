@@ -1,3 +1,4 @@
+import type { WireError } from './errors';
 import type { ProductUser } from './product';
 
 export const DEFAULT_IDLE_SECONDS = 300;
@@ -24,6 +25,8 @@ export interface AuthState {
     available: boolean;
     enrolled: boolean;
     reason?: string;
+    outcome?: 'no_matching_face' | 'camera_unavailable';
+    error?: WireError;
     challengeId?: string;
     purpose?: FacePurpose;
     status?: FaceStatus;

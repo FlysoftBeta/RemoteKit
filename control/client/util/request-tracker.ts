@@ -25,12 +25,20 @@ export class RequestTracker<T> {
     signal?: AbortSignal,
     onDeadline?: () => void,
   ): Promise<T> {
-    if (this.pending.has(id)) return Promise.reject(new RemoteKitError('conflict', 'Duplicate request'));
+    if (this.pending.has(id)) return Promise.reject(new RemoteKitError('conflict', '请求标识重复'));
     return new Promise<T>((resolve, reject) => {
-      const abort = () => this.reject(id, new DOMException('Aborted', 'AbortError'));
+      let sent = false;
+      const abort = () =>
+        this.reject(
+          id,
+          new RemoteKitError(
+            sent ? 'outcome_unknown' : 'canceled',
+            sent ? '请求已发送，取消结果请核对当前状态' : '',
+          ),
+        );
       const cleanup = () => signal?.removeEventListener('abort', abort);
       const timer = setTimeout(() => {
-        if (this.reject(id, new RemoteKitError('outcome_unknown', '请求结果未知，请核对后重试')))
+        if (this.reject(id, new RemoteKitError('outcome_unknown', '请求结果未知，请核对当前状态')))
           onDeadline?.();
       }, deadlineMs);
       this.pending.set(id, {
@@ -51,12 +59,13 @@ export class RequestTracker<T> {
       signal?.addEventListener('abort', abort, { once: true });
       try {
         send();
+        sent = true;
       } catch (error) {
         this.reject(
           id,
           error instanceof RemoteKitError
             ? error
-            : new RemoteKitError('unavailable', '发送失败', String(error)),
+            : new RemoteKitError('unavailable', '发送失败', { detail: String(error) }),
         );
       }
     });

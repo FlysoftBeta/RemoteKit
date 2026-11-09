@@ -23,13 +23,13 @@ export interface NodeConfig {
   dataPath: string;
   browser: string | null;
   browserTraceDir: string | null;
-  maxSessions: number;
+  maxSessions: number | null;
   /** Node-to-node object transfer: where this node listens and where other nodes reach it. */
   peer: Readonly<{ listen: string; address: string }>;
   /** Viewer media: UDP port range for WebRTC and the host or IP Viewers use to reach it. */
   rtc: Readonly<{ ports: string | null; address: string | null }>;
-  diskReserveBytes: number;
-  sessionMemoryBytes: number;
+  diskReserveBytes: number | null;
+  sessionMemoryBytes: number | null;
 }
 export interface ConfiguredNode {
   readonly config: Readonly<NodeConfig>;
@@ -50,7 +50,7 @@ export interface RuntimeConfig {
   readonly clientDir: string;
   readonly diagnosticDir: string;
   readonly cluster: Readonly<{ keyFile: string; key: string }>;
-  readonly quotas: Readonly<{ tenantObjectBytes: number }>;
+  readonly quotas: Readonly<{ tenantObjectBytes: number | null }>;
   readonly nodes: Readonly<Record<string, ConfiguredNode>>;
 }
 export interface SessionImportConfig {
@@ -62,7 +62,6 @@ export interface SessionImportConfig {
   readonly pollSeconds: number;
   readonly replyWindowSeconds: number;
 }
-export const defaultQuotas = Object.freeze({ tenantObjectBytes: 4 * 1024 ** 3 });
 export const nodeDefaults: Omit<NodeConfig, 'nodeId'> = Object.freeze({
   encoder: 'auto',
   fps: 60,
@@ -80,11 +79,11 @@ export const nodeDefaults: Omit<NodeConfig, 'nodeId'> = Object.freeze({
   dataPath: 'data',
   browser: null,
   browserTraceDir: null,
-  maxSessions: 3,
+  maxSessions: null,
   peer: Object.freeze({ listen: '0.0.0.0:3101', address: '' }),
   rtc: Object.freeze({ ports: null, address: null }),
-  diskReserveBytes: 10 * 1024 ** 3,
-  sessionMemoryBytes: 2 * 1024 ** 3,
+  diskReserveBytes: null,
+  sessionMemoryBytes: null,
 });
 export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']';
@@ -139,11 +138,23 @@ function validateNode(value: Record<string, any>, partial = false): NodeConfig {
     maxEncodeHeight: [16, 4096],
     maxSessions: [1, 64],
     diskReserveBytes: [0, Number.MAX_SAFE_INTEGER],
-    sessionMemoryBytes: [1, Number.MAX_SAFE_INTEGER],
+    sessionMemoryBytes: [0, Number.MAX_SAFE_INTEGER],
   };
   for (const [key, [min, max]] of Object.entries(ranges)) {
     if (partial && !(key in value)) continue;
-    if (value[key] === null && ['asyncDepth', 'gop', 'targetUsage', 'bufferMs'].includes(key)) continue;
+    if (
+      value[key] === null &&
+      [
+        'asyncDepth',
+        'gop',
+        'targetUsage',
+        'bufferMs',
+        'maxSessions',
+        'diskReserveBytes',
+        'sessionMemoryBytes',
+      ].includes(key)
+    )
+      continue;
     integer(value[key], min, max, key);
   }
   if (!partial && value.maxBitrate < value.bitrate) invalid('maxBitrate must be >= bitrate');
@@ -243,7 +254,7 @@ export function runtimeConfig(
           storage: { database: 'control.db', diagnostics: 'diagnostics' },
           cluster: { keyFile: 'cluster.key' },
           nodeDefaults,
-          quotas: defaultQuotas,
+          quotas: {},
           nodes: {
             local: {
               local: { executable: '../../build/endpoint/endpoint/endpoint_service.exe', root: 'node' },
@@ -328,12 +339,10 @@ export function runtimeConfig(
   validateNode(defaults, true);
   const entries = object(source.nodes, Object.keys(source.nodes ?? {}), 'nodes');
   const quotas = object(fallback(source.quotas, {}), ['tenantObjectBytes'], 'quotas');
-  const tenantObjectBytes = integer(
-    fallback(quotas.tenantObjectBytes, defaultQuotas.tenantObjectBytes),
-    1,
-    Number.MAX_SAFE_INTEGER,
-    'quotas.tenantObjectBytes',
-  );
+  const tenantObjectBytes =
+    quotas.tenantObjectBytes == null
+      ? null
+      : integer(quotas.tenantObjectBytes, 1, Number.MAX_SAFE_INTEGER, 'quotas.tenantObjectBytes');
   const nodes: Record<string, ConfiguredNode> = Object.create(null);
   const remoteControlUrls = new Map<string, string>();
   for (const [nodeId, entry] of Object.entries(entries)) {

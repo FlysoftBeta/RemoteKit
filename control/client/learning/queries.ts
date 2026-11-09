@@ -1,3 +1,5 @@
+import { RemoteKitError } from '../../shared/errors';
+import { retryDelay, errorHandling } from '../../shared/error-policy';
 import type { LearningPage, LearningSocketMethods } from '../../shared/learning';
 import { useEffect, useRef, useState } from 'react';
 
@@ -16,7 +18,18 @@ export class LearningQueries {
     const key = JSON.stringify([method, params]);
     let result = this.cache.get(key);
     if (!result) {
-      result = this.call(method, params).catch((error) => {
+      const read = async () => {
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return await this.call(method, params);
+          } catch (error) {
+            const delay = error instanceof RemoteKitError ? retryDelay(error, attempt) : undefined;
+            if (delay === undefined || attempt >= 3) throw error;
+            await new Promise((resolve) => setTimeout(resolve, delay));
+          }
+        }
+      };
+      result = read().catch((error) => {
         this.cache.delete(key);
         throw error;
       });
@@ -33,20 +46,35 @@ export function useQuery<T>(key: string, load: () => Promise<T>, enabled = true)
   const latest = useRef(load);
   latest.current = load;
   const [attempt, setAttempt] = useState(0);
-  const [state, setState] = useState<{ key: string; value?: T; error?: string }>({ key });
+  const [state, setState] = useState<{ key: string; value?: T; error?: string; retryable?: boolean }>({
+    key,
+  });
   useEffect(() => {
     if (!enabled) return;
     let active = true;
     setState({ key });
     void latest.current().then(
       (value) => active && setState({ key, value }),
-      (error) => active && setState({ key, error: error instanceof Error ? error.message : '加载失败' }),
+      (error) =>
+        active &&
+        setState({
+          key,
+          error: error instanceof Error ? error.message : '加载失败',
+          retryable:
+            error instanceof RemoteKitError &&
+            (retryDelay(error, 0) !== undefined || errorHandling(error.code) === 'reconcile'),
+        }),
     );
     return () => {
       active = false;
     };
   }, [key, enabled, attempt]);
-  return { ...(state.key === key ? state : { key }), retry: () => setAttempt((value) => value + 1) };
+  return {
+    ...(state.key === key ? state : { key }),
+    retry: () => {
+      if (state.retryable) setAttempt((value) => value + 1);
+    },
+  };
 }
 
 export function usePaged<T>(key: string, load: (page: number) => Promise<LearningPage<T>>, enabled: boolean) {

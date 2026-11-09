@@ -1,6 +1,7 @@
 #include "management/cluster_link.hpp"
 #include "cluster/node_files.hpp"
 #include "util/thread.hpp"
+#include "util/wire_error.hpp"
 #include <windows.h>
 #include <bcrypt.h>
 #include <condition_variable>
@@ -33,6 +34,7 @@ struct ClusterLink::Impl {
   struct Message {
     uint64_t generation;
     std::string bytes;
+    DeliveryFlag delivery;
   };
   Connector connect;
   ValidateConfig validate;
@@ -45,6 +47,7 @@ struct ClusterLink::Impl {
   struct Pending {
     uint64_t generation;
     std::optional<Json> reply;
+    DeliveryFlag delivery = std::make_shared<DeliveryState>();
   };
   std::map<std::string, Pending> pending;
   size_t incoming_bytes = 0, outgoing_bytes = 0;
@@ -215,8 +218,9 @@ struct ClusterLink::Impl {
               continue;
             }
             auto& json = received.value().json;
+            // Control requests carry a method; anything else with a string id answers one of ours.
             if (json.is_object() && json.contains("id") && json["id"].is_string() &&
-                json.contains("ok") && json["ok"].is_boolean()) {
+                !json.contains("method")) {
               std::lock_guard lock(mutex);
               auto found = pending.find(json["id"].get<std::string>());
               if (found != pending.end() && found->second.generation == active) {
@@ -270,11 +274,13 @@ struct ClusterLink::Impl {
         current = channel;
         sending = true;
       }
-      const bool sent = bool(current->Send(Json::parse(message.bytes)));
+      const auto send = [&] { return bool(current->Send(Json::parse(message.bytes))); };
+      const auto sent =
+          message.delivery ? message.delivery->Dispatch(send) : std::optional<bool>(send());
       {
         std::lock_guard lock(mutex);
         sending = false;
-        if (!sent && message.generation == active)
+        if (sent && !*sent && message.generation == active)
           overload = true;
         wake.notify_all();
       }
@@ -353,7 +359,7 @@ std::optional<ManagementLink::ReadyState> ClusterLink::ReadySessions() {
     return {};
   return ReadyState{impl_->active, impl_->sessions, impl_->object_keys};
 }
-bool ClusterLink::Queue(const Json& message, uint64_t generation) {
+bool ClusterLink::Queue(const Json& message, uint64_t generation, DeliveryFlag delivery) {
   auto bytes = message.dump();
   std::lock_guard lock(impl_->mutex);
   if (!generation || generation != impl_->active || impl_->stopping || impl_->overload)
@@ -363,16 +369,22 @@ bool ClusterLink::Queue(const Json& message, uint64_t generation) {
     impl_->overload = true;
     return false;
   }
+  if (message.contains("request")) {
+    const auto found = impl_->pending.find(message.at("id").get<std::string>());
+    if (found == impl_->pending.end())
+      return false;
+    delivery = found->second.delivery;
+  }
   impl_->outgoing_bytes += bytes.size();
-  impl_->outgoing.push_back({generation, std::move(bytes)});
+  impl_->outgoing.push_back({generation, std::move(bytes), std::move(delivery)});
   impl_->wake.notify_all();
   return true;
 }
 bool ClusterLink::SendReply(uint64_t generation, const Json& reply) {
   return Queue(reply, generation);
 }
-bool ClusterLink::SendEvent(const Json& event, uint64_t generation) {
-  return Queue(event, generation);
+bool ClusterLink::SendEvent(const Json& event, uint64_t generation, DeliveryFlag delivery) {
+  return Queue(event, generation, std::move(delivery));
 }
 void ClusterLink::OnDisconnect(Disconnect callback) {
   std::lock_guard lock(impl_->callback_mutex);
@@ -398,7 +410,7 @@ Result<Json> ClusterLink::Request(const std::string& name, Json fields) {
     if (!impl_->active || impl_->stopping || impl_->overload)
       return Error{ErrorCode::kUnavailable, "Control disconnected"};
     if (impl_->pending.size() >= 256)
-      return Error{ErrorCode::kLimitExceeded, "too many in-flight requests"};
+      return Error{ErrorCode::kBusy, "too many in-flight requests"};
     generation = impl_->active;
     impl_->pending.emplace(id, Impl::Pending{generation, {}});
   }
@@ -414,20 +426,19 @@ Result<Json> ClusterLink::Request(const std::string& name, Json fields) {
     return impl_->stopping || impl_->active != generation ||
            impl_->pending.at(id).reply.has_value();
   });
+  const auto delivery = impl_->pending.at(id).delivery;
   auto reply = std::move(impl_->pending.at(id).reply);
   impl_->pending.erase(id);
+  lock.unlock();
+  const bool dispatched = delivery->CancelAndWasWritten();
   if (!reply)
-    return Error{ErrorCode::kOutcomeUnknown, "Control request outcome unknown"};
-  if (reply->value("ok", false) && reply->contains("result"))
+    return Error{
+        dispatched ? ErrorCode::kOutcomeUnknown : ErrorCode::kUnavailable,
+        dispatched ? "Control request outcome unknown" : "Control request was not dispatched"};
+  if (!reply->is_object() || !reply->contains("ok") || !(*reply)["ok"].is_boolean())
+    return Error{ErrorCode::kOutcomeUnknown, "Invalid Control reply envelope"};
+  if ((*reply)["ok"] == true && reply->contains("result"))
     return (*reply)["result"];
-  const auto error = reply->value("error", Json::object());
-  const auto code = error.value("code", std::string("rejected"));
-  for (auto value : {ErrorCode::kInvalidRequest, ErrorCode::kUnauthenticated, ErrorCode::kForbidden,
-                     ErrorCode::kNotFound, ErrorCode::kConflict, ErrorCode::kLimitExceeded,
-                     ErrorCode::kRateLimited, ErrorCode::kUnavailable, ErrorCode::kOutcomeUnknown,
-                     ErrorCode::kBusy, ErrorCode::kInternal, ErrorCode::kRejected})
-    if (ErrorCodeName(value) == code)
-      return Error{value, error.value("message", code)};
-  return Error{ErrorCode::kRejected, "invalid Control reply"};
+  return ParseWireError(reply->value("error", Json()));
 }
 }  // namespace remotekit

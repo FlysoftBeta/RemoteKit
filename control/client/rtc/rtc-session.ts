@@ -8,7 +8,9 @@ import {
 } from '../media/receive-profile';
 import { type Diagnostics } from '../media/types';
 
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, parseWireError, toRemoteKitError } from '../../shared/errors';
+import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { formatError } from '../util/format-error';
 import { diagnostics } from '../media/diagnostics';
 import { Events } from '../util/store';
 import type { ControlRpc } from './session-port';
@@ -69,11 +71,13 @@ export class RtcSession {
       return;
     }
     if (message.signal.type === 'error') {
-      this.connectionFailed(message.signal.message);
+      this.connectionFailed(
+        parseWireError(message.signal.error) ?? new RemoteKitError('internal', '媒体信令错误码无效'),
+      );
       return;
     }
     if (this.remoteIce.length >= 256) {
-      this.connectionFailed('远端 ICE 候选超过上限');
+      this.connectionFailed(new RemoteKitError('limit_exceeded', '远端 ICE 候选超过上限'));
       return;
     }
     this.markConnection('remoteFirstCandidate');
@@ -91,7 +95,9 @@ export class RtcSession {
       })
       .catch((error) => {
         if (this.currentPeer === peer && this.signalAttemptId === attemptId)
-          this.connectionFailed('ICE candidate rejected: ' + String(error));
+          this.connectionFailed(
+            new RemoteKitError('invalid_request', 'ICE 候选无效', { detail: String(error) }),
+          );
       });
   }
 
@@ -105,8 +111,7 @@ export class RtcSession {
           await this.rtcRequest('rtc.ice', { connectionId, attemptId, candidate: this.localIce.shift()! });
       })
       .catch((error) => {
-        if (this.currentPeer === peer && this.signalAttemptId === attemptId)
-          this.connectionFailed('ICE candidate delivery failed: ' + String(error));
+        if (this.currentPeer === peer && this.signalAttemptId === attemptId) this.connectionFailed(error);
       });
   }
 
@@ -141,6 +146,7 @@ export class RtcSession {
   }
 
   private connectionId: string | undefined;
+  private closing: Promise<void> = Promise.resolve();
   confirmedAvSync: boolean | undefined;
 
   private endpointGeneration: number | undefined;
@@ -163,14 +169,20 @@ export class RtcSession {
 
   private retryCount = 0;
 
-  private scheduleReconnect(reason: string, attemptId: string) {
+  private scheduleReconnect(error: RemoteKitError, attemptId: string) {
     if (this.state.phase === 'stopped' || this.state.phase === 'retryWait') return;
-    if (this.retryCount === 3) {
+    const handling = errorHandling(error.code);
+    if (retryDelay(error, this.retryCount) === undefined && handling !== 'reconcile') {
       this.transition({ phase: 'exhausted' });
-      this.observe({ connection: '连接失败', error: reason });
+      this.observe({ connection: '连接失败', error: formatError(error) });
       return;
     }
-    const delay = [2000, 5000, 10000][this.retryCount++];
+    if (this.retryCount === 3) {
+      this.transition({ phase: 'exhausted' });
+      this.observe({ connection: '连接失败', error: formatError(error) });
+      return;
+    }
+    const delay = retryDelay(error, this.retryCount++) ?? 1000;
     this.transition({ phase: 'retryWait', attemptId, dueAt: Date.now() + delay });
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined;
@@ -178,7 +190,30 @@ export class RtcSession {
     }, delay);
   }
 
-  connectionFailed(reason: string) {
+  connectionFailed(error: unknown) {
+    const failure =
+      typeof error === 'string'
+        ? new RemoteKitError('unavailable', error)
+        : error instanceof DOMException
+          ? new RemoteKitError(
+              error.name === 'AbortError'
+                ? 'canceled'
+                : ['NotAllowedError', 'SecurityError'].includes(error.name)
+                  ? 'forbidden'
+                  : error.name === 'NotSupportedError'
+                    ? 'rejected'
+                    : 'internal',
+              '媒体连接建立失败',
+              { detail: error.message },
+            )
+          : toRemoteKitError(error);
+    if (errorHandling(failure.code) === 'canceled') {
+      this.closeLocal();
+      this.transition({ phase: 'idle' });
+      this.observe({ connection: '未连接', error: undefined });
+      return;
+    }
+    const reason = formatError(failure);
     const attemptId = this.signalAttemptId ?? String(this.attempt);
     const trace = this.connectionAttempts[this.connectionAttempts.length - 1];
     if (trace) {
@@ -187,7 +222,7 @@ export class RtcSession {
     }
     this.closeLocal();
     this.observe({ connection: '连接失败', error: reason });
-    this.scheduleReconnect(reason, attemptId);
+    this.scheduleReconnect(failure, attemptId);
   }
 
   observeEndpointGeneration(generation: number | undefined) {
@@ -216,6 +251,8 @@ export class RtcSession {
     if (this.connectionAttempts.length > 4) this.connectionAttempts.shift();
     this.observe({ connection: '正在连接', error: undefined });
     try {
+      await this.closing;
+      if (attempt !== this.attempt) return;
       const peer = new RTCPeerConnection({ bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
       peer.onicecandidate = (event) => {
         if (this.peer !== peer) return;
@@ -225,7 +262,7 @@ export class RtcSession {
         }
         this.markConnection('localFirstCandidate');
         if (this.localIce.length >= 256) {
-          this.connectionFailed('本地 ICE 候选超过上限');
+          this.connectionFailed(new RemoteKitError('limit_exceeded', '本地 ICE 候选超过上限'));
           return;
         }
         this.localIce.push(event.candidate.toJSON());
@@ -344,7 +381,7 @@ export class RtcSession {
       this.connectionId = answer.connectionId;
       this.confirmedAvSync = answer.avSync;
       if (this.remoteSignalConnection && this.remoteSignalConnection !== answer.connectionId)
-        throw new RemoteKitError('unavailable', '媒体协商连接身份不一致');
+        throw new RemoteKitError('internal', '媒体协商连接身份不一致');
       this.endpointGeneration = answer.endpointGeneration;
       this.signaling.answerSdp = answer.sdp;
       this.signaling.controlNegotiationTiming = (answer as any).negotiationTiming;
@@ -366,7 +403,7 @@ export class RtcSession {
         trace.error = error instanceof Error ? error.message : String(error);
         this.markConnection('failed');
       }
-      this.connectionFailed(error instanceof Error ? error.message : String(error));
+      this.connectionFailed(error);
     }
   }
 
@@ -380,6 +417,7 @@ export class RtcSession {
   private closeLocal() {
     this.events.emit({ type: 'closed' });
     this.confirmedAvSync = undefined;
+    const connectionId = this.connectionId ?? this.remoteSignalConnection;
     this.signalAttemptId = undefined;
     this.remoteSignalConnection = undefined;
     this.remoteDescriptionReady = false;
@@ -389,10 +427,9 @@ export class RtcSession {
     this.localIceDelivery = Promise.resolve();
     this.attemptNumber++;
     this.endpointGeneration = undefined;
-    if (this.connectionId) {
-      void this.rtcRequest('rtc.close', { connectionId: this.connectionId }).catch((error) =>
-        diagnostics.record('rtc-close', error),
-      );
+    if (connectionId) {
+      this.closing = this.closeRemote(connectionId);
+      void this.closing.catch((error) => diagnostics.record('rtc-close', error));
       this.connectionId = undefined;
     }
     const peer = this.peer;
@@ -401,6 +438,20 @@ export class RtcSession {
     this.notify();
   }
 
+  private async closeRemote(connectionId: string) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.rtcRequest('rtc.close', { connectionId });
+        return;
+      } catch (error) {
+        const failure = toRemoteKitError(error);
+        const delay =
+          retryDelay(failure, attempt) ?? (errorHandling(failure.code) === 'reconcile' ? 1000 : undefined);
+        if (delay === undefined || attempt >= 3) throw failure;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
   readonly events = new Events<RtcEvent>();
 
   private observe(change: Partial<Diagnostics>) {

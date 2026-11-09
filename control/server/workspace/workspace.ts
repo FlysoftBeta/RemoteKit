@@ -174,15 +174,19 @@ export class Workspace {
     if (
       typeof params.url !== 'string' ||
       typeof params.image !== 'string' ||
-      params.image.length > 'data:image/jpeg;base64,'.length + 32768 ||
       !/^data:image\/jpeg;base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
         params.image,
       )
     )
       throw new RemoteKitError('invalid_request', '需要 JPEG 页面预览');
+    if (params.image.length > 'data:image/jpeg;base64,'.length + 32768)
+      throw new RemoteKitError('limit_exceeded', '页面预览超过大小限制');
     const image = Buffer.from(params.image.slice('data:image/jpeg;base64,'.length), 'base64');
     if (!image.length || image.length > 24 * 1024 || image[0] !== 0xff || image[1] !== 0xd8)
-      throw new RemoteKitError('invalid_request', '页面预览必须为不超过 24 KiB 的 JPEG');
+      throw new RemoteKitError(
+        image.length > 24 * 1024 ? 'limit_exceeded' : 'invalid_request',
+        '页面预览必须为不超过 24 KiB 的 JPEG',
+      );
     const url = normalizedUsagePage(params.url);
     if (!url) return { saved: false };
     if (

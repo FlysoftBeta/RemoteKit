@@ -6,7 +6,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { createServer as createHttpsServer } from 'node:https';
 import type { Socket } from 'node:net';
 import { extname, resolve, sep } from 'node:path';
-import { RemoteKitError, httpStatus, toRemoteKitError } from '../../shared/errors';
+import { RemoteKitError, httpStatus, toRemoteKitError, wireError } from '../../shared/errors';
 
 import type { DomainServices } from '../application';
 import type { ProcessLog } from '../diagnostics/process-log';
@@ -69,9 +69,8 @@ export function createHttp(
   const firstViewer = new Map<string, number>();
   const cookie = (token: string, clear = false) =>
     `rk_session=${token}; HttpOnly; SameSite=Strict; Path=/${options.tls ? '; Secure' : ''}${clear ? '; Max-Age=0' : '; Max-Age=2592000'}`;
-  const checkOrigin = (req: IncomingMessage) => {
-    if (!req.headers.origin || !options.origins.includes(req.headers.origin))
-      throw new RemoteKitError('forbidden', '请求来源不允许');
+  const checkOrigin = (origin: string | undefined) => {
+    if (!origin || !options.origins.includes(origin)) throw new RemoteKitError('forbidden', '请求来源不允许');
   };
   const handler = async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -134,14 +133,19 @@ export function createHttp(
         await pipeline(createReadStream(archive.path), res);
         return;
       }
+      if (path === '/api/socket/check' && req.method === 'GET') {
+        checkOrigin(address.searchParams.get('origin') ?? undefined);
+        control.accounts.me(token);
+        return json(res, 200, { ready: true });
+      }
       if (path === '/api/auth/me' && req.method === 'GET') {
         return json(res, 200, control.accounts.me(token));
       }
       if (path.startsWith('/api/')) {
         if (!['/api/auth/setup', '/api/auth/login', '/api/auth/logout'].includes(path))
-          throw new RemoteKitError('not_found', 'Interface does not exist');
+          throw new RemoteKitError('not_found', '接口不存在', { detail: 'Interface does not exist' });
         if (req.method !== 'POST') throw new RemoteKitError('invalid_request', '不支持的方法');
-        checkOrigin(req);
+        checkOrigin(req.headers.origin);
         if (!req.headers['content-type']?.startsWith('application/json'))
           throw new RemoteKitError('invalid_request', '需要 JSON 请求');
         const body = await readBody(req);
@@ -179,8 +183,12 @@ export function createHttp(
         appEntry = path === '/',
         file = resolve(root, appEntry ? 'index.html' : `.${path}`);
       if (!file.startsWith(root + sep)) throw new RemoteKitError('forbidden', '无效路径');
-      const content = await readFile(file).catch(() => {
-        throw new RemoteKitError('not_found', '文件不存在，请先 npm run build');
+      const content = await readFile(file).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+          throw new RemoteKitError('not_found', '文件不存在');
+        if (['EBUSY', 'EIO', 'EMFILE', 'ENFILE'].includes(error.code ?? ''))
+          throw new RemoteKitError('unavailable', '文件暂时无法读取', { detail: String(error) });
+        throw toRemoteKitError(error);
       });
       const mime: Record<string, string> = {
         '.html': 'text/html; charset=utf-8',
@@ -192,7 +200,10 @@ export function createHttp(
       res.end(req.method === 'HEAD' ? undefined : content);
     } catch (error) {
       const failure = toRemoteKitError(error);
-      json(res, httpStatus[failure.code], { error: { code: failure.code, message: failure.message } });
+      if (failure.retryAfterMs !== undefined)
+        res.setHeader('Retry-After', String(Math.ceil(failure.retryAfterMs / 1000)));
+      if (failure.code === 'internal') console.error('HTTP request failed', failure.detail);
+      json(res, httpStatus[failure.code], { error: wireError(failure) });
     }
   };
   const server = options.tls

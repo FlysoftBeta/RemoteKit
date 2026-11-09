@@ -1,5 +1,6 @@
 #include "download.hpp"
 #include "archive.hpp"
+#include "util/wire_error.hpp"
 #include "cluster/channel.hpp"
 #include <fstream>
 
@@ -61,7 +62,7 @@ Result<void> Download(cluster::Channel& channel,
       if (!json.contains("offset") || !json["offset"].is_number_unsigned() ||
           json["offset"].get<uint64_t>() != offset || frame.bytes.empty() ||
           frame.bytes.size() > 1024 * 1024 || frame.bytes.size() > expected - offset)
-        return Retry("invalid package chunk");
+        return Error{ErrorCode::kInternal, "invalid package chunk"};
       if (!file.write(reinterpret_cast<const char*>(frame.bytes.data()), frame.bytes.size()))
         return Retry("package write failed");
       offset += frame.bytes.size();
@@ -69,18 +70,21 @@ Result<void> Download(cluster::Channel& channel,
                json.value("type", "") == "package.end") {
       if (!json.contains("size") || !json["size"].is_number_unsigned() ||
           json["size"].get<uint64_t>() != expected || offset != expected)
-        return Retry("package size mismatch");
+        return Error{ErrorCode::kInternal, "package size mismatch"};
       file.close();
       auto hash = cluster::Sha256File(partial);
       if (!hash)
         return hash.error();
       if (cluster::Hex(hash.value()) != release["sha256"].get<std::string>()) {
         fs::remove(partial);
-        return Retry("package SHA-256 mismatch");
+        return Error{ErrorCode::kRejected, "package SHA-256 mismatch"};
       }
       return {};
+    } else if (frame.kind == cluster::Message::Kind::kJson &&
+               json.value("type", "") == "package.error") {
+      return ParseWireError(json.value("error", Json()));
     } else
-      return Retry("unexpected package response");
+      return Error{ErrorCode::kInternal, "unexpected package response"};
   }
   return Retry("update stopped");
 }
@@ -107,8 +111,10 @@ Result<void> InstallRuntime(const fs::path& root, const fs::path& archive, const
   fs::remove_all(ExtendedPath(temporary), cleanup_error);
   if (!extracted)
     return extracted.error();
+  if (error)
+    return Error{ErrorCode::kUnavailable, "Cannot move extracted runtime: " + error.message()};
   if (!RuntimeInstalled(runtime, id))
-    return Retry("cannot install node runtime: invalid archive or destination");
+    return Error{ErrorCode::kInternal, "Release archive does not contain the promised runtime"};
   return {};
 }
 Result<bool> ReplaceSelf(const fs::path& root, const fs::path& runtime, bool service, Log& log) {
@@ -170,7 +176,7 @@ Result<void> InstallBundled(const fs::path& root, const fs::path& package) {
     return build.error();
   const auto& id = build.value();
   if (!cluster::ValidBuildId(id))
-    return Retry("invalid bundled build identity");
+    return Error{ErrorCode::kInternal, "invalid bundled build identity"};
   if (RuntimeInstalled(root / L"runtime" / id, id))
     return {};
   auto archive = package / L"release/node.tar.zst";
@@ -180,15 +186,16 @@ Result<void> InstallBundled(const fs::path& root, const fs::path& package) {
       !release.contains("sha256") || !release["sha256"].is_string() || !release.contains("size") ||
       !release["size"].is_number_unsigned() ||
       fs::file_size(archive) != release["size"].get<uint64_t>())
-    return Retry("invalid bundled node release");
+    return Error{ErrorCode::kInternal, "invalid bundled node release"};
   auto hash = cluster::Sha256File(archive);
   if (!hash)
     return hash.error();
   if (cluster::Hex(hash.value()) != release["sha256"].get<std::string>())
-    return Retry("bundled node package SHA-256 mismatch");
+    return Error{ErrorCode::kRejected, "bundled node package SHA-256 mismatch"};
   return InstallRuntime(root, archive, id);
 }
 Result<bool> Update(const fs::path& root, HANDLE stop, Log& log, bool service) {
+  static std::string failed_release;
   try {
     auto files = cluster::LoadNodeFiles(root);
     if (!files)
@@ -209,8 +216,10 @@ Result<bool> Update(const fs::path& root, HANDLE stop, Log& log, bool service) {
         !release.contains("sha256") || !release["sha256"].is_string() ||
         !cluster::ValidBuildId(release["sha256"].get<std::string>()) || !release.contains("size") ||
         !release["size"].is_number_unsigned() || release["size"].get<uint64_t>() == 0)
-      return Retry("invalid node release");
+      return Error{ErrorCode::kInternal, "invalid node release"};
     std::string id = release["buildId"].get<std::string>();
+    if (id == failed_release)
+      return Retry("Waiting for a different Control release");
     if (id == previous)
       return Retry("Control release equals current runtime");
     fs::create_directories(root / L"downloads");
@@ -219,14 +228,22 @@ Result<bool> Update(const fs::path& root, HANDLE stop, Log& log, bool service) {
     auto archive = root / L"downloads" / (id + ".tar.zst");
     auto downloaded = Download(*connection.value().channel, release, partial, stop);
     connection.value().channel->Close();
-    if (!downloaded)
+    if (!downloaded) {
+      if (downloaded.error().code == ErrorCode::kRejected ||
+          downloaded.error().code == ErrorCode::kInternal)
+        failed_release = id;
       return downloaded.error();
+    }
     if (!MoveFileExW(partial.c_str(), archive.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
       return Retry("cannot finish archive download");
     auto installed = InstallRuntime(root, archive, id);
-    if (!installed)
+    if (!installed) {
+      if (installed.error().code == ErrorCode::kRejected ||
+          installed.error().code == ErrorCode::kInternal)
+        failed_release = id;
       return installed.error();
+    }
     auto runtime = root / L"runtime" / id;
     auto activated = SetCurrent(root, id);
     if (!activated)
@@ -248,8 +265,10 @@ Result<bool> Update(const fs::path& root, HANDLE stop, Log& log, bool service) {
       return replaced.error();
     }
     return replaced;
-  } catch (...) {
-    return Retry("node update failed");
+  } catch (const fs::filesystem_error& error) {
+    return Error{ErrorCode::kUnavailable, error.what()};
+  } catch (const std::exception& error) {
+    return Error{ErrorCode::kInternal, error.what()};
   }
 }
 }  // namespace remotekit::updater

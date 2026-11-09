@@ -396,12 +396,15 @@ export function AdminUsersSection({
                   </TableCell>
                   <TableCell className="admin-wide">
                     <Box className="admin-usage">
-                      <LinearProgress
-                        variant="determinate"
-                        value={Math.min(100, (user.storage.bytes / user.storage.quotaBytes) * 100)}
-                      />
+                      {user.storage.quotaBytes !== null && (
+                        <LinearProgress
+                          variant="determinate"
+                          value={Math.min(100, (user.storage.bytes / user.storage.quotaBytes) * 100)}
+                        />
+                      )}
                       <Typography variant="caption" color="text.secondary" noWrap>
-                        {formatBytes(user.storage.bytes)} / {formatBytes(user.storage.quotaBytes)}
+                        {formatBytes(user.storage.bytes)}
+                        {user.storage.quotaBytes !== null && ` / ${formatBytes(user.storage.quotaBytes)}`}
                       </Typography>
                     </Box>
                   </TableCell>

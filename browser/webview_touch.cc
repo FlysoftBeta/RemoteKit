@@ -21,23 +21,23 @@ std::optional<Status> TouchController::PrepareInput(const InputEvent& input) {
     if (!new_sequence && touch->clock && client_touch_token_ &&
         (*client_touch_token_ != input.token ||
          touch->clock->sequence_id != client_touch_sequence_))
-      return Fail(ErrorCode::stale_identity,
-                  "Client touch sequence does not own the current contacts");
+      return Fail(ErrorCode::kConflict, "Client touch sequence does not own the current contacts");
     if (!new_sequence && OwnershipUnconfirmed())
-      return Fail(ErrorCode::unavailable, "Touch ACK timed out; start a new touch sequence");
+      return Fail(ErrorCode::kConflict, "Touch ACK timed out; start a new touch sequence");
     if (HasDevToolsConflict())
-      return Fail(ErrorCode::unsupported, "Remote touch is exclusive with attached DevTools");
+      return Fail(ErrorCode::kRejected, "Remote touch is exclusive with attached DevTools");
     std::size_t changed_points = touch->points.size();
     for (const auto& sample : touch->samples)
       changed_points += sample.points.size();
     if (changed_points > 64)
-      return Fail(ErrorCode::invalid_request, "Too many touch history contacts");
+      return Fail(ErrorCode::kLimitExceeded, "Too many touch history contacts");
     std::size_t pending = client_gesture_bridge_ ? client_gesture_bridge_->pending_ack_count() : 0;
     for (const auto& bridge : draining_gesture_bridges_)
       pending += bridge->pending_ack_count();
     const auto cancellation = new_sequence && !touches_.empty() ? 1u : 0u;
     if (pending + changed_points + cancellation + 1 > 128)
-      return Fail(ErrorCode::busy, "Touch ACK queue busy; retry this input with the same sequence");
+      return Fail(ErrorCode::kBusy,
+                  "Touch ACK queue busy; retry this input with the same sequence");
     std::map<std::uint32_t, TouchPoint> next_touches;
     auto status = BuildTouchState(*touch, new_sequence, &next_touches);
     if (!status)
@@ -52,19 +52,19 @@ Status TouchController::SupersedeClientTouch() {
     if (TouchTargetAlive()) {
       bridge->StopMomentum();
       if (!weak)
-        return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+        return Fail(ErrorCode::kConflict, "Touch owner destroyed");
       if (!touches_.empty() && !bridge->has_routed_terminal()) {
         TouchInput cancel;
         cancel.action = TouchInput::Action::cancel;
         cancel.clock = touch_clock_;
         const auto status = InjectTouches(cancel);
         if (!weak)
-          return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+          return Fail(ErrorCode::kConflict, "Touch owner destroyed");
         if (!status)
           return status;
         bridge->Cancel(true);
         if (!weak)
-          return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+          return Fail(ErrorCode::kConflict, "Touch owner destroyed");
       }
       // A queued terminal retains arbitration until its canonical ACK so an
       // admitted tap can produce its click before the next sequence's gestures.
@@ -73,7 +73,7 @@ Status TouchController::SupersedeClientTouch() {
     } else {
       bridge->Cancel(false);
       if (!weak)
-        return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+        return Fail(ErrorCode::kConflict, "Touch owner destroyed");
     }
   }
   client_gesture_bridge_.reset();
@@ -102,14 +102,14 @@ Status TouchController::Momentum(const GestureInput& gesture) {
         touches_.empty())
       return {};
     if (!TouchTargetAlive())
-      return Fail(ErrorCode::stale_identity, "Long press document/target lost");
+      return Fail(ErrorCode::kConflict, "Long press document/target lost");
     auto value = gesture;
     value.x += touch_root_offset_x_;
     value.y += touch_root_offset_y_;
     return client_gesture_bridge_->LongPress(value);
   }
   if (!TouchTargetAlive() || !client_gesture_bridge_)
-    return Fail(ErrorCode::stale_identity, "Momentum document/target lost");
+    return Fail(ErrorCode::kConflict, "Momentum document/target lost");
   return client_gesture_bridge_->Momentum(gesture);
 }
 Status TouchController::BuildTouchState(const TouchInput& input,
@@ -121,42 +121,41 @@ Status TouchController::BuildTouchState(const TouchInput& input,
   for (const auto& sample : input.samples)
     for (const auto& point : sample.points)
       if (!next->contains(point.id) || !FloatFits(point.x) || !FloatFits(point.y))
-        return Fail(ErrorCode::invalid_request, "Invalid touch history contact");
+        return Fail(ErrorCode::kInvalidRequest, "Invalid touch history contact");
   for (const auto& point : input.points) {
     if (!FloatFits(point.x) || !FloatFits(point.y))
-      return Fail(ErrorCode::invalid_request, "Touch point outside Blink representation");
+      return Fail(ErrorCode::kInvalidRequest, "Touch point outside Blink representation");
     bool exists = next->contains(point.id);
     if ((input.action == TouchInput::Action::start && exists) ||
         ((input.action == TouchInput::Action::move || input.action == TouchInput::Action::end) &&
          !exists))
-      return Fail(ErrorCode::invalid_request, "Invalid touch contact transition");
+      return Fail(ErrorCode::kInvalidRequest, "Invalid touch contact transition");
     if (input.action != TouchInput::Action::cancel)
       (*next)[point.id] = point;
   }
   if (next->size() > blink::WebTouchEvent::kTouchesLengthCap)
-    return Fail(ErrorCode::unsupported, "At most 16 simultaneous touch contacts supported");
+    return Fail(ErrorCode::kLimitExceeded, "At most 16 simultaneous touch contacts supported");
   if (input.action == TouchInput::Action::cancel && next->empty())
-    return Fail(ErrorCode::invalid_request, "No touch sequence to cancel");
+    return Fail(ErrorCode::kInvalidRequest, "No touch sequence to cancel");
   return {};
 }
 Status TouchController::TouchInjectionStatus() const {
   if (touch_cleanup_pending_)
-    return Fail(ErrorCode::busy, "Draining remote touch");
+    return Fail(ErrorCode::kBusy, "Draining remote touch");
   if (AwaitingHitTest())
-    return Fail(ErrorCode::busy, "Resolving touch target; retry subsequent input");
+    return Fail(ErrorCode::kBusy, "Resolving touch target; retry subsequent input");
   if (HasDevToolsConflict())
-    return Fail(ErrorCode::unsupported, "Remote touch is exclusive with DevTools touch emulation");
+    return Fail(ErrorCode::kRejected, "Remote touch is exclusive with DevTools touch emulation");
   if (!touches_.empty() && !TouchTargetAlive())
-    return Fail(ErrorCode::stale_identity, "Touch target/document is no longer current");
+    return Fail(ErrorCode::kConflict, "Touch target/document is no longer current");
   if (touch_pending_callbacks_)
-    return {ErrorCode::none,
-            "Submitted to Chromium; input processing pending, execution unconfirmed"};
+    return {std::nullopt, "Submitted to Chromium; input processing pending, execution unconfirmed"};
   return touch_status_;
 }
 void TouchController::RefreshClientTouchOwner() {
   if (client_gesture_bridge_ && !TouchTargetAlive()) {
     CancelTouches(false);
-    touch_status_ = Fail(ErrorCode::stale_identity, "Client touch target/document invalidated");
+    touch_status_ = Fail(ErrorCode::kConflict, "Client touch target/document invalidated");
   }
 }
 void TouchController::DevToolsAgentHostAttached(content::DevToolsAgentHost* host) {
@@ -166,7 +165,7 @@ void TouchController::DevToolsAgentHostAttached(content::DevToolsAgentHost* host
   // calls. Its private mode can change before we next inspect IsEnabled().
   CancelTouches(false);
   touch_status_ =
-      Fail(ErrorCode::unsupported, "DevTools attachment invalidated remote touch ownership");
+      Fail(ErrorCode::kRejected, "DevTools attachment invalidated remote touch ownership");
 }
 bool TouchController::HasDevToolsConflict() const {
   if (!owner_.contents())
@@ -270,7 +269,7 @@ void TouchController::OnClientTouchProcessed(std::uint64_t epoch,
     if (ack == ClientTouchAckState::target_mismatch)
       client_touch_ack_mismatch_ = true;
     owner_state_ = invalidated ? OwnerState::kInvalidated : OwnerState::kUnconfirmed;
-    touch_status_ = Fail(ErrorCode::stale_identity, "Client touch owner/ACK invalidated");
+    touch_status_ = Fail(ErrorCode::kConflict, "Client touch owner/ACK invalidated");
     if (invalidated)
       CancelTouches(false);
   } else if (terminal && drained && !touch_pending_callbacks_ && !client_touch_ack_mismatch_) {
@@ -294,7 +293,7 @@ Status TouchController::PrepareTouchClock(const TouchInput& touch) {
   const auto reject = [&]() {
     ++touch_clock_rejected_;
     CancelTouches(true);
-    return Fail(ErrorCode::invalid_request, "Invalid touch source clock; sequence cancelled");
+    return Fail(ErrorCode::kInvalidRequest, "Invalid touch source clock; sequence cancelled");
   };
   if (first) {
     touch_clock_.reset();
@@ -347,7 +346,7 @@ Status TouchController::DispatchTouches(const TouchInput& touch, const InputToke
     auto weak = weak_factory_.GetWeakPtr();
     const auto status = SupersedeClientTouch();
     if (!weak)
-      return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+      return Fail(ErrorCode::kConflict, "Touch owner destroyed");
     if (!status)
       return status;
   }
@@ -363,7 +362,7 @@ Status TouchController::DispatchTouches(const TouchInput& touch, const InputToke
   if (touch.action == TouchInput::Action::start && touches_.empty()) {
     auto* root = owner_.input_->pointer_root_widget_.get();
     if (!root || !root->delegate()) {
-      return Fail(ErrorCode::unavailable, "Touch hit testing unavailable");
+      return Fail(ErrorCode::kUnavailable, "Touch hit testing unavailable");
     }
     owner_state_ = OwnerState::kAwaitingHitTest;
     touch_status_ = {};
@@ -375,7 +374,7 @@ Status TouchController::DispatchTouches(const TouchInput& touch, const InputToke
               if (!self || self->touch_epoch_ != expected)
                 return;
               self->CancelTouches(true);
-              self->touch_status_ = Fail(ErrorCode::unavailable, "Touch hit test timed out");
+              self->touch_status_ = Fail(ErrorCode::kUnavailable, "Touch hit test timed out");
             },
             weak_factory_.GetWeakPtr(), epoch));
     // As in DevTools InputHandler, hit test once before injection. Injecting
@@ -417,11 +416,11 @@ void TouchController::OnTouchTarget(std::uint64_t epoch,
       !model || model->instance != token.instance || model->document != token.document ||
       model->focus_generation != token.focus || !model->focused || model->pending ||
       model->actual != Residency::live) {
-    reject(ErrorCode::stale_identity, "Touch target resolution crossed a document/focus boundary");
+    reject(ErrorCode::kConflict, "Touch target resolution crossed a document/focus boundary");
     return;
   }
   if (!target || !transformed || target->GetRootView() != owner_.input_->pointer_root_view_.get()) {
-    reject(ErrorCode::unavailable, "No current touch target in this WebView");
+    reject(ErrorCode::kUnavailable, "No current touch target in this WebView");
     return;
   }
   auto* widget = target->GetRenderWidgetHost();
@@ -433,7 +432,7 @@ void TouchController::OnTouchTarget(std::uint64_t epoch,
           target_frame = static_cast<content::RenderFrameHostImpl*>(frame);
       });
   if (!InputFrameReady(target_frame)) {
-    reject(ErrorCode::unavailable, "Touch target has no active local-root document");
+    reject(ErrorCode::kUnavailable, "Touch target has no active local-root document");
     return;
   }
   // The router expects root coordinates even when its explicit target is an
@@ -462,31 +461,34 @@ Status TouchController::InjectTouches(const TouchInput& touch) {
   auto weak_self = weak_factory_.GetWeakPtr();
   if (!TouchTargetAlive()) {
     CancelTouches(false);
-    return Fail(ErrorCode::stale_identity, "Touch target/document changed");
+    return Fail(ErrorCode::kConflict, "Touch target/document changed");
   }
   if (touch_pending_callbacks_ + touch.points.size() + 1 > 128)
-    return Fail(ErrorCode::unavailable, "Touch ACK queue full");
+    return Fail(ErrorCode::kBusy, "Touch ACK queue full");
   for (const auto& point : touch.points)
     if (!FloatFits(point.x + touch_root_offset_x_) || !FloatFits(point.y + touch_root_offset_y_))
-      return Fail(ErrorCode::invalid_request,
+      return Fail(ErrorCode::kInvalidRequest,
                   "Transformed touch point outside Blink representation");
   if (!touch.samples.empty()) {
     TouchInput history = touch;
     history.samples.clear();
     history.gestures.clear();
+    bool injected = false;
     for (const auto& sample : touch.samples) {
       history.points = sample.points;
       history.clock->elapsed_us = sample.elapsed_us;
       auto status = InjectTouches(history);
       if (!weak_self)
-        return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+        return Fail(ErrorCode::kConflict, "Touch owner destroyed");
       if (!status)
-        return status;
+        return injected ? Fail(ErrorCode::kOutcomeUnknown, status.message.c_str()) : status;
+      injected = true;
     }
     history.points = touch.points;
     history.clock = touch.clock;
     history.gestures = touch.gestures;
-    return InjectTouches(history);
+    auto final = InjectTouches(history);
+    return final ? final : Fail(ErrorCode::kOutcomeUnknown, final.message.c_str());
   }
   const auto emit = [&](Type type, std::optional<std::uint32_t> changed) -> Status {
     const auto now = base::TimeTicks::Now();
@@ -499,7 +501,7 @@ Status TouchController::InjectTouches(const TouchInput& touch) {
     // Keep unclamped source age for calibration diagnostics. Native input uses
     // the Browser clock even if a later packet has less delay than the first.
     if (!client_gesture_bridge_)
-      return Fail(ErrorCode::stale_identity, "Client gesture bridge missing");
+      return Fail(ErrorCode::kConflict, "Client gesture bridge missing");
     const auto dispatched = client_gesture_bridge_->NativeTimestamp(sampled);
     blink::WebTouchEvent event(type, 0, dispatched);
     event.dispatch_type = type == Type::kTouchCancel
@@ -540,7 +542,7 @@ Status TouchController::InjectTouches(const TouchInput& touch) {
     ++touch_pending_callbacks_;
     auto result = client_gesture_bridge_->Dispatch(event, gestures, touch.clock->elapsed_us);
     if (!weak_self)
-      return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+      return Fail(ErrorCode::kConflict, "Touch owner destroyed");
     if (!result) {
       if (touch_pending_callbacks_)
         --touch_pending_callbacks_;
@@ -553,7 +555,7 @@ Status TouchController::InjectTouches(const TouchInput& touch) {
     // MotionEventWeb requires ALL contacts cancelled in a cancellation event.
     auto status = emit(Type::kTouchCancel, std::nullopt);
     if (!weak_self)
-      return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+      return Fail(ErrorCode::kConflict, "Touch owner destroyed");
     if (status) {
       touches_.clear();
       touch_pointer_ids_.clear();
@@ -579,7 +581,7 @@ Status TouchController::InjectTouches(const TouchInput& touch) {
                                                                   : Type::kTouchEnd,
                        point.id);
     if (!weak_self)
-      return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+      return Fail(ErrorCode::kConflict, "Touch owner destroyed");
     if (!status) {
       if (previous)
         touches_[point.id] = *previous;

@@ -85,7 +85,7 @@ class ClipboardController {
       const auto sequence = value.contains("sequence") ? Sequence(value["sequence"]) : std::nullopt;
       if (!sequence || !value.contains("text") || !value["text"].is_string() ||
           !value.contains("html") || !value["html"].is_string())
-        return Error{ErrorCode::kUnavailable, "invalid clipboard response"};
+        return Error{ErrorCode::kInternal, "invalid clipboard response"};
       // A later write invalidates this snapshot, including while the RPC was in flight.
       const auto current = hooks_.sequence();
       if (current && *current > *sequence) {

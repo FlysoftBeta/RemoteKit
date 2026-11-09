@@ -34,7 +34,11 @@ class Link : public ManagementLink {
   }
   bool Current(uint64_t) override { return true; }
   bool SendReply(uint64_t, const Json&) override { return true; }
-  bool SendEvent(const Json&, uint64_t) override { return true; }
+  bool SendEvent(const Json&, uint64_t, remotekit::DeliveryFlag delivery = {}) override {
+    if (delivery)
+      delivery->MarkWritten();
+    return true;
+  }
   void OnDisconnect(Disconnect) override {}
   Result<Json> Request(const std::string& name, Json fields) override {
     if (name == "object.committed") {
@@ -94,7 +98,8 @@ void RoundTrip(const fs::path& root) {
   Check(held != INVALID_HANDLE_VALUE, "lock unchanged file against content reads");
   const auto second = Checkpoints(source).Create(directory, "tenant", "dev");
   CloseHandle(held);
-  Check(bool(second) && second.value() == checkpoint,
+  Check(bool(second) && second.value()["manifestId"] == checkpoint["manifestId"] &&
+            second.value()["objects"] == checkpoint["objects"],
         "unchanged files reuse chunks without reading");
   std::map<fs::path, std::string> expected;
   for (const auto& entry : fs::recursive_directory_iterator(directory)) {
@@ -129,8 +134,54 @@ void RoundTrip(const fs::path& root) {
   Write(remote_directory / "warm-only", "warm");
   Take(Checkpoints(target).Restore(remote_directory, "tenant", "dev", manifest));
   Check(fs::exists(remote_directory / "warm-only"), "warm copy used");
-  Take(Checkpoints(target).Restore(remote_directory, "tenant", "dev", nullptr));
-  Check(fs::is_empty(remote_directory), "null checkpoint starts empty");
+  Take(WriteDurableJson(remote_directory.wstring() + L".checkpoint", manifest));
+  fs::remove(remote_directory / "small");
+  Write(remote_directory / "profile/Cookies-wal", "corrupt");
+  Take(Checkpoints(target).Restore(remote_directory, "tenant", "dev", manifest));
+  Check(Read(remote_directory / "small") == "persistent" &&
+            Read(remote_directory / "profile/Cookies-wal") == "keep wal",
+        "warm validation repairs missing and changed files");
+  Take(Checkpoints(target).Create(remote_directory, "tenant", "dev"));
+  Take(WriteDurableJson(remote_directory.wstring() + L".checkpoint", manifest));
+  const auto unchanged_time = fs::last_write_time(remote_directory / "small");
+  Write(remote_directory / "replacement", "XXXXXXXXXX");
+  fs::last_write_time(remote_directory / "replacement", unchanged_time);
+  fs::remove(remote_directory / "small");
+  fs::rename(remote_directory / "replacement", remote_directory / "small");
+  Take(Checkpoints(target).Restore(remote_directory, "tenant", "dev", manifest));
+  Check(Read(remote_directory / "small") == "persistent",
+        "warm validation checks file ID at equal size and mtime");
+  const auto empty_restore =
+      Checkpoints(target).Restore(remote_directory, "tenant", "dev", nullptr);
+  Check(!empty_restore && empty_restore.error().code == ErrorCode::kConflict &&
+            Read(remote_directory / "small") == "persistent",
+        "null restore refuses populated Profile");
+  Take(Checkpoints::Journal(remote_directory, 7, checkpoint, "dev"));
+  Check(Take(Checkpoints::Hibernation(remote_directory))["placementEpoch"] == 7,
+        "durable journal identity");
+  const auto stale =
+      Checkpoints(target).Restore(remote_directory, "tenant", "dev", std::string(64, '0'));
+  Check(!stale && stale.error().code == ErrorCode::kConflict &&
+            Read(remote_directory / "small") == "persistent",
+        "uncommitted hibernation rejects stale checkpoint without mutation");
+  const auto null_journal = Checkpoints(target).Restore(remote_directory, "tenant", "dev", nullptr);
+  Check(!null_journal && null_journal.error().code == ErrorCode::kConflict,
+        "uncommitted hibernation rejects null checkpoint");
+  Take(WriteDurableJson(remote_directory.wstring() + L".checkpoint", manifest));
+  fs::remove(remote_directory / "small");
+  Write(remote_directory / "profile/Cookies-wal", "leave this changed file");
+  const auto local_index =
+      Json::parse(Read(remote_directory.wstring() + L".checkpoint-index.json"));
+  const auto missing_id = local_index["small"]["chunks"][0].get<std::string>();
+  target_link.sources[missing_id] = Json::array();
+  Take(target.Store().Delete(missing_id));
+  const auto unavailable = Checkpoints(target).Restore(remote_directory, "tenant", "dev", manifest);
+  Check(!unavailable && unavailable.error().code == ErrorCode::kUnavailable &&
+            fs::exists(remote_directory / "warm-only") && !fs::exists(remote_directory / "small") &&
+            Read(remote_directory / "profile/Cookies-wal") == "leave this changed file",
+        "unavailable warm repair preserves directory");
+  Take(Checkpoints(target).Restore(root / "new-session", "tenant", "dev", nullptr));
+  Check(fs::is_empty(root / "new-session"), "null restore creates new Profile");
 }
 void Blockers(const fs::path& root) {
   Link link;
@@ -222,6 +273,130 @@ class FenceLink : public Link {
     return true;
   }
 };
+class JournalLink : public Link {
+ public:
+  const std::string session = std::string(32, 'd');
+  fs::path directory;
+  bool replay = false;
+  size_t step = 0;
+  std::vector<Json> replies;
+  std::optional<ReadyState> ReadySessions() override {
+    return ReadyState{
+        1,
+        Json::array({{{"tenantId", "tenant"}, {"sessionId", session}, {"placementEpoch", 1}}}),
+        {{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+         {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}};
+  }
+  bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
+    eof = false;
+    generation = 1;
+    Json request{{"tenantId", "tenant"}, {"placementEpoch", 1}};
+    if (!replay && step == 0) {
+      request["method"] = "session.open";
+      request["sessionId"] = session;
+      request["profileKey"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+      request["checkpoint"] = nullptr;
+    } else if ((!replay && step <= 3) || (replay && step == 0)) {
+      request["method"] = "session.hibernate";
+      if (!replay && step == 3)
+        request["placementEpoch"] = 2;
+    } else if ((!replay && step == 4) || (replay && step == 1)) {
+      request["method"] = "session.open";
+      request["sessionId"] = session;
+      request["profileKey"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+      request["checkpoint"] = replay ? replies[0]["result"]["manifestId"] : Json(nullptr);
+      request["placementEpoch"] = 2;
+    } else {
+      request["method"] = "shutdown";
+    }
+    request["id"] = step++;
+    bytes = request.dump();
+    return true;
+  }
+  bool SendReply(uint64_t, const Json& reply) override {
+    if (reply.value("ok", false) && reply.value("result", Json::object()).contains("manifestId"))
+      Check(fs::exists(directory.wstring() + L".hibernation.json"), "journal durable before reply");
+    replies.push_back(reply);
+    return true;
+  }
+};
+void JournalReplay(const fs::path& root) {
+  const auto options =
+      Take(RuntimeOptions::FromConfig(TestConfig(), root / "journal", "dev", "test"));
+  media::Sdk sdk;
+  JournalLink first;
+  first.directory = options.data / "sessions" / first.session;
+  {
+    Service service(sdk, options, first, cluster::Key{});
+    Check(service.Run() == 0, "journal service");
+  }
+  Check(first.replies[1]["ok"] && first.replies[2]["ok"] &&
+            first.replies[1]["result"] == first.replies[2]["result"],
+        "duplicate hibernation returns committed manifest");
+  Check(first.replies[3]["error"]["code"] == "conflict" &&
+            first.replies[4]["error"]["code"] == "conflict",
+        "journal fences different epoch and null open");
+  JournalLink restarted;
+  restarted.replay = true;
+  restarted.directory = first.directory;
+  {
+    Service service(sdk, options, restarted, cluster::Key{});
+    Check(service.Run() == 0, "journal restart service");
+  }
+  Check(restarted.replies[0]["result"]["manifestId"] == first.replies[1]["result"]["manifestId"] &&
+            restarted.replies[1]["ok"],
+        "restart replays journal and matching open succeeds");
+  Check(!fs::exists(first.directory.wstring() + L".hibernation.json"),
+        "matching open consumes journal");
+}
+class CapacityLink : public Link {
+ public:
+  size_t step = 0;
+  std::vector<Json> replies;
+  bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
+    eof = false;
+    generation = 1;
+    Json request{{"id", step}};
+    if (step < 4) {
+      request["method"] = "session.open";
+      request["tenantId"] = "tenant-" + std::to_string(step);
+      request["sessionId"] = std::string(31, 'e') + std::to_string(step);
+      request["placementEpoch"] = 1;
+      request["checkpoint"] = nullptr;
+      request["profileKey"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    } else {
+      request["method"] = "shutdown";
+    }
+    ++step;
+    bytes = request.dump();
+    return true;
+  }
+  bool SendReply(uint64_t, const Json& reply) override {
+    replies.push_back(reply);
+    return true;
+  }
+};
+void SessionCapacity(const fs::path& root) {
+  for (const bool limited : {false, true}) {
+    auto config = TestConfig();
+    config["maxSessions"] = limited ? Json(1) : Json(nullptr);
+    config["diskReserveBytes"] = nullptr;
+    config["sessionMemoryBytes"] = nullptr;
+    const auto options = Take(
+        RuntimeOptions::FromConfig(config, root / (limited ? "cap" : "uncapped"), "dev", "test"));
+    CapacityLink link;
+    media::Sdk sdk;
+    Service service(sdk, options, link, cluster::Key{});
+    Check(service.Run() == 0, "capacity service");
+    Check(link.replies[0]["ok"], "first Session admitted");
+    for (size_t i = 1; i < 4; ++i) {
+      if (limited)
+        Check(link.replies[i]["error"]["code"] == "unavailable", "session cap is unavailable");
+      else
+        Check(link.replies[i]["ok"], "null session cap admits every Session");
+    }
+  }
+}
 void Fencing(const fs::path& root) {
   const auto options =
       Take(RuntimeOptions::FromConfig(TestConfig(), root / "fence", "dev", "test"));
@@ -244,6 +419,8 @@ int main(int argc, char** argv) {
     Blockers(root);
     Metrics(root);
     Fencing(root);
+    JournalReplay(root);
+    SessionCapacity(root);
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;

@@ -32,9 +32,9 @@ void Check(HRESULT result) {
 }
 
 template <typename F>
-void RequireError(F operation, std::string_view expected) {
+void RequireError(F operation, remotekit::ErrorCode expected) {
   auto result = operation();
-  Require(!result && result.error().message == expected, "unexpected result error");
+  Require(!result && result.error().code == expected, "unexpected result error");
 }
 
 template <class T>
@@ -185,7 +185,7 @@ void CheckBurst(Fixtures& fixtures) {
           "two clear, equivalent frames should stop early with one retained candidate");
   Require(Take(scores.Finish(stop.keep_frame_ids)).selected_frame_id == stop.selected_frame_id,
           "finish must select the acknowledged retained frame");
-  RequireError([&] { return scores.Finish({"unseen"}); }, "invalid-photo-count");
+  RequireError([&] { return scores.Finish({"unseen"}); }, remotekit::ErrorCode::kInvalidRequest);
 
   cv::Mat blue, orange;
   cv::resize(DetailFixture({255, 174, 193}, {92, 25, 31}), blue, sharp.size());
@@ -201,20 +201,20 @@ void CheckBurst(Fixtures& fixtures) {
   Require(Take(distinct.Finish({"orange"})).selected_frame_id == "orange",
           "finish must not select an evicted winner");
   RequireError([&] { return distinct.Observe("blue", blue_bytes, {"blue"}); },
-               "invalid-photo-frame");
+               remotekit::ErrorCode::kInvalidRequest);
   RequireError([&] { return distinct.Observe("missing", clear_bytes, {"orange"}); },
-               "invalid-photo-frame");
+               remotekit::ErrorCode::kInvalidRequest);
   const cv::Mat wide(64, 513, CV_8UC3, cv::Scalar::all(160));
   RequireError([&] { return distinct.Observe("wide", jpeg("burst-wide.jpg", wide), {"wide"}); },
-               "photo-too-large");
+               remotekit::ErrorCode::kLimitExceeded);
   RequireError(
       [&] { return distinct.Observe("big", std::vector<std::uint8_t>(44 * 1024 + 1), {"big"}); },
-      "photo-too-large");
+      remotekit::ErrorCode::kLimitExceeded);
   RequireError(
       [&] {
         return distinct.Observe("cancelled", clear_bytes, {"cancelled"}, [] { return true; });
       },
-      "cancelled");
+      remotekit::ErrorCode::kCanceled);
 }
 
 void CheckRank(Fixtures& fixtures) {
@@ -249,10 +249,11 @@ void CheckRank(Fixtures& fixtures) {
   const auto low = Take(RankPhotos(std::array{dark, white}));
   Require(low.reason == "low-quality" && !low.uncertain && low.candidates.size() == 1,
           "poor frames should warn without forced alternatives");
-  RequireError([&] { return RankPhotos(std::array{crisp}, [] { return true; }); }, "cancelled");
+  RequireError([&] { return RankPhotos(std::array{crisp}, [] { return true; }); },
+               remotekit::ErrorCode::kCanceled);
   RequireError(
       [&] { return RankPhotos(std::array{crisp, crisp, crisp, crisp, crisp, crisp, crisp}); },
-      "invalid-photo-count");
+      remotekit::ErrorCode::kLimitExceeded);
 }
 
 void CheckDocuments(Fixtures& fixtures) {
@@ -299,9 +300,10 @@ void CheckDocuments(Fixtures& fixtures) {
   std::swap(manual[1], manual[2]);
   const auto invalid = fixtures.dir / "invalid.temp";
   RequireError([&] { return ProcessPhoto(input, invalid, PhotoMode::kScan, manual); },
-               "invalid-corners");
+               remotekit::ErrorCode::kInvalidRequest);
   const auto flat = fixtures.Png("flat.png", cv::Mat(size, CV_8UC3, cv::Scalar::all(170)));
-  RequireError([&] { return ProcessPhoto(flat, invalid, PhotoMode::kRectify); }, "no-document");
+  RequireError([&] { return ProcessPhoto(flat, invalid, PhotoMode::kRectify); },
+               remotekit::ErrorCode::kRejected);
   Require(!std::filesystem::exists(invalid), "rejected crop must produce no output");
 
   cv::Mat two(size, CV_8UC3, cv::Scalar::all(28));
@@ -309,13 +311,14 @@ void CheckDocuments(Fixtures& fixtures) {
   cv::rectangle(two, {340, 70}, {616, 420}, cv::Scalar::all(225), cv::FILLED);
   const auto ambiguous = fixtures.Png("two-documents.png", two);
   RequireError([&] { return ProcessPhoto(ambiguous, invalid, PhotoMode::kRectify); },
-               "no-document");
+               remotekit::ErrorCode::kRejected);
   const auto oversized =
       fixtures.Png("oversized.png", cv::Mat(2897, 2897, CV_8UC3, cv::Scalar::all(165)));
-  RequireError([&] { return RankPhotos(std::array{oversized}); }, "photo-too-large");
+  RequireError([&] { return RankPhotos(std::array{oversized}); },
+               remotekit::ErrorCode::kLimitExceeded);
   const auto broken = fixtures.dir / "broken.png";
   std::ofstream(broken, std::ios::binary) << "not an image";
-  RequireError([&] { return RankPhotos(std::array{broken}); }, "invalid-photo");
+  RequireError([&] { return RankPhotos(std::array{broken}); }, remotekit::ErrorCode::kRejected);
 }
 
 void CheckPartialDocuments(Fixtures& fixtures) {
@@ -439,11 +442,13 @@ void CheckThumbnails(Fixtures& fixtures) {
   const auto too_wide =
       fixtures.Png("too-wide.png", cv::Mat(1, 16385, CV_8UC3, cv::Scalar::all(120)));
   const auto absent = fixtures.dir / "absent.temp";
-  RequireError([&] { return CreatePhotoThumbnail(too_wide, absent); }, "photo_too_large");
+  RequireError([&] { return CreatePhotoThumbnail(too_wide, absent); },
+               remotekit::ErrorCode::kLimitExceeded);
   RequireError([&] { return CreatePhotoThumbnail(fixtures.dir / "broken.png", absent); },
-               "invalid_photo");
-  RequireError([&] { return CreatePhotoThumbnail(big, absent, [] { return true; }); }, "cancelled");
-  RequireError([&] { return CreatePhotoThumbnail(big, big); }, "photo_output_failed");
+               remotekit::ErrorCode::kRejected);
+  RequireError([&] { return CreatePhotoThumbnail(big, absent, [] { return true; }); },
+               remotekit::ErrorCode::kCanceled);
+  RequireError([&] { return CreatePhotoThumbnail(big, big); }, remotekit::ErrorCode::kInternal);
   Require(!std::filesystem::exists(absent), "rejected thumbnails must create no output");
 }
 

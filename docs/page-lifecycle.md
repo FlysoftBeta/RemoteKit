@@ -41,13 +41,13 @@ Browser 的 `CanDiscard` 暴露资格，并在执行点用 `CheckQuiescent` 再�
 
 默认开启。`MemorySaver` 用 Control 本地单调时钟累计"安全隐藏"时长：
 
-- 持续安全隐藏 30 秒 → freeze；累计 120 秒 → discard（冻结后继续计时）。
+- 持续安全隐藏 30 秒 → freeze；累计 120 秒 → discard（冻结后继续计时）。所在节点持续有压力时缩短为 10 秒与 30 秒。
 - 在线页面和 Viewer 断线后的页面共用这套策略。
 - 安全资格使用 Browser 的 canDiscard。媒体、采集、页面请求、关闭或恢复、可见、canDiscard 失败会清空计时；策略自己发起的 freeze 处于 pending 期间暂停累计。
 - 计时绑定 Browser incarnation 与执行实例；对象缺失、重新显示、设置关闭、超过 15 秒的观察间断都清零——宿主休眠或长时间失联不能被当成持续的安全闲置。计时不持久化，也不以绝对时间跨机器传递。音频或导航结束后重新开始一个安全区间，而不是立即回收。
 - 维护周期约 1.5 秒；生命周期请求另有 12 秒的节流。
 - 重新可见时先恢复：等待 actual=live 且 pending=false 再显示。失败或不确定时保留原因显示在 Tab 上，不伪装成功。
-- 整个 Browser 的休眠：Viewer 断开满 10 分钟（节点有压力时 2 分钟）且没有阻塞项时，Control 让 Endpoint 优雅关闭该 Tenant 的整个 Browser 并生成 checkpoint；Tab 保留产品状态并显示为已丢弃，下次需要时在负载最合适的节点上重新打开（见[多节点 · Checkpoint 与休眠](cluster.md#checkpoint-与休眠)）。
+- 整个 Browser 的休眠：Viewer 断开满 10 分钟（节点有压力时按缓解规则，离开 60 秒起按离开时长依次休眠）且没有阻塞项时，Control 让 Endpoint 优雅关闭该 Tenant 的整个 Browser 并生成 checkpoint；Tab 保留产品状态并显示为已丢弃，下次需要时在负载最合适的节点上重新打开（见[多节点 · Checkpoint 与休眠](cluster.md#checkpoint-与休眠)）。
 
 曾经 Browser 实现了 freeze，但 Endpoint 的允许动作列表里漏了它，策略根本执行不了：辅助函数存在不代表端到端的方法被放行。
 

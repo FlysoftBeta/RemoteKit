@@ -57,14 +57,14 @@
 **转换**（Endpoint，`endpoint/src/documents/`）：非 PDF 先用无界面的 LibreOffice 转成 PDF，再用 pdfrender（FlysoftBeta/pdf-render，poppler 的派生）渲染成 `classapp-render-archive` v2 归档：每页是绝对定位的可选择 HTML 文字层叠在 Cairo SVG 背景上，图片转为 WebP，文本资源各自 zstd 压缩（可带字典），整个归档是只用 STORED 的 ZIP64，可按偏移直接读。Endpoint 打开归档时严格校验清单（路径、偏移、大小、hash、引用的资源必须存在），只有一处宽松：页面依赖里同一资源可以出现多次——pdfrender 每使用一次图片就列一次，相同的图片内容寻址后是同一个 ID（Word 文档里重复的徽标、装饰图很常见）——读取时去重保留一次。选 LibreOffice 是因为节点上没有、也不能假设有 MS Office，而它对 Office 与 WPS 格式的保真度在可部署的方案里最好；pdfrender 的输出在 Chrome 89 上也能还原排版、保留文字选择。
 
 - 每个节点一个渲染队列：最多 2 个并发，队列 64，同一源对象的并发请求合并为一次。LibreOffice 与 pdfrender 各自运行在 Job Object 里（关闭即杀、内存 2GiB、无窗口），超时 180 秒；LibreOffice 使用 Endpoint 数据目录下 2 个常驻的用户配置（不按任务新建，热启动的 DOCX 约 7 秒，冷启动约 30 秒），输入先复制到私有临时目录并改成 ASCII 文件名。PDF 渲染通常不到 0.1 秒。
-- 结果是一个以源对象为 `derivedFrom`、`kind: 'document'` 的派生对象，随源对象一起被引用和回收；因为对象存储跨 Tenant 去重，同一份课件全集群只转换一次。转换失败按源对象缓存 10 分钟，加密、损坏、超时给出简短原因。
-- 学习 App 下载附件后由 Control 请求预渲染（`object.render{id}`，交给持有副本的节点），用户打开时通常已经就绪。Control 是学习附件转换的唯一发起者：同一源对象在全集群同时只有一个转换；结果记在 `object_render_failures`——确定性失败（损坏、加密、不支持）在同一构建内不再自动重试，任何 Tenant 的同步都不会再次转换它；记录带构建 ID，节点与 Control 版本锁定，换了构建（可能修好了转换器）后按没有失败处理；暂时性失败（unavailable、busy、超时）按 1、2、4、8、16 小时退避，最长 24 小时；结果未知时只在原节点重试（它的队列按源对象合并）。源对象删除或派生完成时清掉记录。
+- 结果是一个以源对象为 `derivedFrom`、`kind: 'document'` 的派生对象，随源对象一起被引用和回收；因为对象存储跨 Tenant 去重，同一份课件全集群只转换一次。`rejected` 的转换结果按源对象缓存 10 分钟，其余失败不缓存；加密、损坏、不支持、过于复杂由 `reason` 区分。
+- 学习 App 下载附件后由 Control 请求预渲染（`object.render{id}`，交给持有副本的节点），用户打开时通常已经就绪。Control 是学习附件转换的唯一发起者：同一源对象在全集群同时只有一个转换；结果记在 `object_render_failures`——记录保存错误码、诊断与构建 ID。`rejected` 与 `internal` 在同一构建内不再自动重试，任何 Tenant 的同步都不会再次转换它；节点与 Control 版本锁定，换了构建（可能修好了转换器）后按没有失败处理。`busy`、`rate_limited` 从 1 分钟起翻倍、最长 1 小时后重试；`unavailable` 按 1、2、4、8、16 小时退避、最长 24 小时，节点重新就绪时提前重试；结果未知时只在原节点重新提交（转换按源对象幂等，队列按源对象合并，提交即查询）。源对象删除或派生完成时清掉记录。
 - Viewer 打开这类源对象时，Endpoint 向 Control 查询派生对象；Control 的转换仍在进行时回复 `busy`，Endpoint 把它作为 `{state:'converting'}` 交给 Viewer 继续轮询，而不是在本节点再转换一次；本节点渲染队列已满（`busy`）同样报告为 converting。
 - 转换失败的 Endpoint 日志写明工具（soffice / pdfrender）、退出码与 stderr 最后几行（去掉路径与文件名），不写文件内容。
 
 **读取**：归档的 ZIP、zstd 与 hash 校验都在 Endpoint 完成，Viewer 只拿解码后的资源。DataChannel 文件服务（与 `asset.read` 同样的库授权）提供：
 
-- `document.open{assetId}` → `{state:'ready', documentId, pages:[{id, ordinal, width, height, document, dependencies}], shared}`、`{state:'converting'}`（Viewer 每 1.5 秒再问，最多 5 分钟）或错误（`invalid_request` 不是文档，`rejected` 转换失败）。
+- `document.open{assetId}` → `{state:'ready', documentId, pages:[{id, ordinal, width, height, document, dependencies}], shared}`、`{state:'converting'}`（Viewer 每 1.5 秒再问，最多 5 分钟）或错误：`rejected` 表示这个文件在当前构建上无法转换，`reason` 区分不支持的格式、加密、损坏与过于复杂（转换超时或超出内存预算），各自显示不同的说明；`unavailable` 表示转换器或数据暂时不可用，阅读器提供重试。轮询 5 分钟仍在转换时，阅读器停止轮询并显示"仍在转换"，不当作失败。
 - `document.resource{documentId, contentId, offset}` → 与 `asset.read` 相同的分块回复并带 `mime`；Endpoint 每节点保持 8 个打开的归档。
 
 **阅读器**（`control/client/documents/`，取自 talos-ng 的阅读器与虚拟滚动）：页面虚拟化，只挂载视口附近的页并按需取资源，资源 Blob URL 有界 LRU（64 项、32MiB）；每页挂在自己的 shadow root 里，内联样式表，`data-bundle-ref` 解析为 Blob URL，其他 URL 一律去掉，页面内容不会发出网络请求；按 pdfrender 约定给多字符单词设置 `--fit-x` 对齐原始字宽。默认适应宽度，可缩放（按钮、双指、Ctrl+滚轮）。页面控制是浮在页面上方、底边居中的胶囊：页码（点开直接跳页）、缩小、缩放比例（点按回到适合宽度）、放大；内容底部留出空间让最后一页能滚出胶囊；精确指针设备上 2.5 秒无操作淡到 35%，指针移动或滚动时恢复，触屏设备上保持不透明。打开中显示文件类型图标、名称与进度条；Endpoint 报告转换中时改为"正在转换文档"，20 秒后加一行"仍在转换…"；转换失败显示"无法转换此文档"与原因、重试。阅读位置（页号与页内偏移）存在 Control（见[学习与题库 · 文档阅读进度](learning.md#文档阅读进度)）。

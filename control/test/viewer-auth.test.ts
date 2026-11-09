@@ -29,7 +29,7 @@ class AuthEndpoint implements EndpointLink {
   calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   connectionId?: string;
   faceStatus: FaceStatus = 'pending';
-  faceReason?: string;
+  faceOutcome?: 'no_matching_face' | 'camera_unavailable';
   statusGate?: ReturnType<typeof defer>;
   authGate?: ReturnType<typeof defer>;
   private signal?: Parameters<NonNullable<EndpointLink['onSignal']>>[0];
@@ -75,7 +75,7 @@ class AuthEndpoint implements EndpointLink {
         return {
           challengeId: params.challengeId,
           status: this.faceStatus,
-          reason: this.faceReason,
+          outcome: this.faceOutcome,
           ...(this.faceStatus === 'enrolled' ? { template } : {}),
         };
       default:
@@ -150,7 +150,7 @@ test('late unlock acknowledgement cannot restore rights after a subsequent lock'
   await f.request('auth.lock');
   f.endpoint.authGate = defer();
   const pending = f.request('auth.verify', { method: 'password', secret: password });
-  const rejected = assert.rejects(pending, { code: 'conflict' });
+  const rejected = assert.rejects(pending, { code: 'outcome_unknown' });
   while (!f.endpoint.calls.some((c) => c.method === 'rtc.authorize' && c.params.epoch === 3))
     await new Promise((resolve) => setTimeout(resolve, 5));
   await f.request('auth.lock');
@@ -250,15 +250,15 @@ test('face template is encrypted and late matches or enrollment results cannot c
   assert.equal((await f.request('auth.get')).face.status, 'expired');
   await f.request('auth.face.begin', { purpose: 'presence' });
   f.endpoint.faceStatus = 'absent';
-  f.endpoint.faceReason = 'no-matching-face';
+  f.endpoint.faceOutcome = 'no_matching_face';
   await f.control.viewers.pollFaceAuth();
   const absent = await f.request('auth.get');
   assert.equal(absent.locked, true);
   assert.equal(absent.face.status, 'absent');
-  assert.equal(absent.face.reason, 'no-matching-face');
+  assert.equal(absent.face.outcome, 'no_matching_face');
   await f.request('auth.face.begin', { purpose: 'presence' });
   assert.equal((await f.request('auth.get')).face.reason, undefined);
-  f.endpoint.faceReason = 'private endpoint error path';
+  f.endpoint.faceOutcome = undefined;
   await f.control.viewers.pollFaceAuth();
   assert.equal((await f.request('auth.get')).face.reason, undefined);
   await f.request('auth.face.begin', { purpose: 'verify' });

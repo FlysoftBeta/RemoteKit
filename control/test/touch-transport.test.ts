@@ -139,7 +139,7 @@ test('input results associate rejection with original event and immutable target
   assert.equal(results[0].event, event);
   assert.equal(results[0].ok, false);
   unsubscribe();
-  assert.equal(transport.observations.diagnostics.error, formatError(new RemoteKitError('busy', 'busy')));
+  assert.equal(transport.observations.diagnostics.error, formatError(new RemoteKitError('busy', '')));
 });
 test('focus ACK preserves gesture identity and second contact does not renew focus', (t) => {
   const { transport, surface, sent, channel } = setup(t);

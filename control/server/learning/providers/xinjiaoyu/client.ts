@@ -1,3 +1,4 @@
+import { retryDelay } from '../../../../shared/error-policy.js';
 import { RemoteKitError } from '../../../../shared/errors.js';
 import {
   HttpClient,
@@ -130,36 +131,38 @@ export class APIClient {
   ): Promise<ProviderResult<T, XinjiaoyuSession>> {
     if (!input.token || !input.accessToken) throw new RemoteKitError('unauthenticated', '请先登录新教育');
     const session = await this.handshake(input);
-    const data = await this.retry(() =>
-      this.limiter.schedule(async () => {
-        const timestamp = Date.now();
-        const url = new URL(path, this.baseUrl);
-        if (method === 'GET' && payload && typeof payload === 'object') {
-          for (const [key, value] of Object.entries(payload)) {
-            if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+    const data = await this.retry(
+      () =>
+        this.limiter.schedule(async () => {
+          const timestamp = Date.now();
+          const url = new URL(path, this.baseUrl);
+          if (method === 'GET' && payload && typeof payload === 'object') {
+            for (const [key, value] of Object.entries(payload)) {
+              if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+            }
           }
-        }
-        const headers = {
-          ...this.deviceHeaders(session),
-          ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
-          ...(method === 'POST' ? { origin: this.baseUrl } : {}),
-          authorization: `JBY ${session.token}`,
-          accesstoken: session.accessToken,
-          t: String(timestamp),
-          encrypt: createRequestEncrypt(session.safeCode!, session.clientSessionId, timestamp),
-        };
-        return this.envelope(
-          await this.http.json(
-            url,
-            {
-              method,
-              headers,
-              ...(method === 'POST' ? { body: JSON.stringify(payload ?? {}) } : {}),
-            },
-            0,
-          ),
-        );
-      }),
+          const headers = {
+            ...this.deviceHeaders(session),
+            ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
+            ...(method === 'POST' ? { origin: this.baseUrl } : {}),
+            authorization: `JBY ${session.token}`,
+            accesstoken: session.accessToken,
+            t: String(timestamp),
+            encrypt: createRequestEncrypt(session.safeCode!, session.clientSessionId, timestamp),
+          };
+          return this.envelope(
+            await this.http.json(
+              url,
+              {
+                method,
+                headers,
+                ...(method === 'POST' ? { body: JSON.stringify(payload ?? {}) } : {}),
+              },
+              0,
+            ),
+          );
+        }),
+      method === 'GET',
     );
     return { session, data: data as T };
   }
@@ -189,20 +192,19 @@ export class APIClient {
     };
   }
 
-  private async retry<T>(run: () => Promise<T>): Promise<T> {
+  private async retry<T>(run: () => Promise<T>, read = true): Promise<T> {
     for (let attempt = 0; ; attempt += 1) {
       try {
         return await run();
       } catch (error) {
         if (
+          !read ||
           !(error instanceof RemoteKitError) ||
-          error.code !== 'unavailable' ||
+          retryDelay(error, attempt) === undefined ||
           attempt >= this.rateLimit.maxRetries
         )
           throw error;
-        await delay(
-          this.rateLimit.retryBaseMs * 2 ** attempt + Math.floor(Math.random() * this.rateLimit.jitterMs),
-        );
+        await delay(error.retryAfterMs ?? retryDelay(error, attempt)!);
       }
     }
   }

@@ -109,7 +109,7 @@ void MediaPipeline::MediaLoop() {
             }
             std::string drain_error;
             if (!output.Slots().Close(drain_error)) {
-              Error error{ErrorCode::kRejected, drain_error};
+              Error error{ErrorCode::kOutcomeUnknown, drain_error};
               fprintf(stderr, "authorization output transition: %s\n", error.message.c_str());
               return;
             };

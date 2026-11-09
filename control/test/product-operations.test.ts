@@ -112,7 +112,7 @@ for (const initial of ['start', 'remote'] as const) {
           {
             ...f.control.operations.operationStatus(f.tenant, navigate),
             state: 'cancelled',
-            error: 'stopped',
+            error: { code: 'canceled', message: 'Navigation canceled' },
             documentCommitted: false,
           },
           { ...args, state: 'committed', url: '', documentCommitted: false },
@@ -127,7 +127,7 @@ for (const initial of ['start', 'remote'] as const) {
       assert.equal(actual.url, tab.url);
       assert.equal(actual.pendingUrl, undefined);
       assert.equal(actual.loading, false);
-      assert.equal(f.control.operations.operationStatus(f.tenant, navigate).status, 'rejected');
+      assert.equal(f.control.operations.operationStatus(f.tenant, navigate).status, 'failed');
       assert.equal(f.control.operations.operationStatus(f.tenant, stop).status, 'committed');
       for (const op of [navigate, stop])
         assert.ok(
@@ -193,7 +193,7 @@ test('a stop receipt arriving before the cancelled navigation does not commit it
       {
         ...f.control.operations.operationStatus(f.tenant, navigate),
         state: 'cancelled',
-        error: 'stopped',
+        error: { code: 'canceled', message: 'Navigation canceled' },
         documentCommitted: false,
       },
     ];
@@ -236,7 +236,7 @@ test('late old stop and cancelled navigation settle their receipts without rolli
         {
           ...f.control.operations.operationStatus(f.tenant, old),
           state: 'cancelled',
-          error: 'stopped',
+          error: { code: 'canceled', message: 'Navigation canceled' },
           documentCommitted: false,
         },
         {
@@ -251,7 +251,7 @@ test('late old stop and cancelled navigation settle their receipts without rolli
     let actual = f.store.workspaces.workspace(f.tenant).tabs[0];
     assert.equal(actual.navigation?.operationId, current.operationId);
     assert.equal(actual.pendingUrl, 'https://current.test/');
-    assert.equal(f.control.operations.operationStatus(f.tenant, old).status, 'rejected');
+    assert.equal(f.control.operations.operationStatus(f.tenant, old).status, 'failed');
     assert.equal(f.control.operations.operationStatus(f.tenant, stop).status, 'committed');
     view.url = 'https://current.test/';
     view.navigationOperations = [
@@ -296,7 +296,7 @@ test('a delayed stop terminal settles after the cancelled navigator has restored
       {
         ...f.control.operations.operationStatus(f.tenant, navigate),
         state: 'cancelled',
-        error: 'stopped',
+        error: { code: 'canceled', message: 'Navigation canceled' },
         documentCommitted: false,
       },
     ];
@@ -393,7 +393,7 @@ for (const outcome of ['committed', 'failed'] as const) {
       assert.equal(actual.navigation?.operationId, navigate.operationId);
       assert.equal(
         f.control.operations.operationStatus(f.tenant, navigate).status,
-        outcome === 'committed' ? 'committed' : 'rejected',
+        outcome === 'committed' ? 'committed' : 'failed',
       );
       assert.equal(
         f.endpoint.calls.some(
@@ -435,14 +435,14 @@ for (const initial of ['start', 'remote'] as const) {
           ...op,
           state: 'failed',
           url,
-          error: 'ERR_CONNECTION_REFUSED',
+          error: { code: 'rejected', message: 'Connection refused' },
           documentCommitted: true,
           isErrorPage: true,
         },
       ];
       await f.control.reconciler.tick();
       const actual = f.store.workspaces.workspace(f.tenant).tabs[0];
-      assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'rejected');
+      assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'failed');
       assert.equal(actual.kind, 'remote');
       assert.equal(actual.url, url);
       assert.equal(actual.pendingUrl, undefined);
@@ -473,7 +473,7 @@ for (const state of ['failed', 'cancelled'] as const) {
       view.navigationOperations = [{ ...op, state, documentCommitted: false }];
       await f.control.reconciler.tick();
       const actual = f.store.workspaces.workspace(f.tenant).tabs[0];
-      assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'rejected');
+      assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'failed');
       assert.equal(actual.kind, 'start');
       assert.equal(actual.url, previousUrl);
       assert.equal(actual.pendingUrl, undefined);
@@ -723,7 +723,7 @@ test('navigation accepted stays applying, stale loading=false cannot finish it, 
     assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'applying');
     f.endpoint.views[0].navigationOperations = [{ ...op, state: 'cancelled' }];
     await f.control.reconciler.tick();
-    assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'rejected');
+    assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'failed');
     assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].url, 'https://old.test/');
     assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].pendingUrl, undefined);
     const call = f.endpoint.calls.find((call) => call.method === 'view.navigate')!;
@@ -853,7 +853,7 @@ test('beforeunload close receipt stays applying until explicit cancellation, ret
       cancel: true,
     });
     assert.equal((await f.control.operations.submitOperation(f.tenant, cancel, 'lease')).status, 'committed');
-    assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'rejected');
+    assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'failed');
     assert.equal(f.store.workspaces.workspace(f.tenant).tabs.length, 1);
   } finally {
     await f.control.close();
@@ -876,9 +876,9 @@ test('terminal receipt capacity rotates generation explicitly while unresolved o
         );
     })();
     const old = f.op({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
-    assert.equal((await f.control.operations.submitOperation(f.tenant, old, 'lease')).status, 'expired');
+    assert.equal((await f.control.operations.submitOperation(f.tenant, old, 'lease')).status, 'failed');
     assert.notEqual(f.store.operations.operationGeneration(f.tenant), generation);
-    assert.equal(f.control.operations.operationStatus(f.tenant, old).status, 'expired');
+    assert.equal(f.control.operations.operationStatus(f.tenant, old).status, 'failed');
     assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);
     const next = f.op({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
     assert.equal((await f.control.operations.submitOperation(f.tenant, next, 'lease')).status, 'committed');
@@ -904,7 +904,7 @@ test('terminal receipt capacity rotates generation explicitly while unresolved o
         'lease',
       ),
       {
-        code: 'limit_exceeded',
+        code: 'conflict',
       },
     );
     assert.equal(f.store.operations.operationGeneration(f.tenant), currentGeneration);
@@ -921,7 +921,7 @@ test('terminal receipt capacity rotates generation explicitly while unresolved o
           'lease',
         )
       ).status,
-      'expired',
+      'failed',
     );
   } finally {
     await f.control.close();
@@ -936,10 +936,10 @@ test('SQLite completion fault rolls back the workspace mutation and leaves a que
     );
     const op = f.op({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
     const result = await f.control.operations.submitOperation(f.tenant, op, 'lease');
-    assert.equal(result.status, 'rejected');
+    assert.equal(result.status, 'failed');
     assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);
-    assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'rejected');
-    assert.equal((await f.control.operations.submitOperation(f.tenant, op, 'lease')).status, 'rejected');
+    assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'failed');
+    assert.equal((await f.control.operations.submitOperation(f.tenant, op, 'lease')).status, 'failed');
   } finally {
     await f.control.close();
     f.store.db.close();

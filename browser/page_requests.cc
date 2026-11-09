@@ -1,3 +1,4 @@
+#include "browser/control_response.h"
 #include "browser/page_requests.h"
 #include "browser/signin.h"
 #include "browser/browser_context.h"
@@ -63,12 +64,11 @@ std::string Clip(std::string_view text) {
 std::string Text(const std::u16string& text) {
   return Clip(base::UTF16ToUTF8(text));
 }
-base::DictValue Result(const std::string& error = {}) {
-  base::DictValue result;
-  result.Set("ok", error.empty());
-  if (!error.empty())
-    result.Set("error", error);
-  return result;
+base::DictValue Result() {
+  return ControlResult::Success(0);
+}
+base::DictValue Result(protocol::ErrorCode code, const std::string& message) {
+  return ControlResult::Failure(0, code, message);
 }
 base::DictValue Kind(const char* kind) {
   base::DictValue result;
@@ -439,23 +439,23 @@ base::DictValue PageRequests::FileStatus(const std::string& key,
                                          SelectionBinding binding,
                                          bool terminal_only) {
   if (selection_id && !ValidSelectionId(selection_id))
-    return Result("invalid_selection_id");
+    return Result(protocol::ErrorCode::kInvalidRequest, "invalid_selection_id");
   const auto weak = weak_factory_.GetWeakPtr();
   if (!terminal_only)
     Prune();
   if (!weak)
-    return Result("manager_destroyed");
+    return Result(protocol::ErrorCode::kInternal, "manager_destroyed");
   std::uint64_t id = 0;
   if (!base::StringToUint64(key, &id) || base::NumberToString(id) != key)
-    return Result("invalid_file_request");
+    return Result(protocol::ErrorCode::kInvalidRequest, "invalid_file_request");
   const auto found = pending_.find(id);
   if (!terminal_only && found != pending_.end()) {
     if (!found->second->file)
-      return Result("file_request_required");
+      return Result(protocol::ErrorCode::kInvalidRequest, "file_request_required");
     if (selection_id && found->second->validating &&
         (found->second->selection_id != *selection_id ||
          found->second->selection_binding != binding))
-      return Result("unknown_file_request");
+      return Result(protocol::ErrorCode::kNotFound, "unknown_file_request");
     auto result = Result();
     result.Set("state", found->second->validating ? "validating" : "pending");
     if (!found->second->selection_id.empty())
@@ -464,18 +464,20 @@ base::DictValue PageRequests::FileStatus(const std::string& key,
   }
   const auto completed = file_results_.find(id);
   if (completed == file_results_.end())
-    return Result(terminal_only ? "stale_page_request_target" : "unknown_file_request");
+    return Result(terminal_only ? protocol::ErrorCode::kConflict : protocol::ErrorCode::kNotFound,
+                  terminal_only ? "Stale page request target" : "Unknown file request");
   const auto* completed_selection = completed->second.result.FindString("selection_id");
   if (selection_id && (!completed_selection || *completed_selection != *selection_id ||
                        completed->second.binding != binding))
-    return Result(terminal_only ? "stale_page_request_target" : "unknown_file_request");
+    return Result(terminal_only ? protocol::ErrorCode::kConflict : protocol::ErrorCode::kNotFound,
+                  terminal_only ? "Stale page request target" : "Unknown file request");
   return completed->second.result.Clone();
 }
 base::DictValue PageRequests::Snapshot(const AnchorLayout* anchor_layout) {
   auto weak = weak_factory_.GetWeakPtr();
   Prune();
   if (!weak)
-    return Result("manager_destroyed");
+    return Result(protocol::ErrorCode::kInternal, "manager_destroyed");
   base::DictValue result;
   base::ListValue pending;
   for (const auto& [id, request] : pending_) {
@@ -792,7 +794,7 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
   std::uint64_t id = 0;
   if (!key || key->size() > 20 || !base::StringToUint64(*key, &id) ||
       base::NumberToString(id) != *key)
-    return Result("request_required");
+    return Result(protocol::ErrorCode::kInvalidRequest, "request_required");
   auto found = pending_.find(id);
   if (found == pending_.end()) {
     const auto receipt = reply_results_.find(id);
@@ -802,28 +804,28 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
           *reply.FindString("decision") == receipt->second.decision) ||
          (receipt->second.accept.has_value() && accept == receipt->second.accept)))
       return Result();
-    return Result("unknown_or_finished_request");
+    return Result(protocol::ErrorCode::kNotFound, "unknown_or_finished_request");
   }
   auto* request = found->second.get();
   if (reply.FindBool("close_only").value_or(false) &&
       (close_state_ != "closing" || request->type != Pending::Type::dialog ||
        !request->data.FindBool("beforeunload").value_or(false)))
-    return Result("closing_beforeunload_required");
+    return Result(protocol::ErrorCode::kConflict, "closing_beforeunload_required");
   if (reply.FindBool("dialog_only").value_or(false) && request->type != Pending::Type::dialog)
-    return Result("standard_dialog_required");
+    return Result(protocol::ErrorCode::kInvalidRequest, "standard_dialog_required");
   if (reply.FindBool("file_only").value_or(false) && request->type != Pending::Type::file)
-    return Result("file_request_required");
+    return Result(protocol::ErrorCode::kInvalidRequest, "file_request_required");
   auto* frame = request->document.AsRenderFrameHostIfValid();
   if (!Live(frame)) {
     Cancel(id, "document_invalidated");
-    return Result("document_invalidated");
+    return Result(protocol::ErrorCode::kConflict, "document_invalidated");
   }
   if (request->type == Pending::Type::permission) {
     const auto* decision = reply.FindString("decision");
     if (!decision || reply.contains("accept") ||
         (*decision != "allow" && *decision != "allow_once" && *decision != "block" &&
          *decision != "dismiss"))
-      return Result("invalid_permission_decision");
+      return Result(protocol::ErrorCode::kInvalidRequest, "invalid_permission_decision");
     auto completed = std::move(found->second);
     pending_.erase(found);
     reply_results_.insert_or_assign(id, ReplyReceipt{completed->document, *decision, {}});
@@ -834,7 +836,7 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
     return Result();
   }
   if (!accept.has_value())
-    return Result("accept_required");
+    return Result(protocol::ErrorCode::kInvalidRequest, "accept_required");
   if (request->type == Pending::Type::protocol_handler) {
     reply_results_.insert_or_assign(id, ReplyReceipt{request->document, {}, accept});
     while (reply_results_.size() > kLimit)
@@ -845,7 +847,7 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
     const auto* password = reply.FindString("password");
     if (!username || !password || username->size() > 1024 || password->size() > 1024 ||
         !base::IsStringUTF8(*username) || !base::IsStringUTF8(*password))
-      return Result("invalid_credentials");
+      return Result(protocol::ErrorCode::kInvalidRequest, "invalid_credentials");
     auto completed = std::move(found->second);
     pending_.erase(found);
     std::move(completed->auth).Run(true, *username, *password);
@@ -856,16 +858,16 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
     return Result();
   }
   if (request->validating)
-    return Result("reply_already_validating");
+    return Result(protocol::ErrorCode::kBusy, "reply_already_validating");
   if (request->type == Pending::Type::file) {
     const auto* selection = reply.Find("selection_id");
     const auto* selection_id = selection ? selection->GetIfString() : nullptr;
     if (selection && !ValidSelectionId(selection_id))
-      return Result("invalid_selection_id");
+      return Result(protocol::ErrorCode::kInvalidRequest, "invalid_selection_id");
     const auto* values = reply.FindList("files");
     const bool multiple = request->mode == blink::mojom::FileChooserParams::Mode::kOpenMultiple;
     if (!values || values->empty() || values->size() > kLimit || (!multiple && values->size() != 1))
-      return Result("invalid_file_count");
+      return Result(protocol::ErrorCode::kInvalidRequest, "invalid_file_count");
     std::vector<SelectedFile> paths;
     for (const auto& value : *values) {
       const auto* file = value.GetIfDict();
@@ -873,14 +875,14 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
       const auto* display = file ? file->FindString("displayName") : nullptr;
       if (!path || path->empty() || path->size() > kStringLimit ||
           path->find('\0') != std::string::npos || !base::IsStringUTF8(*path))
-        return Result("invalid_file_path");
+        return Result(protocol::ErrorCode::kInvalidRequest, "invalid_file_path");
       auto native = base::FilePath::FromUTF8Unsafe(*path);
       if (!native.IsAbsolute())
-        return Result("file_path_must_be_absolute");
+        return Result(protocol::ErrorCode::kInvalidRequest, "file_path_must_be_absolute");
       if (!display || display->empty() || display->size() > 1024 || !base::IsStringUTF8(*display) ||
           display->find_first_of("/\\:\0", 0, 4) != std::string::npos || *display == "." ||
           *display == "..")
-        return Result("invalid_file_display_name");
+        return Result(protocol::ErrorCode::kInvalidRequest, "invalid_file_display_name");
       paths.push_back({std::move(native), base::UTF8ToUTF16(*display)});
     }
     if (selection_id) {
@@ -908,8 +910,10 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
   std::u16string text;
   if (request->type == Pending::Type::dialog) {
     const auto* input = reply.FindString("text");
-    if (input && (input->size() > kStringLimit || !base::IsStringUTF8(*input)))
-      return Result("invalid_or_oversized_text");
+    if (input && input->size() > kStringLimit)
+      return Result(protocol::ErrorCode::kLimitExceeded, "Dialog input exceeds text limit");
+    if (input && !base::IsStringUTF8(*input))
+      return Result(protocol::ErrorCode::kInvalidRequest, "invalid_or_oversized_text");
     const auto* fallback = request->data.FindString("default_prompt");
     text = base::UTF8ToUTF16(input ? *input : fallback ? *fallback : std::string());
   }
@@ -960,18 +964,18 @@ void PageRequests::FilesValidated(std::uint64_t id,
 base::DictValue PageRequests::Command(const base::DictValue& command) {
   auto* contents = web_contents();
   if (!contents)
-    return Result("contents_not_bound");
+    return Result(protocol::ErrorCode::kConflict, "contents_not_bound");
   const auto* action = command.FindString("action");
   if (!action || action->size() > kStringLimit)
-    return Result("action_required");
+    return Result(protocol::ErrorCode::kInvalidRequest, "action_required");
   auto result = Result();
   result.Set("state", "submitted");
   if (*action == "find") {
     if (!Live(contents->GetPrimaryMainFrame()))
-      return Result("document_invalidated");
+      return Result(protocol::ErrorCode::kConflict, "document_invalidated");
     const auto* text = command.FindString("text");
     if (!text || text->empty() || text->size() > kStringLimit || !base::IsStringUTF8(*text))
-      return Result("invalid_find_text");
+      return Result(protocol::ErrorCode::kInvalidRequest, "invalid_find_text");
     auto options = blink::mojom::FindOptions::New();
     options->forward = command.FindBool("forward").value_or(true);
     options->match_case = command.FindBool("match_case").value_or(false);
@@ -993,11 +997,12 @@ base::DictValue PageRequests::Command(const base::DictValue& command) {
   } else if (*action == "zoom" || *action == "get_zoom") {
     auto* frame = contents->GetPrimaryMainFrame();
     if (!Live(frame))
-      return Result("document_invalidated");
+      return Result(protocol::ErrorCode::kConflict, "document_invalidated");
     if (*action == "zoom") {
       const auto level = command.FindDouble("level");
       if (!level || !std::isfinite(*level) || *level < -10 || *level > 10)
-        return Result("zoom_level_must_be_finite_between_minus10_and10");
+        return Result(protocol::ErrorCode::kInvalidRequest,
+                      "zoom_level_must_be_finite_between_minus10_and10");
       content::HostZoomMap::GetForWebContents(contents)->SetTemporaryZoomLevel(frame->GetGlobalId(),
                                                                                *level);
     }
@@ -1006,7 +1011,7 @@ base::DictValue PageRequests::Command(const base::DictValue& command) {
   } else if (*action == "copy" || *action == "paste" || *action == "cut" ||
              *action == "select_all") {
     if (!Live(contents->GetFocusedFrame()))
-      return Result("no_focused_document");
+      return Result(protocol::ErrorCode::kConflict, "no_focused_document");
     if (*action == "copy")
       contents->Copy();
     else if (*action == "paste")
@@ -1016,7 +1021,7 @@ base::DictValue PageRequests::Command(const base::DictValue& command) {
     else
       contents->SelectAll();
   } else {
-    return Result("unsupported_action");
+    return Result(protocol::ErrorCode::kInvalidRequest, "unsupported_action");
   }
   return result;
 }

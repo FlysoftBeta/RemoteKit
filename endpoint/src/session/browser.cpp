@@ -55,13 +55,13 @@ Result<void> BrowserRuntime::AdmitLaunch() {
   RecordCrash();
   if (const auto code = process_.ExitCode(); code && *code != 0)
     last_failure_ =
-        Error{ErrorCode::kUnavailable,
-              "Browser 进程退出，退出码 " + DescribeExitCode(*code) + "；日志 " + Utf8(log_)};
+        Error{ErrorCode::kUnavailable, "Browser process exited with code " +
+                                           DescribeExitCode(*code) + "; log: " + Utf8(log_)};
   if (!start_policy_.Admit(double(QpcNow()) / QpcFrequency())) {
-    std::string message = start_policy_.attempts() >= 3 ? "Browser 启动连续失败，已停止自动重启"
-                                                        : "Browser 启动失败，正在等待重试退避";
+    std::string message = start_policy_.attempts() >= 3 ? "Browser restart attempts exhausted"
+                                                        : "Browser restart backoff pending";
     if (last_failure_)
-      message += "；最近一次失败：" + last_failure_->message;
+      message += "; last failure: " + last_failure_->message;
     return Unavailable(std::move(message));
   }
   startup_error_.reset();
@@ -69,22 +69,21 @@ Result<void> BrowserRuntime::AdmitLaunch() {
 }
 Result<void> BrowserRuntime::HealthCheck() {
   if (startup_error_)
-    return startup_error_->reason == ErrorReason::kNone ? Unavailable(startup_error_->message)
-                                                        : *startup_error_;
+    return *startup_error_;
   if (!rpc_.Control())
-    return Unavailable("Browser 进程仍在运行，控制管道尚未就绪");
+    return Unavailable("Browser process is alive; control channel is not ready");
   if (rpc_.NeedsHealthCheck()) {
     // A bounded health check never authorizes killing a live connected Browser.
     auto reply = rpc_.Request({{"method", "snapshot"}}, 0, 1000);
     if (!reply)
-      return reply.error();
+      return Unavailable("Browser health probe failed: " + reply.error().message);
   }
   const auto now = QpcNow();
   if (now >= next_health_check_) {
     next_health_check_ = now + QpcFrequency();
     auto status = rpc_.Request({{"method", "output.status"}}, 0, 1000);
     if (!status && status.error().code == ErrorCode::kOutcomeUnknown)
-      return status.error();
+      return Unavailable("Browser output health probe failed: " + status.error().message);
     if (status && status.value().contains("output")) {
       const auto& output = status.value()["output"];
       if (!output.value("error", std::string()).empty()) {
@@ -132,13 +131,15 @@ Result<void> BrowserRuntime::Start(const fs::path& executable,
   }
   if (!process_.Alive()) {
     const auto code = process_.ExitCode();
-    startup_error_ = Error{ErrorCode::kUnavailable, "Browser 进程在控制管道就绪前退出，退出码 " +
-                                                        (code ? DescribeExitCode(*code) : "未知") +
-                                                        "；日志 " + Utf8(log_)};
-  } else {
     startup_error_ =
-        Error{ErrorCode::kUnavailable, "Browser 控制管道在 15 秒内未就绪；保留仍在运行的进程，" +
-                                           process_.Diagnostic() + "；日志 " + Utf8(log_)};
+        Error{ErrorCode::kUnavailable,
+              "Browser exited before control channel became ready; exit code " +
+                  (code ? DescribeExitCode(*code) : "unknown") + "; log: " + Utf8(log_)};
+  } else {
+    startup_error_ = Error{
+        ErrorCode::kUnavailable,
+        "Browser control channel did not become ready within 15 seconds; retained live process: " +
+            process_.Diagnostic() + "; log: " + Utf8(log_)};
   }
   last_failure_ = startup_error_;
   RecordCrash();

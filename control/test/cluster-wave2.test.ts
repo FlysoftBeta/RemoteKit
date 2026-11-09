@@ -10,15 +10,168 @@ import { NodeRegistry } from '../server/cluster/node-link';
 import { Placement } from '../server/cluster/placement';
 import { MetricsHistory } from '../server/cluster/metrics';
 import { tenantKeys } from '../server/cluster/keys';
-import { nodeDefaults } from '../server/config';
+import { nodeDefaults, type NodeConfig } from '../server/config';
 import { EndpointGateway } from '../server/endpoint/gateway';
 import type { EndpointSnapshot } from '../server/endpoint/types';
 import { ControlDatabase } from '../server/persistence/database';
 import { emptyWorkspace } from '../server/persistence/workspaces';
 import { FakeNode, fakeMetrics } from './fake-node';
 import { TestClock, requestViewer } from './server-fixture';
+import { RemoteKitError } from '../shared/errors';
 
 const id = (n: number) => n.toString(16).padStart(64, '0');
+
+test('hibernating placement authorizes checkpoint objects only on its assigned node', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    const beta = await h.connect('beta', 0.9);
+    await h.gateway.snapshot('tenant');
+    const placement = h.placement.beginHibernation('tenant');
+    assert.equal(h.gateway.isPlacedOn('tenant', 'alpha'), true);
+    assert.equal(h.gateway.isPlacedOn('tenant', 'beta'), false);
+    await h.commit(alpha, 'tenant', id(1));
+    await assert.rejects(h.commit(beta, 'tenant', id(2)), { code: 'forbidden' });
+    h.placement.commitCheckpoint(placement, id(1), [id(1)], 'dev');
+    assert.equal(h.gateway.isPlacedOn('tenant', 'alpha'), false);
+    await assert.rejects(h.commit(alpha, 'tenant', id(3)), { code: 'forbidden' });
+  } finally {
+    await h.close();
+  }
+});
+
+for (const resolution of ['success', 'not_found'] as const) {
+  test(`uncertain hibernation reconciles ${resolution} at the same epoch and blocks resolve`, async () => {
+    const h = await harness();
+    try {
+      const alpha = await h.connect('alpha');
+      await h.gateway.snapshot('tenant');
+      await h.commit(alpha, 'tenant', id(1));
+      const first = h.placement.beginHibernation('tenant');
+      h.placement.commitCheckpoint(first, id(1), [id(1)], 'dev');
+      await h.gateway.snapshot('tenant');
+      const placement = h.placement.peek('tenant')!;
+      const node = h.nodes.get('alpha')!;
+      const original = node.request.bind(node);
+      const epochs: number[] = [];
+      let attempts = 0;
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      node.request = async (method, tenant, args, timeout) => {
+        if (method !== 'session.hibernate') return original(method, tenant, args, timeout);
+        assert.equal(timeout, 180000);
+        epochs.push(args!.placementEpoch as number);
+        if (++attempts === 1) throw new RemoteKitError('outcome_unknown', 'lost reply');
+        await waiting;
+        if (resolution === 'not_found') throw new RemoteKitError('not_found', 'crashed before journal');
+        return { manifestId: id(1), objects: [id(1)], buildId: 'dev' };
+      };
+      await assert.rejects(h.gateway.hibernate('tenant'), { code: 'outcome_unknown' });
+      assert.equal(h.placement.peek('tenant')!.state, 'hibernating');
+      const opens = alpha.requests.filter((r) => r.method === 'session.open').length;
+      assert.throws(() => h.placement.resolve('tenant'), {
+        code: 'unavailable',
+        message: '正在保存会话，请稍候',
+      });
+      await assert.rejects(h.gateway.ensureSession('tenant'), { code: 'unavailable' });
+      assert.equal(attempts, 2);
+      const pending = h.gateway.hibernate('tenant');
+      assert.equal(pending, h.gateway.hibernate('tenant'));
+      release();
+      await pending;
+      assert.equal(h.placement.peek('tenant')!.state, 'hibernated');
+      assert.equal(h.placement.peek('tenant')!.checkpoint, id(1));
+      assert.equal(h.placement.peek('tenant')!.placementEpoch, placement.placementEpoch);
+      assert.deepEqual(epochs, [placement.placementEpoch, placement.placementEpoch]);
+      assert.equal(alpha.requests.filter((r) => r.method === 'session.open').length, opens);
+    } finally {
+      await h.close();
+    }
+  });
+}
+
+test('reconciler discovers durable hibernation without a runtime and commits the journal', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.gateway.snapshot('tenant');
+    await h.commit(alpha, 'tenant', id(1));
+    h.placement.beginHibernation('tenant');
+    alpha.handler = (request) =>
+      request.method === 'session.hibernate'
+        ? { manifestId: id(1), objects: [id(1)], buildId: 'dev' }
+        : alpha.handle(request);
+    await h.control.reconciler.tick();
+    assert.equal(h.placement.peek('tenant')!.state, 'hibernated');
+    assert.equal(h.placement.peek('tenant')!.checkpoint, id(1));
+  } finally {
+    await h.close();
+  }
+});
+
+test('hibernation blockers return active, malformed replies and offline reconciliation retain hibernating', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.gateway.snapshot('tenant');
+    alpha.handler = (request) => {
+      if (request.method === 'session.hibernate')
+        throw { code: 'conflict', message: 'hibernation blocked: rtcConnected' };
+      return alpha.handle(request);
+    };
+    await assert.rejects(h.gateway.hibernate('tenant'), { code: 'conflict' });
+    assert.equal(h.placement.peek('tenant')!.state, 'active');
+    alpha.handler = (request) => (request.method === 'session.hibernate' ? {} : alpha.handle(request));
+    await assert.rejects(h.gateway.hibernate('tenant'), { code: 'outcome_unknown' });
+    assert.equal(h.placement.peek('tenant')!.state, 'hibernating');
+    const offline = once(h.nodes.get('alpha')!, 'offline');
+    alpha.close();
+    await offline;
+    await assert.rejects(h.gateway.hibernate('tenant'), { code: 'unavailable' });
+    assert.equal(h.placement.peek('tenant')!.state, 'hibernating');
+    await h.connect('alpha', 0.1, alpha);
+    assert.equal(alpha.helloReply.sessions[0].placementEpoch, h.placement.peek('tenant')!.placementEpoch);
+  } finally {
+    await h.close();
+  }
+});
+
+test('an open in flight finishes before hibernation and a blocked save keeps its open tracking', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    alpha.handler = async (request) => {
+      if (request.method === 'session.open') await waiting;
+      if (request.method === 'session.hibernate') throw { code: 'busy', message: 'busy before delivery' };
+      return alpha.handle(request);
+    };
+    const opening = h.gateway.snapshot('tenant');
+    const saving = h.gateway.hibernate('tenant');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      alpha.requests.some((request) => request.method === 'session.hibernate'),
+      false,
+    );
+    await assert.rejects(h.gateway.snapshot('tenant'), {
+      code: 'unavailable',
+      message: '正在保存会话，请稍候',
+    });
+    release();
+    await opening;
+    await assert.rejects(saving, { code: 'busy' });
+    assert.equal(h.placement.peek('tenant')!.state, 'active');
+    await h.gateway.snapshot('tenant');
+    assert.equal(alpha.requests.filter((request) => request.method === 'session.open').length, 1);
+  } finally {
+    await h.close();
+  }
+});
 const clearSnapshot = (): EndpointSnapshot => ({
   running: true,
   views: [],
@@ -33,7 +186,7 @@ const clearSnapshot = (): EndpointSnapshot => ({
     lifecycleUncertain: false,
   },
 });
-async function harness(quota = 4096) {
+async function harness(quota: number | null = 4096, nodeLimits: Partial<NodeConfig> = {}) {
   const key = randomBytes(32);
   const store = new ControlDatabase(':memory:');
   const nodes = new NodeRegistry({
@@ -51,6 +204,7 @@ async function harness(quota = 4096) {
             maxSessions: 8,
             diskReserveBytes: 100,
             sessionMemoryBytes: 100,
+            ...nodeLimits,
             peer: { listen: '0.0.0.0:3101', address: nodeId + ':3101' },
             rtc: { ports: null, address: null },
           },
@@ -272,7 +426,7 @@ test('two nodes place by pressure, checkpoint, wake at epoch+1, fence reconnects
     });
     alpha.handler = (request) =>
       request.method === 'session.hibernate'
-        ? { manifestId: id(2), objects: [id(1), id(2)] }
+        ? { manifestId: id(2), objects: [id(1), id(2)], buildId: 'dev' }
         : alpha.handle(request);
     assert.equal(await h.gateway.hibernate('tenant'), 1);
     assert.equal(h.placement.peek('tenant')!.state, 'hibernated');
@@ -327,6 +481,23 @@ test('two nodes place by pressure, checkpoint, wake at epoch+1, fence reconnects
     h.control.nodeAdmin.readd('beta');
     assert.equal((await h.connect('beta')).helloReply.type, 'node.ready');
     assert.equal(h.control.nodeAdmin.list().find((node) => node.nodeId === 'beta')!.state, 'ready');
+  } finally {
+    await h.close();
+  }
+});
+
+test('object quota is disabled by null and usage reports null', async () => {
+  const h = await harness(null);
+  try {
+    const alpha = await h.connect('alpha');
+    h.placement.resolve('tenant');
+    await h.commit(alpha, 'tenant', id(1), 100000);
+    h.control.objects.checkQuota('tenant');
+    assert.deepEqual(h.control.objects.tenantUsage('tenant'), {
+      objects: 1,
+      bytes: 100000,
+      quotaBytes: null,
+    });
   } finally {
     await h.close();
   }
@@ -596,7 +767,7 @@ test('GC follows library and selection references, derivatives and only the newe
   }
 });
 
-test('hibernation policy respects Memory Saver, viewer absence, every blocker, receipts and the pressure timeout', async () => {
+test('hibernation policy respects Memory Saver, ten-minute viewer absence, every blocker and receipts', async () => {
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
@@ -630,10 +801,14 @@ test('hibernation policy respects Memory Saver, viewer absence, every blocker, r
       .run('tenant', 'op', '{}', JSON.stringify({ status: 'applying' }));
     assert.equal(await h.control.lifecycle.hibernate('tenant', snapshot), false);
     h.store.db.exec('DELETE FROM operation_receipts');
+    assert.equal(await h.control.lifecycle.hibernate('tenant', snapshot), false);
+    h.clock.advance(480000);
+    h.nodes.get('alpha')!.metrics.clear();
+    h.nodes.get('alpha')!.metrics.record(fakeMetrics());
     await h.commit(alpha, 'tenant', id(1));
     alpha.handler = (request) =>
       request.method === 'session.hibernate'
-        ? { manifestId: id(1), objects: [id(1)] }
+        ? { manifestId: id(1), objects: [id(1)], buildId: 'dev' }
         : alpha.handle(request);
     assert.equal(await h.control.lifecycle.hibernate('tenant', snapshot), true);
     assert.equal(runtime.started, false);
@@ -662,6 +837,46 @@ test('disk pressure deletes cold copies, relocates replicas before deletion and 
     await h.gateway.snapshot('new-tenant');
     assert.equal(h.placement.peek('new-tenant')!.nodeId, 'beta');
     assert.equal(h.placement.peek('tenant')!.nodeId, 'alpha');
+  } finally {
+    await h.close();
+  }
+});
+
+test('null limits reach nodes and automatic disk floors drain cold copies and relocate replicas', async () => {
+  const h = await harness(null, { maxSessions: null, diskReserveBytes: null, sessionMemoryBytes: null });
+  try {
+    const alpha = await h.connect('alpha');
+    const beta = await h.connect('beta');
+    for (const client of [alpha, beta]) {
+      assert.equal(client.helloReply.config.maxSessions, null);
+      assert.equal(client.helloReply.config.diskReserveBytes, null);
+      assert.equal(client.helloReply.config.sessionMemoryBytes, null);
+      client.metrics = fakeMetrics();
+      client.publishMetrics();
+    }
+    await Promise.all([alpha.barrier(), beta.barrier()]);
+    await h.control.objects.tick();
+    await h.gateway.snapshot('tenant');
+    await h.commit(alpha, 'tenant', id(1), 200);
+    alpha.metrics.disk.free = 4 * 1024 ** 3;
+    alpha.publishMetrics();
+    await alpha.barrier();
+    await h.control.objects.tick();
+    assert.equal(h.nodes.get('alpha')!.diskDraining, true);
+    assert.ok(alpha.requests.some((request) => request.method === 'session.cold.delete'));
+    assert.ok(beta.objects.has(id(1)));
+    assert.equal(alpha.objects.has(id(1)), false);
+    const views = h.control.nodeAdmin.list();
+    assert.equal(views[0].maxSessions, null);
+    assert.equal(views[0].headroom, 1 - h.nodes.get('alpha')!.metrics.predicted()!);
+    alpha.metrics.disk.free = 9 * 1024 ** 3;
+    alpha.publishMetrics();
+    await alpha.barrier();
+    assert.equal(h.nodes.get('alpha')!.diskDraining, true);
+    alpha.metrics.disk.free = 10 * 1024 ** 3;
+    alpha.publishMetrics();
+    await alpha.barrier();
+    assert.equal(h.nodes.get('alpha')!.diskDraining, false);
   } finally {
     await h.close();
   }
@@ -869,7 +1084,7 @@ test('normal hibernation waits ten minutes and fails without committing a checkp
     await h.commit(alpha, 'tenant', id(1));
     alpha.handler = (request) =>
       request.method === 'session.hibernate'
-        ? { manifestId: id(1), objects: [id(1)] }
+        ? { manifestId: id(1), objects: [id(1)], buildId: 'dev' }
         : request.method === 'session.snapshot'
           ? { ...clearSnapshot(), running: false }
           : alpha.handle(request);
@@ -1118,7 +1333,7 @@ test('Control puts enforce stream bounds and quota, cancel blocked producers, an
     };
     const pending = h.control.objects.put('cancelled', blocked, { maxBytes: 100, signal: controller.signal });
     await entered;
-    const rejection = assert.rejects(pending, { code: 'rejected' });
+    const rejection = assert.rejects(pending, { code: 'canceled' });
     controller.abort();
     await rejection;
     assert.ok(alpha.requests.some((r) => r.method === 'object.put.cancel'));

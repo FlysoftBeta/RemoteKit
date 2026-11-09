@@ -8,6 +8,8 @@ int main(int argc, char** argv) {
     std::fputs("usage: remotekit_control_smoke CHANNEL_NAME\n", stderr);
     return 1;
   }
+  if (remotekit_sdk_abi_version() != REMOTEKIT_SDK_ABI_VERSION)
+    return 2;
   if (remotekit_sdk_initialize() != REMOTEKIT_SDK_OK)
     return 2;
   uint64_t handle = 0;
@@ -27,6 +29,12 @@ int main(int argc, char** argv) {
     std::fputc('\n', stdout);
   } else {
     std::fprintf(stderr, "control_request failed: %d (required=%zu)\n", status, size);
+  }
+  remotekit_sdk_failure failure{};
+  if (status == REMOTEKIT_SDK_OK) {
+    status = remotekit_sdk_control_command(handle, request, sizeof(request) - 1, 5000, &failure);
+    if (status == REMOTEKIT_SDK_REFUSED)
+      std::fprintf(stderr, "Browser %s: %s\n", failure.code, failure.message);
   }
   remotekit_sdk_control_close(handle);
   const int stopped = remotekit_sdk_shutdown();

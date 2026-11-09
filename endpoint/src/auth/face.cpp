@@ -1,4 +1,5 @@
 #include "auth/face.hpp"
+#include "util/wire_error.hpp"
 #include "diagnostics/timing.hpp"
 #include "rtc/authorization.hpp"
 #include "rtc/peer.hpp"
@@ -126,8 +127,12 @@ Result<Json> FaceController::FaceCommand(const std::string& method,
     Json reply = {{"challengeId", challenge}, {"status", state}};
     if (result->state == State::enrolled && result->face_template)
       reply["template"] = *result->face_template;
-    if (!result->reason.empty())
-      reply["reason"] = result->reason;
+    if (result->outcome == rk::auth::FaceOutcome::camera_unavailable)
+      reply["outcome"] = "camera_unavailable";
+    else if (result->outcome == rk::auth::FaceOutcome::no_matching_face)
+      reply["outcome"] = "no_matching_face";
+    if (result->error)
+      reply["error"] = WireError(*result->error);
     return reply;
   }
   if (method != "auth.face.begin")

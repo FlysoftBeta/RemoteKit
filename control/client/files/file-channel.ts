@@ -1,3 +1,5 @@
+import { endpointError } from '../../server/endpoint/gateway';
+import { retryDelay } from '../../shared/error-policy';
 import { RemoteKitError } from '../../shared/errors';
 import type { Asset, SelectionState } from '../../shared/file-library';
 import { operationId } from '../control/product-operations';
@@ -16,12 +18,6 @@ export interface PhotoBurstDecision {
   reason: string;
 }
 
-export class PhotoBurstBackpressureError extends RemoteKitError {
-  constructor() {
-    super('rate_limited', '照片分析通道繁忙');
-  }
-}
-
 const libraryBinding = { requestId: 'library' };
 const maxBufferedBytes = 64 * 1024;
 const chunkBytes = 16 * 1024;
@@ -36,7 +32,7 @@ type RequestOptions = {
 };
 
 function checkAbort(signal: AbortSignal) {
-  if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+  if (signal.aborted) throw new RemoteKitError('canceled', '');
 }
 
 /** File bytes and transaction commands share the current authenticated RTC peer.
@@ -54,8 +50,7 @@ export class FileChannel {
     if (message.type !== 'files.result') return false;
     this.syncScope();
     if (message.ok) this.pending.resolve(message.requestId, message.result);
-    else
-      this.pending.reject(message.requestId, new RemoteKitError(message.error!.code, message.error!.message));
+    else this.pending.reject(message.requestId, endpointError(message.error));
     return true;
   }
   disconnect() {
@@ -93,9 +88,9 @@ export class FileChannel {
     const channel = this.checkBinding(binding, options.signal);
     const { authEpoch } = binding;
     if (this.pending.size >= 8 || channel.bufferedAmount > maxBufferedBytes) {
-      if (options.skipWhenBusy) throw new PhotoBurstBackpressureError();
-      if (this.pending.size >= 8) throw new RemoteKitError('unavailable', '文件发送繁忙，请稍后重试');
-      throw new RemoteKitError('unavailable', '文件发送暂时拥塞，请重试');
+      if (options.skipWhenBusy) throw new RemoteKitError('busy', '照片分析通道繁忙');
+      if (this.pending.size >= 8) throw new RemoteKitError('busy', '文件发送繁忙，请稍后重试');
+      throw new RemoteKitError('busy', '文件发送暂时拥塞，请重试');
     }
     const requestId = operationId();
     const encoded = JSON.stringify({
@@ -108,7 +103,7 @@ export class FileChannel {
     });
     // Wire byte bound includes multibyte filenames and MIME strings.
     if (new TextEncoder().encode(encoded).byteLength > (method === 'photo.burst.sample' ? 61440 : 24576))
-      throw new RemoteKitError('unavailable', '文件信息过长，请减少文件数量');
+      throw new RemoteKitError('limit_exceeded', '文件信息过长，请减少文件数量');
     const signal = options.finishSentRequest ? undefined : options.signal;
     const response = this.pending.request(
       requestId,
@@ -128,7 +123,7 @@ export class FileChannel {
     // Leave headroom for input/layout without taking over bufferedamountlow.
     while (!options.skipWhenBusy && (binding.channel?.bufferedAmount ?? 0) > maxBufferedBytes) {
       this.checkBinding(binding, options.signal);
-      if (performance.now() > deadline) throw new RemoteKitError('unavailable', '文件发送暂时拥塞，请重试');
+      if (performance.now() > deadline) throw new RemoteKitError('busy', '文件发送暂时拥塞，请重试');
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     const sent = this.request<T>(method, params, { ...options, binding });
@@ -143,7 +138,19 @@ export class FileChannel {
     params: Record<string, unknown>,
     options?: RequestOptions,
   ): Promise<T> {
-    return (await this.send<T>(method, params, options)).response;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await (
+          await this.send<T>(method, params, options)
+        ).response;
+      } catch (error) {
+        const delay = error instanceof RemoteKitError ? retryDelay(error, attempt) : undefined;
+        if (method === 'document.open' || options?.skipWhenBusy || delay === undefined || attempt >= 3)
+          throw error;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        if (options?.signal) checkAbort(options.signal);
+      }
+    }
   }
   async uploadAsset(file: File, operationId: string, signal: AbortSignal): Promise<Asset> {
     const binding = this.currentBinding();
@@ -162,7 +169,7 @@ export class FileChannel {
     );
     let abort!: () => void;
     const aborted = new Promise<never>((_, reject) => {
-      abort = () => reject(new DOMException('Aborted', 'AbortError'));
+      abort = () => reject(new RemoteKitError('canceled', ''));
     });
     void aborted.catch(() => {
       /* The upload races this signal when bytes are in flight. */
@@ -171,7 +178,7 @@ export class FileChannel {
     try {
       check();
       if (typeof uploadId !== 'string' || !Number.isSafeInteger(offset) || offset < 0 || offset > file.size)
-        throw new RemoteKitError('unavailable', '文件发送状态无效');
+        throw new RemoteKitError('outcome_unknown', '文件发送状态无效');
       const window: Promise<void>[] = [];
       for (let position = offset; position < file.size;) {
         if (window.length === 4) await Promise.race([window.shift(), aborted]);
@@ -204,7 +211,7 @@ export class FileChannel {
         }
         const ack = response
           .then((result) => {
-            if (result?.offset !== next) throw new RemoteKitError('unavailable', '文件接收进度不一致');
+            if (result?.offset !== next) throw new RemoteKitError('outcome_unknown', '文件接收进度不一致');
           })
           .finally(() => {
             this.assetChunksInFlight--;
@@ -236,15 +243,17 @@ export class FileChannel {
     }
   }
   async readPhoto(asset: Asset, signal: AbortSignal): Promise<Blob> {
-    if (asset.size <= 0 || asset.size > 64 * 1024 * 1024)
-      throw new RemoteKitError('unavailable', '照片预览大小超出限制');
+    if (!Number.isSafeInteger(asset.size) || asset.size <= 0)
+      throw new RemoteKitError('invalid_request', '照片大小无效');
+    if (asset.size > 64 * 1024 * 1024) throw new RemoteKitError('limit_exceeded', '照片预览大小超出限制');
     return this.readAsset(asset, signal);
   }
   async readAsset(asset: Asset, signal: AbortSignal): Promise<Blob> {
     const binding = this.currentBinding();
     const parts: Uint8Array<ArrayBuffer>[] = [];
-    if (!Number.isSafeInteger(asset.size) || asset.size < 0 || asset.size > 256 * 1024 * 1024)
-      throw new RemoteKitError('unavailable', '文件预览大小超出限制');
+    if (!Number.isSafeInteger(asset.size) || asset.size < 0)
+      throw new RemoteKitError('invalid_request', '文件大小无效');
+    if (asset.size > 256 * 1024 * 1024) throw new RemoteKitError('limit_exceeded', '文件预览大小超出限制');
     for (let offset = 0; offset < asset.size;) {
       const part = await this.call<{ data: string; offset: number; total: number }>(
         'asset.read',
@@ -263,7 +272,7 @@ export class FileChannel {
         part.total !== asset.size ||
         part.offset > part.total
       )
-        throw new RemoteKitError('unavailable', '文件预览数据无效');
+        throw new RemoteKitError('internal', '文件预览数据无效');
       const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
       parts.push(bytes);
       offset = part.offset;
@@ -300,7 +309,7 @@ export class FileChannel {
       !Number.isSafeInteger(asset.size) ||
       asset.size < 0
     ) {
-      throw new RemoteKitError('unavailable', '文件信息无效');
+      throw new RemoteKitError('internal', '文件信息无效');
     }
     return asset;
   }
@@ -313,7 +322,7 @@ export class FileChannel {
     });
     this.checkBinding(binding);
     if (typeof result?.burstId !== 'string' || !result.burstId)
-      throw new RemoteKitError('unavailable', '拍照会话无效');
+      throw new RemoteKitError('outcome_unknown', '拍照会话无效');
     this.photoBursts.set(result.burstId, binding);
     if (signal.aborted) {
       void this.cancelPhotoBurst(result.burstId).catch((failure) =>
@@ -337,10 +346,11 @@ export class FileChannel {
     signal: AbortSignal,
   ): Promise<PhotoBurstDecision> {
     const binding = this.photoBursts.get(burstId);
-    if (!binding) throw new RemoteKitError('unavailable', '拍照会话已结束');
+    if (!binding) throw new RemoteKitError('not_found', '拍照会话已结束');
     this.checkBinding(binding, signal);
-    if (blob.type !== 'image/jpeg' || !blob.size || blob.size > 44 * 1024)
-      throw new RemoteKitError('unavailable', '拍照分析图大小或格式无效');
+    if (blob.type !== 'image/jpeg' || !blob.size)
+      throw new RemoteKitError('invalid_request', '拍照分析图格式无效');
+    if (blob.size > 44 * 1024) throw new RemoteKitError('limit_exceeded', '拍照分析图超出大小限制');
     const bytes = new Uint8Array(await blob.arrayBuffer());
     let binary = '';
     for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -362,7 +372,7 @@ export class FileChannel {
     signal: AbortSignal,
   ): Promise<PhotoBurstDecision> {
     const binding = this.photoBursts.get(burstId);
-    if (!binding) throw new RemoteKitError('unavailable', '拍照会话已结束');
+    if (!binding) throw new RemoteKitError('not_found', '拍照会话已结束');
     const decision = await this.call<PhotoBurstDecision>(
       'photo.burst.end',
       {
@@ -395,7 +405,7 @@ export class FileChannel {
       (asset.width ?? 0) > 320 ||
       (asset.height ?? 0) > 320
     )
-      throw new RemoteKitError('unavailable', '照片缩略图数据无效');
+      throw new RemoteKitError('internal', '照片缩略图数据无效');
     return this.readPhoto(asset, signal);
   }
   processPhoto(assetId: string, mode: 'rectify' | 'scan', signal?: AbortSignal): Promise<Asset> {

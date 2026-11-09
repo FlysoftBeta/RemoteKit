@@ -16,6 +16,11 @@ class Checkpoints {
                        const std::string& build,
                        const Json& checkpoint);
   static bool Excluded(const fs::path& relative, bool directory);
+  static Result<Json> Hibernation(const fs::path& directory);
+  static Result<void> Journal(const fs::path& directory,
+                              uint64_t epoch,
+                              const Json& checkpoint,
+                              const std::string& build);
 
  private:
   Result<std::string> Put(const std::string& tenant, const std::string& bytes);

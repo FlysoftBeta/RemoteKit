@@ -1,5 +1,6 @@
 #include "supervisor.hpp"
 #include "download.hpp"
+#include "util/error_policy.hpp"
 #include <thread>
 
 namespace remotekit::updater {
@@ -87,18 +88,29 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
     return 1;
   }
   unsigned backoff = 1;
+  unsigned update_attempt = 0;
   bool update = ReadCurrent(root).empty();
   while (!Stopping(stop)) {
     if (update) {
       auto result = Update(root, stop, log, service);
       if (!result) {
         log.Line(result.error().message);
-        if (Delay(stop, 30000))
+        const auto delay = result.error().code == ErrorCode::kUnavailable ||
+                                   result.error().code == ErrorCode::kBusy
+                               ? RetryDelay(result.error(), update_attempt++)
+                               : std::nullopt;
+        if (!delay) {
+          if (result.error().code != ErrorCode::kRejected &&
+              result.error().code != ErrorCode::kInternal)
+            return 1;
+        }
+        if (Delay(stop, delay ? static_cast<DWORD>(delay->count()) : 30000))
           break;
         continue;
       }
       if (result.value())
         return service ? 1 : 0;
+      update_attempt = 0;
       update = false;
     }
     auto id = ReadCurrent(root);

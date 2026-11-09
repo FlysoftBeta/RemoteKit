@@ -1,6 +1,7 @@
 #include "objects/peer.hpp"
 #include "cluster/node_files.hpp"
 #include "util/result_macros.hpp"
+#include "util/wire_error.hpp"
 #include <windows.h>
 #include <fstream>
 #include <algorithm>
@@ -9,7 +10,7 @@ namespace {
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 Error Invalid() {
-  return {ErrorCode::kRejected, "invalid object transfer"};
+  return {ErrorCode::kInternal, "Invalid object transfer"};
 }
 bool Number(const Json& value) {
   return value.is_number_unsigned() || (value.is_number_integer() && value.get<int64_t>() >= 0);
@@ -70,11 +71,23 @@ void PeerServer::Loop() {
         channels_.push_back(channel);
       }
       auto served = Serve(*channel);
-      if (!served)
-        channel->Send({{"type", "object.error"}, {"code", ErrorCodeName(served.error().code)}});
-    } catch (const std::exception&) {
-      if (channel)
-        channel->Send({{"type", "object.error"}, {"code", "invalid_request"}});
+      if (!served) {
+        auto error = WireError(served.error());
+        error["type"] = "object.error";
+        channel->Send(error);
+      }
+    } catch (const std::filesystem::filesystem_error& failure) {
+      if (channel) {
+        auto error = WireError({ErrorCode::kUnavailable, failure.what()});
+        error["type"] = "object.error";
+        channel->Send(error);
+      }
+    } catch (const std::exception& failure) {
+      if (channel) {
+        auto error = WireError({ErrorCode::kInternal, failure.what()});
+        error["type"] = "object.error";
+        channel->Send(error);
+      }
     }
     if (channel) {
       channel->Close();
@@ -133,7 +146,7 @@ Result<ObjectInfo> PeerClient::Fetch(const std::string& id, const std::string& a
   RK_ASSIGN_OR_RETURN(
       connection, cluster::ConnectCarrier(std::move(carrier), key_, {"peer", node_, build_, {}}));
   if (connection.reply.value("type", Json()) == "node.reject")
-    return Error{ErrorCode::kRejected, connection.reply.value("code", "peer rejected")};
+    return Error{ErrorCode::kUnavailable, "Peer capability negotiation refused"};
   if (connection.reply.value("buildId", Json()) != build_)
     return Invalid();
   auto& channel = *connection.channel;
@@ -141,22 +154,23 @@ Result<ObjectInfo> PeerClient::Fetch(const std::string& id, const std::string& a
   std::ofstream output(partial, std::ios::binary | std::ios::app);
   if (!output)
     return Error{ErrorCode::kUnavailable, "object partial unavailable"};
+  const auto invalid_transfer = [&]() {
+    output.close();
+    fs::remove(partial, error);
+    return Invalid();
+  };
   while (true) {
     RK_ASSIGN_OR_RETURN(message, channel.Receive(20s));
     const auto& header = message.json;
     const auto type = header.value("type", Json());
     if (type == "object.error") {
-      if (offset && header.value("code", Json()) == "rejected") {
-        output.close();
-        fs::remove(partial, error);
-      }
-      return Error{ErrorCode::kUnavailable, header.value("code", "object transfer failed")};
+      return ParseWireError(header);
     }
     if (type == "object.chunk" && message.kind == cluster::Message::Kind::kBinary) {
       if (!header.contains("offset") || !Number(header["offset"]) ||
           header["offset"].get<uint64_t>() != offset || message.bytes.empty() ||
           message.bytes.size() > kSegmentSize || offset > UINT64_MAX - message.bytes.size())
-        return Invalid();
+        return invalid_transfer();
       output.write(reinterpret_cast<const char*>(message.bytes.data()), message.bytes.size());
       if (!output)
         return Error{ErrorCode::kUnavailable, "object partial write failed"};
@@ -165,13 +179,13 @@ Result<ObjectInfo> PeerClient::Fetch(const std::string& id, const std::string& a
       if (!header.contains("size") || !Number(header["size"]) ||
           header["size"].get<uint64_t>() != offset || !header.contains("sha256") ||
           !header["sha256"].is_string())
-        return Invalid();
+        return invalid_transfer();
       output.close();
       if (!output)
         return Error{ErrorCode::kUnavailable, "object partial write failed"};
       return store_.Import(id, offset, header["sha256"].get<std::string>());
     } else
-      return Invalid();
+      return invalid_transfer();
   }
 }
 }  // namespace remotekit::objects

@@ -46,6 +46,11 @@ class BrowserRuntime {
   void RecordCrash();
   Error Unavailable(std::string detail) const;
   bool Initialized() const { return initialized_; }
+  const char* RestartState() const {
+    return Alive() && Initialized()        ? "ready"
+           : start_policy_.attempts() >= 3 ? "exhausted"
+                                           : "waiting";
+  }
   bool Crashed() const { return crash_recorded_; }
   void MarkInitialized() { initialized_ = true; }
   void ReleaseExited() { process_.ReleaseExited(); }

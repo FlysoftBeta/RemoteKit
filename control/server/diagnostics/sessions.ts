@@ -3,7 +3,7 @@ import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import type { AdminDiagnostic } from '../../shared/admin';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import { writeDiagnosticArchive, type ArchiveEntry } from './archive';
 import type { EndpointLogName, LogWindow, LogWindowRequest } from '../endpoint/types';
 import { diagnosticClientSample, diagnosticEndpointSnapshot, diagnosticEnvironment } from './projection';
@@ -105,8 +105,7 @@ export class DiagnosticSessions {
         };
       } else throw new RemoteKitError('conflict', '当前会话已有诊断正在采集');
     }
-    if (this.sessions.size >= maxActive)
-      throw new RemoteKitError('limit_exceeded', '诊断采集繁忙，请稍后重试');
+    if (this.sessions.size >= maxActive) throw new RemoteKitError('busy', '诊断采集繁忙，请稍后重试');
     const status = { id: randomUUID(), status: 'collecting' } as const;
     const session: Session = {
       viewer,
@@ -465,11 +464,16 @@ export class DiagnosticSessions {
       try {
         const archive = await stat(join(directory, `${id}.tar.zst`));
         const reason = await readFile(join(directory, `${id}.reason`), 'utf8');
-        if (archive.isFile() && stopReasons.includes(reason as StopReason))
-          return { id, status: 'complete', bytes: archive.size, reason: reason as StopReason };
+        if (!archive.isFile() || !stopReasons.includes(reason as StopReason))
+          throw new RemoteKitError('internal', '诊断记录已损坏');
+        return { id, status: 'complete', bytes: archive.size, reason: reason as StopReason };
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-          throw new RemoteKitError('rejected', '无法读取诊断记录');
+        if (error instanceof RemoteKitError) throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT')
+          throw ['EIO', 'EBUSY', 'EMFILE', 'ENFILE'].includes(code ?? '')
+            ? new RemoteKitError('unavailable', '无法读取诊断记录', { detail: String(error) })
+            : toRemoteKitError(error);
       }
     }
     throw new RemoteKitError('not_found', '诊断记录不存在');

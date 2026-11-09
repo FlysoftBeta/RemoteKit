@@ -39,14 +39,6 @@ const resolutionReason: Record<string, string> = {
   'receiver-level-axis-limit': '接收端尺寸上限',
   'encoder-axis-limit': '编码器尺寸上限',
 };
-const presentationReasons: Record<string, string> = {
-  'video-capability-unavailable': 'Video 能力不可用',
-  'presentation-protocol-unavailable': '呈现协议协商超时',
-  'video-playback-failed': 'Video 播放失败',
-  'video-rtp-metadata-unavailable': 'Video RTP 元数据不可用',
-  'invalid-presentation-mode': '呈现模式无效',
-  'invalid-presentation-barrier': '呈现布局屏障无效',
-};
 export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostics; surface?: Surface }) {
   const overlay = useRef<HTMLDivElement>(null),
     [scale, setScale] = useState(1);
@@ -115,10 +107,7 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
         {diagnostics.rendering?.backendReason && (
           <>
             <dt>呈现错误</dt>
-            <dd>
-              {presentationReasons[diagnostics.rendering.backendReason] ??
-                diagnostics.rendering.backendReason}
-            </dd>
+            <dd>{diagnostics.rendering.backendReason}</dd>
           </>
         )}
         {row('Marker 抽样', diagnostics.markerSampleHz, 'Hz')}

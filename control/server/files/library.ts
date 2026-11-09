@@ -31,20 +31,16 @@ function id(value: unknown): string {
   return value;
 }
 function ids(value: unknown, max: number, min = 0): string[] {
-  if (
-    !Array.isArray(value) ||
-    value.length < min ||
-    value.length > max ||
-    new Set(value).size !== value.length
-  )
+  if (!Array.isArray(value) || value.length < min || new Set(value).size !== value.length)
     throw invalid('无效的文件数量或重复文件');
+  if (value.length > max) throw new RemoteKitError('limit_exceeded', '文件数量超过限制');
   return value.map(id);
 }
 
 function librarySource(value: unknown): LibrarySource {
-  if (!value || typeof value !== 'object') throw invalid('Invalid source');
+  if (!value || typeof value !== 'object') throw invalid('文件来源无效');
   const { app, channel } = value as LibrarySource;
-  if (typeof app !== 'string' || typeof channel !== 'string') throw invalid('Invalid source');
+  if (typeof app !== 'string' || typeof channel !== 'string') throw invalid('文件来源无效');
   if (app === 'files' && (channel === 'upload' || channel === 'camera')) return { app, channel };
   if (/^web:[a-zA-Z0-9_-]{1,128}$/.test(app) && channel === '') return { app, channel };
   if (app === 'download' && channel === '') return { app, channel };
@@ -65,10 +61,10 @@ function librarySource(value: unknown): LibrarySource {
         return { app, channel };
     } catch {}
   }
-  throw invalid('Invalid source');
+  throw invalid('文件来源无效');
 }
 function importOrigin(value: unknown): Params<'library.import'>['origin'] {
-  if (!value || typeof value !== 'object') throw invalid('Invalid import origin');
+  if (!value || typeof value !== 'object') throw invalid('导入来源无效');
   const origin = value as Params<'library.import'>['origin'];
   if (origin.kind === 'request') return { kind: 'request', requestId: id(origin.requestId) };
   if (origin.kind === 'files' && (origin.channel === 'upload' || origin.channel === 'camera'))
@@ -77,7 +73,7 @@ function importOrigin(value: unknown): Params<'library.import'>['origin'] {
       channel: origin.channel,
       partitionId: origin.partitionId === null ? null : id(origin.partitionId),
     };
-  throw invalid('Invalid import origin');
+  throw invalid('导入来源无效');
 }
 
 function photoMetadata(value: unknown): PhotoMetadata | undefined {
@@ -106,10 +102,11 @@ function assetIds({
   ];
 }
 function fileName(value: unknown): string {
+  if (typeof value === 'string' && value.length > 255)
+    throw new RemoteKitError('limit_exceeded', '文件名超过 255 字符');
   if (
     typeof value !== 'string' ||
     !value ||
-    value.length > 255 ||
     /[\x00-\x1f\x7f<>:"/\\|?*]/.test(value) ||
     /[ .]$/.test(value) ||
     /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(value)
@@ -118,7 +115,9 @@ function fileName(value: unknown): string {
   return value;
 }
 function partitionName(value: unknown): string {
-  if (typeof value !== 'string' || !value.trim() || value.length > 120 || /[\x00-\x1f\x7f]/.test(value))
+  if (typeof value === 'string' && value.length > 120)
+    throw new RemoteKitError('limit_exceeded', '分区名称超过 120 字符');
+  if (typeof value !== 'string' || !value.trim() || /[\x00-\x1f\x7f]/.test(value))
     throw invalid('无效的分区名');
   return value.trim();
 }
@@ -179,18 +178,17 @@ export class FileLibrary {
       if (
         !Number.isSafeInteger(input.size) ||
         input.size < 0 ||
-        input.size > 256 * 1024 * 1024 ||
         typeof input.type !== 'string' ||
-        input.type.length > 255 ||
         /[\x00-\x1f\x7f]/.test(input.type) ||
-        typeof input.detail !== 'string' ||
-        input.detail.length > 512
+        typeof input.detail !== 'string'
       )
         throw invalid('无效的导入文件');
+      if (input.size > 256 * 1024 * 1024 || input.type.length > 255 || input.detail.length > 512)
+        throw new RemoteKitError('limit_exceeded', '导入文件大小或信息长度超过限制');
       const payload = operationHash('control-import', input);
       const snapshot = this.repository.change(tenant, operationId, payload, (snapshot) => {
         authorize();
-        if (sourceExcluded(snapshot, source)) throw new RemoteKitError('rejected', '已排除此文件来源');
+        if (sourceExcluded(snapshot, source)) throw new RemoteKitError('forbidden', '已排除此文件来源');
         if (snapshot.entries.length >= MAX_CATALOG) throw new RemoteKitError('limit_exceeded', '文件库已满');
         if (snapshot.entries.some((entry) => entry.id === entryId))
           throw new RemoteKitError('conflict', '文件已存在');
@@ -247,7 +245,7 @@ export class FileLibrary {
         event.eventId,
         event.name,
         event.origin,
-        event.type === 'download.imported' ? [event.assetId, event.mimeType, event.size] : event.reason,
+        event.type === 'download.imported' ? [event.assetId, event.mimeType, event.size] : event.error,
       );
       if (this.repository.operation(tenant, operationId, payload)) return;
       if (event.type === 'download.failed') {
@@ -255,9 +253,11 @@ export class FileLibrary {
           tenant,
           name: event.name,
           origin: event.origin,
-          reason: event.reason,
+          error: event.error,
         });
-        this.repository.change(tenant, operationId, payload, () => {});
+        this.repository.change(tenant, operationId, payload, () =>
+          this.repository.recordDownloadFailure(tenant, event),
+        );
         return;
       }
       const assetId = id(event.assetId),
@@ -266,22 +266,20 @@ export class FileLibrary {
       if (
         typeof event.size !== 'string' ||
         !/^(0|[1-9][0-9]*)$/.test(event.size) ||
-        !Number.isSafeInteger(size) ||
-        size > this.limits.maxFileBytes
+        !Number.isSafeInteger(size)
       )
-        throw invalid('Invalid download size');
-      if (
-        typeof event.mimeType !== 'string' ||
-        Buffer.byteLength(event.mimeType) > 255 ||
-        /[\x00-\x1f\x7f]/.test(event.mimeType)
-      )
-        throw invalid('Invalid download type');
+        throw invalid('下载大小无效');
+      if (size > this.limits.maxFileBytes) throw new RemoteKitError('limit_exceeded', '下载文件超过大小限制');
+      if (typeof event.mimeType === 'string' && Buffer.byteLength(event.mimeType) > 255)
+        throw new RemoteKitError('limit_exceeded', '下载类型超过长度限制');
+      if (typeof event.mimeType !== 'string' || /[\x00-\x1f\x7f]/.test(event.mimeType))
+        throw invalid('下载类型无效');
       let channel = '';
       if (event.origin && event.origin !== 'null') {
         try {
           channel = new URL(event.origin).host;
         } catch {
-          throw invalid('Invalid download origin');
+          throw invalid('下载来源无效');
         }
       }
       const source = { app: 'download', channel };
@@ -326,7 +324,9 @@ export class FileLibrary {
   private rejectPending(tenant: string, selected: LibraryEntry[]) {
     const pending = this.repository.pendingEntries(tenant);
     if (selected.some((entry) => pending.has(entry.id)))
-      throw new RemoteKitError('conflict', 'Files are held by a pending selection');
+      throw new RemoteKitError('conflict', '文件正被待完成的选择占用', {
+        detail: 'Files are held by a pending selection',
+      });
   }
   private async describe(tenant: string, assetId: string): Promise<Asset> {
     this.objects.require(tenant, assetId);
@@ -341,7 +341,7 @@ export class FileLibrary {
       Buffer.byteLength(value.type) > 255 ||
       /[\x00-\x1f\x7f]/.test(value.type)
     )
-      throw new RemoteKitError('rejected', 'Endpoint未返回有效文件信息');
+      throw new RemoteKitError('outcome_unknown', 'Endpoint未返回有效文件信息');
     return value;
   }
   private async describeAssets(
@@ -374,10 +374,15 @@ export class FileLibrary {
       origin.kind === 'files'
         ? { app: 'files', channel: origin.channel }
         : this.fileSourceForRequest(tenant, origin.requestId);
-    if (!source) throw new RemoteKitError('conflict', 'File request is no longer available');
+    if (!source)
+      throw new RemoteKitError('conflict', '文件请求已失效', {
+        detail: 'File request is no longer available',
+      });
     const validate = (snapshot: LibrarySnapshot) => {
       if (destination === 'library' && origin.kind === 'request' && sourceExcluded(snapshot, source))
-        throw new RemoteKitError('conflict', 'Source is excluded from collection');
+        throw new RemoteKitError('conflict', '该来源已被排除收集', {
+          detail: 'Source is excluded from collection',
+        });
       const partitionId = partition(snapshot, requestedPartition);
       if (snapshot.entries.length >= MAX_CATALOG)
         throw new RemoteKitError('limit_exceeded', '文件库已达上限');
@@ -470,7 +475,7 @@ export class FileLibrary {
       const request = resolve(requestId);
       if (!request || request.state !== 'pending') throw new RemoteKitError('conflict', '文件选择请求已失效');
       if ((!request.multiple && entryIds.length !== 1) || entryIds.length > request.limits.maxFiles)
-        throw invalid('文件数量超出页面限制');
+        throw new RemoteKitError('limit_exceeded', '文件数量超出页面限制');
       const snapshot = this.repository.snapshot(tenant),
         selected = entries(snapshot, entryIds);
       if (selected.some((entry) => entry.photo?.pending))
@@ -498,7 +503,7 @@ export class FileLibrary {
       requestId,
     });
     authorize();
-    if (accepted?.accepted !== true) throw new RemoteKitError('rejected', 'Endpoint未确认文件选择');
+    if (accepted?.accepted !== true) throw new RemoteKitError('outcome_unknown', 'Endpoint未确认文件选择');
     manifest.prepared = true;
     this.repository.saveSelection(tenant, manifest);
     return { selectionId };
@@ -622,7 +627,7 @@ export class FileLibrary {
       }
       case 'library.source': {
         const source = librarySource(params.source);
-        if (typeof params.excluded !== 'boolean') throw invalid('Invalid source exclusion');
+        if (typeof params.excluded !== 'boolean') throw invalid('来源排除设置无效');
         const excluded = params.excluded;
         return this.repository.change(
           tenant,

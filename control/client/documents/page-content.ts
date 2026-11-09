@@ -105,7 +105,7 @@ export function rewriteAttributes(
   const ref = input.get('data-bundle-ref');
   const image = tag === 'image';
   const url = ref && image ? refs.get(ref) : undefined;
-  if (ref && (!image || !url)) throw new RemoteKitError('rejected', '页面依赖缺失');
+  if (ref && (!image || !url)) throw new RemoteKitError('internal', '页面依赖缺失');
   for (const [name, value] of input) {
     const lower = name.toLowerCase();
     if (lower === 'style') output.set(name, cleanStyle(value));
@@ -136,7 +136,7 @@ export function sanitizePage(html: string, refs: ReadonlyMap<string, string>): H
     page.localName !== 'main' ||
     !page.classList.contains('page')
   ) {
-    throw new RemoteKitError('rejected', '页面格式错误');
+    throw new RemoteKitError('internal', '页面格式错误');
   }
   for (const node of [page, ...Array.from(page.querySelectorAll('*'))]) {
     if (!elements.has(node.localName.toLowerCase())) {

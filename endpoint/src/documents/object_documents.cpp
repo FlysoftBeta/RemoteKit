@@ -44,10 +44,13 @@ ObjectDocuments::Future ObjectDocuments::Submit(const std::string& source,
   auto future = promise->get_future().share();
   jobs_.emplace(source, Job{future});
   if (!workers_.Submit([this, source, tenant, temporary, promise] {
-        Result<std::string> result = Error{ErrorCode::kRejected, "document rendition failed"};
+        Result<std::string> result = Error{ErrorCode::kInternal, "document rendition failed"};
         try {
           result = Convert(source, tenant, temporary);
-        } catch (const std::exception&) {
+        } catch (const std::filesystem::filesystem_error& error) {
+          result = Error{ErrorCode::kUnavailable, error.what()};
+        } catch (const std::exception& error) {
+          result = Error{ErrorCode::kInternal, error.what()};
         }
         std::lock_guard lock(mutex_);
         const bool conversion_failure =
@@ -77,13 +80,14 @@ Result<std::string> ObjectDocuments::Convert(const std::string& source,
   RK_RETURN_IF_ERROR(objects_.Store().Read(objects_.ObjectKeys(), source, output));
   output.close();
   if (!output)
-    return Error{ErrorCode::kRejected, "cannot stage document"};
+    return Error{ErrorCode::kUnavailable, "cannot stage document"};
   RK_ASSIGN_OR_RETURN(format, DetectDocumentFile(plaintext));
   if (format.type == DocumentType::kUnsupported)
-    return Error{ErrorCode::kInvalidRequest, "unsupported document type"};
+    return Error{ErrorCode::kRejected, "Unsupported document type",
+                 ErrorReason::kDocumentUnsupported};
   auto rendered_result = renders_.Render(source, plaintext, "input" + format.extension);
   if (!rendered_result)
-    return Error{ErrorCode::kRejected, rendered_result.error().message};
+    return rendered_result.error();
   auto rendered = std::move(rendered_result).value();
   struct Cleanup {
     std::filesystem::path path;

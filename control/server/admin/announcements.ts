@@ -7,7 +7,7 @@ import type { DomainContext, DomainServices } from '../application';
 function text(value: unknown, limit: number, name: string) {
   const trimmed = typeof value === 'string' ? value.trim() : '';
   if (!trimmed) throw new RemoteKitError('invalid_request', `请填写${name}`);
-  if (trimmed.length > limit) throw new RemoteKitError('invalid_request', `${name}不能超过 ${limit} 个字`);
+  if (trimmed.length > limit) throw new RemoteKitError('limit_exceeded', `${name}不能超过 ${limit} 个字`);
   return trimmed;
 }
 

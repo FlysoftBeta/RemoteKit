@@ -262,9 +262,9 @@ int main() {
       CHECK(!Overlap(a.outer, atlas.value.placements[j].outer));
   }
   CHECK(protocol::PackAtlas(10, 10, 0, {{1, 11, 1, 1}}).error ==
-        protocol::ErrorCode::resource_limit);
+        protocol::ErrorCode::kLimitExceeded);
   CHECK(protocol::PackAtlas(10, 10, 1, {{1, 9, 9, 1}}).error ==
-        protocol::ErrorCode::resource_limit);
+        protocol::ErrorCode::kLimitExceeded);
   CHECK(!protocol::PackAtlas(10, 10, 0, {{1, 6, 10, 1}, {2, 6, 10, 1}}));
   CHECK(!protocol::PackAtlas(10, 10, 0, {{1, 1, 1, 1}, {1, 1, 1, 1}}));
   CHECK(!protocol::PackAtlas(10, 10, 0, {{1, 1, 1, 0}}));

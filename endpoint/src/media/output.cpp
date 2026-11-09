@@ -94,7 +94,7 @@ Result<void> OutputController::Close() {
   }
   std::string error;
   if (!pool.Close(error) && !failure)
-    failure = Error{ErrorCode::kUnavailable, error};
+    failure = Error{ErrorCode::kOutcomeUnknown, error};
   if (failure && failure->code == ErrorCode::kOutcomeUnknown)
     return Error{failure->code, failure->message, ErrorReason::kBrowserRestarting};
   if (failure)

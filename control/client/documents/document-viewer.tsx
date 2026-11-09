@@ -1,3 +1,4 @@
+import { retryDelay } from '../../shared/error-policy';
 import { useAutoFocus } from '../editing/local-autofocus';
 // Page layout and controls adapted from FlysoftBeta/talos-ng packages/client/src/features/reader/view/viewer.tsx.
 import { ErrorOutline, ZoomInOutlined, ZoomOutOutlined } from '@mui/icons-material';
@@ -49,7 +50,7 @@ function Page({
           const lease = await cache.acquire(id, controller.signal);
           if (controller.signal.aborted) {
             lease.release();
-            throw new DOMException('请求已取消', 'AbortError');
+            throw new RemoteKitError('canceled', '');
           }
           leases.push(lease);
           return [id, lease] as const;
@@ -59,7 +60,7 @@ function Page({
       const html = await byId.get(page.document)!.resource.data.text();
       const styles = resources.filter(([, lease]) => lease.resource.mime === 'text/css');
       if (!styles.length || byId.get(page.document)!.resource.mime !== 'text/html') {
-        throw new Error('页面格式错误');
+        throw new RemoteKitError('internal', '页面格式错误');
       }
       const css = (await Promise.all(styles.map(([, lease]) => lease.resource.data.text()))).join('\n');
       if (controller.signal.aborted) return;
@@ -362,6 +363,7 @@ export function DocumentViewer({
     cache?: ResourceCache;
     error?: string;
     rejected?: boolean;
+    retryable?: boolean;
   }>();
   const [status, setStatus] = useState<'converting' | 'ready'>();
   const [slow, setSlow] = useState(false);
@@ -391,12 +393,13 @@ export function DocumentViewer({
         },
         (error) => {
           if (controller.signal.aborted) return;
-          if (error instanceof RemoteKitError && error.code === 'invalid_request') unsupported.current?.();
+          if (error instanceof RemoteKitError && error.code === 'rejected') unsupported.current?.();
           setStatus(undefined);
           setState({
             source,
             error: error instanceof Error ? error.message : '无法打开此文档',
             rejected: error instanceof RemoteKitError && error.code === 'rejected',
+            retryable: error instanceof RemoteKitError && retryDelay(error, 0) !== undefined,
           });
         },
       );
@@ -428,7 +431,7 @@ export function DocumentViewer({
               <ErrorOutline className="document-viewer-error-icon" />
               <strong>{active.rejected ? '无法转换此文档' : active.error}</strong>
               {active.rejected && <span>{active.error}</span>}
-              <Button onClick={() => setAttempt((value) => value + 1)}>重试</Button>
+              {active.retryable && <Button onClick={() => setAttempt((value) => value + 1)}>重试</Button>}
             </>
           ) : (
             <>

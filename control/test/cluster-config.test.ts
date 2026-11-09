@@ -19,14 +19,15 @@ test('config creates defaults and key, resolves paths, hashes effective override
   try {
     const initial = load();
     assert.equal(initial.port, 3001);
+    assert.equal(initial.nodes.local.config.maxSessions, null);
     assert.deepEqual(initial.nodes.local.config.peer, {
       listen: '0.0.0.0:3101',
       address: '127.0.0.1:3101',
     });
     assert.deepEqual(initial.nodes.local.config.rtc, { ports: null, address: null });
-    assert.equal(initial.nodes.local.config.diskReserveBytes, 10 * 1024 ** 3);
-    assert.equal(initial.nodes.local.config.sessionMemoryBytes, 2 * 1024 ** 3);
-    assert.equal(initial.quotas.tenantObjectBytes, 4 * 1024 ** 3);
+    assert.equal(initial.nodes.local.config.diskReserveBytes, null);
+    assert.equal(initial.nodes.local.config.sessionMemoryBytes, null);
+    assert.equal(initial.quotas.tenantObjectBytes, null);
     assert.equal(Buffer.from(initial.cluster.key, 'base64').length, 32);
     assert.equal(
       initial.nodes.local.local!.executable,
@@ -114,6 +115,34 @@ test('config creates defaults and key, resolves paths, hashes effective override
   }
 });
 
+test('config accepts null or explicit quotas and node limits, including zero byte floors', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rk-optional-limits-'));
+  const configPath = join(directory, 'control.json');
+  try {
+    for (const limits of [
+      { maxSessions: null, diskReserveBytes: null, sessionMemoryBytes: null, tenantObjectBytes: null },
+      { maxSessions: 4, diskReserveBytes: 1000, sessionMemoryBytes: 2000, tenantObjectBytes: 3000 },
+      { maxSessions: 1, diskReserveBytes: 0, sessionMemoryBytes: 0, tenantObjectBytes: 1 },
+    ]) {
+      const { tenantObjectBytes, ...nodeLimits } = limits;
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          nodeDefaults: { maxSessions: 10, diskReserveBytes: 100, sessionMemoryBytes: 100 },
+          quotas: { tenantObjectBytes },
+          nodes: { local: { ...nodeLimits, local: { executable: 'endpoint.exe', root: 'node' } } },
+        }),
+      );
+      const config = runtimeConfig({ REMOTEKIT_CONTROL_CONFIG: configPath }, []);
+      for (const key of ['maxSessions', 'diskReserveBytes', 'sessionMemoryBytes'] as const)
+        assert.equal(config.nodes.local.config[key], nodeLimits[key]);
+      assert.equal(config.quotas.tenantObjectBytes, tenantObjectBytes);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('config rejects unknown fields, wrong types, invalid ranges and invalid combinations', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rk-invalid-config-'));
   const configPath = join(directory, 'control.json');
@@ -131,12 +160,16 @@ test('config rejects unknown fields, wrong types, invalid ranges and invalid com
       { nodeDefaults: { rtc: { ports: '40000-40001', address: 'bad host' } } },
       { nodes: { local: { local: { executable: 'e.exe', root: 'r' }, controlUrl: 'ws://t/api/node' } } },
       { quotas: { tenantObjectBytes: -1 } },
+      { quotas: { tenantObjectBytes: 0 } },
+      { quotas: { tenantObjectBytes: 1.5 } },
+      { nodeDefaults: { maxSessions: 0 } },
+      { nodeDefaults: { maxSessions: '3' } },
       { quotas: { tenantObjectBytes: '1000' } },
       { nodeDefaults: { peer: { listen: 'invalid' } } },
       { nodeDefaults: { peer: { address: 'host:65536' } } },
       { nodeDefaults: { peer: { advertise: 'host:3101' } } },
       { nodeDefaults: { diskReserveBytes: -1 } },
-      { nodeDefaults: { sessionMemoryBytes: 0 } },
+      { nodeDefaults: { sessionMemoryBytes: -1 } },
       { nodes: { Bad_ID: {} } },
       { extra: true },
       { http: null },

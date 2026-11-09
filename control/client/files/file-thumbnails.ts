@@ -1,7 +1,10 @@
+import { toRemoteKitError, type ErrorCode } from '../../shared/errors';
+import { retryDelay } from '../../shared/error-policy';
 type Listener = (blob: Blob | undefined) => void;
 interface Preview {
   blob?: Blob;
   retryAt?: number;
+  code?: ErrorCode;
 }
 interface PendingPreview {
   listeners: Set<Listener>;
@@ -94,9 +97,15 @@ export class FileThumbnails {
             this.cache(id, { blob: chosen });
             job.listeners.forEach((listener) => listener(chosen));
           },
-          () => {
+          (error) => {
             if (this.pending.get(id) === job && !this.previews.get(id)?.blob) {
-              this.cache(id, { retryAt: Date.now() + 30_000 });
+              const failure = toRemoteKitError(error);
+              const delay = retryDelay(failure, 0);
+              if (failure.code !== 'canceled')
+                this.cache(id, {
+                  code: failure.code,
+                  retryAt: delay === undefined ? Infinity : Date.now() + delay,
+                });
               job.listeners.forEach((listener) => listener(undefined));
             }
           },

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { retryDelay } from '../../../shared/error-policy.js';
 import { RemoteKitError } from '../../../shared/errors.js';
 import { providerEndpoint } from './endpoint.js';
 
@@ -50,26 +51,35 @@ export function positiveInteger(value: number, label: string): number {
 
 export function serviceError(code: unknown, service: string, auth = false): never {
   const value = String(code).toLowerCase();
-  if (value === '429' || (Number(value) >= 500 && Number(value) < 600)) {
+  if (value === '429') throw new RemoteKitError('rate_limited', `${service}请求过于频繁`);
+  if (value === '408' || (Number(value) >= 500 && Number(value) < 600)) {
     throw new RemoteKitError('unavailable', `${service}暂时不可用，请稍后重试`);
   }
   if (
-    ['401', '416', '900004'].includes(value) ||
-    (service === '新教育' && value === '410') ||
-    auth ||
-    /token|tgt|ticket|password|account|credential/.test(value)
+    ['401', '900004'].includes(value) ||
+    // XinJiaoyu business statuses 410 and 416 denote an expired sign-in session.
+    (service === '新教育' && ['410', '416'].includes(value)) ||
+    (auth && ['invalid_credentials', 'wrong_password', 'invalid_password'].includes(value))
   ) {
     throw new RemoteKitError('unauthenticated', `${service}登录已失效或账号密码错误，请重新登录`);
   }
-  if (/captcha/.test(value)) {
-    throw new RemoteKitError('rejected', '请完成极验验证后重新登录');
-  }
+  if (value === '403') throw new RemoteKitError('forbidden', `${service}无权访问`);
+  if (value === '404') throw new RemoteKitError('not_found', `${service}内容不存在`);
+  if (value === '409') throw new RemoteKitError('conflict', `${service}状态已改变`);
+  if (value === '413') throw new RemoteKitError('limit_exceeded', `${service}内容超过限制`);
   throw new RemoteKitError(
-    'rejected',
-    `${service}请求被拒绝（${/^[\w.-]{1,60}$/.test(value) ? value : '未知错误'}）`,
+    'internal',
+    `${service}请求失败（${/^[\w.-]{1,60}$/.test(value) ? value : '未知错误'}）`,
   );
 }
 
+export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
+  if (!value) return;
+  const seconds = Number(value);
+  const milliseconds = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now;
+  if (!Number.isFinite(milliseconds)) return;
+  return Math.min(86_400_000, Math.max(0, Math.ceil(milliseconds)));
+}
 export class HttpClient {
   private readonly fetchImpl: typeof globalThis.fetch;
   readonly maxRetries: number;
@@ -83,11 +93,12 @@ export class HttpClient {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.timeoutMs = options.timeoutMs ?? 20_000;
     this.maxRetries = options.maxRetries ?? 3;
-    this.retryBaseMs = options.retryBaseMs ?? 500;
+    this.retryBaseMs = options.retryBaseMs ?? 1000;
   }
 
   async response(url: string | URL, init: RequestInit = {}, retries = this.maxRetries): Promise<Response> {
     for (let attempt = 0; ; attempt += 1) {
+      if (init.signal?.aborted) throw new RemoteKitError('canceled', '');
       try {
         const timeout = AbortSignal.timeout(this.timeoutMs);
         const response = await this.fetchImpl(providerEndpoint(url), {
@@ -102,25 +113,56 @@ export class HttpClient {
           } catch {}
           this.logRejection(url, init, response.status, message);
         }
-        if (response.status === 401 || response.status === 403 || response.status === 416) {
+        if (response.status === 401) {
           await response.body?.cancel();
           throw new RemoteKitError('unauthenticated', '学习服务登录已失效，请重新登录');
         }
-        if (response.status === 429 || response.status >= 500 || response.status === 408) {
+        if (response.status === 429) {
+          await response.body?.cancel();
+          throw new RemoteKitError('rate_limited', '学习服务请求过于频繁', {
+            retryAfterMs: parseRetryAfter(response.headers.get('retry-after')),
+          });
+        }
+        if (response.status >= 500 || response.status === 408) {
           await response.body?.cancel();
           throw new RemoteKitError('unavailable', '学习服务暂时不可用，请稍后重试');
         }
         if (!response.ok) {
           await response.body?.cancel();
-          throw new RemoteKitError('rejected', '学习服务请求被拒绝');
+          throw new RemoteKitError(
+            response.status === 403
+              ? 'forbidden'
+              : response.status === 404
+                ? 'not_found'
+                : response.status === 409
+                  ? 'conflict'
+                  : response.status === 413
+                    ? 'limit_exceeded'
+                    : response.status === 416
+                      ? 'invalid_request'
+                      : 'internal',
+            '学习服务请求失败',
+          );
         }
         return response;
       } catch (error) {
-        if (error instanceof RemoteKitError && error.code !== 'unavailable') throw error;
-        if (attempt >= retries || init.signal?.aborted) {
-          throw new RemoteKitError('unavailable', '学习服务连接失败或超时，请稍后重试');
-        }
-        await delay(this.retryBaseMs * 2 ** attempt);
+        const read =
+          !init.method || init.method.toUpperCase() === 'GET' || init.method.toUpperCase() === 'HEAD';
+        if (init.signal?.aborted)
+          throw new RemoteKitError(
+            read ? 'canceled' : 'outcome_unknown',
+            read ? '' : '学习服务请求结果待确认',
+            { detail: String(error) },
+          );
+        const failure =
+          error instanceof RemoteKitError
+            ? error
+            : new RemoteKitError(read ? 'unavailable' : 'outcome_unknown', '学习服务连接失败或超时', {
+                detail: String(error),
+              });
+        const wait = retryDelay(failure, attempt);
+        if (!read || wait === undefined || attempt >= retries) throw failure;
+        await delay(failure.retryAfterMs ?? (wait * this.retryBaseMs) / 1000);
       }
     }
   }
@@ -146,7 +188,10 @@ export class HttpClient {
       return value;
     } catch (error) {
       if (error instanceof SyntaxError) return malformed();
-      throw new RemoteKitError('unavailable', '学习服务读取超时或连接中断，请稍后重试');
+      throw new RemoteKitError(
+        !init.method || init.method.toUpperCase() === 'GET' ? 'unavailable' : 'outcome_unknown',
+        '学习服务读取超时或连接中断',
+      );
     }
   }
 
@@ -197,14 +242,18 @@ export class HttpClient {
     });
   }
 
-  async retry<T>(run: () => Promise<T>): Promise<T> {
+  async retry<T>(run: () => Promise<T>, read = true): Promise<T> {
     for (let attempt = 0; ; attempt += 1) {
       try {
         return await run();
       } catch (error) {
-        if (!(error instanceof RemoteKitError) || error.code !== 'unavailable' || attempt >= this.maxRetries)
-          throw error;
-        await delay(this.retryBaseMs * 2 ** attempt);
+        const wait = error instanceof RemoteKitError ? retryDelay(error, attempt) : undefined;
+        if (!read || wait === undefined || attempt >= this.maxRetries) throw error;
+        await delay(
+          error instanceof RemoteKitError && error.retryAfterMs !== undefined
+            ? wait
+            : (wait * this.retryBaseMs) / 1000,
+        );
       }
     }
   }

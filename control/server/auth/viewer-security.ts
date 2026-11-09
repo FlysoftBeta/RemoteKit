@@ -1,3 +1,5 @@
+import { wireError } from '../../shared/errors';
+import { endpointError } from '../endpoint/gateway';
 import { randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type { AuthSettings, AuthState, FacePurpose, FaceStatus } from '../../shared/security';
@@ -159,7 +161,7 @@ export class ViewerSecurity {
     try {
       const result = await this.endpoint.authorizeRtc(tenant, { connectionId, epoch, unlocked });
       if (result?.applied !== true || result.epoch !== epoch || viewer.peer !== peer || peer.epoch !== epoch)
-        throw new RemoteKitError('conflict', 'Endpoint 授权已改变');
+        throw new RemoteKitError('outcome_unknown', 'Endpoint 授权结果未知');
       peer.appliedEpoch = epoch;
       this.changed(tenant, viewer, false);
     } finally {
@@ -219,7 +221,7 @@ export class ViewerSecurity {
       modelVersion = viewer.face.modelVersion;
     const record = this.store.security.security(viewer.user.id);
     if (!peer || peer.appliedEpoch !== peer.epoch || !viewer.face.available || !modelVersion)
-      throw new RemoteKitError('conflict', '人脸验证通道尚未就绪');
+      throw new RemoteKitError('unavailable', '人脸验证通道尚未就绪');
     if (
       purpose !== 'enroll' &&
       (!record.settings.faceEnabled || !record.face || record.face.modelVersion !== modelVersion)
@@ -264,7 +266,7 @@ export class ViewerSecurity {
         viewer.challenge !== challenge ||
         result?.accepted !== true
       )
-        throw new RemoteKitError('conflict', 'Endpoint 未接受人脸请求');
+        throw new RemoteKitError('outcome_unknown', '人脸请求结果未知');
       challenge.started = true;
       viewer.face = { ...viewer.face, challengeId: challenge.id, purpose, status: 'pending' };
       this.changed(tenant, viewer, false);
@@ -291,7 +293,13 @@ export class ViewerSecurity {
     try {
       const result = await this.endpoint
         .faceStatus(tenant, this.faceBinding(challenge))
-        .catch(() => undefined);
+        .catch((error: unknown) => ({
+          challengeId: challenge.id,
+          status: 'failed',
+          error: wireError(endpointError(error)),
+          outcome: undefined,
+          template: undefined,
+        }));
       if (
         !this.valid(tenant, viewer) ||
         viewer.epoch !== generation ||
@@ -334,10 +342,13 @@ export class ViewerSecurity {
         }
       }
       viewer.face.status = status;
-      const reason = result?.reason;
-      if (status === 'absent' && (reason === 'camera-unavailable' || reason === 'no-matching-face'))
-        viewer.face.reason = reason;
-      else if (viewer.face.available) delete viewer.face.reason;
+      if (status === 'absent') viewer.face.outcome = result?.outcome;
+      else delete viewer.face.outcome;
+      if (status === 'failed')
+        viewer.face.error = wireError(
+          result?.error ? endpointError(result.error) : new RemoteKitError('internal', '人脸验证失败'),
+        );
+      else delete viewer.face.error;
       this.clearChallenge(tenant, viewer, true);
       this.changed(tenant, viewer, false);
       if (challenge.purpose === 'verify' && status === 'matched')
@@ -380,7 +391,7 @@ export class ViewerSecurity {
     }
     const generation = viewer.epoch,
       user = viewer.user.id;
-    if (viewer.mutating) throw new RemoteKitError('limit_exceeded', '验证请求仍在处理');
+    if (viewer.mutating) throw new RemoteKitError('busy', '验证请求仍在处理');
     viewer.mutating = true;
     try {
       if (method === 'auth.verify') {

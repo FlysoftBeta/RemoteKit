@@ -14,7 +14,7 @@ enum remotekit_rtc_event_type {
   REMOTEKIT_RTC_ICE = 3,
   REMOTEKIT_RTC_STATE = 4,
   REMOTEKIT_RTC_DATA = 5,
-  REMOTEKIT_RTC_ERROR = 6,
+  REMOTEKIT_RTC_ERROR = 6, /* bytes: diagnosis; auxiliary: shared handling code name. */
   REMOTEKIT_RTC_DATA_STATE = 7,
   REMOTEKIT_RTC_ICE_COMPLETE = 8,
   REMOTEKIT_RTC_REFRESH_REQUEST = 9,

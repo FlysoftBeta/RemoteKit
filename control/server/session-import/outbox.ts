@@ -1,3 +1,5 @@
+import { mailError } from './mail-error';
+import { errorHandling, retryDelay } from '../../shared/error-policy';
 import nodemailer from 'nodemailer';
 import type { SendMailOptions } from 'nodemailer';
 import type { ControlEvent, ImportMessage, MailboxStatus } from '../../shared/session-import';
@@ -69,6 +71,8 @@ export class ImportOutbox {
   private transport?: MailTransport;
   private running?: Promise<void>;
   private stopped = false;
+  private blocked = false;
+  private errorCode?: import('../../shared/errors').ErrorCode;
   private failures = new Map<string, { attempts: number; retryAt: number }>();
   private volatile: QueuedEvent[] = [];
   private lastErrorAt: number | null = null;
@@ -92,10 +96,11 @@ export class ImportOutbox {
       pending: this.store.outgoing().length + this.volatile.length,
       lastErrorAt: this.lastErrorAt,
       lastError: this.lastError,
+      errorCode: this.errorCode,
     };
   }
   flush(): Promise<void> {
-    if (!this.config || this.stopped) return Promise.resolve();
+    if (!this.config || this.stopped || this.blocked) return Promise.resolve();
     if (this.running) return this.running;
     this.running = this.send().finally(() => {
       this.running = undefined;
@@ -160,9 +165,13 @@ export class ImportOutbox {
         if (!this.failures.size) this.lastError = null;
       } catch (error) {
         const attempts = (this.failures.get(keyId)?.attempts ?? 0) + 1;
-        this.failures.set(keyId, { attempts, retryAt: now + Math.min(60000 * 2 ** (attempts - 1), 3600000) });
+        const failure = mailError(error, true);
+        this.errorCode = failure.code;
+        const wait = retryDelay(failure, attempts - 1);
+        this.blocked = wait === undefined && errorHandling(failure.code) !== 'reconcile';
+        this.failures.set(keyId, { attempts, retryAt: now + (wait ?? 60_000) });
         this.lastErrorAt = this.clock.wallMs();
-        this.lastError = error instanceof Error ? error.message : String(error);
+        this.lastError = failure.message;
         this.log('Session import outbox: ' + this.lastError);
       }
     }

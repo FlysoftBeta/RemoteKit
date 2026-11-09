@@ -7,7 +7,15 @@ function version12Database() {
   const db = new Database(':memory:');
   db.exec(`CREATE TABLE schema_version (version INTEGER NOT NULL CHECK(version=12));
     INSERT INTO schema_version VALUES (12);
+    CREATE TABLE operation_receipts (tenant TEXT,id TEXT,receipt TEXT);
+    CREATE TABLE session_imports (id TEXT);
+    CREATE TABLE session_import_events (type TEXT,body TEXT);
+    CREATE TABLE session_deletions (session_id TEXT,node_id TEXT);
     CREATE TABLE file_library (tenant TEXT PRIMARY KEY, snapshot TEXT NOT NULL);
+    CREATE TABLE session_placements (
+      tenant TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, node_id TEXT NOT NULL,
+      placement_epoch INTEGER NOT NULL, key_ciphertext TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'active', checkpoint_id INTEGER);
     CREATE TABLE user_settings (tenant TEXT PRIMARY KEY, data TEXT NOT NULL);
     CREATE TABLE site_preferences (tenant TEXT NOT NULL, origin TEXT NOT NULL, data TEXT NOT NULL,
       PRIMARY KEY(tenant,origin));`);
@@ -44,7 +52,7 @@ test('version 12 migration adds global keyboard default and removes per-site key
       JSON.stringify({ ...permissions, manualKeyboard: true }),
     );
     createSchema(db);
-    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 13 });
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 15 });
     const readSettings = (tenant: string) =>
       JSON.parse(
         (db.prepare('SELECT data FROM user_settings WHERE tenant=?').get(tenant) as { data: string }).data,

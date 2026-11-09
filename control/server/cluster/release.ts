@@ -40,6 +40,6 @@ export function loadRelease(controlRoot: string, buildId: string): NodeRelease |
     if (hash.digest('hex') !== descriptor.sha256) throw new Error('Archive checksum mismatch');
     return Object.freeze({ descriptor: Object.freeze(descriptor), archive });
   } catch {
-    throw new RemoteKitError('invalid_request', 'Invalid node release');
+    throw new RemoteKitError('invalid_request', '节点发布包信息无效', { detail: 'Invalid node release' });
   }
 }

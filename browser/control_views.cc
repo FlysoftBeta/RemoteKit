@@ -16,19 +16,19 @@ Result<ClosedAckRequest> DecodeClosedAck(const base::DictValue& wire, RequestEnv
   request.eventIds = decoder.Optional<base::ListValue>("eventIds");
   if (request.eventIds) {
     if (request.eventIds->size() > 256)
-      return {{}, {ErrorCode::invalid_request, "Too many event IDs"}};
+      return {{}, {ErrorCode::kLimitExceeded, "Too many event IDs"}};
     for (const auto& value : *request.eventIds)
       if (!value.is_string() || value.GetString().empty() || value.GetString().size() > 256)
-        return {{}, {ErrorCode::invalid_request, "Invalid event ID"}};
+        return {{}, {ErrorCode::kInvalidRequest, "Invalid event ID"}};
   }
   const auto ids = decoder.Optional<base::ListValue>("views");
   if (!ids || ids->size() > 256)
-    return {{}, {ErrorCode::invalid_request, "Closed view IDs required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Closed view IDs required"}};
   request.views.emplace();
   for (const auto& value : *ids) {
     WebViewId view = 0;
     if (!value.is_string() || !base::StringToUint64(value.GetString(), &view) || !view)
-      return {{}, {ErrorCode::invalid_request, "Invalid closed view ID"}};
+      return {{}, {ErrorCode::kInvalidRequest, "Invalid closed view ID"}};
     request.views->push_back(view);
   }
   request.session = decoder.Optional<uint64_t>("session");
@@ -51,7 +51,7 @@ Result<CreateViewRequest> DecodeCreateView(const base::DictValue& wire, RequestE
   RequestDecoder decoder(wire);
   request.signIn = decoder.Optional<std::string>("signIn");
   if (request.signIn && !ValidSignInPurpose(*request.signIn))
-    return {{}, {ErrorCode::invalid_request, "Invalid sign-in purpose"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Invalid sign-in purpose"}};
   request.provisionalId = decoder.Optional<std::string>("provisionalId");
   request.width = decoder.Optional<int>("width");
   request.height = decoder.Optional<int>("height");
@@ -66,7 +66,7 @@ Result<CreateViewRequest> DecodeCreateView(const base::DictValue& wire, RequestE
     return {{}, operation.status};
   request.operation = std::move(operation.value);
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
@@ -78,7 +78,7 @@ Result<CloseViewRequest> DecodeCloseView(const base::DictValue& wire, RequestEnv
   request.session = decoder.Optional<uint64_t>("session");
   request.view = decoder.Optional<uint64_t>("view");
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
@@ -95,7 +95,7 @@ Result<RecreateViewRequest> DecodeRecreateView(const base::DictValue& wire,
     return {{}, operation.status};
   request.operation = std::move(operation.value);
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
@@ -112,7 +112,7 @@ Result<ConfigureViewRequest> DecodeConfigureView(const base::DictValue& wire,
   request.session = decoder.Optional<uint64_t>("session");
   request.view = decoder.Optional<uint64_t>("view");
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
@@ -127,7 +127,7 @@ Result<FocusRequest> DecodeFocus(const base::DictValue& wire, RequestEnvelope en
   request.instance = decoder.Optional<uint64_t>("instance");
   request.document = decoder.Optional<uint64_t>("document");
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
@@ -139,7 +139,7 @@ Result<VisibleRequest> DecodeVisible(const base::DictValue& wire, RequestEnvelop
   request.session = decoder.Optional<uint64_t>("session");
   request.view = decoder.Optional<uint64_t>("view");
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
@@ -154,15 +154,15 @@ Result<LifecycleControlRequest> DecodeLifecycle(const base::DictValue& wire,
   request.session = decoder.Optional<uint64_t>("session");
   request.view = decoder.Optional<uint64_t>("view");
   if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+    return {{}, {ErrorCode::kInvalidRequest, "Session and view required"}};
   return decoder.Finish(std::move(request));
 }
 
 ControlResult ControlDispatcher::HandleClosedAck(const ClosedAckRequest& request) {
   const int id = request.id;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
 
   uint64_t session = 0;
@@ -172,10 +172,10 @@ ControlResult ControlDispatcher::HandleClosedAck(const ClosedAckRequest& request
       base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("browser-incarnation");
   if (!Assign(request.session, &session) || !runtime_.view_model.FindSession(session) ||
       !incarnation || current.empty() || *incarnation != current || !ids || ids->size() > 256)
-    return error("invalid_closed_ack_target");
+    return error(ErrorCode::kInvalidRequest, "invalid_closed_ack_target");
   const auto acknowledged = runtime_.closed.Acknowledge(session, *ids);
   if (!acknowledged)
-    return ControlResult::Failure(id, acknowledged.error, acknowledged.message);
+    return ControlResult::Failure(id, *acknowledged.error, acknowledged.message);
   if (request.eventIds)
     for (auto& context : runtime_.contexts)
       context->AcknowledgeDownloadEvents(*request.eventIds);
@@ -187,19 +187,19 @@ ControlResult ControlDispatcher::HandleClosedAck(const ClosedAckRequest& request
 ControlResult ControlDispatcher::HandleSitePreferences(const SitePreferencesRequest& request) {
   const int id = request.id;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
 
   uint64_t session = 0;
   const auto* sites = Ptr(request.sites);
   if (!Assign(request.session, &session) || !sites)
-    return error("session_and_sites_required");
+    return error(ErrorCode::kInvalidRequest, "session_and_sites_required");
   if (session != runtime_.session_id)
-    return error("session_not_found");
+    return error(ErrorCode::kNotFound, "session_not_found");
   std::string detail;
   if (!runtime_.contexts.front()->SetSitePreferences(*sites, &detail))
-    return error(detail);
+    return error(ErrorCode::kInvalidRequest, detail);
   reply.Set("ok", true);
   reply.Set("accepted", true);
   reply.Set("applied", true);
@@ -210,25 +210,25 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
   const int id = request.id;
   const auto* method = &request.method;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
 
   uint64_t session = 0, view = 0;
   if (!Assign(request.session, &session) || !Assign(request.view, &view) ||
       !runtime_.view_model.FindSession(session) || session != runtime_.session_id)
-    return error("invalid_session_or_view");
+    return error(ErrorCode::kInvalidRequest, "invalid_session_or_view");
   if (runtime_.closed.retired.contains(view))
-    return error("view_id_closed");
+    return error(ErrorCode::kConflict, "view_id_closed");
   const bool adopting = *method == "view.adopt";
   const auto* provisional = Ptr(request.provisionalId);
   if (adopting && request.signIn)
-    return error("sign_in_popup_adoption_forbidden");
+    return error(ErrorCode::kForbidden, "sign_in_popup_adoption_forbidden");
   if (adopting && !provisional)
-    return error("provisional_id_required");
+    return error(ErrorCode::kInvalidRequest, "provisional_id_required");
   if (adopting && runtime_.popups.adopted.contains(*provisional)) {
     if (runtime_.popups.adopted.at(*provisional) != view)
-      return error("popup_already_adopted_elsewhere");
+      return error(ErrorCode::kConflict, "popup_already_adopted_elsewhere");
     reply.Set("ok", true);
     reply.Set("accepted", true);
     reply.Set("completed", true);
@@ -239,7 +239,7 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
   if (adopting) {
     const auto allowed = runtime_.popups.CanAdopt(*provisional, session);
     if (!allowed)
-      return ControlResult::Failure(id, allowed.error, allowed.message);
+      return ControlResult::Failure(id, *allowed.error, allowed.message);
   }
   ViewSpec spec;
   spec.sign_in = request.signIn.value_or("");
@@ -250,12 +250,12 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
   if (!url || !GURL(*url).is_valid() || spec.width < 1 || spec.height < 1 || spec.width > 8192 ||
       spec.height > 8192 || (device && *device != "desktop" && *device != "tablet") ||
       (Ptr(request.device) && !device))
-    return error("invalid_view_configuration");
+    return error(ErrorCode::kInvalidRequest, "invalid_view_configuration");
   spec.visible = request.visible.value_or(true);
   if (Ptr(request.device_scale_factor)) {
     const auto scale = request.device_scale_factor;
     if (!scale || !std::isfinite(*scale) || *scale < 0.5 || *scale > 4)
-      return error("invalid_page_device_scale_factor");
+      return error(ErrorCode::kInvalidRequest, "invalid_page_device_scale_factor");
     spec.page_dsf = static_cast<float>(*scale);
   }
   spec.url = *url;
@@ -263,15 +263,15 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
     if (runtime_.views.records.at(i).webview->view_id() != view)
       continue;
     if (adopting)
-      return error("view_id_already_exists");
+      return error(ErrorCode::kConflict, "view_id_already_exists");
     if (runtime_.views.records.at(i).webview->session_id() != session ||
         runtime_.views.records.at(i).spec != spec)
-      return error("view_id_configuration_conflict");
+      return error(ErrorCode::kConflict, "view_id_configuration_conflict");
     if (request.operation) {
       const auto status =
           runtime_.views.records.at(i).webview->Navigate(GURL(spec.url), request.operation);
       if (!status)
-        return ControlResult::Failure(id, status.error, status.message, std::move(reply));
+        return ControlResult::Failure(id, *status.error, status.message, std::move(reply));
     }
     reply.Set("ok", true);
     reply.Set("accepted", true);
@@ -282,15 +282,15 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
     return reply;
   }
   if (runtime_.views.records.size() >= kSharedAtlasMaxViews)
-    return error("view_limit_reached");
+    return error(ErrorCode::kLimitExceeded, "view_limit_reached");
   auto next = runtime_.views.Specs();
   next.emplace(view, spec);
   auto layout = runtime_.layout_transaction.Prepare(next);
   if (!layout)
-    return ControlResult::Failure(id, layout.status.error, layout.status.message);
+    return ControlResult::Failure(id, *layout.status.error, layout.status.message);
   auto created = runtime_.view_model.CreateWebView(session, runtime_.profiles.front(), view);
   if (!created)
-    return ControlResult::Failure(id, created.status.error, created.status.message,
+    return ControlResult::Failure(id, *created.status.error, created.status.message,
                                   std::move(reply));
   std::unique_ptr<content::WebContents> adopted;
   if (adopting)
@@ -305,7 +305,7 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
       adopting ? Status{} : record.webview->Navigate(GURL(spec.url), request.operation);
   if (!navigated) {
     runtime_.RemoveView(view);
-    return ControlResult::Failure(id, navigated.error, navigated.message, std::move(reply));
+    return ControlResult::Failure(id, *navigated.error, navigated.message, std::move(reply));
   }
   if (adopting) {
     runtime_.popups.CompleteAdoption(*provisional, view);
@@ -322,14 +322,14 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
 ControlResult ControlDispatcher::HandleCloseView(const CloseViewRequest& request) {
   const int id = request.id;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
 
   uint64_t session = 0, view = 0;
   if (!Assign(request.session, &session) || !Assign(request.view, &view) ||
       !runtime_.view_model.FindSession(session))
-    return error("invalid_session_or_view");
+    return error(ErrorCode::kInvalidRequest, "invalid_session_or_view");
   if (runtime_.closed.retired.contains(view)) {
     reply.Set("ok", true);
     reply.Set("accepted", true);
@@ -338,7 +338,7 @@ ControlResult ControlDispatcher::HandleCloseView(const CloseViewRequest& request
   }
   auto* record = runtime_.views.Find(session, view);
   if (!record)
-    return error("view_not_in_session");
+    return error(ErrorCode::kNotFound, "view_not_in_session");
   bool force = request.force.value_or(false);
   if (force)
     runtime_.RemoveView(view);
@@ -353,24 +353,24 @@ ControlResult ControlDispatcher::HandleCloseView(const CloseViewRequest& request
 ControlResult ControlDispatcher::HandleRecreateView(const RecreateViewRequest& request) {
   const int id = request.id;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
   const auto session = request.session.value_or(0);
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view))
-    return ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session");
+    return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
 
   if (record->requests->close_state() == "closing" || record->requests->close_state() == "closed")
-    return error("view_closing");
+    return error(ErrorCode::kConflict, "view_closing");
   const auto* url = Ptr(request.url);
   if (!url || !GURL(*url).is_valid())
-    return error("invalid_url");
+    return error(ErrorCode::kInvalidRequest, "invalid_url");
   if (const auto existing = adapter.ExistingNavigationOperation(GURL(*url), request.operation)) {
     if (!*existing)
-      return ControlResult::Failure(id, existing->error, existing->message);
+      return ControlResult::Failure(id, *existing->error, existing->message);
     reply.Set("ok", true);
     reply.Set("accepted", true);
     reply.Set("token", TokenValue(runtime_.view_model.Token(session, view).value));
@@ -385,7 +385,7 @@ ControlResult ControlDispatcher::HandleRecreateView(const RecreateViewRequest& r
   const auto profile = runtime_.view_model.FindWebView(session, view)->profile;
   const auto owner = std::ranges::find(runtime_.profiles, profile);
   if (owner == runtime_.profiles.end())
-    return error("profile_missing");
+    return error(ErrorCode::kInternal, "profile_missing");
   runtime_.views.Recreate(runtime_.views.records.at(view),
                           runtime_.contexts[owner - runtime_.profiles.begin()].get(),
                           runtime_.view_model);
@@ -398,7 +398,7 @@ ControlResult ControlDispatcher::HandleRecreateView(const RecreateViewRequest& r
   runtime_.paused_output.erase(view);
   runtime_.UpdateOutput();
   if (!status)
-    return ControlResult::Failure(id, status.error, status.message);
+    return ControlResult::Failure(id, *status.error, status.message);
   reply.Set("ok", true);
   reply.Set("accepted", true);
   reply.Set("token", TokenValue(runtime_.view_model.Token(session, view).value));
@@ -408,18 +408,18 @@ ControlResult ControlDispatcher::HandleRecreateView(const RecreateViewRequest& r
 ControlResult ControlDispatcher::HandleConfigureView(const ConfigureViewRequest& request) {
   const int id = request.id;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
   const auto session = request.session.value_or(0);
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view))
-    return ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session");
+    return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
 
   auto spec = record->spec;
   if (record->requests->close_state() == "closing")
-    return error("view_closing");
+    return error(ErrorCode::kConflict, "view_closing");
   if (Ptr(request.visible)) {
     spec.visible = *request.visible;
   }
@@ -429,17 +429,17 @@ ControlResult ControlDispatcher::HandleConfigureView(const ConfigureViewRequest&
     spec.height = request.height.value_or(0);
   if (const auto* device = Ptr(request.device)) {
     if (*device != "desktop" && *device != "tablet")
-      return error("invalid_device");
+      return error(ErrorCode::kInvalidRequest, "invalid_device");
   } else if (Ptr(request.device))
-    return error("invalid_device");
+    return error(ErrorCode::kInvalidRequest, "invalid_device");
   if (Ptr(request.device_scale_factor)) {
     const auto scale = request.device_scale_factor;
     if (!scale || !std::isfinite(*scale) || *scale < 0.5 || *scale > 4)
-      return error("invalid_page_device_scale_factor");
+      return error(ErrorCode::kInvalidRequest, "invalid_page_device_scale_factor");
     spec.page_dsf = static_cast<float>(*scale);
   }
   if (spec.width < 1 || spec.height < 1 || spec.width > 8192 || spec.height > 8192)
-    return error("invalid_viewport");
+    return error(ErrorCode::kInvalidRequest, "invalid_viewport");
   if (spec == record->spec) {
     reply.Set("ok", true);
     reply.Set("accepted", true);
@@ -451,7 +451,7 @@ ControlResult ControlDispatcher::HandleConfigureView(const ConfigureViewRequest&
   next[view] = spec;
   auto layout = runtime_.layout_transaction.Prepare(next);
   if (!layout)
-    return ControlResult::Failure(id, layout.status.error, layout.status.message);
+    return ControlResult::Failure(id, *layout.status.error, layout.status.message);
   runtime_.layout_transaction.Commit(std::move(layout.value));
   runtime_.UpdateOutput();
   reply.Set("ok", true);
@@ -464,32 +464,32 @@ ControlResult ControlDispatcher::HandleConfigureView(const ConfigureViewRequest&
 ControlResult ControlDispatcher::HandleFocus(const FocusRequest& request) {
   const int id = request.id;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
   const auto session = request.session.value_or(0);
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view))
-    return ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session");
+    return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
   if (record->requests->close_state() == "closing")
-    return ControlResult::Failure(id, "view_closing");
+    return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   Status status;
 
   if (!Ptr(request.focus))
-    return error("focus_token_required");
+    return error(ErrorCode::kInvalidRequest, "focus_token_required");
   const auto current = runtime_.view_model.Token(session, view).value;
   for (const auto& [supplied, expected] :
        {std::pair{request.instance, current.instance},
         std::pair{request.document, current.document}, std::pair{request.focus, current.focus}}) {
     if (supplied && *supplied != expected)
-      return error("stale_focus_target");
+      return error(ErrorCode::kConflict, "stale_focus_target");
   }
   auto focused = request.focused;
   if (!focused)
-    return error("focused_boolean_required");
+    return error(ErrorCode::kInvalidRequest, "focused_boolean_required");
   if (*focused) {
     for (auto& [other_id, other_record] : runtime_.views.records)
       if (other_record.webview->session_id() == session && other_id != view)
@@ -500,34 +500,34 @@ ControlResult ControlDispatcher::HandleFocus(const FocusRequest& request) {
   reply.Set("token", TokenValue(runtime_.view_model.Token(session, view).value));
   runtime_.UpdateOutput();
   if (!status)
-    return ControlResult::Failure(id, status.error, status.message, std::move(reply));
+    return ControlResult::Failure(id, *status.error, status.message, std::move(reply));
   return reply;
 }
 
 ControlResult ControlDispatcher::HandleVisible(const VisibleRequest& request) {
   const int id = request.id;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
   const auto session = request.session.value_or(0);
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view))
-    return ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session");
+    return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   if (record->requests->close_state() == "closing")
-    return ControlResult::Failure(id, "view_closing");
+    return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   Status status;
 
   auto visible = request.visible;
   if (!visible)
-    return error("visible_boolean_required");
+    return error(ErrorCode::kInvalidRequest, "visible_boolean_required");
   auto next = runtime_.views.Specs();
   next[view].visible = *visible;
   auto layout = runtime_.layout_transaction.Prepare(next);
   if (!layout)
-    return ControlResult::Failure(id, layout.status.error, layout.status.message);
+    return ControlResult::Failure(id, *layout.status.error, layout.status.message);
   {
     runtime_.layout_transaction.Commit(std::move(layout.value));
     runtime_.UpdateOutput();
@@ -536,30 +536,30 @@ ControlResult ControlDispatcher::HandleVisible(const VisibleRequest& request) {
   reply.Set("token", TokenValue(runtime_.view_model.Token(session, view).value));
   runtime_.UpdateOutput();
   if (!status)
-    return ControlResult::Failure(id, status.error, status.message, std::move(reply));
+    return ControlResult::Failure(id, *status.error, status.message, std::move(reply));
   return reply;
 }
 
 ControlResult ControlDispatcher::HandleLifecycle(const LifecycleControlRequest& request) {
   const int id = request.id;
   auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
+  auto error = [&](ErrorCode code, std::string detail) {
+    return ControlResult::Failure(id, code, detail, std::move(reply));
   };
   const auto session = request.session.value_or(0);
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view))
-    return ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session");
+    return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
   if (record->requests->close_state() == "closing")
-    return ControlResult::Failure(id, "view_closing");
+    return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   Status status;
 
   const auto* action = Ptr(request.action);
   if (!action)
-    return error("action_required");
+    return error(ErrorCode::kInvalidRequest, "action_required");
   std::optional<Lifecycle> operation;
   if (*action == "unload")
     operation = Lifecycle::unload;
@@ -570,7 +570,7 @@ ControlResult ControlDispatcher::HandleLifecycle(const LifecycleControlRequest& 
   if (*action == "discard")
     operation = Lifecycle::discard;
   if (!operation)
-    return error("unknown_lifecycle_action");
+    return error(ErrorCode::kInvalidRequest, "unknown_lifecycle_action");
   const bool guarded = request.expected_lifecycle_generation.has_value();
   const bool recover_uncertain = guarded && *operation == Lifecycle::unload;
   if (guarded) {
@@ -579,20 +579,20 @@ ControlResult ControlDispatcher::HandleLifecycle(const LifecycleControlRequest& 
     if (!Assign(request.expected_lifecycle_generation, &generation) || !model ||
         model->lifecycle_generation != generation || model->pending ||
         record->requests->close_state() == "closing" || record->requests->close_state() == "closed")
-      return error("stale_lifecycle_recovery");
+      return error(ErrorCode::kConflict, "stale_lifecycle_recovery");
     if (recover_uncertain) {
       const auto allowed = adapter.CanRecoverLifecycle();
       if (!allowed)
-        return ControlResult::Failure(id, allowed.error, allowed.message, std::move(reply));
+        return ControlResult::Failure(id, *allowed.error, allowed.message, std::move(reply));
     } else if (*operation != Lifecycle::restore || model->actual != Residency::unloaded ||
                adapter.lifecycle_uncertain()) {
-      return error("stale_lifecycle_recovery");
+      return error(ErrorCode::kConflict, "stale_lifecycle_recovery");
     }
   }
   if (*operation == Lifecycle::discard || *operation == Lifecycle::freeze) {
     const auto allowed = runtime_.CanDiscard(view);
     if (!allowed)
-      return ControlResult::Failure(id, allowed.error, allowed.message, std::move(reply));
+      return ControlResult::Failure(id, *allowed.error, allowed.message, std::move(reply));
   }
   if (runtime_.output) {
     runtime_.paused_output.insert(view);
@@ -614,7 +614,7 @@ ControlResult ControlDispatcher::HandleLifecycle(const LifecycleControlRequest& 
   reply.Set("token", TokenValue(runtime_.view_model.Token(session, view).value));
   runtime_.UpdateOutput();
   if (!status)
-    return ControlResult::Failure(id, status.error, status.message, std::move(reply));
+    return ControlResult::Failure(id, *status.error, status.message, std::move(reply));
   return reply;
 }
 }  // namespace remotekit::browser

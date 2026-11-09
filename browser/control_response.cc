@@ -20,59 +20,35 @@ base::DictValue ControlResult::Success(int id, base::DictValue fields) {
 }
 base::DictValue ControlResult::Failure(int id,
                                        protocol::ErrorCode code,
-                                       std::string_view detail,
-                                       base::DictValue fields) {
+                                       std::string_view message,
+                                       base::DictValue fields,
+                                       std::optional<protocol::ErrorReason> reason,
+                                       std::optional<uint32_t> retry_after_ms) {
   fields.Set("version", protocol::kControlVersion);
   fields.Set("id", id);
   fields.Set("ok", false);
-  fields.Set("code", static_cast<int>(code));
-  fields.Set("error", protocol::ErrorName(code));
-  std::string text(detail.empty() ? "Control request failed" : detail);
-  const bool machine_name =
-      text.find('_') != std::string::npos && std::ranges::all_of(text, [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
-      });
-  if (machine_name) {
-    std::replace(text.begin(), text.end(), '_', ' ');
-    if (text.front() >= 'a' && text.front() <= 'z')
-      text.front() -= 'a' - 'A';
-  }
-  fields.Set("detail", std::move(text));
+  base::DictValue error;
+  error.Set("code", protocol::ErrorCodeName(code));
+  error.Set("message", message);
+  if (reason)
+    error.Set("reason", protocol::ErrorReasonName(*reason));
+  if (retry_after_ms && *retry_after_ms <= 86400000 &&
+      (code == protocol::ErrorCode::kBusy || code == protocol::ErrorCode::kRateLimited ||
+       code == protocol::ErrorCode::kUnavailable))
+    error.Set("retryAfterMs", static_cast<int>(*retry_after_ms));
+  fields.Set("error", std::move(error));
   return fields;
 }
-base::DictValue ControlResult::Failure(int id, std::string_view detail, base::DictValue fields) {
-  auto code = protocol::ErrorCode::invalid_request;
-  if (detail == "view_closing" || detail.starts_with("close_output_before") ||
-      detail == "output_pending" || detail.ends_with("_already_pending"))
-    code = protocol::ErrorCode::busy;
-  else if (detail.starts_with("stale_") || detail.ends_with("identity_mismatch"))
-    code = protocol::ErrorCode::stale_identity;
-  else if (detail == "atlas_no_space" || detail.ends_with("_limit") || detail == "queue_full" ||
-           detail.ends_with("_limit_reached") || detail == "atlas_resource_budget_exceeded")
-    code = protocol::ErrorCode::resource_limit;
-  else if (detail.ends_with("_not_found") || detail == "view_not_in_session" ||
-           detail == "transfer_not_found")
-    code = protocol::ErrorCode::not_found;
-  else if (detail.ends_with("_missing") || detail.ends_with("manager_destroyed"))
-    code = protocol::ErrorCode::internal;
-  else if (detail == "unsupported_method" || detail.starts_with("unsupported_"))
-    code = protocol::ErrorCode::unsupported;
-  else if (detail == "output_not_open" || detail == "output_gpu_fault_sealed" ||
-           detail == "popup_not_pending")
-    code = protocol::ErrorCode::unavailable;
-  return Failure(id, code, detail, std::move(fields));
-}
 base::DictValue ControlResult::FromFields(int id, base::DictValue fields) {
-  if (fields.FindBool("ok").value_or(!fields.contains("error")))
+  if (fields.FindBool("ok") != false)
     return Success(id, std::move(fields));
-  std::string detail;
-  if (const auto* value = fields.FindString("detail"))
-    detail = *value;
-  else if (const auto* error = fields.FindString("error"))
-    detail = *error;
-  if (const auto code = fields.FindInt("code"))
-    return Failure(id, static_cast<protocol::ErrorCode>(*code), detail, std::move(fields));
-  return Failure(id, detail, std::move(fields));
+  const auto* error = fields.FindDict("error");
+  const auto* code = error ? error->FindString("code") : nullptr;
+  if (!code || !protocol::ParseErrorCode(*code) || !error->FindString("message"))
+    return Failure(id, protocol::ErrorCode::kInternal, "Invalid local control result");
+  fields.Set("version", protocol::kControlVersion);
+  fields.Set("id", id);
+  return fields;
 }
 
 bool WriteControlResponse(const base::DictValue& request,
@@ -85,8 +61,9 @@ bool WriteControlResponse(const base::DictValue& request,
   if (encoded->size() > ControlResponseJsonLimit(request)) {
     original_reply = false;
     const auto error = ControlResult::Failure(
-        request.FindInt("id").value_or(0), protocol::ErrorCode::resource_limit,
-        "Browser state is too large to synchronize. Close or change the affected page and retry.");
+        request.FindInt("id").value_or(0), protocol::ErrorCode::kOutcomeUnknown,
+        "Browser reply exceeded the synchronization size limit", {},
+        protocol::ErrorReason::kBrowserStateTooLarge);
     encoded = base::WriteJson(error);
   }
   return encoded && write.Run(*encoded, original_reply);

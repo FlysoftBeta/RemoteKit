@@ -43,7 +43,7 @@ Status PopupRegistry::CanAdopt(const std::string& key, SessionId session) const 
   const auto found = pending.find(key);
   if (found == pending.end() || found->second.session != session ||
       found->second.status != "pending")
-    return {ErrorCode::unavailable, "Popup is not pending in this session"};
+    return {ErrorCode::kNotFound, "Popup is not pending in this session"};
   return {};
 }
 std::unique_ptr<content::WebContents> PopupRegistry::TakeContents(const std::string& key) {

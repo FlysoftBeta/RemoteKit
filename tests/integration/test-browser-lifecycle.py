@@ -179,7 +179,7 @@ def main():
                 cancelled = completed('2')
                 assert cancelled['actual'] == 0 and not cancelled['lifecycle_uncertain'], cancelled
                 assert cancelled['last_lifecycle']['succeeded'] is False, cancelled
-                assert 'Freeze cancelled' in cancelled['last_lifecycle']['detail'], cancelled
+                assert 'Freeze cancelled' in cancelled['last_lifecycle']['error']['message'], cancelled
                 resumed = wait_for(lambda: view('2'), lambda v: v['title'] == 'same heap resumed', 'same heap after thaw')
                 assert resumed['url'].endswith('/race#raced') and resumed['instance'] == race['instance'], resumed
                 rpc('lifecycle', view='2', action='freeze')
@@ -203,12 +203,12 @@ def main():
                 wait_for(lambda: view('3'), lambda v: v['title'] == 'freeze hook blocking', 'bounded blocking renderer hook', 4)
                 uncertain = completed('3')
                 assert uncertain['lifecycle_uncertain'] and not uncertain['last_lifecycle']['succeeded'], uncertain
-                assert 'timed out' in uncertain['last_lifecycle']['detail'], uncertain
+                assert 'timed out' in uncertain['last_lifecycle']['error']['message'], uncertain
                 late = wait_for(lambda: view('3'), lambda v: v['title'] == 'late freeze acknowledgement', 'late renderer completion')
                 assert late['lifecycle_uncertain'] and late['lifecycle_generation'] == uncertain['lifecycle_generation'], late
                 rejected = rpc('lifecycle', ok=False, view='3', action='unload',
                                expected_lifecycle_generation=timeout['lifecycle_generation'])
-                assert rejected['error'] == 'stale_lifecycle_recovery', rejected
+                assert rejected['error']['code'] == 'conflict', rejected
                 assert view('3')['instance'] == timeout['instance']
                 unloaded = rpc('lifecycle', view='3', action='unload',
                                expected_lifecycle_generation=uncertain['lifecycle_generation'])

@@ -214,9 +214,9 @@ Result<RenderArchive> Open(const Bytes& data) {
       data.size());
 }
 
-void Reject(const Bytes& zip) {
+void Reject(const Bytes& zip, ErrorCode code = ErrorCode::kInternal) {
   auto result = Open(zip);
-  Check(!result && result.error().code == ErrorCode::kRejected, "malformed archive accepted");
+  Check(!result && result.error().code == code, "malformed archive accepted");
 }
 
 void ArchiveTests(const fs::path& fixtures) {
@@ -270,7 +270,8 @@ void ArchiveTests(const fs::path& fixtures) {
     m["resources"][0]["storedOffset"] = m["resources"][0]["storedOffset"].get<uint64_t>() + 1;
   }));
   Reject(bundle.Build([](Json& m) { m["resources"][0]["storedSize"] = 1; }));
-  Reject(bundle.Build([](Json& m) { m["resources"][0]["rawSize"] = 67108865; }));
+  Reject(bundle.Build([](Json& m) { m["resources"][0]["rawSize"] = 67108865; }),
+         ErrorCode::kRejected);
   Reject(bundle.Build([](Json& m) { m["version"] = 1; }));
   Reject(bundle.Build([](Json& m) { m["format"] = "other"; }));
   Reject(bundle.Build(
@@ -280,8 +281,9 @@ void ArchiveTests(const fs::path& fixtures) {
     m["document"]["items"] = Json::array();
     for (size_t i = 0; i < 20001; ++i)
       m["document"]["items"].push_back(page);
-  }));
-  Reject(Zip({{"manifest.json", Bytes(8 * 1024 * 1024 + 1, ' ')}}));
+  }),
+         ErrorCode::kRejected);
+  Reject(Zip({{"manifest.json", Bytes(8 * 1024 * 1024 + 1, ' ')}}), ErrorCode::kRejected);
   for (size_t length : {size_t{0}, size_t{21}, bytes.size() - 1})
     Reject(Bytes(bytes.begin(), bytes.begin() + length));
   auto bad_zip64 = bytes;
@@ -417,7 +419,7 @@ void QueueTests() {
     throw std::runtime_error("worker failure");
   });
   auto failure = failing.Render("exception", {}, "test.pdf");
-  Check(!failure && failure.error().code == ErrorCode::kRejected, "worker exception escaped");
+  Check(!failure && failure.error().code == ErrorCode::kInternal, "worker exception escaped");
 }
 
 void ProcessTests(const fs::path& output) {
@@ -428,8 +430,12 @@ void ProcessTests(const fs::path& output) {
                   {{L"RK_DOCUMENT_TEST", L"present"}}));
   auto timed = RunTool(self, {L"--sleep"}, directory.path(), {}, std::chrono::milliseconds(80));
   Check(!timed && timed.error().code == ErrorCode::kRejected &&
-            timed.error().message.find("timeout") != std::string::npos,
+            timed.error().reason == remotekit::ErrorReason::kDocumentTooComplex,
         "tool timeout not enforced");
+  auto crashed = RunTool(self, {L"--crash-probe"}, directory.path());
+  Check(!crashed && crashed.error().code == ErrorCode::kRejected &&
+            crashed.error().reason == remotekit::ErrorReason::kDocumentCorrupt,
+        "tool crash lost content classification");
   auto missing = RunTool(directory.path() / "missing.exe", {}, directory.path());
   Check(!missing && missing.error().code == ErrorCode::kUnavailable, "missing tool accepted");
   FILE* capture = nullptr;
@@ -607,7 +613,7 @@ int Integration(const fs::path& output, const fs::path& tools) {
             password.error().message == "password-protected document",
         "password protection not reported");
   auto unsupported = queue.Render("image", docx, "image.png");
-  Check(!unsupported && unsupported.error().code == ErrorCode::kInvalidRequest,
+  Check(!unsupported && unsupported.error().code == ErrorCode::kRejected,
         "unsupported input accepted");
   RenderQueue absent(directory.path(), directory.path() / "missing-tools");
   auto unavailable = absent.Render("missing-tool", docx, "test.docx");
@@ -651,6 +657,10 @@ int wmain(int argc, wchar_t** argv) {
                    std::wstring_view(value) == L"present"
                ? 0
                : 4;
+  }
+  if (argc == 2 && std::wstring_view(argv[1]) == L"--crash-probe") {
+    TerminateProcess(GetCurrentProcess(), EXCEPTION_ACCESS_VIOLATION);
+    return 1;
   }
   try {
     if (argc == 4 && std::wstring_view(argv[1]) == L"--integration")

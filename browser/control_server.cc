@@ -59,7 +59,7 @@ void ControlServer::OnReadable(MojoResult result) {
       return;
     }
     if (!parsed) {
-      SendReply({}, ControlResult::Failure(0, protocol::ErrorCode::invalid_request,
+      SendReply({}, ControlResult::Failure(0, protocol::ErrorCode::kInvalidRequest,
                                            "Invalid control JSON"));
     } else {
       auto application_request = parsed->Clone();

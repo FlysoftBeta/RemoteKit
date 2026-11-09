@@ -77,7 +77,7 @@ export class ZhixueClient {
     return this.read(session, async (reader) => {
       const page = positiveInteger(query.page ?? 1, '页码');
       const pageSize = positiveInteger(query.pageSize ?? 10, '每页数量');
-      if (pageSize > 100) throw new RemoteKitError('invalid_request', '每页数量不能超过 100');
+      if (pageSize > 100) throw new RemoteKitError('limit_exceeded', '每页数量不能超过 100');
       const bucket = query.bucket ?? 'active';
       const raw = record(
         await reader.post(
@@ -347,7 +347,7 @@ class ZhixueReader {
       if (String(envelope.code) !== '000000') serviceError(envelope.code, '智学');
       if (envelope.result == null) return malformed();
       return envelope.result;
-    });
+    }, false);
   }
 }
 

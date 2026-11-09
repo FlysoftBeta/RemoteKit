@@ -18,7 +18,7 @@ export interface SecretHash {
 }
 let kdfActive = 0;
 export async function deriveSecret(secret: string, salt: string): Promise<Buffer> {
-  if (kdfActive >= 4) throw new RemoteKitError('limit_exceeded', '验证服务繁忙，请稍后再试');
+  if (kdfActive >= 4) throw new RemoteKitError('busy', '验证服务繁忙，请稍后再试');
   kdfActive++;
   try {
     return await new Promise<Buffer>((resolve, reject) =>
@@ -45,8 +45,12 @@ export class AuthAttempts {
     for (const [id, entry] of this.attempts)
       if (!entry.inFlight && entry.until <= now) this.attempts.delete(id);
     let entry = this.attempts.get(key);
-    if (entry?.inFlight || (entry && entry.count >= limit) || (!entry && this.attempts.size >= 4096))
-      throw new RemoteKitError('rate_limited', '尝试次数过多，请稍后再试');
+    if (entry?.inFlight || (!entry && this.attempts.size >= 4096))
+      throw new RemoteKitError('busy', '验证服务繁忙，请稍后再试');
+    if (entry && entry.count >= limit)
+      throw new RemoteKitError('rate_limited', '尝试次数过多，请稍后再试', {
+        retryAfterMs: Math.max(0, Math.ceil(entry.until - now)),
+      });
     if (!entry) {
       entry = { count: 0, until: now + interval, inFlight: false };
       this.attempts.set(key, entry);
@@ -93,7 +97,7 @@ export class AtRestKey {
     }
     if (this.key.length !== 32) {
       this.key = undefined;
-      throw new RemoteKitError('internal', 'Invalid at-rest key');
+      throw new RemoteKitError('internal', '本地密钥无效', { detail: 'Invalid at-rest key' });
     }
     return this.key;
   }
@@ -116,14 +120,16 @@ export class AtRestKey {
 export class FaceVault {
   constructor(private readonly key: AtRestKey) {}
   seal(user: string, template: number[], modelVersion: string) {
-    if (!validFaceTemplate(template)) throw new RemoteKitError('invalid_request', 'Invalid face template');
+    if (!validFaceTemplate(template))
+      throw new RemoteKitError('invalid_request', '人脸模板格式无效', { detail: 'Invalid face template' });
     return this.key.seal(JSON.stringify([user, modelVersion]), Buffer.from(JSON.stringify(template)));
   }
   open(user: string, sealed: string, modelVersion: string): number[] {
     const template: unknown = JSON.parse(
       this.key.open(JSON.stringify([user, modelVersion]), sealed).toString(),
     );
-    if (!validFaceTemplate(template)) throw new RemoteKitError('invalid_request', 'Invalid face template');
+    if (!validFaceTemplate(template))
+      throw new RemoteKitError('invalid_request', '人脸模板格式无效', { detail: 'Invalid face template' });
     return template;
   }
 }

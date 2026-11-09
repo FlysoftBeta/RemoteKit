@@ -18,14 +18,14 @@ class ClusterLink final : public ManagementLink {
   bool Next(std::string& bytes, uint64_t& generation, bool& eof) override;
   bool Current(uint64_t generation) override;
   bool SendReply(uint64_t generation, const Json& reply) override;
-  bool SendEvent(const Json& event, uint64_t generation) override;
+  bool SendEvent(const Json& event, uint64_t generation, DeliveryFlag delivery = {}) override;
   void OnDisconnect(Disconnect callback) override;
   void OnBinary(Binary callback) override;
   Result<Json> Request(const std::string& name, Json fields) override;
   std::optional<ReadyState> ReadySessions() override;
 
  private:
-  bool Queue(const Json& message, uint64_t generation);
+  bool Queue(const Json& message, uint64_t generation, DeliveryFlag delivery = {});
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

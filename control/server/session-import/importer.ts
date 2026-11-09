@@ -1,6 +1,7 @@
+import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { generateKeyPairSync } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import type {
   ImportChunk,
   ImportDeployment,
@@ -27,14 +28,14 @@ export function* importChunks(payload: ImportChunk): Generator<ImportChunk> {
     const bytes = Buffer.byteLength(JSON.stringify(cookie)) + (chunk.cookies.length ? 1 : 0);
     if (size + bytes > MAX_CHUNK_BYTES) {
       if (!chunk.cookies.length && !chunk.localStorage.length)
-        throw new RemoteKitError('invalid_request', 'Cookie 超过分块大小');
+        throw new RemoteKitError('limit_exceeded', 'Cookie 超过分块大小');
       yield chunk;
       chunk = { cookies: [], localStorage: [] };
       size = Buffer.byteLength(JSON.stringify(chunk));
     }
     chunk.cookies.push(cookie);
     size = Buffer.byteLength(JSON.stringify(chunk));
-    if (size > MAX_CHUNK_BYTES) throw new RemoteKitError('invalid_request', 'Cookie 超过分块大小');
+    if (size > MAX_CHUNK_BYTES) throw new RemoteKitError('limit_exceeded', 'Cookie 超过分块大小');
   }
   for (const storage of payload.localStorage) {
     for (const item of storage.items) {
@@ -47,7 +48,7 @@ export function* importChunks(payload: ImportChunk): Generator<ImportChunk> {
           (chunk.localStorage.length ? 1 : 0);
       if (size + added > MAX_CHUNK_BYTES) {
         if (!chunk.cookies.length && !chunk.localStorage.length)
-          throw new RemoteKitError('invalid_request', '来源超过分块大小');
+          throw new RemoteKitError('limit_exceeded', '来源超过分块大小');
         yield chunk;
         chunk = { cookies: [], localStorage: [] };
         size = Buffer.byteLength(JSON.stringify(chunk));
@@ -60,7 +61,7 @@ export function* importChunks(payload: ImportChunk): Generator<ImportChunk> {
       }
       size += Buffer.byteLength(JSON.stringify(item)) + (group.items.length ? 1 : 0);
       group.items.push(item);
-      if (size > MAX_CHUNK_BYTES) throw new RemoteKitError('invalid_request', '来源超过分块大小');
+      if (size > MAX_CHUNK_BYTES) throw new RemoteKitError('limit_exceeded', '来源超过分块大小');
     }
   }
   if (chunk.cookies.length || chunk.localStorage.length) yield chunk;
@@ -81,6 +82,7 @@ export class SessionImporter {
   private readonly requested = new Set<string>();
   private readonly abort = new AbortController();
   private readonly revokedKeys = new Set<string>();
+  private readonly pairRetryAt = new Map<string, number>();
   private receiving: Promise<unknown> = Promise.resolve();
   constructor(
     private readonly store: ControlDatabase,
@@ -238,6 +240,10 @@ export class SessionImporter {
           decisions[item.index] = 'keep';
           continue;
         }
+        if ((this.pairRetryAt.get(keyId) ?? 0) > this.clock.monotonicMs()) {
+          decisions[item.index] = 'keep';
+          continue;
+        }
         const checks = new Map<number, PairCheck>();
         let pairedTenant = device?.tenant;
         try {
@@ -258,7 +264,9 @@ export class SessionImporter {
           }
         } catch (error) {
           const failure = toRemoteKitError(error);
-          if (failure.code === 'rate_limited' || failure.code === 'limit_exceeded') {
+          const wait = retryDelay(failure, 0);
+          if (wait !== undefined) {
+            this.pairRetryAt.set(keyId, this.clock.monotonicMs() + wait);
             decisions[item.index] = 'keep';
             continue;
           }
@@ -337,7 +345,7 @@ export class SessionImporter {
     for (const tenant of tenants) void this.applyTenant(tenant);
     return decisions;
   }
-  private processEvent(device: DeviceRow, { event, error }: EventResult) {
+  private processEvent(device: DeviceRow, { event, error, errorCode }: EventResult) {
     if (event.type === 'pair') return;
     const id = event.id.toLowerCase();
     const existing = this.store.sessionImports.get(id);
@@ -346,7 +354,14 @@ export class SessionImporter {
       this.store.sessionImports.reply(
         device.tenant,
         device.keyId,
-        { type: 'importFailed', ref: event.seq, id, reason: '导入 ID 冲突', retryable: false },
+        {
+          type: 'importFailed',
+          ref: event.seq,
+          id,
+
+          reason: '导入 ID 冲突',
+          retryable: false,
+        },
         now,
       );
       return;
@@ -358,14 +373,31 @@ export class SessionImporter {
       this.recordReply(this.store.sessionImports.get(id)!, event.seq);
       return;
     }
-    if (event.at < now - 30 * 86400000) error = '导入已超过 30 天';
+    if (event.at < now - 30 * 86400000) {
+      error = '导入已超过 30 天';
+      errorCode = 'rejected';
+    }
     if (error) {
       if (!existing || existing.state === 'failed' || existing.state === 'discarded')
-        this.store.sessionImports.saveImport(device.tenant, device.keyId, event, now, error);
+        this.store.sessionImports.saveImport(
+          device.tenant,
+          device.keyId,
+          event,
+          now,
+          error,
+          errorCode ?? 'invalid_request',
+        );
       this.store.sessionImports.reply(
         device.tenant,
         device.keyId,
-        { type: 'importFailed', ref: event.seq, id, reason: error, retryable: false },
+        {
+          type: 'importFailed',
+          ref: event.seq,
+          id,
+
+          reason: error,
+          retryable: false,
+        },
         now,
       );
     } else if (existing && (existing.state === 'pending' || existing.state === 'applied')) {
@@ -401,7 +433,14 @@ export class SessionImporter {
       this.store.sessionImports.reply(
         tenant,
         keyId,
-        { type: 'importFailed', ref, id, reason: record.error ?? '导入失败', retryable },
+        {
+          type: 'importFailed',
+          ref,
+          id,
+
+          retryable,
+          reason: record.error ?? '导入失败',
+        },
         now,
       );
     }
@@ -456,20 +495,26 @@ export class SessionImporter {
   }
   private async applyRecords(tenant: string) {
     for (const record of this.store.sessionImports.pending(tenant)) {
+      if (record.retryAt !== undefined && record.retryAt > this.clock.wallMs()) continue;
       const ref = this.store.sessionImports.latestRef(record.keyId, record.id);
       if (!this.active(tenant, record.id)) return;
       try {
         const payload = this.store.sessionImports.payload(tenant, record.id);
         if (!payload) continue;
-        const counts = { cookies: { applied: 0, rejected: 0 }, localStorage: { applied: 0, rejected: 0 } };
-        for (const chunk of importChunks(payload)) {
+        const counts = record.applyCounts ?? {
+          cookies: { applied: 0, rejected: 0 },
+          localStorage: { applied: 0, rejected: 0 },
+        };
+        const chunks = [...importChunks(payload)];
+        for (let index = record.chunkIndex; index < chunks.length; index++) {
+          const chunk = chunks[index];
           if (!this.active(tenant, record.id, ref)) return;
           const timeout = new AbortController();
           const signal = AbortSignal.any([timeout.signal, this.abort.signal]);
           const deadline = this.clock.monotonicMs() + 60000;
           try {
             const result = await Promise.race([
-              this.applyChunk(tenant, record.id, ref, chunk, deadline),
+              this.applyChunk(tenant, record.id, ref, chunk, deadline, record.storageJob),
               sleep(60000, undefined, { signal }).then(() => {
                 throw new RemoteKitError('outcome_unknown', '导入等待超时');
               }),
@@ -478,6 +523,12 @@ export class SessionImporter {
               counts[field].applied += result[field].applied;
               counts[field].rejected += result[field].rejected;
             }
+            this.store.db
+              .prepare(
+                'UPDATE session_imports SET chunk_index=?,apply_counts=?,storage_job=NULL,error_code=NULL,retry_at=NULL WHERE id=?',
+              )
+              .run(index + 1, JSON.stringify(counts), record.id);
+            record.storageJob = undefined;
           } finally {
             timeout.abort();
           }
@@ -501,8 +552,18 @@ export class SessionImporter {
           });
       } catch (error) {
         if (this.abort.signal.aborted) return;
+        if (!this.active(tenant, record.id, ref)) return;
         const failure = toRemoteKitError(error);
-        if (failure.code === 'invalid_request' || failure.code === 'rejected') {
+        const wait = retryDelay(failure, 0);
+        this.store.db
+          .prepare('UPDATE session_imports SET error_code=?,error=?,retry_at=? WHERE id=?')
+          .run(
+            failure.code,
+            failure.message,
+            wait === undefined ? null : this.clock.wallMs() + Math.max(15000, wait),
+            record.id,
+          );
+        if (wait === undefined && errorHandling(failure.code) !== 'reconcile') {
           if (this.active(tenant, record.id, ref))
             this.store.transaction(() => {
               this.store.sessionImports.finish(
@@ -520,8 +581,9 @@ export class SessionImporter {
                   type: 'importFailed',
                   ref,
                   id: record.id,
+
                   reason: failure.message,
-                  retryable: true,
+                  retryable: failure.code === 'limit_exceeded',
                 },
                 this.clock.wallMs(),
               );
@@ -539,13 +601,26 @@ export class SessionImporter {
     ref: number,
     chunk: ImportChunk,
     deadline: number,
+    previousJob?: import('../../shared/session-import').StorageImportJob,
   ): Promise<Extract<import('../../shared/session-import').StorageImportStatus, { state: 'done' }>> {
+    let job = previousJob;
     const check = () => {
       if (!this.active(tenant, id, ref) || this.clock.monotonicMs() >= deadline)
-        throw new RemoteKitError('outcome_unknown', '导入等待中');
+        throw new RemoteKitError(job ? 'outcome_unknown' : 'unavailable', '导入等待中');
     };
     check();
-    const job = await this.gateway.storageImport(tenant, chunk);
+    if (!job) {
+      if (this.store.sessionImports.get(id)?.errorCode === 'outcome_unknown')
+        throw new RemoteKitError('outcome_unknown', '导入任务身份待对账');
+      job = await this.gateway.storageImport(tenant, chunk);
+      if (job?.accepted !== true || typeof job.job !== 'string' || typeof job.browserIncarnation !== 'string')
+        throw new RemoteKitError('outcome_unknown', '导入任务身份待对账');
+      if (this.active(tenant, id, ref))
+        this.store.db
+          .prepare('UPDATE session_imports SET storage_job=? WHERE id=?')
+          .run(JSON.stringify(job), id);
+      check();
+    }
     for (;;) {
       check();
       await sleep(200, undefined, { signal: this.abort.signal });

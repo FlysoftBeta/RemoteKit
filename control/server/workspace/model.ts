@@ -9,22 +9,23 @@ import type {
 export const WORKSPACE_LIMITS = Object.freeze({ tabs: 32, windows: 16, windowsPerSpace: 3, sites: 4096 });
 export function findTab(workspace: ProductWorkspace, id: string): ProductTab {
   const tab = workspace.tabs.find((tab) => tab.id === id);
-  if (!tab) throw new RemoteKitError('not_found', 'Tab does not exist');
+  if (!tab) throw new RemoteKitError('not_found', '标签页不存在', { detail: 'Tab does not exist' });
   return tab;
 }
 export function findWindow(workspace: ProductWorkspace, id: string): ProductWindow {
   const window = workspace.windows.find((window) => window.id === id);
-  if (!window) throw new RemoteKitError('not_found', 'Window does not exist');
+  if (!window) throw new RemoteKitError('not_found', '窗口不存在', { detail: 'Window does not exist' });
   return window;
 }
 export function findSpace(workspace: ProductWorkspace, id: string): ProductSpace {
   const space = workspace.spaces.find((space) => space.id === id);
-  if (!space) throw new RemoteKitError('not_found', 'Space does not exist');
+  if (!space) throw new RemoteKitError('not_found', '空间不存在', { detail: 'Space does not exist' });
   return space;
 }
 export function windowSpace(workspace: ProductWorkspace, windowId: string): ProductSpace {
   const space = workspace.spaces.find((space) => space.windowIds.includes(windowId));
-  if (!space) throw new RemoteKitError('not_found', 'Window space does not exist');
+  if (!space)
+    throw new RemoteKitError('not_found', '窗口所属空间不存在', { detail: 'Window space does not exist' });
   return space;
 }
 export function windowClosing(workspace: ProductWorkspace, windowId: string): boolean {
@@ -34,7 +35,8 @@ export function windowClosing(workspace: ProductWorkspace, windowId: string): bo
   );
 }
 export function assertWindowMutable(workspace: ProductWorkspace, windowId: string) {
-  if (windowClosing(workspace, windowId)) throw new RemoteKitError('conflict', 'The window is closing');
+  if (windowClosing(workspace, windowId))
+    throw new RemoteKitError('conflict', '窗口正在关闭', { detail: 'The window is closing' });
 }
 export function normalizeWeights(space: ProductSpace) {
   const sum = space.weights.reduce((total, weight) => total + weight, 0);
@@ -80,16 +82,18 @@ export function placeWindow(
 ) {
   assertWindowMutable(workspace, windowId);
   if (!placement || !['space', 'split'].includes(placement.mode))
-    throw new RemoteKitError('invalid_request', 'Invalid window placement');
+    throw new RemoteKitError('invalid_request', '窗口位置无效', { detail: 'Invalid window placement' });
   let target: ProductSpace | undefined;
   if (placement.mode === 'split') {
     assertWindowMutable(workspace, placement.besideWindowId);
     if (!['left', 'right'].includes(placement.side) || placement.besideWindowId === windowId)
-      throw new RemoteKitError('invalid_request', 'Invalid window placement');
+      throw new RemoteKitError('invalid_request', '窗口位置无效', { detail: 'Invalid window placement' });
     findWindow(workspace, placement.besideWindowId);
     target = windowSpace(workspace, placement.besideWindowId);
     if (!target.windowIds.includes(windowId) && target.windowIds.length >= WORKSPACE_LIMITS.windowsPerSpace)
-      throw new RemoteKitError('limit_exceeded', 'Each space supports up to 3 windows');
+      throw new RemoteKitError('limit_exceeded', '每个空间最多支持 3 个窗口', {
+        detail: 'Each space supports up to 3 windows',
+      });
     const previousIndex = target.windowIds.indexOf(windowId);
     if (previousIndex >= 0) {
       const [weight] = target.weights.splice(previousIndex, 1);

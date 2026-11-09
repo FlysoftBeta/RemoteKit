@@ -65,7 +65,10 @@ test('local stdio shares authenticated handshake, encrypted RPCs and lost-reply 
     ),
   );
   assert.deepEqual(await request, { running: true });
+  const written = once(child.stdin, 'data');
   const lost = assert.rejects(link.request('session.ensure', 'tenant'), { code: 'outcome_unknown' });
+  await written;
+  await new Promise((resolve) => setImmediate(resolve));
   child.emit('exit', 1);
   await lost;
   assert.equal(link.state.state, 'offline');

@@ -85,7 +85,7 @@ void CheckSelectionCancellationGrant() {
   flush();
   CHECK(replies.size() == 1 &&
         replies.back()["error"]["message"] == "stale_library_authorization" &&
-        replies.back()["error"]["code"] == "forbidden");
+        replies.back()["error"]["code"] == "conflict");
   services.Authorize("connection", 99, {{"opaque", binding}}, true);
   services.Admit(7, request);
   Until([&] {
@@ -278,7 +278,7 @@ int main() {
   services.Admit(7, b);
   flush();
   CHECK(replies.back()["error"]["message"] == "stale_file_request" &&
-        replies.back()["error"]["code"] == "forbidden");
+        replies.back()["error"]["code"] == "conflict");
   services.Authorize("connection", 99, {{"opaque", binding}});
   hold = true;
   entered = false;
@@ -335,13 +335,13 @@ int main() {
   library.Admit(9, asset);
   drain();
   CHECK(replies.back()["error"]["message"] == "stale_file_request" &&
-        replies.back()["error"]["code"] == "forbidden");
+        replies.back()["error"]["code"] == "conflict");
   library.Authorize("library-peer", 99, {{"opaque", binding}}, true);
   library.Admit(9, chooser_asset);
   library.Admit(9, library_commit);
   drain();
   CHECK(replies.size() == 3 && replies.back()["error"]["message"] == "stale_file_request" &&
-        replies.back()["error"]["code"] == "forbidden");
+        replies.back()["error"]["code"] == "conflict");
   hold = true;
   library.Admit(9, asset);
   Until([&] { return entered.load(); });
@@ -371,7 +371,7 @@ int main() {
   library.Admit(9, chooser_describe);
   drain();
   CHECK(replies.size() == 6 && replies.back()["error"]["message"] == "stale_file_request" &&
-        replies.back()["error"]["code"] == "forbidden");
+        replies.back()["error"]["code"] == "conflict");
   chooser_describe["params"]["requestId"] = "library";
   library.Admit(9, chooser_describe);
   Until([&] {
@@ -387,7 +387,7 @@ int main() {
     CHECK(FileRequestEnvelope(document, document.dump().size()));
     library.Admit(9, document);
     drain();
-    CHECK(replies.back()["error"]["code"] == "forbidden");
+    CHECK(replies.back()["error"]["code"] == "conflict");
     document["params"]["requestId"] = "library";
     library.Admit(9, document);
     const auto count = replies.size();

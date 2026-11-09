@@ -361,3 +361,20 @@ executable("remotekit_site_preferences_tests") {
   include_dirs = [ "//remotekit" ]
   deps = [ "//base", "//url" ]
 }
+
+executable("remotekit_storage_import_probe") {
+  testonly = true
+  configs -= [ "//build/config/clang:find_bad_constructs" ]
+  sources = [ "storage_import.cc", "storage_import_probe.cc" ]
+  include_dirs = [ "//remotekit" ]
+  deps = [
+    "//base",
+    "//base/test:test_support",
+    "//content/public/browser",
+    "//components/services/storage/public/mojom",
+    "//services/network/public/mojom",
+    "//content/public/common",
+    "//net",
+    "//url",
+  ]
+}

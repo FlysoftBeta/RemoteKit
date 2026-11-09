@@ -10,6 +10,8 @@
 #include <condition_variable>
 #include <thread>
 #include "util/thread.hpp"
+#include "util/wire_error.hpp"
+#include "util/error_policy.hpp"
 
 #define CHECK(x)                                    \
   do {                                              \
@@ -22,10 +24,12 @@ using Json = nlohmann::json;
 
 void RpcLockAndStatusMapping() {
   using remotekit::ErrorCode;
-  CHECK(remotekit::media::SdkErrorCode(6) == ErrorCode::kLimitExceeded);
-  CHECK(remotekit::media::SdkErrorCode(8) == ErrorCode::kBusy);
-  CHECK(remotekit::media::SdkErrorCode(6, true) == ErrorCode::kOutcomeUnknown);
-  CHECK(remotekit::media::SdkErrorCode(8, true) == ErrorCode::kUnavailable);
+  CHECK(remotekit::media::SdkErrorCode(REMOTEKIT_SDK_CHANNEL_CLOSED) == ErrorCode::kUnavailable);
+  CHECK(remotekit::media::SdkErrorCode(REMOTEKIT_SDK_LOST) == ErrorCode::kOutcomeUnknown);
+  CHECK(remotekit::media::SdkErrorCode(REMOTEKIT_SDK_BUSY) == ErrorCode::kBusy);
+  CHECK(remotekit::BrowserRpc::ReplyError(
+            {{"error", {{"code", "internal"}, {"message", "Browser invariant"}}}})
+            .code == ErrorCode::kInternal);
   struct BlockingRequest {
     std::mutex mutex;
     std::condition_variable wake;
@@ -103,8 +107,10 @@ void InputWireFailures() {
     CHECK(wire.at("id") == ++*current->calls);
     const auto response =
         current->application->is_null()
-            ? (*current->calls < 3 ? Json{{"ok", false}, {"code", 6}, {"error", "busy"}}
-                                   : Json{{"ok", true}, {"accepted", true}})
+            ? (*current->calls < 3
+                   ? Json{{"ok", false},
+                          {"error", {{"code", "busy"}, {"message", "Input queue full"}}}}
+                   : Json{{"ok", true}, {"accepted", true}})
             : *current->application;
     auto bytes = response.dump();
     *count = bytes.size();
@@ -122,15 +128,15 @@ void InputWireFailures() {
   CHECK(dispatch().value().at("ok") == true);
   CHECK(calls == 3 && retries == 2 && waits == 2 && exhausted == 0);
   // An accepted injection's later status is not a pre-admission BUSY.
-  application = {{"ok", true}, {"accepted", true}, {"injectionStatus", "failed"}, {"code", 6}};
+  application = {{"ok", true}, {"accepted", true}, {"injectionStatus", "failed"}};
   CHECK(dispatch().value().at("accepted") == true);
   CHECK(calls == 4 && retries == 2);
-  application = {{"ok", false}, {"code", 3}, {"error", "rejected"}, {"detail", "target mismatch"}};
+  application = {{"ok", false}, {"error", {{"code", "conflict"}, {"message", "target mismatch"}}}};
   CHECK(remotekit::BrowserRpc::ReplyError(application).message == "target mismatch");
   CHECK(dispatch().value() == application);
   CHECK(calls == 5 && retries == 2);
   CHECK(dispatch().value() == application);
-  application = {{"ok", false}, {"code", 6}};
+  application = {{"ok", false}, {"error", {{"code", "busy"}, {"message", "queue full"}}}};
   identity = false;
   CHECK(dispatch().error().code == remotekit::ErrorCode::kConflict);
   CHECK(calls == 7 && retries == 2);
@@ -142,7 +148,9 @@ void InputWireFailures() {
   const auto before = calls;
   CHECK(dispatch().error().code == remotekit::ErrorCode::kBusy);
   CHECK(calls - before == 51 && exhausted == 2);
-  application = {{"ok", false}, {"code", 6}, {"inputAdmitted", true}};
+  application = {{"ok", false},
+                 {"error", {{"code", "outcome_unknown"}, {"message", "partial injection"}}},
+                 {"inputAdmitted", true}};
   const auto admitted_calls = calls;
   CHECK(dispatch().value() == application && calls == admitted_calls + 1);
   sdk.remotekit_sdk_control_request = [](uint64_t, const void*, size_t, void*, size_t, size_t*,
@@ -173,7 +181,9 @@ void OpenRenderLifetimeAndStartupBackoff() {
   remotekit::BrowserRpc browser(sdk);
   CHECK(browser.Connect("test"));
   sdk.remotekit_sdk_control_open_render = [](uint64_t, uint32_t, remotekit_sdk_render_setup*,
-                                             uint32_t) -> int { return REMOTEKIT_SDK_TIMEOUT; };
+                                             uint32_t, remotekit_sdk_failure*) -> int {
+    return REMOTEKIT_SDK_TIMEOUT;
+  };
   remotekit_sdk_render_setup setup{};
   auto timeout = browser.OpenRender(setup);
   CHECK(!timeout && timeout.error().code == remotekit::ErrorCode::kOutcomeUnknown);
@@ -187,7 +197,7 @@ void OpenRenderLifetimeAndStartupBackoff() {
   };
   CHECK(browser.Request({{"method", "snapshot"}}) && !browser.NeedsHealthCheck());
   sdk.remotekit_sdk_control_open_render = [](uint64_t, uint32_t, remotekit_sdk_render_setup*,
-                                             uint32_t) -> int {
+                                             uint32_t, remotekit_sdk_failure*) -> int {
     return REMOTEKIT_SDK_CHANNEL_CLOSED;
   };
   CHECK(!browser.OpenRender(setup) && !browser.Control() && browser.Disconnected());
@@ -409,9 +419,11 @@ void OversizedBrowserReplyIsApplicationError() {
     const auto request =
         Json::parse(static_cast<const char*>(input), static_cast<const char*>(input) + size);
     const auto serial = request.at("id").get<uint64_t>();
-    const auto reply = serial == 1
-                           ? Json{{"ok", false}, {"code", 3}, {"error", "response_too_large"}}
-                           : Json{{"ok", true}, {"id", serial}};
+    const auto reply =
+        serial == 1
+            ? Json{{"ok", false},
+                   {"error", {{"code", "outcome_unknown"}, {"message", "response_too_large"}}}}
+            : Json{{"ok", true}, {"id", serial}};
     const auto bytes = reply.dump();
     *count = bytes.size();
     std::memcpy(output, bytes.data(), bytes.size());
@@ -420,7 +432,7 @@ void OversizedBrowserReplyIsApplicationError() {
   remotekit::BrowserRpc browser(sdk);
   CHECK(browser.Connect("test"));
   auto rejected = browser.Request(Json{{"method", "snapshot"}});
-  CHECK(!rejected && rejected.error().code == remotekit::ErrorCode::kRejected);
+  CHECK(!rejected && rejected.error().code == remotekit::ErrorCode::kOutcomeUnknown);
   CHECK(rejected.error().message.find("response_too_large") != std::string::npos);
   auto next = browser.Request(Json{{"method", "snapshot"}});
   CHECK(next && next.value().at("id") == 2);

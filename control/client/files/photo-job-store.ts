@@ -1,3 +1,4 @@
+import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { diagnostics } from '../media/diagnostics';
 import { Store } from '../util/store';
 import { formatError } from '../util/format-error';
@@ -44,6 +45,7 @@ export interface PhotoJob extends PhotoDestination {
 interface Task extends PhotoJob {
   controller: AbortController;
   burst?: CapturedBurst;
+  uploads?: Map<string, { operationId: string; assetId?: string }>;
   retake?: boolean;
   resume?: () => Promise<void>;
   waiting?: () => Promise<void>;
@@ -72,7 +74,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
   };
   private emit() {
     this.publish(
-      [...this.tasks.values()].map(({ controller, burst, retake, resume, waiting, ...job }) => ({
+      [...this.tasks.values()].map(({ controller, burst, retake, resume, waiting, uploads, ...job }) => ({
         ...job,
         origin: { ...job.origin },
         insertion: job.insertion && { ...job.insertion },
@@ -217,7 +219,12 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
         if (this.valid(task))
           this.update(task.id, {
             state: 'error',
-            retryable: !!(task.resume || task.burst),
+            retryable:
+              !!(task.resume || task.burst) &&
+              failure instanceof RemoteKitError &&
+              (retryDelay(failure, 0) !== undefined ||
+                failure.code === 'limit_exceeded' ||
+                (errorHandling(failure.code) === 'reconcile' && !!task.resume)),
             error: formatError(failure),
           });
       }
@@ -280,17 +287,26 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     const assets = new Map<string, string>();
     for (const frame of frames) {
       if (!this.valid(task)) return;
-      const asset = await this.services.rpc.uploadAsset(
-        new File([frame.blob], 'photo.png', { type: 'image/png' }),
-        operationId(),
-        task.controller.signal,
-      );
+      task.uploads ??= new Map();
+      let upload = task.uploads.get(frame.frameId);
+      if (!upload) {
+        upload = { operationId: operationId() };
+        task.uploads.set(frame.frameId, upload);
+      }
+      const asset = upload.assetId
+        ? { assetId: upload.assetId }
+        : await this.services.rpc.uploadAsset(
+            new File([frame.blob], 'photo.png', { type: 'image/png' }),
+            upload.operationId,
+            task.controller.signal,
+          );
       if (!this.valid(task)) return;
+      upload.assetId = asset.assetId;
       assets.set(frame.frameId, asset.assetId);
     }
     task.burst = undefined;
     const originalId = assets.get(decision.selectedFrameId);
-    if (!originalId) throw new RemoteKitError('outcome_unknown', '无法确认拍摄结果');
+    if (!originalId) throw new RemoteKitError('internal', '拍摄结果缺少选中照片');
     const candidates = [
       ...new Set([originalId, ...decision.candidates.flatMap((item) => assets.get(item.frameId) ?? [])]),
     ];

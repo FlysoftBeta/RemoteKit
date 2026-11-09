@@ -65,7 +65,8 @@ struct Faces::Impl {
     if (challenge.purpose == FacePurpose::presence && now - last_match >= 5s)
       Finish({FaceState::absent,
               {},
-              now - last_submit >= 5s ? "camera-unavailable" : "no-matching-face"});
+              now - last_submit >= 5s ? FaceOutcome::camera_unavailable
+                                      : FaceOutcome::no_matching_face});
     else if (now >= deadline)
       Finish({FaceState::expired, {}, {}});
   }
@@ -115,13 +116,13 @@ struct Faces::Impl {
       latest.reset();
       lock.unlock();
       std::optional<FaceTemplate> value;
-      bool failed = false;
+      std::optional<remotekit::Error> failure;
       FaceGate gate = FaceGate::none;
 #if defined(RK_FACE_OPENCV)
       if (Clock::now() - frame.received <= 1s) {
         auto engine = GetEngine(models);
         if (!engine)
-          failed = true;
+          failure = engine.error();
         else {
           auto inferred = engine.value()->InferRGB24(frame.width, frame.height, frame.data.data());
           if (inferred) {
@@ -129,12 +130,13 @@ struct Faces::Impl {
             if (gate == FaceGate::none)
               value = std::move(inferred.value().feature);
           } else {
-            failed = true;
+            failure = inferred.error();
           }
         }
       }
 #else
-      failed = true;
+      failure = remotekit::Error{remotekit::ErrorCode::kUnavailable,
+                                 "Face inference capability unavailable"};
 #endif
       const auto frame_hash = value ? Fingerprint(frame.data) : 0;
       lock.lock();
@@ -144,9 +146,8 @@ struct Faces::Impl {
         continue;
       if (gate != FaceGate::none)
         ++gate_failures[static_cast<size_t>(gate)];
-      if (failed) {
-        if (challenge.purpose != FacePurpose::presence)
-          Finish({FaceState::failed, {}, "face-inference-failed"});
+      if (failure) {
+        Finish({FaceState::failed, {}, FaceOutcome::none, *failure});
       } else if (now - frame.received <= 1s) {
         Observe(frame.received, value, frame_hash);
       }
@@ -215,7 +216,10 @@ bool Faces::Begin(FaceChallenge challenge) {
           "face", [impl, stop] { impl->Run(stop); },
           [impl] {
             std::lock_guard lock(impl->mutex);
-            impl->Finish({FaceState::failed, {}, "face-worker-failed"});
+            impl->Finish({FaceState::failed,
+                          {},
+                          FaceOutcome::none,
+                          remotekit::Error{remotekit::ErrorCode::kInternal, "Face worker failed"}});
           });
     });
   }

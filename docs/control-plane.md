@@ -2,7 +2,7 @@
 
 Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、设置、站点偏好、文件目录和操作收据都只在 Control 的 SQLite 里。Endpoint 和 Browser 拥有"执行"：进程、WebContents、恢复数据、GPU 资源。Control 通过对账让执行趋向期望。Control 同时管理多个 Endpoint 节点，每个 Tenant 的请求路由到它被放置的节点（见[多节点](cluster.md)）。
 
-SQLite 带 `schema_version`（当前 13）。空库在一个事务里建表并写入版本。已有库按 `schema.ts` 的 `migrations` 逐步升级：每一步把版本 N 改写成 N+1 的格式（例如 12→13 给设置补 `autoKeyboard`、删掉站点偏好里的 `manualKeyboard`、建立转换失败表），全部在同一事务里完成再写新版本；没有升级路径的版本、或已有表却没有版本的库拒绝启动，需要保留账户时用[凭据恢复](auth.md#凭据恢复)。读取路径只认当前格式，不在运行时补默认值。
+SQLite 带 `schema_version`（当前 15）。空库在一个事务里建表并写入版本。已有库按 `schema.ts` 的 `migrations` 逐步升级：每一步把版本 N 改写成 N+1 的格式（例如 12→13 给设置补 `autoKeyboard`、删掉站点偏好里的 `manualKeyboard`、建立转换失败表；13→14 给会话放置加 `hibernating` 状态；14→15 把操作收据改为 `failed` + 结构化错误、给后台任务记录错误码与重试时间），全部在同一事务里完成再写新版本；没有升级路径的版本、或已有表却没有版本的库拒绝启动，需要保留账户时用[凭据恢复](auth.md#凭据恢复)。读取路径只认当前格式，不在运行时补默认值。
 
 ## 数据归属
 
@@ -52,16 +52,16 @@ Control  每 Tenant 串行：
          → 新的 workspace 快照经 WS 推送
 ```
 
-收据状态：`accepted → applying → committed | rejected | unknown`，另有 `expired`（generation 已轮换）。
+收据状态：`accepted → applying → committed | failed | unknown`。`failed` 带结构化 `error:{code, message}`，调用方按 code 处理（见[错误模型](architecture.md#错误模型)）；generation 已轮换的旧收据是 `failed` + `conflict`。
 
-- **unknown** 表示可能已经执行。Endpoint 转发后 15 秒没有结果、或 Native 调用超时，都是 unknown，而不是 rejected：曾经客户端把超时当作拒绝，停止查询并鼓励用户用新 ID 重做，造成重复副作用。unknown 通过 `operation.status` 查询收敛，从不用新 ID 重做。
-- 只有"确定没有执行"的失败才是 rejected：执行前的校验失败，或 Endpoint/Browser 明确拒绝。由错误码决定（`rejected` / `invalid_request` 等 → rejected；`outcome_unknown` → unknown），不由异常类型决定。
+- **unknown** 表示可能已经执行。Endpoint 转发后 15 秒没有结果、或 Native 调用超时，都是 unknown；把超时当作失败会让用户用新 ID 重做，造成重复副作用。unknown 通过 `operation.status` 查询收敛，从不用新 ID 重做。Endpoint 在转发前就失败的操作是 `failed` + `unavailable`，可以原样重试。
+- 收据状态由错误码决定，不由异常类型决定：`outcome_unknown`（以及已受理变更的 `internal`）→ unknown；其余 code 都是确定没有执行 → failed，code 原样保存在收据里。
 - 导航和带确认的关闭在获得明确的 Native 证据前保持 applying。
 - 只改产品数据的操作可以先 committed，而 Endpoint 应用仍在 pending（例如站点偏好）。
 - Control 重启时，持久化的 accepted/applying 收据变为 unknown。每 Tenant 最多 4096 条收据；只有在没有未决执行时才轮换 generation；快照携带最近 64 条。
 - `unknown + resolved` 表示执行结果仍未知，但其目标已退役（例如 Tab 已关闭、Browser 已替换），不再阻塞。
 
-**快照是权威**：WS 快照携带 `serverIncarnation` 和单调的 `snapshotSequence`（独立于 workspace.revision），较旧的运行态快照不能覆盖较新的对话框、Endpoint 或 ready 观测。DC 回来的收据只更新对应 pending 操作的资格，不直接改 workspace。committed 的投影保留到权威 workspace revision 追上收据 revision。新 Viewer 不继承旧端的 pending 投影；已受理的旧操作可以完成，但迟到的结果不投给新 peer。UI 只在 committed 时显示"已保存"。
+**快照是权威**：WS 快照携带 `serverIncarnation` 和单调的 `snapshotSequence`（独立于 workspace.revision）。只有内容变化时序号才前进、快照才推送；不改变任何东西的 `viewer.viewport` 不产生新快照，Viewer 也不重发与上次确认相同的视口，收到内容相同的权威快照时不替换自己的快照对象。较旧的运行态快照不能覆盖较新的对话框、Endpoint 或 ready 观测。DC 回来的收据只更新对应 pending 操作的资格，不直接改 workspace。committed 的投影保留到权威 workspace revision 追上收据 revision。新 Viewer 不继承旧端的 pending 投影；已受理的旧操作可以完成，但迟到的结果不投给新 peer。UI 只在 committed 时显示"已保存"。
 
 历史问题：创建 Window 的回复丢失后用户重试，会因为传输层请求 ID 只在连接内有效而创建出第二个 Window——加长超时解决不了重复副作用，稳定的操作 ID 和可查询的 unknown 才能。导航曾在 Control 保存地址意图之前就在 Endpoint 执行，崩溃窗口内执行与产品状态不一致——现在意图在外部执行之前持久化，之后的结算绑定到 Native 导航身份。
 
@@ -118,10 +118,10 @@ Control 约每 1.5 秒对每个活跃 Tenant 做一次维护（不同 Tenant 互
 | 分区 | 内容与操作 |
 |---|---|
 | 概览 | 节点在线数、用户与在线数、运行中/休眠的会话、对象总量；Control 与发布包版本；节点离线、版本不一致、副本不足、待清理会话等提示 |
-| 用户 | 在线状态、会话位置、配额使用、最近登录。新建；重置密码（撤销该用户所有 token 并断开 Viewer）；清除 PIN 与人脸；强制下线；立即休眠（用户离线且无阻塞项时，跳过 Memory Saver 与空闲时间条件）；重置浏览器数据（仅已休眠：删除放置与全部 checkpoint，下次从空白 Profile 按 URL 恢复标签页，"我的文件"与设置保留）；停用/启用（停用账户的 token 不再有效，登录返回"账户已停用"）；转让管理员；删除用户（输入用户名确认） |
+| 用户 | 在线状态、会话位置、存储用量（设置了配额时显示占比）、最近登录。新建；重置密码（撤销该用户所有 token 并断开 Viewer）；清除 PIN 与人脸；强制下线；立即休眠（用户离线且无阻塞项时，跳过 Memory Saver 与空闲时间条件）；重置浏览器数据（仅已休眠：删除放置与全部 checkpoint，下次从空白 Profile 按 URL 恢复标签页，"我的文件"与设置保留）；停用/启用（停用账户的 token 不再有效，登录返回"账户已停用"）；转让管理员；删除用户（输入用户名确认） |
 | 公告 | 发布、编辑、删除；每条显示发布/修改时间与"已读/启用用户数"。编辑可选"重新提醒已读的用户" |
 | 节点 | 见[多节点 · 管理 App](cluster.md#管理-app) |
-| 存储 | 对象数、内容与单副本占用、副本不足、孤立副本与待清理会话；每个用户的配额使用、文件数与最近 checkpoint |
+| 存储 | 对象数、内容与单副本占用、副本不足、孤立副本与待清理会话；每个用户的存储用量（及配额）、文件数与最近 checkpoint |
 | 诊断 | 服务端保存的诊断包（ID、用户、时间、大小、结束原因），下载与删除 |
 
 **删除用户**是彻底删除：先停用并撤销 token、断开 Viewer；在该 Tenant 的串行队列里，一个事务删除账户、安全设置、公告读记录、工作区、设置、站点偏好、操作与弹窗收据、文件目录与选择事务、放置、checkpoint 与对象索引。对象副本转为首次发现时间为 0 的孤立副本，下一次对象维护即向持有它的节点发送 `object.delete`；离线节点在下次连接对账时清理。Session 本身按节点排队到 `session_deletions`（每个配置的节点一行），节点就绪时发送 `session.delete`，成功后删除该行，因此离线节点重新上线后也会删掉其热/冷副本。最后删除该用户的诊断包目录（若仍在采集，先结束采集）。每张表只由其所有者删除：账户、安全、工作区、操作、文件目录各自的 repository，Placement 删除放置与 checkpoint，对象索引删除对象，`SessionPurge` 负责节点上的 Session 数据。

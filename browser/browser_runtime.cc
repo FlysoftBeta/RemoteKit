@@ -54,7 +54,6 @@
 #include "url/gurl.h"
 
 namespace remotekit::browser {
-static_assert(static_cast<int>(ErrorCode::busy) == protocol::kBusyError);
 namespace {
 // Keep the IO clipboard installed until the IO loop itself is destroyed, so
 // late Chromium teardown cannot lazily recreate the Windows clipboard.
@@ -136,9 +135,9 @@ void BrowserRuntime::DrainClosed() {
 Status BrowserRuntime::CanDiscard(WebViewId index) const {
   if (views.records.at(index).requests->close_state() == "closing" ||
       views.records.at(index).requests->close_state() == "closed")
-    return {ErrorCode::unavailable, "WebView is closing"};
+    return {ErrorCode::kUnavailable, "WebView is closing"};
   if (views.records.at(index).requests->pending_count())
-    return {ErrorCode::busy, "Page request pending"};
+    return {ErrorCode::kBusy, "Page request pending"};
   return views.records.at(index).webview->CanDiscard();
 }
 void BrowserRuntime::UpdateOutput() {

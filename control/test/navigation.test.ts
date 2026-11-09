@@ -48,15 +48,15 @@ test('navigation checks final normalized URL bytes after URL and search expansio
   const normalized = prefix + '中'.repeat(907) + 'a'.repeat(9);
   assert.equal(Buffer.byteLength(new URL(normalized).href), 8192);
   assert.equal(resolveNavigation(normalized, 'google'), new URL(normalized).href);
-  assert.throws(() => resolveNavigation(normalized + 'a', 'google'), { code: 'invalid_request' });
+  assert.throws(() => resolveNavigation(normalized + 'a', 'google'), { code: 'limit_exceeded' });
   assert.throws(() => resolveNavigation('example.com/' + '中'.repeat(1000), 'google'), {
-    code: 'invalid_request',
+    code: 'limit_exceeded',
   });
   for (const engine of ['google', 'bing', 'duckduckgo', 'baidu'] as const) {
     const base = resolveNavigation('x', engine).slice(0, -1);
     const search = '中'.repeat(Math.floor((8192 - base.length) / 9));
     assert.ok(Buffer.byteLength(resolveNavigation(search, engine)) <= 8192);
-    assert.throws(() => resolveNavigation(search + '中', engine), { code: 'invalid_request' });
+    assert.throws(() => resolveNavigation(search + '中', engine), { code: 'limit_exceeded' });
   }
-  assert.throws(() => resolveNavigation('a'.repeat(8193), 'google'), { code: 'invalid_request' });
+  assert.throws(() => resolveNavigation('a'.repeat(8193), 'google'), { code: 'limit_exceeded' });
 });

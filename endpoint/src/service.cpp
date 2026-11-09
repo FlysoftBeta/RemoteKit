@@ -107,6 +107,11 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
       ~ClearKey() { SecureZeroMemory(key.data(), key.size()); }
     } clear_key{key.value()};
     const auto epoch = request["placementEpoch"].get<uint64_t>();
+    const auto directory = options_.data / "sessions" / id;
+    RK_ASSIGN_OR_RETURN(journal, Checkpoints::Hibernation(directory));
+    if (!journal.is_null() && request["checkpoint"] != journal["manifestId"])
+      return Error{ErrorCode::kConflict,
+                   "uncommitted hibernation: checkpoint does not match journal"};
     for (const auto& placement : placements_)
       if (placement["tenantId"] == tenant &&
           (placement["placementEpoch"].get<uint64_t>() > epoch ||
@@ -119,8 +124,8 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
       session_count_ = sessions_.size();
     }
     if (!sessions_.contains(tenant)) {
-      if (sessions_.size() >= options_.max_sessions)
-        return Error{ErrorCode::kLimitExceeded, "node session capacity reached"};
+      if (options_.max_sessions && sessions_.size() >= *options_.max_sessions)
+        return Error{ErrorCode::kUnavailable, "node session capacity reached"};
       for (const auto& [other_tenant, session] : sessions_)
         if (session->Id() == id)
           return Error{ErrorCode::kConflict, "sessionId is already open"};
@@ -150,6 +155,27 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
                          [&](const Json& placement) { return placement["tenantId"] == tenant; }),
           placements_.end());
       placements_.push_back({{"tenantId", tenant}, {"sessionId", id}, {"placementEpoch", epoch}});
+      fs::remove(directory.wstring() + L".hibernation.json");
+    }
+  }
+  if (method == "session.hibernate") {
+    if (!request.contains("placementEpoch") || !request["placementEpoch"].is_number_integer() ||
+        request["placementEpoch"].get<int64_t>() <= 0)
+      return Error{ErrorCode::kInvalidRequest, "invalid hibernation placement epoch"};
+    const auto placement =
+        std::find_if(placements_.begin(), placements_.end(),
+                     [&](const Json& value) { return value["tenantId"] == tenant; });
+    if (placement != placements_.end()) {
+      const auto directory =
+          options_.data / "sessions" / (*placement)["sessionId"].get<std::string>();
+      RK_ASSIGN_OR_RETURN(journal, Checkpoints::Hibernation(directory));
+      if (!journal.is_null()) {
+        if (journal["placementEpoch"] != request["placementEpoch"])
+          return Error{ErrorCode::kConflict, "hibernation placement epoch changed"};
+        return journal;
+      }
+      if ((*placement)["placementEpoch"] != request["placementEpoch"])
+        return Error{ErrorCode::kConflict, "hibernation placement epoch changed"};
     }
   }
   if (!sessions_.contains(tenant))
@@ -215,7 +241,8 @@ Result<Json> Service::DeleteSession(const std::string& id) {
                                    [&](const Json& p) { return p["sessionId"] == id; }),
                     placements_.end());
   const auto root = options_.data / "sessions";
-  for (const auto* suffix : {"", ".checkpoint", ".checkpoint-index.json", ".restore", ".discard"})
+  for (const auto* suffix : {"", ".checkpoint", ".checkpoint-index.json", ".hibernation.json",
+                             ".hibernation.json.new", ".restore", ".discard"})
     fs::remove_all(root / (id + suffix));
   return Json{{"stopped", stopped}};
 }
@@ -232,7 +259,8 @@ Result<Json> Service::DeleteCold(bool expired_only) {
                       [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }) &&
           (name.size() == 32 || name.substr(32) == ".checkpoint" ||
            name.substr(32) == ".checkpoint-index.json" || name.substr(32) == ".restore" ||
-           name.substr(32) == ".discard"))
+           name.substr(32) == ".discard" || name.substr(32) == ".hibernation.json" ||
+           name.substr(32) == ".hibernation.json.new"))
         ids.insert(id);
     }
   }
@@ -241,6 +269,8 @@ Result<Json> Service::DeleteCold(bool expired_only) {
                     [&](const auto& item) { return item.second->Id() == id; }))
       continue;
     const auto directory = root / id;
+    if (fs::exists(directory.wstring() + L".hibernation.json"))
+      continue;
     const fs::path marker = directory.wstring() + L".checkpoint";
     const bool placed = std::any_of(placements_.begin(), placements_.end(),
                                     [&](const Json& p) { return p["sessionId"] == id; });
@@ -252,7 +282,8 @@ Result<Json> Service::DeleteCold(bool expired_only) {
             std::chrono::hours(24 * 7))
       continue;
     // All targets are direct children of the configured sessions root with validated IDs.
-    for (const auto* suffix : {"", ".checkpoint", ".checkpoint-index.json", ".restore", ".discard"})
+    for (const auto* suffix : {"", ".checkpoint", ".checkpoint-index.json", ".hibernation.json",
+                               ".hibernation.json.new", ".restore", ".discard"})
       fs::remove_all(root / (id + suffix));
     ++deleted;
   }
@@ -268,7 +299,9 @@ bool Service::HandleRequest(Json request, uint64_t generation) {
       response["id"] = request.value("id", Json(nullptr));
     result = Dispatch(request, generation);
   } catch (const Json::exception&) {
-    result = Error{ErrorCode::kInvalidRequest, "invalid request JSON"};
+    result = Error{ErrorCode::kInternal, "Unexpected JSON failure while processing request"};
+  } catch (const std::filesystem::filesystem_error& error) {
+    result = Error{ErrorCode::kUnavailable, error.what()};
   } catch (const std::exception& error) {
     fprintf(stderr, "endpoint internal: %s\n", error.what());
     result = Error{ErrorCode::kInternal, "internal endpoint error"};

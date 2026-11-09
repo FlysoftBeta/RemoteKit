@@ -112,18 +112,18 @@ Status ValidateInput(const InputPayload& p) {
       },
       p);
   return ok ? Status{}
-            : Fail(ErrorCode::invalid_request, "Invalid input payload or UTF-16 selection");
+            : Fail(ErrorCode::kInvalidRequest, "Invalid input payload or UTF-16 selection");
 }
 Result<SessionId> ViewModel::CreateSession(std::string tenant, SessionId requested_id) {
   if (tenant.empty())
-    return {{}, Fail(ErrorCode::invalid_request, "Tenant cannot be empty")};
+    return {{}, Fail(ErrorCode::kInvalidRequest, "Tenant cannot be empty")};
   if (tenants_.contains(tenant))
-    return {{}, Fail(ErrorCode::invalid_request, "Tenant already has a session")};
+    return {{}, Fail(ErrorCode::kInvalidRequest, "Tenant already has a session")};
   if (!requested_id && next_session_ == UINT64_MAX)
-    return {{}, Fail(ErrorCode::unavailable, "Session ID space exhausted")};
+    return {{}, Fail(ErrorCode::kInternal, "Session ID space exhausted")};
   auto id = requested_id ? requested_id : next_session_++;
   if (sessions_.contains(id))
-    return {{}, Fail(ErrorCode::invalid_request, "Session ID already exists")};
+    return {{}, Fail(ErrorCode::kInvalidRequest, "Session ID already exists")};
   if (requested_id && requested_id >= next_session_)
     next_session_ = requested_id == UINT64_MAX ? UINT64_MAX : requested_id + 1;
   sessions_.emplace(id, Session{id, tenant, {}, {}});
@@ -133,9 +133,9 @@ Result<SessionId> ViewModel::CreateSession(std::string tenant, SessionId request
 Result<ProfileId> ViewModel::AddProfile(SessionId s, std::string name) {
   auto it = sessions_.find(s);
   if (it == sessions_.end())
-    return {{}, Fail(ErrorCode::not_found, "Session not found")};
+    return {{}, Fail(ErrorCode::kNotFound, "Session not found")};
   if (!it->second.profiles.empty())
-    return {{}, Fail(ErrorCode::unsupported, "Multiple profiles per session are not implemented")};
+    return {{}, Fail(ErrorCode::kRejected, "Multiple profiles per session are not implemented")};
   auto id = next_profile_++;
   it->second.profiles.emplace(id, Profile{id, std::move(name)});
   return {id, {}};
@@ -143,15 +143,15 @@ Result<ProfileId> ViewModel::AddProfile(SessionId s, std::string name) {
 Result<WebViewId> ViewModel::CreateWebView(SessionId s, ProfileId p, WebViewId requested_id) {
   auto it = sessions_.find(s);
   if (it == sessions_.end())
-    return {{}, Fail(ErrorCode::not_found, "Session not found")};
+    return {{}, Fail(ErrorCode::kNotFound, "Session not found")};
   if (!it->second.profiles.contains(p))
-    return {{}, Fail(ErrorCode::stale_identity, "Profile does not belong to session")};
+    return {{}, Fail(ErrorCode::kConflict, "Profile does not belong to session")};
   if (!requested_id && next_view_ == UINT64_MAX)
-    return {{}, Fail(ErrorCode::unavailable, "WebView ID space exhausted")};
+    return {{}, Fail(ErrorCode::kInternal, "WebView ID space exhausted")};
   auto id = requested_id ? requested_id : next_view_++;
   for (const auto& [session_id, session] : sessions_)
     if (session.views.contains(id))
-      return {{}, Fail(ErrorCode::invalid_request, "WebView ID already exists")};
+      return {{}, Fail(ErrorCode::kInvalidRequest, "WebView ID already exists")};
   if (requested_id && requested_id >= next_view_)
     next_view_ = requested_id == UINT64_MAX ? UINT64_MAX : requested_id + 1;
   WebView v;
@@ -163,7 +163,7 @@ Result<WebViewId> ViewModel::CreateWebView(SessionId s, ProfileId p, WebViewId r
 Status ViewModel::ResetWebView(SessionId session, WebViewId view) {
   auto* model = MutableView(session, view);
   if (!model)
-    return Fail(ErrorCode::not_found, "WebView not found in session");
+    return Fail(ErrorCode::kNotFound, "WebView not found in session");
   InvalidateInstance(session, view);
   model->actual = model->desired = Residency::live;
   model->last_lifecycle.reset();
@@ -172,7 +172,7 @@ Status ViewModel::ResetWebView(SessionId session, WebViewId view) {
 Status ViewModel::RemoveWebView(SessionId session, WebViewId view) {
   auto it = sessions_.find(session);
   if (it == sessions_.end() || !it->second.views.erase(view))
-    return Fail(ErrorCode::not_found, "WebView not found in session");
+    return Fail(ErrorCode::kNotFound, "WebView not found in session");
   return {};
 }
 const Session* ViewModel::FindSession(SessionId s) const {
@@ -196,9 +196,9 @@ WebView* ViewModel::MutableView(SessionId s, WebViewId v) {
 Status ViewModel::SetFocus(SessionId s, WebViewId id, bool focused) {
   auto v = MutableView(s, id);
   if (!v)
-    return Fail(ErrorCode::not_found, "WebView not found in session");
+    return Fail(ErrorCode::kNotFound, "WebView not found in session");
   if (focused && (v->actual != Residency::live || v->pending))
-    return Fail(ErrorCode::unavailable, "WebView is not available");
+    return Fail(ErrorCode::kConflict, "WebView is not available");
   if (focused)
     for (auto& [other_id, other] : sessions_.at(s).views)
       if (other_id != id && other.focused) {
@@ -214,27 +214,27 @@ Status ViewModel::SetFocus(SessionId s, WebViewId id, bool focused) {
 Status ViewModel::InvalidateInput(SessionId session, WebViewId view) {
   auto* model = MutableView(session, view);
   if (!model)
-    return Fail(ErrorCode::not_found, "WebView not found in session");
+    return Fail(ErrorCode::kNotFound, "WebView not found in session");
   ++model->focus_generation;
   return {};
 }
 Status ViewModel::CommitDocument(SessionId s, WebViewId id) {
   auto v = MutableView(s, id);
   if (!v)
-    return Fail(ErrorCode::not_found, "WebView not found in session");
+    return Fail(ErrorCode::kNotFound, "WebView not found in session");
   // A renderer can commit during freeze/thaw. Preserve the new document's
   // identity while the pending lifecycle request continues to gate input.
   if ((v->actual != Residency::live && v->actual != Residency::frozen) ||
       (v->pending && v->pending->action != Lifecycle::freeze &&
        !(v->pending->action == Lifecycle::restore && v->actual == Residency::frozen)))
-    return Fail(ErrorCode::unavailable, "WebView does not have a live document");
+    return Fail(ErrorCode::kConflict, "WebView does not have a live document");
   ++v->document;
   return {};
 }
 Status ViewModel::InvalidateInstance(SessionId s, WebViewId id) {
   auto v = MutableView(s, id);
   if (!v)
-    return Fail(ErrorCode::not_found, "WebView not found in session");
+    return Fail(ErrorCode::kNotFound, "WebView not found in session");
   ++v->instance;
   ++v->document;
   ++v->focus_generation;
@@ -246,7 +246,7 @@ Status ViewModel::InvalidateInstance(SessionId s, WebViewId id) {
 Result<InputToken> ViewModel::Token(SessionId s, WebViewId id) const {
   auto v = FindWebView(s, id);
   if (!v)
-    return {{}, Fail(ErrorCode::not_found, "WebView not found in session")};
+    return {{}, Fail(ErrorCode::kNotFound, "WebView not found in session")};
   return {{s, id, v->instance, v->document, v->focus_generation}, {}};
 }
 bool IsHoverInput(const InputPayload& payload) {
@@ -258,14 +258,14 @@ bool IsHoverInput(const InputPayload& payload) {
 }
 Status ViewModel::AcceptInput(SessionId s, const InputEvent& e) {
   if (s != e.token.session)
-    return Fail(ErrorCode::stale_identity, "Input token session mismatch");
+    return Fail(ErrorCode::kConflict, "Input token session mismatch");
   auto v = MutableView(s, e.token.view);
   if (!v)
-    return Fail(ErrorCode::not_found, "WebView not found in session");
+    return Fail(ErrorCode::kNotFound, "WebView not found in session");
   if (e.token != Token(s, v->id).value || e.sequence <= v->last_sequence)
-    return Fail(ErrorCode::stale_identity, "Stale token or sequence");
+    return Fail(ErrorCode::kConflict, "Stale token or sequence");
   if (v->actual != Residency::live || v->pending || (!v->focused && !IsHoverInput(e.payload)))
-    return Fail(ErrorCode::unavailable, "WebView cannot receive input");
+    return Fail(ErrorCode::kConflict, "WebView cannot receive input");
   auto result = ValidateInput(e.payload);
   if (!result)
     return result;
@@ -275,19 +275,19 @@ Status ViewModel::AcceptInput(SessionId s, const InputEvent& e) {
 Result<LifecycleRequest> ViewModel::RequestLifecycle(SessionId s, WebViewId id, Lifecycle action) {
   auto v = MutableView(s, id);
   if (!v)
-    return {{}, Fail(ErrorCode::not_found, "WebView not found in session")};
+    return {{}, Fail(ErrorCode::kNotFound, "WebView not found in session")};
   if (v->pending)
-    return {{}, Fail(ErrorCode::busy, "Lifecycle operation pending")};
+    return {{}, Fail(ErrorCode::kBusy, "Lifecycle operation pending")};
   Residency target;
   switch (action) {
     case Lifecycle::freeze:
       if (v->actual != Residency::live)
-        return {{}, Fail(ErrorCode::invalid_request, "Freeze requires live state")};
+        return {{}, Fail(ErrorCode::kConflict, "Freeze requires live state")};
       target = Residency::frozen;
       break;
     case Lifecycle::discard:
       if (v->actual != Residency::live && v->actual != Residency::frozen)
-        return {{}, Fail(ErrorCode::invalid_request, "Discard requires live or frozen state")};
+        return {{}, Fail(ErrorCode::kConflict, "Discard requires live or frozen state")};
       target = Residency::discarded;
       break;
     case Lifecycle::unload:
@@ -295,11 +295,11 @@ Result<LifecycleRequest> ViewModel::RequestLifecycle(SessionId s, WebViewId id, 
       break;
     case Lifecycle::restore:
       if (v->actual == Residency::live)
-        return {{}, Fail(ErrorCode::invalid_request, "Already live")};
+        return {{}, Fail(ErrorCode::kConflict, "Already live")};
       target = Residency::live;
       break;
     default:
-      return {{}, Fail(ErrorCode::invalid_request, "Unknown lifecycle operation")};
+      return {{}, Fail(ErrorCode::kInvalidRequest, "Unknown lifecycle operation")};
   }
   v->desired = target;
   v->pending = LifecycleRequest{id, ++v->lifecycle_generation, action, target};
@@ -311,13 +311,14 @@ Result<LifecycleRequest> ViewModel::RequestLifecycle(SessionId s, WebViewId id, 
 Status ViewModel::CompleteLifecycle(SessionId s,
                                     const LifecycleRequest& r,
                                     bool succeeded,
-                                    std::string detail) {
+                                    std::string detail,
+                                    std::optional<ErrorCode> error) {
   auto v = MutableView(s, r.view);
   if (!v)
-    return Fail(ErrorCode::not_found, "WebView not found in session");
+    return Fail(ErrorCode::kNotFound, "WebView not found in session");
   if (!v->pending || v->pending->generation != r.generation || v->pending->action != r.action ||
       v->pending->target != r.target)
-    return Fail(ErrorCode::stale_identity, "Stale lifecycle completion");
+    return Fail(ErrorCode::kConflict, "Stale lifecycle completion");
   if (succeeded) {
     if (r.target == Residency::discarded || r.target == Residency::unloaded) {
       ++v->instance;
@@ -325,7 +326,7 @@ Status ViewModel::CompleteLifecycle(SessionId s,
     }
     v->actual = r.target;
   }
-  v->last_lifecycle = LifecycleResult{r.generation, r.action, succeeded, std::move(detail)};
+  v->last_lifecycle = LifecycleResult{r.generation, r.action, succeeded, std::move(detail), error};
   v->pending.reset();
   return {};
 }

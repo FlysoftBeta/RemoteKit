@@ -41,7 +41,7 @@ def main():
             rpc('view.closed.ack',views=['1'],browserIncarnation=incarnation)
             after=rpc('snapshot');assert after['sessions'][0]['views']==[]
             rejected=rpc('view.create',view='1',url='about:blank',width=320,height=240,visible=False,device='desktop',ok=False)
-            assert rejected['error']=='invalid_request' and rejected['detail']=='View id closed',rejected
+            assert rejected['error']['code'] == 'conflict',rejected
             assert rpc('view.close',view='1',force=True)['completed']
         finally:
             if handle.value:sdk.remotekit_sdk_control_close(handle)

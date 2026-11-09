@@ -1,3 +1,5 @@
+import { endpointError } from '../../server/endpoint/gateway';
+import { errorHandling } from '../../shared/error-policy';
 import { RemoteKitError } from '../../shared/errors';
 import { formatError } from '../util/format-error';
 import { type Diagnostics } from './types';
@@ -474,8 +476,7 @@ export class MediaObservations {
       this.endpointStatsAtMs = performance.now();
       this.update({ endpoint: message });
     }
-    if (message.type === 'error')
-      this.update({ error: formatError(new RemoteKitError(message.error.code, message.error.message)) });
+    if (message.type === 'error') this.update({ error: formatError(endpointError(message.error)) });
   }
 
   reset() {

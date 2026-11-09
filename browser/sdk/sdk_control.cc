@@ -35,6 +35,38 @@ int ExchangeJson(uint64_t handle,
                                       base::JSON_PARSE_RFC, 32);
   return reply->has_value() ? REMOTEKIT_SDK_OK : REMOTEKIT_SDK_DATA_MISMATCH;
 }
+int ReplyStatus(const base::DictValue& reply, remotekit_sdk_failure* failure) {
+  if (reply.FindInt("version") != 1 || !reply.FindInt("id"))
+    return REMOTEKIT_SDK_DATA_MISMATCH;
+  if (reply.FindBool("ok") == true && !reply.contains("error"))
+    return REMOTEKIT_SDK_OK;
+  const auto* error = reply.FindDict("error");
+  const auto* code = error ? error->FindString("code") : nullptr;
+  const auto* message = error ? error->FindString("message") : nullptr;
+  if (reply.FindBool("ok") != false || !code || !message || !protocol::ParseErrorCode(*code))
+    return REMOTEKIT_SDK_DATA_MISMATCH;
+  if (failure) {
+    *failure = {};
+    auto copy = [](auto& target, const std::string& source) {
+      const size_t count = std::min(source.size(), sizeof(target) - 1);
+      UNSAFE_BUFFERS(std::memcpy(target, source.data(), count));
+    };
+    copy(failure->code, *code);
+    copy(failure->message, *message);
+    if (const auto* reason = error->FindString("reason");
+        reason && protocol::ParseErrorReason(*reason))
+      copy(failure->reason, *reason);
+    const auto parsed = *protocol::ParseErrorCode(*code);
+    const auto retry = error->FindInt("retryAfterMs");
+    if (retry && *retry >= 0 && *retry <= 86400000 &&
+        (parsed == protocol::ErrorCode::kBusy || parsed == protocol::ErrorCode::kRateLimited ||
+         parsed == protocol::ErrorCode::kUnavailable)) {
+      failure->retry_after_ms = *retry;
+      failure->has_retry_after = 1;
+    }
+  }
+  return REMOTEKIT_SDK_REFUSED;
+}
 bool ReadToken(const base::DictValue& reply, remotekit_sdk_token* token) {
   const auto* node = reply.Find("token");
   if (!node)
@@ -56,10 +88,13 @@ int Command(uint64_t handle,
             const char* json,
             size_t size,
             uint32_t timeout_ms,
-            remotekit_sdk_token* token) {
+            remotekit_sdk_token* token,
+            remotekit_sdk_failure* failure) {
   OperationLease lease;
   if (!lease)
     return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  if (failure)
+    *failure = {};
   if (token)
     *token = {};
   if (!json || !size || size > browser::kClipboardJsonLimit || !timeout_ms || timeout_ms > 30000)
@@ -73,11 +108,7 @@ int Command(uint64_t handle,
   ReplyHandles handles(*reply);
   if (token && !ReadToken(*reply, token))
     return REMOTEKIT_SDK_DATA_MISMATCH;
-  if (reply->FindBool("ok") == true)
-    return REMOTEKIT_SDK_OK;
-  if (reply->FindInt("code") == remotekit::protocol::kBusyError)
-    return REMOTEKIT_SDK_BUSY;
-  return REMOTEKIT_SDK_DATA_MISMATCH;
+  return ReplyStatus(*reply, failure);
 }
 }  // namespace remotekit::sdk
 int remotekit_sdk_control_connect(const char* name_utf8, uint64_t* handle) {
@@ -151,7 +182,8 @@ int ControlRequestInternal(uint64_t handle,
   if (channel->closed.load(std::memory_order_acquire))
     return REMOTEKIT_SDK_CHANNEL_CLOSED;
   const auto fail = [&](int status) {
-    if (status == REMOTEKIT_SDK_CHANNEL_CLOSED)
+    if (status == REMOTEKIT_SDK_CHANNEL_CLOSED || status == REMOTEKIT_SDK_MOJO_ERROR ||
+        status == REMOTEKIT_SDK_LOST)
       RetireChannel(handle, channel);
     return status;
   };
@@ -182,7 +214,7 @@ int ControlRequestInternal(uint64_t handle,
   std::vector<mojo::ScopedHandle> received_handles;
   for (;;) {
     if (channel->closed.load(std::memory_order_acquire))
-      return REMOTEKIT_SDK_CHANNEL_CLOSED;
+      return fail(REMOTEKIT_SDK_LOST);
     if (base::TimeTicks::Now() >= deadline) {
       LOG(WARNING) << "RemoteKit control timeout method="
                    << (request->FindString("method") ? *request->FindString("method") : "")
@@ -195,7 +227,7 @@ int ControlRequestInternal(uint64_t handle,
         mojo::ReadMessageRaw(pipe, &response, &received_handles, MOJO_READ_MESSAGE_FLAG_NONE);
     if (result == MOJO_RESULT_OK) {
       if (response.size() > browser::kClipboardJsonLimit)
-        return fail(REMOTEKIT_SDK_MOJO_ERROR);
+        return fail(REMOTEKIT_SDK_DATA_MISMATCH);
       auto reply = base::JSONReader::ReadDict(base::as_string_view(base::span(response)),
                                               base::JSON_PARSE_RFC, 32);
       if (!reply)
@@ -215,7 +247,7 @@ int ControlRequestInternal(uint64_t handle,
       }
       if (response.size() > browser::ControlResponseJsonLimit(*request)) {
         ReplyHandles discard(*reply);
-        return fail(REMOTEKIT_SDK_MOJO_ERROR);
+        return fail(REMOTEKIT_SDK_DATA_MISMATCH);
       }
       reply->Set("id", caller_id);
       const auto restored = base::WriteJson(*reply);
@@ -231,14 +263,13 @@ int ControlRequestInternal(uint64_t handle,
       break;
     }
     if (result != MOJO_RESULT_SHOULD_WAIT)
-      return fail(result == MOJO_RESULT_FAILED_PRECONDITION ? REMOTEKIT_SDK_CHANNEL_CLOSED
-                                                            : REMOTEKIT_SDK_MOJO_ERROR);
+      return fail(REMOTEKIT_SDK_LOST);
     base::PlatformThread::Sleep(base::Milliseconds(1));
   }
   if (!attachments && !received_handles.empty())
     return fail(REMOTEKIT_SDK_DATA_MISMATCH);
   if (response.size() > browser::ControlResponseJsonLimit(*request))
-    return fail(REMOTEKIT_SDK_MOJO_ERROR);
+    return fail(REMOTEKIT_SDK_DATA_MISMATCH);
   if (response.size() > capacity) {
     *output_size = response.size();
     return fail(REMOTEKIT_SDK_BUFFER_TOO_SMALL);
@@ -287,16 +318,18 @@ int remotekit_sdk_control_close(uint64_t handle) {
 int remotekit_sdk_control_command(uint64_t handle,
                                   const char* json,
                                   size_t size,
-                                  uint32_t timeout_ms) {
-  return Command(handle, json, size, timeout_ms, nullptr);
+                                  uint32_t timeout_ms,
+                                  remotekit_sdk_failure* failure) {
+  return Command(handle, json, size, timeout_ms, nullptr, failure);
 }
 int remotekit_sdk_control_command_token(uint64_t handle,
                                         const char* json,
                                         size_t size,
                                         uint32_t timeout_ms,
-                                        remotekit_sdk_token* token) {
+                                        remotekit_sdk_token* token,
+                                        remotekit_sdk_failure* failure) {
   if (!token)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   *token = {};
-  return Command(handle, json, size, timeout_ms, token);
+  return Command(handle, json, size, timeout_ms, token, failure);
 }

@@ -37,6 +37,7 @@ export class ViewerHub {
       quality: this.services.policy.qualityFor(tenant, workspace),
       endpointGeneration: this.context.tenants.mediaGeneration(tenant),
       endpointError: runtime.lastError ?? null,
+      browserRestart: runtime.browserRestart,
       viewer: {
         connected: runtime.viewer !== undefined,
       },
@@ -112,7 +113,8 @@ export class ViewerHub {
       this.services.security.forgetPeer(tenant, old.security);
     }
     const user = this.context.store.accounts.userForTenant(tenant);
-    if (!user) throw new RemoteKitError('unauthenticated', 'Account does not exist');
+    if (!user)
+      throw new RemoteKitError('unauthenticated', '账号不存在', { detail: 'Account does not exist' });
     const security = this.services.security.create(user, initialUnlocked);
     this.services.pageRequests.clearFullscreen(tenant);
     runtime.viewer = { id, revoke, authentication, security };

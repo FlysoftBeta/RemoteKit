@@ -353,7 +353,7 @@ test('abort releases original canvases immediately while quality is pending', as
   assert.equal(f.released(), false);
   abort.abort();
   assert.ok(f.released());
-  await assert.rejects(run, { name: 'AbortError' });
+  await assert.rejects(run, { code: 'canceled' });
   pending.resolve(decision('1', ['1'], true));
   await flush();
   assert.equal(cancels, 1);

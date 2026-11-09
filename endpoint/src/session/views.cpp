@@ -220,7 +220,7 @@ Result<void> ViewController::Start() {
       return {};
   }
   if (browser.Stopping())
-    return Error{ErrorCode::kUnavailable, "Browser 正在停止，等待进程退出"};
+    return Error{ErrorCode::kUnavailable, "Browser is stopping; waiting for process exit"};
   if (browser.Alive() && !browser.Rpc().Control() && !browser.Rpc().Disconnected())
     return browser.HealthCheck();
   if (!retained) {
@@ -543,6 +543,7 @@ Result<Json> ViewController::InactiveSnapshot() {
       return browser.Unavailable(stopped.error().message);
   }
   return Json{
+      {"browserRestart", browser.RestartState()},
       {"status", browser.Crashed() ? WireError(browser.Unavailable("Browser process exited"))
                                    : Json(nullptr)},
       {"sessionId", id},
@@ -654,7 +655,7 @@ Result<Json> ViewController::Snapshot(bool output_diagnostics) {
     if (output_diagnostics) {
       auto status = browser.Rpc().Request({{"method", "output.status"}});
       output_status = status ? std::move(status).value()
-                             : Json{{"ok", false}, {"error", "output_status_unavailable"}};
+                             : Json{{"ok", false}, {"error", WireError(status.error())}};
     }
     return Json{
         {"sessionId", id},
@@ -1076,7 +1077,7 @@ Result<Json> ViewController::ManageViewLifecycle(const Json& request) {
     return Error{ErrorCode::kInvalidRequest, "unsupported lifecycle action"};
   if (navigation.Recovering(view)) {
     if (guarded_lifecycle)
-      return Error{ErrorCode::kConflict, "navigation_recovery_pending"};
+      return Error{ErrorCode::kBusy, "navigation_recovery_pending"};
     return Json{{"accepted", true},
                 {"pending", true},
                 {"completed", false},

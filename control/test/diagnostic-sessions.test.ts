@@ -344,9 +344,9 @@ test('global capacity includes finalization, and shutdown drains even when Endpo
   const started = await Promise.all(
     ['a', 'b', 'c', 'd'].map((tenant) => manager.request(viewer(tenant), 'diagnostics.start', {})),
   );
-  await assert.rejects(manager.request(viewer('e'), 'diagnostics.start', {}), { code: 'limit_exceeded' });
+  await assert.rejects(manager.request(viewer('e'), 'diagnostics.start', {}), { code: 'busy' });
   const stopping = manager.request(viewer('a'), 'diagnostics.stop', { id: started[0].id });
-  await assert.rejects(manager.request(viewer('e'), 'diagnostics.start', {}), { code: 'limit_exceeded' });
+  await assert.rejects(manager.request(viewer('e'), 'diagnostics.start', {}), { code: 'busy' });
   await manager.shutdown();
   assert.deepEqual(await stopping, { id: started[0].id, status: 'failed', reason: 'archive-write-failed' });
   assert.equal(

@@ -56,24 +56,43 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 
 ## 错误模型
 
-所有组件使用同一组错误码（`control/shared/errors.ts`、`endpoint/src/util/error.hpp`、`protocol/control.h`（Browser 控制错误码） 中的 `ErrorCode`）：
+所有组件使用同一组错误码（`control/shared/errors.ts`、`endpoint/src/util/error.hpp`、`protocol/control.h` 中的 `ErrorCode`）。**错误码就是处理指令**：调用方只按 code 决定重试、对账、刷新、重新认证或放弃；`message` 只是给人看的文字（用户提示或运维诊断），任何代码都不按 message、`reason` 或 HTTP 状态文字分支。
 
-| code | 含义 | 执行确定性 |
+| code | 调用方怎么做 | 可能已执行 |
 |---|---|---|
-| `invalid_request` | 输入格式或语义无效 | 未执行 |
-| `unauthenticated` / `forbidden` / `locked` | 认证、权限、锁定 | 未执行 |
-| `not_found` / `conflict` | 目标不存在；版本过期、ID 复用、并发修改 | 未执行 |
-| `limit_exceeded` / `rate_limited` | 容量、配额、资源预算；认证尝试限流 | 未执行 |
-| `busy` | 对端暂时忙，可以原样重试 | 未执行 |
-| `unavailable` | Endpoint 离线、Browser 未运行、能力缺失 | 未执行（未发出） |
-| `rejected` | 对端明确拒绝 | 未执行 |
-| `outcome_unknown` | 已发出，结果未知（超时、回复丢失） | **可能已执行** |
-| `internal` | 本地缺陷或意外故障 | — |
+| `busy` | 短退避（抖动，秒级以内）后原样重试，次数有上限 | 否 |
+| `rate_limited` | 等 `retryAfterMs`（缺省用生产方默认值）后重试 | 否 |
+| `unavailable` | 指数退避，或等对端/能力恢复的事件后重试 | 否（未送达） |
+| `outcome_unknown` | 不重做；用同一操作身份查询或对账。只读请求重新读取即是查询；幂等请求可以用**同一身份**重新提交 | **可能** |
+| `conflict` | 刷新状态后重新决定 | 否 |
+| `not_found` | 刷新状态，放弃这个请求 | 否 |
+| `locked` | 等用户解锁后重试 | 否 |
+| `unauthenticated` | 重新登录 | 否 |
+| `forbidden` | 显示无权限，不重试 | 否 |
+| `limit_exceeded` | 需要用户释放空间/配额或缩小输入；不自动重试 | 否 |
+| `invalid_request` | 调用方缺陷：记录，不重试 | 否 |
+| `rejected` | 对这个输入、这个构建是最终结果；不重试 | 否 |
+| `canceled` | 调用方自己取消；不重试、不提示 | 否 |
+| `internal` | 记录并报告，不自动重试；带操作身份的变更按 `outcome_unknown` 对账 | — |
 
-- 错误码同时表达"是什么错"和"有没有可能已经执行"。操作收据由此决定 rejected 还是 unknown；`outcome_unknown` 的操作只查询，从不用新 ID 重做。
-- 每个边界只转换一次：HTTP 返回 `{error:{code,message}}` 和对应状态码；WS 返回 `{type:"error", id, error:{code,message}}`；Endpoint 管理回复 `{ok:false, error:{code,message}}`；Browser 控制回复 `{ok:false, code, error, detail}`。`message` 可以展示给用户；内部细节只进日志。
-- Endpoint 的 Session 状态错误额外带一个 `reason`：`browser_crashed`（Browser 非正常退出）、`browser_restarting`（替换中）、`output_failed`（GPU 输出无法继续），错误码为 `unavailable`；在途操作仍按 `outcome_unknown` 处理。Control 在网关处把 reason 转成一次面向用户的文字（如"浏览器异常退出，正在恢复…"），内部原因（例如 render generation 未决的 GPU 工作）只进日志和诊断，不出现在 Viewer。
-- 意外异常在请求边界和线程入口被捕获：请求返回 `internal`，线程入口把所属组件标记为失败，而不是终止进程。
+**生产方按处理方式选 code，而不是按"出了什么事"。**
+- 暂时饱和（在途槽位、队列、KDF 并发、发送缓冲）是 `busy`；容量被别的租户占满、节点或工具缺失、IO 失败是 `unavailable`；只有用户能自己释放的配额和输入本身超出上限才是 `limit_exceeded`。
+- 输入本身无法处理（不支持的格式、损坏、加密文档、转换器在该输入上失败或超出计算预算）是 `rejected`；我们自己的协议/状态不变量被破坏是 `internal`；调用方请求的格式错误才是 `invalid_request`。
+- 过期的身份、代次、授权 epoch 是 `conflict`；被替换的授权要求解锁时是 `locked`，要求登录时是 `unauthenticated`。
+- **送达证据决定 `unavailable` 与 `outcome_unknown`**：每条传输记录请求是否已写出。写出前失败（连接已关、写失败、本地排队超时）是 `unavailable`；写出后超时、断开、回复格式错误或过大是 `outcome_unknown`。服务端处理已经执行后才发现回复无法编码，同样是 `outcome_unknown`。执行后才发现授权或目标已变化，结果是 `outcome_unknown`，披露另由授权门禁控制。健康探测超时不会成为被阻塞动作的结果：那个动作没有发出，是 `unavailable`。
+- 外部服务与工具在边界处按其类型化证据分类一次：HTTP 401 → `unauthenticated`，403 → `forbidden`，404 → `not_found`，429 → `rate_limited`（读取 Retry-After），408/5xx 与读请求的传输失败 → `unavailable`，变更请求发出后的传输失败 → `outcome_unknown`，无法归类的上游失败 → `internal`。
+
+**线上形状**（所有 JSON 边界相同）：`error:{code, message, reason?, retryAfterMs?}`。
+- `retryAfterMs` 只随 `busy`、`rate_limited`、`unavailable` 出现（0…86 400 000 的整数）；其他 code 带上它会在校验时被丢弃。提示只调整允许重试时的等待，永远不会让不可重试的 code 变得可以重试。HTTP 同时设置 `Retry-After` 头，但客户端只读 JSON。
+- Native（Endpoint、Browser）的 `message` 是英文运维诊断；需要向用户区分的情形（如加密文档与损坏文档、单文件过大与配额已满）带一个 `reason`，取自协议里封闭的枚举，只用于选择展示文字。Control 是展示边界：把 Native 错误转换成 Viewer 用的中文 `message`（按 `reason`，否则按 code 的通用句），原始诊断进日志和诊断包。Control → Viewer 只有 `{code, message, retryAfterMs?}`，Viewer 直接显示 `message`。
+- Browser 控制回复：`{version:1, id, ok:false, error:{code, message, reason?, retryAfterMs?}}`，code 用名称字符串。SDK 的类型化调用把 Browser 的应用错误原样交给调用方，不折叠成传输状态；SDK 传输状态区分"未发出"（通道已关、写失败）与"已发出、结果未知"（超时、发出后断开、回复无效）。
+- 操作收据的失败是 `status:'failed'` 加结构化 `error:{code, message}`；`expired`（generation 已轮换）是 `failed` + `conflict`。Viewer 按收据里的 code 处理，与直接回复的错误走同一套处理。
+- 每个边界只转换一次；中途转发保留 code、`reason` 与 `retryAfterMs`。
+
+**处理规则集中在一处**：`control/shared/error-policy.ts` 与 `endpoint/src/util/error_policy.hpp` 把 code 映射为处理方式和默认等待（`busy` 250ms 起翻倍、上限 5 秒；`unavailable` 1 秒起翻倍、上限 5 分钟；`rate_limited` 无提示时 30 秒）。后台调度（文档转换、学习附件下载、会话导入、下载导入、更新器）都从这里取策略：只有 `busy`、`rate_limited`、`unavailable` 自动重试，`outcome_unknown` 先对账，其余 code 记录为最终结果，等用户操作或构建、输入、配额变化后再评估。持久化的失败记录保存 code、诊断、`retry_at` 与构建 ID；`rejected`、`internal` 只对产生它的构建有效。
+
+- Endpoint 的 Session 状态错误用 `reason` 说明原因：`browser_crashed`（Browser 非正常退出）、`browser_restarting`（替换中）、`output_failed`（GPU 输出无法继续），错误码为 `unavailable`；在途操作仍按 `outcome_unknown` 处理。内部原因（例如 render generation 未决的 GPU 工作）只进日志和诊断。
+- 意外异常在请求边界和线程入口被捕获：请求返回 `internal`，线程入口把所属组件标记为失败，而不是终止进程。只在校验调用方请求时才把解析异常归为 `invalid_request`；解析对端回复或本地存储时的异常是 `internal`（已送达的请求则是 `outcome_unknown`）。
 - 不确定的 GPU 工作、编码任务和原生回调不靠超时"放弃"：资源保留到有证据为止，必要时保留到进程结束。
 - 控制 RPC 超时只使本次结果成为 `outcome_unknown`，不关闭 SDK 通道、不清除 Endpoint 的控制句柄。SDK 使用每通道请求 ID 匹配回复，丢弃迟到回复并释放其 Mojo 附件与本地资源句柄；后续健康检查有界等待。只有管道确实断开或进程退出才允许替换 Browser，连续失败最多启动三次，按 1/2/4 秒退避，健康运行一分钟后恢复额度。拒绝重启的错误附带最近一次真实失败（进程退出码及其含义、控制管道超时或 `output.status` 错误）和 Session 目录下 `browser.log` 的路径；Endpoint 自己终止的进程（退出码 0）不算失败。GPU 输出启动失败通过现有 Session 错误投影显示在标签页/工作区。
 

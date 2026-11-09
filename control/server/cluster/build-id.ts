@@ -16,6 +16,6 @@ export function readBuildId(controlRoot: string): string {
       throw new Error();
     return value.buildId;
   } catch {
-    throw new RemoteKitError('invalid_request', 'Invalid build.json');
+    throw new RemoteKitError('invalid_request', '构建信息无效', { detail: 'Invalid build.json' });
   }
 }

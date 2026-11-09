@@ -215,10 +215,10 @@ int main(int argc, char** argv) {
   std::this_thread::sleep_for(2600ms);
   status = faces.Status(2, "presence");
   if (!status || status->state != FaceState::absent || status->face_template ||
-      status->reason != "camera-unavailable")
+      status->outcome != FaceOutcome::camera_unavailable)
     return 13;
   status = no_match.Status(2, "no-match");
   if (!status || status->state != FaceState::absent || status->face_template ||
-      status->reason != "no-matching-face")
+      status->outcome != FaceOutcome::no_matching_face)
     return 14;
 }

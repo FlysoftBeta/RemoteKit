@@ -55,9 +55,10 @@ struct OptionValues {
   std::string peer_listen, peer_address;
   uint16_t rtc_port_min = 0, rtc_port_max = 0;
   std::string rtc_address;
-  uint64_t disk_reserve_bytes, session_memory_bytes;
+  std::optional<uint64_t> disk_reserve_bytes, session_memory_bytes;
   media::EncoderSettings encoding;
-  uint32_t idle_idr_ms, max_encode_width, max_encode_height, max_sessions;
+  uint32_t idle_idr_ms, max_encode_width, max_encode_height;
+  std::optional<uint32_t> max_sessions;
 };
 RuntimeOptions::RuntimeOptions(OptionValues v)
     : node_id(std::move(v.node_id)),
@@ -124,13 +125,15 @@ Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& config,
       continue;
     }
     if (name == "diskReserveBytes" || name == "sessionMemoryBytes") {
+      if (value.is_null())
+        continue;
       if (!value.is_number_integer() || (!value.is_number_unsigned() && value.get<int64_t>() < 0) ||
           value.get<uint64_t>() > 9007199254740991ULL ||
           (name == "sessionMemoryBytes" && value == 0))
         return Invalid(name);
       continue;
     }
-    if (value.is_null() && nullable.contains(name))
+    if (value.is_null() && (nullable.contains(name) || name == "maxSessions"))
       continue;
     if (auto range = ranges.find(name); range != ranges.end()) {
       if (!value.is_number_integer() ||
@@ -174,8 +177,12 @@ Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& config,
         }))
       return Invalid("rtc.address");
   }
-  v.disk_reserve_bytes = config["diskReserveBytes"];
-  v.session_memory_bytes = config["sessionMemoryBytes"];
+  if (!config["diskReserveBytes"].is_null())
+    v.disk_reserve_bytes = config["diskReserveBytes"].get<uint64_t>();
+  if (!config["sessionMemoryBytes"].is_null())
+    v.session_memory_bytes = config["sessionMemoryBytes"].get<uint64_t>();
+  if (!config["maxSessions"].is_null())
+    v.max_sessions = config["maxSessions"].get<uint32_t>();
   v.node_id = node_id;
   v.build_id = std::move(build_id);
   v.node_root = root;
@@ -196,7 +203,6 @@ Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& config,
   number("idleIdrMs", v.idle_idr_ms);
   number("maxEncodeWidth", v.max_encode_width);
   number("maxEncodeHeight", v.max_encode_height);
-  number("maxSessions", v.max_sessions);
   if (v.encoding.max_bitrate < v.encoding.bitrate)
     return Invalid("maxBitrate");
   v.encoding.target_usage_explicit = !config["targetUsage"].is_null();

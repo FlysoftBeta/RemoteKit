@@ -1,3 +1,4 @@
+#include "browser/control_response.h"
 #include "browser/profile_services.h"
 #include "browser/browser_context.h"
 #include "browser/page_requests.h"
@@ -46,12 +47,11 @@ using Status = content::PermissionStatus;
 using Result = content::PermissionResult;
 constexpr std::size_t kStringLimit = 16 * 1024;
 
-base::DictValue Response(const std::string& error = {}) {
-  base::DictValue result;
-  result.Set("ok", error.empty());
-  if (!error.empty())
-    result.Set("error", error);
-  return result;
+base::DictValue Response() {
+  return ControlResult::Success(0);
+}
+base::DictValue Response(protocol::ErrorCode code, const std::string& message) {
+  return ControlResult::Failure(0, code, message);
 }
 std::string Clip(std::string_view value) {
   return std::string(base::TruncateUTF8ToByteSize(value, kStringLimit));
@@ -759,7 +759,7 @@ void ProfileDownloads::Acknowledge(const base::ListValue& ids) {
 void ProfileDownloads::Remove(const std::string& guid,
                               base::OnceCallback<void(base::DictValue)> callback) {
   if (shutdown_) {
-    std::move(callback).Run(Response("profile_shutdown"));
+    std::move(callback).Run(Response(protocol::ErrorCode::kUnavailable, "profile_shutdown"));
     return;
   }
   const auto found = records_.find(guid);
@@ -778,7 +778,8 @@ void ProfileDownloads::Remove(const std::string& guid,
             if (!owner)
               return;
             if (!removed) {
-              std::move(callback).Run(Response("download_remove_failed"));
+              std::move(callback).Run(
+                  Response(protocol::ErrorCode::kUnavailable, "download_remove_failed"));
               return;
             }
             const auto found = owner->records_.find(guid);
@@ -794,7 +795,7 @@ void ProfileDownloads::Remove(const std::string& guid,
 base::DictValue ProfileDownloads::Command(const base::DictValue& command) {
   const auto* action = command.FindString("action");
   if (!action)
-    return Response("action_required");
+    return Response(protocol::ErrorCode::kInvalidRequest, "action_required");
   if (*action == "snapshot") {
     auto result = Response();
     result.Set("policy", "https_network_trustworthy_local_no_safebrowsing");
@@ -810,12 +811,12 @@ base::DictValue ProfileDownloads::Command(const base::DictValue& command) {
     return result;
   }
   if (shutdown_)
-    return Response("profile_shutdown");
+    return Response(protocol::ErrorCode::kUnavailable, "profile_shutdown");
   const auto* key = command.FindString("id");
   std::uint32_t id = 0;
   if (!key || key->size() > 10 || !base::StringToUint(*key, &id) ||
       base::NumberToString(id) != *key)
-    return Response("download_id_required");
+    return Response(protocol::ErrorCode::kInvalidRequest, "download_id_required");
   download::DownloadItem* item = nullptr;
   for (const auto& [guid, record] : records_)
     if (record.item && record.item->GetId() == id) {
@@ -823,24 +824,24 @@ base::DictValue ProfileDownloads::Command(const base::DictValue& command) {
       break;
     }
   if (!item)
-    return Response("download_not_available");
+    return Response(protocol::ErrorCode::kNotFound, "download_not_available");
   if (*action == "cancel") {
     if (item->GetState() == download::DownloadItem::COMPLETE ||
         item->GetState() == download::DownloadItem::CANCELLED)
-      return Response("download_already_terminal");
+      return Response(protocol::ErrorCode::kConflict, "download_already_terminal");
     item->Cancel(true);
   } else if (*action == "pause") {
     if (item->GetState() != download::DownloadItem::IN_PROGRESS)
-      return Response("download_not_in_progress");
+      return Response(protocol::ErrorCode::kConflict, "download_not_in_progress");
     item->Pause();
   } else if (*action == "resume") {
     if (!BlockReason(item).empty())
-      return Response("download_blocked_by_policy");
+      return Response(protocol::ErrorCode::kForbidden, "download_blocked_by_policy");
     if (!item->CanResume())
-      return Response("download_cannot_resume");
+      return Response(protocol::ErrorCode::kRejected, "download_cannot_resume");
     item->Resume(true);
   } else
-    return Response("unsupported_action");
+    return Response(protocol::ErrorCode::kInvalidRequest, "unsupported_action");
   auto result = Response();
   result.Set("state", "submitted");
   return result;

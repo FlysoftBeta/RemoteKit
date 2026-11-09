@@ -157,18 +157,19 @@ int main() {
   Check(services.Admit(1, Action(), 0), "admit action");
   Check(services.Admit(1, Action(), 0), "duplicate pending action");
   unsigned dispatched = 0;
-  services.DispatchPending(1, 1, [&](auto) {
+  services.DispatchPending(1, 1, [&](auto, auto delivery) {
+    delivery->MarkWritten();
     ++dispatched;
     return true;
   });
-  services.DispatchPending(1, 2, [&](auto) {
+  services.DispatchPending(1, 2, [&](auto, auto delivery) {
+    delivery->MarkWritten();
     ++dispatched;
     return true;
   });
   Check(dispatched == 1, "never blindly replay");
   auto reply = Action();
   reply.erase("action");
-  reply["ok"] = true;
   reply["result"] = {{"status", "committed"}};
   Check(!services.Result(2, reply), "old peer result");
   Check(services.Result(1, reply), "route matching result");
@@ -178,26 +179,34 @@ int main() {
     sent.push_back(Json::parse(bytes));
     return 0;
   });
-  Check(sent.size() == 1 && sent[0]["type"] == "product.result", "BUSY retains result");
+  Check(sent.size() == 1 && sent[0]["type"] == "product.result" && !sent[0].contains("ok") &&
+            !sent[0].contains("error"),
+        "BUSY retains result");
   services.Admit(1, Action(1), 0);
-  services.DispatchPending(1, 1, [](auto) { return false; });
+  services.DispatchPending(1, 1, [](auto, auto) { return false; });
   services.Flush(1, [&](auto bytes) {
     sent.push_back(Json::parse(bytes));
     return 0;
   });
-  Check(sent.back()["error"]["code"] == "unavailable" &&
-            sent.back()["error"]["message"] == "control_unavailable",
+  Check(sent.back()["result"]["error"]["code"] == "unavailable" &&
+            sent.back()["result"]["error"]["message"] == "control_unavailable",
         "explicit management disconnect");
-  Check(sent.back()["result"]["status"] == "rejected", "never forwarded is explicitly rejected");
+  Check(sent.back()["result"]["status"] == "failed", "never forwarded is explicitly rejected");
   services.Admit(1, Action(2), 0);
-  services.DispatchPending(1, 1, [](auto) { return true; });
-  services.DispatchPending(1, 15000, [](auto) { return true; });
+  services.DispatchPending(1, 1, [](auto, auto delivery) {
+    delivery->MarkWritten();
+    return true;
+  });
+  services.DispatchPending(1, 15000, [](auto, auto delivery) {
+    delivery->MarkWritten();
+    return true;
+  });
   services.Flush(1, [&](auto bytes) {
     sent.push_back(Json::parse(bytes));
     return 0;
   });
-  Check(sent.back()["error"]["code"] == "outcome_unknown" &&
-            sent.back()["error"]["message"] == "control_result_unknown",
+  Check(sent.back()["result"]["error"]["code"] == "outcome_unknown" &&
+            sent.back()["result"]["error"]["message"] == "control_result_unknown",
         "ambiguous accepted message expires without replay");
   std::ifstream fixture(std::filesystem::path(__FILE__).parent_path() /
                         "fixtures/product-action-timeout.json");
@@ -206,16 +215,15 @@ int main() {
   fixture >> expected;
   Check(sent.back() == expected, "native timeout wire matches Client semantic fixture");
   auto late = Action(2);
-  late["ok"] = true;
   late["result"] = {{"status", "committed"}};
   Check(!services.Result(1, late),
         "late result cannot overwrite already returned uncertain receipt");
-  services.DispatchPending(1, 16000, [&](auto) {
+  services.DispatchPending(1, 16000, [&](auto, auto) {
     Check(false, "timeout cannot replay operation");
     return true;
   });
   services.Admit(1, Action(3), 0);
-  services.DispatchPending(1, 15000, [](auto) {
+  services.DispatchPending(1, 15000, [](auto, auto) {
     Check(false, "expired undispatched operation cannot forward");
     return true;
   });
@@ -223,10 +231,32 @@ int main() {
     sent.push_back(Json::parse(bytes));
     return 0;
   });
-  Check(sent.back()["result"]["status"] == "rejected" &&
-            sent.back()["error"]["code"] == "unavailable" &&
-            sent.back()["error"]["message"] == "control_unavailable",
+  Check(sent.back()["result"]["status"] == "failed" &&
+            sent.back()["result"]["error"]["code"] == "unavailable" &&
+            sent.back()["result"]["error"]["message"] == "control_unavailable",
         "undispatched expiration is known failure");
+  remotekit::DeliveryFlag queued;
+  services.Admit(1, Action(4), 0);
+  services.DispatchPending(1, 1, [&](auto, auto delivery) {
+    queued = delivery;
+    return true;
+  });
+  services.DispatchPending(1, 15000, [](auto, auto) { return true; });
+  bool wrote = false;
+  Check(!queued->Dispatch([&] {
+                 wrote = true;
+                 return true;
+               })
+                .has_value() &&
+            !wrote,
+        "expired queued action cannot be sent later");
+  services.Flush(1, [&](auto bytes) {
+    sent.push_back(Json::parse(bytes));
+    return 0;
+  });
+  Check(sent.back()["result"]["status"] == "failed" &&
+            sent.back()["result"]["error"]["code"] == "unavailable",
+        "queue admission is not delivery");
   for (unsigned n = 0; n < 64; ++n)
     Check(services.Admit(1, Action(n), 0), "bounded capacity admission");
   Check(!services.Admit(1, Action(64), 0), "bounded backpressure");

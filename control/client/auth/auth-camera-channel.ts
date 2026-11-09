@@ -1,3 +1,5 @@
+import { endpointError } from '../../server/endpoint/gateway';
+import { errorHandling } from '../../shared/error-policy';
 import { RemoteKitError } from '../../shared/errors';
 import { diagnostics } from '../media/diagnostics';
 import {
@@ -207,7 +209,7 @@ export class AuthCameraChannel {
         return;
       }
       if (message.type === 'error' && message.authEpoch === binding.authEpoch) {
-        throw new RemoteKitError(message.error.code, message.error.message);
+        throw endpointError(message.error);
       }
       if (message.type !== 'auth.camera.config' && message.type !== 'auth.camera.frame') return;
       if (

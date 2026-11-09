@@ -43,6 +43,7 @@ struct StorageImportJobs::Job {
   } cookies, local_storage;
   content::StoragePartition* partition = nullptr;
   std::vector<mojo::Remote<blink::mojom::StorageArea>> areas;
+  uint64_t view = 0;
   size_t pending = 0;
   bool flushing = false, done = false;
 };
@@ -51,12 +52,18 @@ StorageImportJobs::StorageImportJobs() = default;
 StorageImportJobs::~StorageImportJobs() = default;
 
 Result<uint64_t> StorageImportJobs::Begin(content::StoragePartition* partition,
-                                          const StorageImportData& data) {
-  if (jobs_.size() >= 16)
-    return {0, {ErrorCode::resource_limit, "Too many storage import jobs"}};
+                                          const StorageImportData& data,
+                                          uint64_t view) {
+  for (const auto& [id, job] : jobs_)
+    if (job->view == view && !job->done)
+      return {0, {ErrorCode::kBusy, "Storage import already pending for this view"}};
+  if (std::ranges::count_if(jobs_, [](const auto& entry) { return !entry.second->done; }) >= 16)
+    return {0, {ErrorCode::kBusy, "Too many storage import jobs"}};
+  std::erase_if(jobs_, [&](const auto& entry) { return entry.second->view == view; });
   const auto id = next_job_++;
   auto job = std::make_unique<Job>();
   job->partition = partition;
+  job->view = view;
   jobs_.emplace(id, std::move(job));
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(&StorageImportJobs::Start, weak_factory_.GetWeakPtr(), id, data));
@@ -64,6 +71,8 @@ Result<uint64_t> StorageImportJobs::Begin(content::StoragePartition* partition,
 }
 
 void StorageImportJobs::Start(uint64_t id, StorageImportData data) {
+  if (!jobs_.contains(id))
+    return;
   auto& job = *jobs_.at(id);
   job.pending = data.cookies.size();
   for (const auto& origin : data.local_storage)
@@ -106,6 +115,8 @@ void StorageImportJobs::Start(uint64_t id, StorageImportData data) {
 }
 
 void StorageImportJobs::OnItem(uint64_t id, bool cookie, bool applied) {
+  if (!jobs_.contains(id))
+    return;
   auto& job = *jobs_.at(id);
   auto& counts = cookie ? job.cookies : job.local_storage;
   if (applied)
@@ -117,6 +128,8 @@ void StorageImportJobs::OnItem(uint64_t id, bool cookie, bool applied) {
 }
 
 void StorageImportJobs::MaybeFlush(uint64_t id) {
+  if (!jobs_.contains(id))
+    return;
   auto& job = *jobs_.at(id);
   if (job.pending || job.flushing)
     return;
@@ -128,6 +141,8 @@ void StorageImportJobs::MaybeFlush(uint64_t id) {
 }
 
 void StorageImportJobs::OnFlushed(uint64_t id) {
+  if (!jobs_.contains(id))
+    return;
   auto& job = *jobs_.at(id);
   job.areas.clear();
   job.done = true;
@@ -136,16 +151,27 @@ void StorageImportJobs::OnFlushed(uint64_t id) {
 Result<base::DictValue> StorageImportJobs::Poll(uint64_t id) {
   const auto found = jobs_.find(id);
   if (found == jobs_.end())
-    return {{}, {ErrorCode::stale_identity, "Unknown storage import job"}};
+    return {{}, {ErrorCode::kNotFound, "Unknown storage import job"}};
   const auto& job = *found->second;
   base::DictValue value;
+  value.Set("job", base::NumberToString(id));
   value.Set("state", job.done ? "done" : "pending");
   if (job.done) {
     value.Set("cookies", job.cookies.Value());
     value.Set("localStorage", job.local_storage.Value());
-    jobs_.erase(found);
   }
   return {std::move(value), {}};
+}
+
+Result<base::DictValue> StorageImportJobs::Latest(uint64_t view) {
+  for (const auto& [id, job] : jobs_)
+    if (job->view == view)
+      return Poll(id);
+  return {{}, {ErrorCode::kNotFound, "No storage import job for this view"}};
+}
+
+void StorageImportJobs::Cancel(uint64_t id) {
+  jobs_.erase(id);
 }
 
 void StorageImportJobs::Clear() {

@@ -51,7 +51,11 @@ class Control final : public remotekit::ManagementLink {
   bool Next(std::string&, uint64_t&, bool&) override { return false; }
   bool Current(uint64_t) override { return true; }
   bool SendReply(uint64_t, const remotekit::Json&) override { return true; }
-  bool SendEvent(const remotekit::Json&, uint64_t) override { return true; }
+  bool SendEvent(const remotekit::Json&, uint64_t, remotekit::DeliveryFlag delivery = {}) override {
+    if (delivery)
+      delivery->MarkWritten();
+    return true;
+  }
   void OnDisconnect(Disconnect) override {}
   remotekit::Result<remotekit::Json> Request(const std::string& name,
                                              remotekit::Json fields) override {
@@ -149,10 +153,11 @@ void Documents(const fs::path& root) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
     failed = first.OpenDocument(unsupported.id, live);
   }
-  CHECK(!failed && failed.error().code == remotekit::ErrorCode::kInvalidRequest);
+  CHECK(!failed && failed.error().code == remotekit::ErrorCode::kRejected);
   const auto located = control.located;
   for (int attempt = 0; attempt < 3; ++attempt)
-    CHECK(first.OpenDocument(unsupported.id, live).error().message == "unsupported document type");
+    CHECK(first.OpenDocument(unsupported.id, live).error().reason ==
+          remotekit::ErrorReason::kDocumentUnsupported);
   CHECK(control.located == located && fs::is_empty(root / "first/documents"));
 }
 

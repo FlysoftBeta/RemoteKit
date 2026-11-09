@@ -1,3 +1,4 @@
+import { retryDelay } from '../../shared/error-policy';
 import { RemoteKitError } from '../../shared/errors';
 import type { ProductState, ViewerViewport } from '../../shared/product';
 import { formatError } from '../util/format-error';
@@ -13,6 +14,10 @@ export class ViewportRequests extends Store<string> {
   private serial = 0;
   private acknowledged?: string;
   private pending?: string;
+  private attempts = 0;
+  private failedKey?: string;
+  private retry?: { key: string; at: number };
+  private attemptKey?: string;
   private state: ProductState | null = null;
   private bounds = { width: 0, height: 0 };
   private dpr = 1;
@@ -43,6 +48,10 @@ export class ViewportRequests extends Store<string> {
     this.serial++;
     this.acknowledged = undefined;
     this.pending = undefined;
+    this.failedKey = undefined;
+    this.attempts = 0;
+    this.retry = undefined;
+    this.attemptKey = undefined;
     clearTimeout(this.timer);
     this.timer = undefined;
     this.state = null;
@@ -73,7 +82,21 @@ export class ViewportRequests extends Store<string> {
         })),
       };
       const key = canonicalJson(params);
-      if (key === this.pending || (this.pending === undefined && key === this.acknowledged)) return;
+      if (
+        key === this.failedKey ||
+        key === this.pending ||
+        (this.pending === undefined && key === this.acknowledged)
+      )
+        return;
+      if (this.attemptKey !== key) {
+        this.attempts = 0;
+        this.retry = undefined;
+        this.attemptKey = key;
+      }
+      if (this.retry?.key === key && this.retry.at > Date.now()) {
+        this.timer = setTimeout(() => this.schedule(), this.retry.at - Date.now());
+        return;
+      }
       this.pending = key;
       const serial = ++this.serial;
       void this.request(params)
@@ -82,6 +105,9 @@ export class ViewportRequests extends Store<string> {
             this.pending = undefined;
             this.acknowledged = key;
             this.publish('');
+            this.attempts = 0;
+            this.retry = undefined;
+            this.failedKey = undefined;
             this.schedule();
           }
         })
@@ -91,12 +117,23 @@ export class ViewportRequests extends Store<string> {
             this.acknowledged = undefined;
           }
           diagnostics.record('viewport', error);
+          if (serial !== this.serial) return;
+          const failure =
+            error instanceof RemoteKitError ? error : new RemoteKitError('internal', '画面尺寸更新失败');
+          const delay = retryDelay(failure, this.attempts++);
+          if (delay !== undefined && this.attempts <= 4) {
+            this.retry = { key, at: Date.now() + delay };
+            this.timer = setTimeout(() => {
+              this.timer = undefined;
+              this.schedule();
+            }, delay);
+            return;
+          }
+          this.failedKey = key;
           if (serial === this.serial && this.available)
             this.publish(
               formatError(
-                error instanceof RemoteKitError
-                  ? error
-                  : new RemoteKitError('unavailable', '画面尺寸更新失败'),
+                error instanceof RemoteKitError ? error : new RemoteKitError('internal', '画面尺寸更新失败'),
               ),
             );
         });

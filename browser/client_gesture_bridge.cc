@@ -40,9 +40,9 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
                             event.GetType() == blink::WebInputEvent::Type::kTouchCancel;
   if ((stopped_ && !cancellation) || !router_ || !root_ || !target_ ||
       !router_->IsViewInMap(root_.get()))
-    return {ErrorCode::stale_identity, "Client touch owner lost"};
+    return {ErrorCode::kConflict, "Client touch owner lost"};
   if (pending_.size() >= 128)
-    return {ErrorCode::busy, "Client touch ACK queue full"};
+    return {ErrorCode::kBusy, "Client touch ACK queue full"};
   event.unique_touch_event_id = ui::GetNextTouchEventId();
   content::MotionEventWeb selection_motion(event);
   const bool selection_handled = HandleSelectionTouch(root_.get(), selection_motion);
@@ -68,36 +68,36 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
     SelectionTouchBoundary(root_.get(), false);
   }
   if (!first_id_ && !event.IsTouchSequenceStart())
-    return {ErrorCode::invalid_request, "Missing first client touch"};
+    return {ErrorCode::kInvalidRequest, "Missing first client touch"};
   const auto first_id = first_id_ ? first_id_ : event.unique_touch_event_id;
   auto candidate_state = candidate_state_;
   if (!candidate_state.Accept(candidates, !first_id_, event.IsTouchSequenceEnd(),
                               event.touches_length))
-    return {ErrorCode::invalid_request, "Invalid client gesture candidate order"};
+    return {ErrorCode::kInvalidRequest, "Invalid client gesture candidate order"};
   auto source_time = source_time_;
   if (!source_time.Raw(source_elapsed_us, event.IsTouchSequenceEnd()))
-    return {ErrorCode::invalid_request, "Invalid client raw source time"};
+    return {ErrorCode::kInvalidRequest, "Invalid client raw source time"};
   event.moved_beyond_slop_region = candidate_state.moved();
   content::MotionEventWeb motion(event);
   auto packet = MakeClientGesturePacket(motion, candidates, first_id);
   if (!router_->RegisterClientTouch(
           root_.get(), event.unique_touch_event_id,
           base::BindOnce(&ClientGestureBridge::Ack, weak_factory_.GetWeakPtr())))
-    return {ErrorCode::busy, "Client touch router registrations full"};
+    return {ErrorCode::kBusy, "Client touch router registrations full"};
   pending_.insert(event.unique_touch_event_id);
   auto weak = weak_factory_.GetWeakPtr();
   if (!cancellation &&
       filter_.OnGesturePacket(packet) != ui::TouchDispositionGestureFilter::SUCCESS) {
     router_->WithdrawUnroutedClientTouch(root_.get(), event.unique_touch_event_id);
     pending_.erase(event.unique_touch_event_id);
-    return {ErrorCode::invalid_request, "Invalid client gesture packet order"};
+    return {ErrorCode::kInvalidRequest, "Invalid client gesture packet order"};
   }
   if (!weak || (stopped_ && !cancellation) || !router_ || !root_ || !target_ ||
       !router_->IsViewInMap(root_.get())) {
     if (router_)
       router_->WithdrawUnroutedClientTouch(root_.get(), event.unique_touch_event_id);
     pending_.erase(event.unique_touch_event_id);
-    return {ErrorCode::stale_identity, "Client touch owner destroyed"};
+    return {ErrorCode::kConflict, "Client touch owner destroyed"};
   }
   first_id_ = first_id;
   candidate_state_ = candidate_state;
@@ -205,7 +205,7 @@ Status ClientGestureBridge::LongPress(const GestureInput& value) {
   auto candidate = candidate_state_;
   auto source = source_time_;
   if (contact_count_ != 1 || !candidate.LongPress() || !source.Raw(value.elapsed_us, false))
-    return {ErrorCode::invalid_request, "Invalid long press"};
+    return {ErrorCode::kInvalidRequest, "Invalid long press"};
   ui::GestureEventDetails details(ui::EventType::kGestureLongPress);
   details.set_device_type(ui::GestureDeviceType::DEVICE_TOUCHSCREEN);
   details.set_primary_unique_touch_event_id(first_id_);
@@ -216,7 +216,7 @@ Status ClientGestureBridge::LongPress(const GestureInput& value) {
   source_time_ = source;
   if (filter_.OnGesturePacket(ui::GestureEventDataPacket::FromTouchTimeout(gesture)) !=
       ui::TouchDispositionGestureFilter::SUCCESS)
-    return {ErrorCode::invalid_request, "Invalid long press packet order"};
+    return {ErrorCode::kInvalidRequest, "Invalid long press packet order"};
   return {};
 }
 Status ClientGestureBridge::Momentum(const GestureInput& value) {
@@ -224,7 +224,7 @@ Status ClientGestureBridge::Momentum(const GestureInput& value) {
   if (selection_owned_)
     return {};
   if (stopped_ || value.sequence_id != sequence_ || !root_ || !target_)
-    return {ErrorCode::stale_identity, "Momentum owner lost"};
+    return {ErrorCode::kConflict, "Momentum owner lost"};
   if (value.action == GestureInput::Action::cancel) {
     EndMomentum();
     return {};
@@ -234,11 +234,11 @@ Status ClientGestureBridge::Momentum(const GestureInput& value) {
       buffered_ = value;
       return {};
     }
-    return {ErrorCode::stale_identity, "Momentum was not allowed"};
+    return {ErrorCode::kConflict, "Momentum was not allowed"};
   }
   if (base::TimeTicks::Now() > momentum_deadline_ || !source_time_.Momentum(value.elapsed_us)) {
     EndMomentum();
-    return {ErrorCode::invalid_request, "Invalid momentum source time"};
+    return {ErrorCode::kInvalidRequest, "Invalid momentum source time"};
   }
   auto event = *last_gesture_;
   event.SetType(blink::WebInputEvent::Type::kGestureScrollUpdate);

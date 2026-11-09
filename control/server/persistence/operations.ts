@@ -20,7 +20,7 @@ export class OperationsRepository {
       const receipt = JSON.parse(row.receipt);
       if (['accepted', 'applying'].includes(receipt.status)) {
         settle(receipt, { status: 'unknown' });
-        receipt.error = 'Control重启，执行结果待对账';
+        receipt.error = { code: 'outcome_unknown', message: 'Control重启，执行结果待对账' };
         this.db
           .prepare('UPDATE operation_receipts SET receipt=? WHERE tenant=? AND id=?')
           .run(JSON.stringify(receipt), row.tenant, row.id);
@@ -98,8 +98,8 @@ export class OperationsRepository {
           (receipt.status === 'unknown' && !receipt.resolved)
         );
       });
-      if (unresolved) throw new RemoteKitError('limit_exceeded', '操作收据已满，请先核对未确认的操作');
-      // Rotate only between operations. Old generations always receive expired.
+      if (unresolved) throw new RemoteKitError('conflict', '操作收据已满，请先核对未确认的操作');
+      // Rotate only between operations. Old generations require a workspace refresh.
       transaction(this.db, () => {
         this.db.prepare('DELETE FROM operation_receipts WHERE tenant=?').run(tenant);
         this.db

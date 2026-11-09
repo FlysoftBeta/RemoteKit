@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { HttpClient, type HttpOptions, record, malformed, requiredText, serviceError } from '../http.js';
 import { AUTH_CONFIG } from './config.js';
-import { AuthClient, type AccountSession } from './auth.js';
+import { AuthClient, type AccountSession, type CaptchaChallenge } from './auth.js';
 
 const ZHIXUE_BASE_URL = 'https://www.zhixue.com';
 
@@ -35,8 +35,11 @@ export class ZhixueAuthClient {
     this.randomHex = options.randomHex ?? (() => randomBytes(16).toString('hex'));
   }
 
-  async loginAccount(options: Parameters<AuthClient['login']>[0]): Promise<AccountSession> {
-    return this.renew(await this.auth.login(options));
+  async loginAccount(
+    options: Parameters<AuthClient['login']>[0],
+  ): Promise<AccountSession | CaptchaChallenge> {
+    const result = await this.auth.login(options);
+    return 'challenge' in result ? result : this.renew(result);
   }
 
   async renew(input: AccountSession): Promise<AccountSession> {
@@ -119,7 +122,7 @@ export class ZhixueAuthClient {
         result: envelope.result,
         cookies: { ...(previous?.cookies ?? {}), ...responseCookies(response.headers) },
       };
-    });
+    }, false);
   }
 }
 

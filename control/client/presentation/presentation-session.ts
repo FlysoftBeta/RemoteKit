@@ -10,7 +10,8 @@ import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneS
 import { VideoPlane } from './video-plane';
 import { barrierMatchesLayout, presentationBarrier, type PresentationBarrier } from './video-presentation';
 
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, type ErrorCode } from '../../shared/errors';
+import { retryDelay } from '../../shared/error-policy';
 import { diagnostics } from '../media/diagnostics';
 import { type Incoming } from '../rtc/protocol';
 import { Events } from '../util/store';
@@ -19,6 +20,23 @@ import type { PlaneRenderer, VideoObservation, ViewportRegistration } from './ty
 import type { AuthorizationScope } from '../auth/authorization-scope';
 import type { EndpointChannel } from '../rtc/endpoint-channel';
 import type { RtcSession } from '../rtc/rtc-session';
+const presentationMessages = {
+  'video-capability-unavailable': '浏览器缺少视频呈现所需的功能。',
+  'video-rtp-metadata-unavailable': '浏览器未提供视频帧时间戳，无法显示远程页面。',
+  'video-playback-failed': '浏览器无法播放远程视频。',
+  'presentation-protocol-unavailable': '远程视频呈现协商超时。',
+  'invalid-presentation-mode': '远程节点返回了不兼容的视频呈现模式。',
+  'invalid-presentation-barrier': '远程节点返回了无效的视频布局信息。',
+};
+const presentationCodes: Record<PresentationErrorCode, ErrorCode> = {
+  'video-capability-unavailable': 'rejected',
+  'video-rtp-metadata-unavailable': 'rejected',
+  'video-playback-failed': 'unavailable',
+  'presentation-protocol-unavailable': 'unavailable',
+  'invalid-presentation-mode': 'internal',
+  'invalid-presentation-barrier': 'internal',
+};
+
 type PresentationErrorCode =
   | 'video-capability-unavailable'
   | 'video-rtp-metadata-unavailable'
@@ -91,15 +109,19 @@ export class PresentationSession {
 
   get presentationError() {
     return this.presentationErrorCode
-      ? new RemoteKitError('unavailable', '视频呈现不可用', this.presentationErrorCode)
+      ? new RemoteKitError(
+          presentationCodes[this.presentationErrorCode],
+          presentationMessages[this.presentationErrorCode],
+          {
+            detail: this.presentationErrorCode,
+          },
+        )
       : undefined;
   }
 
   get canRetryPresentation() {
-    return (
-      this.presentationErrorCode === 'video-playback-failed' ||
-      this.presentationErrorCode === 'presentation-protocol-unavailable'
-    );
+    const error = this.presentationError;
+    return !!error && retryDelay(error, 0) !== undefined;
   }
 
   retryPresentation() {
@@ -176,7 +198,7 @@ export class PresentationSession {
   getRenderingDiagnostics() {
     return {
       backend: this.presentationBackend,
-      backendReason: this.presentationErrorCode,
+      backendReason: this.presentationError?.message,
       videoCompositorByView: Object.fromEntries(
         [...this.videoPlanes].map(([renderer, plane]) => [
           renderer.view.id,

@@ -34,6 +34,11 @@ function issues(overview: AdminOverview) {
       severity: 'info',
       text: `${overview.storage.pendingSessionDeletions} 个已删除会话的数据等待节点上线后清理。`,
     });
+  for (const failure of overview.storage.deletionFailures ?? [])
+    list.push({
+      severity: 'error',
+      text: `会话清理失败（${failure.nodeId} · ${failure.error.code}）：${failure.error.message}`,
+    });
   if (overview.sessionImport.lastError)
     list.push({
       severity: 'warning',

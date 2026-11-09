@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../../shared/errors';
 import type { DocumentResource, DocumentSource } from './document-source';
 
 type Entry = { resource: DocumentResource; url?: string; users: number };
@@ -20,11 +21,11 @@ export class ResourceCache {
   ) {}
 
   async acquire(id: string, signal: AbortSignal): Promise<ResourceLease> {
-    if (signal.aborted || this.closed) throw new DOMException('请求已取消', 'AbortError');
+    if (signal.aborted || this.closed) throw new RemoteKitError('canceled', '');
     let entry = this.entries.get(id);
     if (!entry) {
       const resource = await this.source.resource(id, signal);
-      if (signal.aborted || this.closed) throw new DOMException('请求已取消', 'AbortError');
+      if (signal.aborted || this.closed) throw new RemoteKitError('canceled', '');
       entry = this.entries.get(id);
       if (!entry) {
         entry = {

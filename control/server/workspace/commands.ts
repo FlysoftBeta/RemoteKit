@@ -53,7 +53,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
     action = body as any;
   const effects: CommandEffect[] = [];
   if (action.source !== undefined && action.source !== 'launcher')
-    throw new RemoteKitError('invalid_request', 'Invalid action source');
+    throw new RemoteKitError('invalid_request', '操作来源无效', { detail: 'Invalid action source' });
   let idIndex = 0;
   const now = ctx.now ?? Date.now();
   const nextId = () => ctx.ids[idIndex++];
@@ -67,25 +67,24 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
     throw new RemoteKitError('forbidden', '登录页面仅支持取消或关闭');
   const window = () => findWindow(state, action.windowId);
   const navigationUrl = (value: unknown, searchOnly = false) => {
-    try {
-      const resolve = searchOnly ? resolveSearch : resolveNavigation;
-      return resolve(value, state.settings.browser.searchEngine);
-    } catch (error) {
-      throw new RemoteKitError(
-        'invalid_request',
-        error instanceof Error ? error.message : '无效网址或搜索内容',
-      );
-    }
+    const resolve = searchOnly ? resolveSearch : resolveNavigation;
+    return resolve(value, state.settings.browser.searchEngine);
   };
   const createTab = (windowId: string, address: string | undefined = action.url, searchOnly = false) => {
     assertWindowMutable(state, windowId);
     const target = findWindow(state, windowId);
     if (target.appId !== 'browser' && !target.appId.startsWith('web:'))
-      throw new RemoteKitError('invalid_request', 'This App does not support tabs');
+      throw new RemoteKitError('invalid_request', '此应用不支持标签页', {
+        detail: 'This App does not support tabs',
+      });
     if (target.appId.startsWith('web:') && state.tabs.some((tab) => tab.windowId === target.id))
-      throw new RemoteKitError('conflict', 'Web Apps have exactly one tab');
+      throw new RemoteKitError('conflict', '网页应用只能有一个标签页', {
+        detail: 'Web Apps have exactly one tab',
+      });
     if (state.tabs.length >= WORKSPACE_LIMITS.tabs)
-      throw new RemoteKitError('limit_exceeded', 'The workspace supports up to 32 tabs');
+      throw new RemoteKitError('limit_exceeded', '工作区最多支持 32 个标签页', {
+        detail: 'The workspace supports up to 32 tabs',
+      });
     const kind = address === undefined ? 'start' : 'remote';
     const next: ProductTab = {
       id: nextId(),
@@ -102,35 +101,52 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
   };
   const closeWindows = (ids: string[]) => {
     if (state.pendingWindowCloseId || state.pendingClose || state.pendingWindowCloseIds?.length)
-      throw new RemoteKitError('conflict', 'Resolve the pending close request first');
+      throw new RemoteKitError('conflict', '请先处理待确认的关闭请求', {
+        detail: 'Resolve the pending close request first',
+      });
     state.pendingWindowCloseIds = [...ids];
     state.pendingWindowCloseId = state.pendingWindowCloseIds.shift() ?? null;
     if (state.pendingWindowCloseId) effects.push({ kind: 'closeWindow' });
   };
   const httpUrl = (value: unknown) => {
-    if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 8192)
-      throw new RemoteKitError('invalid_request', 'Invalid URL');
+    if (typeof value !== 'string') throw new RemoteKitError('invalid_request', '网址格式无效');
+    if (Buffer.byteLength(value, 'utf8') > 8192)
+      throw new RemoteKitError('limit_exceeded', '网址超过 8192 字节');
     let parsed: URL;
     try {
       parsed = new URL(value);
     } catch {
-      throw new RemoteKitError('invalid_request', 'Enter an HTTP or HTTPS URL');
+      throw new RemoteKitError('invalid_request', '请输入 HTTP 或 HTTPS 网址', {
+        detail: 'Enter an HTTP or HTTPS URL',
+      });
     }
     if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password)
-      throw new RemoteKitError('invalid_request', 'Enter an HTTP or HTTPS URL');
+      throw new RemoteKitError('invalid_request', '请输入 HTTP 或 HTTPS 网址', {
+        detail: 'Enter an HTTP or HTTPS URL',
+      });
+    if (Buffer.byteLength(parsed.href, 'utf8') > 8192)
+      throw new RemoteKitError('limit_exceeded', '网址编码后超过 8192 字节');
     return parsed.href;
   };
   const appDefinition = (value: AppDefinition): Omit<InstalledApp, 'id' | 'createdAt' | 'updatedAt'> => {
-    if (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 120)
-      throw new RemoteKitError('invalid_request', 'App names must contain 1 to 120 characters');
+    if (typeof value.name === 'string' && value.name.length > 120)
+      throw new RemoteKitError('limit_exceeded', '应用名称超过 120 字符');
+    if (typeof value.name !== 'string' || !value.name.trim())
+      throw new RemoteKitError('invalid_request', '应用名称应为 1 至 120 个字符', {
+        detail: 'App names must contain 1 to 120 characters',
+      });
     const startUrl = httpUrl(value.startUrl);
     const scope = httpUrl(value.scope ?? new URL('.', startUrl).href);
     if (new URL(scope).origin !== new URL(startUrl).origin || !startUrl.startsWith(scope))
-      throw new RemoteKitError('invalid_request', 'The start URL must be within the same-origin scope');
+      throw new RemoteKitError('invalid_request', '启动网址必须位于同源范围内', {
+        detail: 'The start URL must be within the same-origin scope',
+      });
     if (value.display !== undefined && !['standalone', 'browser'].includes(value.display))
-      throw new RemoteKitError('invalid_request', 'Invalid App display mode');
+      throw new RemoteKitError('invalid_request', '应用显示模式无效', { detail: 'Invalid App display mode' });
     if (value.themeColor !== undefined && !/^#[0-9a-f]{6}$/i.test(value.themeColor))
-      throw new RemoteKitError('invalid_request', 'Theme color must be #rrggbb');
+      throw new RemoteKitError('invalid_request', '主题颜色应为 #rrggbb 格式', {
+        detail: 'Theme color must be #rrggbb',
+      });
     return {
       name: value.name.trim(),
       startUrl,
@@ -141,7 +157,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
   };
   const app = () => {
     const installed = state.apps.find((item) => `web:${item.id}` === action.appId);
-    if (!installed) throw new RemoteKitError('not_found', 'App does not exist');
+    if (!installed) throw new RemoteKitError('not_found', '应用不存在', { detail: 'App does not exist' });
     return installed;
   };
   let application: ProductActionResult['application'];
@@ -159,14 +175,18 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         typeof action.appId !== 'string' ||
         (!isBuiltinApp(action.appId) && !action.appId.startsWith('web:'))
       )
-        throw new RemoteKitError('invalid_request', 'Invalid App');
+        throw new RemoteKitError('invalid_request', '应用信息无效', { detail: 'Invalid App' });
       const installed = action.appId.startsWith('web:') ? app() : undefined;
       if (installed && installed.id === state.pendingAppUninstallId)
-        throw new RemoteKitError('conflict', 'The App is being uninstalled');
+        throw new RemoteKitError('conflict', '应用正在卸载', { detail: 'The App is being uninstalled' });
       if (state.windows.length >= WORKSPACE_LIMITS.windows)
-        throw new RemoteKitError('limit_exceeded', 'The workspace supports up to 16 windows');
+        throw new RemoteKitError('limit_exceeded', '工作区最多支持 16 个窗口', {
+          detail: 'The workspace supports up to 16 windows',
+        });
       if (action.url !== undefined && !installed && action.appId !== 'browser')
-        throw new RemoteKitError('invalid_request', 'This App does not support URLs');
+        throw new RemoteKitError('invalid_request', '此应用不支持网址', {
+          detail: 'This App does not support URLs',
+        });
       const id = nextId();
       state.windows.push({ id, appId: action.appId, activeTabId: null, lastActiveAt: now });
       if (action.placement?.mode === 'replace')
@@ -183,13 +203,12 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       break;
     case 'window.state': {
       const value = action.state;
-      if (
-        !value ||
-        typeof value !== 'object' ||
-        Array.isArray(value) ||
-        Buffer.byteLength(JSON.stringify(value), 'utf8') > 8192
-      )
-        throw new RemoteKitError('invalid_request', 'Window state must be a JSON object of at most 8 KiB');
+      if (!value || typeof value !== 'object' || Array.isArray(value))
+        throw new RemoteKitError('invalid_request', '窗口状态必须是 JSON 对象', {
+          detail: 'Window state must be a JSON object of at most 8 KiB',
+        });
+      if (Buffer.byteLength(JSON.stringify(value), 'utf8') > 8192)
+        throw new RemoteKitError('limit_exceeded', '窗口状态超过 8 KiB');
       window().state = structuredClone(value);
       break;
     }
@@ -207,9 +226,10 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
           (weight: unknown) => typeof weight !== 'number' || !Number.isFinite(weight) || weight <= 0,
         )
       )
-        throw new RemoteKitError('invalid_request', 'Invalid value');
+        throw new RemoteKitError('invalid_request', '参数值无效', { detail: 'Invalid value' });
       const sum = action.weights.reduce((total: number, weight: number) => total + weight, 0);
-      if (!Number.isFinite(sum)) throw new RemoteKitError('invalid_request', 'Invalid value');
+      if (!Number.isFinite(sum))
+        throw new RemoteKitError('invalid_request', '参数值无效', { detail: 'Invalid value' });
       space.weights = action.weights.map((weight: number) => weight / sum);
       break;
     }
@@ -252,9 +272,9 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
     }
     case 'favorite.add': {
       const url = cleanUrl(httpUrl(action.url));
-      if (!url) throw new RemoteKitError('invalid_request', 'Invalid URL');
+      if (!url) throw new RemoteKitError('invalid_request', '网址格式无效', { detail: 'Invalid URL' });
       if (typeof action.title !== 'string' || action.title.length > 512)
-        throw new RemoteKitError('invalid_request', 'Invalid value');
+        throw new RemoteKitError('invalid_request', '参数值无效', { detail: 'Invalid value' });
       const existing = state.favorites.find((favorite) => favorite.url === url);
       if (existing) existing.title = action.title;
       else state.favorites.push({ id: nextId(), url, title: action.title, createdAt: now });
@@ -262,13 +282,15 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
     }
     case 'favorite.remove': {
       if (!state.favorites.some((favorite) => favorite.id === action.id))
-        throw new RemoteKitError('not_found', 'Item does not exist');
+        throw new RemoteKitError('not_found', '项目不存在', { detail: 'Item does not exist' });
       state.favorites = state.favorites.filter((favorite) => favorite.id !== action.id);
       break;
     }
     case 'tab.create':
       if (action.url !== undefined && action.query !== undefined)
-        throw new RemoteKitError('invalid_request', 'URL and query are mutually exclusive');
+        throw new RemoteKitError('invalid_request', '网址和搜索内容不能同时提供', {
+          detail: 'URL and query are mutually exclusive',
+        });
       createTab(
         window().id,
         action.query === undefined ? action.url : action.query,
@@ -288,7 +310,9 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       assertWindowMutable(state, old.id);
       assertWindowMutable(state, target.id);
       if (old.appId !== 'browser' || target.appId !== 'browser')
-        throw new RemoteKitError('invalid_request', 'Tabs can only move between browser windows');
+        throw new RemoteKitError('invalid_request', '标签页只能在浏览器窗口之间移动', {
+          detail: 'Tabs can only move between browser windows',
+        });
       if (action.index !== undefined && !(Number.isInteger(action.index) && action.index >= 0))
         throw new RemoteKitError('invalid_request', '无效的标签页位置');
       placeTab(state.tabs, t.id, target.id, action.index);
@@ -303,7 +327,10 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         address = navigationUrl(action.url),
         previousKind = t.kind ?? 'remote';
       if (t.lifecycleRecovery || t.lifecycleRecoveryError)
-        throw new RemoteKitError('conflict', t.lifecycleRecoveryError ?? '页面正在恢复');
+        throw new RemoteKitError(
+          t.lifecycleRecoveryError ? 'unavailable' : 'busy',
+          t.lifecycleRecoveryError ?? '页面正在恢复',
+        );
       if (ctx.execution) {
         t.navigation = {
           operationId: ctx.execution.operationId,
@@ -327,7 +354,10 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         throw new RemoteKitError('invalid_request', '未知导航命令');
       if (isLocalTab(t)) break;
       if (t.lifecycleRecovery || t.lifecycleRecoveryError)
-        throw new RemoteKitError('conflict', t.lifecycleRecoveryError ?? '页面正在恢复');
+        throw new RemoteKitError(
+          t.lifecycleRecoveryError ? 'unavailable' : 'busy',
+          t.lifecycleRecoveryError ?? '页面正在恢复',
+        );
       if (ctx.execution && action.command !== 'stop')
         t.navigation = {
           operationId: ctx.execution.operationId,
@@ -383,7 +413,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         Array.isArray(value) ||
         Object.keys(value).some((key) => !['workspace', 'browser'].includes(key))
       )
-        throw new RemoteKitError('invalid_request', 'Item does not exist');
+        throw new RemoteKitError('invalid_request', '项目不存在', { detail: 'Item does not exist' });
       const browser = value.browser;
       if (browser !== undefined) {
         if (
@@ -392,14 +422,14 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
           Array.isArray(browser) ||
           Object.keys(browser).some((key) => !['searchEngine', 'memorySaverEnabled'].includes(key))
         )
-          throw new RemoteKitError('invalid_request', 'Invalid settings');
+          throw new RemoteKitError('invalid_request', '设置格式无效', { detail: 'Invalid settings' });
         if (
           'searchEngine' in browser &&
           !SEARCH_ENGINES.some((engine) => engine.value === browser.searchEngine)
         )
-          throw new RemoteKitError('invalid_request', 'Invalid value');
+          throw new RemoteKitError('invalid_request', '参数值无效', { detail: 'Invalid value' });
         if ('memorySaverEnabled' in browser && typeof browser.memorySaverEnabled !== 'boolean')
-          throw new RemoteKitError('invalid_request', 'Invalid value');
+          throw new RemoteKitError('invalid_request', '参数值无效', { detail: 'Invalid value' });
         Object.assign(state.settings.browser, browser);
       }
       if (value.workspace === undefined) break;
@@ -422,9 +452,9 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
             ].includes(key),
         )
       )
-        throw new RemoteKitError('invalid_request', 'Invalid settings');
+        throw new RemoteKitError('invalid_request', '设置格式无效', { detail: 'Invalid settings' });
       if ('autoKeyboard' in workspaceSettings && typeof workspaceSettings.autoKeyboard !== 'boolean')
-        throw new RemoteKitError('invalid_request', 'Invalid value');
+        throw new RemoteKitError('invalid_request', '参数值无效', { detail: 'Invalid value' });
       if (
         'qualityPreference' in workspaceSettings &&
         !['quality', 'auto', 'smooth'].includes(workspaceSettings.qualityPreference)

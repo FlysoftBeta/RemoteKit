@@ -144,10 +144,9 @@ export function feasibleDpr(items: AtlasItem[], requested: number) {
     return value;
   };
   if (!planAtlas(items, 0.5))
-    throw new RemoteKitError(
-      'limit_exceeded',
-      'Visible viewports cannot fit the 8192-axis / 16Mi-pixel atlas at minimum DPR 0.5',
-    );
+    throw new RemoteKitError('limit_exceeded', '可见窗口超过画面尺寸上限，请减少窗口或缩小视口', {
+      detail: 'Visible viewports cannot fit the 8192-axis / 16Mi-pixel atlas at minimum DPR 0.5',
+    });
   if (planAtlas(items, ceiling)) return remember(Math.fround(ceiling));
   let low = 0.5,
     high = ceiling;

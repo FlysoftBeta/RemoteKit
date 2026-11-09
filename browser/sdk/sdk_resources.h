@@ -2,6 +2,7 @@
 #include "remotekit/browser/sdk/sdk_internal.h"
 namespace remotekit::sdk {
 HANDLE NativeHandle(uint64_t value);
+int ReplyStatus(const base::DictValue&, remotekit_sdk_failure*);
 bool ValidHandle(uint64_t value);
 bool StringUint64(const base::DictValue&, std::string_view, uint64_t*);
 // Every identified resource handle in a decoded reply has already been

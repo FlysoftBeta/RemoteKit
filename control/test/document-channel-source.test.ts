@@ -68,13 +68,15 @@ test('conversion polling retries at 1.5 seconds and stops on cancellation', asyn
   ).open(controller.signal);
   await Promise.resolve();
   controller.abort();
-  await assert.rejects(cancelled, { name: 'AbortError' });
+  await assert.rejects(cancelled, { code: 'canceled' });
 });
 
-test('conversion timeout and typed unsupported/failure errors reach the caller', async (context) => {
+test('long conversions keep polling and typed final errors reach the caller', async (context) => {
   context.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+  let converting = true;
   const channel = {
-    documentOpen: async () => ({ state: 'converting' as const }),
+    documentOpen: async () =>
+      converting ? { state: 'converting' as const } : { state: 'ready' as const, ...documentFixture.info },
     documentResource: async () => {
       throw new Error();
     },
@@ -82,7 +84,10 @@ test('conversion timeout and typed unsupported/failure errors reach the caller',
   const opening = new ChannelDocumentSource(channel, 'asset').open(new AbortController().signal);
   await Promise.resolve();
   context.mock.timers.tick(300000);
-  await assert.rejects(opening, /超时/);
+  await new Promise((resolve) => setImmediate(resolve));
+  converting = false;
+  context.mock.timers.tick(1500);
+  await opening;
   for (const code of ['invalid_request', 'rejected'] as const) {
     const source = new ChannelDocumentSource(
       {
@@ -178,7 +183,7 @@ test('resource loading limits simultaneous file requests and cancels queued read
   const abort = new AbortController();
   const queued = source.resource('queued', abort.signal);
   abort.abort();
-  await assert.rejects(queued, { name: 'AbortError' });
+  await assert.rejects(queued, { code: 'canceled' });
   pending.forEach((resolve) => resolve());
   await Promise.all(reads);
   assert.equal(maximum, 4);

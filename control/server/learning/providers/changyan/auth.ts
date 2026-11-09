@@ -47,6 +47,10 @@ export interface CaptchaPolicy {
   staticServers: string[];
 }
 
+export interface CaptchaChallenge {
+  challenge: CaptchaPolicy;
+}
+
 export class AuthClient {
   private readonly http: HttpClient;
 
@@ -88,7 +92,7 @@ export class AuthClient {
     username: string;
     password: string;
     seccode?: CaptchaSeccode;
-  }): Promise<AccountSession> {
+  }): Promise<AccountSession | CaptchaChallenge> {
     if (!options.username || !options.password) {
       throw new RemoteKitError('invalid_request', '请输入畅言账号和密码');
     }
@@ -103,7 +107,7 @@ export class AuthClient {
           options.seccode.passToken,
         ].every((value) => typeof value === 'string' && value.length > 0))
     ) {
-      throw new RemoteKitError('rejected', '本次登录需要极验验证，请先完成验证并提供 Geetest v4 seccode');
+      return { challenge: policy };
     }
     const seccode = options.seccode;
     const grant = toSso(
@@ -201,7 +205,7 @@ export class AuthClient {
       if (typeof envelope.code !== 'string') return malformed();
       if (envelope.code !== 'success') {
         try {
-          serviceError(envelope.code, '畅言', !/captcha/.test(envelope.code));
+          serviceError(envelope.code, '畅言', true);
         } catch (error) {
           if (
             error instanceof RemoteKitError &&
@@ -213,7 +217,7 @@ export class AuthClient {
         }
       }
       return record(envelope.data);
-    });
+    }, false);
   }
 }
 

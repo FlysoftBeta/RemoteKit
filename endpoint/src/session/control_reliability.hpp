@@ -5,15 +5,6 @@
 
 namespace remotekit {
 using ControlJson = nlohmann::json;
-inline ErrorCode InputRejectionCode(std::string_view message) {
-  if (message == "input_queue_busy")
-    return ErrorCode::kBusy;
-  if (message == "input_not_authorized" || message == "wrong_session")
-    return ErrorCode::kForbidden;
-  if (message == "input_sequence_exhausted")
-    return ErrorCode::kLimitExceeded;
-  return ErrorCode::kConflict;
-}
 template <class Rpc, class Current, class Expired, class Wait, class Retry, class Exhausted>
 Result<ControlJson> RetryBrowserInput(const ControlJson& command,
                                       Rpc rpc,

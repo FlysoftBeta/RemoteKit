@@ -1,4 +1,5 @@
-import { RemoteKitError } from '../../shared/errors';
+import { retryDelay } from '../../shared/error-policy';
+import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type { AuthSocketMethods, AuthState, FacePurpose } from '../../shared/security';
 import { diagnostics } from '../media/diagnostics';
 import { Store } from '../util/store';
@@ -29,7 +30,7 @@ export interface CameraEnvironment {
 const browserCamera: CameraEnvironment = {
   open: () => {
     if (!navigator.mediaDevices?.getUserMedia)
-      throw new RemoteKitError('unavailable', 'Camera capture requires HTTPS and browser support');
+      throw new RemoteKitError('rejected', '此浏览器不支持摄像头采集，请使用 HTTPS 和支持摄像头的浏览器');
     return navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: 'user' },
@@ -64,9 +65,18 @@ function stopStream(stream?: MediaStream) {
 }
 function cameraError(error: unknown) {
   if (error instanceof RemoteKitError) return error;
+  if (!(error instanceof DOMException)) return toRemoteKitError(error);
   const code =
-    error instanceof DOMException && error.name === 'NotAllowedError' ? 'forbidden' : 'unavailable';
-  return new RemoteKitError(code, 'Camera capture failed', String(error));
+    error.name === 'AbortError'
+      ? 'canceled'
+      : ['NotAllowedError', 'SecurityError'].includes(error.name)
+        ? 'forbidden'
+        : ['NotFoundError', 'NotReadableError'].includes(error.name)
+          ? 'unavailable'
+          : error.name === 'OverconstrainedError'
+            ? 'rejected'
+            : 'internal';
+  return new RemoteKitError(code, '摄像头采集失败', { detail: String(error) });
 }
 type CameraPort = Pick<AuthorizationScope, 'authCameraReady' | 'setAuthCamera' | 'recentAuthCameraFrame'>;
 
@@ -113,10 +123,19 @@ export class AuthCameraSession extends Store<CameraState> {
     if (previous && !this.explicit && this.desired(previous) !== this.desired(options)) this.cancel();
     const face = options.auth?.face;
     if (
+      face?.status === 'failed' &&
+      (previous?.auth?.face.status !== 'failed' ||
+        face.challengeId !== previous.auth.face.challengeId ||
+        face.error?.code !== previous.auth.face.error?.code)
+    ) {
+      const delay = face.error ? retryDelay(face.error, 0) : undefined;
+      this.retryAt = delay === undefined ? Infinity : this.environment.now() + delay;
+    }
+    if (
       options.manualLock &&
       face?.purpose === 'presence' &&
       face.status === 'absent' &&
-      face.reason === 'no-matching-face' &&
+      face.outcome === 'no_matching_face' &&
       face.challengeId &&
       face.challengeId === this.manualPresence &&
       this.departureReported !== face.challengeId
@@ -173,7 +192,7 @@ export class AuthCameraSession extends Store<CameraState> {
   private async open(explicitly: boolean, current: number) {
     if (this.active?.getVideoTracks()[0]?.readyState === 'live') return;
     if (!explicitly && (await this.environment.permission()) !== 'granted')
-      throw new RemoteKitError('forbidden', 'Camera permission has not been granted');
+      throw new RemoteKitError('forbidden', '请允许访问摄像头');
     if (current !== this.generation) return;
     const next = await this.environment.open();
     if (current !== this.generation) {
@@ -183,7 +202,7 @@ export class AuthCameraSession extends Store<CameraState> {
     const track = next.getVideoTracks()[0];
     if (!track || track.readyState !== 'live') {
       stopStream(next);
-      throw new RemoteKitError('unavailable', 'Camera has no live video track');
+      throw new RemoteKitError('unavailable', '摄像头没有可用画面');
     }
     stopStream(this.active);
     this.active = next;
@@ -199,7 +218,8 @@ export class AuthCameraSession extends Store<CameraState> {
   }
   start = async (purpose: 'verify' | 'enroll', currentPassword?: string) => {
     if (!this.options?.online || !this.port.authCameraReady)
-      throw new RemoteKitError('unavailable', 'Face verification channel is not ready');
+      throw new RemoteKitError('unavailable', '人脸验证通道尚未就绪');
+    this.retryAt = 0;
     const current = ++this.generation;
     const old = this.challenge;
     this.challenge = undefined;
@@ -281,9 +301,11 @@ export class AuthCameraSession extends Store<CameraState> {
       if (this.options?.manualLock && desired === 'presence') this.manualPresence = next.face.challengeId;
       this.syncSource();
     } catch (error) {
-      diagnostics.record('auth-camera', cameraError(error));
+      const failure = cameraError(error);
+      diagnostics.record('auth-camera', failure);
+      const delay = retryDelay(failure, 0);
+      this.retryAt = delay === undefined ? Infinity : this.environment.now() + delay;
     } finally {
-      this.retryAt = this.environment.now() + 2500;
       this.automaticPending = false;
     }
   };

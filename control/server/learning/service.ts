@@ -31,13 +31,15 @@ export const learningMethods = [
 ] as const satisfies readonly (keyof LearningSocketMethods)[];
 
 function string(value: unknown): string {
-  if (typeof value !== 'string' || !value || value.length > 1024 || /[\x00-\x1f\x7f]/.test(value))
+  if (typeof value !== 'string' || !value || /[\x00-\x1f\x7f]/.test(value))
     throw new RemoteKitError('invalid_request', '无效的学习参数');
+  if (value.length > 1024) throw new RemoteKitError('limit_exceeded', '学习参数超过长度限制');
   return value;
 }
 function page(value: unknown, max = 100_000): number {
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > max)
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1)
     throw new RemoteKitError('invalid_request', '无效的页码或数量');
+  if (value > max) throw new RemoteKitError('limit_exceeded', '页码或数量超过限制');
   return value;
 }
 function choice<T extends string>(value: unknown, options: readonly T[]): T {
@@ -46,8 +48,8 @@ function choice<T extends string>(value: unknown, options: readonly T[]): T {
 }
 function strings(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > 100)
-    throw new RemoteKitError('invalid_request', '无效筛选条件');
+  if (!Array.isArray(value)) throw new RemoteKitError('invalid_request', '无效筛选条件');
+  if (value.length > 100) throw new RemoteKitError('limit_exceeded', '筛选条件超过数量限制');
   return value.map(string);
 }
 

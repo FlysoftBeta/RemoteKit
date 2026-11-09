@@ -53,7 +53,7 @@ WebView::~WebView() {
     model_->CompleteLifecycle(session_, *lifecycle_->lifecycle_request_, false);
   model_->InvalidateInstance(session_, view_);
   if (callback)
-    callback(Fail(ErrorCode::unavailable, "WebView adapter destroyed"));
+    callback(Fail(ErrorCode::kOutcomeUnknown, "WebView adapter destroyed"));
 }
 void WebView::SetSessionStorageShouldPersist(bool persist) {
   if (contents()) {
@@ -91,7 +91,7 @@ Status WebView::CanShow() const {
   const auto* model = model_->FindWebView(session_, view_);
   if (!execution_->contents_ || lifecycle_->lifecycle_uncertain_ || !model ||
       model->actual != Residency::live || model->pending)
-    return {ErrorCode::unavailable, "Restore must complete before showing the WebView"};
+    return {ErrorCode::kConflict, "Restore must complete before showing the WebView"};
   return {};
 }
 Status WebView::SetVisible(bool visible) {

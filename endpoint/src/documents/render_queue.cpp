@@ -21,14 +21,15 @@ class Engine {
                                  const std::string& name) {
     std::ifstream input(plaintext, std::ios::binary);
     if (!input)
-      return Error{ErrorCode::kNotFound, "source document missing"};
+      return Error{ErrorCode::kUnavailable, "Cannot open staged source document"};
     Bytes prefix(4096);
     input.read(reinterpret_cast<char*>(prefix.data()), prefix.size());
     prefix.resize(static_cast<size_t>(input.gcount()));
     input.close();
     auto format = DetectDocument(name, prefix);
     if (format.type == DocumentType::kUnsupported)
-      return Error{ErrorCode::kInvalidRequest, "unsupported document type"};
+      return Error{ErrorCode::kRejected, "Unsupported document type",
+                   ErrorReason::kDocumentUnsupported};
     TemporaryDirectory temporary(data_ / "work");
     auto pdf = temporary.path() / "input.pdf";
     if (format.type == DocumentType::kPdf) {
@@ -145,11 +146,13 @@ void RenderQueue::Work(size_t slot) {
       job = std::move(pending_.front());
       pending_.pop_front();
     }
-    Result<RenditionResult> result = Error{ErrorCode::kRejected, "document rendition failed"};
+    Result<RenditionResult> result = Error{ErrorCode::kInternal, "document rendition failed"};
     try {
       result = worker_(slot, job->source_id, job->plaintext, job->name);
-    } catch (const std::exception&) {
-      result = Error{ErrorCode::kRejected, "document rendition failed"};
+    } catch (const std::filesystem::filesystem_error& error) {
+      result = Error{ErrorCode::kUnavailable, error.what()};
+    } catch (const std::exception& error) {
+      result = Error{ErrorCode::kInternal, error.what()};
     }
     {
       std::lock_guard lock(mutex_);

@@ -155,7 +155,7 @@ struct Engine::Impl {
     recognizer_->feature(aligned, features);
     FaceTemplate value;
     if (features.total() != value.size() || features.type() != CV_32F || !features.isContinuous())
-      return Error{ErrorCode::kUnavailable, "invalid SFace output"};
+      return Error{ErrorCode::kInternal, "invalid SFace output"};
     std::copy_n(features.ptr<float>(), value.size(), value.begin());
     if (Normalize(value))
       result.feature = value;
@@ -183,10 +183,10 @@ struct Engine::Impl {
     net.setInput(cv::dnn::blobFromImage(frame(crop), 1.0, {80, 80}));
     const cv::Mat output = net.forward();
     if (output.total() != 3 || output.type() != CV_32F || !output.isContinuous())
-      return Error{ErrorCode::kUnavailable, "invalid MiniFAS output"};
+      return Error{ErrorCode::kInternal, "invalid MiniFAS output"};
     const float* logits = output.ptr<float>();
     if (!std::isfinite(logits[0]) || !std::isfinite(logits[1]) || !std::isfinite(logits[2]))
-      return Error{ErrorCode::kUnavailable, "invalid MiniFAS logits"};
+      return Error{ErrorCode::kInternal, "invalid MiniFAS logits"};
     const float peak = std::max({logits[0], logits[1], logits[2]});
     const float real = std::exp(logits[1] - peak);
     return real / (std::exp(logits[0] - peak) + real + std::exp(logits[2] - peak));

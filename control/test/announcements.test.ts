@@ -85,7 +85,7 @@ test('announcements reach every user, track reads per publication and are admin-
     });
     await assert.rejects(
       h.call(h.admin.tenantId, 'admin.publishAnnouncement', { title: 't', body: 'x'.repeat(5001) }),
-      { code: 'invalid_request' },
+      { code: 'limit_exceeded' },
     );
 
     const published = await h.call(h.admin.tenantId, 'admin.publishAnnouncement', {

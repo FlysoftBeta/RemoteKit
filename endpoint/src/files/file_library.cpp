@@ -192,7 +192,7 @@ Result<void> FileLibrary::Initialize() {
                     value.value("width", 0u), value.value("height", 0u)};
         if (!HexId(id, 64) || !ValidSpec({"asset", asset.type, asset.size}) ||
             entries_.size() >= kAssets)
-          return Error{ErrorCode::kInvalidRequest, "invalid_asset_record"};
+          return Error{ErrorCode::kInternal, "invalid_asset_record"};
         entries_.emplace(id, Entry{std::move(asset)});
         return {};
       }));
@@ -206,16 +206,16 @@ Result<void> FileLibrary::Initialize() {
                     value.at("expires").get<std::int64_t>()};
         if (!HexId(id, 32) || !BoundedServiceId(draft.operation) || !ValidSpec(draft.spec) ||
             drafts_.size() >= kDrafts)
-          return Error{ErrorCode::kInvalidRequest, "invalid_asset_draft"};
+          return Error{ErrorCode::kInternal, "invalid_asset_draft"};
         if (draft.sealed.empty()) {
           const auto path = DraftData(id);
           RK_ASSIGN_OR_RETURN(size, FileSize(path));
           if (!Plain(path) || size > draft.spec.size ||
               draft.spec.size > kDraftBytes - draft_bytes_)
-            return Error{ErrorCode::kInvalidRequest, "invalid_asset_draft"};
+            return Error{ErrorCode::kInternal, "invalid_asset_draft"};
           draft_bytes_ += draft.spec.size;
         } else if (!HexId(draft.sealed, 64)) {
-          return Error{ErrorCode::kInvalidRequest, "invalid_asset_draft"};
+          return Error{ErrorCode::kInternal, "invalid_asset_draft"};
         }
         drafts_.emplace(id, std::move(draft));
         return {};
@@ -235,7 +235,7 @@ Result<void> FileLibrary::Initialize() {
         const auto& files = value.at("files");
         if (!HexId(id, 32) || selections_.size() >= kSelections || !files.is_array() ||
             files.empty() || files.size() > 64)
-          return Error{ErrorCode::kInvalidRequest, "invalid_selection_record"};
+          return Error{ErrorCode::kInternal, "invalid_selection_record"};
         for (const auto& file : files) {
           selection.files.push_back({file.at("assetId").get<std::string>(),
                                      file.at("name").get<std::string>(),
@@ -250,7 +250,7 @@ Result<void> FileLibrary::Initialize() {
     RK_ASSIGN_OR_RETURN(entries, DirectoryEntries(directory));
     for (const auto& entry : entries) {
       if (++count > maximum || !Plain(entry.path()))
-        return Error{ErrorCode::kInvalidRequest, "invalid_library_payload"};
+        return Error{ErrorCode::kInternal, "invalid_library_payload"};
       if (!keep(entry.path().filename().string()) && !Remove(entry.path()))
         return Error{ErrorCode::kUnavailable, "cannot_clean_library_payload"};
     }
@@ -273,13 +273,13 @@ Result<const FileLibrary::Entry*> FileLibrary::RequireAsset(const std::string& i
   RK_ASSIGN_OR_RETURN(info, access_->Ensure(id));
   if (found == entries_.end()) {
     if (info.size > kFileBytes)
-      return Error{ErrorCode::kLimitExceeded, "asset_too_large"};
+      return Error{ErrorCode::kLimitExceeded, "asset_too_large", ErrorReason::kFileTooLarge};
     Entry entry{Asset{id, "application/octet-stream", info.size}};
     RK_RETURN_IF_ERROR(SaveEntry(entry));
     found = entries_.emplace(id, std::move(entry)).first;
   }
   if (found->second.asset.size != info.size)
-    return Error{ErrorCode::kRejected, "invalid_asset_size"};
+    return Error{ErrorCode::kInternal, "invalid_asset_size"};
   return &found->second;
 }
 Result<FileLibrary::Draft*> FileLibrary::RequireDraft(std::uint64_t grant, const std::string& id) {
@@ -351,7 +351,8 @@ Result<ServiceJson> FileLibrary::Begin(std::uint64_t grant,
                                     [](const auto& item) { return item.second.sealed.empty(); });
   if (drafts_.size() >= kDrafts || static_cast<std::size_t>(active) >= kActiveDrafts ||
       spec.size > kDraftBytes - draft_bytes_)
-    return Error{ErrorCode::kLimitExceeded, "asset_draft_quota"};
+    return Error{ErrorCode::kLimitExceeded, "asset_draft_quota",
+                 ErrorReason::kStorageQuotaExceeded};
   RK_ASSIGN_OR_RETURN(random, RandomId());
   Draft draft{random, operation, {}, spec, Now() + kDraftLifetime, grant};
   const auto path = DraftData(draft.id);
@@ -460,7 +461,7 @@ Result<FileLibrary::Asset> FileLibrary::ImportDownload(const fs::path& profile,
   if (parsed.ec != std::errc() || parsed.ptr != size_text.data() + size_text.size())
     return Error{ErrorCode::kInvalidRequest, "invalid_download_size"};
   if (size > kFileBytes)
-    return Error{ErrorCode::kLimitExceeded, "file_too_large"};
+    return Error{ErrorCode::kLimitExceeded, "file_too_large", ErrorReason::kFileTooLarge};
   const FileUploadStore::Spec spec{download.at("name").get<std::string>(),
                                    download.at("mimeType").get<std::string>(), size};
   if (!ValidSpec(spec) || reference.empty() || reference.find('\\') != std::string::npos ||
@@ -513,9 +514,9 @@ Result<FileLibrary::Asset> FileLibrary::ImportDownload(const fs::path& profile,
     if (!directory) {
       const auto actual = (uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
       if (actual > kFileBytes)
-        return Error{ErrorCode::kLimitExceeded, "file_too_large"};
+        return Error{ErrorCode::kLimitExceeded, "file_too_large", ErrorReason::kFileTooLarge};
       if (actual != size)
-        return Error{ErrorCode::kUnavailable, "download_size_mismatch"};
+        return Error{ErrorCode::kInternal, "download_size_mismatch"};
     }
   }
   return Publish(path, {{}, spec.type, size}, []() -> Result<void> { return {}; });
@@ -585,7 +586,8 @@ Result<fs::path> FileLibrary::Path(const std::string& id) const {
   for (const auto& staged : fs::directory_iterator(root_ / "staging"))
     used += staged.file_size();
   if (entry->asset.size > kStagingBytes - std::min(used, kStagingBytes))
-    return Error{ErrorCode::kLimitExceeded, "asset_staging_quota"};
+    return Error{ErrorCode::kLimitExceeded, "asset_staging_quota",
+                 ErrorReason::kStorageQuotaExceeded};
   auto partial = path;
   partial += ".new";
   std::ofstream output(partial, std::ios::binary | std::ios::trunc);
@@ -629,7 +631,7 @@ Result<FileLibrary::Asset> FileLibrary::CreateDerivative(const Render& render,
       return Error{ErrorCode::kUnavailable, "photo_output_failed"};
     RK_ASSIGN_OR_RETURN(size, FileSize(path));
     if (size > budget)
-      return Error{ErrorCode::kLimitExceeded, "photo_output_too_large"};
+      return Error{ErrorCode::kLimitExceeded, "photo_output_too_large", ErrorReason::kFileTooLarge};
     auto result = Publish(
         path, {{}, png ? "image/png" : "image/jpeg", size, dimensions.width, dimensions.height},
         check, derived_from);
@@ -668,7 +670,8 @@ Result<void> FileLibrary::Prepare(const Selection& selection) {
     return {};
   }
   if (selections_.size() >= kSelections)
-    return Error{ErrorCode::kLimitExceeded, "selection_receipt_quota"};
+    return Error{ErrorCode::kLimitExceeded, "selection_receipt_quota",
+                 ErrorReason::kStorageQuotaExceeded};
   std::uint64_t bytes = 0;
   for (const auto& file : selection.files) {
     RK_ASSIGN_OR_RETURN(asset_entry, RequireAsset(file.asset_id));

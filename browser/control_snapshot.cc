@@ -64,7 +64,10 @@ ControlResult ControlDispatcher::HandleSnapshot(const SnapshotRequest& request) 
       result.Set("generation", base::NumberToString(model.last_lifecycle->generation));
       result.Set("action", static_cast<int>(model.last_lifecycle->action));
       result.Set("succeeded", model.last_lifecycle->succeeded);
-      result.Set("detail", model.last_lifecycle->detail);
+      if (model.last_lifecycle->error)
+        result.Set("error", base::DictValue()
+                                .Set("code", protocol::ErrorCodeName(*model.last_lifecycle->error))
+                                .Set("message", model.last_lifecycle->detail));
       value.Set("last_lifecycle", std::move(result));
     }
     for (auto& [i, record] : runtime_.views.records) {
@@ -90,8 +93,10 @@ ControlResult ControlDispatcher::HandleSnapshot(const SnapshotRequest& request) 
       value.Set("canDiscard", static_cast<bool>(discard));
       value.Set("discardBlockReason", discard.message);
       auto touch = adapter->TouchInjectionStatus();
-      value.Set("touch_code", static_cast<int>(touch.error));
-      value.Set("touch_detail", touch.message);
+      if (touch.error)
+        value.Set("touch_error", base::DictValue()
+                                     .Set("code", protocol::ErrorCodeName(*touch.error))
+                                     .Set("message", touch.message));
       value.Set("pending_page_requests",
                 static_cast<int>(runtime_.views.records.at(i).requests->pending_count()));
       if (auto* page = adapter->contents()) {

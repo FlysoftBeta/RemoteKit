@@ -1,5 +1,7 @@
-import { randomUUID } from 'node:crypto';
-import { RemoteKitError, type ErrorCode } from '../../shared/errors';
+import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { diskFloor } from './disk';
+import { createHmac, randomUUID } from 'node:crypto';
+import { RemoteKitError, parseWireError, toRemoteKitError, type ErrorCode } from '../../shared/errors';
 import type { ControlDatabase } from '../persistence/database';
 import type { NodeLink, NodeRegistry } from './node-link';
 import { clusterObjectKeys } from './keys';
@@ -33,6 +35,7 @@ interface RenderFailure {
   attempts: bigint;
   retry_at: bigint | null;
   node_id: string | null;
+  display_reason: string | null;
 }
 export class ObjectIndex {
   private readonly fetches = new Map<string, Set<string>>();
@@ -53,7 +56,7 @@ export class ObjectIndex {
   constructor(
     private readonly store: ControlDatabase,
     readonly nodes: NodeRegistry,
-    readonly tenantObjectBytes: number,
+    readonly tenantObjectBytes: number | null,
     private readonly placedOn: (tenant: string, node: string) => boolean,
     private readonly checkpointing: (tenant: string) => boolean,
     private readonly now = Date.now,
@@ -76,6 +79,9 @@ export class ObjectIndex {
   }
   private readonly ready = ({ nodeId }: { nodeId: string }) => {
     this.readFetches.delete(nodeId);
+    this.store.db
+      .prepare("UPDATE object_render_failures SET retry_at=0 WHERE reason='unavailable' AND build_id=?")
+      .run(this.nodes.options.buildId);
     this.track(this.reconcile(this.nodes.get(nodeId)!).then(() => this.tick()));
   };
   private readonly metrics = () => {
@@ -89,15 +95,22 @@ export class ObjectIndex {
     return bytes;
   }
   require(tenant: string, id: string) {
-    if (!objectId(id)) throw new RemoteKitError('invalid_request', 'Asset id must be an object id');
+    if (!objectId(id))
+      throw new RemoteKitError('invalid_request', '文件标识格式无效', {
+        detail: 'Asset id must be an object id',
+      });
     if (this.retired.has(id) || !tenantObjects(this.store.db).get(tenant)?.has(id))
-      throw new RemoteKitError('forbidden', 'Tenant has no object reference or claim');
+      throw new RemoteKitError('forbidden', '无权访问该文件', {
+        detail: 'Tenant has no object reference or claim',
+      });
     if (!this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(id))
-      throw new RemoteKitError('not_found', 'Object is not available');
+      throw new RemoteKitError('not_found', '文件不可用', { detail: 'Object is not available' });
   }
   checkQuota(tenant: string) {
-    if (this.bytes(tenant) > this.tenantObjectBytes)
-      throw new RemoteKitError('limit_exceeded', 'Tenant object quota exceeded');
+    if (this.tenantObjectBytes !== null && this.bytes(tenant) > this.tenantObjectBytes)
+      throw new RemoteKitError('limit_exceeded', '存储空间已满，请清理文件后重试', {
+        detail: 'Tenant object quota exceeded',
+      });
   }
   derived(sourceId: string, kind: 'thumbnail' | 'document'): string | undefined {
     const row = this.store.db
@@ -118,12 +131,17 @@ export class ObjectIndex {
   derivation(node: NodeLink, message: Record<string, any>) {
     const { id: sourceId, kind } = message.params ?? {};
     if (!objectId(sourceId) || kind !== 'document')
-      throw new RemoteKitError('invalid_request', 'Invalid document derivation request');
+      throw new RemoteKitError('invalid_request', '文档转换请求格式无效', {
+        detail: 'Invalid document derivation request',
+      });
     if (!message.tenantId && this.rendering(node, sourceId)) {
-      if (this.retired.has(sourceId)) throw new RemoteKitError('conflict', 'Source object is being deleted');
+      if (this.retired.has(sourceId))
+        throw new RemoteKitError('conflict', '源文件正在删除', { detail: 'Source object is being deleted' });
     } else {
       if (!this.placedOn(message.tenantId, node.nodeId))
-        throw new RemoteKitError('forbidden', 'Tenant session is not hosted on this node');
+        throw new RemoteKitError('forbidden', '会话已迁移，请刷新状态', {
+          detail: 'Tenant session is not hosted on this node',
+        });
       this.require(message.tenantId, sourceId);
     }
     const id = this.derived(sourceId, 'document');
@@ -137,11 +155,19 @@ export class ObjectIndex {
           .get(sourceId))
     ) {
       this.render(sourceId);
-      if (this.renders.has(sourceId)) throw new RemoteKitError('busy', 'Document conversion in progress');
+      if (this.renders.has(sourceId))
+        throw new RemoteKitError('busy', '文档正在转换', { detail: 'Document conversion in progress' });
       const failure = this.renderFailure(sourceId);
       throw new RemoteKitError(
         failure?.reason ?? 'unavailable',
         failure?.message ?? 'Document conversion unavailable',
+        {
+          reason: failure?.display_reason ?? undefined,
+          retryAfterMs:
+            failure?.retry_at === null || failure?.retry_at === undefined
+              ? undefined
+              : Math.min(86_400_000, Math.max(0, Number(failure.retry_at) - this.now())),
+        },
       );
     }
     return id ? { id } : null;
@@ -153,20 +179,29 @@ export class ObjectIndex {
       .get(id, this.nodes.options.buildId) as RenderFailure | undefined;
   }
   private failRender(id: string, error: unknown, node?: NodeLink) {
-    const value = error as { code?: ErrorCode; message?: string };
-    const reason = value?.code === 'invalid_request' ? 'rejected' : (value?.code ?? 'unavailable');
+    const value = parseWireError(error) ?? toRemoteKitError(error);
+    const reason = value.code;
     const attempts = Number(this.renderFailure(id)?.attempts ?? 0) + 1;
     const failedAt = this.now();
-    const retryAt =
-      reason === 'rejected' ? null : failedAt + Math.min(24, 2 ** Math.min(attempts - 1, 5)) * 3600_000;
+    const handling = errorHandling(reason);
+    const policyDelay = retryDelay(value, attempts - 1);
+    const delay =
+      reason === 'unavailable'
+        ? Math.min(24, 2 ** Math.min(attempts - 1, 5)) * 3600_000
+        : policyDelay !== undefined
+          ? Math.max(value.retryAfterMs ?? 0, Math.min(3600_000, 60_000 * 2 ** Math.min(attempts - 1, 6)))
+          : handling === 'reconcile'
+            ? 60_000
+            : undefined;
+    const retryAt = delay === undefined ? null : failedAt + delay;
     // An unknown outcome may still be running. Retry only that node, whose queue deduplicates by source.
-    const nodeId = reason === 'outcome_unknown' ? node?.nodeId : this.renderFailure(id)?.node_id;
+    const nodeId = reason === 'outcome_unknown' ? (node?.nodeId ?? this.renderFailure(id)?.node_id) : null;
     this.store.db
       .prepare(
-        `INSERT INTO object_render_failures VALUES (?,'failed',?,?,?,?,?,?,?)
+        `INSERT INTO object_render_failures(source_id,state,reason,message,failed_at,attempts,retry_at,node_id,build_id,display_reason) VALUES (?,'failed',?,?,?,?,?,?,?,?)
       ON CONFLICT(source_id) DO UPDATE SET reason=excluded.reason,message=excluded.message,
       failed_at=excluded.failed_at,attempts=excluded.attempts,retry_at=excluded.retry_at,
-      node_id=excluded.node_id,build_id=excluded.build_id`,
+      node_id=excluded.node_id,build_id=excluded.build_id,display_reason=excluded.display_reason`,
       )
       .run(
         id,
@@ -177,6 +212,9 @@ export class ObjectIndex {
         retryAt,
         nodeId ?? null,
         this.nodes.options.buildId,
+        error && typeof error === 'object' && 'reason' in error && typeof error.reason === 'string'
+          ? error.reason
+          : null,
       );
     console.error('object.render failed', id, error);
   }
@@ -209,7 +247,8 @@ export class ObjectIndex {
           a.nodeId.localeCompare(b.nodeId),
       )[0];
     if (!node || node.state.state !== 'ready') {
-      this.failRender(id, new RemoteKitError('unavailable', 'No ready node'));
+      if (failure?.reason === 'outcome_unknown') return;
+      this.failRender(id, new RemoteKitError('unavailable', '没有可用节点', { detail: 'No ready node' }));
       return;
     }
     this.renders.set(id, { node, epoch: node.state.connectionEpoch });
@@ -217,8 +256,10 @@ export class ObjectIndex {
       (async () => {
         try {
           const result = await node.request('object.render', '', { params: { id } }, 6 * 60_000);
-          if (!objectId(result.documentId) || this.derived(id, 'document') !== result.documentId)
-            throw new RemoteKitError('unavailable', 'Invalid object render result');
+          if (!objectId(result?.documentId) || this.derived(id, 'document') !== result.documentId)
+            throw new RemoteKitError('outcome_unknown', '文档转换结果待确认', {
+              detail: 'Invalid object render result',
+            });
           this.store.db.prepare('DELETE FROM object_render_failures WHERE source_id=?').run(id);
         } catch (error) {
           if (!this.derived(id, 'document')) this.failRender(id, error, node);
@@ -241,7 +282,9 @@ export class ObjectIndex {
         (!objectId(derivedFrom) || derivedFrom === id || !['thumbnail', 'document'].includes(kind))) ||
       (kind !== undefined && derivedFrom === undefined)
     )
-      throw new RemoteKitError('invalid_request', 'Invalid object metadata');
+      throw new RemoteKitError('invalid_request', '文件元数据格式无效', {
+        detail: 'Invalid object metadata',
+      });
     const replication = this.fetches.get(node.nodeId)?.has(id) || this.readFetches.get(node.nodeId)?.has(id);
     const put = typeof message.putId === 'string' ? this.puts.get(message.putId) : undefined;
     const expectedPut =
@@ -260,7 +303,9 @@ export class ObjectIndex {
           ? !this.placedOn(tenant, node.nodeId)
           : !replication && !render
     )
-      throw new RemoteKitError('forbidden', 'Commit has no session or Control operation');
+      throw new RemoteKitError('forbidden', '文件写入缺少有效操作授权', {
+        detail: 'Commit has no session or Control operation',
+      });
     return this.store.transaction(() => {
       const previous = this.store.db.prepare('SELECT * FROM objects WHERE id=?').get(id) as
         IndexedObject | undefined;
@@ -270,8 +315,11 @@ export class ObjectIndex {
           Number(previous.size) !== size ||
           Number(previous.stored_size) !== storedSize)
       )
-        throw new RemoteKitError('conflict', 'Object metadata conflicts with the index');
-      if (this.retired.has(id)) throw new RemoteKitError('conflict', 'Object is being deleted');
+        throw new RemoteKitError('conflict', '文件元数据与索引不一致', {
+          detail: 'Object metadata conflicts with the index',
+        });
+      if (this.retired.has(id))
+        throw new RemoteKitError('conflict', '文件正在删除', { detail: 'Object is being deleted' });
       if (derivedFrom) {
         if (tenant) this.require(tenant, derivedFrom);
         else if (
@@ -279,7 +327,9 @@ export class ObjectIndex {
           this.retired.has(derivedFrom) ||
           !this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(derivedFrom)
         )
-          throw new RemoteKitError('forbidden', 'Commit has no source render operation');
+          throw new RemoteKitError('forbidden', '文件转换操作未获授权', {
+            detail: 'Commit has no source render operation',
+          });
       }
       if (!previous)
         this.store.db
@@ -316,20 +366,24 @@ export class ObjectIndex {
   locate(node: NodeLink, message: Record<string, any>) {
     const render = !message.tenantId && this.rendering(node, message.renderSource);
     if (!render && !this.placedOn(message.tenantId, node.nodeId))
-      throw new RemoteKitError('forbidden', 'Tenant session is not hosted on this node');
+      throw new RemoteKitError('forbidden', '会话已迁移，请刷新状态', {
+        detail: 'Tenant session is not hosted on this node',
+      });
     if (
       !Array.isArray(message.ids) ||
       message.ids.length > 4096 ||
       message.ids.some((id: unknown) => !objectId(id))
     )
-      throw new RemoteKitError('invalid_request', 'Invalid object ids');
+      throw new RemoteKitError('invalid_request', '文件标识格式无效', { detail: 'Invalid object ids' });
     for (const id of message.ids) {
       if (!render) this.require(message.tenantId, id);
       else if (
         this.retired.has(id) ||
         (id !== message.renderSource && id !== this.derived(message.renderSource, 'document'))
       )
-        throw new RemoteKitError('forbidden', 'Object is outside the render operation');
+        throw new RemoteKitError('forbidden', '文件不属于当前转换操作', {
+          detail: 'Object is outside the render operation',
+        });
     }
     const expected = this.readFetches.get(node.nodeId) ?? new Set<string>();
     this.readFetches.set(node.nodeId, expected);
@@ -355,17 +409,20 @@ export class ObjectIndex {
   async put(
     tenant: string,
     chunks: AsyncIterable<Uint8Array>,
-    options: { maxBytes: number; signal?: AbortSignal },
+    options: { maxBytes: number; signal?: AbortSignal; onIdentity?: (id: string) => void },
   ): Promise<{ id: string; size: number }> {
     if (
       !/^[a-zA-Z0-9_-]{1,128}$/.test(tenant) ||
       !Number.isSafeInteger(options.maxBytes) ||
       options.maxBytes < 0
     )
-      throw new RemoteKitError('invalid_request', 'Invalid object put options');
+      throw new RemoteKitError('invalid_request', '文件上传参数无效', {
+        detail: 'Invalid object put options',
+      });
     const check = () => {
-      if (options.signal?.aborted) throw new RemoteKitError('rejected', 'Object put cancelled');
-      if (this.closed) throw new RemoteKitError('unavailable', 'Object index closed');
+      if (options.signal?.aborted) throw new RemoteKitError('canceled', '');
+      if (this.closed)
+        throw new RemoteKitError('unavailable', '文件服务已关闭', { detail: 'Object index closed' });
     };
     check();
     const node = this.nodes
@@ -384,11 +441,20 @@ export class ObjectIndex {
         return 1 - x.free / x.total - (1 - y.free / y.total) || a.nodeId.localeCompare(b.nodeId);
       })[0];
     if (!node || node.state.state !== 'ready')
-      throw new RemoteKitError('unavailable', 'No ready node has put capacity');
+      throw new RemoteKitError(
+        this.nodes
+          .all()
+          .some((n) => n.state.state === 'ready' && !n.diskDraining && !this.nodes.isRemoved(n.nodeId))
+          ? 'busy'
+          : 'unavailable',
+        '文件服务暂时没有可用容量',
+        { detail: 'No ready node has put capacity' },
+      );
     const putId = randomUUID(),
       epoch = node.state.connectionEpoch;
     const operation = { node, tenant, epoch, ending: false, object: undefined as string | undefined };
     this.puts.set(putId, operation);
+    const digest = createHmac('sha256', Buffer.from(this.nodes.objectKeys!.objectIdKey, 'base64'));
     let completed = false;
     const cancel = () => {
       if (node.state.state === 'ready' && node.state.connectionEpoch === epoch)
@@ -401,10 +467,20 @@ export class ObjectIndex {
     });
     void interrupted.catch(() => {});
     const onAbort = () => {
-      interrupt(new RemoteKitError('rejected', 'Object put cancelled'));
-      void cancel();
+      interrupt(
+        new RemoteKitError(
+          operation.ending ? 'outcome_unknown' : 'canceled',
+          operation.ending ? '文件写入结果待确认' : '',
+        ),
+      );
+      if (!operation.ending) void cancel();
     };
-    const onOffline = () => interrupt(new RemoteKitError('unavailable', 'Node disconnected'));
+    const onOffline = () =>
+      interrupt(
+        new RemoteKitError(operation.ending ? 'outcome_unknown' : 'unavailable', '节点连接已断开', {
+          detail: 'Node disconnected',
+        }),
+      );
     node.on('offline', onOffline);
     let iterator: AsyncIterator<Uint8Array> | undefined;
     options.signal?.addEventListener('abort', onAbort, { once: true });
@@ -418,9 +494,10 @@ export class ObjectIndex {
         const next = await Promise.race([iterator.next(), interrupted]);
         if (next.done) break;
         const bytes = next.value;
+        digest.update(bytes);
         check();
         if (offset + bytes.byteLength > Math.min(options.maxBytes, 256 * 1024 * 1024))
-          throw new RemoteKitError('limit_exceeded', 'Object too large');
+          throw new RemoteKitError('limit_exceeded', '文件超过大小上限', { detail: 'Object too large' });
         for (let start = 0; start < bytes.byteLength; start += 1024 * 1024) {
           check();
           const data = Buffer.from(
@@ -433,10 +510,13 @@ export class ObjectIndex {
         }
       }
       check();
+      options.onIdentity?.(digest.digest('hex'));
       operation.ending = true;
       const result = await Promise.race([node.request('object.put.end', '', { putId }), interrupted]);
-      if (!objectId(result.objectId) || result.objectId !== operation.object || result.size !== offset)
-        throw new RemoteKitError('rejected', 'Invalid object put result');
+      if (!objectId(result?.objectId) || result.objectId !== operation.object || result.size !== offset)
+        throw new RemoteKitError('outcome_unknown', '文件写入结果待确认', {
+          detail: 'Invalid object put result',
+        });
       completed = true;
       return { id: result.objectId, size: result.size };
     } finally {
@@ -460,7 +540,7 @@ export class ObjectIndex {
         const page = await node.request('object.inventory', '', { cursor });
         if (node.state.state !== 'ready' || node.state.connectionEpoch !== epoch) return;
         if (!Array.isArray(page.objects) || (page.next !== null && typeof page.next !== 'string'))
-          throw new RemoteKitError('rejected', 'Invalid object inventory');
+          throw new RemoteKitError('internal', '文件清单格式错误', { detail: 'Invalid object inventory' });
         for (const item of page.objects) {
           if (
             !objectId(item.id) ||
@@ -468,7 +548,9 @@ export class ObjectIndex {
             !Number.isSafeInteger(item.storedSize) ||
             item.storedSize < 0
           )
-            throw new RemoteKitError('rejected', 'Invalid inventory object');
+            throw new RemoteKitError('internal', '文件清单条目格式错误', {
+              detail: 'Invalid inventory object',
+            });
           present.add(item.id);
           const indexed = this.store.db.prepare('SELECT * FROM objects WHERE id=?').get(item.id) as
             IndexedObject | undefined;
@@ -492,7 +574,7 @@ export class ObjectIndex {
         }
         cursor = page.next;
         if (cursor !== null && seen.has(cursor))
-          throw new RemoteKitError('rejected', 'Inventory cursor repeated');
+          throw new RemoteKitError('internal', '文件清单游标重复', { detail: 'Inventory cursor repeated' });
         if (cursor !== null) seen.add(cursor);
       } while (cursor !== null);
       if (node.state.state !== 'ready' || node.state.connectionEpoch !== epoch) return;
@@ -652,7 +734,7 @@ export class ObjectIndex {
           return (
             sample &&
             sample.value.disk.free - (this.reserved.get(node.nodeId) ?? 0) - Number(object.stored_size) >=
-              node.config.diskReserveBytes &&
+              diskFloor(node, sample) &&
             !node.diskDraining &&
             !this.reconciling.has(node.nodeId) &&
             !this.fetches.get(node.nodeId)?.has(object.id) &&
@@ -672,7 +754,7 @@ export class ObjectIndex {
           node.metrics.latest()!.value.disk.free -
             (this.reserved.get(node.nodeId) ?? 0) -
             Number(object.stored_size) <
-            node.config.diskReserveBytes
+            diskFloor(node, node.metrics.latest()!)
         )
           continue;
         missing--;
@@ -685,8 +767,9 @@ export class ObjectIndex {
     for (const node of this.nodes.all()) {
       const sample = node.metrics.latest();
       if (node.state.state !== 'ready' || !sample) continue;
-      if (sample.value.disk.free >= 2 * node.config.diskReserveBytes) node.diskDraining = false;
-      if (sample.value.disk.free < node.config.diskReserveBytes) node.diskDraining = true;
+      const floor = diskFloor(node, sample);
+      if (sample.value.disk.free >= 2 * floor) node.diskDraining = false;
+      if (sample.value.disk.free < floor) node.diskDraining = true;
       if (!node.diskDraining) continue;
       await node.request('session.cold.delete', '', {});
       this.store.db
@@ -703,7 +786,7 @@ export class ObjectIndex {
         )
         .all(node.nodeId) as IndexedObject[];
       for (const object of copies) {
-        if (free >= 2 * node.config.diskReserveBytes) break;
+        if (free >= 2 * diskFloor(node, node.metrics.latest() ?? sample)) break;
         let elsewhere = this.sources(object.id).filter((source) => source.nodeId !== node.nodeId);
         const target = Math.min(
           2,
@@ -719,7 +802,7 @@ export class ObjectIndex {
               candidate !== node &&
               candidate.state.state === 'ready' &&
               metrics &&
-              metrics.value.disk.free - Number(object.stored_size) >= candidate.config.diskReserveBytes &&
+              metrics.value.disk.free - Number(object.stored_size) >= diskFloor(candidate, metrics) &&
               !elsewhere.some((source) => source.nodeId === candidate.nodeId)
             );
           })

@@ -1,4 +1,6 @@
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, parseWireError } from '../../shared/errors';
+import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { request as httpRequest } from './http-request';
 import type { ProductState, RtcServerSignal, SocketMessage, SocketMethods } from '../../shared/product';
 import type { AuthState } from '../../shared/security';
 import { diagnostics } from '../media/diagnostics';
@@ -99,11 +101,14 @@ export class ControlSession {
       } else if (message.type === 'library') {
         this.library.emit(message.snapshot);
       } else if (message.type === 'lease') {
-        this.status(message.reason === 'logout' ? 'expired' : 'revoked');
+        this.status(message.outcome === 'logged_out' ? 'expired' : 'revoked');
         this.close(true);
       } else {
         if (message.type === 'error') {
-          this.pending.reject(message.id, new RemoteKitError(message.error.code, message.error.message));
+          this.pending.reject(
+            message.id,
+            parseWireError(message.error) ?? new RemoteKitError('outcome_unknown', '控制回复错误码无效'),
+          );
           if (message.error.code === 'unauthenticated') {
             this.status('expired');
             this.close(true);
@@ -122,40 +127,58 @@ export class ControlSession {
       // auth keeps counting toward the retry limit instead of looping forever.
       const authAt = trace.marks.firstAuth;
       if (authAt !== undefined && trace.marks.closed - authAt >= stableConnectionMs) this.attempts = 0;
-      if (event.code === 4001) {
-        this.status(event.reason === 'logout' ? 'expired' : 'revoked');
+      if (event.code === 4001 || event.code === 4002) {
+        this.status(event.code === 4002 ? 'expired' : 'revoked');
         this.close(true);
         return;
       }
       this.status('reconnecting');
-      // A failed upgrade can mean an expired cookie. Check before retrying.
-      void fetch('/api/auth/me', { credentials: 'same-origin' })
-        .then((response) => {
+      // Browsers hide failed upgrade responses; the read probe exposes their handling code.
+      void httpRequest('/api/socket/check?origin=' + encodeURIComponent(location.origin))
+        .then(() => {
           if (this.stopped) return;
-          if (response.status === 401) {
-            this.status('expired');
-            this.close(true);
-            return;
-          }
           this.retry();
         })
         .catch((error) => {
           diagnostics.record('control-auth-check', error);
-          this.retry();
+          const failure =
+            error instanceof RemoteKitError ? error : new RemoteKitError('unavailable', '连接不可用');
+          const handling = errorHandling(failure.code);
+          if (handling === 'sign-in') {
+            this.status('expired');
+            this.close(true);
+            return;
+          }
+          if (handling === 'unlock') {
+            this.authCheckLocked();
+            return;
+          }
+          const delay = retryDelay(failure, this.attempts);
+          if (delay === undefined) {
+            this.status('failed');
+            return;
+          }
+          this.retry(delay);
         });
     };
     ws.onerror = () => {
       /* onclose owns retry and pending rejection. */
     };
   }
-  private retry() {
+  private authCheckLocked() {
+    this.status('failed');
+  }
+  private retry(delay?: number) {
     if (this.stopped || this.socket) return;
     if (++this.attempts > 5) {
       this.status('failed');
       return;
     }
     this.status('reconnecting');
-    this.timer = setTimeout(() => this.connect(), Math.min(8000, 500 * 2 ** (this.attempts - 1)));
+    this.timer = setTimeout(
+      () => this.connect(),
+      delay ?? retryDelay(new RemoteKitError('unavailable', ''), this.attempts - 1)!,
+    );
   }
   request<K extends keyof SocketMethods>(
     method: K,
@@ -164,8 +187,14 @@ export class ControlSession {
     if (this.stopped || this.socket?.readyState !== WebSocket.OPEN)
       return Promise.reject(new RemoteKitError('unavailable', '连接尚未恢复，请稍后重试'));
     const id = String(++this.sequence);
+    let encoded: string;
+    try {
+      encoded = JSON.stringify({ id, method, params });
+    } catch (error) {
+      return Promise.reject(new RemoteKitError('internal', '控制请求编码失败', { detail: String(error) }));
+    }
     return this.pending.request(id, 20000, () => {
-      this.socket!.send(JSON.stringify({ id, method, params }));
+      this.socket!.send(encoded);
     }) as Promise<SocketMethods[K]['result']>;
   }
   restart() {

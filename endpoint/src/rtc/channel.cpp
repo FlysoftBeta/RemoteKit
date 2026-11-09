@@ -72,7 +72,8 @@ void ChannelController::FlushSignals() {
   const auto stamp = authorization.Stamp();
   if (stamp)
     direct_services.DispatchPending(
-        peer_controller.Handle(), 1000.0 * QpcNow() / QpcFrequency(), [&](const Json& message) {
+        peer_controller.Handle(), 1000.0 * QpcNow() / QpcFrequency(),
+        [&](const Json& message, DeliveryFlag delivery) {
           if (!authorization.Current(stamp))
             return false;
           return management.SendEvent(Json({{"event", "client.action"},
@@ -82,7 +83,7 @@ void ChannelController::FlushSignals() {
                                             {"operationGeneration", message["operationGeneration"]},
                                             {"operationId", message["operationId"]},
                                             {"action", message["action"]}}),
-                                      authorization.ManagementGeneration());
+                                      authorization.ManagementGeneration(), std::move(delivery));
         });
   data_router.Drain();
   peer_controller.FlushSignals();
@@ -218,17 +219,14 @@ Result<Json> ChannelController::ManageRtcActionResult(const Json& request) {
   if (!request.contains("operationId") ||
       !remotekit::BoundedServiceId(request["operationId"], 36) ||
       !request.contains("operationGeneration") ||
-      !remotekit::BoundedServiceId(request["operationGeneration"]) || !request.contains("ok") ||
-      !request["ok"].is_boolean())
+      !remotekit::BoundedServiceId(request["operationGeneration"]) || !request.contains("result") ||
+      !request["result"].is_object())
     return Error{ErrorCode::kInvalidRequest, "invalid action result"};
   Json result = {{"connectionId", peer_controller.Connection()},
                  {"operationId", request["operationId"]},
                  {"operationGeneration", request["operationGeneration"]},
-                 {"ok", request["ok"]}};
-  if (request.contains("result"))
-    result["result"] = request["result"];
-  if (request.contains("error"))
-    result["error"] = request["error"];
+                 {"result", request["result"]}};
+
   const bool accepted = direct_services.Result(peer_controller.Handle(), result);
   pipeline.Wake();
   return Json{{"accepted", accepted}};
@@ -245,7 +243,7 @@ Result<Json> ChannelController::ManageRtcOffer(const Json& request) {
       if (!management_lost_result)
         return management_lost_result.error();
     }
-    return Error{ErrorCode::kUnavailable, "management_disconnected"};
+    return Error{ErrorCode::kOutcomeUnknown, "Management disconnected after applying RTC offer"};
   }
   return result;
 }

@@ -8,7 +8,7 @@ import { EventEmitter } from 'node:events';
 import { FILE_LIMITS } from '../shared/product';
 import { AccountService } from './auth/accounts';
 import { ViewerSecurity } from './auth/viewer-security';
-import { defaultQuotas, type RuntimeConfig, type SessionImportConfig } from './config';
+import { type RuntimeConfig, type SessionImportConfig } from './config';
 import { SessionImporter } from './session-import/importer';
 import type { EndpointGateway } from './endpoint/gateway';
 import type { NodeRegistry } from './cluster/node-link';
@@ -68,7 +68,7 @@ export function createApplication(
   endpoint: EndpointGateway,
   fileLimits: FileLimits = FILE_LIMITS,
   clock: Clock = systemClock,
-  tenantObjectBytes = defaultQuotas.tenantObjectBytes,
+  tenantObjectBytes: number | null = null,
   sessionImport?: SessionImportConfig,
 ): DomainServices {
   const context: DomainContext = {

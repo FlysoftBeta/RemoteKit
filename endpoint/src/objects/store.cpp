@@ -15,7 +15,7 @@ namespace {
 namespace fs = std::filesystem;
 using cluster::Bytes;
 Error Corrupt() {
-  return {ErrorCode::kRejected, "corrupt object"};
+  return {ErrorCode::kInternal, "Corrupt local object"};
 }
 Error Io() {
   return {ErrorCode::kUnavailable, "object I/O failed"};
@@ -359,7 +359,7 @@ Result<Bytes> ObjectStore::ReadRange(const Keys& keys,
                                      uint64_t offset,
                                      size_t length) const {
   if (length > kSegmentSize)
-    return Error{ErrorCode::kInvalidRequest, "object range too large"};
+    return Error{ErrorCode::kLimitExceeded, "object range too large"};
   RK_ASSIGN_OR_RETURN(path, StoredPath(id));
   auto lock = Lock(id);
   std::ifstream input(path, std::ios::binary);

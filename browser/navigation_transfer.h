@@ -8,7 +8,7 @@ class NavigationTransfer {
   struct Transfer {
     uint64_t id = 0, instance = 0, document = 0;
     size_t total = 0;
-    bool importing = false;
+    bool importing = false, committed = false;
     std::string data;
   };
   static constexpr size_t kMemoryLimit = 64 * 1024 * 1024;
