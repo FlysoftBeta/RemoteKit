@@ -6,9 +6,9 @@ and MirrorBrain .mirrorlist on 2026-11-09. Administrative extraction never
 registers or installs LibreOffice on the host. Retain Chinese/English resources
 and all fonts in the headless PDF conversion runtime.
 
-pdfrender: FlysoftBeta/pdf-render run 39002781402, commit
-9b6f190656501c4f0f37e167c0a976cc6c53e3ad. The Actions artifact expires
-2027-01-15: refresh its artifact ID and SHA-256 before that date. The zip pin
+pdfrender: FlysoftBeta/pdf-render run 42721072432, commit
+159d0ace369b4d7f0c575bad90e7f85634d4847d. The Actions artifact expires
+2027-02-07: refresh its artifact ID and SHA-256 before that date. The zip pin
 is checked against GitHub's published artifact digest and the downloaded zip.
 Run with C:\\src\\depot_tools\\python3.bat.
 """
@@ -33,8 +33,8 @@ LO_URL = (
     f"{LO_VERSION}/win/x86_64/LibreOffice_{LO_VERSION}_Win_x86-64.msi"
 )
 LO_SHA256 = "ff4b911403b67ee9e6249f820f9782c44bb32c94fdaa45b0da53a8e419e5307a"
-PDF_ARTIFACT = 12089514051
-PDF_SHA256 = "0e713786c3281bfe3f6e8f3d72ac4b895dbfe03dbe628cdd5b8338fa64db7164"
+PDF_ARTIFACT = 13719849040
+PDF_SHA256 = "3ee2b578c2dabbfa2fe28900778f2ad24f794bdc5e86150ae170dcb0b25c475c"
 PDF_URL = f"https://api.github.com/repos/FlysoftBeta/pdf-render/actions/artifacts/{PDF_ARTIFACT}/zip"
 PINS = {"libreoffice": LO_SHA256, "pdfrender": PDF_SHA256}
 LO_PRUNE_REVISION = 6
