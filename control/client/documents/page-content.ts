@@ -185,11 +185,13 @@ export function mountPage(
   refs: ReadonlyMap<string, string>,
 ): () => void {
   const page = sanitizePage(html, refs);
+  page.setAttribute('data-selectable', '');
   const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
   const style = document.createElement('style');
   style.textContent =
     ':host{display:block;contain:layout paint;overflow:hidden;color:var(--black);background:var(--surface)}' +
-    cleanCss(css);
+    cleanCss(css) +
+    '[data-selectable],[data-selectable] *{user-select:text;-webkit-user-select:text;-webkit-touch-callout:none}';
   root.replaceChildren(style, page);
   let closed = false;
   fitWords(host, root);

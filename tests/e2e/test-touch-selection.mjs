@@ -1,5 +1,5 @@
-/**
- * Headed Chrome 157, isolated Control and native H264 touch-selection regression.
+﻿/**
+ * Isolated Control and native H264 selection regression on Edge and Chrome 89.
  * node tests/e2e/test-touch-selection.mjs <playwright module> <viewer exe>
  *   <endpoint exe> <browser exe> <unused evidence directory> [port=34631]
  */
@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { startProductStack, until } from './kit/stack.mjs';
 
 const [modulePath, viewer, endpoint, browser, output, portArg = '34631'] = process.argv.slice(2);
@@ -21,9 +21,15 @@ const port = Number(portArg);
 const origin = `http://127.0.0.1:${port}`;
 const { chromium } = createRequire(import.meta.url)(resolve(modulePath));
 await mkdir(run);
-const html = await readFile(new URL('./fixtures/touch-selection.html', import.meta.url));
+const html = (await readFile(new URL('./fixtures/touch-selection.html', import.meta.url), 'utf8'))
+  .replace(
+    'let serial = 0;',
+    "let serial = 0; let clicks = 0; document.querySelector('#blank').onclick = () => ++clicks;",
+  )
+  .replace('scrollY,', 'scrollY, clicks,');
 const remote = [];
 const results = [];
+const password = randomBytes(18).toString('hex');
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 const fixture = createServer(async (request, response) => {
   if (request.method === 'POST' && request.url === '/event') {
@@ -51,7 +57,7 @@ try {
   await until(async () => (await fetch(origin + '/api/auth/setup')).ok, 'Control startup');
   context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
-    headless: false,
+    headless: true,
     viewport: { width: 1100, height: 1000 },
     deviceScaleFactor: 1,
     isMobile: true,
@@ -71,6 +77,47 @@ try {
       }
       return send.call(this, raw);
     };
+    q.pending = new Map();
+    q.call = (method, params, rtc, id) =>
+      new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          q.pending.delete(id);
+          reject(Error('RPC timeout: ' + method));
+        }, 30000);
+        q.pending.set(id, (message) => {
+          clearTimeout(timeout);
+          q.pending.delete(id);
+          message.error ? reject(Error(JSON.stringify(message.error))) : resolve(message.result);
+        });
+        (rtc ? q.channels.find((c) => c.label === 'remotekit') : q.socket).send(
+          JSON.stringify(
+            rtc
+              ? {
+                  type: 'files.request',
+                  version: 1,
+                  requestId: id,
+                  method,
+                  params,
+                  authEpoch: q.auth.peerEpoch,
+                }
+              : { id, method, params },
+          ),
+        );
+      });
+    window.WebSocket = class extends WebSocket {
+      constructor(...args) {
+        super(...args);
+        q.socket = this;
+        this.addEventListener('message', ({ data }) => {
+          try {
+            const message = JSON.parse(data);
+            q.pending.get(message.id)?.(message);
+            if (message.type === 'state') q.state = message.state;
+            if (message.type === 'auth') q.auth = message.auth;
+          } catch {}
+        });
+      }
+    };
     const Peer = RTCPeerConnection;
     window.RTCPeerConnection = class extends Peer {
       constructor(...args) {
@@ -84,10 +131,16 @@ try {
           channel.addEventListener('message', (event) => {
             try {
               const message = JSON.parse(event.data);
+              q.pending.get(message.requestId)?.(message);
               if (
-                ['layout', 'input.selection', 'input.editable', 'input.result', 'focus'].includes(
-                  message.type,
-                )
+                [
+                  'layout',
+                  'input.selection',
+                  'input.contextMenu',
+                  'input.editable',
+                  'input.result',
+                  'focus',
+                ].includes(message.type)
               )
                 q.wire.push({ direction: 'in', message, at: performance.now() });
             } catch {}
@@ -98,7 +151,7 @@ try {
   });
   const cdp = await context.newCDPSession(page);
   const version = await cdp.send('Browser.getVersion');
-  assert.match(version.product, /\/157\./, 'This scenario requires Chrome 157');
+  assert(Number(version.product.match(/\/(\d+)/)[1]) >= 89);
   result('platform', version.product);
   await page.goto(origin);
   await page.locator('.viewer-lock-blank').waitFor();
@@ -108,9 +161,25 @@ try {
     await pause(55);
   }
   await page.locator('input[autocomplete=username]').fill('touch-selection');
-  await page.locator('input[autocomplete=new-password]').fill(randomBytes(18).toString('hex'));
+  await page.locator('input[autocomplete=new-password]').fill(password);
   await page.locator('button[type=submit]').click();
   await page.waitForFunction(() => selectionQA.channels.filter((c) => c.readyState === 'open').length === 2);
+  await page.evaluate((operationId) => {
+    const q = selectionQA;
+    q.channels
+      .find((c) => c.label === 'remotekit')
+      .send(
+        JSON.stringify({
+          type: 'product.action',
+          version: 1,
+          operationId,
+          operationGeneration: q.state.operationGeneration,
+          action: { type: 'settings.update', settings: { workspace: { clipboardSync: false } } },
+          authEpoch: q.auth.peerEpoch,
+        }),
+      );
+  }, randomUUID());
+  await page.waitForFunction(() => selectionQA.state.workspace.settings.workspace.clipboardSync === false);
   await page.getByRole('button', { name: '打开开始屏幕', exact: true }).click();
   await page.locator('.launcher-search input').fill(`http://127.0.0.1:${port + 1}/`);
   await page.locator('.launcher-search input').press('Enter');
@@ -126,6 +195,30 @@ try {
   });
   await pause(800);
   const latest = () => remote.at(-1);
+  const call = (method, params = {}, rtc = false) =>
+    page.evaluate(({ method, params, rtc, id }) => selectionQA.call(method, params, rtc, id), {
+      method,
+      params,
+      rtc,
+      id: randomUUID(),
+    });
+  const action = (value) =>
+    page.evaluate(
+      ({ value, id }) =>
+        selectionQA.channels
+          .find((c) => c.label === 'remotekit')
+          .send(
+            JSON.stringify({
+              type: 'product.action',
+              version: 1,
+              operationId: id,
+              operationGeneration: selectionQA.state.operationGeneration,
+              action: value,
+              authEpoch: selectionQA.auth.peerEpoch,
+            }),
+          ),
+      { value, id: randomUUID() },
+    );
   const project = async (rect) => {
     const canvas = await page.locator('canvas[data-video-input]').boundingBox();
     return {
@@ -183,8 +276,9 @@ try {
   const selectionMessage = () =>
     page.evaluate(
       () =>
-        selectionQA.wire.findLast((e) => e.direction === 'in' && e.message.type === 'input.selection')
-          ?.message,
+        [...selectionQA.wire]
+          .reverse()
+          .find((e) => e.direction === 'in' && e.message.type === 'input.selection')?.message,
     );
   const menu = async () => {
     await page.locator('.selection-menu').waitFor({ state: 'visible' });
@@ -194,14 +288,15 @@ try {
   };
   const command = async (label) => {
     await page.locator('.selection-menu').getByRole('button', { name: label, exact: true }).tap();
-    await page.locator('.selection-menu').waitFor({ state: 'hidden' });
+    if (label !== '??') await page.locator('.selection-menu').waitFor({ state: 'hidden' });
     await pause(350);
   };
   const crop = async (name, rect) => {
     const image = await page.evaluate((rect) => {
       const video = document.querySelector('.remote-viewport video');
-      const surface = selectionQA.wire.findLast((e) => e.message.type === 'layout' && e.message.views.length)
-        ?.message.views[0];
+      const surface = [...selectionQA.wire]
+        .reverse()
+        .find((e) => e.message.type === 'layout' && e.message.views.length)?.message.views[0];
       const scaleX = surface.deviceScaleFactor * (surface.mediaScaleX ?? surface.mediaScale ?? 1);
       const scaleY = surface.deviceScaleFactor * (surface.mediaScaleY ?? surface.mediaScale ?? 1);
       const canvas = document.createElement('canvas');
@@ -261,24 +356,22 @@ try {
     if (Math.max(...[0, 1, 2].map((c) => Math.abs(after.pixels[i + c] - before.pixels[i + c]))) > 35)
       changed[(i / 4) % after.width < after.width / 2 ? 0 : 1]++;
   }
-  result('2 streamed handles', {
+  assert.equal(await page.locator('.selection-handle-start').count(), 1);
+  assert.equal(await page.locator('.selection-handle-end').count(), 1);
+  result('2 Viewer handles and clean video', {
     leftChanged: changed[0],
     rightChanged: changed[1],
     width: after.width,
     height: after.height,
   });
   assert(
-    changed.every((count) => count >= 100),
-    'STOP: teardrop handles absent from streamed video; inspect Aura compositor/layer capture path',
+    changed.every((count) => count < 20),
+    'Chromium handle pixels remain in the streamed frame',
   );
   await page.screenshot({ path: join(run, 'selection-menu.png') });
   const dragBefore = latest();
-  const start = await project({
-    x: word.x + word.width + 7,
-    y: word.y + word.height + 10,
-    width: 0,
-    height: 0,
-  });
+  const handle = await page.locator('.selection-handle-end').boundingBox();
+  const start = { x: handle.x + handle.width / 2, y: handle.y + 16 };
   const end = await project({
     x: dragBefore.geometry.extended.x + dragBefore.geometry.extended.width + 20,
     y: word.y + word.height + 10,
@@ -304,7 +397,27 @@ try {
   await hold(word);
   await menu();
   await command('复制');
+  await until(
+    async () => (await call('clipboard.get')).text === 'bravo',
+    'remote copy reaches app clipboard',
+  );
+  await page.getByRole('button', { name: '开始', exact: true }).click();
+  const search = page.locator('.launcher-search input');
+  await search.fill('');
+  const searchBox = await search.boundingBox();
+  await touch('touchStart', { x: searchBox.x + 18, y: searchBox.y + searchBox.height / 2 });
+  await pause(650);
+  await touch('touchEnd');
+  await page.locator('.selection-menu').getByRole('button', { name: '粘贴', exact: true }).tap();
+  assert.equal(await search.inputValue(), 'bravo');
+  await page.keyboard.press('Escape');
+  result('app clipboard into Viewer search', 'bravo with device sync disabled');
   await tap(latest().geometry.editor);
+  await page.waitForFunction(
+    () =>
+      [...selectionQA.wire].reverse().find((entry) => entry.message.type === 'input.editable')?.message
+        .editable.focusSource === 'pointer',
+  );
   await hold(latest().geometry.editor);
   assert((await menu()).commands.includes('paste'));
   await command('粘贴');
@@ -363,10 +476,13 @@ try {
     await page.waitForFunction(
       () =>
         document.activeElement?.matches('.remote-input') &&
-        !!(selectionQA.wire.findLast((e) => e.message.type === 'input.editable')?.message.editable.flags & 2),
+        !!(
+          [...selectionQA.wire].reverse().find((e) => e.message.type === 'input.editable')?.message.editable
+            .flags & 2
+        ),
     );
     const editable = await page.evaluate(
-      () => selectionQA.wire.findLast((e) => e.message.type === 'input.editable').message.editable,
+      () => [...selectionQA.wire].reverse().find((e) => e.message.type === 'input.editable').message.editable,
     );
     const expected = await project({
       x: editable.caretX,
@@ -390,29 +506,189 @@ try {
   await pause(250);
   const caretAfter = await caret();
   assert(Math.abs(caretAfter.actual.x - caretBefore.actual.x) > 20, 'IME proxy did not move with caret');
-  await cdp.send('Input.dispatchKeyEvent', {
-    type: 'rawKeyDown',
-    windowsVirtualKeyCode: 229,
-    nativeVirtualKeyCode: 229,
-  });
-  await cdp.send('Input.imeSetComposition', { text: '你好', selectionStart: 2, selectionEnd: 2 });
-  await until(
-    () => latest().compositions.some((e) => e.type === 'compositionupdate' && e.data === '你好'),
-    'remote composition',
-  );
-  await cdp.send('Input.insertText', { text: '你好' });
-  await cdp.send('Input.dispatchKeyEvent', {
-    type: 'keyUp',
-    windowsVirtualKeyCode: 229,
-    nativeVirtualKeyCode: 229,
-  });
-  await until(
-    () =>
-      latest().value.includes('abcdef你好') &&
-      latest().compositions.some((e) => e.type === 'compositionend' && e.data === '你好'),
-    'remote IME commit',
-  );
+  if (Number(version.product.match(/\/(\d+)/)[1]) >= 100) {
+    await cdp.send('Input.dispatchKeyEvent', {
+      type: 'rawKeyDown',
+      windowsVirtualKeyCode: 229,
+      nativeVirtualKeyCode: 229,
+    });
+    await cdp.send('Input.imeSetComposition', { text: '你好', selectionStart: 2, selectionEnd: 2 });
+    await until(
+      () => latest().compositions.some((e) => e.type === 'compositionupdate' && e.data === '你好'),
+      'remote composition',
+    );
+    await cdp.send('Input.insertText', { text: '你好' });
+    await cdp.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      windowsVirtualKeyCode: 229,
+      nativeVirtualKeyCode: 229,
+    });
+    await until(
+      () =>
+        latest().value.includes('abcdef你好') &&
+        latest().compositions.some((e) => e.type === 'compositionend' && e.data === '你好'),
+      'remote IME commit',
+    );
+  } else result('CDP composition', 'unavailable in Chrome 89');
   result('7 IME placement and commit', { caretBefore, caretAfter, value: latest().value });
+  await page.keyboard.press('Control+A');
+  await page.keyboard.insertText('alpha bravo charlie');
+  await until(() => latest().value === 'alpha bravo charlie', 'populated input');
+  const inputWord = { ...latest().geometry.editor, x: latest().geometry.editor.x + 80, width: 30 };
+  await hold(inputWord);
+  const populated = await menu();
+  assert(populated.commands.includes('copy') && populated.commands.includes('cut'));
+  await command('复制');
+  await tap(latest().geometry.editor);
+  await page.keyboard.press('Control+A');
+  await page.keyboard.press('Backspace');
+  await until(() => latest().value === '', 'empty input');
+  await hold(latest().geometry.editor);
+  assert((await menu()).commands.includes('paste'));
+  await command('粘贴');
+  await until(() => latest().value.length > 0, 'empty input paste');
+  result('8 editable long press', { populated, value: latest().value });
+  await tap(latest().geometry.editor);
+  const insertion = await page.evaluate(
+    () =>
+      [...selectionQA.wire].reverse().find((entry) => entry.message.type === 'input.editable').message
+        .editable,
+  );
+  await page.locator('.selection-handle-insertion').waitFor();
+  const insertionHandle = await page.locator('.selection-handle-insertion').boundingBox();
+  await touch('touchStart', { x: insertionHandle.x + 22, y: insertionHandle.y + 16 });
+  await pause(650);
+  await touch('touchEnd');
+  assert((await menu()).commands.includes('paste'));
+  await command('粘贴');
+  result('8 insertion handle long press', latest().value);
+  for (const close of ['outside', 'command', 'reload', 'disconnect', 'escape']) {
+    await page.locator('.address-form input').fill(`http://127.0.0.1:${port + 1}/?more=${close}`);
+    await page.locator('.address-form input').press('Enter');
+    await pause(1200);
+    await page.waitForFunction(() => document.querySelector('canvas[data-video-input]:not(.no-frame)'));
+    await tap(latest().geometry.blank);
+    await hold(latest().geometry.word);
+    await menu();
+    await page.locator('.selection-menu').getByRole('button', { name: '更多', exact: true }).tap();
+    const contextMenu = page.getByRole('menu', { name: '页面菜单', exact: true });
+    await contextMenu.waitFor({ state: 'visible' });
+    if (close === 'command') await contextMenu.getByRole('menuitem', { name: '复制', exact: true }).tap();
+    else if (close === 'escape') await page.keyboard.press('Escape');
+    else if (close !== 'disconnect') await page.touchscreen.tap(10, 100);
+    if (close !== 'disconnect') {
+      await contextMenu.waitFor({ state: 'hidden' });
+      await page.waitForFunction(
+        () =>
+          ![...selectionQA.wire].reverse().find((entry) => entry.message.type === 'input.contextMenu')
+            ?.message.menu,
+      );
+    }
+    if (close === 'reload' || close === 'disconnect') {
+      await page.reload();
+      await page.locator('.viewer-lock-blank').waitFor();
+      await pause(650);
+      for (const direction of ['Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right']) {
+        await page.keyboard.press('Arrow' + direction);
+        await pause(55);
+      }
+      await page.locator('input[type=password]').fill(password);
+      await page.getByRole('button', { name: '解锁', exact: true }).click();
+      await page.waitForFunction(() => document.querySelector('canvas[data-video-input]:not(.no-frame)'));
+      await pause(1000);
+    }
+    const clicks = latest().clicks;
+    await tap(latest().geometry.blank);
+    await until(() => latest().clicks > clicks, `tap after more ${close}`);
+    const position = await point(latest().geometry.blank);
+    const scroll = latest().scrollY;
+    await touch('touchStart', { x: position.x + 300, y: position.y + 300 });
+    for (let step = 1; step <= 10; ++step) {
+      await pause(20);
+      await touch('touchMove', { x: position.x + 300, y: position.y + 300 - step * 20 });
+    }
+    await touch('touchEnd');
+    await until(() => latest().scrollY > scroll + 30, `scroll after more ${close}`);
+    await page.waitForFunction(() => {
+      const wire = selectionQA.wire;
+      const end = [...wire]
+        .reverse()
+        .find(
+          (entry) =>
+            entry.direction === 'out' &&
+            entry.message.type === 'input' &&
+            entry.message.event?.type === 'touch' &&
+            entry.message.event.action === 'end',
+        )?.message.event;
+      if (!end?.gestures.some((gesture) => gesture.type === 'flingStart')) return true;
+      return wire.some(
+        (entry) =>
+          entry.direction === 'out' &&
+          entry.message.type === 'input' &&
+          entry.message.event?.sequenceId === end.sequenceId &&
+          ['momentumEnd', 'cancel'].includes(entry.message.event.action),
+      );
+    });
+    await pause(150);
+    result(`9 more ${close}`, { clicks: latest().clicks });
+  }
+  const readerText = Buffer.from('Reader alpha bravo charlie delta.\n');
+  const upload = await call(
+    'asset.begin',
+    {
+      requestId: 'library',
+      operationId: randomUUID(),
+      name: 'Selection reader.txt',
+      type: 'text/plain',
+      size: readerText.length,
+    },
+    true,
+  );
+  await call(
+    'asset.chunk',
+    { requestId: 'library', uploadId: upload.uploadId, offset: 0, data: readerText.toString('base64') },
+    true,
+  );
+  const sealed = await call('asset.seal', { requestId: 'library', uploadId: upload.uploadId }, true);
+  await call('library.import', {
+    operationId: randomUUID(),
+    assetId: sealed.assetId,
+    name: 'Selection reader.txt',
+    destination: 'library',
+    origin: { kind: 'files', channel: 'upload', partitionId: null },
+  });
+  await action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
+  const file = page.getByRole('button', { name: 'Selection reader.txt', exact: true });
+  await file.waitFor();
+  const tile = await file.boundingBox();
+  await page.evaluate(() => document.getSelection().removeAllRanges());
+  await touch('touchStart', { x: tile.x + 20, y: tile.y + 20 });
+  await pause(650);
+  await touch('touchEnd');
+  assert(await page.evaluate(() => document.getSelection().isCollapsed));
+  await page.getByRole('button', { name: '退出选择', exact: true }).click();
+  await file.click();
+  await page.getByRole('menuitem', { name: '预览', exact: true }).click();
+  const wordNode = page.locator('.document-viewer-page-body .word').filter({ hasText: 'Reader' }).first();
+  await wordNode.waitFor({ timeout: 60000 });
+  const readerWord = await wordNode.boundingBox();
+  await touch('touchStart', {
+    x: readerWord.x + readerWord.width / 2,
+    y: readerWord.y + readerWord.height / 2,
+  });
+  await pause(650);
+  await touch('touchEnd');
+  await page.locator('.selection-handle-start').waitFor();
+  await page.locator('.selection-menu').getByRole('button', { name: '复制', exact: true }).tap();
+  const clipboard = await call('clipboard.get');
+  assert.equal(clipboard.text, 'Reader');
+  assert(
+    (await call('library.get')).entries.some(
+      (entry) => entry.kind === 'snippet' && entry.preview === 'Reader',
+    ),
+  );
+  await page.screenshot({ path: join(run, 'document-selection.png') });
+  result('document shadow-root selection and snippet', clipboard.text);
   const codecs = await page.evaluate(async () => {
     const stats = await selectionQA.peers[0].getStats();
     return [...stats.values()]

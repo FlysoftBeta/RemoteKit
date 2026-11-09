@@ -3,12 +3,14 @@
 #include <array>
 #include <utility>
 #include "browser/offscreen_host.h"
+#include "browser/selection_geometry.h"
 #include "browser/view_registry.h"
 #include "content/browser/renderer_host/input/touch_selection_controller_client_aura.h"  // nogncheck
 #include "content/browser/renderer_host/render_widget_host_view_aura.h"  // nogncheck
 #include "content/public/browser/context_menu_params.h"
 #include "ui/base/mojom/menu_source_type.mojom.h"
 #include "ui/aura/window.h"
+#include "ui/base/class_property.h"
 #include "ui/touch_selection/touch_editing_controller.h"
 #include "ui/events/gesture_detection/gesture_event_data.h"
 #include "ui/events/velocity_tracker/motion_event.h"
@@ -17,6 +19,34 @@
 
 namespace remotekit::browser {
 namespace {
+DEFINE_UI_CLASS_PROPERTY_KEY(bool, kViewerSelectionClient, false)
+
+class ViewerHandleDrawable final : public ui::TouchHandleDrawable {
+ public:
+  void SetEnabled(bool enabled) override { enabled_ = enabled; }
+  void SetOrientation(ui::TouchHandleOrientation, bool, bool) override {}
+  void SetOrigin(const gfx::PointF& origin) override { origin_ = origin; }
+  void SetAlpha(float alpha) override { alpha_ = alpha; }
+  gfx::RectF GetVisibleBounds() const override {
+    return enabled_ && alpha_ > 0 ? gfx::RectF(origin_, gfx::SizeF(24, 24)) : gfx::RectF();
+  }
+  float GetDrawableHorizontalPaddingRatio() const override { return 0; }
+
+ private:
+  gfx::PointF origin_;
+  bool enabled_ = false;
+  float alpha_ = 0;
+};
+
+class ViewerSelectionClient final : public content::TouchSelectionControllerClientAura {
+ public:
+  explicit ViewerSelectionClient(content::RenderWidgetHostViewAura* view)
+      : TouchSelectionControllerClientAura(view) {}
+  std::unique_ptr<ui::TouchHandleDrawable> CreateDrawable() override {
+    return std::make_unique<ViewerHandleDrawable>();
+  }
+};
+
 constexpr std::array commands = {
     ui::TouchEditable::MenuCommands::kCut, ui::TouchEditable::MenuCommands::kCopy,
     ui::TouchEditable::MenuCommands::kPaste, ui::TouchEditable::MenuCommands::kSelectAll};
@@ -28,7 +58,12 @@ uint32_t Enabled(const ui::TouchSelectionMenuClient* client, bool can_paste) {
   return mask;
 }
 content::RenderWidgetHostViewAura* Aura(input::RenderWidgetHostViewInput* view) {
-  return static_cast<content::RenderWidgetHostViewAura*>(view);
+  auto* aura = static_cast<content::RenderWidgetHostViewAura*>(view);
+  if (!aura->GetNativeView()->GetProperty(kViewerSelectionClient)) {
+    aura->SetSelectionControllerClientForTest(std::make_unique<ViewerSelectionClient>(aura));
+    aura->GetNativeView()->SetProperty(kViewerSelectionClient, true);
+  }
+  return aura;
 }
 }  // namespace
 RemoteTouchSelectionMenuRunner::RemoteTouchSelectionMenuRunner(ViewRegistry& views)
@@ -98,11 +133,39 @@ bool RemoteTouchSelectionMenuRunner::IsRunning() const {
 }
 SharedAtlasSelectionMenu RemoteTouchSelectionMenuRunner::StateFor(SessionId session,
                                                                   WebViewId view) const {
-  if (!IsRunning() || open_->session != session || open_->view != view)
-    return {};
-  auto state = open_->menu;
-  state.flags = kAtlasSelectionMenuVisible | Enabled(open_->client.get(), open_->can_paste);
+  SharedAtlasSelectionMenu state{};
+  if (IsRunning() && open_->session == session && open_->view == view) {
+    state = open_->menu;
+    state.flags = kAtlasSelectionMenuVisible | Enabled(open_->client.get(), open_->can_paste);
+  }
+  const auto* record = views_.Find(session, view);
+  if (record && record->webview->contents()) {
+    auto* root = static_cast<content::RenderWidgetHostViewBase*>(
+        record->webview->contents()->GetRenderWidgetHostView());
+    if (root) {
+      auto* controller = Aura(root)->selection_controller();
+      ReadSelectionHandles(*controller, state);
+      if (state.menu_id) {
+        const auto rect = controller->GetRectBetweenBounds();
+        state.anchor_x = rect.x();
+        state.anchor_y = rect.y();
+        state.anchor_width = rect.width();
+        state.anchor_height = rect.height();
+      }
+    }
+  }
   return state;
+}
+Status DragSelectionHandle(input::RenderWidgetHostViewInput* view, const SelectionExtent& extent) {
+  if (!view)
+    return {ErrorCode::kUnavailable, "Selection view unavailable"};
+  auto* aura = Aura(view);
+  if (!MoveSelectionExtent(*aura->selection_controller(), *aura->selection_controller_client(),
+                           extent))
+    return {ErrorCode::kConflict, "Selection changed"};
+  if (extent.which == SelectionExtent::Which::insertion)
+    ShowInsertionMenu(view, aura->selection_controller()->GetStartHandleRect().CenterPoint());
+  return {};
 }
 Status RemoteTouchSelectionMenuRunner::Execute(SessionId session,
                                                WebViewId view,

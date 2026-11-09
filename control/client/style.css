@@ -6,6 +6,17 @@ body,
   margin: 0;
   overflow: hidden;
 }
+html {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+[data-selectable],
+[data-selectable] * {
+  user-select: text;
+  -webkit-user-select: text;
+}
 :root {
   /* Viewport units do not follow the transform on <body>; size against the scaled layout instead. */
   --layout-vw: calc(100vw / var(--ui-scale, 1));

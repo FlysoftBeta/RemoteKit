@@ -472,6 +472,8 @@ Status InputController::DispatchInput(const InputEvent& original, bool* admitted
   }
   if (const auto* command = std::get_if<SelectionCommand>(&input.payload))
     return RemoteTouchSelectionMenuRunner::Get().Execute(owner_.session_, owner_.view_, *command);
+  if (const auto* extent = std::get_if<SelectionExtent>(&input.payload))
+    return DragSelectionHandle(root_view, *extent);
   if (const auto* command = std::get_if<ContextCommand>(&input.payload))
     return RemoteContextMenu::Get().Execute(owner_.session_, owner_.view_, *command);
   if (const auto* touch = std::get_if<TouchInput>(&input.payload)) {

@@ -28,6 +28,9 @@ const message = (revision = '1'): SelectionMessage => ({
   type: 'input.selection',
   version: 1,
   revision,
+  outputGeneration: '1',
+  layoutEpoch: '1',
+  handles: { start: null, end: null, insertion: null },
   view: { session: 's', id: 'v', instance: 'i', document: 'd' },
   menu: {
     id: '18446744073709551615',
@@ -46,6 +49,11 @@ test('selection protocol accepts visible and cleared menus with exact decimal id
     message(),
     { ...message('2'), view: null, menu: null },
     { ...message('3'), menu: { ...message().menu!, commands: ['copy', 'selectAll'] } },
+    {
+      ...message('4'),
+      menu: null,
+      handles: { start: null, end: null, insertion: { x: 20, y: 40, lineHeight: 20 } },
+    },
   ]) {
     assert.deepEqual(decodeIncoming(JSON.stringify(value)), value);
   }
@@ -60,6 +68,10 @@ test('selection protocol rejects malformed identity, geometry, revisions and com
     { ...valid, view: null },
     { ...valid, menu: null },
     { ...valid, view: { ...valid.view!, instance: 1 } },
+    { ...valid, layoutEpoch: '01' },
+    { ...valid, outputGeneration: 1 },
+    { ...valid, handles: { ...valid.handles, start: { x: 0, y: 20, lineHeight: 0 } } },
+    { ...valid, handles: { ...valid.handles, end: { x: Infinity, y: 20, lineHeight: 20 } } },
     ...[
       { id: '0' },
       { id: '01' },

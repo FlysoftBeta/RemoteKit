@@ -71,7 +71,7 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 | `focus` | 焦点请求结果与新 token |
 | `input.result` | clientSequence、browserSequence、ok/error；触控使用普通有序输入结果 |
 | `input.editable` | revision、页面编辑身份、type/flags/selection/composition/caret、`editable.target`、focusSource、focusRevision |
-| `input.selection` | revision、页面身份（session/id/instance/document）或 null；`menu`：null 或 {id、根 DIP 锚点 x/y/width/height、handleHeight、commands（cut/copy/paste/selectAll 中可用者，固定顺序）、more} |
+| `input.selection` | revision、页面身份（session/id/instance/document）或 null；outputGeneration/layoutEpoch；handles:{start,end,insertion}（各为 null 或根 DIP 的 {x,y,lineHeight}）；`menu`：null 或 {id、根 DIP 锚点 x/y/width/height、handleHeight、commands（cut/copy/paste/selectAll 中可用者，固定顺序）、more} |
 | `input.contextMenu` | revision、页面身份或 null；`menu`：null 或 {id、根 DIP 按下点 x/y、source mouse/touch/keyboard、link {url,text}?、image {src}?、selection?、editable {undo,redo,cut,copy,paste,selectAll}?} |
 | `product.result` | `{operationId, operationGeneration, connectionId, result:收据}`；失败只在收据里表达（`status:"failed"` + `error`，或 `status:"unknown"`） |
 | `files.result` | 文件 RPC 结果 |
@@ -105,6 +105,7 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 | `touch` | action start/move/end/cancel、points（≤16）、gestureMode `client-v1`、sequenceId、clockMode、sampleElapsedUs、startServerWallUs、samples（≤32）、gestures（≤8） |
 | `gesture` | action momentum/momentumEnd/cancel、sequenceId、sampleElapsedUs、cumulativeX/Y；action longPress、sequenceId、sampleElapsedUs、x/y（根 DIP） |
 | `selection_command` | menu（菜单 ID）、command cut/copy/paste/selectAll/contextMenu/dismiss；需要焦点，过期菜单返回 `conflict` |
+| `selection.extent` | which start/end/insertion、x/y（根 DIP），完整有序输入门禁 |
 | `context_command` | menu（菜单 ID）、command undo/redo/cut/copy/paste/selectAll/copyLinkAddress/copyImage/copyImageAddress/dismiss；需要焦点，过期菜单返回 `conflict` |
 
 **`remotekit-auth`**：`auth.camera.ready/config/accept/frame` JSON 消息，加 68 字节头的 RGB24 二进制块，见[认证](auth.md#人脸验证)。

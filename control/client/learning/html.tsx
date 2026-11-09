@@ -103,7 +103,7 @@ export function LearningHtml({ html }: { html: string }) {
     sanitizer ??= learningSanitizer(window);
     return sanitizer(html);
   }, [html]);
-  return <div className="learning-html" dangerouslySetInnerHTML={{ __html: clean }} />;
+  return <div data-selectable className="learning-html" dangerouslySetInnerHTML={{ __html: clean }} />;
 }
 
 export function stripOptionLabel(html: string): string {

@@ -11,6 +11,7 @@ import { BlankScreen, RevealScreen } from './auth/lock-screen';
 import { selectProductReceiveProfile } from './media/receive-profile';
 import { AuthView } from './app/product-dialogs';
 import './style.css';
+import { LocalSelection } from './selection/local-selection';
 import { request } from './control/http-request';
 // Automation hooks exist only in dev builds; Vite drops this branch from production.
 if (import.meta.env.DEV) void import('./test-hooks');
@@ -51,6 +52,7 @@ function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
+      <LocalSelection />
       {user === undefined ? (
         <BlankScreen />
       ) : user ? (

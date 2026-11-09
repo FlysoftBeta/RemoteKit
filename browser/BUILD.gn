@@ -7,10 +7,6 @@ executable("remotekit_browser") {
   sources = [
     "//chrome/renderer/loadtimes_bindings.cc",
     "//chrome/renderer/loadtimes_bindings.h",
-    "resources/signin/changyan_page.h",
-    "signin.cc",
-    "signin.h",
-    "signin_result.h",
     "audio_target.cc",
     "audio_target.h",
     "browser_context.cc",
@@ -18,6 +14,8 @@ executable("remotekit_browser") {
     "browser_runtime.cc",
     "browser_runtime.h",
     "browser_shutdown.cc",
+    "chrome_parity.cc",
+    "chrome_parity.h",
     "client_gesture_bridge.cc",
     "client_gesture_bridge.h",
     "client_gesture_packet.cc",
@@ -25,16 +23,16 @@ executable("remotekit_browser") {
     "client_input_timing.h",
     "clipboard_bridge.cc",
     "clipboard_bridge.h",
-    "control_clipboard.h",
     "closed_views.cc",
     "closed_views.h",
-    "chrome_parity.cc",
-    "chrome_parity.h",
     "compat.cc",
     "compat.h",
     "compat_renderer.cc",
     "compat_renderer.h",
+    "context_menu.cc",
+    "context_menu.h",
     "control_app_info.cc",
+    "control_clipboard.h",
     "control_dispatcher.cc",
     "control_dispatcher.h",
     "control_input.cc",
@@ -43,8 +41,6 @@ executable("remotekit_browser") {
     "control_navigation.cc",
     "control_output.cc",
     "control_page.cc",
-    "context_menu.cc",
-    "context_menu.h",
     "control_requests.h",
     "control_response.cc",
     "control_response.h",
@@ -87,14 +83,6 @@ executable("remotekit_browser") {
     "osr_renderer.cc",
     "osr_renderer.h",
     "osr_wake_state.h",
-    "services_browser.cc",
-    "services_browser.h",
-    "services_binders.cc",
-    "services_devices.cc",
-    "services_flash.cc",
-    "services_prompts.cc",
-    "site_preferences.cc",
-    "site_preferences.h",
     "page_requests.cc",
     "page_requests.h",
     "popup_registry.cc",
@@ -107,8 +95,23 @@ executable("remotekit_browser") {
     "profile_services.h",
     "render_channel.cc",
     "render_channel.h",
+    "resources/signin/changyan_page.h",
+    "selection_geometry.h",
+    "services_binders.cc",
+    "services_browser.cc",
+    "services_browser.h",
+    "services_devices.cc",
+    "services_flash.cc",
+    "services_prompts.cc",
+    "signin.cc",
+    "signin.h",
+    "signin_result.h",
+    "site_preferences.cc",
+    "site_preferences.h",
     "storage_import.cc",
     "storage_import.h",
+    "touch_selection.cc",
+    "touch_selection.h",
     "view_model.cc",
     "view_model.h",
     "view_registry.cc",
@@ -124,8 +127,6 @@ executable("remotekit_browser") {
     "webview_lifecycle.h",
     "webview_navigation.cc",
     "webview_navigation.h",
-    "touch_selection.cc",
-    "touch_selection.h",
     "webview_touch.cc",
     "webview_touch.h",
   ]
@@ -141,15 +142,12 @@ executable("remotekit_browser") {
     "//components/download/public/common:public",
     "//components/embedder_support:user_agent",
     "//components/embedder_support/origin_trials",
-    "//components/payments/core",
-    "//components/password_manager/core/common",
-    "//services/device/public/cpp/geolocation",
-    "//services/device/public/mojom",
-    "//services/device/public/mojom:usb",
     "//components/headless/clipboard",
     "//components/input",
     "//components/os_crypt/async/browser",
     "//components/os_crypt/async/browser:key_provider_interface",
+    "//components/password_manager/core/common",
+    "//components/payments/core",
     "//components/services/quarantine",
     "//components/services/quarantine/public/mojom",
     "//components/services/storage/public/mojom",
@@ -170,10 +168,13 @@ executable("remotekit_browser") {
     "//mojo/public/cpp/system",
     "//net",
     "//sandbox",
-    "//skia",
+    "//services/device/public/cpp/geolocation",
+    "//services/device/public/mojom",
+    "//services/device/public/mojom:usb",
     "//services/network/public/cpp",
     "//services/network/public/mojom",
     "//services/viz/privileged/mojom/compositing",
+    "//skia",
     "//third_party/blink/public:blink",
     "//third_party/blink/public/common",
     "//ui/aura",
@@ -182,24 +183,38 @@ executable("remotekit_browser") {
     "//ui/compositor",
     "//ui/display",
     "//ui/events:gesture_detection",
-    "//ui/touch_selection",
     "//ui/events/blink",
     "//ui/events/platform",
     "//ui/gfx",
     "//ui/gfx/codec",
+    "//ui/touch_selection",
     "//url",
     "//v8",
   ]
+
   # Chromium owns the root locales/*.pak output paths.
   data_deps = [
-    "//tools/v8_context_snapshot",
     "//chrome:packed_resources_locales",
     "//third_party/hyphenation-patterns:bundle_hyphen_data",
+    "//tools/v8_context_snapshot",
   ]
   libs = [
     "d3d11.lib",
     "d3dcompiler.lib",
     "dxgi.lib",
+  ]
+}
+
+executable("remotekit_selection_geometry_probe") {
+  testonly = true
+  configs -= [ "//build/config/clang:find_bad_constructs" ]
+  sources = [ "selection_geometry_probe.cc" ]
+  include_dirs = [ "//remotekit" ]
+  deps = [
+    "//base",
+    "//ui/events:velocity_tracker",
+    "//ui/gfx",
+    "//ui/touch_selection",
   ]
 }
 
@@ -357,24 +372,33 @@ executable("remotekit_render_wire_probe") {
 
 executable("remotekit_site_preferences_tests") {
   testonly = true
-  sources = [ "site_preferences.cc", "site_preferences_tests.cc" ]
+  sources = [
+    "site_preferences.cc",
+    "site_preferences_tests.cc",
+  ]
   include_dirs = [ "//remotekit" ]
-  deps = [ "//base", "//url" ]
+  deps = [
+    "//base",
+    "//url",
+  ]
 }
 
 executable("remotekit_storage_import_probe") {
   testonly = true
   configs -= [ "//build/config/clang:find_bad_constructs" ]
-  sources = [ "storage_import.cc", "storage_import_probe.cc" ]
+  sources = [
+    "storage_import.cc",
+    "storage_import_probe.cc",
+  ]
   include_dirs = [ "//remotekit" ]
   deps = [
     "//base",
     "//base/test:test_support",
-    "//content/public/browser",
     "//components/services/storage/public/mojom",
-    "//services/network/public/mojom",
+    "//content/public/browser",
     "//content/public/common",
     "//net",
+    "//services/network/public/mojom",
     "//url",
   ]
 }

@@ -89,21 +89,17 @@ Browser 的仲裁（patch 0010）：
 
 **长按**由计时器触发，不随 raw 包到达：单触点、未出 slop 时按住 500ms，客户端发 `{type:"gesture", action:"longPress", sequenceId, sampleElapsedUs, x, y}`，每个序列最多一次。Browser 把它作为 `GestureEventDataPacket::FromTouchTimeout` 送进该序列的 `TouchDispositionGestureFilter`——这正是 Chromium 自己的 GestureProvider 投递定时长按的方式，所以 touchstart 被 preventDefault 或 touch-action 禁止时长按同样被丢弃。长按之后这一序列不再开始滚动、缩放或 fling，最后的 up 带 `longTap` 而不是 tap/tapCancel。迟于 up 到达的长按是空操作，不是错误。
 
-## 触控文本选择
+## 统一文本选择
 
-文本选择完全复用 Chromium 的 Aura 实现。每个页面是虚拟 Aura 根下的 `RenderWidgetHostViewAura`，它自带 `ui::TouchSelectionController` 与 `TouchSelectionControllerClientAura`：选区边界来自渲染帧元数据（OOPIF 由 `TouchSelectionControllerClientManager` 汇总），水滴形手柄由 `TouchHandleDrawableAura` 作为该 view 窗口下的 Aura layer 绘制。OSR 输出渲染的就是这棵 Aura 树的合成结果，所以手柄随页面一起进入视频，与选区高亮同帧、同延迟，不在客户端另画。
+Viewer 的 `client/selection/` 通过 `SelectionTarget` 统一远端页面、本地 input/textarea、文档 shadow root、学习富文本和片段全文的手柄、快捷菜单与命令。手柄使用视觉视口坐标，选择层挂在缩放 body 之外；菜单在锚点上方放不下时翻到下方，并避开软键盘。选区高亮继续由网页或 DOM 绘制。
 
-缺的只是输入接线：RemoteKit 的输入直接进 `RenderWidgetHostInputEventRouter`，不经过 Aura 的事件派发，因此 `browser/touch_selection.cc` 照搬 `RenderWidgetHostViewEventHandler` 在 Aura 下做的调用：
+远端保留 Chromium 的 `ui::TouchSelectionController` 与 Aura selection client，安装不绘图的 `TouchHandleDrawable`；视频里不画手柄。Browser 从根 DIP 的 selection bounds 发布 `input.selection.handles {start,end,insertion}`，每个非空值有 `x/y/lineHeight`。消息绑定 view、`outputGeneration / layoutEpoch`，布局或文档不匹配时隐藏。拖动发送有序的 `selection.extent {which:start|end|insertion,x,y}`，经完整输入身份与坐标门禁到 Browser 的选区/光标移动路径；DPR、atlas mediaScale、letterbox 与外壳缩放只在投影时换算。
 
-- 每个 raw 包路由前先交给 `WillHandleTouchEvent`（`MotionEventWeb`，根 DIP）。若首个 down 被它接住（按在手柄上），整个序列归选择控制器：raw 包与手势候选不进页面，惯性包是空操作，客户端的 ACK 与终止账本照常完成。否则在首个 down 与最后一指抬起时调用 `OnTouchDown`/`OnTouchUp`。
-- 经过手势过滤器放行的 LongPress、双击 TapDown、Tap、ScrollBegin/End 在路由前交给控制器；被页面消费而丢弃的手势不会到达它，与 Aura 一致。
-- 鼠标按下、滚轮、按键按下时隐藏手柄和菜单，对应 Aura 的 `EnvEventObserver`。
+raw 触控仍先交给 Chromium `WillHandleTouchEvent`；手柄拥有的序列不投网页，但 ACK 与终止账本正常结束。普通序列的 `OnTouchDown/Up`、滚动与选择状态继续接线。长按已有文本选词；空输入框和插入手柄显示可用的粘贴/全选。快捷菜单由 Browser 的 `RemoteTouchSelectionMenuRunner` 决定可用命令，Viewer 的剪切/复制/粘贴/全选/更多按钮不抢编辑代理焦点。`selection_command` 执行时复核菜单 ID 和能力；`contextMenu` 调用 `RunContextMenu()`。显式 dismiss、切 view、布局失效、断链与 peer 清理都结束远端菜单/controller 状态，见[移动编辑](mobile-editing.md#手动收起与菜单生命周期)。
 
-快捷菜单由 Chromium 决定何时出现、何时因触摸或滚动暂时隐藏、指向哪里，由 Viewer 绘制。Browser 安装自己的 `ui::TouchSelectionMenuRunner`（`RemoteTouchSelectionMenuRunner`，进程内唯一，持有当前唯一打开的菜单）：`OpenMenu` 记录菜单 ID、客户端、换算到根 DIP 的锚点矩形和手柄高度；可用命令在每次发布时从 `IsCommandIdEnabled` 重新读取。菜单随每 view 元数据发布，Endpoint 转成 `input.selection`。Viewer 在锚点上方（放不下则在下方并让开手柄）显示剪切/复制/粘贴/全选胶囊按钮，按钮在 pointerdown 阻止默认行为，不抢编辑代理的焦点。点击发送 `selection_command`，走与键盘相同的身份与焦点门禁；菜单 ID 不是当前打开的菜单或命令已不可用时返回 `conflict`，不执行。Viewer 点击后立即在本地隐藏该菜单，最终状态以 Browser 的下一条 `input.selection` 为准。
+外壳根为 `user-select:none; -webkit-user-select:none; -webkit-touch-callout:none`，控件不触发选择。内容通过 `data-selectable` opt in：文档页、题目富文本、片段全文；可编辑 input/textarea 由统一注册器标记，远端代理除外。触摸的长按、双击、selectstart 与 contextmenu 由 Viewer 接管，程序化 Selection API / setSelectionRange 仍可用。本地 input 用镜像测量点位；正文用 caret-from-point 和 DOM Range，支持 shadow root。精细指针保留鼠标选区和快捷键，只有触控显示水滴手柄。
 
-快捷菜单末尾的"⋯"对应 Chromium Views 菜单里的同名按钮：`selection_command {contextMenu}` 调用客户端的 `RunContextMenu()`，随后出现的是下文的页面上下文菜单。
-
-被否决的方案：在 Viewer 里用 DOM 画手柄（手柄随手指即时移动而选区高亮滞后一个往返，两者错位）；把触摸改走 Aura 事件派发以获得现成接线（Aura 会在服务端按到达时间重新识别手势并加上原生 fling，抵消客户端手势的设计；OOPIF 路由本来就由同一个 router 完成）；远程渲染 Views 的 `TouchSelectionMenuViews`（需要引入 Views 基础设施和单独的菜单命中路径，按钮反馈要等一个往返）。
+本地剪切/复制写 Control 的应用剪贴板，粘贴读取应用缓存；设备同步关闭时仍然工作。显式本地粘贴在已授予读取权限时先同步设备文本，不触发权限提示；异步返回后重新检查节点、内容和选区。远端粘贴复用显式设备读取，再发 Browser 命令，菜单或文档已失效则放弃。物理 Android/iPadOS 的系统插入手柄是否完全被抑制，需要在对应设备上确认。
 
 ## 页面上下文菜单
 
@@ -160,4 +156,4 @@ layoutEpoch 变化时，旧 move/end 仍按过期坐标拒绝。客户端丢弃�
 
 ## 测试
 
-`tests/e2e/test-touch-selection.mjs` 用隔离的 Viewer、Control 和真实 Native H.264，在 headed Chrome 157 上以 CDP 触控驱动：长按选词与快捷菜单锚点、视频回读中的水滴手柄、拖动手柄不产生页面 touch 事件、复制→粘贴与全选、tap 与鼠标点击隐藏手柄、`touch-action:none` + preventDefault 阻止长按选择，以及输入法代理跟随远端光标并提交组合。
+`tests/e2e/test-touch-selection.mjs` 用隔离的 Viewer、Control 和真实 Native H.264，在 headed Chrome 157 上以 CDP 触控驱动：长按选词与快捷菜单锚点、视频回读中没有 Chromium 手柄、Viewer 水滴手柄、拖动手柄不产生页面 touch 事件、复制→粘贴与全选、tap 与鼠标点击隐藏手柄、`touch-action:none` + preventDefault 阻止长按选择，以及输入法代理跟随远端光标并提交组合。

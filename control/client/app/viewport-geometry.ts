@@ -68,13 +68,31 @@ export function placeSelectionMenu(
 ) {
   const anchor = projectRootRect(surface, geometry, menu);
   const handle = projectRootRect(surface, geometry, { x: 0, y: 0, width: 0, height: menu.handleHeight });
+  return placeViewportSelectionMenu(
+    anchor,
+    { left: 0, top: 0, width: geometry.width, height: geometry.height },
+    menuWidth,
+    handle.height,
+  );
+}
+
+export function placeViewportSelectionMenu(
+  anchor: { left: number; top: number; width: number; height: number },
+  viewport: { left: number; top: number; width: number; height: number },
+  menuWidth: number,
+  handleHeight: number,
+) {
   const above = anchor.top - 8 - 36;
   return {
-    left: clamp(anchor.left + anchor.width / 2 - menuWidth / 2, 8, geometry.width - menuWidth - 8),
+    left: clamp(
+      anchor.left + anchor.width / 2 - menuWidth / 2,
+      viewport.left + 8,
+      viewport.left + viewport.width - menuWidth - 8,
+    ),
     top: clamp(
-      above >= 8 ? above : anchor.top + anchor.height + handle.height + 8,
-      8,
-      geometry.height - 36 - 8,
+      above >= viewport.top + 8 ? above : anchor.top + anchor.height + handleHeight + 8,
+      viewport.top + 8,
+      viewport.top + viewport.height - 36 - 8,
     ),
   };
 }

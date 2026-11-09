@@ -11,7 +11,7 @@ import { useViewerSessionSelector } from './use-viewer-session';
 import { useViewportTransition } from '../presentation/use-viewport-transition';
 import type { ViewerSession } from '../viewer-session';
 import { sameEditingDocument } from '../editing/mobile-editing-state';
-import { SelectionMenu } from './selection-menu';
+import { RemoteSelection } from '../selection/remote-selection';
 import { ContextMenu } from './context-menu';
 import { useViewportGeometry } from './use-viewport-geometry';
 import { projectEditableCaret } from './viewport-geometry';
@@ -59,7 +59,6 @@ export function RemoteViewport({
   const [controller, setController] = useState<ViewportInput>();
   const [frameReady, setFrameReady] = useState(false);
   useLayoutEffect(() => onFrameReady?.(frameReady), [frameReady, onFrameReady]);
-  const [dismissedMenu, setDismissedMenu] = useState<string>();
   const [dismissedContextMenu, setDismissedContextMenu] = useState<string>();
   const product = useSyncExternalStore(transport.operations.subscribe, transport.operations.getSnapshot);
   const geometry = useViewportGeometry(viewport, canvas);
@@ -122,15 +121,6 @@ export function RemoteViewport({
     };
   }, [surface, geometry, snapshot.current, resize.waiting]);
   const selection = snapshot.selection;
-  const menu =
-    selection?.view &&
-    surface &&
-    sameEditingDocument(surface, selection.view) &&
-    frameReady &&
-    !resize.waiting &&
-    `${owner}:${selection.menu?.id}` !== dismissedMenu
-      ? selection.menu
-      : undefined;
   const context = snapshot.contextMenu;
   const contextMenu =
     context?.view &&
@@ -162,6 +152,7 @@ export function RemoteViewport({
   return (
     <section
       ref={viewport}
+      data-view-id={viewId}
       style={resize.style}
       className={`remote-viewport${resize.waiting ? ' resize-waiting' : ''}`}
       aria-label="远程页面"
@@ -180,19 +171,15 @@ export function RemoteViewport({
         autoComplete="off"
         spellCheck={false}
       />
-      {menu && surface && geometry && (
-        <SelectionMenu
-          key={menu.id}
-          menu={menu}
-          surface={surface}
-          geometry={geometry}
-          onCommand={(command) => {
-            transport.input.ensureInputFocus(surface);
-            transport.input.sendInput(surface, { type: 'selection_command', menu: menu.id, command });
-            setDismissedMenu(`${owner}:${menu.id}`);
-          }}
-        />
-      )}
+      <RemoteSelection
+        key={owner}
+        transport={transport}
+        message={selection}
+        surface={surface}
+        geometry={geometry}
+        canvas={canvas.current}
+        ready={frameReady && !resize.waiting && keyboardActive}
+      />
       {contextMenu && surface && geometry && tab && product.state && (
         <ContextMenu
           key={`${owner}:${contextMenu.id}`}
