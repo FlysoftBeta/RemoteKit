@@ -10,22 +10,33 @@ class StorageImportJobsProbe {
   static void Run() {
     base::test::SingleThreadTaskEnvironment environment;
     StorageImportJobs jobs;
-    const auto first = jobs.Begin(nullptr, {}, 1);
+    StorageImportData data;
+    const auto first = jobs.Begin(nullptr, "record:0", data, 1);
     CHECK(first);
-    CHECK(!jobs.Begin(nullptr, {}, 1));
-    jobs.OnFlushed(first.value);
-    const auto poll = jobs.Poll(first.value);
+    CHECK(jobs.Begin(nullptr, "record:0", data, 1).value == first.value);
+    CHECK(!jobs.Begin(nullptr, "other:0", data, 1));
+    data.fingerprint[0] = 1;
+    CHECK(!jobs.Begin(nullptr, "record:0", data, 1));
+    data.fingerprint[0] = 0;
+    jobs.OnFlushed("record:0");
+    const auto poll = jobs.Poll("record:0");
     CHECK(poll && *poll.value.FindString("state") == "done");
-    CHECK(jobs.Poll(first.value).value == poll.value);
-    CHECK(jobs.Latest(1).value == poll.value);
-    const auto other = jobs.Begin(nullptr, {}, 2);
-    CHECK(other && jobs.Poll(first.value));
-    const auto replacement = jobs.Begin(nullptr, {}, 1);
-    CHECK(replacement && !jobs.Poll(first.value));
-    jobs.Cancel(replacement.value);
-    CHECK(!jobs.Poll(replacement.value));
+    CHECK(jobs.Poll("record:0").value == poll.value);
+    CHECK(jobs.Begin(nullptr, "record:0", data, 1).value == poll.value);
+    for (int i = 1; i <= 64; ++i) {
+      const auto id = "record:" + std::to_string(i);
+      CHECK(jobs.Begin(nullptr, id, data, 1));
+      jobs.OnFlushed(id);
+    }
+    CHECK(!jobs.Poll("record:0"));
+    CHECK(jobs.Poll("record:1"));
+    CHECK(jobs.Poll("record:64"));
+    CHECK(!jobs.Begin(nullptr, "", data));
+    CHECK(!jobs.Begin(nullptr, std::string(129, 'a'), data));
+    jobs.Cancel("record:64");
+    CHECK(!jobs.Poll("record:64"));
     jobs.Clear();
-    CHECK(!jobs.Poll(other.value));
+    CHECK(!jobs.Poll("record:1"));
   }
 };
 }  // namespace remotekit::browser

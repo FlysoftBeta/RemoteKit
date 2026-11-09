@@ -71,13 +71,10 @@ export class EndpointGateway {
     );
     return () => unsubscribe.forEach((fn) => fn());
   }
-  storageImport(tenant: string, args: ImportChunk): Promise<StorageImportJob> {
+  storageImport(tenant: string, args: ImportChunk & StorageImportJob): Promise<StorageImportStatus> {
     return this.invoke('session.storage.import', tenant, args);
   }
-  storageImportStatus(
-    tenant: string,
-    args: { job: string; browserIncarnation: string },
-  ): Promise<StorageImportStatus> {
+  storageImportStatus(tenant: string, args: StorageImportJob): Promise<StorageImportStatus> {
     return this.invoke('session.storage.importStatus', tenant, args);
   }
   identity(tenant: string): Promise<BrowserIdentity> {

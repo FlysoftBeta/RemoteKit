@@ -1,4 +1,5 @@
 #include "objects/store.hpp"
+#include "objects/digest.hpp"
 #include "util/result_macros.hpp"
 #include <windows.h>
 #include <bcrypt.h>
@@ -9,6 +10,8 @@
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <chrono>
+#include <sstream>
 
 namespace remotekit::objects {
 namespace {
@@ -34,35 +37,6 @@ Result<void> Flush(const fs::path& path) {
     return Io();
   return {};
 }
-struct Digest {
-  BCRYPT_ALG_HANDLE algorithm{};
-  BCRYPT_HASH_HANDLE hash{};
-  explicit Digest(const Key* key = nullptr) {
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr,
-                                    key ? BCRYPT_ALG_HANDLE_HMAC_FLAG : 0) < 0 ||
-        BCryptCreateHash(algorithm, &hash, nullptr, 0,
-                         key ? const_cast<PUCHAR>(key->data()) : nullptr,
-                         key ? static_cast<ULONG>(key->size()) : 0, 0) < 0)
-      throw std::runtime_error("object hash initialization failed");
-  }
-  ~Digest() {
-    if (hash)
-      BCryptDestroyHash(hash);
-    if (algorithm)
-      BCryptCloseAlgorithmProvider(algorithm, 0);
-  }
-  void Add(std::span<const uint8_t> bytes) {
-    if (BCryptHashData(hash, const_cast<PUCHAR>(bytes.data()), static_cast<ULONG>(bytes.size()),
-                       0) < 0)
-      throw std::runtime_error("object hash failed");
-  }
-  Key Finish() {
-    Key value;
-    if (BCryptFinishHash(hash, value.data(), static_cast<ULONG>(value.size()), 0) < 0)
-      throw std::runtime_error("object hash failed");
-    return value;
-  }
-};
 void Append(Bytes& bytes, std::string_view text) {
   bytes.insert(bytes.end(), text.begin(), text.end());
 }
@@ -202,6 +176,10 @@ Json ObjectInfo::Inventory() const {
 }
 ObjectStore::ObjectStore(fs::path data) : root_(std::move(data) / "objects") {
   fs::create_directories(root_);
+  constexpr char hex[] = "0123456789abcdef";
+  for (char high : std::string_view(hex, 16))
+    for (char low : std::string_view(hex, 16))
+      fs::create_directory(root_ / std::string{high, low});
 }
 std::unique_lock<std::recursive_mutex> ObjectStore::Lock(const std::string& id) const {
   return std::unique_lock(locks_[std::hash<std::string>{}(id) % locks_.size()]);
@@ -233,10 +211,69 @@ Result<ObjectInfo> ObjectStore::Write(const Keys& keys,
     return Io();
   return Write(keys, input, check);
 }
+Result<ObjectInfo> ObjectStore::WriteChunk(const Keys& keys,
+                                           std::string_view plaintext,
+                                           const ObjectInfo* known) {
+  if (plaintext.size() > kSegmentSize) {
+    std::istringstream input{std::string(plaintext)};
+    return Write(keys, input);
+  }
+  const auto bytes =
+      std::span(reinterpret_cast<const uint8_t*>(plaintext.data()), plaintext.size());
+  Digest digest(&keys.id);
+  digest.Add(bytes);
+  const auto id = cluster::Hex(digest.Finish());
+  if (known && known->id == id)
+    return *known;
+  auto lock = Lock(id);
+  auto local = Inspect(id);
+  if (local)
+    return local;
+  if (local.error().code != ErrorCode::kNotFound)
+    return local.error();
+  const auto start = std::chrono::steady_clock::now();
+  Bytes encoded;
+  Append(encoded, "RKO2");
+  Append32(encoded, 2);
+  for (int i = 0; i < 8; ++i)
+    encoded.push_back(static_cast<uint8_t>(uint64_t(bytes.size()) >> (i * 8)));
+  Append32(encoded, kSegmentSize);
+  Append32(encoded, bytes.empty() ? 0 : 1);
+  if (!bytes.empty()) {
+    Bytes compressed(ZSTD_compressBound(bytes.size()));
+    const auto size =
+        ZSTD_compress(compressed.data(), compressed.size(), bytes.data(), bytes.size(), 3);
+    if (ZSTD_isError(size))
+      return Error{ErrorCode::kInternal, "object compression failed"};
+    const bool compress = size < bytes.size();
+    RK_ASSIGN_OR_RETURN(
+        ciphertext, Crypt(true, keys.object, id, 0, 1,
+                          compress ? std::span<const uint8_t>(compressed.data(), size) : bytes));
+    encoded.push_back(static_cast<uint8_t>(compress));
+    Append32(encoded, static_cast<uint32_t>(ciphertext.size()));
+    encoded.insert(encoded.end(), ciphertext.begin(), ciphertext.end());
+  }
+  const auto cpu_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+  RK_ASSIGN_OR_RETURN(path, StoredPath(id));
+  auto partial = path;
+  partial += ".partial";
+  std::ofstream output(partial, std::ios::binary | std::ios::trunc);
+  output.write(reinterpret_cast<const char*>(encoded.data()),
+               static_cast<std::streamsize>(encoded.size()));
+  output.close();
+  if (!output)
+    return Io();
+  RK_RETURN_IF_ERROR(Flush(partial));
+  if (!MoveFileExW(partial.c_str(), path.c_str(),
+                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    return Io();
+  return ObjectInfo{id,   bytes.size(), encoded.size(), cluster::Hex(cluster::Sha256(encoded)),
+                    true, cpu_ms};
+}
 Result<ObjectInfo> ObjectStore::Write(const Keys& keys, std::istream& input, const Check& check) {
   // Spooling supports non-seekable streams and fixes the plaintext before its id is used as a nonce
   // input.
-  fs::create_directories(root_);
   std::array<uint8_t, 16> random{};
   if (BCryptGenRandom(nullptr, random.data(), static_cast<ULONG>(random.size()),
                       BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
@@ -279,7 +316,6 @@ Result<ObjectInfo> ObjectStore::Write(const Keys& keys, std::istream& input, con
   const auto id = cluster::Hex(digest.Finish());
   auto lock = Lock(id);
   RK_ASSIGN_OR_RETURN(path, StoredPath(id));
-  fs::create_directories(path.parent_path());
   auto partial = path;
   partial += ".partial";
   Cleanup partial_cleanup{partial};

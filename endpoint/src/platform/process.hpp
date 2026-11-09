@@ -16,7 +16,7 @@ class BrowserProcess {
                       std::span<const uint8_t, 32> profile_key);
   Result<void> Terminate();
   bool JobEmpty() const;
-  bool WaitCleanExit(uint32_t timeout_ms);
+  bool WaitCleanExit(uint32_t timeout_ms, Json* timing = nullptr);
   void ReleaseExited();
   bool Alive() const;
   bool Exited() const;

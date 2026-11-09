@@ -4,6 +4,7 @@
 #include "session/views.hpp"
 #include "util/error_policy.hpp"
 #include "util/wire_error.hpp"
+#include "persistence/phase_timing.hpp"
 namespace remotekit {
 using ConnectionPhase = ConnectionTiming::ConnectionPhase;
 
@@ -441,7 +442,9 @@ void NavigationRecovery::MaintainNavigationExport() {
     fprintf(stderr, "navigation save: %s\n", saved.error().message.c_str());
 }
 Result<void> NavigationRecovery::ExportTick(uint32_t timeout_ms) {
-  return navigation_export.Tick(
+  const auto start = PhaseClock::now();
+  const auto selected_view = navigation_export.NextView();
+  auto result = navigation_export.Tick(
       browser.Incarnation(),
       [&](const std::string& view) -> Result<Json> {
         auto snapshot = browser.Rpc().Request({{"method", "snapshot"}}, 0, timeout_ms);
@@ -466,8 +469,22 @@ Result<void> NavigationRecovery::ExportTick(uint32_t timeout_ms) {
         recovery_revisions[view] = saved.at("navigationRevision").get<std::string>();
         return {};
       });
+  if (final_exporting_ && !selected_view.empty()) {
+    auto& view = final_export_timing_["views"][selected_view];
+    if (!view.is_object())
+      view = Json::object();
+    view["ms"] = view.value("ms", 0.0) + PhaseMs(start);
+    view["requests"] = view.value("requests", 0) + 1;
+  }
+  return result;
 }
 Result<void> NavigationRecovery::FinalExport() {
+  final_export_timing_ = {{"views", Json::object()}, {"count", 0}};
+  final_exporting_ = true;
+  struct Finish {
+    bool& active;
+    ~Finish() { active = false; }
+  } finish{final_exporting_};
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
   auto snapshot = browser.Rpc().Request({{"method", "snapshot"}}, 0, 1000);
   if (!snapshot)
@@ -480,6 +497,8 @@ Result<void> NavigationRecovery::FinalExport() {
       if (Recovering(name) || view.value("loading", false) || view.value("pending", false) ||
           view.value("lifecycle_uncertain", false))
         return Error{ErrorCode::kUnavailable, "navigation state is unsettled at shutdown"};
+      final_export_timing_["views"][name] = {{"ms", 0.0}, {"requests", 0}};
+      final_export_timing_["count"] = final_export_timing_["count"].get<size_t>() + 1;
       CaptureNavigation(view);
     }
   while (navigation_export.Pending()) {

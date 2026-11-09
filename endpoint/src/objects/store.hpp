@@ -20,6 +20,8 @@ struct ObjectInfo {
   std::string id;
   uint64_t size{}, stored_size{};
   std::string stored_sha256;
+  bool created = false;
+  double compress_encrypt_ms = 0;
   Json Committed() const;
   Json Inventory() const;
 };
@@ -31,6 +33,9 @@ class ObjectStore {
                            const std::filesystem::path& plaintext,
                            const Check& check = {});
   Result<ObjectInfo> Write(const Keys& keys, std::istream& plaintext, const Check& check = {});
+  Result<ObjectInfo> WriteChunk(const Keys& keys,
+                                std::string_view plaintext,
+                                const ObjectInfo* known = nullptr);
   Result<void> Read(const Keys& keys, const std::string& id, std::ostream& plaintext) const;
   Result<cluster::Bytes> ReadRange(const Keys& keys,
                                    const std::string& id,

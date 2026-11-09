@@ -21,12 +21,12 @@ struct AppInfoRequest : RequestEnvelope {
   WebViewId view = 0;
 };
 struct StorageImportRequest : RequestEnvelope {
+  std::string import_id;
   uint64_t view = 0;
   StorageImportData data;
 };
 struct StorageImportStatusRequest : RequestEnvelope {
-  uint64_t view = 0;
-  uint64_t job = 0;
+  std::string import_id;
 };
 struct ViewConfiguration {
   SessionId session = 0;

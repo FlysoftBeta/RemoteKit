@@ -4,6 +4,8 @@
 #include "media/adapter.hpp"
 #include "session/browser_rpc.hpp"
 #include "cluster/noise.hpp"
+#include <map>
+#include <mutex>
 
 namespace remotekit {
 // Three launches per failure burst; a minute of healthy uptime starts a new
@@ -52,7 +54,15 @@ class BrowserRuntime {
                                            : "waiting";
   }
   bool Crashed() const { return crash_recorded_; }
-  void MarkInitialized() { initialized_ = true; }
+  void MarkInitialized();
+  void SetOpenTiming(Json phases) { open_timing_ = std::move(phases); }
+  void OpenPhase(const char* name, double ms) {
+    if (open_timing_.contains("event"))
+      open_timing_[name] = ms;
+  }
+  void RestoredView(const std::string& view);
+  void Presented(const std::string& view, int64_t at);
+  const Json& ShutdownTiming() const { return shutdown_timing_; }
   void ReleaseExited() { process_.ReleaseExited(); }
   bool Alive() const { return process_.Alive(); }
   bool Exited() const { return process_.Exited(); }
@@ -80,5 +90,11 @@ class BrowserRuntime {
   bool initialized_ = false;
   bool clean_shutdown_ = true;
   bool crash_recorded_ = false;
+  Json shutdown_timing_ = Json::object();
+  Json open_timing_ = Json::object();
+  int64_t launch_started_ = 0;
+  std::mutex presented_mutex_;
+  std::map<std::string, int64_t> restored_views_;
+  std::string wake_tenant_;
 };
 }  // namespace remotekit

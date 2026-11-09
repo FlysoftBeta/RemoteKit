@@ -2,6 +2,7 @@
 #include "util/file_io.hpp"
 #include "util/result_macros.hpp"
 #include "diagnostics/log_files.hpp"
+#include "persistence/phase_timing.hpp"
 #include <fstream>
 #include <sstream>
 #include <chrono>
@@ -116,6 +117,13 @@ Result<void> BrowserRuntime::NewIncarnation() {
 Result<void> BrowserRuntime::Start(const fs::path& executable,
                                    std::wstring command,
                                    const std::string& channel) {
+  const auto started = PhaseClock::now();
+  launch_started_ = QpcNow();
+  {
+    std::lock_guard lock(presented_mutex_);
+    restored_views_.clear();
+    wake_tenant_ = open_timing_.value("tenantId", std::string());
+  }
   process_incarnation_ = incarnation_;
   crash_recorded_ = false;
   auto launched = process_.Launch(executable, std::move(command), profile_key_);
@@ -125,8 +133,10 @@ Result<void> BrowserRuntime::Start(const fs::path& executable,
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
   while (process_.Alive() && std::chrono::steady_clock::now() < deadline) {
     auto connected = rpc_.Connect(channel);
-    if (connected)
+    if (connected) {
+      OpenPhase("browserLaunch", PhaseMs(started));
       return {};
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
   if (!process_.Alive()) {
@@ -154,6 +164,7 @@ Result<void> BrowserRuntime::Stop() {
   return process_.Terminate();
 }
 Result<void> BrowserRuntime::Shutdown(const std::function<Result<void>()>& export_navigation) {
+  shutdown_timing_ = Json::object();
   if (!process_.Present()) {
     if (!clean_shutdown_)
       return Error{ErrorCode::kUnavailable, "unclean Browser shutdown"};
@@ -161,9 +172,15 @@ Result<void> BrowserRuntime::Shutdown(const std::function<Result<void>()>& expor
   }
   bool clean = false;
   if (process_.Alive() && rpc_.Control()) {
+    auto start = PhaseClock::now();
     const auto exported = export_navigation();
+    shutdown_timing_["navigationExport"] = PhaseMs(start);
+    start = PhaseClock::now();
     const auto shutdown = rpc_.Request({{"method", "browser.shutdown"}}, 0, 1000);
-    clean = process_.WaitCleanExit(30000) && bool(exported) && bool(shutdown);
+    shutdown_timing_["shutdownRpc"] = PhaseMs(start);
+    start = PhaseClock::now();
+    clean = process_.WaitCleanExit(30000, &shutdown_timing_) && bool(exported) && bool(shutdown);
+    shutdown_timing_["processExitWait"] = PhaseMs(start);
   }
   if (!clean) {
     auto stopped = Stop();
@@ -175,6 +192,36 @@ Result<void> BrowserRuntime::Shutdown(const std::function<Result<void>()>& expor
   rpc_.Invalidate();
   clean_shutdown_ = true;
   return {};
+}
+void BrowserRuntime::RestoredView(const std::string& view) {
+  std::lock_guard lock(presented_mutex_);
+  if (!wake_tenant_.empty())
+    restored_views_.try_emplace(view, QpcNow());
+}
+void BrowserRuntime::Presented(const std::string& view, int64_t at) {
+  std::lock_guard lock(presented_mutex_);
+  const auto found = restored_views_.find(view);
+  if (found == restored_views_.end())
+    return;
+  const Json event = {{"event", "session.open.presented"},
+                      {"tenantId", wake_tenant_},
+                      {"viewId", view},
+                      {"ms", double(at - found->second) * 1000 / QpcFrequency()}};
+  fprintf(stderr, "%s\n", event.dump().c_str());
+  restored_views_.erase(found);
+}
+void BrowserRuntime::MarkInitialized() {
+  initialized_ = true;
+  if (!open_timing_.empty()) {
+    const auto now = QpcNow();
+    open_timing_["browserReady"] = double(now - launch_started_) * 1000 / QpcFrequency() -
+                                   open_timing_.value("browserLaunch", 0.0);
+    open_timing_["total"] =
+        double(now - open_timing_.value("startedQpc", launch_started_)) * 1000 / QpcFrequency();
+    open_timing_.erase("startedQpc");
+    fprintf(stderr, "%s\n", open_timing_.dump().c_str());
+    open_timing_ = Json::object();
+  }
 }
 }  // namespace remotekit
 

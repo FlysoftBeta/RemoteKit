@@ -20,12 +20,8 @@ const clock = {
   monotonicMs: () => performance.now() + elapsed,
   wallMs: () => Date.now(),
 };
-const control = createApplication(
-  store,
-  new EndpointGateway(nodes, new Placement(store, nodes)),
-  undefined,
-  clock,
-);
+const gateway = new EndpointGateway(nodes, new Placement(store, nodes));
+const control = createApplication(store, gateway, undefined, clock);
 const server = createHttp(control, {
   nodes,
   origins: [...config.origins],
@@ -82,6 +78,13 @@ process.on('message', (message: any) => {
       await nodes.get(message.nodeId)!.request('object.delete', message.tenant, { ids: [message.objectId] });
       return { evicted: true };
     }
+    if (message.method === 'storageImport') {
+      const result = await gateway.storageImport(message.tenant, message.params);
+      if (message.loseReply) throw Error('outcome_unknown: forced lost begin reply after admission');
+      return result;
+    }
+    if (message.method === 'storageImportStatus')
+      return gateway.storageImportStatus(message.tenant, message.params);
     throw Error('Unknown harness command');
   })().then(
     (result) =>
@@ -91,6 +94,6 @@ process.on('message', (message: any) => {
           JSON.stringify(result, (_, value) => (typeof value === 'bigint' ? Number(value) : value)),
         ),
       }),
-    (error) => notify({ id: message.id, error: String(error) }),
+    (error) => notify({ id: message.id, error: `${error.code ? error.code + ': ' : ''}${String(error)}` }),
   );
 });

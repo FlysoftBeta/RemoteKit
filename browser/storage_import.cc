@@ -3,7 +3,6 @@
 #include <algorithm>
 
 #include "base/functional/bind.h"
-#include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "base/values.h"
@@ -43,6 +42,7 @@ struct StorageImportJobs::Job {
   } cookies, local_storage;
   content::StoragePartition* partition = nullptr;
   std::vector<mojo::Remote<blink::mojom::StorageArea>> areas;
+  std::array<uint8_t, 32> fingerprint{};
   uint64_t view = 0;
   size_t pending = 0;
   bool flushing = false, done = false;
@@ -51,26 +51,33 @@ struct StorageImportJobs::Job {
 StorageImportJobs::StorageImportJobs() = default;
 StorageImportJobs::~StorageImportJobs() = default;
 
-Result<uint64_t> StorageImportJobs::Begin(content::StoragePartition* partition,
-                                          const StorageImportData& data,
-                                          uint64_t view) {
-  for (const auto& [id, job] : jobs_)
+Result<base::DictValue> StorageImportJobs::Begin(content::StoragePartition* partition,
+                                                 const std::string& id,
+                                                 const StorageImportData& data,
+                                                 uint64_t view) {
+  if (id.empty() || id.size() > 128)
+    return {{}, {ErrorCode::kInvalidRequest, "Invalid storage import identity"}};
+  if (const auto found = jobs_.find(id); found != jobs_.end()) {
+    if (found->second->fingerprint != data.fingerprint || found->second->view != view)
+      return {{}, {ErrorCode::kConflict, "Storage import payload conflicts with identity"}};
+    return Poll(id);
+  }
+  for (const auto& [other_id, job] : jobs_)
     if (job->view == view && !job->done)
-      return {0, {ErrorCode::kBusy, "Storage import already pending for this view"}};
+      return {{}, {ErrorCode::kBusy, "Storage import already pending for this view"}};
   if (std::ranges::count_if(jobs_, [](const auto& entry) { return !entry.second->done; }) >= 16)
-    return {0, {ErrorCode::kBusy, "Too many storage import jobs"}};
-  std::erase_if(jobs_, [&](const auto& entry) { return entry.second->view == view; });
-  const auto id = next_job_++;
+    return {{}, {ErrorCode::kBusy, "Too many storage import jobs"}};
   auto job = std::make_unique<Job>();
   job->partition = partition;
   job->view = view;
+  job->fingerprint = data.fingerprint;
   jobs_.emplace(id, std::move(job));
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(&StorageImportJobs::Start, weak_factory_.GetWeakPtr(), id, data));
-  return {id, {}};
+  return Poll(id);
 }
 
-void StorageImportJobs::Start(uint64_t id, StorageImportData data) {
+void StorageImportJobs::Start(std::string id, StorageImportData data) {
   if (!jobs_.contains(id))
     return;
   auto& job = *jobs_.at(id);
@@ -92,14 +99,14 @@ void StorageImportJobs::Start(uint64_t id, StorageImportData data) {
       OnItem(id, true, false);
       continue;
     }
-    manager->SetCanonicalCookie(
-        *cookie, url, net::CookieOptions::MakeAllInclusive(),
-        base::BindOnce(
-            [](base::WeakPtr<StorageImportJobs> jobs, uint64_t id, net::CookieAccessResult result) {
-              if (jobs)
-                jobs->OnItem(id, true, result.status.IsInclude());
-            },
-            weak_factory_.GetWeakPtr(), id));
+    manager->SetCanonicalCookie(*cookie, url, net::CookieOptions::MakeAllInclusive(),
+                                base::BindOnce(
+                                    [](base::WeakPtr<StorageImportJobs> jobs, std::string id,
+                                       net::CookieAccessResult result) {
+                                      if (jobs)
+                                        jobs->OnItem(id, true, result.status.IsInclude());
+                                    },
+                                    weak_factory_.GetWeakPtr(), id));
   }
   for (const auto& origin : data.local_storage) {
     mojo::Remote<blink::mojom::StorageArea> area;
@@ -114,7 +121,7 @@ void StorageImportJobs::Start(uint64_t id, StorageImportData data) {
   MaybeFlush(id);
 }
 
-void StorageImportJobs::OnItem(uint64_t id, bool cookie, bool applied) {
+void StorageImportJobs::OnItem(std::string id, bool cookie, bool applied) {
   if (!jobs_.contains(id))
     return;
   auto& job = *jobs_.at(id);
@@ -127,7 +134,7 @@ void StorageImportJobs::OnItem(uint64_t id, bool cookie, bool applied) {
   MaybeFlush(id);
 }
 
-void StorageImportJobs::MaybeFlush(uint64_t id) {
+void StorageImportJobs::MaybeFlush(const std::string& id) {
   if (!jobs_.contains(id))
     return;
   auto& job = *jobs_.at(id);
@@ -140,21 +147,28 @@ void StorageImportJobs::MaybeFlush(uint64_t id) {
       base::BindOnce(&StorageImportJobs::OnFlushed, weak_factory_.GetWeakPtr(), id));
 }
 
-void StorageImportJobs::OnFlushed(uint64_t id) {
+void StorageImportJobs::OnFlushed(const std::string& id) {
   if (!jobs_.contains(id))
     return;
   auto& job = *jobs_.at(id);
   job.areas.clear();
+  if (job.done)
+    return;
   job.done = true;
+  completed_.push_back(id);
+  while (completed_.size() > 64) {
+    jobs_.erase(completed_.front());
+    completed_.pop_front();
+  }
 }
 
-Result<base::DictValue> StorageImportJobs::Poll(uint64_t id) {
+Result<base::DictValue> StorageImportJobs::Poll(const std::string& id) {
   const auto found = jobs_.find(id);
   if (found == jobs_.end())
     return {{}, {ErrorCode::kNotFound, "Unknown storage import job"}};
   const auto& job = *found->second;
   base::DictValue value;
-  value.Set("job", base::NumberToString(id));
+  value.Set("importId", id);
   value.Set("state", job.done ? "done" : "pending");
   if (job.done) {
     value.Set("cookies", job.cookies.Value());
@@ -163,19 +177,14 @@ Result<base::DictValue> StorageImportJobs::Poll(uint64_t id) {
   return {std::move(value), {}};
 }
 
-Result<base::DictValue> StorageImportJobs::Latest(uint64_t view) {
-  for (const auto& [id, job] : jobs_)
-    if (job->view == view)
-      return Poll(id);
-  return {{}, {ErrorCode::kNotFound, "No storage import job for this view"}};
-}
-
-void StorageImportJobs::Cancel(uint64_t id) {
+void StorageImportJobs::Cancel(const std::string& id) {
   jobs_.erase(id);
+  std::erase(completed_, id);
 }
 
 void StorageImportJobs::Clear() {
   weak_factory_.InvalidateWeakPtrs();
   jobs_.clear();
+  completed_.clear();
 }
 }  // namespace remotekit::browser

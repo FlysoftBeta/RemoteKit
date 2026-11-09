@@ -98,6 +98,8 @@ Control 包中的 `release/node.tar.zst` 与 `release/node.json` 供本地离线
 
 **Browser 优雅关闭**：`BrowserRuntime::Shutdown()` 先导出所有导航状态有变化的 view（总计最多 20 秒），再发 `browser.shutdown`，等 Browser 作业中的进程全部退出（最多 30 秒）；只有退出码 0 且作业为空才算干净。所有有意的停止（休眠、服务关闭、更新与配置重启）都走这条路径；强制终止只用于故障与 fencing。一次不干净的关闭之后，同一目录不再生成 checkpoint，直到 Browser 再次启动并干净关闭：重试休眠不能把不一致的数据库提交出去。
 
+**阶段计时**：Endpoint 为每次休眠与打开写一行结构化日志（阻塞检查、导航导出、Browser 关闭与进程退出、扫描、存储、登记、日志落盘；打开时的方式、manifest、校验、定位、拉取、物化、替换、Browser 启动与就绪），诊断包随 `endpoint.log` 收集。
+
 **`session.hibernate{placementEpoch}`**：
 
 1. 有阻塞项则 `conflict`：未确认的自然关闭事件、未决原生选择、上传中、页面请求（对话框、文件选择）、下载中、RTC 连接存在、生命周期不确定。这些计数由各自的所有者组件报告在快照的 `hibernation` 字段里。
@@ -106,6 +108,9 @@ Control 包中的 `release/node.tar.zst` 与 `release/node.json` 供本地离线
 4. 不超过 1MiB 的文件是一个对象，更大的按 1MiB 固定切块（SQLite 原地改页、LevelDB 只追加或整文件新建，固定切块的增量效果最好）。Session 目录之外的本地索引记录每个文件的大小、mtime、文件 ID 与块列表，未变的文件直接复用块 id，不重新读取。
 5. 生成 manifest 对象（相对路径、大小、块列表、目录、sessionId、epoch、buildId），把新对象逐个 `object.committed`。manifest 里的 buildId 只记录生成它的构建；恢复只校验 manifest 格式版本，不要求构建相同——Chromium 版本固定，旧构建写的 Profile 原样打开，升级不会让已休眠的 Session 失效。
 6. 原子写入休眠日志 `<sessionId>.hibernation.json`（epoch、manifest id、对象列表、buildId），然后回复 manifest id。Session 关闭，目录保留为热副本。
+   - **增量扫描**：每个运行中的 Session 在 Browser 启动前就用 `ReadDirectoryChangesW` 递归监视自己的目录，收集变化的路径；checkpoint 只 stat 这些路径（新建目录才遍历），在上次索引上增删改。监视缓冲溢出、出错、Endpoint 重启或任何不确定时退回完整遍历。开发构建用 `REMOTEKIT_CHECKPOINT_VERIFY=1` 同时做两种并要求结果一致。
+   - **流水线**：读取、hash、压缩、加密在有界工作池上并行，manifest 仍按路径排序；对象登记按批发出（`object.committed.batch`，每批 ≤1024 个、一个事务），与存储重叠。Control 往返次数与文件数无关。
+   - **空闲预存**：Session 没有 RTC peer 满 30 秒后，后台低优先级把静默 10 秒以上的变化文件预先存成块，读前读后各记一次文件身份，读期间变化的作废；休眠时身份不变的文件直接复用这些块。预存的块以该 Tenant 的认领提交，没被 checkpoint 引用的按认领过期回收。
 
 `session.hibernate` 对同一 epoch 幂等：有日志直接返回日志里的结果；同一 Session 的休眠正在进行时加入它、返回同一结果；Session 已不在内存、也没有日志时返回 `not_found`；epoch 不同返回 `conflict`。日志在 Control 以同一 manifest 打开该 Session 时删除；冷副本清理不删有日志的 Session。
 
@@ -113,7 +118,7 @@ Control 包中的 `release/node.tar.zst` 与 `release/node.json` 供本地离线
 
 把超时当作失败会造成整个 Profile 丢失：Endpoint 已经生成 checkpoint 并卸载了 Session，Control 却按旧指针（首次休眠时为空）重新打开，Endpoint 用空目录替换了原目录。所以除了上面的对账，Endpoint 还守住两条不变量：Session 有休眠日志而 `session.open` 的 checkpoint 与日志不符时返回 `conflict`、不动目录；新放置总是新的 Session ID，因此以空 checkpoint 打开一个已有非空目录是不变量错误，返回 `conflict` 并记录。
 
-**打开**：之后任何对该 Tenant 的需要（Viewer 连接、对账）都会重新放置并以该 checkpoint 打开。节点本地的热副本对应同一 manifest 时，先按本地索引（大小、mtime、文件 ID）逐个校验文件，缺失或不符的文件从对象重新物化，取不到则以 `unavailable` 失败、不动目录；没有对应热副本时拉取对象物化到 `.restore` 再原子替换。Tab 保留产品状态，经现有的导航恢复流程回到原页面。
+**打开**：之后任何对该 Tenant 的需要（Viewer 连接、对账）都会重新放置并以该 checkpoint 打开。节点本地的热副本对应同一 manifest 时，先按本地索引（大小、mtime、文件 ID）逐个校验文件，缺失或不符的文件从对象重新物化，取不到则以 `unavailable` 失败、不动目录；没有对应热副本时拉取对象物化到 `.restore` 再原子替换：manifest 的块一次批量 `object.locate`（同时授予读取权），本地已有的块与网络拉取并行解码，缺失的块最多 8 个并发、每个来源最多 4 个传输，按偏移写入，新副本批量登记。Tab 保留产品状态，经现有的导航恢复流程回到原页面。
 
 **休眠策略**（Control，只在该 Tenant 开启 Memory Saver 时；没有处于 applying 的操作、快照报告无阻塞项）：
 

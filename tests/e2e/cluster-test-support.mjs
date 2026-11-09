@@ -56,13 +56,13 @@ export function startControl(server, configPath, evidence) {
   return {
     child,
     events,
-    async call(method, params = {}) {
+    async call(method, params = {}, timeoutMs = 60000) {
       const id = randomUUID();
       return new Promise((done, reject) => {
         const timer = setTimeout(() => {
           pending.delete(id);
           reject(Error('Harness timeout: ' + method));
-        }, 60000);
+        }, timeoutMs);
         pending.set(id, (message) => {
           clearTimeout(timer);
           pending.delete(id);
@@ -184,12 +184,12 @@ export async function instrumentViewer(context, evidence, name) {
         return receipt.status === 'committed';
       });
     },
-    async ready() {
+    async ready(timeout = 45000) {
       await page.waitForFunction(
         () =>
           clusterQA.channel?.readyState === 'open' && clusterQA.auth?.peerEpoch > 0 && !clusterQA.auth.locked,
         undefined,
-        { timeout: 45000 },
+        { timeout },
       );
     },
     async media() {

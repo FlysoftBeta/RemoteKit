@@ -21,6 +21,95 @@ import { RemoteKitError } from '../shared/errors';
 
 const id = (n: number) => n.toString(16).padStart(64, '0');
 
+test('object commit batches are atomic, idempotent, bounded and repair replica rows', async () => {
+  const h = await harness(null);
+  try {
+    const alpha = await h.connect('alpha');
+    const beta = await h.connect('beta', 0.9);
+    await h.gateway.snapshot('tenant');
+    const objects = Array.from({ length: 1024 }, (_, i) => ({
+      objectId: id(i + 1),
+      size: 1,
+      storedSize: 41,
+      storedSha256: id(i + 2000),
+    }));
+    let transactions = 0;
+    const transaction = h.store.transaction.bind(h.store);
+    h.store.transaction = (work) => {
+      transactions++;
+      return transaction(work);
+    };
+    const handler = h.nodes.handlers.get('object.committed.batch')!;
+    assert.deepEqual(handler(h.nodes.get('alpha')!, { tenantId: 'tenant', objects }), { ok: true });
+    h.store.transaction = transaction;
+    assert.equal(transactions, 1);
+    assert.deepEqual(await alpha.request('object.committed.batch', 'tenant', { objects }), { ok: true });
+    h.store.db.prepare('DELETE FROM object_replicas WHERE id=?').run(objects[0].objectId);
+    await alpha.request('object.committed.batch', 'tenant', { objects });
+    assert(
+      h.store.db
+        .prepare('SELECT 1 FROM object_replicas WHERE id=? AND node_id=?')
+        .get(objects[0].objectId, 'alpha'),
+    );
+    const located = await alpha.request('object.locate', 'tenant', { ids: objects.map((o) => o.objectId) });
+    assert.equal(Object.keys(located.sources).length, 1024);
+    await beta.request('object.locate', 'tenant', { ids: [] }).then(
+      () => assert.fail('unplaced node was authorized'),
+      (error) => assert.equal(error.code, 'forbidden'),
+    );
+    await assert.rejects(beta.request('object.committed.batch', 'tenant', { objects: [objects[0]] }), {
+      code: 'forbidden',
+    });
+    for (const invalid of [[], [...objects, objects[0]], [{ ...objects[0], kind: 'document' }]])
+      await assert.rejects(alpha.request('object.committed.batch', 'tenant', { objects: invalid }), {
+        code: 'invalid_request',
+      });
+    await assert.rejects(
+      alpha.request('object.committed.batch', 'tenant', {
+        objects: [objects[0]],
+        padding: 'x'.repeat(256 * 1024),
+      }),
+      { code: 'invalid_request' },
+    );
+    const replica = { objects: [objects[0]] };
+    await alpha.request('object.committed.batch', '', replica);
+    await alpha.request('object.committed.batch', '', replica);
+  } finally {
+    await h.close();
+  }
+});
+
+test('a commit batch rolls back metadata and claims on conflict or quota failure', async () => {
+  const h = await harness(20);
+  try {
+    const alpha = await h.connect('alpha');
+    await h.gateway.snapshot('tenant');
+    await h.commit(alpha, 'tenant', id(1));
+    const item = (n: number, size = 10) => ({
+      objectId: id(n),
+      size,
+      storedSize: size + 40,
+      storedSha256: id(1000 + n),
+    });
+    for (const [objects, code] of [
+      [[item(2), { ...item(1), storedSha256: id(9999) }], 'conflict'],
+      [[item(2), item(3)], 'limit_exceeded'],
+    ] as const) {
+      await assert.rejects(alpha.request('object.committed.batch', 'tenant', { objects }), { code });
+      assert.equal(h.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(id(2)), undefined);
+      assert.equal(
+        h.store.db.prepare('SELECT 1 FROM object_claims WHERE tenant=? AND id=?').get('tenant', id(2)),
+        undefined,
+      );
+    }
+    assert.deepEqual(await alpha.request('object.committed.batch', 'tenant', { objects: [item(2)] }), {
+      ok: true,
+    });
+  } finally {
+    await h.close();
+  }
+});
+
 test('hibernating placement authorizes checkpoint objects only on its assigned node', async () => {
   const h = await harness();
   try {

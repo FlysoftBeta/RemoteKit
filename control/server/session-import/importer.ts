@@ -514,7 +514,7 @@ export class SessionImporter {
           const deadline = this.clock.monotonicMs() + 60000;
           try {
             const result = await Promise.race([
-              this.applyChunk(tenant, record.id, ref, chunk, deadline, record.storageJob),
+              this.applyChunk(tenant, record.id, ref, chunk, deadline, `${record.id}:${index}`),
               sleep(60000, undefined, { signal }).then(() => {
                 throw new RemoteKitError('outcome_unknown', '导入等待超时');
               }),
@@ -601,36 +601,36 @@ export class SessionImporter {
     ref: number,
     chunk: ImportChunk,
     deadline: number,
-    previousJob?: import('../../shared/session-import').StorageImportJob,
+    importId: string,
   ): Promise<Extract<import('../../shared/session-import').StorageImportStatus, { state: 'done' }>> {
-    let job = previousJob;
     const check = () => {
       if (!this.active(tenant, id, ref) || this.clock.monotonicMs() >= deadline)
-        throw new RemoteKitError(job ? 'outcome_unknown' : 'unavailable', '导入等待中');
+        throw new RemoteKitError('outcome_unknown', 'Import is awaiting recovery');
     };
     check();
-    if (!job) {
-      if (this.store.sessionImports.get(id)?.errorCode === 'outcome_unknown')
-        throw new RemoteKitError('outcome_unknown', '导入任务身份待对账');
-      job = await this.gateway.storageImport(tenant, chunk);
-      if (job?.accepted !== true || typeof job.job !== 'string' || typeof job.browserIncarnation !== 'string')
-        throw new RemoteKitError('outcome_unknown', '导入任务身份待对账');
-      if (this.active(tenant, id, ref))
-        this.store.db
-          .prepare('UPDATE session_imports SET storage_job=? WHERE id=?')
-          .run(JSON.stringify(job), id);
-      check();
-    }
+    this.store.db
+      .prepare('UPDATE session_imports SET storage_job=? WHERE id=?')
+      .run(JSON.stringify({ importId }), id);
+    let begin = true;
+    let recoveryAttempts = 0;
     for (;;) {
       check();
+      try {
+        const status = begin
+          ? await this.gateway.storageImport(tenant, { ...chunk, importId })
+          : await this.gateway.storageImportStatus(tenant, { importId });
+        check();
+        if (status.state === 'done') return status;
+        begin = false;
+        recoveryAttempts = 0;
+      } catch (error) {
+        const failure = toRemoteKitError(error);
+        if ((failure.code !== 'outcome_unknown' && failure.code !== 'not_found') || recoveryAttempts++)
+          throw error;
+        // Repeating begin recovers a lost admission reply or a restarted Browser.
+        begin = true;
+      }
       await sleep(200, undefined, { signal: this.abort.signal });
-      check();
-      const status = await this.gateway.storageImportStatus(tenant, {
-        job: job.job,
-        browserIncarnation: job.browserIncarnation,
-      });
-      check();
-      if (status.state === 'done') return status;
     }
   }
   async stop() {

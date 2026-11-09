@@ -41,7 +41,13 @@ class PresentationController {
     return barrier_.Send(peer, epoch, keyframe, send);
   }
   void ReceiveFeedback(uint64_t peer, const Json& message, int64_t now, size_t size) {
-    media_feedback.Receive(peer, message, now, size);
+    if (media_feedback.Receive(peer, message, now, size) && first_presented_)
+      for (const auto& plane : message.at("planes"))
+        if (plane.value("frames", 0) > 0)
+          first_presented_(plane.at("view").get<std::string>(), now);
+  }
+  void SetFirstPresented(std::function<void(const std::string&, int64_t)> callback) {
+    first_presented_ = std::move(callback);
   }
   Json FeedbackSnapshot(int64_t now, int64_t frequency) const {
     return media_feedback.Snapshot(now, frequency);
@@ -59,5 +65,6 @@ class PresentationController {
   PresentationBarrier barrier_;
   CoordinateReadiness coordinate_readiness;
   MediaFeedback media_feedback;
+  std::function<void(const std::string&, int64_t)> first_presented_;
 };
 }  // namespace remotekit

@@ -16,6 +16,7 @@
 #include "options.hpp"
 #include "rtc/peer.hpp"
 #include "session/navigation_recovery.hpp"
+#include "persistence/phase_timing.hpp"
 namespace remotekit {
 using ConnectionPhase = ConnectionTiming::ConnectionPhase;
 using Event = RtcEvent;
@@ -236,7 +237,9 @@ Result<void> ViewController::Start() {
     auto stopped = stop_runtime();
     if (!stopped)
       return browser.Unavailable(stopped.error().message);
+    const auto adapter_start = PhaseClock::now();
     auto prepared = registry.PrepareAdapter();
+    browser.OpenPhase("adapter", PhaseMs(adapter_start));
     if (!prepared)
       return prepared.error();
     auto adapter = registry.Adapter();
@@ -270,6 +273,7 @@ Result<void> ViewController::Start() {
     // Hidden construction never requires the previous/final atlas to fit an
     // intermediate set of specs. One transaction applies the complete layout.
     for (auto& [view, config] : desired) {
+      browser.RestoredView(view);
       // Startup can resume after an outcome_unknown create. Observe its stable
       // identity before issuing another create on the retained process.
       if (existing.contains(view))
@@ -736,40 +740,52 @@ Result<Json> ViewController::ManageSessionEnsure(const Json& request) {
               {"recovery", navigation.RecoverySnapshot()}};
 }
 
+namespace {
+bool ValidImportId(const Json& request) {
+  const auto value = request.find("importId");
+  return value != request.end() && value->is_string() &&
+         !value->get_ref<const std::string&>().empty() &&
+         value->get_ref<const std::string&>().size() <= 128;
+}
+Json StorageImportStatus(const Json& reply, const std::string& incarnation) {
+  Json result = {{"importId", reply.at("importId")},
+                 {"state", reply.at("state")},
+                 {"browserIncarnation", incarnation}};
+  for (const auto* field : {"cookies", "localStorage"})
+    if (reply.contains(field))
+      result[field] = reply[field];
+  return result;
+}
+}  // namespace
+
 Result<Json> ViewController::ManageSessionStorageImport(const Json& request) {
-  if (!request.contains("cookies") || !request["cookies"].is_array() ||
+  if (!ValidImportId(request) || !request.contains("cookies") || !request["cookies"].is_array() ||
       !request.contains("localStorage") || !request["localStorage"].is_array())
-    return Error{ErrorCode::kInvalidRequest, "cookies and localStorage arrays required"};
+    return Error{ErrorCode::kInvalidRequest, "importId, cookies and localStorage required"};
   auto started = Start();
   if (!started)
     return started.error();
-  const auto incarnation = browser.Incarnation();
   auto reply = browser.Rpc().Request({{"method", protocol::kStorageImport},
                                       {"session", id},
+                                      {"importId", request["importId"]},
                                       {"cookies", request["cookies"]},
                                       {"localStorage", request["localStorage"]}});
   if (!reply)
     return reply.error();
-  return Json{
-      {"accepted", true}, {"job", reply.value().at("job")}, {"browserIncarnation", incarnation}};
+  return StorageImportStatus(reply.value(), browser.Incarnation());
 }
 
 Result<Json> ViewController::ManageSessionStorageImportStatus(const Json& request) {
-  if (!request.contains("job") || !request["job"].is_string() ||
-      !request.contains("browserIncarnation") || !request["browserIncarnation"].is_string())
-    return Error{ErrorCode::kInvalidRequest, "job and browserIncarnation strings required"};
-  if (!browser.Alive() || !browser.Rpc().Control() || browser.Stopping() ||
-      browser.Incarnation().empty() || request["browserIncarnation"] != browser.Incarnation())
-    return Error{ErrorCode::kConflict, "stale_browser_incarnation"};
-  auto reply = browser.Rpc().Request(
-      {{"method", protocol::kStorageImportStatus}, {"session", id}, {"job", request["job"]}});
+  if (!ValidImportId(request))
+    return Error{ErrorCode::kInvalidRequest, "importId string required (1..128 characters)"};
+  if (!browser.Alive() || !browser.Rpc().Control() || browser.Stopping())
+    return Error{ErrorCode::kNotFound, "Storage import Browser exited"};
+  auto reply = browser.Rpc().Request({{"method", protocol::kStorageImportStatus},
+                                      {"session", id},
+                                      {"importId", request["importId"]}});
   if (!reply)
     return reply.error();
-  Json result = {{"accepted", true}, {"state", reply.value().at("state")}};
-  for (const auto* field : {"cookies", "localStorage"})
-    if (reply.value().contains(field))
-      result[field] = reply.value()[field];
-  return result;
+  return StorageImportStatus(reply.value(), browser.Incarnation());
 }
 
 Result<Json> ViewController::ManageSessionIdentity(const Json&) {

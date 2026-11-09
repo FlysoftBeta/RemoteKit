@@ -57,7 +57,7 @@ async function harness(window = 30) {
       if (method === 'session.storage.import') {
         if (failure) throw new RemoteKitError(failure, 'Browser refused');
         chunks++;
-        return { accepted: true, job: 'job-' + chunks, browserIncarnation: 'browser-1' };
+        return { state: 'pending' };
       }
       if (method === 'session.storage.importStatus') {
         statusHook?.();
@@ -371,37 +371,35 @@ test('import lifecycle applies all chunk counts, repeats current state and clear
     await h.close();
   }
 });
-test('imports stop on final codes, retain unknown begin, and poll the same admitted job', async () => {
+test('imports recover lost begin replies and missing jobs with the same persisted identity', async () => {
   const h = await harness();
   try {
     await h.paired();
     const event = h.event();
     h.active = true;
-    h.failure = 'invalid_request';
+    let begins = 0;
+    const ids: string[] = [];
+    h.gateway.storageImport = async (_tenant, args) => {
+      ids.push(args.importId);
+      assert.deepEqual(h.record(event.id).storageJob, { importId: args.importId });
+      if (++begins === 1) throw new RemoteKitError('outcome_unknown', 'Reply lost after admission');
+      return { state: 'pending' };
+    };
+    let polls = 0;
+    h.gateway.storageImportStatus = async (_tenant, args) => {
+      ids.push(args.importId);
+      if (++polls === 1) throw new RemoteKitError('not_found', 'Browser restarted');
+      return {
+        state: 'done',
+        cookies: { applied: 2, rejected: 0 },
+        localStorage: { applied: 3, rejected: 0 },
+      };
+    };
     await h.receive([event]);
     await h.importer.tick();
-    assert.equal(h.record(event.id).state, 'failed');
-    assert.equal((last(h.replies()) as any).retryable, false);
-    h.active = false;
-    await h.receive([{ ...event, seq: 3 }]);
-    h.failure = 'outcome_unknown';
-    h.active = true;
-    await h.importer.tick();
-    h.failure = undefined;
-    await h.importer.tick();
-    assert.equal(h.record(event.id).state, 'pending');
-    assert.equal(h.chunks, 0, 'unknown begin without a job identity must never run again');
-    h.importer.discard(h.user.tenantId, event.id);
-    h.active = false;
-    await h.receive([{ ...event, seq: 4 }]);
-    h.active = true;
-    h.statusFailure = 'outcome_unknown';
-    await h.importer.tick();
-    assert.equal(h.chunks, 1);
-    h.statusFailure = undefined;
-    await h.importer.tick();
     assert.equal(h.record(event.id).state, 'applied');
-    assert.equal(h.chunks, 1, 'lost poll response must retain the admitted job');
+    assert.equal(begins, 3);
+    assert.deepEqual([...new Set(ids)], [`${event.id}:0`]);
   } finally {
     await h.close();
   }

@@ -3,6 +3,7 @@ import { diskFloor } from './disk';
 import { createHmac, randomUUID } from 'node:crypto';
 import { RemoteKitError, parseWireError, toRemoteKitError, type ErrorCode } from '../../shared/errors';
 import type { ControlDatabase } from '../persistence/database';
+import type Sqlite from 'better-sqlite3';
 import type { NodeLink, NodeRegistry } from './node-link';
 import { clusterObjectKeys } from './keys';
 import {
@@ -28,6 +29,19 @@ interface IndexedObject {
   stored_sha256: string;
   created_at: bigint;
 }
+type CommitStatements = Record<
+  | 'object'
+  | 'replica'
+  | 'insertObject'
+  | 'derivation'
+  | 'clearRender'
+  | 'claim'
+  | 'refreshGc'
+  | 'insertReplica'
+  | 'clearOrphan'
+  | 'source',
+  Sqlite.Statement
+>;
 interface RenderFailure {
   reason: ErrorCode;
   message: string;
@@ -38,6 +52,7 @@ interface RenderFailure {
   display_reason: string | null;
 }
 export class ObjectIndex {
+  private readonly commitSql: CommitStatements;
   private readonly fetches = new Map<string, Set<string>>();
   private readonly readFetches = new Map<string, Set<string>>();
   private readonly puts = new Map<
@@ -61,9 +76,24 @@ export class ObjectIndex {
     private readonly checkpointing: (tenant: string) => boolean,
     private readonly now = Date.now,
   ) {
+    this.commitSql = {
+      object: store.db.prepare('SELECT * FROM objects WHERE id=?'),
+      replica: store.db.prepare('SELECT 1 FROM object_replicas WHERE id=? AND node_id=?'),
+      insertObject: store.db.prepare('INSERT INTO objects VALUES (?,?,?,?,?)'),
+      derivation: store.db.prepare('INSERT OR IGNORE INTO object_derivations VALUES (?,?,?)'),
+      clearRender: store.db.prepare('DELETE FROM object_render_failures WHERE source_id=?'),
+      claim: store.db.prepare(
+        'INSERT INTO object_claims VALUES (?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET claimed_at=excluded.claimed_at',
+      ),
+      refreshGc: store.db.prepare('UPDATE object_gc SET unreferenced_at=? WHERE id=? AND unreferenced_at>=0'),
+      insertReplica: store.db.prepare('INSERT OR IGNORE INTO object_replicas VALUES (?,?)'),
+      clearOrphan: store.db.prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND id=?'),
+      source: store.db.prepare('SELECT 1 FROM objects WHERE id=?'),
+    };
     this.retired = retiringObjects(store);
     nodes.objectKeys = clusterObjectKeys(store);
     nodes.handlers.set('object.committed', (node, message) => this.committed(node, message));
+    nodes.handlers.set('object.committed.batch', (node, message) => this.committedBatch(node, message));
     nodes.handlers.set('object.locate', (node, message) => this.locate(node, message));
     nodes.handlers.set('object.derivation', (node, message) => this.derivation(node, message));
     nodes.on('ready', this.ready);
@@ -94,12 +124,12 @@ export class ObjectIndex {
       bytes += Number((lookup.get(id) as { size: bigint } | undefined)?.size ?? 0);
     return bytes;
   }
-  require(tenant: string, id: string) {
+  require(tenant: string, id: string, references?: ReadonlySet<string>) {
     if (!objectId(id))
       throw new RemoteKitError('invalid_request', '文件标识格式无效', {
         detail: 'Asset id must be an object id',
       });
-    if (this.retired.has(id) || !tenantObjects(this.store.db).get(tenant)?.has(id))
+    if (this.retired.has(id) || !(references ?? tenantObjects(this.store.db).get(tenant))?.has(id))
       throw new RemoteKitError('forbidden', '无权访问该文件', {
         detail: 'Tenant has no object reference or claim',
       });
@@ -270,6 +300,63 @@ export class ObjectIndex {
     );
   }
   committed(node: NodeLink, message: Record<string, any>) {
+    const quotas = new Set<string>();
+    const effects: (() => void)[] = [];
+    this.store.transaction(() => {
+      this.commitObject(node, message, quotas, effects);
+      for (const tenant of quotas) this.checkQuota(tenant);
+    });
+    for (const effect of effects) effect();
+    return { accepted: true };
+  }
+  committedBatch(node: NodeLink, message: Record<string, any>) {
+    if (
+      !Array.isArray(message.objects) ||
+      !message.objects.length ||
+      message.objects.length > 1024 ||
+      Buffer.byteLength(JSON.stringify(message)) > 256 * 1024 ||
+      (message.tenantId !== undefined && typeof message.tenantId !== 'string') ||
+      message.objects.some(
+        (item: any) =>
+          !item ||
+          typeof item !== 'object' ||
+          Array.isArray(item) ||
+          Object.keys(item).length !== 4 ||
+          !['objectId', 'size', 'storedSize', 'storedSha256'].every((key) =>
+            Object.prototype.hasOwnProperty.call(item, key),
+          ),
+      )
+    )
+      throw new RemoteKitError('invalid_request', 'Invalid object commit batch');
+    const quotas = new Set<string>();
+    const effects: (() => void)[] = [];
+    const placementAuthorized = !!message.tenantId && this.placedOn(message.tenantId, node.nodeId);
+    try {
+      this.store.transaction(() => {
+        for (const item of message.objects)
+          this.commitObject(
+            node,
+            { ...item, tenantId: message.tenantId },
+            quotas,
+            effects,
+            placementAuthorized,
+          );
+        for (const tenant of quotas) this.checkQuota(tenant);
+      });
+    } catch (error) {
+      const failure = toRemoteKitError(error);
+      throw new RemoteKitError(failure.code, failure.message);
+    }
+    for (const effect of effects) effect();
+    return { ok: true };
+  }
+  private commitObject(
+    node: NodeLink,
+    message: Record<string, any>,
+    quotas: Set<string>,
+    effects: (() => void)[],
+    placementAuthorized = false,
+  ) {
     const { tenantId: tenant, objectId: id, size, storedSize, storedSha256, derivedFrom, kind } = message;
     if (
       !objectId(id) ||
@@ -285,7 +372,11 @@ export class ObjectIndex {
       throw new RemoteKitError('invalid_request', '文件元数据格式无效', {
         detail: 'Invalid object metadata',
       });
-    const replication = this.fetches.get(node.nodeId)?.has(id) || this.readFetches.get(node.nodeId)?.has(id);
+    const replication =
+      !tenant &&
+      (this.fetches.get(node.nodeId)?.has(id) ||
+        this.readFetches.get(node.nodeId)?.has(id) ||
+        this.commitSql.replica.get(id, node.nodeId));
     const put = typeof message.putId === 'string' ? this.puts.get(message.putId) : undefined;
     const expectedPut =
       put &&
@@ -300,67 +391,47 @@ export class ObjectIndex {
       message.putId !== undefined
         ? !expectedPut
         : tenant
-          ? !this.placedOn(tenant, node.nodeId)
+          ? !placementAuthorized && !this.placedOn(tenant, node.nodeId)
           : !replication && !render
     )
       throw new RemoteKitError('forbidden', '文件写入缺少有效操作授权', {
         detail: 'Commit has no session or Control operation',
       });
-    return this.store.transaction(() => {
-      const previous = this.store.db.prepare('SELECT * FROM objects WHERE id=?').get(id) as
-        IndexedObject | undefined;
-      if (
-        previous &&
-        (previous.stored_sha256 !== storedSha256 ||
-          Number(previous.size) !== size ||
-          Number(previous.stored_size) !== storedSize)
-      )
-        throw new RemoteKitError('conflict', '文件元数据与索引不一致', {
-          detail: 'Object metadata conflicts with the index',
+
+    const previous = this.commitSql.object.get(id) as IndexedObject | undefined;
+    if (
+      previous &&
+      (previous.stored_sha256 !== storedSha256 ||
+        Number(previous.size) !== size ||
+        Number(previous.stored_size) !== storedSize)
+    )
+      throw new RemoteKitError('conflict', '文件元数据与索引不一致', {
+        detail: 'Object metadata conflicts with the index',
+      });
+    if (this.retired.has(id))
+      throw new RemoteKitError('conflict', '文件正在删除', { detail: 'Object is being deleted' });
+    if (derivedFrom) {
+      if (tenant) this.require(tenant, derivedFrom);
+      else if (!render || this.retired.has(derivedFrom) || !this.commitSql.source.get(derivedFrom))
+        throw new RemoteKitError('forbidden', '文件转换操作未获授权', {
+          detail: 'Commit has no source render operation',
         });
-      if (this.retired.has(id))
-        throw new RemoteKitError('conflict', '文件正在删除', { detail: 'Object is being deleted' });
-      if (derivedFrom) {
-        if (tenant) this.require(tenant, derivedFrom);
-        else if (
-          !render ||
-          this.retired.has(derivedFrom) ||
-          !this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(derivedFrom)
-        )
-          throw new RemoteKitError('forbidden', '文件转换操作未获授权', {
-            detail: 'Commit has no source render operation',
-          });
-      }
-      if (!previous)
-        this.store.db
-          .prepare('INSERT INTO objects VALUES (?,?,?,?,?)')
-          .run(id, size, storedSize, storedSha256, Date.now());
-      if (derivedFrom)
-        this.store.db
-          .prepare('INSERT OR IGNORE INTO object_derivations VALUES (?,?,?)')
-          .run(id, derivedFrom, kind);
-      if (kind === 'document')
-        this.store.db.prepare('DELETE FROM object_render_failures WHERE source_id=?').run(derivedFrom);
-      if (tenant) {
-        this.store.db
-          .prepare(
-            'INSERT INTO object_claims VALUES (?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET claimed_at=excluded.claimed_at',
-          )
-          .run(tenant, id, Date.now());
-        const affected = derivedFrom ? tenantObjects(this.store.db).keys() : [tenant];
-        for (const owner of affected) this.checkQuota(owner);
-        this.store.db
-          .prepare('UPDATE object_gc SET unreferenced_at=? WHERE id=? AND unreferenced_at>=0')
-          .run(Date.now(), id);
-      }
-      this.store.db.prepare('INSERT OR IGNORE INTO object_replicas VALUES (?,?)').run(id, node.nodeId);
-      this.inventoryCommits.get(node.nodeId)?.add(id);
-      this.store.db
-        .prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND id=?')
-        .run(node.nodeId, id);
+    }
+    if (!previous) this.commitSql.insertObject.run(id, size, storedSize, storedSha256, Date.now());
+    if (derivedFrom) this.commitSql.derivation.run(id, derivedFrom, kind);
+    if (kind === 'document') this.commitSql.clearRender.run(derivedFrom);
+    if (tenant) {
+      this.commitSql.claim.run(tenant, id, Date.now());
+      const affected = derivedFrom ? tenantObjects(this.store.db).keys() : [tenant];
+      for (const owner of affected) quotas.add(owner);
+      this.commitSql.refreshGc.run(Date.now(), id);
+    }
+    this.commitSql.insertReplica.run(id, node.nodeId);
+    effects.push(() => this.inventoryCommits.get(node.nodeId)?.add(id));
+    this.commitSql.clearOrphan.run(node.nodeId, id);
+    effects.push(() => {
       if (put) put.object = id;
       this.readFetches.get(node.nodeId)?.delete(id);
-      return { accepted: true };
     });
   }
   locate(node: NodeLink, message: Record<string, any>) {
@@ -375,8 +446,11 @@ export class ObjectIndex {
       message.ids.some((id: unknown) => !objectId(id))
     )
       throw new RemoteKitError('invalid_request', '文件标识格式无效', { detail: 'Invalid object ids' });
+    const references = render
+      ? undefined
+      : (tenantObjects(this.store.db).get(message.tenantId) ?? new Set<string>());
     for (const id of message.ids) {
-      if (!render) this.require(message.tenantId, id);
+      if (!render) this.require(message.tenantId, id, references);
       else if (
         this.retired.has(id) ||
         (id !== message.renderSource && id !== this.derived(message.renderSource, 'document'))
@@ -618,19 +692,25 @@ export class ObjectIndex {
         Number(c.claimed_at) < now - GRACE_MS
       )
         this.store.db.prepare('DELETE FROM object_claims WHERE tenant=? AND id=?').run(c.tenant, c.id);
+    let references: { durable: Set<string>; all: Set<string> } | undefined;
+    const currentReferences = () =>
+      (references ??= {
+        durable: new Set([...tenantObjects(this.store.db, false, now).values()].flatMap((ids) => [...ids])),
+        all: new Set([...tenantObjects(this.store.db, true, now).values()].flatMap((ids) => [...ids])),
+      });
+    const lastClaims = new Map<string, number>();
+    for (const claim of claims)
+      lastClaims.set(claim.id, Math.max(lastClaims.get(claim.id) ?? 0, Number(claim.claimed_at)));
     for (const object of this.store.db.prepare('SELECT * FROM objects').all() as IndexedObject[]) {
       if (this.retired.has(object.id)) continue;
-      const current = tenantObjects(this.store.db, false, now);
-      if (this.renders.has(object.id) || [...current.values()].some((ids) => ids.has(object.id))) {
+      const current = currentReferences();
+      if (this.renders.has(object.id) || current.durable.has(object.id)) {
         this.store.db
           .prepare('INSERT INTO object_gc VALUES (?,-1) ON CONFLICT(id) DO UPDATE SET unreferenced_at=-1')
           .run(object.id);
         continue;
       }
-      const lastClaim = Math.max(
-        Number(object.created_at),
-        ...claims.filter((c) => c.id === object.id).map((c) => Number(c.claimed_at)),
-      );
+      const lastClaim = Math.max(Number(object.created_at), lastClaims.get(object.id) ?? 0);
       this.store.db
         .prepare('INSERT OR IGNORE INTO object_gc VALUES (?,?)')
         .run(object.id, Math.min(now, lastClaim));
@@ -642,7 +722,7 @@ export class ObjectIndex {
         .get(object.id) as { unreferenced_at: bigint };
       if (
         claimed.has(object.id) ||
-        [...tenantObjects(this.store.db, true, now).values()].some((ids) => ids.has(object.id)) ||
+        current.all.has(object.id) ||
         Number(since.unreferenced_at) >= now - GRACE_MS
       )
         continue;
@@ -655,6 +735,7 @@ export class ObjectIndex {
           const node = this.nodes.get(replica.node_id);
           if (node?.state.state !== 'ready') continue;
           await node.request('object.delete', '', { ids: [object.id] });
+          references = undefined;
           this.store.db
             .prepare('DELETE FROM object_replicas WHERE id=? AND node_id=?')
             .run(object.id, node.nodeId);
@@ -888,6 +969,7 @@ export class ObjectIndex {
     this.nodes.off('metrics', this.metrics);
     this.nodes.off('offline', this.offline);
     this.nodes.handlers.delete('object.committed');
+    this.nodes.handlers.delete('object.committed.batch');
     this.nodes.handlers.delete('object.locate');
     this.nodes.handlers.delete('object.derivation');
     await Promise.allSettled([...this.jobs, ...(this.maintenance ? [this.maintenance] : [])]);

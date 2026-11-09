@@ -11,6 +11,7 @@
 #include "rtc/channel.hpp"
 #include "session/views.hpp"
 #include "session/clipboard.hpp"
+#include "persistence/checkpoint_cache.hpp"
 namespace remotekit {
 class Session {
  public:
@@ -25,6 +26,7 @@ class Session {
           std::shared_ptr<objects::SessionObjects> access = {});
   ~Session();
   Result<void> Initialize();
+  void SetOpenTiming(Json phases) { browser.SetOpenTiming(std::move(phases)); }
   Result<void> Stop();
   Result<void> Shutdown();
   Result<Json> Snapshot(bool output_diagnostics = false);
@@ -49,6 +51,7 @@ class Session {
     browser.RecordCrash();
     navigation.MaintainRecovery();
     views.PollSignIn(generation_.load());
+    checkpoint_cache.MaybeStage(context.objects, config.tenant);
   }
   void FlushSignals() { channel.FlushSignals(); }
   ViewController& Views() { return views; }
@@ -69,6 +72,7 @@ class Session {
   ManagementLink& management;
   BrowserRuntime browser;
   SessionStore store;
+  CheckpointCache checkpoint_cache;
   const std::shared_ptr<media::ServerTrace> trace;
   ControllerContext context;
   std::atomic<uint64_t> generation_{0};

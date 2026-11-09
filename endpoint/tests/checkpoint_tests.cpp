@@ -7,7 +7,31 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <functional>
+#include <iomanip>
 
+namespace remotekit {
+class CheckpointCacheProbe {
+ public:
+  static void Age(CheckpointCache& cache) {
+    cache.no_peer_ = PhaseClock::now() - std::chrono::seconds(31);
+    std::lock_guard lock(cache.watcher_.mutex_);
+    for (auto& [name, changed] : cache.watcher_.changes_.paths)
+      changed = PhaseClock::now() - std::chrono::seconds(11);
+  }
+  static void Overflow(DirectoryWatcher& watcher) {
+    std::lock_guard lock(watcher.mutex_);
+    for (int i = 0; i < 2048; ++i) {
+      const auto name = std::to_string(i) + std::string(100, 'x');
+      std::ofstream(watcher.directory_ / name, std::ios::binary) << 'x';
+    }
+  }
+  static void Wait(CheckpointCache& cache) {
+    if (cache.staging_.valid())
+      cache.staging_.get();
+  }
+};
+}  // namespace remotekit
 using namespace remotekit;
 namespace {
 void Check(bool value, const char* message) {
@@ -28,6 +52,10 @@ class Link : public ManagementLink {
  public:
   Json sources = Json::object();
   std::set<std::string> committed;
+  std::mutex mutex;
+  size_t commit_requests = 0, locate_requests = 0;
+  std::vector<Json> batches;
+  std::function<void()> on_commit;
   bool Next(std::string&, uint64_t&, bool& eof) override {
     eof = true;
     return false;
@@ -41,11 +69,27 @@ class Link : public ManagementLink {
   }
   void OnDisconnect(Disconnect) override {}
   Result<Json> Request(const std::string& name, Json fields) override {
+    std::lock_guard lock(mutex);
+    if (name == "object.committed.batch") {
+      ++commit_requests;
+      Check(fields.contains("tenantId") && fields["tenantId"].is_string(),
+            "reverse request includes its tenant scope");
+      Check(fields["objects"].size() <= 1024 && fields.dump().size() <= 256 * 1024,
+            "bounded object commit batch");
+      batches.push_back(fields);
+      for (const auto& object : fields["objects"])
+        committed.insert(object["objectId"].get<std::string>());
+      if (on_commit)
+        on_commit();
+      return Json{{"ok", true}};
+    }
     if (name == "object.committed") {
       committed.insert(fields["objectId"].get<std::string>());
       return Json{{"accepted", true}};
     }
     Check(name == "object.locate", "unexpected request");
+    ++locate_requests;
+    Check(fields["ids"].size() <= 1024, "bounded locate batch");
     Json result = Json::object();
     for (const auto& id : fields["ids"])
       result[id.get<std::string>()] = sources.value(id.get<std::string>(), Json::array());
@@ -188,6 +232,145 @@ void RoundTrip(const fs::path& root) {
         "unavailable warm repair preserves directory");
   Take(Checkpoints(target).Restore(root / "new-session", "tenant", nullptr));
   Check(fs::is_empty(root / "new-session"), "null restore creates new Profile");
+}
+void IncrementalEquality(const fs::path& root) {
+  const auto directory = root / "incremental";
+  Write(directory / "rename/sub/file", "old");
+  Write(directory / "remove", "deleted");
+  Write(directory / "case", "case");
+  Write(directory / "replace/old", "removed child");
+  auto previous = Take(Checkpoints::Scan(directory, Json(), {}));
+  DirectoryWatcher watcher;
+  watcher.Start(directory);
+  fs::rename(directory / "rename", directory / "renamed");
+  fs::rename(directory / "case", directory / "CASE");
+  fs::remove(directory / "remove");
+  fs::remove_all(directory / "replace");
+  Write(directory / "replace/new", "new child");
+  Write(directory / "new/sub/file", "created");
+  Write(directory / "renamed/sub/file", "changed");
+  Write(directory / "profile/Cache/ignored", "cache");
+  watcher.Stop();
+  const auto changes = watcher.Snapshot();
+  Check(changes.continuous, "watcher drained through shutdown boundary");
+  _putenv_s("REMOTEKIT_CHECKPOINT_VERIFY", "1");
+  const auto incremental = Take(Checkpoints::Scan(directory, previous, changes));
+  _putenv_s("REMOTEKIT_CHECKPOINT_VERIFY", "");
+  Check(incremental == Take(Checkpoints::Scan(directory, Json(), {})),
+        "incremental scan equals full walk for renames, deletes, replacements and new directories");
+  watcher.Start(directory);
+  CheckpointCacheProbe::Overflow(watcher);
+  for (int i = 0; i < 500 && watcher.Snapshot().continuous; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  Check(!watcher.Snapshot().continuous, "kernel notification overflow invalidates coverage");
+  Write(directory / "overflow/new", "overflow");
+  watcher.Stop();
+  Json phases = CheckpointPhases();
+  Check(Take(Checkpoints::Scan(directory, previous, watcher.Snapshot(), &phases)) ==
+                Take(Checkpoints::Scan(directory, Json(), {})) &&
+            phases["scan"]["filesFromWatcher"] == 0,
+        "overflow invalidates the baseline and forces a full walk");
+}
+void BatchesAndPipeline(const fs::path& root) {
+  Link source_link, target_link;
+  objects::ObjectService source(root / "pipeline-source", source_link, {}, "source", "dev");
+  objects::ObjectService target(root / "pipeline-target", target_link, {}, "target", "dev");
+  const Json keys = {{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                     {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}};
+  Take(source.Configure(keys));
+  Take(target.Configure(keys));
+  std::vector<objects::ObjectInfo> infos;
+  std::vector<std::string> ids;
+  for (int i = 0; i < 2050; ++i) {
+    std::ostringstream text;
+    text << std::hex << std::setfill('0') << std::setw(64) << i;
+    ids.push_back(text.str());
+    infos.push_back({text.str(), 1, 41, std::string(64, 'a')});
+  }
+  Take(source.CommittedBatch(infos, "tenant"));
+  Check(source_link.commit_requests == 3, "commit list streams in bounded batches");
+  objects::SessionObjects access(source, "tenant");
+  Take(access.Prepare(ids));
+  Check(source_link.locate_requests == 3, "locate grants a complete list in bounded batches");
+  const auto directory = root / "pipeline-profile";
+  for (int i = 0; i < 64; ++i)
+    Write(directory / (std::to_string(i) + "/file"), std::string(2048, char(i)));
+  Write(directory / "large", std::string(3 * 1024 * 1024 + 13, 'p'));
+  const auto first = Take(Checkpoints(source).Create(directory, "tenant", "dev"));
+  const auto second = Take(Checkpoints(source).Create(directory, "tenant", "dev"));
+  Check(first == second, "parallel checkpoint manifest is deterministic");
+  objects::PeerServer peer(source.Store(), {}, "source", "dev");
+  Take(peer.Start("127.0.0.1:0"));
+  for (const auto& id : first["objects"])
+    target_link.sources[id.get<std::string>()] =
+        Json::array({{{"nodeId", "failed"}, {"address", "127.0.0.1:1"}},
+                     {{"nodeId", "source"}, {"address", peer.Address()}}});
+  auto phases = RestorePhases();
+  const auto restored = root / "pipeline-restored";
+  Take(Checkpoints(target, {}, &phases).Restore(restored, "tenant", first["manifestId"]));
+  Check(Read(restored / "large") == Read(directory / "large"),
+        "parallel chunk offsets preserve bytes");
+  for (int i = 0; i < 64; ++i)
+    Check(Read(restored / (std::to_string(i) + "/file")) == std::string(2048, char(i)),
+          "parallel restore materializes every file through a failing source");
+  Check(phases["fetch"]["concurrency"] == 8 && target_link.locate_requests == 2 &&
+            target_link.commit_requests == 2,
+        "parallel restore batches grants and new replicas");
+  CheckpointCache cache;
+  cache.Start(directory);
+  {
+    std::fstream changed(directory / "large", std::ios::binary | std::ios::in | std::ios::out);
+    changed.put('q');
+  }
+  cache.Stop();
+  const auto previous = Json::parse(Read(directory.wstring() + L".checkpoint-index.json"));
+  const auto chunk = previous["large"]["chunks"][1].get<std::string>();
+  const auto object_path = Take(source.Store().StoredPath(chunk));
+  HANDLE held = CreateFileW(object_path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+  Check(held != INVALID_HANDLE_VALUE, "hold unchanged checkpoint object against inspection");
+  auto incremental_phases = CheckpointPhases();
+  const auto changed =
+      Checkpoints(source, {}, &incremental_phases, &cache).Create(directory, "tenant", "dev");
+  CloseHandle(held);
+  Check(bool(changed) && incremental_phases["store"]["filesRead"] == 1 &&
+            incremental_phases["store"]["chunksNew"] == 1,
+        "changed files hash and reuse indexed chunks without inspecting their stored replicas");
+}
+void PreStageIdentity(const fs::path& root) {
+  Link link;
+  objects::ObjectService objects(root / "stage-objects", link, {}, "stage", "dev");
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  const auto directory = root / "stage-profile";
+  CheckpointCache cache;
+  cache.Start(directory);
+  const auto file = directory / "quiet-file";
+  Write(file, "first identity");
+  for (int i = 0; i < 500 && !cache.Changes().paths.contains("quiet-file"); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  Check(cache.Changes().paths.contains("quiet-file"), "pre-stage observes file change");
+  const auto before = Take(CheckpointIdentity(file));
+  link.on_commit = [&] { Write(file, "changed during pre-stage"); };
+  CheckpointCacheProbe::Age(cache);
+  cache.MaybeStage(objects, "tenant");
+  CheckpointCacheProbe::Wait(cache);
+  Check(!cache.Find("quiet-file", before), "identity change discards pre-staged cache entry");
+  link.on_commit = {};
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  const auto stable = Take(CheckpointIdentity(file));
+  CheckpointCacheProbe::Age(cache);
+  cache.MaybeStage(objects, "tenant");
+  CheckpointCacheProbe::Wait(cache);
+  Check(cache.Find("quiet-file", stable).has_value(), "quiet stable file reuses pre-staged chunks");
+  for (const auto& batch : link.batches)
+    Check(batch.value("tenantId", std::string()) == "tenant", "pre-stage owns tenant claims");
+  cache.PeerPresent(true);
+  Write(directory / "peer-active", "do not pre-stage");
+  cache.MaybeStage(objects, "tenant");
+  Check(!cache.Find("peer-active", Take(CheckpointIdentity(directory / "peer-active"))),
+        "an RTC peer stops pre-staging");
+  cache.Stop();
 }
 void Blockers(const fs::path& root) {
   Link link;
@@ -422,6 +605,9 @@ int main(int argc, char** argv) {
                       ("checkpoint-native-" + std::to_string(GetCurrentProcessId()));
     fs::create_directories(root);
     RoundTrip(root);
+    IncrementalEquality(root);
+    BatchesAndPipeline(root);
+    PreStageIdentity(root);
     Blockers(root);
     Metrics(root);
     Fencing(root);

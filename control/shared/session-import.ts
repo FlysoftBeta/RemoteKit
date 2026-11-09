@@ -155,9 +155,7 @@ export interface SessionImportSocketMethods {
   'sessionImport.discard': { params: { id: string }; result: { ok: true } };
 }
 export interface StorageImportJob {
-  accepted: true;
-  job: string;
-  browserIncarnation: string;
+  importId: string;
 }
 export type StorageImportStatus =
   | { state: 'pending' }

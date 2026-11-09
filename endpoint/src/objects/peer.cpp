@@ -1,4 +1,5 @@
 #include "objects/peer.hpp"
+#include "objects/digest.hpp"
 #include "cluster/node_files.hpp"
 #include "util/result_macros.hpp"
 #include "util/wire_error.hpp"
@@ -104,28 +105,40 @@ Result<void> PeerServer::Serve(cluster::Channel& channel) {
       !request["id"].is_string() || !request.contains("offset") || !Number(request["offset"]))
     return Invalid();
   const auto id = request["id"].get<std::string>();
-  RK_ASSIGN_OR_RETURN(info, store_.Inspect(id));
-  auto offset = request["offset"].get<uint64_t>();
-  if (offset > info.stored_size)
-    return Invalid();
   RK_ASSIGN_OR_RETURN(path, store_.StoredPath(id));
   std::ifstream input(path, std::ios::binary);
-  input.seekg(static_cast<std::streamoff>(offset));
+  if (!input)
+    return Error{ErrorCode::kNotFound, "object not found"};
+  input.seekg(0, std::ios::end);
+  const auto end = input.tellg();
+  if (end < 0)
+    return Error{ErrorCode::kUnavailable, "object size unavailable"};
+  const auto stored_size = static_cast<uint64_t>(end);
+  const auto offset = request["offset"].get<uint64_t>();
+  if (offset > stored_size)
+    return Invalid();
+  input.seekg(0);
   cluster::Bytes buffer(kSegmentSize);
-  while (offset < info.stored_size && !stopping_) {
+  Digest digest;
+  uint64_t position = 0;
+  while (position < stored_size && !stopping_) {
     const auto count =
-        static_cast<size_t>(std::min<uint64_t>(buffer.size(), info.stored_size - offset));
+        static_cast<size_t>(std::min<uint64_t>(buffer.size(), stored_size - position));
     input.read(reinterpret_cast<char*>(buffer.data()), count);
     if (!input)
       return Error{ErrorCode::kUnavailable, "object read failed"};
-    RK_RETURN_IF_ERROR(
-        channel.SendBinary({{"type", "object.chunk"}, {"offset", offset}}, {buffer.data(), count}));
-    offset += count;
+    digest.Add({buffer.data(), count});
+    const auto skip =
+        static_cast<size_t>(std::min<uint64_t>(count, offset > position ? offset - position : 0));
+    if (skip < count)
+      RK_RETURN_IF_ERROR(channel.SendBinary({{"type", "object.chunk"}, {"offset", position + skip}},
+                                            {buffer.data() + skip, count - skip}));
+    position += count;
   }
   if (stopping_)
     return Error{ErrorCode::kUnavailable, "peer stopping"};
   return channel.Send(
-      {{"type", "object.end"}, {"size", info.stored_size}, {"sha256", info.stored_sha256}});
+      {{"type", "object.end"}, {"size", stored_size}, {"sha256", cluster::Hex(digest.Finish())}});
 }
 PeerClient::PeerClient(ObjectStore& store, const Key& key, std::string node, std::string build)
     : store_(store), key_(key), node_(std::move(node)), build_(std::move(build)) {}

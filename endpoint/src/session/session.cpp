@@ -199,6 +199,8 @@ Session::Session(media::Sdk& api,
   views.SetDownloadImport(
       [this](const Json& download) { return files.Library().ImportDownload(download); });
   output.Slots().SetTrace(trace);
+  presentation.SetFirstPresented(
+      [this](const std::string& view, int64_t at) { browser.Presented(view, at); });
 }
 Result<Json> Session::Open(const Json& request) {
   auto key = cluster::DecodeKey(request.at("profileKey").get<std::string>());
@@ -220,6 +222,7 @@ Result<Json> Session::Ensure(const Json& request) {
   return views.ManageSessionEnsure(request);
 }
 Result<void> Session::Initialize() {
+  checkpoint_cache.Start(config.directory);
   auto loaded = views.Initialize();
   if (!loaded)
     return loaded.error();
@@ -235,8 +238,10 @@ Session::~Session() {
   auto stopped = Shutdown();
   if (!stopped)
     fprintf(stderr, "session shutdown: %s\n", stopped.error().message.c_str());
+  checkpoint_cache.Stop();
 }
 void Session::BindPeerResources(uint64_t handle) {
+  checkpoint_cache.PeerPresent(handle != 0);
   timing.Reset();
   authorization.Bind();
   pipeline.Reset();
@@ -255,6 +260,7 @@ Result<void> Session::StartPeerResources(uint64_t handle, const std::string& sdp
   return {};
 }
 void Session::StopPeerResources() {
+  checkpoint_cache.PeerPresent(false);
   authorization.Close();
   face.Stop();
   audio.Stop();
@@ -378,23 +384,39 @@ Result<Json> Session::ReadLog(const Json& request) const {
   return window;
 }
 Result<Json> Session::Hibernate(objects::ObjectService& objects) {
+  OperationTiming timing{CheckpointPhases()};
+  timing.fields["event"] = "session.hibernate.timing";
+  timing.fields["tenantId"] = config.tenant;
+  auto phase = PhaseClock::now();
   RK_ASSIGN_OR_RETURN(snapshot, Snapshot());
+  timing.fields["blockers"] = PhaseMs(phase);
   for (const auto& [name, value] : snapshot["hibernation"].items())
     if ((value.is_boolean() && value.get<bool>()) ||
         (value.is_number() && value.get<uint64_t>() != 0))
       return Error{ErrorCode::kConflict, "hibernation blocked: " + name};
   auto save = [&]() -> Result<Json> {
+    phase = PhaseClock::now();
     RK_RETURN_IF_ERROR(Shutdown());
+    timing.fields["browserShutdown"] = browser.ShutdownTiming();
+    timing.fields["navigationExport"] = navigation.FinalExportTiming();
+    timing.fields["navigationExport"]["ms"] =
+        browser.ShutdownTiming().value("navigationExport", 0.0);
+    timing.fields["browserShutdown"]["ms"] = PhaseMs(phase);
     files.Stop();
     // No session worker can mutate files after the shutdown boundary.
     for (const auto* relative :
          {"uploads", "file-library/drafts", "file-library/incoming", "file-library/staging"})
       fs::remove_all(config.directory / relative);
-    RK_ASSIGN_OR_RETURN(checkpoint,
-                        Checkpoints(objects, config.object_access)
-                            .Create(config.directory, config.tenant, config.options.build_id));
+    phase = PhaseClock::now();
+    checkpoint_cache.Stop();
+    AddPhase(&timing.fields, "scan", "ms", PhaseMs(phase));
+    RK_ASSIGN_OR_RETURN(
+        checkpoint, Checkpoints(objects, config.object_access, &timing.fields, &checkpoint_cache)
+                        .Create(config.directory, config.tenant, config.options.build_id));
+    phase = PhaseClock::now();
     RK_RETURN_IF_ERROR(Checkpoints::Journal(config.directory, PlacementEpoch(), checkpoint,
                                             config.options.build_id));
+    timing.fields["journal"] = timing.fields.value("journal", 0.0) + PhaseMs(phase);
     return Checkpoints::Hibernation(config.directory);
   };
   try {

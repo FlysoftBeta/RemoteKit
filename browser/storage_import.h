@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -31,6 +33,7 @@ struct ImportedLocalStorage {
 };
 
 struct StorageImportData {
+  std::array<uint8_t, 32> fingerprint{};
   std::vector<ImportedCookie> cookies;
   std::vector<ImportedLocalStorage> local_storage;
 };
@@ -39,22 +42,24 @@ class StorageImportJobs {
  public:
   StorageImportJobs();
   ~StorageImportJobs();
-  Result<uint64_t> Begin(content::StoragePartition*, const StorageImportData&, uint64_t view = 0);
-  Result<base::DictValue> Poll(uint64_t job);
-  Result<base::DictValue> Latest(uint64_t view);
-  void Cancel(uint64_t job);
+  Result<base::DictValue> Begin(content::StoragePartition*,
+                                const std::string& import_id,
+                                const StorageImportData&,
+                                uint64_t view = 0);
+  Result<base::DictValue> Poll(const std::string& import_id);
+  void Cancel(const std::string& import_id);
   void Clear();
 
  private:
   friend class StorageImportJobsProbe;
   struct Job;
-  void Start(uint64_t job, StorageImportData data);
-  void OnItem(uint64_t job, bool cookie, bool applied);
-  void MaybeFlush(uint64_t job);
-  void OnFlushed(uint64_t job);
+  void Start(std::string import_id, StorageImportData data);
+  void OnItem(std::string import_id, bool cookie, bool applied);
+  void MaybeFlush(const std::string& import_id);
+  void OnFlushed(const std::string& import_id);
 
-  uint64_t next_job_ = 1;
-  std::map<uint64_t, std::unique_ptr<Job>> jobs_;
+  std::map<std::string, std::unique_ptr<Job>> jobs_;
+  std::deque<std::string> completed_;
   base::WeakPtrFactory<StorageImportJobs> weak_factory_{this};
 };
 }  // namespace remotekit::browser

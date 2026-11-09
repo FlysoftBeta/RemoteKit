@@ -46,6 +46,14 @@ class NavigationExport {
   }
   void Forget(const std::string& view) { candidates_.erase(view); }
   bool Pending() const { return task_.has_value() || !candidates_.empty(); }
+  std::string NextView() const {
+    if (task_)
+      return task_->view;
+    if (candidates_.empty())
+      return {};
+    const auto next = candidates_.upper_bound(cursor_);
+    return (next == candidates_.end() ? candidates_.begin() : next)->first;
+  }
   void Observe(const Json& view, const std::string& incarnation, bool needed) {
     const auto id = view.at("view").get<std::string>();
     const auto identity = Identify(view, incarnation);

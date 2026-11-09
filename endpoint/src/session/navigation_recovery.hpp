@@ -20,12 +20,15 @@ class NavigationRecovery : private ControllerContext {
   void CaptureNavigation(const Json& browser_view);
   void MaintainNavigationExport();
   Result<void> FinalExport();
+  const Json& FinalExportTiming() const { return final_export_timing_; }
 
  private:
   ViewController& views;
   std::map<std::string, std::string> recovery_revisions;
   remotekit::NavigationExport navigation_export;
   bool export_turn = false;
+  bool final_exporting_ = false;
+  Json final_export_timing_ = Json::object();
   std::string scavenged_incarnation;
   Result<void> ExportTick(uint32_t timeout_ms = 10000);
   struct Recovery {

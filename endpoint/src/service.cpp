@@ -130,15 +130,30 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
         if (session->Id() == id)
           return Error{ErrorCode::kConflict, "sessionId is already open"};
       auto access = std::make_shared<objects::SessionObjects>(objects_, tenant);
-      RK_RETURN_IF_ERROR(
-          Checkpoints(objects_, access)
-              .Restore(options_.data / "sessions" / id, tenant, request["checkpoint"]));
+      auto phases = RestorePhases();
+      phases["event"] = "session.open.timing";
+      phases["tenantId"] = tenant;
+      const auto restore_start = PhaseClock::now();
+      phases["startedQpc"] = QpcNow();
+      auto restored =
+          Checkpoints(objects_, access, &phases).Restore(directory, tenant, request["checkpoint"]);
+      if (!restored) {
+        phases["total"] = PhaseMs(restore_start);
+        phases["error"] = restored.error().message;
+        phases.erase("startedQpc");
+        fprintf(stderr, "%s\n", phases.dump().c_str());
+        return restored.error();
+      }
       auto session = std::make_unique<Session>(sdk_, options_, tenant, id,
                                                request["placementEpoch"].get<uint64_t>(),
                                                key.value(), link_, objects_, access);
+      const auto initialize_start = PhaseClock::now();
       auto initialized = session->Initialize();
       if (!initialized)
         return initialized.error();
+      phases["initialization"] = PhaseMs(initialize_start);
+      phases["restoreTotal"] = PhaseMs(restore_start);
+      session->SetOpenTiming(std::move(phases));
       {
         std::lock_guard lock(mutex_);
         sessions_.emplace(tenant, std::move(session));

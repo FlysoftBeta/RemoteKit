@@ -422,30 +422,26 @@ void SessionManagementRequests() {
   CHECK(!session.Snapshot().value().at("running").get<bool>());
   for (const auto* field : {"cookies", "localStorage"}) {
     for (const auto& invalid : {Json(), Json(0), Json("array"), Json::object()}) {
-      Json request = {{"cookies", Json::array()}, {"localStorage", Json::array()}};
+      Json request = {
+          {"importId", "record:0"}, {"cookies", Json::array()}, {"localStorage", Json::array()}};
       request[field] = invalid;
       auto result = session.Views().ManageSessionStorageImport(request);
       CHECK(!result && result.error().code == ErrorCode::kInvalidRequest);
     }
-    Json missing = {{"cookies", Json::array()}, {"localStorage", Json::array()}};
+    Json missing = {
+        {"importId", "record:0"}, {"cookies", Json::array()}, {"localStorage", Json::array()}};
     missing.erase(field);
     CHECK(session.Views().ManageSessionStorageImport(missing).error().code ==
           ErrorCode::kInvalidRequest);
   }
-  for (const auto* field : {"job", "browserIncarnation"}) {
-    Json missing = {{"job", "1"}, {"browserIncarnation", "old"}};
-    missing.erase(field);
-    CHECK(session.Views().ManageSessionStorageImportStatus(missing).error().code ==
-          ErrorCode::kInvalidRequest);
-    Json invalid = {{"job", "1"}, {"browserIncarnation", "old"}};
-    invalid[field] = 1;
-    CHECK(session.Views().ManageSessionStorageImportStatus(invalid).error().code ==
+  for (const auto& value : {Json(), Json(1), Json(""), Json(std::string(129, 'x'))}) {
+    CHECK(session.Views().ManageSessionStorageImportStatus({{"importId", value}}).error().code ==
           ErrorCode::kInvalidRequest);
   }
-  const auto stale = session.Views().ManageSessionStorageImportStatus(
-      {{"job", "1"}, {"browserIncarnation", "old"}});
-  CHECK(!stale && stale.error().code == ErrorCode::kConflict &&
-        stale.error().message == "stale_browser_incarnation");
+  CHECK(session.Views().ManageSessionStorageImportStatus(Json::object()).error().code ==
+        ErrorCode::kInvalidRequest);
+  CHECK(session.Views().ManageSessionStorageImportStatus({{"importId", "record:0"}}).error().code ==
+        ErrorCode::kNotFound);
   const Json request = {{"maxFps", 30}, {"degradationPreference", "balanced"}, {"audio", false}};
   CHECK(session.Media().ManageSessionMediaPolicy(request));
   CHECK(!session.Media().Audio());

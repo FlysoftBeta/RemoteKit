@@ -4,6 +4,8 @@
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <set>
+#include "persistence/phase_timing.hpp"
 
 namespace remotekit {
 namespace {
@@ -195,9 +197,31 @@ bool BrowserProcess::JobEmpty() const {
                                    sizeof(accounting), nullptr) &&
          accounting.ActiveProcesses == 0;
 }
-bool BrowserProcess::WaitCleanExit(uint32_t timeout_ms) {
+bool BrowserProcess::WaitCleanExit(uint32_t timeout_ms, Json* timing) {
+  const auto started = PhaseClock::now();
+  std::set<ULONG_PTR> observed, recorded;
+  if (timing)
+    (*timing)["processes"] = Json::array();
+  auto sample = [&] {
+    if (!timing || !job_)
+      return;
+    std::vector<ULONG_PTR> memory(1026);
+    auto* ids = reinterpret_cast<JOBOBJECT_BASIC_PROCESS_ID_LIST*>(memory.data());
+    if (!QueryInformationJobObject(job_, JobObjectBasicProcessIdList, ids,
+                                   static_cast<DWORD>(memory.size() * sizeof(ULONG_PTR)), nullptr))
+      return;
+    std::set<ULONG_PTR> current;
+    for (DWORD i = 0; i < ids->NumberOfProcessIdsInList; ++i)
+      current.insert(ids->ProcessIdList[i]);
+    observed.insert(current.begin(), current.end());
+    observed.insert(Pid());
+    for (const auto pid : observed)
+      if (!current.contains(pid) && recorded.insert(pid).second)
+        (*timing)["processes"].push_back({{"pid", pid}, {"ms", PhaseMs(started)}});
+  };
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   do {
+    sample();
     if (Exited() && JobEmpty()) {
       state_ = State::kExited;
       return ExitCode() == 0;

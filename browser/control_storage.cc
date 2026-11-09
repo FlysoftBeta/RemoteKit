@@ -3,7 +3,9 @@
 #include <cmath>
 #include <map>
 
+#include "base/json/json_writer.h"
 #include "base/strings/utf_string_conversions.h"
+#include "crypto/hash.h"
 #include "browser/browser_runtime.h"
 #include "browser/compat.h"
 #include "browser/control_requests.h"
@@ -84,6 +86,9 @@ Result<StorageImportRequest> DecodeStorageImport(const base::DictValue& wire,
   StorageImportRequest request;
   static_cast<RequestEnvelope&>(request) = envelope;
   RequestDecoder decoder(wire);
+  request.import_id = decoder.Optional<std::string>("importId").value_or("");
+  if (request.import_id.empty() || request.import_id.size() > 128)
+    return {{}, InvalidStorageImport()};
   request.view = decoder.Optional<uint64_t>("view").value_or(0);
   auto cookies = decoder.Optional<base::ListValue>("cookies");
   auto local_storage = decoder.Optional<base::ListValue>("localStorage");
@@ -124,6 +129,13 @@ Result<StorageImportRequest> DecodeStorageImport(const base::DictValue& wire,
     }
     request.data.local_storage.push_back(std::move(storage));
   }
+  base::DictValue payload;
+  payload.Set("cookies", cookies->Clone());
+  payload.Set("localStorage", local_storage->Clone());
+  std::string serialized;
+  if (!base::JSONWriter::Write(payload, &serialized))
+    return {{}, InvalidStorageImport()};
+  request.data.fingerprint = crypto::hash::Sha256(serialized);
   return decoder.Finish(std::move(request));
 }
 
@@ -132,11 +144,9 @@ Result<StorageImportStatusRequest> DecodeStorageImportStatus(const base::DictVal
   StorageImportStatusRequest request;
   static_cast<RequestEnvelope&>(request) = envelope;
   RequestDecoder decoder(wire);
-  const auto job = decoder.Optional<uint64_t>("job");
-  request.view = decoder.Optional<uint64_t>("view").value_or(0);
-  if (request.method == "storage.import.cancel" && (!job || !*job))
-    return {{}, {ErrorCode::kInvalidRequest, "Storage import cancellation requires a job"}};
-  request.job = job.value_or(0);
+  request.import_id = decoder.Optional<std::string>("importId").value_or("");
+  if (request.import_id.empty() || request.import_id.size() > 128)
+    return {{}, InvalidStorageImport()};
   return decoder.Finish(std::move(request));
 }
 
@@ -161,22 +171,21 @@ ControlResult ControlDispatcher::HandleStorageImport(const StorageImportRequest&
   if (request.view && !runtime_.views.Find(runtime_.session_id, request.view))
     return ControlResult::Failure(request.id, ErrorCode::kNotFound,
                                   "Storage import view not found");
-  auto job = runtime_.storage_import_jobs.Begin(
-      runtime_.contexts.front()->GetDefaultStoragePartition(), request.data, request.view);
+  auto job =
+      runtime_.storage_import_jobs.Begin(runtime_.contexts.front()->GetDefaultStoragePartition(),
+                                         request.import_id, request.data, request.view);
   if (!job)
     return ControlResult::Failure(request.id, *job.status.error, job.status.message);
-  return ControlResult::Success(request.id,
-                                base::DictValue().Set("job", base::NumberToString(job.value)));
+  return ControlResult::Success(request.id, std::move(job.value));
 }
 
 ControlResult ControlDispatcher::HandleStorageImportStatus(
     const StorageImportStatusRequest& request) {
   if (request.method == "storage.import.cancel") {
-    runtime_.storage_import_jobs.Cancel(request.job);
+    runtime_.storage_import_jobs.Cancel(request.import_id);
     return ControlResult::Success(request.id);
   }
-  auto status = request.job ? runtime_.storage_import_jobs.Poll(request.job)
-                            : runtime_.storage_import_jobs.Latest(request.view);
+  auto status = runtime_.storage_import_jobs.Poll(request.import_id);
   if (!status)
     return ControlResult::Failure(request.id, *status.status.error, status.status.message);
   return ControlResult::Success(request.id, std::move(status.value));

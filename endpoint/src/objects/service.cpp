@@ -22,6 +22,7 @@ ObjectService::ObjectService(std::filesystem::path data,
 }
 ObjectService::~ObjectService() {
   documents_.reset();
+  staging_.Stop();
   work_.Stop();
   CancelPuts();
 }
@@ -37,6 +38,22 @@ Result<Json> ObjectService::Derivation(const std::string& id, const std::string&
 Result<void> ObjectService::Start(const std::string& listen) {
   return server_.Start(listen);
 }
+bool ObjectService::PreStage(std::function<void()> work) {
+  bool idle = false;
+  if (!staging_busy_.compare_exchange_strong(idle, true))
+    return false;
+  if (!staging_.Submit([this, work = std::move(work)] {
+        struct Release {
+          std::atomic<bool>& busy;
+          ~Release() { busy = false; }
+        } release{staging_busy_};
+        work();
+      })) {
+    staging_busy_ = false;
+    return false;
+  }
+  return true;
+}
 Result<void> ObjectService::Committed(const ObjectInfo& info, const Json& claim) {
   auto fields = info.Committed();
   fields["tenantId"] = "";
@@ -46,15 +63,66 @@ Result<void> ObjectService::Committed(const ObjectInfo& info, const Json& claim)
     return reply.error();
   return {};
 }
+Result<void> ObjectService::CommittedBatch(const std::vector<ObjectInfo>& objects,
+                                           const std::string& tenant,
+                                           size_t* requests) {
+  Json fields = {{"tenantId", tenant}};
+  fields["objects"] = Json::array();
+  auto send = [&]() -> Result<void> {
+    if (fields["objects"].empty())
+      return {};
+    if (requests)
+      ++*requests;
+    auto result = control_.Request("object.committed.batch", fields);
+    if (!result && result.error().code == ErrorCode::kOutcomeUnknown) {
+      if (requests)
+        ++*requests;
+      result = control_.Request("object.committed.batch", fields);
+    }
+    if (!result)
+      return result.error();
+    if (!result.value().is_object() || result.value().value("ok", false) != true)
+      return Error{ErrorCode::kOutcomeUnknown, "invalid object commit batch reply"};
+    fields["objects"] = Json::array();
+    return {};
+  };
+  size_t bytes = fields.dump().size();
+  for (const auto& object : objects) {
+    auto item = object.Committed();
+    const size_t size = item.dump().size() + 1;
+    if (fields["objects"].size() == 1024 || bytes + size > 256 * 1024 - 1024) {
+      RK_RETURN_IF_ERROR(send());
+      bytes = fields.dump().size();
+    }
+    fields["objects"].push_back(std::move(item));
+    bytes += size;
+  }
+  return send();
+}
 Result<ObjectInfo> ObjectService::Fetch(const std::string& id, const Json& sources) {
   if (!sources.is_array() || sources.size() > 256)
     return Error{ErrorCode::kInvalidRequest, "invalid object sources"};
   Error last{ErrorCode::kUnavailable, "no object source available"};
-  for (const auto& source : sources) {
+  for (size_t i = 0; i < sources.size(); ++i) {
+    const auto& source = sources[(std::hash<std::string>{}(id) + i) % sources.size()];
     if (!source.is_object() || !source.contains("nodeId") || !source["nodeId"].is_string() ||
         !source.contains("address") || !source["address"].is_string())
       return Error{ErrorCode::kInvalidRequest, "invalid object source"};
-    auto fetched = client_.Fetch(id, source["address"].get<std::string>());
+    const auto address = source["address"].get<std::string>();
+    std::shared_ptr<std::counting_semaphore<4>> limit;
+    {
+      std::lock_guard lock(sources_mutex_);
+      auto& entry = source_limits_[address];
+      if (!entry)
+        entry = std::make_shared<std::counting_semaphore<4>>(4);
+      limit = entry;
+    }
+    limit->acquire();
+    struct Permit {
+      std::shared_ptr<std::counting_semaphore<4>> limit;
+      ~Permit() { limit->release(); }
+    } permit{limit};
+    auto fetched = client_.Fetch(id, address);
     if (!fetched) {
       last = fetched.error();
       if (last.code != ErrorCode::kUnavailable && last.code != ErrorCode::kNotFound &&
@@ -62,18 +130,26 @@ Result<ObjectInfo> ObjectService::Fetch(const std::string& id, const Json& sourc
         return last;
       continue;
     }
-    RK_RETURN_IF_ERROR(Committed(fetched.value()));
     return fetched;
   }
   return last;
 }
 Result<ObjectInfo> ObjectService::Ensure(const std::string& id, const Json& sources) {
   auto task = std::make_shared<std::packaged_task<Result<ObjectInfo>()>>(
-      [this, id, sources] { return EnsureLocal(id, sources); });
+      [this, id, sources]() -> Result<ObjectInfo> {
+        if (auto local = store_.Inspect(id); local)
+          return local;
+        RK_ASSIGN_OR_RETURN(info, EnsureLocal(id, sources));
+        RK_RETURN_IF_ERROR(CommittedBatch({info}));
+        return info;
+      });
   auto result = task->get_future();
   if (!work_.Submit([task] { (*task)(); }))
     return Error{ErrorCode::kBusy, "object workers busy"};
   return result.get();
+}
+Result<ObjectInfo> ObjectService::EnsureUncommitted(const std::string& id, const Json& sources) {
+  return EnsureLocal(id, sources);
 }
 Result<ObjectInfo> ObjectService::Write(const std::filesystem::path& path,
                                         const ObjectStore::Check& check,
@@ -97,13 +173,28 @@ Result<ObjectInfo> ObjectService::Write(const std::filesystem::path& path,
   return result.get();
 }
 Result<Json> ObjectService::Locate(const std::string& id, const Json& reference) {
-  auto fields = reference;
-  fields["ids"] = Json::array({id});
-  RK_ASSIGN_OR_RETURN(located, control_.Request("object.locate", std::move(fields)));
-  if (!located.is_object() || !located.contains("sources") || !located["sources"].is_object() ||
-      !located["sources"].contains(id) || !located["sources"][id].is_array())
-    return Error{ErrorCode::kInternal, "invalid object.locate reply"};
-  return located["sources"][id];
+  RK_ASSIGN_OR_RETURN(sources, LocateBatch({id}, reference));
+  return sources[id];
+}
+Result<Json> ObjectService::LocateBatch(const std::vector<std::string>& ids,
+                                        const Json& reference) {
+  Json sources = Json::object();
+  for (size_t offset = 0; offset < ids.size(); offset += 1024) {
+    auto fields = reference;
+    fields["ids"] = Json::array();
+    const auto end = std::min(ids.size(), offset + 1024);
+    for (size_t i = offset; i < end; ++i)
+      fields["ids"].push_back(ids[i]);
+    RK_ASSIGN_OR_RETURN(located, control_.Request("object.locate", std::move(fields)));
+    if (!located.is_object() || !located.contains("sources") || !located["sources"].is_object())
+      return Error{ErrorCode::kOutcomeUnknown, "invalid object.locate reply"};
+    for (size_t i = offset; i < end; ++i) {
+      if (!located["sources"].contains(ids[i]) || !located["sources"][ids[i]].is_array())
+        return Error{ErrorCode::kOutcomeUnknown, "invalid object.locate reply"};
+      sources[ids[i]] = std::move(located["sources"][ids[i]]);
+    }
+  }
+  return sources;
 }
 Result<ObjectInfo> ObjectService::EnsureLocal(const std::string& id, const Json& sources) {
   if (!ValidId(id))
@@ -116,19 +207,34 @@ Result<ObjectInfo> ObjectService::EnsureLocal(const std::string& id, const Json&
     return local.error();
   return Fetch(id, sources);
 }
-Result<ObjectInfo> SessionObjects::Ensure(const std::string& id) {
+Result<Json> SessionObjects::Prepare(const std::vector<std::string>& ids) {
+  RK_ASSIGN_OR_RETURN(sources, service_.LocateBatch(ids, {{"tenantId", tenant_}}));
   std::lock_guard lock(mutex_);
-  Json sources = Json::array();
-  if (!grants_.contains(id)) {
-    RK_ASSIGN_OR_RETURN(located, service_.Locate(id, {{"tenantId", tenant_}}));
-    sources = std::move(located);
+  for (const auto& id : ids) {
     grants_.insert(id);
-  } else {
+    sources_[id] = sources[id];
+  }
+  return sources;
+}
+Result<ObjectInfo> SessionObjects::Ensure(const std::string& id) {
+  Json sources;
+  bool granted = false;
+  {
+    std::lock_guard lock(mutex_);
+    granted = grants_.contains(id);
+    if (sources_.contains(id))
+      sources = sources_[id];
+  }
+  if (granted) {
     auto local = service_.Store().Inspect(id);
     if (local)
       return local;
-    RK_ASSIGN_OR_RETURN(located, service_.Locate(id, {{"tenantId", tenant_}}));
-    sources = std::move(located);
+    if (local.error().code != ErrorCode::kNotFound)
+      return local.error();
+  }
+  if (sources.is_null()) {
+    RK_ASSIGN_OR_RETURN(located, Prepare({id}));
+    sources = located[id];
   }
   return service_.Ensure(id, sources);
 }
@@ -189,6 +295,7 @@ Result<Json> ObjectService::Dispatch(const Json& request) {
       return Error{ErrorCode::kInvalidRequest, "invalid object id"};
   if (method == "object.fetch" && (!request.contains("sources") || !request["sources"].is_object()))
     return Error{ErrorCode::kInvalidRequest, "invalid object sources"};
+  std::vector<ObjectInfo> committed;
   for (const auto& item : request["ids"]) {
     const auto id = item.get<std::string>();
     std::lock_guard lock(transfers_[std::hash<std::string>{}(id) % transfers_.size()]);
@@ -197,15 +304,17 @@ Result<Json> ObjectService::Dispatch(const Json& request) {
     } else if (method == "object.fetch") {
       auto local = store_.Inspect(id);
       if (local) {
-        RK_RETURN_IF_ERROR(Committed(local.value()));
+        committed.push_back(local.value());
       } else {
         if (!request["sources"].contains(id))
           return Error{ErrorCode::kInvalidRequest, "missing object sources"};
-        RK_RETURN_IF_ERROR(Fetch(id, request["sources"][id]));
+        RK_ASSIGN_OR_RETURN(info, Fetch(id, request["sources"][id]));
+        committed.push_back(std::move(info));
       }
     } else
       return Error{ErrorCode::kInvalidRequest, "unknown object method"};
   }
+  RK_RETURN_IF_ERROR(CommittedBatch(committed));
   return Json{{"accepted", true}};
 }
 Result<Json> ObjectService::DispatchPut(const Json& request) {

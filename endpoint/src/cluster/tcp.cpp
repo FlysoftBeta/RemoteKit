@@ -56,7 +56,11 @@ struct Addresses {
 };
 class TcpCarrier final : public Carrier {
  public:
-  explicit TcpCarrier(SOCKET socket) : socket_(socket) {}
+  explicit TcpCarrier(SOCKET socket) : socket_(socket) {
+    BOOL enabled = TRUE;
+    setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&enabled),
+               sizeof(enabled));
+  }
   ~TcpCarrier() override { Close(); }
   void Close() override {
     const auto socket = socket_.exchange(INVALID_SOCKET);

@@ -75,6 +75,18 @@ class Control final : public remotekit::ManagementLink {
             fields.at("objectId").get<std::string>();
       return remotekit::Json{{"accepted", true}};
     }
+    if (name == "object.committed.batch") {
+      if (!fields["objects"].empty())
+        last_commit = fields["objects"][0];
+      if (reject_commit)
+        return remotekit::Error{reject_code, "Control rejected commit"};
+      for (auto item : fields["objects"]) {
+        item["tenantId"] = fields.value("tenantId", std::string());
+        last_commit = item;
+        committed.push_back(std::move(item));
+      }
+      return remotekit::Json{{"ok", true}};
+    }
     CHECK(name == "object.locate");
     ++located;
     if (fields["tenantId"] == "other-tenant")
