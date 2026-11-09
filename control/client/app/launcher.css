@@ -237,11 +237,6 @@
 .launcher-file-image + .tile-icon {
   visibility: hidden;
 }
-@media (max-width: 599px) {
-  .workspace-overlay {
-    padding: 20px 16px;
-  }
-}
 
 .launcher-system-controls {
   display: flex;
@@ -316,32 +311,30 @@
     opacity: 1;
   }
 }
-@media (max-width: 719px) {
-  .workspace-overlay {
-    padding: 16px;
-  }
-  .launcher-heading {
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-  .launcher-system-controls {
-    gap: 0;
-  }
-  .launcher-audio {
-    width: 204px;
-  }
-  .launcher-system-controls > .MuiIconButton-root {
-    padding: 6px;
-  }
-  .launcher-system-controls > .MuiIconButton-root > svg {
-    font-size: 20px;
-  }
-  .launcher-body {
-    flex-direction: column;
-    gap: 12px;
-  }
-  .launcher-search {
-    margin-bottom: 12px;
-  }
+:root.layout-compact .workspace-overlay {
+  padding: 16px;
+}
+:root.layout-compact .launcher-heading {
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+:root.layout-compact .launcher-system-controls {
+  gap: 0;
+}
+:root.layout-compact .launcher-audio {
+  width: 204px;
+}
+:root.layout-compact .launcher-system-controls > .MuiIconButton-root {
+  padding: 6px;
+}
+:root.layout-compact .launcher-system-controls > .MuiIconButton-root > svg {
+  font-size: 20px;
+}
+:root.layout-compact .launcher-body {
+  flex-direction: column;
+  gap: 12px;
+}
+:root.layout-compact .launcher-search {
+  margin-bottom: 12px;
 }

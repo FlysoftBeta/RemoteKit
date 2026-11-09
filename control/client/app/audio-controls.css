@@ -23,15 +23,13 @@
 .launcher-audio .menu-audio-row .MuiToggleButton-root {
   background: var(--surface-translucent);
 }
-@media (max-width: 719px) {
-  .launcher-audio .menu-audio-row {
-    gap: 4px;
-  }
-  .launcher-audio .menu-audio-row > svg {
-    display: none;
-  }
-  .launcher-audio .menu-audio-row .MuiToggleButton-root {
-    font-size: 11px;
-    padding: 5px;
-  }
+:root.layout-compact .launcher-audio .menu-audio-row {
+  gap: 4px;
+}
+:root.layout-compact .launcher-audio .menu-audio-row > svg {
+  display: none;
+}
+:root.layout-compact .launcher-audio .menu-audio-row .MuiToggleButton-root {
+  font-size: 11px;
+  padding: 5px;
 }

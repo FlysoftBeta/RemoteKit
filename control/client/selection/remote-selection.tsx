@@ -6,6 +6,7 @@ import { surfaceDipSize } from '../input/coordinates';
 import { projectRootRect, type ViewportGeometry } from '../app/viewport-geometry';
 import { sameEditingDocument } from '../editing/mobile-editing-state';
 import { selectionSession } from './selection-session';
+import { clipboardCommand } from '../clipboard/device-clipboard';
 import type { HandleKind, Point, SelectionHandles, SelectionTarget } from './target';
 
 export class RemoteSelectionTarget implements SelectionTarget {
@@ -87,9 +88,20 @@ export class RemoteSelectionTarget implements SelectionTarget {
   run(command: SelectionAction) {
     const menu = this.message.menu;
     if (!menu || this.consumed) return;
-    this.transport.input.ensureInputFocus(this.surface);
-    this.transport.input.sendInput(this.surface, { type: 'selection_command', menu: menu.id, command });
-    if (command !== 'selectAll') this.consumed = true;
+    const surface = this.surface;
+    clipboardCommand(command, () => {
+      if (
+        !this.alive() ||
+        this.message.menu?.id !== menu.id ||
+        !sameEditingDocument(surface, this.surface) ||
+        surface.focus !== this.surface.focus
+      )
+        return;
+      this.transport.input.ensureInputFocus(this.surface);
+      if (this.transport.input.sendInput(this.surface, { type: 'selection_command', menu: menu.id, command })) {
+        if (command !== 'selectAll') this.consumed = true;
+      }
+    });
   }
 
   dragHandle(which: HandleKind, point: Point) {

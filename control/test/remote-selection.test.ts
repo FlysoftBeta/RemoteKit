@@ -4,6 +4,7 @@ import { JSDOM } from 'jsdom';
 import { RemoteSelectionTarget } from '../client/selection/remote-selection';
 import type { SelectionMessage } from '../client/rtc/protocol';
 import type { Surface } from '../client/presentation/types';
+import { deviceClipboard } from '../client/clipboard/device-clipboard';
 
 const dom = new JSDOM('<canvas></canvas>');
 const canvas = dom.window.document.querySelector('canvas')!;
@@ -92,4 +93,31 @@ test('a caret-only remote target dismisses without a menu and hides clipped hand
   target.collapse();
   assert.deepEqual(sent, [{ type: 'selection_command', menu: '0', command: 'dismiss' }]);
   assert.equal(target.alive(), false);
+});
+
+test('remote paste refreshes before dispatch and abandons a retired menu', async () => {
+  const sent: Record<string, unknown>[] = [];
+  const target = new RemoteSelectionTarget({ input: {
+    ensureInputFocus: () => true,
+    sendInput: (_surface: Surface, event: Record<string, unknown>) => { sent.push(event); return true; },
+  } } as never, message, surface,
+  { width: 450, height: 300, canvas: { left: 20, top: 30, width: 400, height: 200 } }, canvas);
+  const originalRead = deviceClipboard.readForPaste;
+  let finish!: () => void;
+  deviceClipboard.readForPaste = () => new Promise<void>((resolve) => { finish = resolve; });
+  try {
+    target.run('paste');
+    assert.equal(sent.length, 0);
+    finish();
+    await Promise.resolve();
+    assert.deepEqual(sent.pop(), { type: 'selection_command', menu: '5', command: 'paste' });
+    target.update({ ...message, revision: '2' }, surface,
+      { width: 450, height: 300, canvas: { left: 20, top: 30, width: 400, height: 200 } }, canvas);
+    target.run('paste');
+    target.collapse();
+    sent.length = 0;
+    finish();
+    await Promise.resolve();
+    assert.equal(sent.length, 0);
+  } finally { deviceClipboard.readForPaste = originalRead; }
 });

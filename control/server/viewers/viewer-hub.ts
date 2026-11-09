@@ -6,6 +6,7 @@ import { isLocalTab } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 import { type ViewerSecurityState } from '../auth/viewer-security';
 import { QualityState } from '../quality';
+import { WORKSPACE_LIMITS } from '../workspace/model';
 
 export class ViewerHub {
   private readonly snapshots = new WeakMap<object, { content: string; state: ProductState }>();
@@ -176,7 +177,7 @@ export class ViewerHub {
         body.devicePixelRatio < 0.5 ||
         body.devicePixelRatio > 8 ||
         !Array.isArray(body.windows) ||
-        body.windows.length > 8 ||
+        body.windows.length > WORKSPACE_LIMITS.windows ||
         (body.refreshHz !== undefined &&
           (!Number.isFinite(body.refreshHz) || body.refreshHz < 1 || body.refreshHz > 500))
       )

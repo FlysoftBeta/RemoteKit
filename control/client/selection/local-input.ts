@@ -1,4 +1,5 @@
 import type { SelectionAction } from '../rtc/protocol';
+import { deviceClipboard } from '../clipboard/device-clipboard';
 import { wordAt, type HandleKind, type Point, type SelectionClipboard, type SelectionTarget } from './target';
 
 export type TextInput = HTMLInputElement | HTMLTextAreaElement;
@@ -161,6 +162,17 @@ export class LocalInputTarget implements SelectionTarget {
         return;
     }
     if (this.input.readOnly || (command !== 'paste' && command !== 'cut')) return;
+    if (command === 'paste') {
+      await deviceClipboard.readForPaste(false);
+      if (
+        !this.alive() ||
+        this.input.readOnly ||
+        this.input.value !== original ||
+        this.input.selectionStart !== start ||
+        this.input.selectionEnd !== end
+      )
+        return;
+    }
     const text = command === 'paste' ? this.clipboard.read() : '';
     const before = new InputEvent('beforeinput', {
       bubbles: true,

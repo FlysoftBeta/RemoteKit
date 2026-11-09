@@ -692,7 +692,7 @@ export function LibraryTab({
         onOpen={openPreview}
         onSelect={(entry) => setSelected([entry.id])}
       />
-      <Snackbar open={copied} autoHideDuration={1600} onClose={() => setCopied(false)} message="已复制" />
+      <Snackbar anchorOrigin={{ vertical: 'top', horizontal: 'center' }} sx={{ pointerEvents: 'none' }} open={copied} autoHideDuration={1600} onClose={() => setCopied(false)} message="已复制" />
       {camera && (
         <PhotoCapture
           windowId={windowId}

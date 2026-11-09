@@ -195,7 +195,7 @@ export async function instrumentViewer(context, evidence, name) {
     async media() {
       return until('H264 decoded', () =>
         page.evaluate(async () => {
-          const peer = clusterQA.peers.at(-1);
+          const peer = clusterQA.peers[clusterQA.peers.length - 1];
           if (peer?.connectionState !== 'connected') return false;
           const stats = await peer.getStats();
           const video = [...stats.values()].find(

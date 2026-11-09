@@ -167,6 +167,18 @@ test('basket mutations record file usage only after a successful addition in the
   ]);
 });
 
+test('upload admission distinguishes the file count and size limits', () => {
+  const queue = new ImportQueue({ rpc: { uploadAsset: async () => asset },
+    mutate: async () => snapshot(1) }, 'library');
+  const origin = { kind: 'files' as const, channel: 'upload' as const, partitionId: null };
+  assert.throws(() => queue.enqueue(Array.from({ length: 65 }, () => new File(['a'], 'a.txt')), 0, origin),
+    /最多可添加 64 个文件/);
+  const oversized = new File(['a'], 'large.txt');
+  Object.defineProperty(oversized, 'size', { value: 256 * 1024 * 1024 + 1 });
+  assert.throws(() => queue.enqueue([oversized], 0, origin), /单个文件不能超过 256 MiB/);
+  queue.dispose();
+});
+
 test('Files uploads retain the selected partition and upload channel', async () => {
   const origins: unknown[] = [];
   const queue = new ImportQueue(

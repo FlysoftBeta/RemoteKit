@@ -20,7 +20,6 @@ export interface DocumentViewerProps {
   type?: string;
   initialProgress?: DocumentProgress;
   onProgress?: (progress: DocumentProgress) => void;
-  onUnsupported?: () => void;
   hideTitle?: boolean;
 }
 
@@ -351,11 +350,8 @@ export function DocumentViewer({
   type = '',
   initialProgress,
   onProgress,
-  onUnsupported,
   hideTitle = false,
 }: DocumentViewerProps) {
-  const unsupported = useRef(onUnsupported);
-  unsupported.current = onUnsupported;
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<{
     source: DocumentSource;
@@ -393,7 +389,6 @@ export function DocumentViewer({
         },
         (error) => {
           if (controller.signal.aborted) return;
-          if (error instanceof RemoteKitError && error.code === 'rejected') unsupported.current?.();
           setStatus(undefined);
           setState({
             source,

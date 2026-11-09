@@ -96,14 +96,12 @@ const PreviewContent = memo(
     onFiles?: () => void;
   }) {
     const source = useMemo(() => new ChannelDocumentSource(rpc, entry.assetId), [rpc, entry.assetId]);
-    const [unsupported, setUnsupported] = useState(false);
     const [progress, setProgress] = useState<DocumentProgress | null | undefined>();
     const [progressError, setProgressError] = useState('');
     const pendingProgress = useRef<DocumentProgress>(undefined);
     const [attempt, setAttempt] = useState(0);
     const document = isDocumentFile(entry);
     useEffect(() => {
-      setUnsupported(false);
       setProgress(undefined);
       setProgressError('');
       pendingProgress.current = undefined;
@@ -130,7 +128,7 @@ const PreviewContent = memo(
       );
     };
     if (!online) return <Alert severity="info">连接已断开，恢复后继续预览</Alert>;
-    if (document && !unsupported)
+    if (document)
       return (
         <div className="file-document-preview">
           {progressError && (
@@ -159,7 +157,6 @@ const PreviewContent = memo(
                 type={entry.type}
                 hideTitle
                 initialProgress={progress ?? undefined}
-                onUnsupported={() => setUnsupported(true)}
                 onProgress={saveProgress}
               />
             </Suspense>

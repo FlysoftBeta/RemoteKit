@@ -51,9 +51,10 @@ export class ImportQueue extends Store<ImportState> {
   enqueue = (files: File[], basketSize: number, origin: ImportBatch['origin'], afterId?: string) => {
     if (!files.length || this.batch) return;
     const maxFiles = this.destination === 'basket' ? 64 - basketSize : 64;
-    if (files.length > maxFiles || files.some((file) => file.size > FILE_LIMITS.maxFileBytes)) {
-      throw new RemoteKitError('limit_exceeded', '选择的文件数量或大小超出限制');
-    }
+    if (files.length > maxFiles)
+      throw new RemoteKitError('limit_exceeded', `本次最多可添加 ${maxFiles} 个文件`);
+    if (files.some((file) => file.size > FILE_LIMITS.maxFileBytes))
+      throw new RemoteKitError('limit_exceeded', '单个文件不能超过 256 MiB');
     this.batch = {
       jobs: files.map((file) => ({ file, operationId: operationId() })),
       origin: { ...origin },

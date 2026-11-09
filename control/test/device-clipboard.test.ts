@@ -174,3 +174,13 @@ test('a clipboard permission response cannot write into a replacement account', 
   await reading;
   assert.deepEqual(sent, []);
 });
+
+test('local explicit paste reads only after permission is already granted', async () => {
+  const h = fixture();
+  h.device('device');
+  await h.sync.readForPaste(false);
+  assert.deepEqual(h.sent, []);
+  h.grant(true);
+  await h.sync.readForPaste(false);
+  assert.deepEqual(h.sent, ['device']);
+});

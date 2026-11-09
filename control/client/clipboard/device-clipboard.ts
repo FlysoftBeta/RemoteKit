@@ -116,11 +116,12 @@ export class DeviceClipboardSync {
     }
   };
 
-  async readForPaste() {
+  async readForPaste(allowPrompt = true) {
     if (!this.enabled) return;
     const generation = this.generation;
     let text: string;
     try {
+      if (!allowPrompt && !(await this.port.granted())) return;
       text = await this.port.read();
     } catch {
       this.port.failed();

@@ -136,6 +136,7 @@ export function useDeviceImport({
         requestId ? { kind: 'request', requestId } : { kind: 'files', channel: 'upload', partitionId },
         afterId,
       );
+      onError('');
     } catch (failure) {
       onError(fileError(failure));
     }

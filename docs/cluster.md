@@ -98,9 +98,9 @@ Control 版本目录中的 `release/node.tar.zst` 与 `release/node.json` 不在
 
 ## Checkpoint 与休眠
 
-**Browser 优雅关闭**：`BrowserRuntime::Shutdown()` 先导出所有导航状态有变化的 view（总计最多 20 秒），再发 `browser.shutdown`，等 Browser 作业中的进程全部退出（最多 30 秒）；只有退出码 0 且作业为空才算干净。所有有意的停止（休眠、服务关闭、更新与配置重启）都走这条路径；强制终止只用于故障与 fencing。一次不干净的关闭之后，同一目录不再生成 checkpoint，直到 Browser 再次启动并干净关闭：重试休眠不能把不一致的数据库提交出去。
-
 **阶段计时**：Endpoint 为每次休眠与打开写一行结构化日志（阻塞检查、导航导出、Browser 关闭与进程退出、扫描、存储、登记、日志落盘；打开时的方式、manifest、校验、定位、拉取、物化、替换、Browser 启动与就绪），诊断包随 `endpoint.log` 收集。
+
+**Browser 优雅关闭**：`BrowserRuntime::Shutdown()` 先导出所有导航状态有变化的 view（总计最多 20 秒），再发 `browser.shutdown`，等 Browser 作业中的进程全部退出（最多 30 秒）；只有退出码 0 且作业为空才算干净。所有有意的停止（休眠、服务关闭、更新与配置重启）都走这条路径；强制终止只用于故障与 fencing。一次不干净的关闭之后，同一目录不再生成 checkpoint，直到 Browser 再次启动并干净关闭：重试休眠不能把不一致的数据库提交出去。
 
 **`session.hibernate{placementEpoch}`**：
 
@@ -108,11 +108,11 @@ Control 版本目录中的 `release/node.tar.zst` 与 `release/node.json` 不在
 2. 优雅关闭 Browser；不干净则 `unavailable`。
 3. 遍历 Session 目录。排除 `browser.log`、名为 `Cache`、`Code Cache`、`GPUCache`、`DawnWebGPUCache`、`DawnGraphiteCache`、`Shared Dictionary`、`VideoDecodeStats` 的目录、LevelDB 的 `LOCK`/`LOG`/`LOG.old`，以及文件库草稿与暂存（休眠时丢弃）。SQLite 的 `-journal`/`-wal` 保留：干净关闭才是一致性的前提，文件名是否存在不是。
 4. 不超过 1MiB 的文件是一个对象，更大的按 1MiB 固定切块（SQLite 原地改页、LevelDB 只追加或整文件新建，固定切块的增量效果最好）。Session 目录之外的本地索引记录每个文件的大小、mtime、文件 ID 与块列表，未变的文件直接复用块 id，不重新读取。
-5. 生成 manifest 对象（相对路径、大小、块列表、目录、sessionId、epoch、buildId），把新对象逐个 `object.committed`。manifest 里的 buildId 只记录生成它的构建；恢复只校验 manifest 格式版本，不要求构建相同——Chromium 版本固定，旧构建写的 Profile 原样打开，升级不会让已休眠的 Session 失效。
-6. 原子写入休眠日志 `<sessionId>.hibernation.json`（epoch、manifest id、对象列表、buildId），然后回复 manifest id。Session 关闭，目录保留为热副本。
    - **增量扫描**：每个运行中的 Session 在 Browser 启动前就用 `ReadDirectoryChangesW` 递归监视自己的目录，收集变化的路径；checkpoint 只 stat 这些路径（新建目录才遍历），在上次索引上增删改。监视缓冲溢出、出错、Endpoint 重启或任何不确定时退回完整遍历。开发构建用 `REMOTEKIT_CHECKPOINT_VERIFY=1` 同时做两种并要求结果一致。
    - **流水线**：读取、hash、压缩、加密在有界工作池上并行，manifest 仍按路径排序；对象登记按批发出（`object.committed.batch`，每批 ≤1024 个、一个事务），与存储重叠。Control 往返次数与文件数无关。
    - **空闲预存**：Session 没有 RTC peer 满 30 秒后，后台低优先级把静默 10 秒以上的变化文件预先存成块，读前读后各记一次文件身份，读期间变化的作废；休眠时身份不变的文件直接复用这些块。预存的块以该 Tenant 的认领提交，没被 checkpoint 引用的按认领过期回收。
+5. 生成 manifest 对象（相对路径、大小、块列表、目录、sessionId、epoch、buildId），把新对象逐个 `object.committed`。manifest 里的 buildId 只记录生成它的构建；恢复只校验 manifest 格式版本，不要求构建相同——Chromium 版本固定，旧构建写的 Profile 原样打开，升级不会让已休眠的 Session 失效。
+6. 原子写入休眠日志 `<sessionId>.hibernation.json`（epoch、manifest id、对象列表、buildId），然后回复 manifest id。Session 关闭，目录保留为热副本。
 
 `session.hibernate` 对同一 epoch 幂等：有日志直接返回日志里的结果；同一 Session 的休眠正在进行时加入它、返回同一结果；Session 已不在内存、也没有日志时返回 `not_found`；epoch 不同返回 `conflict`。日志在 Control 以同一 manifest 打开该 Session 时删除；冷副本清理不删有日志的 Session。
 

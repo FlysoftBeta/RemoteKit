@@ -201,7 +201,7 @@ export function FileEntryMenu({
           <ListItemText>{entry?.kind === 'snippet' ? '删除' : '删除文件'}</ListItemText>
         </MenuItem>
       </Menu>
-      <Snackbar open={copied} autoHideDuration={1600} onClose={() => setCopied(false)} message="已复制" />
+      <Snackbar anchorOrigin={{ vertical: 'top', horizontal: 'center' }} sx={{ pointerEvents: 'none' }} open={copied} autoHideDuration={1600} onClose={() => setCopied(false)} message="已复制" />
       {error && !deletion && (
         <Dialog open onClose={() => setError('')}>
           <DialogTitle>操作失败</DialogTitle>

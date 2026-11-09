@@ -2,6 +2,7 @@ import './window-menus.css';
 import React, { useEffect, useState } from 'react';
 import {
   Add,
+  ArrowForward,
   Close,
   DriveFileMoveOutlined,
   Fullscreen,
@@ -113,6 +114,12 @@ export function WindowMenus({
   };
   const moreItems: { label: string; icon: React.ReactElement; disabled?: boolean; select(): void }[] = browser
     ? [
+        {
+          label: '前进',
+          icon: <ArrowForward />,
+          disabled: !online || !active?.canGoForward,
+          select: () => active && run({ type: 'tab.command', tabId: active.id, command: 'forward' }),
+        },
         { label: '新建标签页', icon: <Add />, disabled: !online, select: createStartTab },
         {
           label: '新建窗口',

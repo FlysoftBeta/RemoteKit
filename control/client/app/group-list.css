@@ -85,25 +85,23 @@
   font-size: 28px;
   margin-bottom: 16px;
 }
-@media (max-width: 719px) {
-  .launcher-spaces {
-    order: -1;
-    flex: 0 0 110px;
-    width: 100%;
-    flex-direction: row;
-    overflow-x: auto;
-    overflow-y: hidden;
-    gap: 8px;
-  }
-  .launcher-space-card.MuiButtonBase-root {
-    width: 144px;
-  }
-  .launcher-space-new.MuiButtonBase-root {
-    width: 88px;
-    height: 100%;
-    flex-direction: column;
-  }
-  .launcher-space-preview {
-    height: 68px;
-  }
+:root.layout-compact .launcher-spaces {
+  order: -1;
+  flex: 0 0 110px;
+  width: 100%;
+  flex-direction: row;
+  overflow-x: auto;
+  overflow-y: hidden;
+  gap: 8px;
+}
+:root.layout-compact .launcher-space-card.MuiButtonBase-root {
+  width: 144px;
+}
+:root.layout-compact .launcher-space-new.MuiButtonBase-root {
+  width: 88px;
+  height: 100%;
+  flex-direction: column;
+}
+:root.layout-compact .launcher-space-preview {
+  height: 68px;
 }

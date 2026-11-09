@@ -5,6 +5,7 @@ import { LocalInputTarget } from '../client/selection/local-input';
 import { LocalTextTarget } from '../client/selection/local-text';
 import { wordAt } from '../client/selection/target';
 import { AppClipboard } from '../client/clipboard/app-clipboard';
+import { deviceClipboard } from '../client/clipboard/device-clipboard';
 import { placeViewportSelectionMenu } from '../client/app/viewport-geometry';
 
 const dom = new JSDOM('<html><body></body></html>', { pretendToBeVisual: true });
@@ -137,6 +138,32 @@ test('a delayed cut acknowledgement cannot delete edits made while it was pendin
   acknowledge();
   await cutting;
   assert.equal(input.value, 'newly typed text');
+});
+
+test('explicit paste refreshes the device first and cannot overwrite a changed selection', async () => {
+  const { input } = field('alpha bravo');
+  input.setSelectionRange(6, 11);
+  const originalRead = deviceClipboard.readForPaste;
+  let finish!: () => void;
+  let text = 'stale';
+  deviceClipboard.readForPaste = () => new Promise<void>((resolve) => {
+    finish = () => { text = 'fresh'; resolve(); };
+  });
+  const target = new LocalInputTarget(input, { read: () => text, write: async () => {} });
+  try {
+    const paste = target.run('paste');
+    finish();
+    await paste;
+    assert.equal(input.value, 'alpha fresh');
+    input.setSelectionRange(0, 5);
+    const stalePaste = target.run('paste');
+    input.setSelectionRange(6, 11);
+    finish();
+    await stalePaste;
+    assert.equal(input.value, 'alpha fresh');
+  } finally {
+    deviceClipboard.readForPaste = originalRead;
+  }
 });
 
 test('shared placement flips and clamps within the visual viewport above the keyboard', () => {
