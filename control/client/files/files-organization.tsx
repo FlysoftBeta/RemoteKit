@@ -1,6 +1,7 @@
 import { useAutoFocus } from '../editing/local-autofocus';
 import {
   Add,
+  ContentPasteOutlined,
   AppsOutlined,
   DeleteOutline,
   DownloadOutlined,
@@ -68,7 +69,12 @@ export function FilesOrganization({
   const [error, setError] = useState('');
   if (!snapshot) return null;
   const disabled = !online || busy;
-  const activeSource = typeof view === 'object' && 'source' in view ? view.source : undefined;
+  const activeSource =
+    view === 'clipboard'
+      ? { app: 'clipboard', channel: '' }
+      : typeof view === 'object' && 'source' in view
+        ? view.source
+        : undefined;
   const excluded = (source: LibrarySource) =>
     snapshot.excludedSources.some((item) => sourceKey(item) === sourceKey(source));
   const sourceLabel = (source: LibrarySource) =>
@@ -97,6 +103,8 @@ export function FilesOrganization({
       .filter((source) => !snapshot.sources.some((item) => sourceKey(item) === sourceKey(source)))
       .map((source) => ({ ...source, count: 0, excluded: true })),
   ];
+  if (!settingsSources.some((source) => source.app === 'clipboard'))
+    settingsSources.push({ app: 'clipboard', channel: '', count: 0, excluded: false });
   const items: {
     key: string;
     label: string;
@@ -107,6 +115,12 @@ export function FilesOrganization({
   }[] = [
     { key: 'all', label: '全部', view: 'all', count: filesInView(snapshot, 'all').length },
     { key: 'recent', label: '最近', view: 'recent', count: filesInView(snapshot, 'recent').length },
+    {
+      key: 'clipboard',
+      label: '剪贴板',
+      view: 'clipboard',
+      count: filesInView(snapshot, 'clipboard').length,
+    },
     ...snapshot.partitions.map((partition) => ({
       key: partition.id,
       label: partition.name,
@@ -115,6 +129,7 @@ export function FilesOrganization({
       section: '分区',
     })),
     ...[...snapshot.sources]
+      .filter((source) => source.app !== 'clipboard')
       .sort((a, b) => a.app.localeCompare(b.app) || a.channel.localeCompare(b.channel))
       .map((source) => ({
         key: sourceKey(source),
@@ -145,6 +160,7 @@ export function FilesOrganization({
           {items.map((item) => (
             <Chip
               key={item.key}
+              icon={item.view === 'clipboard' ? <ContentPasteOutlined /> : undefined}
               label={`${item.section && item.section !== '分区' ? item.section + ' › ' : ''}${item.label} ${item.count}`}
               color={selected(item.view) ? 'primary' : 'default'}
               variant={selected(item.view) ? 'filled' : 'outlined'}
@@ -182,7 +198,15 @@ export function FilesOrganization({
                 <NavRow
                   key={item.key}
                   item={item}
-                  icon={item.view === 'recent' ? <ScheduleOutlined /> : <InboxOutlined />}
+                  icon={
+                    item.view === 'clipboard' ? (
+                      <ContentPasteOutlined />
+                    ) : item.view === 'recent' ? (
+                      <ScheduleOutlined />
+                    ) : (
+                      <InboxOutlined />
+                    )
+                  }
                   selected={selected(item.view)}
                   onSelect={onView}
                 />

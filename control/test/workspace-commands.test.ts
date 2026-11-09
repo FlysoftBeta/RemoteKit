@@ -24,6 +24,7 @@ function empty(): ProductWorkspace {
         showStats: false,
         autoFullscreen: false,
         autoKeyboard: false,
+        clipboardSync: true,
         avSync: false,
         audioChannels: { left: true, right: true },
       },
@@ -220,6 +221,20 @@ test('settings updates merge each section and reject fields in the wrong section
   assert.equal(workspace.settings.workspace.avSync, false);
   assert.equal(workspace.settings.browser.searchEngine, 'bing');
   assert.equal(workspace.settings.browser.memorySaverEnabled, true);
+  assert.equal(workspace.settings.workspace.clipboardSync, true);
+  const unsynced = command(workspace, {
+    type: 'settings.update',
+    settings: { workspace: { clipboardSync: false } },
+  }).workspace;
+  assert.equal(unsynced.settings.workspace.clipboardSync, false);
+  assert.throws(
+    () =>
+      command(workspace, {
+        type: 'settings.update',
+        settings: { workspace: { clipboardSync: 'yes' } },
+      } as unknown as ProductAction),
+    { code: 'invalid_request' },
+  );
   assert.equal(original.settings.browser.searchEngine, 'google');
   assert.throws(() =>
     command(original, {

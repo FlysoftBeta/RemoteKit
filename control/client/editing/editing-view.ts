@@ -6,6 +6,7 @@ import { EditingInput, EDITOR_SENTINEL } from './editing-input';
 import type { EditingSession } from './editing-session';
 import { KeyboardSession } from './keyboard-session';
 import { DeferredEditingInput, editableInputMode } from './mobile-editing-state';
+import { deviceClipboard } from '../clipboard/device-clipboard';
 const pointerMedia = new WeakMap<Window, { coarse: MediaQueryList; fine: MediaQueryList }>();
 function pointerQueries() {
   let queries = pointerMedia.get(window);
@@ -63,6 +64,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
   ) {
     super({ keyboardShown: false, keyboardReady: false, keyboardEnabled: false });
     this.resetEditor();
+    editor.addEventListener('paste', this.paste);
     const queries = pointerQueries();
     queries.coarse.addEventListener?.('change', this.observe);
     queries.fine.addEventListener?.('change', this.observe);
@@ -272,6 +274,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     this.hideKeyboard();
   }
   dispose() {
+    this.editor.removeEventListener('paste', this.paste);
     const queries = pointerQueries();
     queries.coarse.removeEventListener?.('change', this.observe);
     queries.fine.removeEventListener?.('change', this.observe);
@@ -438,6 +441,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     if (this.editing.composing || event.isComposing || event.keyCode === 229) return;
     if (!this.editing.matches(this.editorOwner) || (action === 'up' && !this.heldKeys.has(event.code)))
       return;
+    if ((event.ctrlKey || event.metaKey) && event.code === 'KeyV') return;
     if (
       event.key === 'Tab' ||
       ['Enter', 'Backspace', 'Delete'].includes(event.key) ||
@@ -461,6 +465,38 @@ export class EditingView extends Store<EditingViewSnapshot> {
     if (action === 'down') this.heldKeys.set(event.code, value);
     else this.heldKeys.delete(event.code);
     this.sendEdit(value);
+  };
+  private paste = (event: ClipboardEvent) => {
+    if (!this.editing.matches(this.editorOwner)) return;
+    event.preventDefault();
+    const owner = this.editorOwner;
+    const text = event.clipboardData?.getData('text/plain');
+    const pending = text === undefined ? Promise.resolve() : deviceClipboard.send(text);
+    void pending
+      .then(() => {
+        if (owner !== this.editorOwner || !this.editing.matches(owner)) return;
+        this.sendEdit({
+          type: 'key',
+          action: 'down',
+          ...keyIdentity('KeyV', 'v'),
+          windows_key_code: 86,
+          modifiers: 2,
+          text: '',
+          unmodified_text: '',
+          repeat: false,
+        });
+        this.sendEdit({
+          type: 'key',
+          action: 'up',
+          ...keyIdentity('KeyV', 'v'),
+          windows_key_code: 86,
+          modifiers: 2,
+          text: '',
+          unmodified_text: '',
+          repeat: false,
+        });
+      })
+      .catch(() => this.setError('剪贴板暂未同步，请重试粘贴。'));
   };
   edit = (event: InputEvent, phase: 'before' | 'input') => {
     if (document.activeElement !== this.editor) return;

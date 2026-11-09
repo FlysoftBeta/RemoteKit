@@ -1,7 +1,7 @@
 import { FileUploadOutlined } from '@mui/icons-material';
 import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Typography } from '@mui/material';
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { LibraryEntry, LibraryPartition, LibrarySnapshot } from '../../shared/file-library';
+import type { LibraryFileEntry, LibraryPartition, LibrarySnapshot } from '../../shared/file-library';
 import { ScaledSelect } from '../app/scaled-select';
 import { formatError } from '../util/format-error';
 import { useLibrary } from './file-library-state';
@@ -11,12 +11,12 @@ export function fileError(error: unknown) {
   return formatError(error);
 }
 
-export function basketEntries(snapshot?: LibrarySnapshot): LibraryEntry[] {
+export function basketEntries(snapshot?: LibrarySnapshot): LibraryFileEntry[] {
   if (!snapshot) return [];
   const entries = new Map(snapshot.entries.map((entry) => [entry.id, entry]));
   return snapshot.basket.flatMap((id) => {
     const entry = entries.get(id);
-    return entry ? [entry] : [];
+    return entry?.kind === 'file' ? [entry] : [];
   });
 }
 

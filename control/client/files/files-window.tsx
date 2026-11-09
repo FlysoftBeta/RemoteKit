@@ -98,7 +98,7 @@ export function FilesWindow({
   const active = restored.tabs.find((tab) => tab.id === restored.activeTabId)!;
   const viewTitle = (view: FilesView): string =>
     typeof view === 'string'
-      ? { all: '全部', recent: '最近', settings: '设置' }[view]
+      ? { all: '全部', recent: '最近', clipboard: '剪贴板', settings: '设置' }[view]
       : 'partition' in view
         ? (snapshot?.partitions.find((item) => item.id === view.partition)?.name ?? '分区')
         : [sourceAppName(view.source.app, apps), sourceChannelName(view.source)].filter(Boolean).join(' › ');
@@ -118,7 +118,12 @@ export function FilesWindow({
               tab.kind === 'document' ? snapshot?.entries.find((item) => item.id === tab.entryId) : undefined;
             return {
               id: tab.id,
-              title: tab.kind === 'library' ? viewTitle(tab.view) : (entry?.name ?? '文件已删除'),
+              title:
+                tab.kind === 'library'
+                  ? viewTitle(tab.view)
+                  : entry?.kind === 'snippet'
+                    ? '剪贴片段'
+                    : (entry?.name ?? '文件已删除'),
               icon:
                 tab.kind === 'library' ? (
                   <FolderOutlined className="tab-icon" />

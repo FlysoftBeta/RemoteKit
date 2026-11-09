@@ -40,6 +40,13 @@ void RouterClassificationAndAdmission() {
   CHECK(!DataRouter::Classify(Json::array()));
   CHECK(!DataRouter::Classify({{"type", 7}}));
   CHECK(!DataRouter::Classify({{"type", "unknown"}}));
+  Json dismiss = {{"type", "editing.dismiss"}, {"target", "5"}, {"revision", "7"}};
+  CHECK(DataRouter::Classify(dismiss).value() == Kind::kInput);
+  dismiss["target"] = "01";
+  CHECK(!DataRouter::Classify(dismiss));
+  dismiss["target"] = "5";
+  dismiss["revision"] = "0";
+  CHECK(!DataRouter::Classify(dismiss));
   Json touch = {{"type", "input"}, {"event", {{"type", "touch"}, {"gestureMode", "client-v1"}}}};
   CHECK(DataRouter::Classify(touch));
   touch["event"]["gestureMode"] = "legacy";
@@ -234,6 +241,19 @@ void PresentationOwnership() {
     return true;
   });
   CHECK(published);
+  const auto messages = sent.size();
+  view.page_height_dip = 360;
+  view.occlusion_revision = 2;
+  CHECK(presentation.ObserveLayout(*frame) == epoch);
+  auto occluded = presentation.Layout(*frame);
+  occluded["epoch"] = std::to_string(epoch);
+  CHECK(occluded == presentation.Snapshot());
+  published = false;
+  CHECK(presentation.Send(scope.peer, epoch, false, [&] {
+    published = true;
+    return true;
+  }));
+  CHECK(published && sent.size() == messages && presentation.Allows("1", epoch));
   ++scope.authorization;
   outbox.Bind(scope);
   presentation.QueueLayout();
@@ -682,6 +702,67 @@ void OrderedTouchInput() {
   CHECK(controller.Snapshot().at("inputBusyRetries") == 1);
 }
 
+void DismissalDuringLayout() {
+  std::mutex mutex;
+  std::condition_variable wake;
+  std::vector<Json> replies;
+  Json dispatched;
+  InputController controller(
+      "1", {.control = [] { return 3; },
+            .input_stamp = [] { return 0; },
+            .epoch = [] { return 9; },
+            .admitted = [](const auto&) { return true; },
+            .admission = [] { return AuthorizationController::AdmissionToken{1, 2, 1}; },
+            .revalidate = [](const auto&) { return true; },
+            .allows = [](const auto&, uint64_t) { return false; },
+            .rpc = [&](Json request, uint64_t, uint32_t, bool,
+                       const std::function<bool()>& admitted) -> Result<Json> {
+              CHECK(admitted());
+              dispatched = std::move(request);
+              return Json{{"ok", true}, {"inputAdmitted", true}};
+            },
+            .send =
+                [&](const Json& reply, uint64_t) {
+                  std::lock_guard lock(mutex);
+                  replies.push_back(reply);
+                  wake.notify_all();
+                },
+            .failed = [] { CHECK(false); },
+            .trace = [] { return std::shared_ptr<media::ServerTrace>(); }});
+  controller.Start(1);
+  RtcEvent event{};
+  event.peer = 1;
+  event.authorization = 2;
+  event.message = {
+      {"type", "editing.dismiss"}, {"session", "1"}, {"view", "2"},     {"instance", "3"},
+      {"document", "4"},           {"focus", "5"},   {"sequence", "1"}, {"layoutEpoch", "1"},
+      {"outputGeneration", "7"},   {"target", "8"},  {"revision", "9"}};
+  controller.QueueInput(event);
+  {
+    std::unique_lock lock(mutex);
+    CHECK(wake.wait_for(lock, std::chrono::seconds(5), [&] { return replies.size() == 1; }));
+    CHECK(replies.back().at("ok") == true);
+    CHECK(dispatched.at("method") == "input" && dispatched.at("sequence") == "1");
+    CHECK(!dispatched.contains("output_generation") && !dispatched.contains("layoutEpoch"));
+    CHECK(dispatched.at("event") ==
+          Json({{"type", "editing.dismiss"}, {"target", "8"}, {"revision", "9"}}));
+  }
+  controller.QueueInput(event);
+  {
+    std::unique_lock lock(mutex);
+    CHECK(wake.wait_for(lock, std::chrono::seconds(5), [&] { return replies.size() == 2; }));
+    CHECK(replies.back().at("error").at("code") == "conflict");
+  }
+  event.message["sequence"] = "2";
+  event.message["session"] = "other";
+  controller.QueueInput(event);
+  {
+    std::unique_lock lock(mutex);
+    CHECK(wake.wait_for(lock, std::chrono::seconds(5), [&] { return replies.size() == 3; }));
+    CHECK(replies.back().at("error").at("code") == "forbidden");
+  }
+  controller.Stop();
+}
 void ClipboardSynchronization() {
   uint64_t sequence = 0;
   std::string incarnation = "first";
@@ -730,12 +811,15 @@ void ClipboardSynchronization() {
   CHECK(clipboard.Poll());
   CHECK(reads == 1);
   ++sequence;
-  contents = {{"text", "copy"}, {"html", "<p>copy</p>"}};
+  contents = {
+      {"text", "copy"}, {"html", "<p>copy</p>"}, {"viewId", "42"}, {"excludeFromHistory", true}};
   CHECK(clipboard.Poll());
   CHECK(events.size() == 1 && events.back()["text"] == "copy");
   CHECK(events.back()["type"] == "clipboard.changed");
   CHECK(events.back()["tenantId"] == "tenant" && events.back()["sessionId"] == "session");
   CHECK(events.back()["browserSequence"] == "1");
+  CHECK(events.back()["viewId"] == "42");
+  CHECK(events.back()["excludeFromHistory"] == true);
   ++sequence;
   supersede = true;
   CHECK(clipboard.Poll());
@@ -781,6 +865,12 @@ void ClipboardSynchronization() {
   supersede = true;
   CHECK(clipboard.Poll(true));
   CHECK(events.size() == count + 2 && events.back()["text"] == "newer");
+  ++sequence;
+  const auto before_device = events.size();
+  CHECK(clipboard.Write({{"revision", "10"}, {"text", "device"}, {"html", ""}}));
+  CHECK(contents["text"] == "device");
+  CHECK(clipboard.Poll(true));
+  CHECK(events.size() == before_device);
   for (const auto* invalid : {"01", "-1", "18446744073709551616"})
     CHECK(!ClipboardController::Valid({{"revision", invalid}, {"text", ""}, {"html", ""}}));
 }
@@ -1035,6 +1125,7 @@ int main(int argc, char** argv) {
     InputFidelityValidation();
     InputFidelityForwarding();
     OrderedTouchInput();
+    DismissalDuringLayout();
     return 0;
   }
   InputFidelityValidation();
@@ -1047,4 +1138,5 @@ int main(int argc, char** argv) {
   SessionManagementRequests();
   PeerFailureCleanup();
   OrderedTouchInput();
+  DismissalDuringLayout();
 }

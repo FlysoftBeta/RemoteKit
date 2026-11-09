@@ -38,6 +38,7 @@ export const libraryFixture: LibrarySnapshot = {
   entries: [
     {
       id: 'learning-file',
+      kind: 'file',
       assetId: 'learning-document',
       name: '二次函数课堂讲义.pdf',
       type: 'application/pdf',
@@ -135,6 +136,7 @@ export function learningProductFixture(appId = 'study', signed = true): ProductS
           uiScale: 1,
           topDeadZone: 'off',
           autoKeyboard: false,
+          clipboardSync: false,
           showStats: false,
           autoFullscreen: false,
           avSync: false,

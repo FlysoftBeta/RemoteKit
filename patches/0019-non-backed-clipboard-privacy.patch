@@ -1,0 +1,338 @@
+diff --git a/ui/base/clipboard/clipboard_data.cc b/ui/base/clipboard/clipboard_data.cc
+index 5f29b414de..9dada865bd 100644
+--- a/ui/base/clipboard/clipboard_data.cc
++++ b/ui/base/clipboard/clipboard_data.cc
+@@ -34,6 +34,7 @@ ClipboardData::ClipboardData(const ClipboardData& other) {
+   svg_data_ = other.svg_data_;
+   filenames_ = other.filenames_;
+   src_ = other.src_;
++  privacy_types_ = other.privacy_types_;
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+   commit_time_ = other.commit_time_;
+@@ -50,13 +51,14 @@ bool ClipboardData::operator==(const ClipboardData& that) const {
+   // Two `ClipboardData` instances are equal if they have the same contents.
+   // Their sequence number tokens need not be the same, but if they are, we
+   // can be sure the data contents will be the same as well.
+-  if (sequence_number_token_ == that.sequence_number_token_)
++  if (sequence_number_token_ == that.sequence_number_token_) {
+     return true;
++  }
+ 
+   bool equal_except_images =
+-      format_ == that.format() && text_ == that.text() &&
+-      markup_data_ == that.markup_data() && url_ == that.url() &&
+-      rtf_data_ == that.rtf_data() &&
++      privacy_types_ == that.privacy_types_ && format_ == that.format() &&
++      text_ == that.text() && markup_data_ == that.markup_data() &&
++      url_ == that.url() && rtf_data_ == that.rtf_data() &&
+       bookmark_title_ == that.bookmark_title() &&
+       bookmark_url_ == that.bookmark_url() &&
+       custom_data_ == that.custom_data_ &&
+@@ -64,12 +66,14 @@ bool ClipboardData::operator==(const ClipboardData& that) const {
+       svg_data_ == that.svg_data() && filenames_ == that.filenames() &&
+       (src_ ? (that.source().has_value() && *src_ == *that.source())
+             : !that.source().has_value());
+-  if (!equal_except_images)
++  if (!equal_except_images) {
+     return false;
++  }
+ 
+   // Both instances have encoded PNGs. Compare these.
+-  if (maybe_png_.has_value() && that.maybe_png_.has_value())
++  if (maybe_png_.has_value() && that.maybe_png_.has_value()) {
+     return maybe_png_ == that.maybe_png_;
++  }
+ 
+   // If only one of the these instances has a bitmap which has not yet been
+   // encoded as a PNG, we can't be sure that the images are equal without
+@@ -83,8 +87,9 @@ bool ClipboardData::operator==(const ClipboardData& that) const {
+   //   b.SetPngData(clipboard_util::EncodeBitmapToPng(image));
+   //
+   // Avoid this scenario if possible.
+-  if (maybe_bitmap_.has_value() != that.maybe_bitmap_.has_value())
++  if (maybe_bitmap_.has_value() != that.maybe_bitmap_.has_value()) {
+     return false;
++  }
+ 
+   // Both or neither instances have a bitmap. Compare the bitmaps to determine
+   // equality without encoding.
+@@ -98,28 +103,33 @@ std::optional<size_t> ClipboardData::CalculateSize(
+     const std::optional<ClipboardFormatType>& custom_data_format) const {
+   size_t total_size = 0;
+   if (format_ & static_cast<int>(ClipboardInternalFormat::kText)) {
+-    if (format.has_value() && *format == ClipboardInternalFormat::kText)
++    if (format.has_value() && *format == ClipboardInternalFormat::kText) {
+       return text_.size();
++    }
+     total_size += text_.size();
+   }
+   if (format_ & static_cast<int>(ClipboardInternalFormat::kHtml)) {
+-    if (format.has_value() && *format == ClipboardInternalFormat::kHtml)
++    if (format.has_value() && *format == ClipboardInternalFormat::kHtml) {
+       return markup_data_.size() + url_.size();
++    }
+     total_size += markup_data_.size() + url_.size();
+   }
+   if (format_ & static_cast<int>(ClipboardInternalFormat::kSvg)) {
+-    if (format.has_value() && *format == ClipboardInternalFormat::kSvg)
++    if (format.has_value() && *format == ClipboardInternalFormat::kSvg) {
+       return svg_data_.size();
++    }
+     total_size += svg_data_.size();
+   }
+   if (format_ & static_cast<int>(ClipboardInternalFormat::kRtf)) {
+-    if (format.has_value() && *format == ClipboardInternalFormat::kRtf)
++    if (format.has_value() && *format == ClipboardInternalFormat::kRtf) {
+       return rtf_data_.size();
++    }
+     total_size += rtf_data_.size();
+   }
+   if (format_ & static_cast<int>(ClipboardInternalFormat::kBookmark)) {
+-    if (format.has_value() && *format == ClipboardInternalFormat::kBookmark)
++    if (format.has_value() && *format == ClipboardInternalFormat::kBookmark) {
+       return bookmark_title_.size() + bookmark_url_.size();
++    }
+     total_size += bookmark_title_.size() + bookmark_url_.size();
+   }
+   if (format_ & static_cast<int>(ClipboardInternalFormat::kPng)) {
+@@ -132,8 +142,9 @@ std::optional<size_t> ClipboardData::CalculateSize(
+       DCHECK(maybe_bitmap_.has_value());
+       image_size = maybe_bitmap_.value().computeByteSize();
+     }
+-    if (format.has_value() && *format == ClipboardInternalFormat::kPng)
++    if (format.has_value() && *format == ClipboardInternalFormat::kPng) {
+       return image_size;
++    }
+     total_size += image_size;
+   }
+   if (format_ & static_cast<int>(ClipboardInternalFormat::kCustom)) {
+diff --git a/ui/base/clipboard/clipboard_data.h b/ui/base/clipboard/clipboard_data.h
+index b7bfd5d3ab..452e094b94 100644
+--- a/ui/base/clipboard/clipboard_data.h
++++ b/ui/base/clipboard/clipboard_data.h
+@@ -159,8 +159,14 @@ class COMPONENT_EXPORT(UI_BASE_CLIPBOARD) ClipboardData {
+   const std::vector<ui::FileInfo>& filenames() const { return filenames_; }
+   void set_filenames(std::vector<ui::FileInfo> filenames) {
+     filenames_ = std::move(filenames);
+-    if (!filenames_.empty())
++    if (!filenames_.empty()) {
+       format_ |= static_cast<int>(ClipboardInternalFormat::kFilenames);
++    }
++  }
++
++  uint32_t privacy_types() const { return privacy_types_; }
++  void set_privacy_types(uint32_t privacy_types) {
++    privacy_types_ = privacy_types;
+   }
+ 
+   const std::optional<DataTransferEndpoint>& source() const { return src_; }
+@@ -228,6 +234,7 @@ class COMPONENT_EXPORT(UI_BASE_CLIPBOARD) ClipboardData {
+ 
+   // The source of the data.
+   std::optional<DataTransferEndpoint> src_;
++  uint32_t privacy_types_ = 0;
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+   // If present, the time at which this data was committed to the clipboard.
+diff --git a/ui/base/clipboard/clipboard_non_backed.cc b/ui/base/clipboard/clipboard_non_backed.cc
+index a5a1b5e40d..fac2d77ffc 100644
+--- a/ui/base/clipboard/clipboard_non_backed.cc
++++ b/ui/base/clipboard/clipboard_non_backed.cc
+@@ -142,14 +142,16 @@ class ClipboardInternal {
+   void ReadAsciiText(std::string* result) const {
+     result->clear();
+     const ClipboardData* data = GetData();
+-    if (!data)
++    if (!data) {
+       return;
+-    if (HasFormat(ClipboardInternalFormat::kText))
++    }
++    if (HasFormat(ClipboardInternalFormat::kText)) {
+       *result = data->text();
+-    else if (HasFormat(ClipboardInternalFormat::kHtml))
++    } else if (HasFormat(ClipboardInternalFormat::kHtml)) {
+       *result = data->markup_data();
+-    else if (HasFormat(ClipboardInternalFormat::kBookmark))
++    } else if (HasFormat(ClipboardInternalFormat::kBookmark)) {
+       *result = data->bookmark_url();
++    }
+   }
+ 
+   // Reads HTML from the ClipboardData.
+@@ -158,13 +160,15 @@ class ClipboardInternal {
+                 uint32_t* fragment_start,
+                 uint32_t* fragment_end) const {
+     markup->clear();
+-    if (src_url)
++    if (src_url) {
+       src_url->clear();
++    }
+     *fragment_start = 0;
+     *fragment_end = 0;
+ 
+-    if (!HasFormat(ClipboardInternalFormat::kHtml))
++    if (!HasFormat(ClipboardInternalFormat::kHtml)) {
+       return;
++    }
+ 
+     const ClipboardData* data = GetData();
+     *markup = base::UTF8ToUTF16(data->markup_data());
+@@ -179,8 +183,9 @@ class ClipboardInternal {
+   void ReadSvg(std::u16string* markup) const {
+     markup->clear();
+ 
+-    if (!HasFormat(ClipboardInternalFormat::kSvg))
++    if (!HasFormat(ClipboardInternalFormat::kSvg)) {
+       return;
++    }
+ 
+     const ClipboardData* data = GetData();
+     *markup = base::UTF8ToUTF16(data->svg_data());
+@@ -192,8 +197,9 @@ class ClipboardInternal {
+   void ReadRTF(std::string* result) const {
+     result->clear();
+     const ClipboardData* data = GetData();
+-    if (!HasFormat(ClipboardInternalFormat::kRtf))
++    if (!HasFormat(ClipboardInternalFormat::kRtf)) {
+       return;
++    }
+ 
+     *result = data->rtf_data();
+   }
+@@ -230,8 +236,9 @@ class ClipboardInternal {
+     // Encoding of this bitmap to a PNG is already in progress. No need to
+     // kick off another encoding operation here. We'll respond to the callback
+     // once the in-progress image encoding completes.
+-    if (callbacks_for_image.size() > 1)
++    if (callbacks_for_image.size() > 1) {
+       return;
++    }
+ 
+     png_encoding_runner_->PostTaskAndReplyWithResult(
+         FROM_HERE,
+@@ -246,8 +253,9 @@ class ClipboardInternal {
+                                   std::u16string* result) const {
+     result->clear();
+     const ClipboardData* data = GetData();
+-    if (!HasFormat(ClipboardInternalFormat::kCustom))
++    if (!HasFormat(ClipboardInternalFormat::kCustom)) {
+       return;
++    }
+ 
+     std::optional<std::u16string> maybe_result = ReadCustomDataForType(
+         base::as_byte_span(data->GetDataTransferCustomData()), type);
+@@ -263,18 +271,23 @@ class ClipboardInternal {
+ 
+   // Reads bookmark from the ClipboardData.
+   void ReadBookmark(std::u16string* title, std::string* url) const {
+-    if (title)
++    if (title) {
+       title->clear();
+-    if (url)
++    }
++    if (url) {
+       url->clear();
+-    if (!HasFormat(ClipboardInternalFormat::kBookmark))
++    }
++    if (!HasFormat(ClipboardInternalFormat::kBookmark)) {
+       return;
++    }
+ 
+     const ClipboardData* data = GetData();
+-    if (title)
++    if (title) {
+       *title = base::UTF8ToUTF16(data->bookmark_title());
+-    if (url)
++    }
++    if (url) {
+       *url = data->bookmark_url();
++    }
+   }
+ 
+   void ReadData(const ClipboardFormatType& type, std::string* result) const {
+@@ -304,8 +317,9 @@ class ClipboardInternal {
+     DataTransferPolicyController* policy_controller =
+         DataTransferPolicyController::Get();
+     auto* data = GetData();
+-    if (!policy_controller || !data)
++    if (!policy_controller || !data) {
+       return true;
++    }
+     return policy_controller->IsClipboardReadAllowed(
+         data->source(), data_dst,
+         data->CalculateSize(format, custom_data_format));
+@@ -373,12 +387,14 @@ class ClipboardDataBuilder {
+   // If |data_src| is nullptr, this means that the data source isn't
+   // confidential and the data can be pasted in any document.
+   static void CommitToClipboard(ClipboardInternal& clipboard,
+-                                std::optional<DataTransferEndpoint> data_src) {
++                                std::optional<DataTransferEndpoint> data_src,
++                                uint32_t privacy_types) {
+     ClipboardData* data = GetCurrentData();
+ #if BUILDFLAG(IS_CHROMEOS)
+     data->set_commit_time(base::Time::Now());
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+     data->set_source(std::move(data_src));
++    data->set_privacy_types(privacy_types);
+     clipboard.WriteData(TakeCurrentData());
+   }
+ 
+@@ -434,8 +450,9 @@ class ClipboardDataBuilder {
+ 
+  private:
+   static ClipboardData* GetCurrentData() {
+-    if (!current_data_)
++    if (!current_data_) {
+       current_data_ = new ClipboardData;
++    }
+     return current_data_;
+   }
+ 
+@@ -456,8 +473,9 @@ ClipboardNonBacked* ClipboardNonBacked::GetForCurrentThread() {
+   auto* clipboard = Clipboard::GetForCurrentThread();
+ 
+   // Ensure type safety. In tests the instance may not be registered.
+-  if (!IsRegisteredInstance(clipboard))
++  if (!IsRegisteredInstance(clipboard)) {
+     return nullptr;
++  }
+ 
+   return static_cast<ClipboardNonBacked*>(clipboard);
+ }
+@@ -525,6 +543,14 @@ std::unique_ptr<ClipboardData> ClipboardNonBacked::WriteClipboardData(
+   return GetInternalClipboard(buffer).WriteData(std::move(data));
+ }
+ 
++bool ClipboardNonBacked::IsMarkedByOriginatorAsConfidential() const {
++  const auto* data =
++      GetInternalClipboard(ClipboardBuffer::kCopyPaste).GetData();
++  return data &&
++         (data->privacy_types() &
++          (Clipboard::kNoDisplay | Clipboard::kNoLocalClipboardHistory));
++}
++
+ void ClipboardNonBacked::OnPreShutdown() {
+ #if BUILDFLAG(IS_CHROMEOS)
+   platform_clipboard_ = nullptr;
+@@ -1019,7 +1045,7 @@ void ClipboardNonBacked::WritePortableAndPlatformRepresentations(
+   }
+ 
+   ClipboardDataBuilder::CommitToClipboard(
+-      clipboard_internal, base::OptionalFromPtr(data_src.get()));
++      clipboard_internal, base::OptionalFromPtr(data_src.get()), privacy_types);
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+   SyncToPlatform(buffer, *clipboard_internal.GetData());
+diff --git a/ui/base/clipboard/clipboard_non_backed.h b/ui/base/clipboard/clipboard_non_backed.h
+index 1a8c5ca431..1ef37efcb3 100644
+--- a/ui/base/clipboard/clipboard_non_backed.h
++++ b/ui/base/clipboard/clipboard_non_backed.h
+@@ -62,6 +62,7 @@ class COMPONENT_EXPORT(UI_BASE_CLIPBOARD) ClipboardNonBacked
+       ClipboardBuffer buffer = ClipboardBuffer::kCopyPaste);
+ 
+   // Clipboard overrides:
++  bool IsMarkedByOriginatorAsConfidential() const override;
+   void GetSource(ClipboardBuffer buffer,
+                  GetSourceCallback callback) const override;
+   const ClipboardSequenceNumberToken& GetSequenceNumber(

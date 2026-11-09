@@ -29,9 +29,9 @@ export function FileLibraryPicker({
   const [filter, setFilter] = useState<FilesView>('all');
   const needle = query.trim().toLowerCase();
   const allowed = new Set(snapshot ? filesInView(snapshot, filter).map((entry) => entry.id) : []);
-  const shown = entries.filter(
-    (entry) => allowed.has(entry.id) && (!needle || entry.name.toLowerCase().includes(needle)),
-  );
+  const shown = entries
+    .filter((entry) => entry.kind === 'file')
+    .filter((entry) => allowed.has(entry.id) && (!needle || entry.name.toLowerCase().includes(needle)));
   const valid = picked.filter((id) => entries.some((entry) => entry.id === id));
   const full = valid.length >= capacity;
   const toggle = (id: string) =>
@@ -83,25 +83,27 @@ export function FileLibraryPicker({
             }}
           />
         ))}
-        {snapshot?.sources.map((source) => (
-          <Chip
-            key={sourceKey(source)}
-            size="small"
-            label={[sourceAppName(source.app, apps), sourceChannelName(source)].filter(Boolean).join(' › ')}
-            color={
-              typeof filter === 'object' &&
-              'source' in filter &&
-              sourceKey(filter.source) === sourceKey(source)
-                ? 'primary'
-                : 'default'
-            }
-            sx={{ color: source.excluded ? 'text.disabled' : undefined }}
-            onClick={() => {
-              setFilter({ source });
-              setLimit(PAGE);
-            }}
-          />
-        ))}
+        {snapshot?.sources
+          .filter((source) => source.app !== 'clipboard')
+          .map((source) => (
+            <Chip
+              key={sourceKey(source)}
+              size="small"
+              label={[sourceAppName(source.app, apps), sourceChannelName(source)].filter(Boolean).join(' › ')}
+              color={
+                typeof filter === 'object' &&
+                'source' in filter &&
+                sourceKey(filter.source) === sourceKey(source)
+                  ? 'primary'
+                  : 'default'
+              }
+              sx={{ color: source.excluded ? 'text.disabled' : undefined }}
+              onClick={() => {
+                setFilter({ source });
+                setLimit(PAGE);
+              }}
+            />
+          ))}
       </Box>
       {entries.length > 6 && (
         <TextField

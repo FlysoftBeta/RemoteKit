@@ -2,7 +2,7 @@ import { Alert, Button, LinearProgress } from '@mui/material';
 import { Suspense, lazy, memo, useEffect, useMemo, useRef, useState } from 'react';
 import { canonicalJson } from '../util/canonical-json';
 import type { FileChannel } from './file-channel';
-import type { LibraryEntry } from '../../shared/file-library';
+import type { LibraryEntry, LibraryFileEntry } from '../../shared/file-library';
 import { ChannelDocumentSource } from '../documents/channel-source';
 import type { DocumentProgress } from '../documents/document-source';
 import type { LearningCall } from '../learning/queries';
@@ -21,7 +21,7 @@ export const isDocumentFile = (entry: Pick<LibraryEntry, 'name' | 'type'>) =>
     entry.type,
   );
 
-function MediaPreview({ entry }: { entry: LibraryEntry }) {
+function MediaPreview({ entry }: { entry: LibraryFileEntry }) {
   const { rpc, online } = useLibrary();
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
@@ -68,9 +68,15 @@ function MediaPreview({ entry }: { entry: LibraryEntry }) {
   );
 }
 
-export function FilePreview(props: Omit<React.ComponentProps<typeof PreviewContent>, 'rpc' | 'online'>) {
+export function FilePreview(
+  props: Omit<React.ComponentProps<typeof PreviewContent>, 'rpc' | 'online' | 'entry'> & {
+    entry: LibraryEntry;
+  },
+) {
   const { rpc, online } = useLibrary();
-  return <PreviewContent {...props} rpc={rpc} online={online} />;
+  return props.entry.kind === 'file' ? (
+    <PreviewContent {...props} entry={props.entry} rpc={rpc} online={online} />
+  ) : null;
 }
 
 const PreviewContent = memo(
@@ -82,7 +88,7 @@ const PreviewContent = memo(
     rpc,
     online,
   }: {
-    entry: LibraryEntry;
+    entry: LibraryFileEntry;
     rpc: FileChannel;
     online: boolean;
     call?: LearningCall;

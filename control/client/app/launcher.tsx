@@ -302,7 +302,7 @@ export function Launcher({
                           }
                         }}
                       >
-                        {entry?.type.startsWith('image/') && (
+                        {entry?.kind === 'file' && entry.type.startsWith('image/') && (
                           <div className="launcher-file-image">
                             <FileThumbnail
                               assetId={entry.assetId}

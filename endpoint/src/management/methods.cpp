@@ -4,6 +4,8 @@
 namespace remotekit {
 ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
   static const std::map<std::string, Handler> methods{
+      {"clipboard.write",
+       [](Session& session, const Json& request) { return session.WriteClipboard(request); }},
       {"session.open", [](Session& session, const Json& request) { return session.Open(request); }},
       {"auth.face.begin",
        [](Session& session, const Json& request) -> Result<Json> {

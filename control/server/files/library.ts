@@ -3,12 +3,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type {
   Asset,
+  LibraryAssetFields,
   LibraryEntry,
   LibraryMethods,
   LibrarySnapshot,
   LibrarySource,
   PhotoMetadata,
   SelectionState,
+  SnippetOrigin,
 } from '../../shared/file-library';
 import type { EndpointGateway } from '../endpoint/gateway';
 import type { DownloadEvent } from '../endpoint/types';
@@ -44,6 +46,7 @@ function librarySource(value: unknown): LibrarySource {
   if (app === 'files' && (channel === 'upload' || channel === 'camera')) return { app, channel };
   if (/^web:[a-zA-Z0-9_-]{1,128}$/.test(app) && channel === '') return { app, channel };
   if (app === 'download' && channel === '') return { app, channel };
+  if (app === 'clipboard' && channel === '') return { app, channel };
   if (app === 'study' && channel.length > 0 && channel.length <= 120 && !/[\x00-\x1f\x7f]/.test(channel))
     return { app, channel };
   if (
@@ -92,11 +95,7 @@ function photoMetadata(value: unknown): PhotoMetadata | undefined {
     ...(warning !== undefined ? { warning } : {}),
   };
 }
-function assetIds({
-  assetId,
-  originalAssetId,
-  photo,
-}: Pick<LibraryEntry, 'assetId' | 'originalAssetId' | 'photo'>): string[] {
+function assetIds({ assetId, originalAssetId, photo }: LibraryAssetFields): string[] {
   return [
     ...new Set([assetId, ...(originalAssetId ? [originalAssetId] : []), ...(photo?.candidateAssetIds ?? [])]),
   ];
@@ -153,6 +152,12 @@ export class FileLibrary {
     private readonly objects: Pick<ObjectIndex, 'require' | 'checkQuota'>,
     private readonly fileSourceForRequest: (tenant: string, requestId: string) => LibrarySource | null,
   ) {}
+  recordSnippet(tenant: string, text: string, origin: SnippetOrigin, copiedAt: number) {
+    return this.queues.run(tenant, async () => {
+      const snapshot = this.repository.recordSnippet(tenant, text, origin, copiedAt);
+      if (snapshot) this.onChanged?.(tenant, snapshot);
+    });
+  }
   importFromControl(
     tenant: string,
     input: {
@@ -195,6 +200,7 @@ export class FileLibrary {
         this.objects.require(tenant, assetId);
         this.objects.checkQuota(tenant);
         snapshot.entries.unshift({
+          kind: 'file',
           id: entryId,
           assetId,
           name,
@@ -292,6 +298,7 @@ export class FileLibrary {
         this.objects.require(tenant, assetId);
         this.objects.checkQuota(tenant);
         snapshot.entries.unshift({
+          kind: 'file',
           id: randomUUID(),
           assetId,
           name,
@@ -312,7 +319,10 @@ export class FileLibrary {
     const snapshot = this.repository.snapshot(tenant);
     return new Set(
       snapshot.entries
-        .filter((entry) => entry.source !== null && sourceExcluded(snapshot, entry.source))
+        .filter(
+          (entry) =>
+            entry.kind === 'snippet' || (entry.source !== null && sourceExcluded(snapshot, entry.source)),
+        )
         .map((entry) => entry.id),
     );
   }
@@ -346,7 +356,7 @@ export class FileLibrary {
   }
   private async describeAssets(
     tenant: string,
-    fields: Pick<LibraryEntry, 'assetId' | 'originalAssetId' | 'photo'>,
+    fields: LibraryAssetFields,
     authorize: () => void,
   ): Promise<Asset> {
     const references = assetIds(fields);
@@ -401,6 +411,7 @@ export class FileLibrary {
       const partitionId = validate(snapshot),
         entryId = randomUUID();
       snapshot.entries.unshift({
+        kind: 'file',
         id: entryId,
         assetId,
         name,
@@ -433,6 +444,7 @@ export class FileLibrary {
       if (snapshot.revision !== expectedRevision)
         throw new RemoteKitError('conflict', '文件篮已更新，请刷新后重试');
       const [entry] = entries(snapshot, [entryId]);
+      if (entry.kind !== 'file') throw invalid('剪贴片段不能替换为文件');
       if (this.repository.pendingEntries(tenant).has(entryId))
         throw new RemoteKitError('conflict', '文件选择尚未确认，暂不能替换');
       return entry;
@@ -477,7 +489,10 @@ export class FileLibrary {
       if ((!request.multiple && entryIds.length !== 1) || entryIds.length > request.limits.maxFiles)
         throw new RemoteKitError('limit_exceeded', '文件数量超出页面限制');
       const snapshot = this.repository.snapshot(tenant),
-        selected = entries(snapshot, entryIds);
+        selected = entries(snapshot, entryIds).map((entry) => {
+          if (entry.kind !== 'file') throw invalid('剪贴片段不能用于文件选择');
+          return entry;
+        });
       if (selected.some((entry) => entry.photo?.pending))
         throw new RemoteKitError('conflict', '照片尚未确认');
       if (
@@ -560,6 +575,8 @@ export class FileLibrary {
     switch (method) {
       case 'library.get':
         return this.get(tenant, authorize);
+      case 'library.snippet':
+        return this.repository.snippet(tenant, id(params.id));
       case 'library.import':
         return this.import(tenant, params, authorize);
       case 'library.replace':
@@ -580,7 +597,8 @@ export class FileLibrary {
           (snapshot) => {
             if (snapshot.revision !== expectedRevision)
               throw new RemoteKitError('conflict', '文件篮已更新，请刷新后重试');
-            entries(snapshot, basket);
+            if (entries(snapshot, basket).some((entry) => entry.kind !== 'file'))
+              throw invalid('剪贴片段不能加入文件篮');
             snapshot.basket = basket;
             this.repository.prune(tenant, snapshot);
           },

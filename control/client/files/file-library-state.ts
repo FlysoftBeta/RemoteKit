@@ -36,6 +36,8 @@ export function useFileLibrary(
       apps: stableApps,
       refresh: store.refresh,
       recordUsage: store.recordUsage,
+      snippet: store.snippet,
+      copySnippet: store.copySnippet,
       mutate: store.mutate,
       select: store.select,
       cancelSelection: store.cancelSelection,

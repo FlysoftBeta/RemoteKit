@@ -20,6 +20,7 @@ export function PhotoOptions({
   const { photos } = useLibrary();
   const [chosen, setChosen] = useState<string>();
   const [preview, setPreview] = useState<string>();
+  if (entry.kind !== 'file') return null;
   const candidates = job?.candidates ?? entry.photo?.candidateAssetIds ?? [];
   const pending = job ? job.state : entry.photo?.pending;
   const selected = chosen && candidates.includes(chosen) ? chosen : candidates[0];

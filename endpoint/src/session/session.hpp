@@ -26,6 +26,7 @@ class Session {
           std::shared_ptr<objects::SessionObjects> access = {});
   ~Session();
   Result<void> Initialize();
+  Result<Json> WriteClipboard(const Json& request);
   void SetOpenTiming(Json phases) { browser.SetOpenTiming(std::move(phases)); }
   Result<void> Stop();
   Result<void> Shutdown();

@@ -448,6 +448,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
               'audioChannels',
               'autoFullscreen',
               'autoKeyboard',
+              'clipboardSync',
               'avSync',
             ].includes(key),
         )
@@ -455,6 +456,8 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         throw new RemoteKitError('invalid_request', '设置格式无效', { detail: 'Invalid settings' });
       if ('autoKeyboard' in workspaceSettings && typeof workspaceSettings.autoKeyboard !== 'boolean')
         throw new RemoteKitError('invalid_request', '参数值无效', { detail: 'Invalid value' });
+      if ('clipboardSync' in workspaceSettings && typeof workspaceSettings.clipboardSync !== 'boolean')
+        throw new RemoteKitError('invalid_request', '无效的剪贴板同步设置');
       if (
         'qualityPreference' in workspaceSettings &&
         !['quality', 'auto', 'smooth'].includes(workspaceSettings.qualityPreference)

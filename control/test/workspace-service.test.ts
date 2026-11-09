@@ -281,6 +281,7 @@ test('launcher adapter maps organized and hidden library entries and usage route
     library.partitions = [{ id: 'partition', name: 'Organized' }];
     library.excludedSources = [{ app: 'files', channel: 'camera' }];
     library.entries = ['visible', 'hidden', 'hidden-organized'].map((id): LibraryEntry => ({
+      kind: 'file',
       id,
       name: id,
       assetId: id,

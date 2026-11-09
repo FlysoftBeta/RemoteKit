@@ -52,14 +52,14 @@ test('version 12 migration adds global keyboard default and removes per-site key
       JSON.stringify({ ...permissions, manualKeyboard: true }),
     );
     createSchema(db);
-    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 15 });
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 16 });
     const readSettings = (tenant: string) =>
       JSON.parse(
         (db.prepare('SELECT data FROM user_settings WHERE tenant=?').get(tenant) as { data: string }).data,
       );
     assert.deepEqual(readSettings('tenant'), {
       ...settings,
-      workspace: { ...settings.workspace, autoKeyboard: false },
+      workspace: { ...settings.workspace, autoKeyboard: false, clipboardSync: true },
     });
     assert.equal(readSettings('other').workspace.autoKeyboard, true);
     const rows = db

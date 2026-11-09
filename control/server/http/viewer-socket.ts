@@ -43,6 +43,11 @@ const library: Handler = product(({ services, authority }, params) =>
   ),
 );
 const handlers: Record<string, Handler> = {
+  'clipboard.set': product(({ services, authority }, params) => services.clipboard.set(authority, params)),
+  'clipboard.get': product(({ services, authority }) => services.clipboard.get(authority)),
+  'library.copySnippet': product(({ services, authority }, params) =>
+    services.clipboard.copySnippet(authority, params.id),
+  ),
   'sessionImport.state': product(({ services, authority }) =>
     services.sessionImporter.state(authority.tenantId),
   ),
@@ -226,6 +231,7 @@ for (const method of [
   handlers[method] = (ctx, params) => auth(ctx, { method, value: params });
 for (const method of [
   'library.get',
+  'library.snippet',
   'library.import',
   'library.replace',
   'library.prepare',
@@ -302,7 +308,11 @@ export function attachViewerSocket(
     track,
     isClosing,
   } = helpers;
-  const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024, perMessageDeflate: false });
+  const sockets = new WebSocketServer({
+    noServer: true,
+    maxPayload: 6 * 1024 * 1024 + 65536,
+    perMessageDeflate: false,
+  });
   const peers = new Map<WebSocket, { tenant: string; lease: string; token: string; alive: boolean }>();
   const send = (ws: WebSocket, message: unknown) => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -329,6 +339,11 @@ export function attachViewerSocket(
         send(ws, { type: 'library', snapshot });
   };
   control.events.on('library', library);
+  const clipboard = (tenant: string, message: unknown) => {
+    for (const [ws, peer] of peers)
+      if (peer.tenant === tenant && control.viewers.productAllowed(tenant, peer.lease)) send(ws, message);
+  };
+  control.events.on('clipboard', clipboard);
   const signal = (tenant: string, lease: string, message: unknown) => {
     for (const [ws, peer] of peers) if (peer.tenant === tenant && peer.lease === lease) send(ws, message);
   };
@@ -405,6 +420,14 @@ export function attachViewerSocket(
             return;
           }
           const diagnosticRequest = request.method.startsWith('diagnostics.');
+          if (request.method !== 'clipboard.set' && Buffer.byteLength(raw) > 1024 * 1024) {
+            send(ws, {
+              type: 'error',
+              id: request.id,
+              error: { code: 'limit_exceeded', message: '请求过大' },
+            });
+            return;
+          }
           if (diagnosticRequest && Buffer.byteLength(raw) > diagnosticMessageLimit) {
             send(ws, {
               type: 'error',
@@ -461,7 +484,10 @@ export function attachViewerSocket(
               })
               .catch((error) => {
                 const failure = toRemoteKitError(error);
-                if (failure.code === 'internal')
+                if (
+                  failure.code === 'internal' &&
+                  !['clipboard.set', 'library.snippet', 'library.copySnippet'].includes(request.method)
+                )
                   viewerLog('request failed', { tenant: peer.tenant, lease, method: request.method, error });
                 send(ws, {
                   type: 'error',
@@ -521,6 +547,7 @@ export function attachViewerSocket(
       control.events.off('auth', auth);
       control.events.off('state', push);
       control.events.off('library', library);
+      control.events.off('clipboard', clipboard);
       control.events.off('rtc.signal', signal);
       for (const [ws, peer] of peers) {
         peers.delete(ws);

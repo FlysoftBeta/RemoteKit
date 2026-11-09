@@ -231,6 +231,7 @@ test('clipboard management events cross the encrypted link and reject stale node
       password_hash: '',
       is_admin: 0,
     });
+    h.store.workspaces.writeWorkspace(emptyWorkspace('one'));
     const alpha = await h.connect();
     const beta = await h.connect({ nodeId: 'beta' });
     h.store.clipboards.record('one', { text: 'seed', html: '' });

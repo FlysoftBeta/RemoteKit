@@ -12,6 +12,7 @@ export const defaultSettings = () => ({
     showStats: false,
     autoFullscreen: false,
     autoKeyboard: false,
+    clipboardSync: true,
     avSync: false,
     audioChannels: { left: true, right: true },
   },

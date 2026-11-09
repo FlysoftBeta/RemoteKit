@@ -24,6 +24,8 @@ export type ClipboardChangedEvent = {
   tenantId: string;
   sessionId: string;
   browserSequence: string;
+  viewId?: string;
+  excludeFromHistory?: boolean;
 } & (
   { oversize: true; textBytes: number; htmlBytes: number } | { oversize?: false; text: string; html: string }
 );

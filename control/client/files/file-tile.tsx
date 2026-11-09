@@ -14,7 +14,7 @@ const MOVE_SLOP = 6;
 
 // Press tracking shared by tiles and rows: a click after the pointer travelled (a swipe or a
 // drag) is not an activation, and a touch held still opens `onLongPress` instead of a click.
-function usePress(onOpen?: (anchor: HTMLElement) => void, onLongPress?: () => void) {
+export function usePress(onOpen?: (anchor: HTMLElement) => void, onLongPress?: () => void) {
   const press = useRef<{ x: number; y: number; moved: boolean; long: boolean; timer?: number }>(undefined);
   const clear = () => window.clearTimeout(press.current?.timer);
   return {

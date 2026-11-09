@@ -13,13 +13,13 @@ export interface PhotoMetadata {
   warning?: string;
 }
 
-interface LibraryAssetFields {
+export interface LibraryAssetFields {
   assetId: string;
   originalAssetId?: string;
   photo?: PhotoMetadata;
 }
 
-export interface LibraryEntry extends LibraryAssetFields {
+interface LibraryEntryFields {
   detail?: string;
   id: string;
   name: string;
@@ -30,6 +30,26 @@ export interface LibraryEntry extends LibraryAssetFields {
   partitionId: string | null;
   collected: boolean;
 }
+
+export type SnippetOrigin =
+  | { kind: 'page'; url: string; title?: string; app: string }
+  | { kind: 'app'; app: string }
+  | { kind: 'device' };
+
+export interface LibraryFileEntry extends LibraryEntryFields, LibraryAssetFields {
+  kind: 'file';
+}
+
+export interface LibrarySnippetEntry extends LibraryEntryFields {
+  kind: 'snippet';
+  preview: string;
+  origin: SnippetOrigin;
+  assetId?: never;
+  originalAssetId?: never;
+  photo?: never;
+}
+
+export type LibraryEntry = LibraryFileEntry | LibrarySnippetEntry;
 
 export interface LibrarySource {
   app: string;
@@ -53,6 +73,8 @@ export type SelectionState = 'pending' | 'validating' | 'selected' | 'cancelled'
 
 export interface LibraryMethods {
   'library.get': { params: Record<string, never>; result: LibrarySnapshot };
+  'library.snippet': { params: { id: string }; result: { text: string } };
+  'library.copySnippet': { params: { id: string }; result: { revision: string; text: string } };
   'library.import': {
     params: LibraryAssetFields & {
       operationId: string;

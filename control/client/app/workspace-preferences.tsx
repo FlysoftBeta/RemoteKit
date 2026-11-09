@@ -187,6 +187,13 @@ export function WorkspacePreferences({
             onChange={(autoKeyboard) => void save('autoKeyboard', { autoKeyboard })}
           />
           {note('autoKeyboard')}
+          <SettingSwitch
+            title="与本机剪贴板同步"
+            checked={settings.clipboardSync}
+            disabled={!online || busy.clipboardSync}
+            onChange={(clipboardSync) => void save('clipboardSync', { clipboardSync })}
+          />
+          {note('clipboardSync')}
         </SettingSection>
       )}
       {section === 'media' && (

@@ -2,12 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DownloadOutlined } from '@mui/icons-material';
 import { sourceIcon } from '../client/files/files-organization';
-import type { LibraryEntry, LibrarySnapshot } from '../shared/file-library';
+import type { LibraryEntry, LibraryFileEntry, LibrarySnapshot } from '../shared/file-library';
 import { filesInView, removalCounts, sourceAppName } from '../client/files/files-app-state';
 
 const source = { app: 'browser', channel: 'example.com' };
 const now = 20 * 86400_000;
-const entry = (id: string, fields: Partial<LibraryEntry> = {}): LibraryEntry => ({
+const entry = (id: string, fields: Partial<LibraryFileEntry> = {}): LibraryFileEntry => ({
+  kind: 'file',
   id,
   name: id,
   assetId: id,

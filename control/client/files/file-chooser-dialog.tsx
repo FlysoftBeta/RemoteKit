@@ -108,8 +108,9 @@ export function FileBasketDialog({
     (request?.multiple ? pending.length : 0);
   const basketIds = new Set(snapshot?.basket);
   const available =
-    snapshot?.entries.filter((entry) => !basketIds.has(entry.id)).sort((a, b) => b.createdAt - a.createdAt) ??
-    [];
+    snapshot?.entries
+      .filter((entry) => entry.kind === 'file' && !basketIds.has(entry.id))
+      .sort((a, b) => b.createdAt - a.createdAt) ?? [];
   const outcome = selectionViewModel(transaction?.state, cancelOutcome);
   const final = outcome.terminal;
   const waiting = request?.state === 'validating' || !!transaction || cancelOutcome !== undefined;

@@ -9,6 +9,7 @@ import type { ViewerSession } from '../viewer-session';
 import { ContextMenuInteraction, contextMenuItems } from './context-menu-items';
 import { scaledAnchor, useUiScale } from './ui-scale';
 import { projectRootRect, type ViewportGeometry } from './viewport-geometry';
+import { clipboardCommand } from '../clipboard/device-clipboard';
 
 export function ContextMenu({
   menu,
@@ -38,14 +39,15 @@ export function ContextMenu({
   const [interaction] = useState(
     () =>
       new ContextMenuInteraction({
-        command: (command) => {
-          const current = command === 'dismiss' ? surface : transport.presentation.layout?.views.find((view) =>
-            sameEditingDocument(view, surface),
-          );
-          if (!current) return;
-          if (command !== 'dismiss') transport.input.ensureInputFocus(current);
-          transport.input.sendInput(current, { type: 'context_command', menu: menu.id, command });
-        },
+        command: (command) =>
+          clipboardCommand(command, () => {
+            const current = command === 'dismiss' ? surface : transport.presentation.layout?.views.find((view) =>
+              sameEditingDocument(view, surface),
+            );
+            if (!current) return;
+            if (command !== 'dismiss') transport.input.ensureInputFocus(current);
+            transport.input.sendInput(current, { type: 'context_command', menu: menu.id, command });
+          }),
         product: (action) => {
           void transport.operations.action(action).catch(transport.workspace.report);
         },

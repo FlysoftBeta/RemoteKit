@@ -43,6 +43,13 @@ class ClipboardController {
     std::lock_guard lock(mutex_);
     return PollLocked(force);
   }
+  Result<void> Write(const Json& value) {
+    if (!Valid(value))
+      return Error{ErrorCode::kInvalidRequest, "invalid clipboard value"};
+    std::lock_guard lock(mutex_);
+    seed_ = value;
+    return hooks_.ready() ? WriteLocked() : Result<void>{};
+  }
 
  private:
   static std::optional<uint64_t> Sequence(const Json& value) {
@@ -60,10 +67,16 @@ class ClipboardController {
     const auto incarnation = hooks_.incarnation();
     if (!seed_ || applied_incarnation_ == incarnation)
       return {};
+    return WriteLocked();
+  }
+  Result<void> WriteLocked() {
     auto written = hooks_.write(*seed_);
     if (!written)
       return written;
-    applied_incarnation_ = incarnation;
+    applied_incarnation_ = hooks_.incarnation();
+    reported_incarnation_ = applied_incarnation_;
+    if (const auto sequence = hooks_.sequence())
+      reported_sequence_ = *sequence;
     return {};
   }
   Result<void> PollLocked(bool force) {
@@ -103,6 +116,9 @@ class ClipboardController {
                  {"browserSequence", std::to_string(*sequence)},
                  {"text", text},
                  {"html", html}};
+      if (value.contains("viewId") && value["viewId"].is_string() && value["viewId"] != "")
+        event["viewId"] = value["viewId"];
+      event["excludeFromHistory"] = value.value("excludeFromHistory", false);
       if (text.size() + html.size() >= kMaxEventBytes || event.dump().size() >= kMaxEventBytes) {
         event.erase("text");
         event.erase("html");

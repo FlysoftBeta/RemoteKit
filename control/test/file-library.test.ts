@@ -436,6 +436,7 @@ test('photo choice and scan failure remain blocked until confirmed in place', as
   await f.run('finish', prepared);
   const replaced = await f.run('replace', replacement);
   assert.deepEqual(replaced.entries[0], {
+    kind: 'file',
     id: entry.id,
     assetId: ASSETS.photo,
     size: 3,

@@ -8,6 +8,8 @@ import { RequestTracker } from '../util/request-tracker';
 import { snapshotNewer } from './product-operations';
 import { Events } from '../util/store';
 import type { LibrarySnapshot } from '../../shared/file-library';
+import { appClipboard } from '../clipboard/app-clipboard';
+import { deviceClipboard } from '../clipboard/device-clipboard';
 
 const stableConnectionMs = 10_000;
 
@@ -28,6 +30,8 @@ export class ControlSession {
     };
   };
   private status = (phase: ConnectionStatus) => {
+    if (phase !== 'online')
+      deviceClipboard.configure(undefined, false, (text) => this.request('clipboard.set', { text }));
     this.snapshot = Object.freeze(phase === 'reconnecting' ? { phase, attempt: this.attempts } : { phase });
     this.listeners.forEach((listener) => listener());
     this.changed(phase);
@@ -100,6 +104,9 @@ export class ControlSession {
         }
       } else if (message.type === 'library') {
         this.library.emit(message.snapshot);
+      } else if (message.type === 'clipboard') {
+        appClipboard.receive(message);
+        deviceClipboard.receive(message);
       } else if (message.type === 'lease') {
         this.status(message.outcome === 'logged_out' ? 'expired' : 'revoked');
         this.close(true);
@@ -207,6 +214,7 @@ export class ControlSession {
     this.socket?.close();
   }
   close(preserveState = false) {
+    deviceClipboard.configure(undefined, false, (text) => this.request('clipboard.set', { text }));
     if (!preserveState) {
       this.snapshot = { phase: 'stopped' };
       this.listeners.forEach((listener) => listener());

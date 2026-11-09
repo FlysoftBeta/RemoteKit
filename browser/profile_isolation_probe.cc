@@ -162,6 +162,24 @@ int main(int argc, char** argv) {
   }
   CHECK(ui::Clipboard::GetForCurrentThread()->GetSequenceNumber(ui::ClipboardBuffer::kCopyPaste) !=
         empty);
+  CHECK(!ui::Clipboard::GetForCurrentThread()->IsMarkedByOriginatorAsConfidential());
+  {
+    ui::ScopedClipboardWriter writer(ui::ClipboardBuffer::kCopyPaste);
+    writer.WriteText(u"concealed");
+    writer.MarkAsConfidential();
+  }
+  CHECK(ui::Clipboard::GetForCurrentThread()->IsMarkedByOriginatorAsConfidential());
+  {
+    ui::ScopedClipboardWriter writer(ui::ClipboardBuffer::kCopyPaste);
+    writer.WriteText(u"exclude from history");
+    writer.MarkAsOffTheRecord();
+  }
+  CHECK(ui::Clipboard::GetForCurrentThread()->IsMarkedByOriginatorAsConfidential());
+  {
+    ui::ScopedClipboardWriter writer(ui::ClipboardBuffer::kCopyPaste);
+    writer.WriteText(u"ordinary");
+  }
+  CHECK(!ui::Clipboard::GetForCurrentThread()->IsMarkedByOriginatorAsConfidential());
   ui::Clipboard::DestroyClipboardForCurrentThread();
   headless::SetHeadlessClipboardForCurrentThread();
   CHECK(ui::ClipboardNonBacked::GetForCurrentThread());

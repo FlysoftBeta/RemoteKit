@@ -1,6 +1,15 @@
 import type Database from 'better-sqlite3';
+import { createHash, randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
-import type { LibraryEntry, LibrarySnapshot, LibrarySource, SelectionState } from '../../shared/file-library';
+import type {
+  LibraryEntry,
+  LibraryFileEntry,
+  LibrarySnapshot,
+  LibrarySource,
+  SelectionState,
+  SnippetOrigin,
+} from '../../shared/file-library';
+import { clipboardLimits } from './clipboards';
 import type { FileBinding } from '../endpoint/types';
 import { transaction } from './database';
 import { syncObjectReferences } from './object-references';
@@ -31,12 +40,68 @@ export interface Selection {
   requestId: string;
   binding: FileBinding;
   entryIds: string[];
-  files: Pick<LibraryEntry, 'assetId' | 'name' | 'type'>[];
+  files: Pick<LibraryFileEntry, 'assetId' | 'name' | 'type'>[];
   prepared: boolean;
 }
 
 export class LibraryRepository {
   constructor(private readonly db: Database.Database) {}
+  snippet(tenant: string, entryId: string): { text: string } {
+    const row = this.db
+      .prepare('SELECT text FROM library_snippets WHERE tenant=? AND entry_id=?')
+      .get(tenant, entryId) as { text: string } | undefined;
+    if (!row) throw new RemoteKitError('not_found', '剪贴片段不存在');
+    return row;
+  }
+  recordSnippet(
+    tenant: string,
+    text: string,
+    origin: SnippetOrigin,
+    copiedAt: number,
+  ): LibrarySnapshot | undefined {
+    if (!text || Buffer.byteLength(text, 'utf8') > clipboardLimits.text) return;
+    return transaction(this.db, () => {
+      const snapshot = this.snapshot(tenant);
+      const source = { app: 'clipboard', channel: '' };
+      if (sourceExcluded(snapshot, source)) return;
+      const hash = createHash('sha256').update(text).digest('hex');
+      const existing = this.db
+        .prepare('SELECT entry_id FROM library_snippets WHERE tenant=? AND hash=?')
+        .get(tenant, hash) as { entry_id: string } | undefined;
+      const entry = existing && snapshot.entries.find((entry) => entry.id === existing.entry_id);
+      const entryId = entry?.id ?? randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO library_snippets VALUES (?,?,?,?,?,?)
+        ON CONFLICT(tenant,hash) DO UPDATE SET origin=excluded.origin,copied_at=excluded.copied_at`,
+        )
+        .run(entryId, tenant, text, hash, JSON.stringify(origin), copiedAt);
+      snapshot.entries = snapshot.entries.filter((item) => item.id !== entryId);
+      const firstLine = text.split(/\r\n|\r|\n/).find((line) => line.trim()) ?? '';
+      snapshot.entries.unshift({
+        kind: 'snippet',
+        id: entryId,
+        name: '',
+        type: 'text/plain',
+        size: Buffer.byteLength(text, 'utf8'),
+        createdAt: copiedAt,
+        source,
+        partitionId: entry?.partitionId ?? null,
+        collected: true,
+        preview: Array.from(firstLine.replace(/\s+/g, ' ').trim()).slice(0, 200).join(''),
+        origin,
+      });
+      this.save(tenant, snapshot);
+      return snapshot;
+    });
+  }
+  private retainSnippets(snapshot: LibrarySnapshot) {
+    let unorganized = 0;
+    snapshot.entries.sort((a, b) => b.createdAt - a.createdAt);
+    snapshot.entries = snapshot.entries.filter(
+      (entry) => entry.kind !== 'snippet' || entry.partitionId !== null || ++unorganized <= 200,
+    );
+  }
   snapshot(tenant: string): LibrarySnapshot {
     const row = this.db.prepare('SELECT snapshot FROM file_library WHERE tenant=?').get(tenant) as
       { snapshot: string } | undefined;
@@ -56,7 +121,19 @@ export class LibraryRepository {
   }
   save(tenant: string, snapshot: LibrarySnapshot) {
     transaction(this.db, () => {
+      this.retainSnippets(snapshot);
       snapshot.sources = librarySources(snapshot);
+      const retained = new Set(
+        snapshot.entries.filter((entry) => entry.kind === 'snippet').map((entry) => entry.id),
+      );
+      for (const row of this.db
+        .prepare('SELECT entry_id FROM library_snippets WHERE tenant=?')
+        .all(tenant) as { entry_id: string }[]) {
+        if (!retained.has(row.entry_id))
+          this.db
+            .prepare('DELETE FROM library_snippets WHERE tenant=? AND entry_id=?')
+            .run(tenant, row.entry_id);
+      }
       snapshot.revision++;
       this.db
         .prepare('INSERT OR REPLACE INTO file_library VALUES (?,?)')
@@ -186,6 +263,7 @@ export class LibraryRepository {
     return this.snapshot(tenant).entries.length;
   }
   deleteTenant(tenant: string) {
+    this.db.prepare('DELETE FROM library_snippets WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM download_import_failures WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM file_library WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM file_library_operations WHERE tenant=?').run(tenant);

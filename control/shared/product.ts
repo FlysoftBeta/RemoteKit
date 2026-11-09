@@ -56,6 +56,7 @@ export interface WorkspaceSettings {
   showStats: boolean;
   autoFullscreen: boolean;
   autoKeyboard: boolean;
+  clipboardSync: boolean;
   avSync: boolean;
   audioChannels: { left: boolean; right: boolean };
 }
@@ -443,6 +444,8 @@ export interface SocketMethods
     AdminSocketMethods,
     LearningSocketMethods,
     SessionImportSocketMethods {
+  'clipboard.set': { params: { text: string }; result: { revision: string } };
+  'clipboard.get': { params: Record<string, never>; result: { revision: string; text: string } };
   'operation.status': {
     params: { operationId: string; operationGeneration: string };
     result: OperationReceipt;
@@ -494,6 +497,7 @@ export type RtcServerSignal = {
     | { type: 'error'; error: WireError };
 };
 export type SocketMessage =
+  | { type: 'clipboard'; revision: string; text: string }
   | AuthMessage
   | RtcServerSignal
   | { type: 'state'; revision: number; state: ProductState }

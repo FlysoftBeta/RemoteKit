@@ -4,7 +4,14 @@ import { createAnnouncementTables } from './announcements';
 import { createLearningTables } from './learning';
 import { createObjectRenderTables } from './object-renders';
 
-const version = 15;
+const version = 16;
+
+function createSnippetTable(db: Database.Database) {
+  db.exec(`CREATE TABLE library_snippets (
+    entry_id TEXT PRIMARY KEY, tenant TEXT NOT NULL, text TEXT NOT NULL,
+    hash TEXT NOT NULL, origin TEXT NOT NULL, copied_at INTEGER NOT NULL,
+    UNIQUE(tenant,hash));`);
+}
 
 function addErrorColumns(db: Database.Database) {
   db.exec(`CREATE TABLE download_import_failures (tenant TEXT NOT NULL, event_id TEXT NOT NULL, name TEXT NOT NULL, origin TEXT NOT NULL, error TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(tenant,event_id));
@@ -22,6 +29,28 @@ function addErrorColumns(db: Database.Database) {
     ALTER TABLE session_deletions ADD COLUMN error_message TEXT;`);
 }
 const migrations: Record<number, (db: Database.Database) => void> = {
+  15: (db) => {
+    createSnippetTable(db);
+    for (const row of db.prepare('SELECT tenant,data FROM user_settings').all() as {
+      tenant: string;
+      data: string;
+    }[]) {
+      const settings = JSON.parse(row.data);
+      settings.workspace.clipboardSync = true;
+      db.prepare('UPDATE user_settings SET data=? WHERE tenant=?').run(JSON.stringify(settings), row.tenant);
+    }
+    for (const row of db.prepare('SELECT tenant,snapshot FROM file_library').all() as {
+      tenant: string;
+      snapshot: string;
+    }[]) {
+      const snapshot = JSON.parse(row.snapshot);
+      for (const entry of snapshot.entries) entry.kind = 'file';
+      db.prepare('UPDATE file_library SET snapshot=? WHERE tenant=?').run(
+        JSON.stringify(snapshot),
+        row.tenant,
+      );
+    }
+  },
   14: (db) => {
     for (const row of db.prepare('SELECT tenant,id,receipt FROM operation_receipts').all() as {
       tenant: string;
@@ -176,6 +205,7 @@ export function createSchema(db: Database.Database) {
         tenant TEXT NOT NULL, id TEXT NOT NULL, manifest TEXT NOT NULL, terminal TEXT, checked INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(tenant,id));
       CREATE INDEX file_library_open ON file_library_selections(tenant,terminal,checked);`);
+    createSnippetTable(db);
     db.exec(`CREATE TABLE session_placements (
   tenant TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, node_id TEXT NOT NULL,
   placement_epoch INTEGER NOT NULL, key_ciphertext TEXT NOT NULL,

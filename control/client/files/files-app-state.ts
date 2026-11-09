@@ -1,6 +1,8 @@
 import type { LibrarySnapshot, LibrarySource } from '../../shared/file-library';
+import { BUILTIN_APP_TITLES, isBuiltinApp } from '../../shared/product';
 
-export type FilesView = 'all' | 'recent' | 'settings' | { partition: string } | { source: LibrarySource };
+export type FilesView =
+  'all' | 'recent' | 'clipboard' | 'settings' | { partition: string } | { source: LibrarySource };
 export type FilesTab =
   | { id: string; kind: 'library'; view: FilesView; query: string }
   | { id: string; kind: 'document'; entryId: string; from?: FilesView };
@@ -33,6 +35,7 @@ export function validFilesView(view: unknown): view is FilesView {
   return (
     view === 'all' ||
     view === 'recent' ||
+    view === 'clipboard' ||
     view === 'settings' ||
     (object(view) &&
       ((keys(view, ['partition']) && identifier(view.partition)) ||
@@ -219,19 +222,19 @@ export const sameSource = (a: LibrarySource | null, b: LibrarySource) =>
 export const sourceKey = (source: LibrarySource) => JSON.stringify([source.app, source.channel]);
 export function sourceAppName(app: string, apps: readonly { id: string; name: string }[] = []) {
   if (app === 'download') return '下载';
-  if (app === 'browser') return '浏览器';
-  if (app === 'files') return '我的文件';
-  if (app === 'study') return '学习';
+  if (isBuiltinApp(app)) return BUILTIN_APP_TITLES[app];
+  if (app === 'clipboard') return '剪贴板';
   return apps.find((item) => `web:${item.id}` === app)?.name ?? app;
 }
 export function sourceChannelName(source: LibrarySource) {
   if (source.app === 'files') return source.channel === 'camera' ? '拍照' : '上传';
   return source.channel;
 }
-export function filesInView(snapshot: LibrarySnapshot, view: FilesView, now = Date.now()) {
+export function filesInView(snapshot: LibrarySnapshot, view: FilesView, now = Date.now(), searching = false) {
   return snapshot.entries
     .filter((entry) => {
       if (view === 'settings') return false;
+      if (view === 'clipboard') return entry.kind === 'snippet' && entry.source?.app === 'clipboard';
       if (typeof view === 'object')
         return 'partition' in view
           ? entry.partitionId === view.partition
@@ -240,9 +243,10 @@ export function filesInView(snapshot: LibrarySnapshot, view: FilesView, now = Da
             : sameSource(entry.source, view.source);
       if (entry.source && snapshot.excludedSources.some((source) => sameSource(entry.source, source)))
         return false;
+      if (entry.kind === 'snippet') return searching;
       return view === 'all' || entry.createdAt >= now - 7 * 86400_000;
     })
-    .sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+    .sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export function removalCounts(

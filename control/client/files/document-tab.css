@@ -43,6 +43,11 @@
 .document-tab-content > .file-document-preview {
   flex: 1;
 }
+.snippet-document {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
 .document-tab-missing {
   flex: 1;
   display: flex;

@@ -356,7 +356,7 @@ export function BasketItems({
               <Close fontSize="small" />
             </IconButton>
           </Box>
-          {panel?.view === 'image' && active.entry ? (
+          {panel?.view === 'image' && active.entry?.kind === 'file' ? (
             <FileImagePreview
               key={active.entry.assetId}
               inline

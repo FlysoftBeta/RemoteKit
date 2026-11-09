@@ -1,5 +1,5 @@
 /**
- * Headed Chrome 157, isolated Control and native H264 clipboard verification.
+ * Edge / Chrome 89, isolated Control and native H264 clipboard verification.
  * node tests/e2e/test-clipboard.mjs <playwright module> <viewer exe>
  *   <endpoint exe> <browser exe> <unused evidence directory> [port=35300]
  */
@@ -84,6 +84,10 @@ const connect = async (username, setup = false) => {
     currentPassword: password,
     settings: { lockOnHidden: false, lockOnIdle: false },
   });
+  if (username === 'clipboard-user') {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
+    await connected.page.bringToFront();
+  }
   return connected;
 };
 const ready = async () => {
@@ -169,7 +173,7 @@ try {
     args: ['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required'],
   });
   const version = await (await chrome.newBrowserCDPSession()).send('Browser.getVersion');
-  assert.match(version.product, /\/157\./);
+  assert.match(version.product, /\/(?:89|\d{3})\./);
   admin = await connect('clipboard-admin', true);
   await admin.call('admin.createUser', { username: 'clipboard-user', password });
   user = await connect('clipboard-user');
@@ -194,9 +198,48 @@ try {
   await pause(700);
   assert.equal(revision(), before + 1);
   assert(row().html.includes(marker), 'Copied HTML missing');
-  const copied = row();
-  await writeFile(join(run, 'copy-row.json'), JSON.stringify(copied, null, 2));
+  await until(
+    () => user.page.evaluate(() => navigator.clipboard.readText()).then((text) => text === marker),
+    'remote copy reaches device',
+  );
+  const library = await user.call('library.get');
+  const snippet = library.entries.find((entry) => entry.kind === 'snippet' && entry.preview === marker);
+  assert(snippet, 'Page copy missing from clipboard history');
+  assert.deepEqual(snippet.source, { app: 'clipboard', channel: '' });
+  assert.equal(snippet.origin.kind, 'page');
+  assert.equal(new URL(snippet.origin.url).host, new URL(fixtureOrigin).host);
+  const deviceText = 'DEVICE' + marker;
+  await user.page.evaluate((text) => navigator.clipboard.writeText(text), deviceText);
+  assert.equal(await paste(), deviceText);
+  await until(() => row()?.text === deviceText, 'device clipboard reaches Control');
+  const deviceEntry = (await user.call('library.get')).entries.find(
+    (entry) => entry.kind === 'snippet' && entry.preview === deviceText,
+  );
+  assert.deepEqual(deviceEntry?.origin, { kind: 'device' });
+  const browserSpace = (await user.state()).workspace.activeSpaceId;
+  await user.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
+  await user.page.getByRole('navigation', { name: '文件导航' }).getByText('剪贴板', { exact: true }).click();
+  const snippetRow = user.page.locator(`[data-snippet="${snippet.id}"]`);
+  await snippetRow.getByText(new URL(fixtureOrigin).host, { exact: false }).waitFor();
+  await user.page.screenshot({ path: join(run, 'clipboard-history.png') });
+  await snippetRow.getByRole('button', { name: marker, exact: true }).click();
+  await user.page.getByText('已复制', { exact: true }).waitFor();
+  await until(() => row()?.text === marker, 'snippet copy reaches remote clipboard');
+  await until(
+    () => user.page.evaluate(() => navigator.clipboard.readText()).then((text) => text === marker),
+    'snippet copy reaches device clipboard',
+  );
+  const filesWindow = (await user.state()).workspace.windows.find((window) => window.appId === 'files');
+  await user.action({ type: 'window.close', windowId: filesWindow.id });
+  await user.action({ type: 'space.activate', spaceId: browserSpace });
+  await ready();
+  assert.equal(await paste(), marker);
+  result('clipboard history and two-way device sync', {
+    pageOrigin: new URL(snippet.origin.url).host,
+    deviceOrigin: deviceEntry.origin.kind,
+  });
   result('1 mouse copy and privacy', { revision: revision(), ...(await privacy()) });
+  await user.action({ type: 'settings.update', settings: { workspace: { clipboardSync: false } } });
   const incarnation = latest().incarnation;
   await user.context.close();
   await until(
@@ -214,12 +257,13 @@ try {
   );
   user = await connect('clipboard-user');
   await ready();
+  const seedRevision = revision();
   await until(() => latest().incarnation !== incarnation, 'new Browser page incarnation');
   assert.equal(await paste(), marker);
   if (latest().startup?.value !== undefined) assert.equal(latest().startup.value, marker);
   result('2 restart seed and paste', { incarnation: latest().incarnation, startup: latest().startup });
   await pause(900);
-  assert.equal(revision(), copied.revision);
+  assert.equal(revision(), seedRevision);
   result('6 seed does not echo', { revision: revision() });
 
   const menu = user.page.getByRole('menu', { name: '页面菜单', exact: true });

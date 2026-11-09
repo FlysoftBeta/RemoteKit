@@ -12,6 +12,7 @@ import { FilePreview } from './file-preview';
 import { FileEntryMenu } from './file-entry-menu';
 import { formatFileSize } from './file-format';
 import { sourceAppName, sourceChannelName, type FilesTab } from './files-app-state';
+import { snippetOriginLabel } from './snippet-view';
 import './document-tab.css';
 
 export function DocumentTab({
@@ -72,6 +73,7 @@ export function DocumentTab({
       </div>
     );
   const secondary = [
+    entry.kind === 'snippet' ? snippetOriginLabel(entry.origin, apps) : '',
     entry.source
       ? [sourceAppName(entry.source.app, apps), sourceChannelName(entry.source)].filter(Boolean).join(' › ')
       : '',
@@ -88,25 +90,29 @@ export function DocumentTab({
             <ArrowBack fontSize="small" />
           </Tool>
         )}
-        <span className="document-tab-icon">
-          <FileTypeIcon type={entry.type} name={entry.name} />
-        </span>
+        {entry.kind === 'file' && (
+          <span className="document-tab-icon">
+            <FileTypeIcon type={entry.type} name={entry.name} />
+          </span>
+        )}
         <div className="document-tab-title">
-          <div title={entry.name}>{entry.name}</div>
+          <div title={entry.name}>{entry.kind === 'snippet' ? '剪贴片段' : entry.name}</div>
           <div className="document-tab-secondary" title={secondary}>
             {secondary}
           </div>
         </div>
         <span className="document-tab-spacer" />
-        <Tool
-          title={inBasket ? '从文件篮移除' : '加入文件篮'}
-          disabled={!online || busy || (!inBasket && basket.length >= 64)}
-          onClick={() => void toggleBasket(entry)}
-        >
-          <Badge variant="dot" color="primary" invisible={!inBasket}>
-            <ShoppingBasketOutlined fontSize="small" />
-          </Badge>
-        </Tool>
+        {entry.kind === 'file' && (
+          <Tool
+            title={inBasket ? '从文件篮移除' : '加入文件篮'}
+            disabled={!online || busy || (!inBasket && basket.length >= 64)}
+            onClick={() => void toggleBasket(entry)}
+          >
+            <Badge variant="dot" color="primary" invisible={!inBasket}>
+              <ShoppingBasketOutlined fontSize="small" />
+            </Badge>
+          </Tool>
+        )}
         <Tool title="更多" disabled={!online} onClick={(event) => setMenu(event.currentTarget)}>
           <MoreVert fontSize="small" />
         </Tool>
@@ -117,7 +123,11 @@ export function DocumentTab({
         </Alert>
       )}
       <div className="document-tab-content">
-        <FilePreview entry={entry} call={call} />
+        {entry.kind === 'snippet' ? (
+          <SnippetDocument id={entry.id} />
+        ) : (
+          <FilePreview entry={entry} call={call} />
+        )}
       </div>
       <FileEntryMenu
         entry={entry}
@@ -126,6 +136,41 @@ export function DocumentTab({
         onClose={() => setMenu(undefined)}
         onDeleted={onBack}
       />
+    </div>
+  );
+}
+
+function SnippetDocument({ id }: { id: string }) {
+  const { snippet } = useLibrary();
+  const [text, setText] = useState<string>();
+  const [error, setError] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void snippet(id).then(
+      (value) => {
+        if (active) setText(value.text);
+      },
+      () => {
+        if (active) setError(true);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [id, snippet]);
+  return (
+    <div
+      className="snippet-document"
+      data-selectable
+      style={{
+        padding: 24,
+        whiteSpace: 'pre-wrap',
+        overflowWrap: 'anywhere',
+        fontFamily: 'inherit',
+        lineHeight: 1.7,
+      }}
+    >
+      {error ? '无法加载剪贴片段' : (text ?? '正在加载…')}
     </div>
   );
 }

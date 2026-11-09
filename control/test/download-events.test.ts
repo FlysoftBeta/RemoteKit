@@ -84,6 +84,7 @@ test('download entries use a separate collected source, host with port, and no p
     { ...entry, id: '', createdAt: 0 },
     {
       id: '',
+      kind: 'file',
       createdAt: 0,
       assetId: imported.assetId,
       name: 'report.pdf',

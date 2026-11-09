@@ -38,6 +38,11 @@
       "sha256": "bede3ecdef5831ca7506cb30b6c798f0c8f3c108cbf718586b4258f5f5a33b6c"
     },
     {
+      "id": "non-backed-clipboard-privacy",
+      "path": "0019-non-backed-clipboard-privacy.patch",
+      "sha256": "356f7d18e434c2338db4298d2c5a52ac576abe59b0899801be4361d4fcbb78d1"
+    },
+    {
       "id": "pointer-refocus-observation",
       "path": "0020-pointer-refocus-observation.patch",
       "sha256": "0c45bbe4dfad0800e5e2d16fb45c0d1d54096309cdc94b7e6847a7bc7118019a"

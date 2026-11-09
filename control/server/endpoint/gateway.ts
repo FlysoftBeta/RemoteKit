@@ -195,6 +195,9 @@ export class EndpointGateway {
       throw endpointError(error);
     }
   }
+  writeClipboard(tenant: string, clipboard: ClipboardValue): Promise<Accepted> {
+    return this.invoke('clipboard.write', tenant, clipboard);
+  }
   hibernate(tenant: string): Promise<number> {
     const previous = this.hibernating.get(tenant);
     if (previous) return previous;

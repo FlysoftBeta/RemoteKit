@@ -340,6 +340,9 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         typeof message.sessionId !== 'string' ||
         typeof message.browserSequence !== 'string' ||
         !/^\d{1,20}$/.test(message.browserSequence) ||
+        (message.viewId !== undefined &&
+          (typeof message.viewId !== 'string' || !/^[1-9]\d*$/.test(message.viewId))) ||
+        (message.excludeFromHistory !== undefined && typeof message.excludeFromHistory !== 'boolean') ||
         (message.oversize === true
           ? ![message.textBytes, message.htmlBytes].every((size) => Number.isSafeInteger(size) && size >= 0)
           : typeof message.text !== 'string' || typeof message.html !== 'string')

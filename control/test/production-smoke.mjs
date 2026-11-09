@@ -72,7 +72,7 @@ try {
     const timeout = setTimeout(() => reject(new Error(`Production startup timeout: ${output}`)), 5000);
     child.stdout.on('data', (data) => {
       output += data;
-      const match = output.match(/http:\/\/127\.0\.0\.1:(\d+)/);
+      const match = output.match(/RemoteKit Control http:\/\/127\.0\.0\.1:(\d+)/);
       if (match && Number(match[1])) {
         clearTimeout(timeout);
         resolve(Number(match[1]));
@@ -85,7 +85,7 @@ try {
   });
   const base = `http://127.0.0.1:${port}`;
   const page = await fetch(base);
-  assert.equal(page.status, 200);
+  assert.equal(page.status, 200, output);
   assert.match(await page.text(), /RemoteKit/);
   const response = await fetch(base + '/api/auth/setup', {
     method: 'POST',

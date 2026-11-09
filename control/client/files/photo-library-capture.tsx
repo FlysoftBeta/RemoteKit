@@ -441,7 +441,7 @@ export function PhotoCapture({
               localOnly
               sx={{ width: 32, height: 32 }}
             />
-          ) : latestEntry?.type.startsWith('image/') ? (
+          ) : latestEntry?.kind === 'file' && latestEntry.type.startsWith('image/') ? (
             <FileThumbnail
               assetId={latestEntry.assetId}
               type={latestEntry.type}

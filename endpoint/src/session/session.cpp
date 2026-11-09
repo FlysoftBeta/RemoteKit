@@ -221,6 +221,10 @@ Result<Json> Session::Ensure(const Json& request) {
     RK_RETURN_IF_ERROR(clipboard.Seed(request["clipboard"]));
   return views.ManageSessionEnsure(request);
 }
+Result<Json> Session::WriteClipboard(const Json& request) {
+  RK_RETURN_IF_ERROR(clipboard.Write(request));
+  return Json{{"accepted", true}};
+}
 Result<void> Session::Initialize() {
   checkpoint_cache.Start(config.directory);
   auto loaded = views.Initialize();

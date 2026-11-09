@@ -34,6 +34,7 @@ import {
   TextField,
   Tooltip,
   Typography,
+  Snackbar,
 } from '@mui/material';
 import React, {
   type JSX,
@@ -71,6 +72,7 @@ import type { PhotoJob } from './photo-job-store';
 import { PhotoOptions } from './photo-options';
 import { filesInView, sourceAppName, sourceChannelName, type FilesView } from './files-app-state';
 import { FilesOrganization } from './files-organization';
+import { SnippetView, snippetOriginLabel, snippetRelativeTime, snippetSearchText } from './snippet-view';
 
 const MAX_BASKET = 64;
 
@@ -93,7 +95,8 @@ export function LibraryTab({
   onLayout(layout: 'grid' | 'list'): void;
   onOpen(entry: LibraryEntry): void;
 }): JSX.Element {
-  const { snapshot, online, refresh, mutate, photos, recordUsage, apps } = useLibrary();
+  const { snapshot, online, refresh, mutate, photos, recordUsage, apps, copySnippet } = useLibrary();
+  const [copied, setCopied] = useState(false);
   const pane = useRef<HTMLDivElement>(null);
   const [paneWidth, setPaneWidth] = useState(Infinity);
   // narrow: chips replace the side navigation; compact: header actions become icons.
@@ -117,9 +120,10 @@ export function LibraryTab({
   const inBasket = new Set(basket.map((entry) => entry.id));
   const catalog = snapshot?.entries ?? [];
   const needle = query.trim().toLowerCase();
-  const entries = (snapshot ? filesInView(snapshot, filter) : []).filter(
+  const entries = (snapshot ? filesInView(snapshot, filter, Date.now(), !!needle) : []).filter(
     (entry) =>
       !needle ||
+      (entry.kind === 'snippet' && snippetSearchText(entry, apps).toLowerCase().includes(needle)) ||
       [
         entry.name,
         entry.detail,
@@ -142,8 +146,9 @@ export function LibraryTab({
               job.origin.kind === 'files' &&
               job.origin.partitionId === currentPartition.id)),
       );
+  const effectiveLayout = filter === 'clipboard' ? 'list' : layout;
   const view = {
-    mode: layout === 'grid' ? ('cards' as const) : ('list' as const),
+    mode: effectiveLayout === 'grid' ? ('cards' as const) : ('list' as const),
     set: (mode: 'cards' | 'list') => onLayout(mode === 'cards' ? 'grid' : 'list'),
   };
   const partitionOf = (id: string | null) => partitions.find((item) => item.id === id)?.name ?? '';
@@ -240,15 +245,17 @@ export function LibraryTab({
     ? `搜索“${query.trim()}”`
     : filter === 'settings'
       ? '设置'
-      : filter === 'recent'
-        ? '最近'
-        : filter === 'all'
-          ? '全部'
-          : 'partition' in filter
-            ? (currentPartition?.name ?? '分区')
-            : [sourceAppName(filter.source.app, apps), sourceChannelName(filter.source)]
-                .filter(Boolean)
-                .join(' › ');
+      : filter === 'clipboard'
+        ? '剪贴板'
+        : filter === 'recent'
+          ? '最近'
+          : filter === 'all'
+            ? '全部'
+            : 'partition' in filter
+              ? (currentPartition?.name ?? '分区')
+              : [sourceAppName(filter.source.app, apps), sourceChannelName(filter.source)]
+                  .filter(Boolean)
+                  .join(' › ');
   const openPreview = (entry: LibraryEntry) => {
     if (entry.photo) {
       setPhoto(entry.id);
@@ -257,20 +264,29 @@ export function LibraryTab({
   };
   const openEntry = (entry: LibraryEntry, anchor: HTMLElement) => {
     if (selecting) toggleSelected(entry.id);
+    else if (entry.kind === 'snippet')
+      void run(async () => {
+        await copySnippet(entry.id);
+        setCopied(true);
+      });
     else if (entry.photo?.pending) openPreview(entry);
     else setMenu({ anchor, id: entry.id });
   };
   const entryMeta = (entry: LibraryEntry) =>
-    [
-      formatFileSize(entry.size),
-      formatTime(entry.createdAt),
-      entry.source
-        ? [sourceAppName(entry.source.app, apps), sourceChannelName(entry.source)].filter(Boolean).join(' › ')
-        : '已整理',
-      partitions.length && (!currentPartition || needle) ? partitionOf(entry.partitionId) : '',
-    ]
-      .filter(Boolean)
-      .join(' · ');
+    entry.kind === 'snippet'
+      ? `${snippetOriginLabel(entry.origin, apps)} · ${snippetRelativeTime(entry.createdAt)}`
+      : [
+          formatFileSize(entry.size),
+          formatTime(entry.createdAt),
+          entry.source
+            ? [sourceAppName(entry.source.app, apps), sourceChannelName(entry.source)]
+                .filter(Boolean)
+                .join(' › ')
+            : '已整理',
+          partitions.length && (!currentPartition || needle) ? partitionOf(entry.partitionId) : '',
+        ]
+          .filter(Boolean)
+          .join(' · ');
 
   const latestActions = useRef({ openEntry, toggleSelected, addToBasket, removeFromBasket, catalog });
   latestActions.current = { openEntry, toggleSelected, addToBasket, removeFromBasket, catalog };
@@ -297,7 +313,7 @@ export function LibraryTab({
   const listViewport = useRef<VirtualViewport>(null);
   const [listWidth, setListWidth] = useState(0);
   const columns =
-    layout === 'list' ? 1 : Math.max(1, Math.floor((listWidth + 12) / ((narrow ? 136 : 160) + 12)));
+    effectiveLayout === 'list' ? 1 : Math.max(1, Math.floor((listWidth + 12) / ((narrow ? 136 : 160) + 12)));
   const cardHeight = ((listWidth - (columns - 1) * 12) / columns) * 0.75 + 46;
   const virtualRows: LibraryRow[] = [];
   for (const [label, section] of sections) {
@@ -315,7 +331,15 @@ export function LibraryTab({
     }
   }
   const rowSizes = new SizeIndex(
-    virtualRows.map((row) => (row.header ? 38 : layout === 'list' ? 74 : cardHeight + 12)),
+    virtualRows.map((row) =>
+      row.header
+        ? 38
+        : effectiveLayout === 'list'
+          ? row.entries[0]?.kind === 'snippet'
+            ? 48
+            : 74
+          : cardHeight + 12,
+    ),
   );
   useLayoutEffect(() => listViewport.current?.scrollTo(0), [query, filter, layout]);
 
@@ -337,7 +361,12 @@ export function LibraryTab({
       </Button>
       {(
         [
-          ['加入文件篮', <ShoppingBasketOutlined fontSize="small" />, () => addToBasket([...chosen]), false],
+          [
+            '加入文件篮',
+            <ShoppingBasketOutlined fontSize="small" />,
+            () => addToBasket([...chosen]),
+            entries.some((entry) => chosen.has(entry.id) && entry.kind === 'snippet'),
+          ],
           ['移到分区', <DriveFileMoveOutlined fontSize="small" />, () => setMove([...chosen]), false],
           [
             '删除',
@@ -383,7 +412,7 @@ export function LibraryTab({
         </Typography>
         {snapshot && filter !== 'settings' && (
           <Typography variant="body2" color="text.secondary" sx={{ flex: 'none' }}>
-            {entries.length} 个文件
+            {entries.length} 项
           </Typography>
         )}
       </Box>
@@ -400,7 +429,7 @@ export function LibraryTab({
       ) : (
         <SearchField value={query} onChange={setQuery} />
       )}
-      {!narrow && <FileViewToggle mode={view.mode} onChange={view.set} />}
+      {!narrow && filter !== 'clipboard' && <FileViewToggle mode={view.mode} onChange={view.set} />}
       {compact ? (
         <Tooltip title="文件篮">
           <span>
@@ -521,7 +550,7 @@ export function LibraryTab({
               <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 1, pt: 1.5, pb: 0.5 }}>
                 <FilesOrganization mode="source" view={filter} onView={selectFilter} />
                 <Box sx={{ flex: 1 }} />
-                {narrow && <FileViewToggle mode={view.mode} onChange={view.set} />}
+                {narrow && filter !== 'clipboard' && <FileViewToggle mode={view.mode} onChange={view.set} />}
                 {!selecting && !!entries.length && !narrow && (
                   <Button size="small" startIcon={<CheckBoxOutlined />} onClick={() => setSelected([])}>
                     选择
@@ -529,14 +558,23 @@ export function LibraryTab({
                 )}
               </Box>
             )}
-            {snapshot && filter !== 'settings' && !entries.length && !pending.length && (
-              <EmptyLibrary
-                kind={needle ? 'search' : catalog.length ? 'partition' : 'none'}
-                disabled={disabled}
-                onUpload={upload.pick}
-                onCamera={startCamera}
-              />
+            {snapshot && filter === 'clipboard' && !entries.length && (
+              <Typography color="text.secondary" sx={{ py: 6, textAlign: 'center' }}>
+                还没有剪贴片段
+              </Typography>
             )}
+            {snapshot &&
+              filter !== 'settings' &&
+              filter !== 'clipboard' &&
+              !entries.length &&
+              !pending.length && (
+                <EmptyLibrary
+                  kind={needle ? 'search' : catalog.length ? 'partition' : 'none'}
+                  disabled={disabled}
+                  onUpload={upload.pick}
+                  onCamera={startCamera}
+                />
+              )}
             {filter === 'settings' && (
               <FilesOrganization mode="settings" view={filter} onView={selectFilter} />
             )}
@@ -591,7 +629,7 @@ export function LibraryTab({
                         <LibraryEntryView
                           key={entry.id}
                           entry={entry}
-                          mode={layout}
+                          mode={effectiveLayout}
                           meta={entryMeta(entry)}
                           selected={chosen.has(entry.id)}
                           selecting={selecting}
@@ -654,6 +692,7 @@ export function LibraryTab({
         onOpen={openPreview}
         onSelect={(entry) => setSelected([entry.id])}
       />
+      <Snackbar open={copied} autoHideDuration={1600} onClose={() => setCopied(false)} message="已复制" />
       {camera && (
         <PhotoCapture
           windowId={windowId}
@@ -957,6 +996,20 @@ const LibraryEntryView = memo(
     onBasket,
     onMenu,
   }: LibraryEntryProps) {
+    if (entry.kind === 'snippet')
+      return (
+        <SnippetView
+          entry={entry}
+          mode={mode}
+          meta={meta}
+          selected={selected}
+          selecting={selecting}
+          disabled={disabled}
+          onOpen={onOpen}
+          onSelect={onSelect}
+          onMenu={onMenu}
+        />
+      );
     const entryCheckbox = (entry: LibraryEntry, tile: boolean) => (
       <Checkbox
         className="library-check"

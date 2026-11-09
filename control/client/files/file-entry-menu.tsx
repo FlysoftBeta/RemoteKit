@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import {
   CheckBoxOutlined,
+  ContentCopyOutlined,
   DeleteOutline,
   DriveFileMoveOutlined,
   ShoppingBasketOutlined,
@@ -21,6 +22,7 @@ import {
   Menu,
   MenuItem,
   Typography,
+  Snackbar,
 } from '@mui/material';
 import type { LibraryEntry } from '../../shared/file-library';
 import { scaledAnchor } from '../app/ui-scale';
@@ -48,7 +50,8 @@ export function FileEntryMenu({
   onSelect?(entry: LibraryEntry): void;
   onDeleted?(): void;
 }) {
-  const { snapshot, online, mutate } = useLibrary();
+  const { snapshot, online, mutate, copySnippet } = useLibrary();
+  const [copied, setCopied] = useState(false);
   const [move, setMove] = useState<LibraryEntry>();
   const [deletion, setDeletion] = useState<{ entry: LibraryEntry; operationId: string }>();
   const [busy, setBusy] = useState(false);
@@ -80,7 +83,7 @@ export function FileEntryMenu({
         onClose={onClose}
         slotProps={{ list: { dense: true } }}
       >
-        {entry && (
+        {entry?.kind === 'file' && (
           <Box className="file-entry-menu-heading">
             <Typography variant="subtitle2">{entry.name}</Typography>
             <Typography variant="caption" color="text.secondary">
@@ -90,13 +93,34 @@ export function FileEntryMenu({
             </Typography>
           </Box>
         )}
-        <Divider />
+        {entry?.kind === 'file' && <Divider />}
+        {entry?.kind === 'snippet' && (
+          <MenuItem
+            disabled={disabled}
+            onClick={() =>
+              choose(
+                (item) =>
+                  void run(async () => {
+                    await copySnippet(item.id);
+                    setCopied(true);
+                  }),
+              )
+            }
+          >
+            <ListItemIcon>
+              <ContentCopyOutlined fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>复制</ListItemText>
+          </MenuItem>
+        )}
         {onOpen && (
           <MenuItem disabled={disabled} onClick={() => choose(onOpen)}>
             <ListItemIcon>
               <VisibilityOutlined fontSize="small" />
             </ListItemIcon>
-            <ListItemText>{entry && canPreviewFile(entry) ? '查看大图' : '预览'}</ListItemText>
+            <ListItemText>
+              {entry?.kind === 'snippet' ? '查看全文' : entry && canPreviewFile(entry) ? '查看大图' : '预览'}
+            </ListItemText>
           </MenuItem>
         )}
         {onOpen && entry?.photo && (
@@ -107,33 +131,35 @@ export function FileEntryMenu({
             <ListItemText>照片详情</ListItemText>
           </MenuItem>
         )}
-        <MenuItem
-          disabled={disabled || (!inBasket && basket.length >= 64)}
-          onClick={() =>
-            choose(
-              (item) =>
-                void run(async () => {
-                  if (!snapshot) return;
-                  await mutate(
-                    'library.basket',
-                    {
-                      operationId: operationId(),
-                      ids: inBasket
-                        ? basket.filter((value) => value.id !== item.id).map((value) => value.id)
-                        : [...basket.map((value) => value.id), item.id],
-                      expectedRevision: snapshot.revision,
-                    },
-                    windowId,
-                  );
-                }),
-            )
-          }
-        >
-          <ListItemIcon>
-            <ShoppingBasketOutlined fontSize="small" />
-          </ListItemIcon>
-          <ListItemText>{inBasket ? '从文件篮移除' : '加入文件篮'}</ListItemText>
-        </MenuItem>
+        {entry?.kind === 'file' && (
+          <MenuItem
+            disabled={disabled || (!inBasket && basket.length >= 64)}
+            onClick={() =>
+              choose(
+                (item) =>
+                  void run(async () => {
+                    if (!snapshot) return;
+                    await mutate(
+                      'library.basket',
+                      {
+                        operationId: operationId(),
+                        ids: inBasket
+                          ? basket.filter((value) => value.id !== item.id).map((value) => value.id)
+                          : [...basket.map((value) => value.id), item.id],
+                        expectedRevision: snapshot.revision,
+                      },
+                      windowId,
+                    );
+                  }),
+              )
+            }
+          >
+            <ListItemIcon>
+              <ShoppingBasketOutlined fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>{inBasket ? '从文件篮移除' : '加入文件篮'}</ListItemText>
+          </MenuItem>
+        )}
         <MenuItem disabled={disabled} onClick={() => choose(setMove)}>
           <ListItemIcon>
             <DriveFileMoveOutlined fontSize="small" />
@@ -172,9 +198,10 @@ export function FileEntryMenu({
           <ListItemIcon sx={{ color: 'inherit' }}>
             <DeleteOutline fontSize="small" />
           </ListItemIcon>
-          <ListItemText>删除文件</ListItemText>
+          <ListItemText>{entry?.kind === 'snippet' ? '删除' : '删除文件'}</ListItemText>
         </MenuItem>
       </Menu>
+      <Snackbar open={copied} autoHideDuration={1600} onClose={() => setCopied(false)} message="已复制" />
       {error && !deletion && (
         <Dialog open onClose={() => setError('')}>
           <DialogTitle>操作失败</DialogTitle>

@@ -13,6 +13,8 @@ import { useSystemControls } from './system-controls';
 import { WorkspaceSettings } from './workspace-settings';
 import { selectVisibility } from './visibility';
 import { WindowDragProvider } from './window-drag';
+import { appClipboard } from '../clipboard/app-clipboard';
+import { deviceClipboard } from '../clipboard/device-clipboard';
 
 // Only the administrator downloads the console App.
 const AdminApp = lazy(() => import('./admin/console').then((m) => ({ default: m.AdminApp })));
@@ -26,6 +28,32 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
   const { auth, localLock, status } = workspaceState;
   const { state } = operationState;
   const showShell = !!state && !localLock && auth?.locked === false;
+  useEffect(() => {
+    const scope = showShell && status === 'online' ? auth.user.id : undefined;
+    const set = (text: string) => media.control.request('clipboard.set', { text });
+    appClipboard.configure(scope, set);
+    let active = true;
+    if (scope)
+      void media.control
+        .request('clipboard.get', {})
+        .then((value) => {
+          if (active) appClipboard.receive(value);
+        })
+        .catch(media.workspace.report);
+    return () => {
+      active = false;
+      appClipboard.configure(undefined, set);
+    };
+  }, [media, showShell, status, auth?.user.id]);
+  useEffect(() => {
+    const set = (text: string) => media.control.request('clipboard.set', { text });
+    deviceClipboard.configure(
+      showShell && status === 'online' ? auth.user.id : undefined,
+      state?.workspace.settings.workspace.clipboardSync ?? false,
+      set,
+    );
+    return () => deviceClipboard.configure(undefined, false, set);
+  }, [media, showShell, status, auth?.user.id, state?.workspace.settings.workspace.clipboardSync]);
   const stage = useWorkspaceStage(media, state, showShell);
   const controls = useSystemControls({
     media,

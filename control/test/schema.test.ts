@@ -9,7 +9,7 @@ import { ControlDatabase } from '../server/persistence/database';
 import { createSchema } from '../server/persistence/schema';
 function stripErrorColumns(db: import('better-sqlite3').Database) {
   db.exec(
-    'DROP TABLE download_import_failures; ALTER TABLE object_render_failures DROP COLUMN display_reason',
+    'DROP TABLE library_snippets; DROP TABLE download_import_failures; ALTER TABLE object_render_failures DROP COLUMN display_reason',
   );
   for (const [table, columns] of Object.entries({
     learning_downloads: ['error_code', 'error_message', 'retry_at', 'failed_usage'],
@@ -19,6 +19,60 @@ function stripErrorColumns(db: import('better-sqlite3').Database) {
     for (const column of columns) db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
   }
 }
+
+test('version fifteen classifies existing files and enables device clipboard sync', () => {
+  const store = new ControlDatabase(':memory:');
+  try {
+    store.db.exec(`DROP TABLE library_snippets; DROP TABLE schema_version;
+      CREATE TABLE schema_version(version INTEGER NOT NULL CHECK(version=15));
+      INSERT INTO schema_version VALUES (15);`);
+    const entry = {
+      id: 'file',
+      assetId: 'asset',
+      name: 'saved.txt',
+      type: 'text/plain',
+      size: 1,
+      createdAt: 0,
+      partitionId: 'saved',
+      source: null,
+      collected: false,
+    };
+    store.db.prepare('INSERT INTO file_library VALUES (?,?)').run(
+      'tenant',
+      JSON.stringify({
+        revision: 1,
+        entries: [entry],
+        partitions: [{ id: 'saved', name: 'Saved' }],
+        basket: [],
+        sources: [],
+        excludedSources: [],
+        basketPartitionId: null,
+      }),
+    );
+    store.db
+      .prepare('INSERT INTO user_settings VALUES (?,?)')
+      .run(
+        'tenant',
+        JSON.stringify({ workspace: { autoKeyboard: false }, browser: { memorySaverEnabled: true } }),
+      );
+    createSchema(store.db);
+    const snapshot = JSON.parse(
+      (store.db.prepare('SELECT snapshot FROM file_library').get() as { snapshot: string }).snapshot,
+    );
+    assert.deepEqual(snapshot.entries, [{ ...entry, kind: 'file' }]);
+    const settings = JSON.parse(
+      (store.db.prepare('SELECT data FROM user_settings').get() as { data: string }).data,
+    );
+    assert.equal(settings.workspace.clipboardSync, true);
+    assert.equal(settings.browser.memorySaverEnabled, true);
+    assert.deepEqual(
+      store.library.recordSnippet('tenant', 'copied', { kind: 'device' }, 1)?.entries[0].kind,
+      'snippet',
+    );
+  } finally {
+    store.db.close();
+  }
+});
 
 test('version fourteen migrates receipt codes and adds persistent scheduler evidence atomically', () => {
   const store = new ControlDatabase(':memory:');
@@ -75,7 +129,7 @@ test('version fourteen migrates receipt codes and adds persistent scheduler evid
       for (const column of columns) assert.ok(actual.has(column));
     }
     createSchema(store.db);
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').get(), { version: 15n });
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').get(), { version: 16n });
   } finally {
     store.db.close();
   }
@@ -107,7 +161,7 @@ test('version thirteen preserves placements and checkpoints and permits hibernat
     );
     assert.throws(() => store.db.exec("UPDATE session_placements SET state='unknown'"));
     createSchema(store.db);
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').get(), { version: 15n });
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').get(), { version: 16n });
   } finally {
     store.db.close();
   }
@@ -116,7 +170,7 @@ test('version thirteen preserves placements and checkpoints and permits hibernat
 test('fresh schema includes workspace spaces, installed apps, favorites and usage', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 15n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 16n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
@@ -214,7 +268,7 @@ test('databases at another schema version are rejected', async () => {
       ['unversioned', 'CREATE TABLE users (id TEXT)'],
       ['previous', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (11)'],
       ['older', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1)'],
-      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (16)'],
+      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (17)'],
       [
         'ambiguous',
         'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1),(1)',
@@ -256,7 +310,7 @@ test('version twelve migrates render outcomes and classifies saved study documen
         .run('tenant', entry.id, entry.id, entry.id);
     createSchema(store.db);
     createSchema(store.db);
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').get(), { version: 15n });
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').get(), { version: 16n });
     assert.deepEqual(store.db.prepare('SELECT key,document FROM learning_downloads ORDER BY key').all(), [
       { key: 'document', document: 1n },
       { key: 'image', document: 0n },
@@ -266,7 +320,7 @@ test('version twelve migrates render outcomes and classifies saved study documen
       JSON.parse(
         (store.db.prepare('SELECT snapshot FROM file_library').get() as { snapshot: string }).snapshot,
       ),
-      { entries },
+      { entries: entries.map((entry) => ({ ...entry, kind: 'file' })) },
     );
   } finally {
     store.db.close();

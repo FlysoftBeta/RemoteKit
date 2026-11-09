@@ -16,7 +16,7 @@ import type { NodeRegistry } from './cluster/node-link';
 import { FileLibrary } from './files/library';
 import type { createHttp } from './http/server';
 import type { ControlDatabase } from './persistence/database';
-import { warnClipboardOversize } from './persistence/clipboards';
+import { ClipboardService } from './clipboard';
 import { TenantRegistry } from './tenants/tenant-registry';
 import { systemClock, type Clock } from './util/clock';
 import { RtcSignaling } from './viewers/rtc-signaling';
@@ -59,6 +59,7 @@ export interface DomainServices extends DomainContext {
   policy: SitePolicy;
   security: ViewerSecurity;
   library: FileLibrary;
+  clipboard: ClipboardService;
   workspace: Workspace;
   learning: LearningService;
   accounts: AccountService;
@@ -125,6 +126,7 @@ export function createApplication(
     (tenant, requestId) => services.workspace.fileSourceForRequest(tenant, requestId),
   );
   services.learning = new LearningService(context, services);
+  services.clipboard = new ClipboardService(context, services);
   services.security = new ViewerSecurity(
     store,
     endpoint,
@@ -162,18 +164,7 @@ export function createApplication(
   });
   const unsubscribeSignals = endpoint.onSignal?.((event) => services.rtc.receiveSignal(event));
   const unsubscribeClipboard = endpoint.onClipboardChanged((event) => {
-    void context.tenants
-      .serial(event.tenantId, async () => {
-        if (endpoint.placement.peek(event.tenantId)?.sessionId !== event.sessionId) return;
-        const user = store.accounts.userForTenant(event.tenantId);
-        if (!user) return;
-        if (event.oversize === true) {
-          warnClipboardOversize(event.textBytes, event.htmlBytes);
-          return;
-        }
-        store.clipboards.record(user.id, { text: event.text, html: event.html });
-      })
-      .catch(() => console.warn('Clipboard write failed'));
+    void services.clipboard.changed(event).catch(() => console.warn('Clipboard write failed'));
   });
   services.close = async () => {
     context.closed = true;

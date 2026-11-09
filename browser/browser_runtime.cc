@@ -72,12 +72,13 @@ class ServiceIoClipboard final : public base::CurrentThread::DestructionObserver
 }  // namespace
 
 BrowserRuntime::BrowserRuntime() {
-  clipboard = std::make_unique<ClipboardBridge>(base::BindRepeating(
-      [](BrowserRuntime* runtime, uint64_t sequence) {
-        if (runtime->output)
-          runtime->output->PublishClipboardSequence(sequence);
-      },
-      base::Unretained(this)));
+  clipboard = std::make_unique<ClipboardBridge>(
+      views, base::BindRepeating(
+                 [](BrowserRuntime* runtime, uint64_t sequence) {
+                   if (runtime->output)
+                     runtime->output->PublishClipboardSequence(sequence);
+                 },
+                 base::Unretained(this)));
   CHECK(!ui::TouchSelectionMenuRunner::GetInstance());
   selection_menu = std::make_unique<RemoteTouchSelectionMenuRunner>(views);
   context_menu = std::make_unique<RemoteContextMenu>(views);

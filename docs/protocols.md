@@ -19,13 +19,14 @@
 
 POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字段。
 
-**WebSocket `/api/socket`**：上限 1MiB，每连接最多 32 个在途请求，请求 ID ≤128 字符。
+**WebSocket `/api/socket`**：普通请求上限 1MiB，`clipboard.set` 允许 1MiB UTF-8 文本的 JSON 转义（传输上限 6MiB+64KiB），每连接最多 32 个在途请求，请求 ID ≤128 字符。
 
 ```
 请求  {id, method, params}
 成功  {type:"result", id, result}
 失败  {type:"error", id, error:{code, message, retryAfterMs?}}
 推送  {type:"state", revision, state}       产品快照（锁定时不推送）
+      {type:"clipboard", revision, text}     当前应用剪贴板（仅已授权 Viewer）
       {type:"auth", auth}                   锁定状态
       {type:"rtc.signal", connectionId, attemptId, signal}
       {type:"lease", status:"revoked", reason:"another-viewer"|"logout"}
@@ -47,6 +48,8 @@ POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字
 | `admin.publishAnnouncement/updateAnnouncement/deleteAnnouncement` | 管理员：发布 `{title, body}`、按 `id` 编辑（`republish` 清空已读）或删除，返回新的公告列表 |
 | `announcement.read` | 当前用户把公告 `id` 标为已读（幂等） |
 | `library.get/import/replace/basket/group/move/delete/prepare/finish` | 文件目录与选择事务 |
+| `library.snippet` / `library.copySnippet` | `{id}` → `{text}` / `{revision,text}`；取片段全文或复制回应用剪贴板 |
+| `clipboard.get` / `clipboard.set` | `{}` → `{revision,text}` / `{text}` → `{revision}`，当前用户剪贴板 |
 | `diagnostics.start/sample/stop/status` | 诊断收集 |
 
 其余产品动作只走 DataChannel，WS 不提供旁路。
@@ -129,6 +132,7 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 | 方法 | 说明 |
 |---|---|
 | `session.open` | 创建或确认 Session：sessionId、placementEpoch、checkpoint、profileKey、可选 clipboard {revision,text,html}（在任何 view 之前写入 Browser）；其他方法只对已打开的 Tenant 有效 |
+| `clipboard.write` | `{revision,text,html}`，在线更新 Browser 剪贴板；作用域抑制回传 |
 | `session.hibernate` | 优雅关闭 Browser 并生成 checkpoint，回复 manifest id；有阻塞项时 `conflict` |
 | `session.ensure` | 启动/取得 Session，幂等；返回 browserIncarnation 与恢复状态，不等导航 |
 | `session.snapshot` | 只读：views、stats、pendingPopups、未确认事件、导航操作；不启动 Browser；`outputDiagnostics:true` 附输出状态 |
@@ -196,3 +200,5 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 - peer 关闭与 `render_close` 是回调屏障，不是 GPU 完成证明。
 - `set_playout_delay` 两个值都是 10ms 的倍数，`0 ≤ min ≤ max ≤ 40950`；已安装后不能取消（需重建 peer）。
 - `set_av_sync` 只能在 `set_remote_description` 之前调用，决定音频发送器的 stream id（与视频相同即接收端唇音同步），之后返回 INVALID_STATE。`set_audio_enabled` 运行期生效：音频发送器只在"媒体已授权且音频启用"时活动，禁用期间 `submit_audio` 接受并丢弃 PCM。
+
+Browser `clipboard.read` 返回 sequence/viewId/excludeFromHistory/text/html；Endpoint `clipboard.changed` 保留 Tenant/Session/browserSequence 并携带 viewId?、excludeFromHistory。正文仅在剪贴板与片段链路传递。

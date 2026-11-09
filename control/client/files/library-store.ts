@@ -171,6 +171,9 @@ export class LibraryStore extends Store<LibraryState> {
   recordUsage = (entryId: string, windowId: string) =>
     this.request('usage.record', { item: `file:${entryId}`, windowId });
 
+  snippet = (id: string) => this.request('library.snippet', { id });
+  copySnippet = (id: string) => this.request('library.copySnippet', { id });
+
   refresh = async () => {
     const epoch = this.epoch;
     const snapshot = await this.request('library.get', {});

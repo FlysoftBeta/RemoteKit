@@ -2,7 +2,7 @@
 
 Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、设置、站点偏好、文件目录和操作收据都只在 Control 的 SQLite 里。Endpoint 和 Browser 拥有"执行"：进程、WebContents、恢复数据、GPU 资源。Control 通过对账让执行趋向期望。Control 同时管理多个 Endpoint 节点，每个 Tenant 的请求路由到它被放置的节点（见[多节点](cluster.md)）。
 
-SQLite 带 `schema_version`（当前 15）。空库在一个事务里建表并写入版本。已有库按 `schema.ts` 的 `migrations` 逐步升级：每一步把版本 N 改写成 N+1 的格式（例如 12→13 给设置补 `autoKeyboard`、删掉站点偏好里的 `manualKeyboard`、建立转换失败表；13→14 给会话放置加 `hibernating` 状态；14→15 把操作收据改为 `failed` + 结构化错误、给后台任务记录错误码与重试时间），全部在同一事务里完成再写新版本；没有升级路径的版本、或已有表却没有版本的库拒绝启动，需要保留账户时用[凭据恢复](auth.md#凭据恢复)。读取路径只认当前格式，不在运行时补默认值。
+SQLite 带 `schema_version`（当前 16）。空库在一个事务里建表并写入版本。已有库按 `schema.ts` 的 `migrations` 逐步升级：每一步把版本 N 改写成 N+1 的格式（例如 12→13 给设置补 `autoKeyboard`、删掉站点偏好里的 `manualKeyboard`、建立转换失败表；13→14 给会话放置加 `hibernating` 状态；14→15 把操作收据改为 `failed` + 结构化错误、给后台任务记录错误码与重试时间），15→16 建立 `library_snippets`、给现有文件条目补 `kind:file`、给设置补默认开启的 `clipboardSync`。每个迁移版本只前进一次，全部在同一事务里完成再写新版本；没有升级路径的版本、或已有表却没有版本的库拒绝启动，需要保留账户时用[凭据恢复](auth.md#凭据恢复)。读取路径只认当前格式，不在运行时补默认值。
 
 ## 数据归属
 
@@ -132,13 +132,18 @@ Control 约每 1.5 秒对每个活跃 Tenant 做一次维护（不同 Tenant 互
 
 ## 剪贴板
 
-剪贴板归 Control 所有，每个用户一份，存最新值（历史记录和与用户设备的同步以后挂在同一个仓库接口后面）。Browser 的剪贴板只是缓存：粘贴读本地，不等网络；每次本地写入都上报给 Control，Session 打开时由 Control 回填。这样 Browser 重启、休眠、Session 换节点都不会丢失剪贴板。
+Control 保存每用户一份最新剪贴板，Browser 是本地粘贴缓存；历史片段也保存在 Control，不进入对象存储。Browser 重启、休眠或 Session 换节点后先回填再创建 view。
 
-- 记录的格式只有纯文本（≤1 MiB UTF-8）和 HTML（≤2 MiB）。超限的写入不记录：Control 保留原值并记一条不含内容的警告，Browser 在本次运行内仍保有它。只有图片等其他格式的写入记录为空剪贴板。
-- 上报：Browser 的 `ClipboardBridge` 观察 UI 线程剪贴板（页面复制/剪切、`navigator.clipboard`、`execCommand`、快捷菜单与上下文菜单命令都经过它），每次变化递增 `clipboard_sequence` 并写到共享映射头部。Endpoint 看到序号变化后调用 `clipboard.read` 取内容（较新的序号使在途读取作废），发管理事件 `clipboard.changed`；输出打开时和休眠/关闭 Browser 前也各读一次，补上映射不存在期间的写入。Control 按 Tenant 串行应用，revision 加一，不回推给产生它的 Browser。
-- 回填：`session.open` / `session.ensure` 带上 `clipboard {revision, text, html}`，Endpoint 在 Browser 启动后、创建或收养任何 view 之前调用 `clipboard.write`，页面看不到过期的空剪贴板。Browser 应用回填期间的写入不上报（显式的作用域状态，不靠时间判断）。
-- "重置浏览器数据"只接受已休眠的 Session（运行中返回 `conflict`"需先休眠"，与管理员面板一致：休眠要求用户离线），同时清除保存的剪贴板，下次启动的 Browser 从空剪贴板开始；删除用户删除它。
-- 剪贴板内容不进入日志、追踪、诊断包或错误消息，只记录大小与 revision。集群帧按消息类型放宽上限：`clipboard.changed` 4 MiB，带剪贴板的 `session.open`/`session.ensure` 20 MiB（JSON 转义后的最坏情况），其余消息仍是 1 MiB。
+- 最新值为纯文本（≤1 MiB UTF-8）与 HTML（≤2 MiB），有单调 revision。超限保留旧值，只报告大小；图片等无文本格式记录为空。正文不进入日志、追踪、诊断或错误消息。
+- `ClipboardBridge` 观察页面、脚本与 Browser 菜单写入，递增共享映射的 `clipboard_sequence`。Endpoint 按序号取 `clipboard.read`，发 `clipboard.changed {viewId?,excludeFromHistory,text,html,…}`；Control 按当前 Session/Tenant 串行接受，更新 revision 和片段，再向已授权 Viewer 推送 `{type:clipboard,revision,text}`。
+- 写入来源由 Chromium ClipboardEndpoint 的 WebContents 映射到 view/tab/app，记录页面 URL 与可用标题；无法归属时为 browser App。Chromium `kNoDisplay / kNoLocalClipboardHistory` 由补丁 `0019` 保留，`excludeFromHistory` 阻止片段记录，最新剪贴板仍正常更新。
+- `session.open / session.ensure` 携带 `{revision,text,html}`，只在 Browser incarnation 需要时回填。在线的 `clipboard.set {text}` 与 `library.copySnippet {id}` 通过独立 Endpoint `clipboard.write` 更新缓存，不被后续 ensure 的旧 seed 覆盖。Browser 用明确作用域抑制回填上报，不使用计时器。
+- Viewer 用 `clipboard.get {}` 恢复应用缓存，返回 `{revision,text}`；本地选择操作不依赖设备同步开关。`clipboard.set` 接受设备或本地选择写入，返回 `{revision}`。`library.snippet {id}` 按 Tenant 读取全文；复制片段返回 `{revision,text}`，保留原始来源。
+- 片段只记录非空纯文本，按用户+SHA-256 去重，重复复制更新时间和来源。`library_snippets(entry_id,tenant,text,hash,origin,copied_at)` 保存正文；目录带 `kind:snippet`、字节大小和首个非空行的 ≤200 字符预览。未整理保留最新 200 条，移入分区的保留；排除 `clipboard/''` 来源停止收集，清除来源删除未整理片段，已整理的保留。
+- “与本机剪贴板同步”（`clipboardSync`）默认开启。远端新值写设备剪贴板，未聚焦时只保留最新待写值；设备粘贴事件先同步再投远端。回到前台仅在 clipboard-read 已 granted 时读取，不自动请求权限；显式远端粘贴可发起读取。本地选择粘贴只在已授权时刷新设备，其余用应用缓存。scope/revision/文本 hash 防止跨账号和回声。
+- “重置浏览器数据”要求 Session 已休眠，清除最新剪贴板；历史片段仍由文件库管理。删除用户同时删除最新值与片段。
+- 集群帧按类型限制：`clipboard.changed` 4 MiB；带剪贴板的 `session.open/ensure` 20 MiB；在线 `clipboard.write` 20 MiB；其他 1 MiB。Viewer WS 普通请求仍为 1 MiB，`clipboard.set` 可容纳 1 MiB 文本最坏 JSON 转义，传输上限为 6 MiB+64 KiB。
+
 
 ## 设置
 
