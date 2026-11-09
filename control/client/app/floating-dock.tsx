@@ -42,6 +42,9 @@ export function FloatingDock({ actions }: { actions: FloatingActions }) {
   const [placement, setPlacement] = useState<Record<string, DockAnchor>>({});
   const [dragging, setDragging] = useState<{ id: string; x: number; y: number } | null>(null);
   const drag = useRef<Drag | null>(null);
+  // A tap runs on the button's own click, not on pointerup: an overlay opened on pointerup would
+  // sit under the finger and receive the tap's trailing click.
+  const tapped = useRef<string | null>(null);
   const layer = useRef<HTMLDivElement>(null);
   if (!list.length) return null;
   const allowed = (action: FloatingAction) => action.anchors ?? ALL_ANCHORS;
@@ -88,6 +91,7 @@ export function FloatingDock({ actions }: { actions: FloatingActions }) {
         onMouseDown={keepFocus}
         onPointerDown={(event) => {
           keepFocus(event);
+          tapped.current = null;
           if (!event.isPrimary || event.button !== 0) return;
           drag.current = {
             id: action.id,
@@ -111,7 +115,7 @@ export function FloatingDock({ actions }: { actions: FloatingActions }) {
           drag.current = null;
           if (!current || current.pointer !== event.pointerId) return;
           if (!current.moved) {
-            if (!action.disabled) action.run();
+            tapped.current = action.id;
             return;
           }
           const anchor = nearest(action, event);
@@ -120,11 +124,13 @@ export function FloatingDock({ actions }: { actions: FloatingActions }) {
         }}
         onPointerCancel={() => {
           drag.current = null;
+          tapped.current = null;
           setDragging(null);
         }}
         onClick={(event) => {
-          // Pointer activation runs on pointerup; this handles keyboard activation only.
-          if (event.detail === 0 && !action.disabled) action.run();
+          const tap = tapped.current === action.id;
+          tapped.current = null;
+          if ((tap || event.detail === 0) && !action.disabled) action.run();
         }}
       >
         {icons[action.icon]}

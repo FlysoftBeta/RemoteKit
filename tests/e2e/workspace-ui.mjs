@@ -346,8 +346,15 @@ await runScenario('workspace-ui', async (v, stack) => {
 
   await step('start-button-opens-start', async () => {
     const active = group().id;
-    await page.getByRole('button', { name: '开始', exact: true }).click();
+    // A real press and release (touch when --pointer touch): the tap's trailing click must not
+    // land on the Start screen that the press just opened.
+    const box = await page.getByRole('button', { name: '开始', exact: true }).boundingBox();
+    await pointer.move(box.x + box.width / 2, box.y + box.height / 2);
+    await pointer.down();
+    await pointer.up();
     await startDialog().waitFor();
+    await page.waitForTimeout(500);
+    assert(await startDialog().isVisible(), 'Start stays open after the tap');
     assert(group().id === active, 'Start preserves group');
   });
 
