@@ -5,12 +5,13 @@ UI/UX 设计与架构设计之外的探索类、实现类任务可以交给 Code
 ## 运行
 
 ```sh
-tools/codex/run.sh <task-dir> <name> [low|medium|high]
+tools/codex/run.sh <task-dir> <name> [low|medium|high] [--resume <prior-name>]
 ```
 
-- `<task-dir>` 放在仓库外（会话 scratchpad 或 `develop/tmp/`），里面写 `<name>.body.md`（任务正文）。脚本把 `preamble.md` + 正文 + `rules.md` 拼成 `<name>.prompt.md`，输出 `<name>.log` 和 `<name>.result.md`（Codex 的最终消息）。只读调查或纯操作任务用不到实现规则时，建一个空文件 `<name>.norules` 跳过 `rules.md`。
+- `<task-dir>` 放在仓库外（会话 scratchpad 或 `develop/tmp/`），里面写 `<name>.body.md`（任务正文）。脚本把 `preamble.md` + 正文 + `rules.md` 拼成 `<name>.prompt.md`，输出 `<name>.log`、`<name>.session`（会话 ID）和 `<name>.result.md`（Codex 的最终消息）。只读调查或纯操作任务用不到实现规则时，建一个空文件 `<name>.norules` 跳过 `rules.md`。
 - 实际命令是 `codex exec -m gpt-6.1-sol -c model_reasoning_effort=<effort> -c project_doc_max_bytes=0 --dangerously-bypass-approvals-and-sandbox -o <result>`。`project_doc_max_bytes=0` 让它不读 `AGENTS.md`（那里的流程约定是写给主对话的，会干扰它）。
 - 强度：实现、调查、真实栈验证用 `high`；上传这类机械操作用 `low`。
+- **分阶段**：`--resume <prior-name>` 在同一会话里继续之前那次运行（同一 `<task-dir>`），把 `<name>.body.md` 作为下一条消息发出，不再拼 `preamble.md`，`rules.md` 照常追加（有 `<name>.norules` 则不追加）。典型用法：机器正被计时实验或别的构建占用时，先跑只读调查（`.norules`，正文写明"只读代码、不构建、不起栈"，并在正文里附上完整任务），等资源空出来再用 `--resume` 让同一会话按自己的调查结论实现与验证，省掉重新调查。
 - 长任务在后台运行，等完成通知；不要轮询。偶发的 `model at capacity`、TLS 握手失败是服务端问题，原样重跑即可。
 - 用 Write 工具写提示文件。Windows 上用 shell heredoc 或 `sed`/`node -e` 处理含反斜杠的路径时容易被转义吃掉，路径一律写成正斜杠。
 
