@@ -153,8 +153,13 @@ struct ImeCommit {
 };
 struct SelectionCommand {
   std::uint64_t menu{};
-  enum class Command { cut, copy, paste, select_all, context_menu };
+  enum class Command { cut, copy, paste, select_all, context_menu, dismiss };
   Command command{};
+};
+struct SelectionExtent {
+  enum class Which { start, end, insertion };
+  Which which{};
+  double x{}, y{};
 };
 struct ContextCommand {
   std::uint64_t menu{};
@@ -172,6 +177,9 @@ struct ContextCommand {
   };
   Command command{};
 };
+struct EditingDismiss {
+  std::uint64_t target{}, revision{};
+};
 struct ImeCancel {};
 struct ImeFinish {};
 using InputPayload = std::variant<KeyInput,
@@ -184,7 +192,9 @@ using InputPayload = std::variant<KeyInput,
                                   ImeCancel,
                                   ImeFinish,
                                   SelectionCommand,
-                                  ContextCommand>;
+                                  SelectionExtent,
+                                  ContextCommand,
+                                  EditingDismiss>;
 struct InputEvent {
   InputToken token;
   std::uint64_t sequence{};
@@ -196,6 +206,7 @@ Status ValidateInput(const InputPayload&);
 inline constexpr std::uint32_t kMouseButtonModifiers =
     (1u << 6) | (1u << 7) | (1u << 8) | (1u << 20) | (1u << 21);
 bool IsHoverInput(const InputPayload&);
+bool IsDismissInput(const InputPayload&);
 
 // A deterministic bookkeeping model. Request/complete calls do not execute browser work.
 // The host authenticates tenant before selecting a session and serializes all access.

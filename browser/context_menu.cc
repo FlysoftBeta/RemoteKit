@@ -7,7 +7,10 @@
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "browser/view_registry.h"
+#include "browser/touch_selection.h"
+#include "content/browser/renderer_host/render_widget_host_view_base.h"  // nogncheck
 #include "content/public/browser/context_menu_params.h"
+#include "content/public/browser/clipboard_types.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
 #include "third_party/blink/public/common/context_menu_data/edit_flags.h"
@@ -25,8 +28,10 @@ constexpr std::array edit_names = {"undo", "redo", "cut", "copy", "paste", "sele
 bool AllowedUrl(const GURL& url) {
   return url.is_valid() && url.SchemeIsHTTPOrHTTPS() && url.spec().size() <= 2048;
 }
-void CopyAddress(const std::string& address) {
-  ui::ScopedClipboardWriter(ui::ClipboardBuffer::kCopyPaste).WriteText(base::UTF8ToUTF16(address));
+void CopyAddress(const std::string& address, content::RenderFrameHost& frame) {
+  ui::ScopedClipboardWriter writer(ui::ClipboardBuffer::kCopyPaste);
+  content::AddSourceDataToClipboardWriter(writer, frame);
+  writer.WriteText(base::UTF8ToUTF16(address));
 }
 const char* Source(ui::mojom::MenuSourceType source) {
   switch (source) {
@@ -127,12 +132,18 @@ void RemoteContextMenu::Close() {
   auto* contents = web_contents();
   Observe(nullptr);
   if (contents) {
+    ResetTouchSelection(
+        static_cast<content::RenderWidgetHostViewBase*>(contents->GetRenderWidgetHostView()));
     contents->SetShowingContextMenu(false);
     contents->NotifyContextMenuClosed(GURL());
   }
 }
 void RemoteContextMenu::CloseFor(content::WebContents* contents) {
   if (contents == web_contents())
+    Close();
+}
+void RemoteContextMenu::CloseFor(SessionId session, WebViewId view) {
+  if (open_ && open_->session == session && (!view || open_->view == view))
     Close();
 }
 void RemoteContextMenu::Prune() {
@@ -157,8 +168,11 @@ Result<base::DictValue> RemoteContextMenu::Details(SessionId session,
   return {open_->details.Clone(), {}};
 }
 Status RemoteContextMenu::Execute(SessionId session, WebViewId view, const ContextCommand& value) {
-  if (!value.menu || StateFor(session, view).menu_id != value.menu)
+  if (!value.menu || StateFor(session, view).menu_id != value.menu) {
+    if (value.command == ContextCommand::Command::dismiss)
+      return {};
     return {ErrorCode::kConflict, "Context menu changed"};
+  }
   auto* frame = open_->document.AsRenderFrameHostIfValid();
   auto* contents = web_contents();
   using Command = ContextCommand::Command;
@@ -201,13 +215,13 @@ Status RemoteContextMenu::Execute(SessionId session, WebViewId view, const Conte
       contents->SelectAll();
       break;
     case Command::copy_link_address:
-      CopyAddress(*open_->details.FindDict("link")->FindString("url"));
+      CopyAddress(*open_->details.FindDict("link")->FindString("url"), *frame);
       break;
     case Command::copy_image:
       frame->CopyImageAt(open_->x, open_->y);
       break;
     case Command::copy_image_address:
-      CopyAddress(*open_->details.FindDict("image")->FindString("src"));
+      CopyAddress(*open_->details.FindDict("image")->FindString("src"), *frame);
       break;
     case Command::dismiss:
       break;

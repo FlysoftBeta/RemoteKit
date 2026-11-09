@@ -215,7 +215,10 @@ int main() {
   CHECK(ValidateInput(ContextCommand{UINT64_MAX, ContextCommand::Command::dismiss}));
   CHECK(!ValidateInput(ContextCommand{}));
   CHECK(!ValidateInput(ContextCommand{1, static_cast<ContextCommand::Command>(10)}));
-  CHECK(!ValidateInput(SelectionCommand{1, static_cast<SelectionCommand::Command>(5)}));
+  CHECK(ValidateInput(SelectionCommand{1, SelectionCommand::Command::dismiss}));
+  CHECK(ValidateInput(SelectionCommand{0, SelectionCommand::Command::dismiss}));
+  CHECK(!ValidateInput(SelectionCommand{0, SelectionCommand::Command::copy}));
+  CHECK(!ValidateInput(SelectionCommand{1, static_cast<SelectionCommand::Command>(6)}));
   GestureInput long_press{GestureInput::Action::long_press, "touch-1", 500000};
   long_press.x = 10;
   long_press.y = 20;

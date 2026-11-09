@@ -34,6 +34,12 @@ export interface InputSnapshot {
   queued: number;
   sent: number;
 }
+function isDismiss(event: Record<string, unknown>) {
+  return (
+    event.type === 'editing.dismiss' ||
+    ((event.type === 'selection_command' || event.type === 'context_command') && event.command === 'dismiss')
+  );
+}
 export class InputPipeline {
   nextSequence() {
     return String(++this.sequence);
@@ -222,6 +228,7 @@ export class InputPipeline {
   }
 
   private queuedInputCurrent(item: QueuedInput) {
+    if (isDismiss(item.event)) return item.surface;
     const current = this.ports.layout()?.views.find((view) => view.id === item.surface.id);
     if (
       current &&
@@ -272,8 +279,9 @@ export class InputPipeline {
   sendInput(surface: Surface, event: Record<string, unknown>) {
     if (this.ports.scope().locked || this.ports.scope().epoch === 0) return false;
     const terminalTouch =
-      (event.type === 'touch' || event.type === 'gesture') &&
-      (event.action === 'cancel' || event.action === 'end' || event.action === 'momentumEnd');
+      isDismiss(event) ||
+      ((event.type === 'touch' || event.type === 'gesture') &&
+        (event.action === 'cancel' || event.action === 'end' || event.action === 'momentumEnd'));
     if (
       this.ports.channel()?.readyState !== 'open' ||
       !this.ports.layout() ||
@@ -287,8 +295,10 @@ export class InputPipeline {
       );
       return false;
     }
-    const current = this.ports.layout()!.views.find((view) => view.id === surface.id);
-    if (!current || !samePlane(current, surface)) {
+    const current = isDismiss(event)
+      ? surface
+      : this.ports.layout()!.views.find((view) => view.id === surface.id);
+    if (!current || (!isDismiss(event) && !samePlane(current, surface))) {
       this.traceInput('blocked', surface, event, 'stale-surface');
       return false;
     }
@@ -301,8 +311,11 @@ export class InputPipeline {
       this.touchInputStats.dropped++;
       return false;
     }
-    const pending = this.pendingFocus?.view === surface.id ? this.pendingFocus : undefined;
-    if (pending && !pending.focused) {
+    const pending =
+      this.pendingFocus?.view === surface.id && (!isDismiss(event) || this.pendingFocus.focused)
+        ? this.pendingFocus
+        : undefined;
+    if (pending && !pending.focused && !isDismiss(event)) {
       this.traceInput('blocked', surface, event, 'blur-pending');
       return false;
     }
@@ -364,12 +377,11 @@ export class InputPipeline {
         this.reportInputDelivery(item, 'discarded', undefined, 'stale-input-identity');
         continue;
       }
-      if (!this.ports.canInput(current.id)) break;
+      if (!isDismiss(item.event) && !this.ports.canInput(current.id)) break;
       this.queuedInput.shift();
       const sequence = this.nextSequence();
       try {
-        this.ports.send({
-          type: 'input',
+        const target = {
           view: current.id,
           session: current.session,
           instance: current.instance,
@@ -378,8 +390,17 @@ export class InputPipeline {
           outputGeneration: item.generation,
           layoutEpoch: item.epoch,
           sequence,
-          event: item.event,
-        });
+        };
+        this.ports.send(
+          item.event.type === 'editing.dismiss'
+            ? {
+                ...target,
+                type: 'editing.dismiss',
+                target: String(item.event.target),
+                revision: String(item.event.revision),
+              }
+            : { ...target, type: 'input', event: item.event },
+        );
       } catch {
         this.touchInputStats.dropped++;
         this.reportInputDelivery(item, 'discarded', undefined, 'channel-send-failed');

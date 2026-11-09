@@ -31,6 +31,8 @@ const message = (
   revision,
   view: surface,
   editable: {
+    focusSource: active ? 'pointer' : 'other',
+    focusRevision: revision,
     type: active ? 1 : 0,
     active,
     target,

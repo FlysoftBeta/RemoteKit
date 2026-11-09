@@ -39,11 +39,11 @@ export function ContextMenu({
     () =>
       new ContextMenuInteraction({
         command: (command) => {
-          const current = transport.presentation.layout?.views.find((view) =>
+          const current = command === 'dismiss' ? surface : transport.presentation.layout?.views.find((view) =>
             sameEditingDocument(view, surface),
           );
           if (!current) return;
-          transport.input.ensureInputFocus(current);
+          if (command !== 'dismiss') transport.input.ensureInputFocus(current);
           transport.input.sendInput(current, { type: 'context_command', menu: menu.id, command });
         },
         product: (action) => {

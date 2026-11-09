@@ -207,6 +207,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     this.systemDismissalSeen = this.resize.keyboardDismissals;
     const dismissedCurrentKeyboard = observedDismissal && !replaced && this.softInputFocused;
     if (dismissedCurrentKeyboard) {
+      this.dismissRemoteEditable();
       policy.systemDismissed();
     }
     const now = performance.now();
@@ -215,6 +216,9 @@ export class EditingView extends Store<EditingViewSnapshot> {
       enabled: this.keyboardEnabled,
       autoOpen: this.autoOpen,
       editor: this.ports.editing.mobileEditing.keyboardObservation(this.editingSurface),
+      revision: this.ports.editing.mobileEditing.current?.revision ?? '0',
+      focusRevision: this.remoteEditable?.editable.focusRevision ?? '0',
+      focusSource: this.remoteEditable?.editable.focusSource ?? 'other',
       focused: this.softInputFocused,
       ready: this.keyboardReady && !this.resize.blocksInput(),
       now,
@@ -303,7 +307,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     if (!this.editing.composing) this.resetEditor();
   };
   toggleKeyboard = () => {
-    if (this.keyboardShown) this.hideKeyboard();
+    if (this.keyboardShown) this.dismissRemoteEditable();
     else if (this.surface && this.keyboardReady && !this.resize.blocksInput()) {
       this.keyboardSession.activate(true);
       this.focusEditor(true, true);
@@ -374,6 +378,21 @@ export class EditingView extends Store<EditingViewSnapshot> {
     node.inputMode = 'none';
     this.finishLocalEditing();
   };
+  private dismissRemoteEditable = () => {
+    const editable = this.remoteEditable;
+    this.hideKeyboard();
+    if (!editable) return;
+    this.sendEditDismiss(editable.editable.target, editable.revision);
+  };
+  private sendEditDismiss(target: string, revision: string) {
+    const event = { type: 'editing.dismiss', target, revision };
+    if (this.remoteOwner && this.deferredEditing.pending) {
+      this.deferredEditing.enqueue(this.remoteOwner, event);
+      return;
+    }
+    const surface = this.editingSurface;
+    if (surface) this.ports.input.sendInput(surface, event);
+  }
   focusEditor = (allowSoftKeyboard: boolean, userRequested = false) => {
     const node = this.editor;
     if (!node || !this.editorOwner) return false;

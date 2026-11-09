@@ -5,6 +5,7 @@
 #include "browser/webview_navigation.h"
 #include "browser/webview_input.h"
 #include "browser/webview_lifecycle.h"
+#include "browser/touch_selection.h"
 
 namespace remotekit::browser {
 TouchController::TouchController(WebView& owner) : owner_(owner) {}
@@ -106,6 +107,8 @@ Status TouchController::Momentum(const GestureInput& gesture) {
     auto value = gesture;
     value.x += touch_root_offset_x_;
     value.y += touch_root_offset_y_;
+    ShowInsertionMenu(owner_.input_->pointer_root_view_.get(),
+                      gfx::PointF(static_cast<float>(value.x), static_cast<float>(value.y)));
     return client_gesture_bridge_->LongPress(value);
   }
   if (!TouchTargetAlive() || !client_gesture_bridge_)

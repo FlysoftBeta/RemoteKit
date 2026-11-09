@@ -146,6 +146,8 @@ test('editing controller defers edits through presentation loss and expires them
   const editor = {
     value: '',
     inputMode: 'none',
+    addEventListener() {},
+    removeEventListener() {},
     setSelectionRange() {},
     focus() {
       document.activeElement = editor;
@@ -162,6 +164,8 @@ test('editing controller defers edits through presentation loss and expires them
     revision: '1',
     view: surface,
     editable: {
+      focusSource: 'pointer',
+      focusRevision: '1',
       type: 1,
       flags: 0,
       active: true,
@@ -194,7 +198,7 @@ test('editing controller defers edits through presentation loss and expires them
   );
   const resize = { waiting: false, keyboardOpen: false, keyboardDismissals: 0, blocksInput: () => false };
   view.configure(true, false, resize);
-  view.activateKeyboard();
+  view.toggleKeyboard();
   ready = false;
   view.sendEdit({ type: 'ime_commit', text: 'first' });
   assert.equal(sent.length, 0);
@@ -208,4 +212,24 @@ test('editing controller defers edits through presentation loss and expires them
   view.observe();
   assert.equal(sent.filter((event) => event.text === 'expired').length, 0);
   assert.ok(view.getSnapshot().error);
+  sent.length = 0;
+  view.compositionStart();
+  view.compositionUpdate('finish');
+  view.toggleKeyboard();
+  assert.deepEqual(
+    sent.map((event) => event.type),
+    ['ime_set', 'ime_commit', 'editing.dismiss'],
+  );
+  assert.equal(sent[2].target, '31');
+  assert.equal(sent[2].revision, '1');
+  sent.length = 0;
+  view.toggleKeyboard();
+  view.configure(true, false, { ...resize, keyboardDismissals: 1 });
+  assert.deepEqual(
+    sent.map((event) => event.type),
+    ['editing.dismiss'],
+  );
+  sent.length = 0;
+  view.release();
+  assert.deepEqual(sent, []);
 });

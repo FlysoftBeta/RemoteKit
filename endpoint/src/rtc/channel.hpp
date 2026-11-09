@@ -51,6 +51,7 @@ class ChannelController : private ControllerContext {
   void QueueMessage(Json message);
   DataRouter::Hooks MakeRouterHooks();
   void Bind(uint64_t handle);
+  void CloseMenus();
   void Clear();
   void Revoke();
   void Opened(uint64_t handle);

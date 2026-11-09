@@ -287,8 +287,8 @@ Result<InputPayload> DecodeSelectionCommand(const base::DictValue* event) {
   SelectionCommand value;
   const auto* menu = event->FindString("menu");
   const auto* command = event->FindString("command");
-  if (!menu || !ReadId(*event, "menu", &value.menu) || *menu != base::NumberToString(value.menu) ||
-      !command)
+  if (!menu || !base::StringToUint64(*menu, &value.menu) ||
+      *menu != base::NumberToString(value.menu) || !command)
     return PayloadError("invalid_selection_command");
   if (*command == "cut")
     value.command = SelectionCommand::Command::cut;
@@ -298,10 +298,31 @@ Result<InputPayload> DecodeSelectionCommand(const base::DictValue* event) {
     value.command = SelectionCommand::Command::paste;
   else if (*command == "selectAll")
     value.command = SelectionCommand::Command::select_all;
+  else if (*command == "dismiss")
+    value.command = SelectionCommand::Command::dismiss;
   else if (*command == "contextMenu")
     value.command = SelectionCommand::Command::context_menu;
   else
     return PayloadError("invalid_selection_command");
+  return {value, {}};
+}
+Result<InputPayload> DecodeSelectionExtent(const base::DictValue* event) {
+  const auto* which = event->FindString("which");
+  const auto x = Number(*event, "x");
+  const auto y = Number(*event, "y");
+  if (!which || !x || !y)
+    return PayloadError("invalid_selection_extent");
+  SelectionExtent value;
+  if (*which == "start")
+    value.which = SelectionExtent::Which::start;
+  else if (*which == "end")
+    value.which = SelectionExtent::Which::end;
+  else if (*which == "insertion")
+    value.which = SelectionExtent::Which::insertion;
+  else
+    return PayloadError("invalid_selection_extent");
+  value.x = *x;
+  value.y = *y;
   return {value, {}};
 }
 Result<InputPayload> DecodeContextCommand(const base::DictValue* event) {
@@ -329,12 +350,21 @@ Result<InputPayload> DecodeContextCommand(const base::DictValue* event) {
   }
   return PayloadError("invalid_context_command");
 }
+Result<InputPayload> DecodeEditingDismiss(const base::DictValue* event) {
+  EditingDismiss value;
+  if (!ReadId(*event, "target", &value.target) || !ReadId(*event, "revision", &value.revision) ||
+      *event->FindString("target") != base::NumberToString(value.target) ||
+      *event->FindString("revision") != base::NumberToString(value.revision))
+    return PayloadError("invalid_editing_dismiss");
+  return {value, {}};
+}
 Result<InputPayload> DecodePayload(const base::DictValue* event, std::string_view type) {
   struct Decoder {
     std::string_view type;
     Result<InputPayload> (*decode)(const base::DictValue*);
   };
   static constexpr Decoder decoders[] = {
+      {"editing.dismiss", DecodeEditingDismiss},
       {"ime_commit", DecodeIme},
       {"ime_set", DecodeIme},
       {"ime_cancel", DecodeIme},
@@ -342,6 +372,7 @@ Result<InputPayload> DecodePayload(const base::DictValue* event, std::string_vie
       {"key", DecodeKey},
       {"touch", DecodeTouch},
       {"selection_command", DecodeSelectionCommand},
+      {"selection.extent", DecodeSelectionExtent},
       {"context_command", DecodeContextCommand},
       {"gesture", DecodeGesture},
       {"mouse", DecodeMouse},

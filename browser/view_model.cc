@@ -96,12 +96,19 @@ Status ValidateInput(const InputPayload& p) {
                  v.elapsed_us <= 86400000000LL && Finite(v.cumulative_x, v.cumulative_y) &&
                  std::abs(v.cumulative_x) <= 1e7 && std::abs(v.cumulative_y) <= 1e7 &&
                  Finite(v.x, v.y) && std::abs(v.x) <= 1e7 && std::abs(v.y) <= 1e7;
+        else if constexpr (std::is_same_v<T, SelectionExtent>)
+          return v.which >= SelectionExtent::Which::start &&
+                 v.which <= SelectionExtent::Which::insertion && Finite(v.x, v.y) &&
+                 std::abs(v.x) <= 1e7 && std::abs(v.y) <= 1e7;
         else if constexpr (std::is_same_v<T, SelectionCommand>)
-          return v.menu && v.command >= SelectionCommand::Command::cut &&
-                 v.command <= SelectionCommand::Command::context_menu;
+          return (v.menu || v.command == SelectionCommand::Command::dismiss) &&
+                 v.command >= SelectionCommand::Command::cut &&
+                 v.command <= SelectionCommand::Command::dismiss;
         else if constexpr (std::is_same_v<T, ContextCommand>)
           return v.menu && v.command >= ContextCommand::Command::undo &&
                  v.command <= ContextCommand::Command::dismiss;
+        else if constexpr (std::is_same_v<T, EditingDismiss>)
+          return v.target && v.revision;
         else if constexpr (std::is_same_v<T, KeyInput>)
           return v.action >= KeyInput::Action::down && v.action <= KeyInput::Action::character &&
                  (v.action != KeyInput::Action::character || !v.text.empty()) &&
@@ -256,15 +263,26 @@ bool IsHoverInput(const InputPayload& payload) {
           mouse->action == MouseInput::Action::leave) &&
          mouse->button == 0 && !(mouse->modifiers & kMouseButtonModifiers);
 }
+bool IsDismissInput(const InputPayload& payload) {
+  if (std::holds_alternative<EditingDismiss>(payload))
+    return true;
+  if (const auto* command = std::get_if<SelectionCommand>(&payload))
+    return command->command == SelectionCommand::Command::dismiss;
+  if (const auto* command = std::get_if<ContextCommand>(&payload))
+    return command->command == ContextCommand::Command::dismiss;
+  return false;
+}
 Status ViewModel::AcceptInput(SessionId s, const InputEvent& e) {
   if (s != e.token.session)
     return Fail(ErrorCode::kConflict, "Input token session mismatch");
   auto v = MutableView(s, e.token.view);
   if (!v)
     return Fail(ErrorCode::kNotFound, "WebView not found in session");
-  if (e.token != Token(s, v->id).value || e.sequence <= v->last_sequence)
+  if ((!IsDismissInput(e.payload) && e.token != Token(s, v->id).value) ||
+      e.sequence <= v->last_sequence)
     return Fail(ErrorCode::kConflict, "Stale token or sequence");
-  if (v->actual != Residency::live || v->pending || (!v->focused && !IsHoverInput(e.payload)))
+  if (!IsDismissInput(e.payload) &&
+      (v->actual != Residency::live || v->pending || (!v->focused && !IsHoverInput(e.payload))))
     return Fail(ErrorCode::kConflict, "WebView cannot receive input");
   auto result = ValidateInput(e.payload);
   if (!result)

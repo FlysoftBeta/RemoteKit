@@ -103,6 +103,9 @@ test('context revisions are exact and independent, with stale-document messages 
   assert.equal(editing.getSnapshot(), latest);
   editing.handle({
     type: 'input.selection',
+    outputGeneration: '1',
+    layoutEpoch: '1',
+    handles: { start: null, end: null, insertion: null },
     version: 1,
     revision: '9999999999999999999',
     view: null,

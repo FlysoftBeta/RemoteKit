@@ -25,14 +25,14 @@ Json Action(unsigned n = 0) {
 }
 void ContextMenuTests() {
   using namespace remotekit;
-  static_assert(kSharedRenderVersion == 5);
-  static_assert(sizeof(SharedAtlasView) == 176);
-  static_assert(offsetof(SharedAtlasView, context_menu) == 160);
-  static_assert(sizeof(SharedAtlasFrame) == 11320);
-  static_assert(offsetof(SharedRenderMapping, slots) == 11392);
+  static_assert(kSharedRenderVersion == 8);
+  static_assert(sizeof(SharedAtlasView) == 256);
+  static_assert(offsetof(SharedAtlasView, context_menu) == 224);
+  static_assert(sizeof(SharedAtlasFrame) == 16440);
+  static_assert(offsetof(SharedRenderMapping, slots) == 16512);
   static_assert(offsetof(SharedRenderMapping, clipboard_sequence) == 24);
   static_assert(offsetof(SharedRenderMapping, latest_layout) == 32);
-  static_assert(sizeof(SharedRenderMapping) == 56704);
+  static_assert(sizeof(SharedRenderMapping) == 82304);
   DirectServices services;
   services.Bind(3);
   SharedAtlasFrame frame{};
@@ -51,7 +51,7 @@ void ContextMenuTests() {
     ++fetches;
     Check(identity["menu"] == "18446744073709551615", "context menu id preserves uint64");
     // Reenter services to ensure fetching holds no service mutex.
-    services.Selection(3, frame);
+    services.Selection(3, frame, 1);
     return Json{{"id", identity["menu"]}, {"x", 10}, {"y", 20}, {"source", "mouse"}};
   };
   std::vector<Json> sent;
@@ -134,7 +134,92 @@ void ContextMenuTests() {
         "suspension closes context menu without fetching");
   Check(fetches == 4, "only new nonzero menu identities cause a fetch");
 }
+void FocusProvenanceTests() {
+  using namespace remotekit;
+  DirectServices services;
+  services.Bind(1);
+  SharedAtlasFrame frame{};
+  frame.generation = 1;
+  frame.view_count = 1;
+  auto& view = frame.views[0];
+  view.session_id = view.webview_id = view.instance_generation = view.document_generation = 1;
+  view.text_input.flags = kAtlasTextInputActive;
+  view.text_input.type = 1;
+  view.text_input.target_id = 7;
+  view.text_input.focus_source = 3;
+  view.text_input.focus_observation = 1;
+  Json message;
+  auto observe = [&] {
+    services.Editable(1, frame);
+    services.Flush(1, [&](auto bytes) {
+      message = Json::parse(bytes);
+      return 0;
+    });
+  };
+  observe();
+  Check(
+      message["editable"]["focusSource"] == "script" && message["editable"]["focusRevision"] == "1",
+      "script focus provenance");
+  view.text_input.selection_end = 2;
+  ++view.focus_generation;
+  observe();
+  Check(message["revision"] == "2" && message["editable"]["focusRevision"] == "1",
+        "caret and input lease changes are not focus observations");
+  view.text_input.focus_source = 1;
+  ++view.text_input.focus_observation;
+  observe();
+  Check(message["editable"]["target"] == "7" && message["editable"]["focusSource"] == "pointer" &&
+            message["editable"]["focusRevision"] == "3",
+        "same editable pointer refocus is fresh");
+  view.text_input.focus_source = 2;
+  ++view.text_input.focus_observation;
+  observe();
+  Check(message["editable"]["focusSource"] == "keyboard" &&
+            message["editable"]["focusRevision"] == "4",
+        "keyboard traversal provenance");
+  view.text_input.flags = 0;
+  observe();
+  Check(
+      message["editable"]["focusSource"] == "other" && message["editable"]["focusRevision"] == "0",
+      "blur clears focus provenance");
+}
+void ViewportTests() {
+  remotekit::DirectServices services;
+  services.Bind(4);
+  remotekit::SharedAtlasFrame frame{};
+  frame.generation = 8;
+  frame.view_count = 1;
+  frame.views[0].webview_id = 7;
+  frame.views[0].page_height_dip = 500;
+  frame.views[0].occlusion_revision = 2;
+  services.Viewports(4, frame);
+  services.Flush(4, [](auto) { return 1; });
+  std::vector<Json> sent;
+  services.Flush(4, [&](auto bytes) {
+    sent.push_back(Json::parse(bytes));
+    return 0;
+  });
+  Check(sent.size() == 1 && sent[0]["type"] == "view.viewport" && sent[0]["pageHeight"] == 500 &&
+            sent[0]["occlusionRevision"] == "2",
+        "viewport feedback retries independently");
+  services.Viewports(4, frame);
+  services.Flush(4, [&](auto bytes) {
+    sent.push_back(Json::parse(bytes));
+    return 0;
+  });
+  Check(sent.size() == 1, "unchanged viewport is not resent");
+  services.Bind(5);
+  services.Viewports(5, frame);
+  services.Flush(5, [&](auto bytes) {
+    sent.push_back(Json::parse(bytes));
+    return 0;
+  });
+  Check(sent.size() == 2, "new peer receives current viewport");
+}
+
 int main() {
+  ViewportTests();
+  FocusProvenanceTests();
   ContextMenuTests();
   Check(remotekit::ProductActionEnvelope(Action(), 200), "valid action");
   auto invalid = Action();
@@ -280,6 +365,8 @@ int main() {
   view.text_input.type = 1;
   view.text_input.selection_end = 4;
   view.text_input.target_id = UINT64_MAX;
+  view.text_input.focus_source = 1;
+  view.text_input.focus_observation = 10;
   services.Editable(3, frame);
   view.text_input.selection_end = 7;
   services.Editable(3, frame);
@@ -290,6 +377,9 @@ int main() {
   });
   Check(sent.size() == 1 && sent[0]["editable"]["selectionEnd"] == 7 && sent[0]["revision"] == "2",
         "latest editable coalesces while advancing the revision");
+  Check(sent[0]["editable"]["focusSource"] == "pointer" &&
+            sent[0]["editable"]["focusRevision"] == "1",
+        "caret changes preserve focus provenance and revision");
   Check(sent[0]["view"]["document"] == "4" && !sent[0].contains("text"),
         "editable identity without contents");
   Check(sent[0]["editable"]["active"] == true &&
@@ -361,9 +451,11 @@ int main() {
                          40,
                          24,
                          0};
-  services.Selection(3, frame);
+  view.selection_menu.start = {10, 60, 40, 1};
+  view.selection_menu.end = {40, 60, 40, 1};
+  services.Selection(3, frame, 1);
   view.selection_menu.anchor_x = 11;
-  services.Selection(3, frame);
+  services.Selection(3, frame, 1);
   sent.clear();
   services.Flush(3, [&](auto bytes) {
     sent.push_back(Json::parse(bytes));
@@ -375,12 +467,17 @@ int main() {
             sent[0]["menu"]["commands"] == Json::array({"cut", "copy", "selectAll"}) &&
             sent[0]["menu"]["more"] == true,
         "selection publishes latest anchor, identity, uint64 id and fixed command order");
-  services.Selection(3, frame);
+  Check(sent[0]["handles"]["start"]["x"] == 10 && sent[0]["handles"]["end"]["lineHeight"] == 40 &&
+            sent[0]["handles"]["insertion"].is_null() &&
+            sent[0]["outputGeneration"] == std::to_string(frame.generation) &&
+            sent[0]["layoutEpoch"] == "1",
+        "selection publishes root DIP handles and layout identity");
+  services.Selection(3, frame, 1);
   services.Flush(3, [&](auto) {
     Check(false, "unchanged selection not resent");
     return 0;
   });
-  services.Selection(3, frame, true);
+  services.Selection(3, frame, 1, true);
   services.Flush(3, [&](auto) { return 1; });
   sent.clear();
   services.Flush(3, [&](auto bytes) {
@@ -391,7 +488,7 @@ int main() {
             sent[0]["revision"] == "3",
         "suspension clears selection and failed sends retry");
   services.RefreshEditable();
-  services.Selection(3, frame);
+  services.Selection(3, frame, 1);
   sent.clear();
   services.Flush(3, [&](auto bytes) {
     sent.push_back(Json::parse(bytes));
@@ -399,7 +496,7 @@ int main() {
   });
   Check(sent.size() == 1 && sent[0]["revision"] == "4", "refresh republishes selection");
   view.selection_menu = {};
-  services.Selection(3, frame);
+  services.Selection(3, frame, 1);
   sent.clear();
   services.Flush(3, [&](auto bytes) {
     sent.push_back(Json::parse(bytes));

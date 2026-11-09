@@ -8,6 +8,17 @@ namespace remotekit {
 using media::QpcFrequency;
 using media::QpcNow;
 using media::TraceIds;
+namespace {
+bool IsDismissal(const Json& command) {
+  if (command.value("type", Json()) == "editing.dismiss")
+    return true;
+  const auto event = command.find("event");
+  return command.value("type", Json()) == "input" && event != command.end() && event->is_object() &&
+         (event->value("type", Json()) == "selection_command" ||
+          event->value("type", Json()) == "context_command") &&
+         event->value("command", Json()) == "dismiss";
+}
+}  // namespace
 void InputController::ReplyInput(Json reply, const Json& request, uint64_t stamp) {
   const bool focus = request.is_object() && request.value("type", Json()) == "focus";
   const bool layout = request.is_object() && request.value("type", Json()) == "keyboard.layout";
@@ -39,14 +50,17 @@ void InputController::HandleData(const Event& event) {
     return event.peer == token.peer && event.authorization == token.stamp &&
            hooks_.revalidate(token);
   };
-  const auto admitted = [&] { return current_token() && hooks_.input_stamp() == token.stamp; };
+  const bool dismissal = IsDismissal(event.message);
+  const auto admitted = [&] {
+    return current_token() && (dismissal || hooks_.input_stamp() == token.stamp);
+  };
   if (event.value != 0 || !hooks_.admitted(event))
     return;
   auto command = event.message;
   if (command.is_discarded() || !command.is_object())
     return;
   auto type = command.value("type", std::string());
-  if (type != "input" && type != "focus" && type != "keyboard.layout")
+  if (type != "input" && type != "editing.dismiss" && type != "focus" && type != "keyboard.layout")
     return;
   const auto request = command;
   if (type == "keyboard.layout") {
@@ -69,7 +83,7 @@ void InputController::HandleData(const Event& event) {
     return;
   }
   const auto request_epoch = hooks_.epoch();
-  if (command.value("layoutEpoch", std::string()) != std::to_string(request_epoch)) {
+  if (!dismissal && command.value("layoutEpoch", std::string()) != std::to_string(request_epoch)) {
     RejectInput(ErrorCode::kConflict, "stale_layout_epoch", request, event);
     return;
   }
@@ -79,10 +93,17 @@ void InputController::HandleData(const Event& event) {
     RejectInput(ErrorCode::kForbidden, "wrong_session", request, event);
     return;
   }
+  if (type == "editing.dismiss") {
+    command["event"] = {
+        {"type", type}, {"target", command["target"]}, {"revision", command["revision"]}};
+    command.erase("target");
+    command.erase("revision");
+    type = "input";
+  }
   if (type == "input" && command.contains("event") && command["event"].is_object()) {
     const auto event_type = command["event"].value("type", std::string());
     if ((event_type == "mouse" || event_type == "wheel" || event_type == "touch" ||
-         event_type == "gesture") &&
+         event_type == "gesture" || event_type == "selection.extent") &&
         !hooks_.allows(command.value("view", std::string()), request_epoch)) {
       RejectInput(ErrorCode::kConflict, "view_not_ready", request, event);
       return;
@@ -104,6 +125,8 @@ void InputController::HandleData(const Event& event) {
                       rk_record.browser_sequence = *sequence;);
     }
   }
+  if (dismissal)
+    command.erase("outputGeneration");
   if (command.contains("outputGeneration")) {
     command["output_generation"] = command["outputGeneration"];
     command.erase("outputGeneration");
@@ -115,18 +138,20 @@ void InputController::HandleData(const Event& event) {
     // Only Browser's pre-admission BUSY is retryable. Keep the exact browser
     // sequence; an accepted asynchronous injection is never replayed.
     const auto deadline = QpcNow() + QpcFrequency() / 4;
-    auto response =
-        type == "input"
-            ? remotekit::RetryBrowserInput(
-                  command,
-                  [&](const Json& request) {
-                    return hooks_.rpc(request, input_control, 10000, 0, admitted);
-                  },
-                  [&] { return !stop_input && admitted() && request_epoch == hooks_.epoch(); },
-                  [&] { return QpcNow() >= deadline; },
-                  [] { std::this_thread::sleep_for(std::chrono::milliseconds(5)); },
-                  [&] { ++input_busy_retries; }, [&] { ++input_busy_exhausted; })
-            : hooks_.rpc(command, 0, 10000, 0, admitted);
+    auto response = type == "input"
+                        ? remotekit::RetryBrowserInput(
+                              command,
+                              [&](const Json& request) {
+                                return hooks_.rpc(request, input_control, 10000, 0, admitted);
+                              },
+                              [&] {
+                                return !stop_input && admitted() &&
+                                       (dismissal || request_epoch == hooks_.epoch());
+                              },
+                              [&] { return QpcNow() >= deadline; },
+                              [] { std::this_thread::sleep_for(std::chrono::milliseconds(5)); },
+                              [&] { ++input_busy_retries; }, [&] { ++input_busy_exhausted; })
+                        : hooks_.rpc(command, 0, 10000, 0, admitted);
     if (!response) {
       const auto& error = response.error();
       if (admitted())
@@ -153,16 +178,17 @@ void InputController::QueueInput(const Event& event) {
   if (!parsed.is_object())
     return;
   const auto type = parsed.value("type", std::string());
-  if (type != "input" && type != "focus" && type != "keyboard.layout")
+  if (type != "input" && type != "editing.dismiss" && type != "focus" && type != "keyboard.layout")
     return;
   // A Session keyboard layout can arrive before the first input-ready frame.
-  if (type != "keyboard.layout" && hooks_.input_stamp() != event.authorization) {
+  if (type != "keyboard.layout" && !IsDismissal(parsed) &&
+      hooks_.input_stamp() != event.authorization) {
     RejectInput(ErrorCode::kForbidden, "input_not_authorized", parsed, event);
     return;
   }
   // Validate arrival order before move coalescing can replace a newer packet.
   // The Browser keeps its independent Session counter across RTC reconnects.
-  if (type == "input" &&
+  if ((type == "input" || type == "editing.dismiss") &&
       (!parsed.contains("sequence") || !parsed["sequence"].is_string() ||
        !input_sequence.Admit(event.peer, parsed["sequence"].get<std::string>()))) {
     RejectInput(ErrorCode::kConflict, "stale_client_sequence", parsed, event);

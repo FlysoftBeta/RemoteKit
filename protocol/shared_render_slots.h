@@ -33,6 +33,11 @@ struct SharedAtlasSelectionMenu {
   float anchor_x, anchor_y, anchor_width, anchor_height;
   float handle_height;
   float reserved_float;
+  struct Handle {
+    float x, y, line_height;
+    std::uint32_t visible;
+  };
+  Handle start, end, insertion;
 };
 
 struct SharedAtlasTextInput {
@@ -42,6 +47,8 @@ struct SharedAtlasTextInput {
   float caret_x, caret_y, caret_width, caret_height;
   std::uint32_t selection_start, selection_end;
   std::uint32_t composition_start, composition_end;
+  std::uint32_t focus_source, reserved;
+  std::uint64_t focus_observation;
 };
 
 enum class SharedAtlasStatus : std::uint32_t {
@@ -69,6 +76,9 @@ struct SharedAtlasView {
   SharedAtlasTextInput text_input;
   SharedAtlasSelectionMenu selection_menu;
   SharedAtlasContextMenu context_menu;
+  std::uint32_t page_height_dip;
+  std::uint32_t viewport_reserved;
+  std::uint64_t occlusion_revision;
 };
 
 struct SharedAtlasFrame {
@@ -106,7 +116,7 @@ struct alignas(64) SharedRenderMapping {
   SharedRenderSlot slots[kSharedAtlasSlotCount];
 };
 inline constexpr std::uint32_t kSharedRenderMagic = 0x524B5253;  // RKRS
-inline constexpr std::uint32_t kSharedRenderVersion = 5;
+inline constexpr std::uint32_t kSharedRenderVersion = 8;
 inline constexpr std::uint32_t kRenderSlotCount = kSharedAtlasSlotCount;
 using RenderView = SharedAtlasView;
 using RenderFrame = SharedAtlasFrame;
@@ -114,19 +124,19 @@ static_assert(std::is_trivially_copyable_v<SharedRenderMapping>);
 static_assert(offsetof(SharedRenderSlot, publication_sequence) % 8 == 0);
 static_assert(offsetof(SharedRenderMapping, publication_sequence) % 8 == 0);
 static_assert(offsetof(SharedRenderSlot, frame) == 8);
-static_assert(sizeof(SharedAtlasTextInput) == 48);
-static_assert(sizeof(SharedAtlasSelectionMenu) == 40);
-static_assert(offsetof(SharedAtlasView, selection_menu) == 120);
+static_assert(sizeof(SharedAtlasTextInput) == 64);
+static_assert(sizeof(SharedAtlasSelectionMenu) == 88);
+static_assert(offsetof(SharedAtlasView, selection_menu) == 136);
 static_assert(sizeof(SharedAtlasContextMenu) == 16);
-static_assert(offsetof(SharedAtlasView, context_menu) == 160);
-static_assert(sizeof(SharedAtlasView) == 176);
-static_assert(sizeof(SharedAtlasFrame) == 11320);
-static_assert(sizeof(SharedRenderSlot) == 11328);
+static_assert(offsetof(SharedAtlasView, context_menu) == 224);
+static_assert(sizeof(SharedAtlasView) == 256);
+static_assert(sizeof(SharedAtlasFrame) == 16440);
+static_assert(sizeof(SharedRenderSlot) == 16448);
 static_assert(offsetof(SharedRenderMapping, clipboard_sequence) == 24);
 static_assert(offsetof(SharedRenderMapping, clipboard_sequence) % 8 == 0);
 static_assert(offsetof(SharedRenderMapping, latest_layout) == 32);
-static_assert(offsetof(SharedRenderMapping, slots) == 11392);
-static_assert(sizeof(SharedRenderMapping) == 56704);
+static_assert(offsetof(SharedRenderMapping, slots) == 16512);
+static_assert(sizeof(SharedRenderMapping) == 82304);
 // Only consumed_fences[slot] >= value releases that slot. UINT64_MAX means
 // device loss, never completion. No other slot's fence value releases it.
 }  // namespace remotekit

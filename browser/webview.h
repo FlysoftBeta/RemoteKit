@@ -91,6 +91,7 @@ class WebView final : public content::WebContentsObserver,
   Status CanShow() const;
   Status SetVisible(bool);
   Status Focus(bool);
+  void ReleaseRemoteInput();
   void ConfigureDevice(int width, int height, float scale = 1);
   // Keep page DPR applied as render views and backing hosts change.
   void RefreshBackingScale();

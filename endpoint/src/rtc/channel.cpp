@@ -90,7 +90,7 @@ void ChannelController::FlushSignals() {
   direct_services.Editable(peer_controller.Handle(), output.Slots().LatestMetadata(),
                            output.Suspended());
   direct_services.Selection(peer_controller.Handle(), output.Slots().LatestMetadata(),
-                            output.Suspended());
+                            presentation.Epoch(), output.Suspended());
   if (stamp && authorization.Current(stamp)) {
     const auto peer = peer_controller.Handle();
     direct_services.ContextMenu(
@@ -277,7 +277,11 @@ DataRouter::Hooks ChannelController::MakeRouterHooks() {
       .refresh = [this](const RtcEvent& event) { pipeline.RequestRefresh(event); },
       .data_state =
           [this](const RtcEvent& event) {
-            if (event.value == 1) {
+            if (event.value != 1) {
+              input.Stop();
+              CloseMenus();
+            } else {
+              input.Start(event.peer);
               pipeline.Refresh();
               presentation.QueueLayout();
               direct_services.RefreshEditable();
@@ -308,7 +312,17 @@ void ChannelController::QueueMessage(Json message) {
 void ChannelController::Bind(uint64_t handle) {
   control_outbox.Bind({handle, authorization.Stamp()});
 }
+void ChannelController::CloseMenus() {
+  if (!browser.Alive() || !browser.Rpc().Control())
+    return;
+  auto response = browser.Rpc().Request({{"method", "input"},
+                                         {"session", BrowserRuntime::kSessionId},
+                                         {"event", {{"type", "menus.close"}}}});
+  if (!response)
+    fprintf(stderr, "menu cleanup: %s\n", response.error().message.c_str());
+}
 void ChannelController::Clear() {
+  CloseMenus();
   data_router.Clear();
   direct_services.Bind(0);
   control_outbox.Bind({});
@@ -317,10 +331,12 @@ void ChannelController::Clear() {
 }
 void ChannelController::Revoke() {
   direct_services.Bind(0);
-  input.Clear();
+  input.Stop();
+  CloseMenus();
   control_outbox.Bind({});
 }
 void ChannelController::Opened(uint64_t handle) {
+  input.Start(handle);
   direct_services.Bind(handle, peer_controller.Connection());
   control_outbox.Bind({handle, authorization.Stamp()});
   presentation.QueueLayout();

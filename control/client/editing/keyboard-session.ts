@@ -5,6 +5,9 @@ export interface KeyboardContext {
   enabled: boolean;
   autoOpen: boolean;
   editor: EditorObservation;
+  revision: string;
+  focusRevision: string;
+  focusSource: 'pointer' | 'keyboard' | 'script' | 'other';
   focused: boolean;
   ready: boolean;
   now: number;
@@ -15,7 +18,7 @@ export interface KeyboardCommand {
 }
 
 /** Document entry and enabling auto-open arm automatic focus; media recovery never does.
- * Taps always arm. With auto-open off, a tap has 1500 ms to observe an active editor;
+ * Taps always arm. With auto-open off, a tap has 1500 ms to observe fresh pointer focus;
  * after that observation it can wait indefinitely for frame and resize readiness.
  * Disabling auto-open dismisses only automatic arms and never closes an attachment.
  * Unknown remote state is not a blur; authoritative NONE allows a short visual grace
@@ -27,6 +30,8 @@ export class KeyboardSession {
   private missingUntil?: number;
   private tapArmedUntil?: number;
   private tapArmed = false;
+  private tapRevision = 0n;
+  private pointerObserved = false;
   private explicitlyRequested = false;
   private systemHidden = false;
   get deadline() {
@@ -54,7 +59,15 @@ export class KeyboardSession {
         this.intent = 'dismissed';
     }
     if (this.tapArmedUntil !== undefined && next.now >= this.tapArmedUntil) this.dismiss();
-    if (next.editor === 'active') this.tapArmedUntil = undefined;
+    if (
+      this.tapArmed &&
+      next.editor === 'active' &&
+      next.focusSource === 'pointer' &&
+      BigInt(next.focusRevision) > this.tapRevision
+    ) {
+      this.pointerObserved = true;
+      this.tapArmedUntil = undefined;
+    }
     this.context = next;
     if (boundary) {
       this.missingUntil = undefined;
@@ -75,7 +88,9 @@ export class KeyboardSession {
     if (!c?.document || !c.enabled) return {};
     this.intent = 'armed';
     this.tapArmed = true;
-    this.tapArmedUntil = !c.autoOpen && c.editor !== 'active' ? now + 1500 : undefined;
+    this.tapRevision = BigInt(c.revision);
+    this.pointerObserved = false;
+    this.tapArmedUntil = !c.autoOpen && !explicit ? now + 1500 : undefined;
     this.explicitlyRequested = explicit;
     this.systemHidden = false;
     return this.openIfReady();
@@ -83,6 +98,12 @@ export class KeyboardSession {
   private openIfReady(): KeyboardCommand {
     const c = this.context;
     if (!c?.enabled || c.editor !== 'active' || !c.ready || this.intent !== 'armed') return {};
+    if (
+      !c.autoOpen &&
+      !this.explicitlyRequested &&
+      (!this.pointerObserved || c.focusSource !== 'pointer' || BigInt(c.focusRevision) <= this.tapRevision)
+    )
+      return {};
     // Consume even if the OS rejects the focus request. A render is not a retry.
     this.intent = 'attached';
     this.tapArmedUntil = undefined;
@@ -97,6 +118,7 @@ export class KeyboardSession {
   dismiss() {
     this.intent = 'dismissed';
     this.tapArmed = false;
+    this.pointerObserved = false;
     this.tapArmedUntil = undefined;
     this.missingUntil = undefined;
     this.explicitlyRequested = false;

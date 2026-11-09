@@ -4,6 +4,8 @@
 #include "browser/browser_runtime.h"
 #include "browser/control_input_codec.h"
 #include "browser/offscreen_host.h"
+#include "browser/context_menu.h"
+#include "browser/touch_selection.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 
@@ -41,6 +43,12 @@ Result<InputRequest> DecodeInput(const base::DictValue& wire, RequestEnvelope en
   request.view = decoder.Optional<uint64_t>("view");
   const auto* event = wire.FindDict("event");
   const auto* type = event ? event->FindString("type") : nullptr;
+  if (type && *type == "menus.close") {
+    if (!request.session || !*request.session || request.view || request.output_generation)
+      return {{}, {ErrorCode::kInvalidRequest, "Invalid menu cleanup"}};
+    request.input = InputRequest::MenusClose{};
+    return decoder.Finish(std::move(request));
+  }
   if (type && *type == "keyboard.layout") {
     auto layout = DecodeKeyboardLayout(*event);
     if (!request.session || !*request.session || request.view || request.output_generation ||
@@ -71,6 +79,17 @@ ControlResult ControlDispatcher::HandleInput(const InputRequest& request) {
     OffscreenHost::SetKeyboardLayoutMap(*layout);
     return reply;
   }
+  if (std::holds_alternative<InputRequest::MenusClose>(request.input)) {
+    if (session != runtime_.session_id)
+      return ControlResult::Failure(id, ErrorCode::kNotFound, "Session not found");
+    RemoteContextMenu::Get().CloseFor(session);
+    RemoteTouchSelectionMenuRunner::Get().CloseFor(session);
+    for (const auto& [view, record] : runtime_.views.records)
+      if (record.webview->session_id() == session)
+        record.webview->ReleaseRemoteInput();
+    runtime_.UpdateOutput();
+    return reply;
+  }
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view))
@@ -81,13 +100,13 @@ ControlResult ControlDispatcher::HandleInput(const InputRequest& request) {
 
   Status status;
 
-  if (Ptr(request.output_generation)) {
+  const auto& input = std::get<InputEvent>(request.input);
+  if (!IsDismissInput(input.payload) && Ptr(request.output_generation)) {
     uint64_t generation = 0;
     if (!Assign(request.output_generation, &generation) || !runtime_.output ||
         generation != runtime_.output_generation)
       return error(ErrorCode::kConflict, "stale_output_generation");
   }
-  const auto& input = std::get<InputEvent>(request.input);
   bool input_admitted = false;
   if (runtime_.output)
     runtime_.output->TraceInput("input_browser_dispatch", input);

@@ -1,0 +1,21 @@
+diff --git a/third_party/blink/renderer/core/input/mouse_event_manager.cc b/third_party/blink/renderer/core/input/mouse_event_manager.cc
+--- a/third_party/blink/renderer/core/input/mouse_event_manager.cc
++++ b/third_party/blink/renderer/core/input/mouse_event_manager.cc
+@@ -550,6 +550,8 @@ WebInputEventResult MouseEventManager::HandleMouseFocus(
+   Element* element = element_under_mouse_;
+   while (element) {
+     if (element->IsMouseFocusable() && element->IsFocusedElementInDocument()) {
++      element->GetDocument().SendFocusNotification(
++          element, mojom::blink::FocusType::kMouse);
+       return WebInputEventResult::kNotHandled;
+     }
+     if (element->IsMouseFocusable() ||
+@@ -601,6 +603,8 @@ WebInputEventResult MouseEventManager::HandleMouseFocus(
+       // If element has a shadow host with a delegated target, we should slide
+       // focus on this target only if it is not already focused.
+       if (delegated_target->IsFocusedElementInDocument()) {
++        delegated_target->GetDocument().SendFocusNotification(
++            delegated_target, mojom::blink::FocusType::kMouse);
+         return WebInputEventResult::kNotHandled;
+       }
+       // Use FocusType::kMouse instead of FocusType::kForward

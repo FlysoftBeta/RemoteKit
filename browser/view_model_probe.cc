@@ -9,6 +9,22 @@
 namespace {
 using namespace remotekit;
 
+void CheckDismissal() {
+  ViewModel model;
+  auto session = model.CreateSession("dismiss").value;
+  auto profile = model.AddProfile(session, "default").value;
+  auto view = model.CreateWebView(session, profile).value;
+  CHECK(model.SetFocus(session, view, true));
+  const auto old = model.Token(session, view).value;
+  CHECK(model.CommitDocument(session, view));
+  CHECK(model.AcceptInput(session, {old, 1, EditingDismiss{1, 1}}));
+  CHECK(!model.AcceptInput(session, {old, 1, EditingDismiss{1, 1}}));
+  CHECK(!model.AcceptInput(session, {old, 2, KeyInput{}}));
+  CHECK(!model.AcceptInput(session, {old, 2, EditingDismiss{0, 1}}));
+  CHECK(model.FindWebView(session, view)->focused);
+  CHECK(model.AcceptInput(session, {model.Token(session, view).value, 2,
+                                    SelectionCommand{1, SelectionCommand::Command::dismiss}}));
+}
 void CheckLifecycleAndInput() {
   ViewModel model;
   const auto session = model.CreateSession("tenant", 42);
@@ -129,6 +145,7 @@ int main(int argc, char** argv) {
   const auto arguments = base::CommandLine::ForCurrentProcess()->GetArgs();
   CHECK_EQ(arguments.size(), 1u);
   CheckAtlasFixtures(base::FilePath(arguments.front()));
+  CheckDismissal();
   CheckLifecycleAndInput();
   CheckValidationAndPacking();
 }

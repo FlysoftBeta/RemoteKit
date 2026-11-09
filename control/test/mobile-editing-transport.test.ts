@@ -44,6 +44,8 @@ function setup() {
       revision,
       view: active ? { ...surface, focus } : null,
       editable: {
+        focusSource: 'pointer',
+        focusRevision: '1',
         type: active ? 1 : 0,
         active,
         target,
@@ -158,5 +160,29 @@ test('focus ACK reevaluates one early editable candidate without modifying token
   assert.ok(transport.editing.mobileEditing.forView(surface));
   transport.input.focus(surface, false);
   assert.equal(transport.editing.mobileEditing.forView(surface), undefined);
+  transport.input.reset();
+});
+
+test('dismissal shares input ordering and can close menus during a media barrier', () => {
+  const { transport, surface, sent, receive } = setup();
+  transport.presentation.canInput = () => true;
+  assert(transport.input.sendInput(surface, { type: 'ime_commit', text: 'done' }));
+  assert(transport.input.sendInput(surface, { type: 'editing.dismiss', target: '31', revision: '8' }));
+  const ordered = sent.filter((message) => message.sequence);
+  assert.equal(ordered[0].type, 'input');
+  assert.equal(ordered[0].event.type, 'ime_commit');
+  assert.equal(ordered[1].type, 'editing.dismiss');
+  assert.equal(ordered[1].target, '31');
+  assert.equal(ordered[1].revision, '8');
+  assert.equal(BigInt(ordered[1].sequence), BigInt(ordered[0].sequence) + 1n);
+  transport.presentation.canInput = () => false;
+  assert(transport.input.sendInput(surface, { type: 'selection_command', menu: '5', command: 'dismiss' }));
+  assert.equal(sent[sent.length - 1].event.command, 'dismiss');
+  assert(transport.input.sendInput(surface, { type: 'context_command', menu: '6', command: 'dismiss' }));
+  assert.equal(sent[sent.length - 1].event.menu, '6');
+  receive({ ...transport.presentation.layout!, generation: '0', epoch: '3', views: [], reconfiguring: true });
+  assert(transport.input.sendInput(surface, { type: 'editing.dismiss', target: '31', revision: '8' }));
+  assert.equal(sent[sent.length - 1].type, 'editing.dismiss');
+  assert.equal(sent[sent.length - 1].document, 'd');
   transport.input.reset();
 });

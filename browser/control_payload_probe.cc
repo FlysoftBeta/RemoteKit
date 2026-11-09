@@ -115,7 +115,33 @@ void ControlContract() {
   CHECK(DecodeControlInput(wire, 1, 1));
   wire.FindDict("event")->Set("command", "contextMenu");
   CHECK(DecodeControlInput(wire, 1, 1));
-  wire.FindDict("event")->Set("type", "context_command");
+  wire.FindDict("event")->Set("command", "dismiss");
+  CHECK(DecodeControlInput(wire, 1, 1));
+  wire.FindDict("event")->Set("menu", "0");
+  CHECK(DecodeControlInput(wire, 1, 1));
+  for (const auto* which : {"start", "end", "insertion"}) {
+    wire.Set("event", base::DictValue()
+                          .Set("type", "selection.extent")
+                          .Set("which", which)
+                          .Set("x", 42)
+                          .Set("y", 64.5));
+    CHECK(DecodeControlInput(wire, 1, 1));
+    wire.FindDict("event")->Set("which", "invalid");
+    CHECK(!DecodeControlInput(wire, 1, 1));
+    wire.FindDict("event")->Set("which", which);
+    wire.FindDict("event")->Set("x", 1e8);
+    CHECK(!DecodeControlInput(wire, 1, 1));
+  }
+  auto dismissal =
+      base::DictValue().Set("type", "editing.dismiss").Set("target", "5").Set("revision", "9");
+  wire.Set("event", dismissal.Clone());
+  CHECK(DecodeControlInput(wire, 1, 1));
+  for (const auto* invalid : {"0", "01", "-1", "18446744073709551616"}) {
+    dismissal.Set("target", invalid);
+    wire.Set("event", dismissal.Clone());
+    CHECK(!DecodeControlInput(wire, 1, 1));
+  }
+  wire.Set("event", base::DictValue().Set("type", "context_command").Set("menu", "5"));
   for (const auto* command : {"undo", "redo", "cut", "copy", "paste", "selectAll",
                               "copyLinkAddress", "copyImage", "copyImageAddress", "dismiss"}) {
     wire.FindDict("event")->Set("command", command);

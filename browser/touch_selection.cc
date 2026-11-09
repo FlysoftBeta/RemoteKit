@@ -6,6 +6,8 @@
 #include "browser/view_registry.h"
 #include "content/browser/renderer_host/input/touch_selection_controller_client_aura.h"  // nogncheck
 #include "content/browser/renderer_host/render_widget_host_view_aura.h"  // nogncheck
+#include "content/public/browser/context_menu_params.h"
+#include "ui/base/mojom/menu_source_type.mojom.h"
 #include "ui/aura/window.h"
 #include "ui/touch_selection/touch_editing_controller.h"
 #include "ui/events/gesture_detection/gesture_event_data.h"
@@ -75,6 +77,22 @@ void RemoteTouchSelectionMenuRunner::OpenMenu(base::WeakPtr<ui::TouchSelectionMe
 void RemoteTouchSelectionMenuRunner::CloseMenu() {
   open_.reset();
 }
+void RemoteTouchSelectionMenuRunner::CloseFor(SessionId session, WebViewId view) {
+  if (open_ && open_->session == session && (!view || open_->view == view))
+    CloseMenu();
+  for (const auto& [id, record] : views_.records) {
+    auto& candidate = *record.webview;
+    if (candidate.session_id() != session || (view && candidate.view_id() != view))
+      continue;
+    ResetTouchSelection(static_cast<content::RenderWidgetHostViewBase*>(
+        candidate.contents() ? candidate.contents()->GetRenderWidgetHostView() : nullptr));
+  }
+}
+void RemoteTouchSelectionMenuRunner::Dismiss(SessionId session, WebViewId view, uint64_t menu) {
+  if (!menu ||
+      (open_ && open_->session == session && open_->view == view && open_->menu.menu_id == menu))
+    CloseFor(session, view);
+}
 bool RemoteTouchSelectionMenuRunner::IsRunning() const {
   return open_ && open_->client;
 }
@@ -106,6 +124,8 @@ Status RemoteTouchSelectionMenuRunner::Execute(SessionId session,
     return {ErrorCode::kConflict, "Selection menu changed"};
   CloseMenu();
   client->ExecuteCommand(command, 0);
+  if (value.command != SelectionCommand::Command::select_all)
+    CloseFor(session, view);
   return {};
 }
 bool HandleSelectionTouch(input::RenderWidgetHostViewInput* view, const ui::MotionEvent& event) {
@@ -154,5 +174,26 @@ void HideTouchSelection(input::RenderWidgetHostViewInput* view) {
   auto* controller = Aura(view)->selection_controller();
   if (controller->active_status() != ui::TouchSelectionController::ActiveStatus::kInactive)
     controller->HideAndDisallowShowingAutomatically();
+}
+void ShowInsertionMenu(input::RenderWidgetHostViewInput* view, const gfx::PointF& point) {
+  if (!view)
+    return;
+  auto* aura = Aura(view);
+  auto* controller = aura->selection_controller();
+  if (controller->active_status() != ui::TouchSelectionController::ActiveStatus::kInsertionActive ||
+      !controller->GetStartHandleRect().Contains(point))
+    return;
+  content::ContextMenuParams params;
+  params.is_editable = true;
+  params.source_type = ui::mojom::MenuSourceType::kLongPress;
+  aura->selection_controller_client()->HandleContextMenu(params, true);
+}
+void ResetTouchSelection(input::RenderWidgetHostViewInput* view) {
+  if (!view)
+    return;
+  auto* aura = Aura(view);
+  aura->selection_controller()->HideAndDisallowShowingAutomatically();
+  aura->selection_controller_client()->OnTouchUp();
+  aura->selection_controller_client()->OnScrollCompleted();
 }
 }  // namespace remotekit::browser

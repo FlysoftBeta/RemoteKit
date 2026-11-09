@@ -23,6 +23,14 @@ Result<DataRouter::Kind> DataRouter::Classify(const Json& message) {
       return layout.error();
     return Kind::kInput;
   }
+  if (type == "editing.dismiss") {
+    uint64_t target = 0;
+    uint64_t revision = 0;
+    if (!Number(message, "target", target) || !target || !Number(message, "revision", revision) ||
+        !revision)
+      return Error{ErrorCode::kInvalidRequest, "invalid editable dismissal"};
+    return Kind::kInput;
+  }
   if (type == "input") {
     const auto raw = message.find("event");
     if (raw != message.end() && raw->is_object() &&
@@ -34,12 +42,19 @@ Result<DataRouter::Kind> DataRouter::Classify(const Json& message) {
       if (!valid)
         return valid.error();
       const auto event_type = raw->value("type", Json());
+      if (event_type == "selection.extent") {
+        const auto which = raw->value("which", Json());
+        if ((which != "start" && which != "end" && which != "insertion") || !raw->contains("x") ||
+            !raw->contains("y") || !InputNumber((*raw)["x"], -1e7, 1e7) ||
+            !InputNumber((*raw)["y"], -1e7, 1e7))
+          return Error{ErrorCode::kInvalidRequest, "invalid selection extent"};
+      }
       if (event_type == "selection_command") {
         uint64_t menu = 0;
         const auto command = raw->value("command", Json());
-        if (!Number(*raw, "menu", menu) || !menu ||
+        if (!Number(*raw, "menu", menu) || (!menu && command != "dismiss") ||
             (command != "cut" && command != "copy" && command != "paste" &&
-             command != "selectAll" && command != "contextMenu"))
+             command != "selectAll" && command != "contextMenu" && command != "dismiss"))
           return Error{ErrorCode::kInvalidRequest, "invalid selection command"};
       }
       if (event_type == "context_command") {
@@ -163,7 +178,9 @@ void DataRouter::Drain() {
         if (!hooks_.current(event))
           return {};
         Json reply = {{"type", "error"}, {"error", WireError(*message.error)}};
-        if (event.message.is_object() && event.message.value("type", Json()) == "input") {
+        if (event.message.is_object() &&
+            (event.message.value("type", Json()) == "input" ||
+             event.message.value("type", Json()) == "editing.dismiss")) {
           reply["type"] = "input.result";
           reply["ok"] = false;
           reply["clientSequence"] = event.message.value("sequence", Json());

@@ -97,6 +97,10 @@ Status WebView::CanShow() const {
 Status WebView::SetVisible(bool visible) {
   return execution_->SetVisible(visible);
 }
+void WebView::ReleaseRemoteInput() {
+  input_->ReleaseKeyboard(true, true);
+  input_->ReleasePointer(true);
+}
 Status WebView::Focus(bool focused) {
   return input_->Focus(focused);
 }

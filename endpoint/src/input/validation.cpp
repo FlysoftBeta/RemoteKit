@@ -101,9 +101,14 @@ Result<void> ValidateInput(const InputPayload& p) {
                  v.elapsed_us <= 86400000000LL && Finite(v.cumulative_x, v.cumulative_y) &&
                  std::abs(v.cumulative_x) <= 1e7 && std::abs(v.cumulative_y) <= 1e7 &&
                  Finite(v.x, v.y) && std::abs(v.x) <= 1e7 && std::abs(v.y) <= 1e7;
+        else if constexpr (std::is_same_v<T, SelectionExtent>)
+          return v.which >= SelectionExtent::Which::start &&
+                 v.which <= SelectionExtent::Which::insertion && Finite(v.x, v.y) &&
+                 std::abs(v.x) <= 1e7 && std::abs(v.y) <= 1e7;
         else if constexpr (std::is_same_v<T, SelectionCommand>)
-          return v.menu && v.command >= SelectionCommand::Command::cut &&
-                 v.command <= SelectionCommand::Command::context_menu;
+          return (v.menu || v.command == SelectionCommand::Command::dismiss) &&
+                 v.command >= SelectionCommand::Command::cut &&
+                 v.command <= SelectionCommand::Command::dismiss;
         else if constexpr (std::is_same_v<T, ContextCommand>)
           return v.menu && v.command >= ContextCommand::Command::undo &&
                  v.command <= ContextCommand::Command::dismiss;

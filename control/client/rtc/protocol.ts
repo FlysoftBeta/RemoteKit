@@ -25,6 +25,8 @@ export interface EditableView {
   focus: string;
 }
 export interface RemoteEditable {
+  focusSource: 'pointer' | 'keyboard' | 'script' | 'other';
+  focusRevision: string;
   type: number;
   flags: number;
   active: boolean;
@@ -66,6 +68,9 @@ export interface SelectionMessage {
   revision: string;
   view: SelectionView | null;
   menu: SelectionMenu | null;
+  outputGeneration: string;
+  layoutEpoch: string;
+  handles: Record<'start' | 'end' | 'insertion', { x: number; y: number; lineHeight: number } | null>;
 }
 
 export type ContextCommand =
@@ -121,6 +126,7 @@ export type FocusMessage = {
   error?: WireError;
 };
 export type FrameMessage = {
+  viewports?: { viewId: string; pageHeight: number; occlusionRevision: string }[];
   type: 'frame';
   rtpTimestamp: number;
   layoutEpoch: string;
@@ -142,10 +148,21 @@ export type ProductResult = {
   operationGeneration: string;
   result: OperationReceipt;
 };
+export interface ViewViewportMessage {
+  type: 'view.viewport';
+  viewId: string;
+  session: string;
+  instance: string;
+  document: string;
+  outputGeneration: string;
+  pageHeight: number;
+  occlusionRevision: string;
+}
 type CameraBinding = { version: 1; authEpoch: number; challengeId: string };
 export type Incoming = Authorized &
   (
     | Layout
+    | ViewViewportMessage
     | EditableMessage
     | SelectionMessage
     | ContextMenuMessage
@@ -200,6 +217,13 @@ export type Outgoing = Authorized &
         event: Record<string, unknown>;
       } & InputTarget)
     | ({ type: 'focus'; focusRequestId: string; focused: boolean } & InputTarget)
+    | ({
+        type: 'editing.dismiss';
+        outputGeneration: string;
+        sequence: string;
+        target: string;
+        revision: string;
+      } & InputTarget)
     | (CameraBinding & {
         type: 'auth.camera.ready';
         width: number;
@@ -264,6 +288,14 @@ function contextSelection(value: unknown): boolean {
 }
 function valid(v: Record<string, unknown>): boolean {
   switch (v.type) {
+    case 'view.viewport':
+      return (
+        strings(v, ['viewId', 'session', 'instance', 'document']) &&
+        sequence(v.outputGeneration) &&
+        sequence(v.occlusionRevision) &&
+        integer(v.pageHeight) &&
+        v.pageHeight > 0
+      );
     case 'layout':
       return (
         sequence(v.generation) &&
@@ -282,6 +314,8 @@ function valid(v: Record<string, unknown>): boolean {
         (view === null ||
           (object(view) && strings(view, ['id', 'session', 'instance', 'document', 'focus']))) &&
         object(e) &&
+        ['pointer', 'keyboard', 'script', 'other'].includes(String(e.focusSource)) &&
+        sequence(e.focusRevision) &&
         typeof e.active === 'boolean' &&
         sequence(e.target) &&
         (e.active ? e.target !== '0' && view !== null : e.target === '0') &&
@@ -302,28 +336,41 @@ function valid(v: Record<string, unknown>): boolean {
     }
     case 'input.selection': {
       const menu = v.menu;
+      const handles = v.handles;
       return (
         v.version === 1 &&
         sequence(v.revision) &&
+        sequence(v.outputGeneration) &&
+        sequence(v.layoutEpoch) &&
+        object(handles) &&
+        ['start', 'end', 'insertion'].every((key) => {
+          const handle = handles[key];
+          return (
+            handle === null ||
+            (object(handle) && numbers(handle, ['x', 'y', 'lineHeight']) && Number(handle.lineHeight) > 0)
+          );
+        }) &&
         (v.view === null
-          ? menu === null
+          ? menu === null && Object.values(handles).every((handle) => handle === null)
           : object(v.view) &&
             strings(v.view, ['session', 'id', 'instance', 'document']) &&
-            object(menu) &&
-            sequence(menu.id) &&
-            menu.id !== '0' &&
-            numbers(menu, ['x', 'y', 'width', 'height', 'handleHeight']) &&
-            Number(menu.width) >= 0 &&
-            Number(menu.height) >= 0 &&
-            Number(menu.handleHeight) >= 0 &&
-            typeof menu.more === 'boolean' &&
-            Array.isArray(menu.commands) &&
-            menu.commands.every(
-              (command, index, commands) =>
-                SELECTION_COMMANDS.includes(command) &&
-                (index === 0 ||
-                  SELECTION_COMMANDS.indexOf(command) > SELECTION_COMMANDS.indexOf(commands[index - 1])),
-            ))
+            (menu !== null || Object.values(handles).some((handle) => handle !== null)) &&
+            (menu === null ||
+              (object(menu) &&
+                sequence(menu.id) &&
+                menu.id !== '0' &&
+                numbers(menu, ['x', 'y', 'width', 'height', 'handleHeight']) &&
+                Number(menu.width) >= 0 &&
+                Number(menu.height) >= 0 &&
+                Number(menu.handleHeight) >= 0 &&
+                typeof menu.more === 'boolean' &&
+                Array.isArray(menu.commands) &&
+                menu.commands.every(
+                  (command, index, commands) =>
+                    SELECTION_COMMANDS.includes(command) &&
+                    (index === 0 ||
+                      SELECTION_COMMANDS.indexOf(command) > SELECTION_COMMANDS.indexOf(commands[index - 1])),
+                ))))
       );
     }
     case 'input.contextMenu': {
@@ -370,6 +417,20 @@ function valid(v: Record<string, unknown>): boolean {
       );
     case 'frame':
       return (
+        optional(
+          v,
+          'viewports',
+          (value) =>
+            Array.isArray(value) &&
+            value.length <= 64 &&
+            value.every(
+              (item) =>
+                object(item) &&
+                string(item.viewId) &&
+                integer(item.pageHeight) &&
+                sequence(item.occlusionRevision),
+            ),
+        ) &&
         integer(v.rtpTimestamp) &&
         v.rtpTimestamp <= 0xffffffff &&
         sequence(v.layoutEpoch) &&

@@ -4,6 +4,7 @@
 #include "browser/view_model.h"
 #include "protocol/shared_render_slots.h"
 #include "ui/touch_selection/touch_selection_menu_runner.h"
+#include "ui/gfx/geometry/point_f.h"
 
 namespace input {
 class RenderWidgetHostViewInput;
@@ -31,6 +32,8 @@ class RemoteTouchSelectionMenuRunner final : public ui::TouchSelectionMenuRunner
                 aura::Window* context,
                 bool can_paste) override;
   void CloseMenu() override;
+  void CloseFor(SessionId, WebViewId = 0);
+  void Dismiss(SessionId, WebViewId, uint64_t menu);
   bool IsRunning() const override;
 
   SharedAtlasSelectionMenu StateFor(SessionId, WebViewId) const;
@@ -52,4 +55,7 @@ bool HandleSelectionTouch(input::RenderWidgetHostViewInput*, const ui::MotionEve
 void SelectionTouchBoundary(input::RenderWidgetHostViewInput*, bool down);
 void HandleSelectionGesture(input::RenderWidgetHostViewInput*, const ui::GestureEventData&);
 void HideTouchSelection(input::RenderWidgetHostViewInput*);
+void ShowInsertionMenu(input::RenderWidgetHostViewInput*, const gfx::PointF&);
+void ResetTouchSelection(input::RenderWidgetHostViewInput*);
+Status DragSelectionHandle(input::RenderWidgetHostViewInput*, const SelectionExtent&);
 }  // namespace remotekit::browser

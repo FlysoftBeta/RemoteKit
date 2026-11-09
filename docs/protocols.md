@@ -67,7 +67,7 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 | `frame` | 实际 wire RTP、layoutEpoch、编码信息；有有效源完成时间时附 captureWallTimeMs 等 |
 | `focus` | 焦点请求结果与新 token |
 | `input.result` | clientSequence、browserSequence、ok/error；触控使用普通有序输入结果 |
-| `input.editable` | revision、页面编辑身份、type/flags/selection/composition/caret、`editable.target` |
+| `input.editable` | revision、页面编辑身份、type/flags/selection/composition/caret、`editable.target`、focusSource、focusRevision |
 | `input.selection` | revision、页面身份（session/id/instance/document）或 null；`menu`：null 或 {id、根 DIP 锚点 x/y/width/height、handleHeight、commands（cut/copy/paste/selectAll 中可用者，固定顺序）、more} |
 | `input.contextMenu` | revision、页面身份或 null；`menu`：null 或 {id、根 DIP 按下点 x/y、source mouse/touch/keyboard、link {url,text}?、image {src}?、selection?、editable {undo,redo,cut,copy,paste,selectAll}?} |
 | `product.result` | `{operationId, operationGeneration, connectionId, result:收据}`；失败只在收据里表达（`status:"failed"` + `error`，或 `status:"unknown"`） |
@@ -85,6 +85,7 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 | `media.feedback` | 约 1.5 秒一次的诊断反馈（不驱动码率/DPR） |
 | `focus` | focusRequestId、页面完整身份、layoutEpoch、focused |
 | `input` | 完整身份、outputGeneration、layoutEpoch、sequence、event |
+| `editing.dismiss` | 完整 InputTarget、sequence、target/revision；用户收起远端元素焦点 |
 | `keyboard.layout` | Session 级 `entries: [[code,key], ...]`，最多 256 项，由当前已授权连接提供 |
 | `product.action` | `{version:1, operationId, operationGeneration, action}` |
 | `files.request` | `{version:1, requestId, method, params}`：asset.begin/chunk/seal/cancel/describe/read、document.open{assetId}/document.resource{documentId, contentId, offset}（见[文件与相机 · 文档预览](files-and-camera.md#文档预览)）、selection.commit、photo.burst.begin/sample/end/cancel、photo.thumbnail/process |
@@ -100,7 +101,7 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 | `ime_set` / `ime_commit` / `ime_cancel` / `ime_finish` | text、selection_start/end（UTF-16）；附 `editableTarget` |
 | `touch` | action start/move/end/cancel、points（≤16）、gestureMode `client-v1`、sequenceId、clockMode、sampleElapsedUs、startServerWallUs、samples（≤32）、gestures（≤8） |
 | `gesture` | action momentum/momentumEnd/cancel、sequenceId、sampleElapsedUs、cumulativeX/Y；action longPress、sequenceId、sampleElapsedUs、x/y（根 DIP） |
-| `selection_command` | menu（菜单 ID）、command cut/copy/paste/selectAll/contextMenu；需要焦点，过期菜单返回 `conflict` |
+| `selection_command` | menu（菜单 ID）、command cut/copy/paste/selectAll/contextMenu/dismiss；需要焦点，过期菜单返回 `conflict` |
 | `context_command` | menu（菜单 ID）、command undo/redo/cut/copy/paste/selectAll/copyLinkAddress/copyImage/copyImageAddress/dismiss；需要焦点，过期菜单返回 `conflict` |
 
 **`remotekit-auth`**：`auth.camera.ready/config/accept/frame` JSON 消息，加 68 字节头的 RGB24 二进制块，见[认证](auth.md#人脸验证)。

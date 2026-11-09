@@ -1,5 +1,6 @@
 #pragma once
 #include "browser/webview.h"
+#include "content/public/browser/focused_node_details.h"
 
 namespace remotekit::browser {
 class InputController {
@@ -30,6 +31,7 @@ class InputController {
   void DidFinishNavigation(content::NavigationHandle*, bool discard_document);
   void PrimaryMainFrameRenderProcessGone();
   void ReadyToCommitNavigation(content::NavigationHandle* navigation);
+  void OnFocusChangedInPage(const content::FocusedNodeDetails& details);
 
  private:
   friend class WebView;
@@ -39,6 +41,19 @@ class InputController {
   friend class TouchController;
   friend class LifecycleCoordinator;
   WebView& owner_;
+  class FocusObserver final : public content::WebContentsObserver {
+   public:
+    explicit FocusObserver(InputController& input) : input_(input) {}
+    void Attach(content::WebContents* contents) { Observe(contents); }
+    content::WebContents* contents() const { return web_contents(); }
+
+   private:
+    void OnFocusChangedInPage(const content::FocusedNodeDetails& details) override {
+      input_.OnFocusChangedInPage(details);
+    }
+    InputController& input_;
+  };
+  FocusObserver focus_observer_{*this};
   base::WeakPtr<content::RenderWidgetHostImpl> input_widget_;
   base::WeakPtr<content::RenderFrameHostImpl> input_frame_;
   std::optional<blink::DocumentToken> input_document_;
@@ -51,6 +66,10 @@ class InputController {
   std::optional<EditableTarget> editable_target_;
   std::uint64_t last_editable_target_id_{};
   std::uint64_t keyboard_editable_target_id_{};
+  content::WeakDocumentPtr focused_document_;
+  std::int32_t focused_node_id_{};
+  std::uint32_t focus_source_{};
+  std::uint64_t focus_observation_{};
   base::ScopedObservation<content::TextInputManager, content::TextInputManager::Observer>
       text_input_observation_{&owner_};
   std::map<std::uint32_t, KeyInput> pressed_keys_;

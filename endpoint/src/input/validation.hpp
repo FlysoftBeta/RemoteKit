@@ -96,8 +96,13 @@ struct ImeCommit {
 };
 struct SelectionCommand {
   std::uint64_t menu{};
-  enum class Command { cut, copy, paste, select_all, context_menu };
+  enum class Command { cut, copy, paste, select_all, context_menu, dismiss };
   Command command{};
+};
+struct SelectionExtent {
+  enum class Which { start, end, insertion };
+  Which which{};
+  double x{}, y{};
 };
 struct ContextCommand {
   std::uint64_t menu{};
@@ -130,6 +135,7 @@ using InputPayload = std::variant<KeyInput,
                                   ImeCancel,
                                   ImeFinish,
                                   SelectionCommand,
+                                  SelectionExtent,
                                   ContextCommand,
                                   KeyboardLayoutInput>;
 bool ValidPen(const PenInput&);

@@ -19,6 +19,7 @@ class RemoteContextMenu final : public content::WebContentsObserver {
   void Open(content::RenderFrameHost&, const content::ContextMenuParams&);
   void Close();
   void CloseFor(content::WebContents*);
+  void CloseFor(SessionId, WebViewId = 0);
   void Prune();
   SharedAtlasContextMenu StateFor(SessionId, WebViewId);
   Result<base::DictValue> Details(SessionId, WebViewId, uint64_t menu);

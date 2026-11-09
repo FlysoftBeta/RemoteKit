@@ -171,10 +171,11 @@ struct LifecycleControlRequest : RequestEnvelope {
 };
 struct InputRequest : RequestEnvelope {
   using KeyboardLayout = base::flat_map<std::string, std::string>;
+  struct MenusClose {};
   std::optional<uint64_t> output_generation;
   std::optional<uint64_t> session;
   std::optional<uint64_t> view;
-  std::variant<InputEvent, KeyboardLayout> input;
+  std::variant<InputEvent, KeyboardLayout, MenusClose> input;
 };
 inline base::DictValue TokenValue(const InputToken& token) {
   base::DictValue value;

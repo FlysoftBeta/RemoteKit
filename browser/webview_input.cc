@@ -32,7 +32,44 @@ void SetPenProperties(blink::WebMouseEvent& event, const std::optional<MouseInpu
 
 InputController::InputController(WebView& owner) : owner_(owner) {}
 InputController::~InputController() = default;
+void InputController::OnFocusChangedInPage(const content::FocusedNodeDetails& details) {
+  const auto& node = details.global_dom_node_id;
+  auto* frame = node.document.AsRenderFrameHostIfValid();
+  const auto node_id = node.target_element_dom_id.value();
+  if (!frame || !node_id || details.editable_level == content::EditableLevel::kNotEditable) {
+    editable_target_.reset();
+    focused_document_ = {};
+    focused_node_id_ = 0;
+    focus_source_ = 0;
+    return;
+  }
+  if (focused_document_.AsRenderFrameHostIfValid() != frame || focused_node_id_ != node_id)
+    editable_target_.reset();
+  focused_document_ = node.document;
+  focused_node_id_ = node_id;
+  using Source = blink::mojom::FocusType;
+  switch (details.focus_type) {
+    case Source::kMouse:
+      focus_source_ = 1;
+      break;
+    case Source::kForward:
+    case Source::kBackward:
+    case Source::kSpatialNavigation:
+    case Source::kAccessKey:
+      focus_source_ = 2;
+      break;
+    case Source::kScript:
+      focus_source_ = 3;
+      break;
+    default:
+      focus_source_ = 0;
+      break;
+  }
+  CHECK(++focus_observation_);
+}
 void InputController::InvalidateLayoutInput(bool remains_visible) {
+  RemoteContextMenu::Get().CloseFor(owner_.session_, owner_.view_);
+  RemoteTouchSelectionMenuRunner::Get().CloseFor(owner_.session_, owner_.view_);
   if (!remains_visible) {
     ReleaseKeyboard(true, true);
   } else {
@@ -178,6 +215,12 @@ void InputController::ReleasePointer(bool deliver) {
 }
 const ui::mojom::TextInputState* InputController::UpdateEditableTarget(
     content::TextInputManager* manager) {
+  if (focus_observer_.contents() != owner_.contents()) {
+    focus_observer_.Attach(owner_.contents());
+    focused_document_ = {};
+    focused_node_id_ = 0;
+    focus_source_ = 0;
+  }
   const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
   auto* active = manager ? manager->GetActiveWidget() : nullptr;
   auto* focused = owner_.contents() ? owner_.contents()->GetFocusedFrame() : nullptr;
@@ -215,6 +258,11 @@ SharedAtlasTextInput InputController::TextInputState() {
   result.target_id = last_editable_target_id_;
   result.type = static_cast<std::uint32_t>(state->type);
   result.flags = kAtlasTextInputActive;
+  if (focused_document_.AsRenderFrameHostIfValid() == editable_target_->frame.get() &&
+      focused_node_id_ == state->node_id) {
+    result.focus_source = focus_source_;
+    result.focus_observation = focus_observation_;
+  }
   if (state->selection.IsValid()) {
     result.selection_start = static_cast<std::uint32_t>(state->selection.GetMin());
     result.selection_end = static_cast<std::uint32_t>(state->selection.GetMax());
@@ -257,6 +305,8 @@ Status InputController::Focus(bool focused) {
                   !RootView(owner_.contents())))
     return Fail(ErrorCode::kConflict, "Visible renderer view required for focus");
   if (!focused) {
+    RemoteContextMenu::Get().CloseFor(owner_.session_, owner_.view_);
+    RemoteTouchSelectionMenuRunner::Get().CloseFor(owner_.session_, owner_.view_);
     editable_target_.reset();
     auto previous = input_widget_;
     const bool could_finish_previous = KeyboardTargetAlive();
@@ -301,13 +351,36 @@ void InputController::RenderFrameHostChanged(content::RenderFrameHost* old_frame
   if (pointer_frame_.get() == old_frame || owner_.touch_->touch_target_frame_.get() == old_frame)
     ReleasePointer(false);
 }
-Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
+Status InputController::DispatchInput(const InputEvent& original, bool* admitted) {
+  InputEvent input = original;
   if (admitted)
     *admitted = false;
   static_assert(kMouseButtonModifiers ==
                 (blink::WebInputEvent::kLeftButtonDown | blink::WebInputEvent::kMiddleButtonDown |
                  blink::WebInputEvent::kRightButtonDown | blink::WebInputEvent::kBackButtonDown |
                  blink::WebInputEvent::kForwardButtonDown));
+  if (IsDismissInput(input.payload)) {
+    auto status = owner_.model_->AcceptInput(owner_.session_, input);
+    if (!status)
+      return status;
+    if (admitted)
+      *admitted = true;
+    if (input.token != owner_.model_->Token(owner_.session_, owner_.view_).value)
+      return {};
+    if (const auto* dismiss = std::get_if<EditingDismiss>(&input.payload)) {
+      if (!UpdateEditableTarget(text_input_observation_.GetSource()) ||
+          dismiss->target != last_editable_target_id_)
+        return {};
+      ReleaseKeyboard(true, true);
+      editable_target_.reset();
+      owner_.contents()->ClearFocusedElement();
+    } else if (const auto* command = std::get_if<SelectionCommand>(&input.payload)) {
+      RemoteTouchSelectionMenuRunner::Get().Dismiss(owner_.session_, owner_.view_, command->menu);
+    } else if (const auto* context = std::get_if<ContextCommand>(&input.payload)) {
+      return RemoteContextMenu::Get().Execute(owner_.session_, owner_.view_, *context);
+    }
+    return {};
+  }
   owner_.touch_->RefreshClientTouchOwner();
   const auto* client_gesture = std::get_if<GestureInput>(&input.payload);
   const bool expired_long_press =
@@ -401,8 +474,11 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
     return RemoteTouchSelectionMenuRunner::Get().Execute(owner_.session_, owner_.view_, *command);
   if (const auto* command = std::get_if<ContextCommand>(&input.payload))
     return RemoteContextMenu::Get().Execute(owner_.session_, owner_.view_, *command);
-  if (const auto* touch = std::get_if<TouchInput>(&input.payload))
+  if (const auto* touch = std::get_if<TouchInput>(&input.payload)) {
+    if (touch->action == TouchInput::Action::start)
+      RemoteContextMenu::Get().CloseFor(owner_.contents());
     return owner_.touch_->DispatchTouches(*touch, input.token);
+  }
   if (const auto* gesture = std::get_if<GestureInput>(&input.payload))
     return owner_.touch_->Momentum(*gesture);
   std::visit(
@@ -444,8 +520,10 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
             host->ForwardKeyboardEvent(event);
           }
         } else if constexpr (std::is_same_v<T, MouseInput>) {
-          if (value.action == MouseInput::Action::down)
+          if (value.action == MouseInput::Action::down) {
+            RemoteContextMenu::Get().CloseFor(owner_.contents());
             HideTouchSelection(root_view);
+          }
           Type type = value.action == MouseInput::Action::move    ? Type::kMouseMove
                       : value.action == MouseInput::Action::down  ? Type::kMouseDown
                       : value.action == MouseInput::Action::leave ? Type::kMouseLeave
@@ -474,6 +552,7 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
           }
           router->RouteMouseEvent(root_view, &event, ui::LatencyInfo());
         } else if constexpr (std::is_same_v<T, WheelInput>) {
+          RemoteContextMenu::Get().CloseFor(owner_.contents());
           HideTouchSelection(root_view);
           // Match Aura's OnMouseWheelEvent: zero deltas do not begin a sequence.
           if (value.delta_x == 0 && value.delta_y == 0)

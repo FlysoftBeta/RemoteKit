@@ -4,6 +4,7 @@
 #include "management/link.hpp"
 #include <json.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -59,6 +60,8 @@ class DirectServices {
   std::string connection_;
   std::map<std::string, Pending> pending_;
   std::deque<std::string> results_;
+  std::map<uint64_t, std::string> viewports_;
+  std::map<uint64_t, std::string> pending_viewports_;
   std::string context_menu_;
   ServiceJson context_menu_identity_;
   uint64_t context_menu_ticket_ = 0;
@@ -69,6 +72,8 @@ class DirectServices {
   std::string editable_;
   ServiceJson editable_value_;
   uint64_t editable_revision_ = 0;
+  ServiceJson editable_focus_;
+  uint64_t editable_focus_revision_ = 0;
   static std::string Key(const ServiceJson& value) {
     return value.at("operationGeneration").get<std::string>() + "\n" +
            value.at("operationId").get<std::string>();
@@ -91,12 +96,16 @@ class DirectServices {
   void Bind(uint64_t peer, std::string connection = {}) {
     std::lock_guard lock(mutex_);
     peer_ = peer;
+    viewports_.clear();
+    pending_viewports_.clear();
     connection_ = std::move(connection);
     pending_.clear();
     results_.clear();
     editable_.clear();
     editable_value_ = nullptr;
     editable_revision_ = 0;
+    editable_focus_ = nullptr;
+    editable_focus_revision_ = 0;
     selection_.clear();
     selection_value_ = nullptr;
     selection_revision_ = 0;
@@ -162,6 +171,27 @@ class DirectServices {
     pending_.erase(found);
     return true;
   }
+  void Viewports(uint64_t peer, const SharedAtlasFrame& frame) {
+    std::lock_guard lock(mutex_);
+    if (!peer || peer != peer_ || !frame.generation)
+      return;
+    for (uint32_t i = 0; i < frame.view_count; ++i) {
+      const auto& view = frame.views[i];
+      ServiceJson value = {{"type", "view.viewport"},
+                           {"viewId", std::to_string(view.webview_id)},
+                           {"session", std::to_string(view.session_id)},
+                           {"instance", std::to_string(view.instance_generation)},
+                           {"document", std::to_string(view.document_generation)},
+                           {"pageHeight", view.page_height_dip},
+                           {"outputGeneration", std::to_string(frame.generation)},
+                           {"occlusionRevision", std::to_string(view.occlusion_revision)}};
+      auto encoded = value.dump();
+      if (viewports_[view.webview_id] != encoded) {
+        viewports_[view.webview_id] = encoded;
+        pending_viewports_[view.webview_id] = std::move(encoded);
+      }
+    }
+  }
   void RefreshEditable() {
     std::lock_guard lock(mutex_);
     editable_value_ = nullptr;
@@ -195,6 +225,8 @@ class DirectServices {
                            {"flags", 0},
                            {"active", false},
                            {"target", "0"},
+                           {"focusSource", "other"},
+                           {"focusRevision", "0"},
                            {"selectionStart", 0},
                            {"selectionEnd", 0},
                            {"compositionStart", 0},
@@ -212,19 +244,35 @@ class DirectServices {
                        {"document", std::to_string(view.document_generation)},
                        {"focus", std::to_string(view.focus_generation)}};
       auto finite = [](float v) { return std::isfinite(v) ? v : 0.0f; };
-      value["editable"] = {{"type", input.type},
-                           {"flags", input.flags},
-                           {"active", true},
-                           {"target", std::to_string(input.target_id)},
-                           {"selectionStart", input.selection_start},
-                           {"selectionEnd", input.selection_end},
-                           {"compositionStart", input.composition_start},
-                           {"compositionEnd", input.composition_end},
-                           {"caretX", finite(input.caret_x)},
-                           {"caretY", finite(input.caret_y)},
-                           {"caretWidth", finite(input.caret_width)},
-                           {"caretHeight", finite(input.caret_height)}};
+      value["editable"] = {
+          {"type", input.type},
+          {"flags", input.flags},
+          {"active", true},
+          {"target", std::to_string(input.target_id)},
+          {"focusSource", std::array{"other", "pointer", "keyboard", "script"}[input.focus_source]},
+          {"selectionStart", input.selection_start},
+          {"selectionEnd", input.selection_end},
+          {"compositionStart", input.composition_start},
+          {"compositionEnd", input.composition_end},
+          {"caretX", finite(input.caret_x)},
+          {"caretY", finite(input.caret_y)},
+          {"caretWidth", finite(input.caret_width)},
+          {"caretHeight", finite(input.caret_height)}};
     }
+    ServiceJson focus = nullptr;
+    if (selected) {
+      focus = {{"session", selected->session_id},
+               {"view", selected->webview_id},
+               {"instance", selected->instance_generation},
+               {"document", selected->document_generation},
+               {"target", selected->text_input.target_id},
+               {"observation", selected->text_input.focus_observation}};
+    }
+    if (focus != editable_focus_) {
+      editable_focus_ = focus;
+      editable_focus_revision_ = selected ? editable_revision_ + 1 : 0;
+    }
+    value["editable"]["focusRevision"] = std::to_string(editable_focus_revision_);
     if (value == editable_value_)
       return;
     editable_value_ = value;
@@ -233,7 +281,10 @@ class DirectServices {
     value["revision"] = std::to_string(++editable_revision_);
     editable_ = value.dump();
   }
-  void Selection(uint64_t peer, const SharedAtlasFrame& frame, bool output_suspended = false) {
+  void Selection(uint64_t peer,
+                 const SharedAtlasFrame& frame,
+                 uint64_t layout_epoch,
+                 bool output_suspended = false) {
     std::lock_guard lock(mutex_);
     if (!peer || peer != peer_)
       return;
@@ -242,11 +293,17 @@ class DirectServices {
                                frame.status != SharedAtlasStatus::kRunning) ||
                               frame.view_count > kSharedAtlasMaxViews))
       return;
-    ServiceJson value = {{"view", nullptr}, {"menu", nullptr}};
+    ServiceJson value = {
+        {"view", nullptr},
+        {"menu", nullptr},
+        {"outputGeneration", std::to_string(frame.generation)},
+        {"layoutEpoch", std::to_string(layout_epoch)},
+        {"handles", {{"start", nullptr}, {"end", nullptr}, {"insertion", nullptr}}}};
     for (uint32_t i = 0; !output_suspended && i < frame.view_count; ++i) {
       const auto& view = frame.views[i];
       const auto& menu = view.selection_menu;
-      if (!(menu.flags & kAtlasSelectionMenuVisible) || !menu.menu_id)
+      const bool menu_visible = (menu.flags & kAtlasSelectionMenuVisible) && menu.menu_id;
+      if (!menu_visible && !menu.start.visible && !menu.end.visible && !menu.insertion.visible)
         continue;
       value["view"] = {{"session", std::to_string(view.session_id)},
                        {"id", std::to_string(view.webview_id)},
@@ -258,14 +315,25 @@ class DirectServices {
         if (menu.flags & (2u << n))
           commands.push_back(names[n]);
       auto finite = [](float v) { return std::isfinite(v) ? v : 0.0f; };
-      value["menu"] = {{"id", std::to_string(menu.menu_id)},
-                       {"x", finite(menu.anchor_x)},
-                       {"y", finite(menu.anchor_y)},
-                       {"width", finite(menu.anchor_width)},
-                       {"height", finite(menu.anchor_height)},
-                       {"handleHeight", finite(menu.handle_height)},
-                       {"commands", commands},
-                       {"more", (menu.flags & kAtlasSelectionCanContextMenu) != 0}};
+      const auto handle = [&](const SharedAtlasSelectionMenu::Handle& bound) -> ServiceJson {
+        if (!bound.visible)
+          return nullptr;
+        return {{"x", finite(bound.x)},
+                {"y", finite(bound.y)},
+                {"lineHeight", finite(bound.line_height)}};
+      };
+      value["handles"] = {{"start", handle(menu.start)},
+                          {"end", handle(menu.end)},
+                          {"insertion", handle(menu.insertion)}};
+      if (menu_visible)
+        value["menu"] = {{"id", std::to_string(menu.menu_id)},
+                         {"x", finite(menu.anchor_x)},
+                         {"y", finite(menu.anchor_y)},
+                         {"width", finite(menu.anchor_width)},
+                         {"height", finite(menu.anchor_height)},
+                         {"handleHeight", finite(menu.handle_height)},
+                         {"commands", commands},
+                         {"more", (menu.flags & kAtlasSelectionCanContextMenu) != 0}};
       break;
     }
     if (value == selection_value_)
@@ -341,6 +409,11 @@ class DirectServices {
       if (send(results_.front()) != 0)
         return;
       results_.pop_front();
+    }
+    for (auto it = pending_viewports_.begin(); it != pending_viewports_.end();) {
+      if (send(it->second) != 0)
+        return;
+      it = pending_viewports_.erase(it);
     }
     if (!editable_.empty() && send(editable_) == 0)
       editable_.clear();
