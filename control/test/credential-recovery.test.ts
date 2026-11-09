@@ -88,6 +88,7 @@ test('current databases recover passwords, PINs, faces and tokens despite damage
       assert.deepEqual(store.security.faceVault.open(admin.user.id, security.face!.sealed, 'm1'), template);
       assert.equal(store.accounts.identity(member.token)?.user.username, 'member');
       assert.equal((await accountsFor(store).login('member', 'member-password1')).user.id, member.user.id);
+      for (const user of plan.users) assert.equal(store.workspaces.workspace(user.tenant).windows.length, 0);
       assert.throws(() => applyRecovery(store, plan), /只能写入空库/);
     } finally {
       store.db.close();

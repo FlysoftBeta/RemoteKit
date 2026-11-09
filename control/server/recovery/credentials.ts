@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { AuthSettings } from '../../shared/security';
 import { AtRestKey, FaceVault, defaultAuthSettings, type SecretHash } from '../auth/crypto';
 import type { ControlDatabase } from '../persistence/database';
+import { emptyWorkspace } from '../persistence/workspaces';
 
 // Every Control version stored passwords and PINs as hex scrypt(N=16384, r=8, p=1, 64 bytes)
 // with a hex salt, so a hash in any other shape came from an unknown method and is dropped.
@@ -238,6 +239,8 @@ export function applyRecovery(store: ControlDatabase, plan: RecoveryPlan) {
         user.lastLoginAt,
         user.disabledAt,
       );
+      // Every account owns a workspace row; a Viewer cannot attach without one.
+      store.workspaces.writeWorkspace(emptyWorkspace(user.tenant));
       store.security.saveSecurity(user.id, {
         settings: user.settings,
         pin: user.pin,

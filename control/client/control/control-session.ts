@@ -7,6 +7,8 @@ import { snapshotNewer } from './product-operations';
 import { Events } from '../util/store';
 import type { LibrarySnapshot } from '../../shared/file-library';
 
+const stableConnectionMs = 10_000;
+
 export type ConnectionStatus = 'connecting' | 'online' | 'reconnecting' | 'failed' | 'revoked' | 'expired';
 
 export type ControlState =
@@ -82,7 +84,6 @@ export class ControlSession {
       } else if (message.type === 'auth') {
         if (message.auth.locked) this.latestState = null;
         mark('firstAuth');
-        this.attempts = 0;
         this.status('online');
         this.auth(message.auth);
       } else if (message.type === 'state') {
@@ -90,7 +91,6 @@ export class ControlSession {
         if (!snapshotNewer(message.state, this.latestState)) return;
         snapshotIncarnation = message.state.serverIncarnation;
         mark('firstState');
-        this.attempts = 0;
         this.status('online');
         if (snapshotNewer(message.state, this.latestState)) {
           this.latestState = message.state;
@@ -118,6 +118,10 @@ export class ControlSession {
       this.socket = undefined;
       this.rejectPending();
       if (this.stopped) return;
+      // Only a connection that stayed up counts as recovered; one the server drops right after
+      // auth keeps counting toward the retry limit instead of looping forever.
+      const authAt = trace.marks.firstAuth;
+      if (authAt !== undefined && trace.marks.closed - authAt >= stableConnectionMs) this.attempts = 0;
       if (event.code === 4001) {
         this.status(event.reason === 'logout' ? 'expired' : 'revoked');
         this.close(true);

@@ -9,6 +9,9 @@ import type { NodeRegistry } from '../cluster/node-link';
 import type { ViewerAuthority } from '../viewers/viewer-hub';
 import { learningMethods } from '../learning/service';
 
+const viewerLog = (event: string, fields: Record<string, unknown>) =>
+  console.warn(`${new Date().toISOString()} [viewer] ${event}`, fields);
+
 type DiagnosticAuthority = { sessions?: DiagnosticSessions; identity: string; allowed: () => boolean };
 type RequestContext = {
   host?: string;
@@ -302,8 +305,15 @@ export function attachViewerSocket(
   const peers = new Map<WebSocket, { tenant: string; lease: string; token: string; alive: boolean }>();
   const send = (ws: WebSocket, message: unknown) => {
     if (ws.readyState === WebSocket.OPEN) {
-      if (ws.bufferedAmount > 2 * 1024 * 1024) ws.terminate();
-      else ws.send(JSON.stringify(message));
+      if (ws.bufferedAmount > 2 * 1024 * 1024) {
+        const peer = peers.get(ws);
+        viewerLog('terminate: send buffer full', {
+          tenant: peer?.tenant,
+          lease: peer?.lease,
+          bufferedAmount: ws.bufferedAmount,
+        });
+        ws.terminate();
+      } else ws.send(JSON.stringify(message));
     }
   };
   const push = (tenant: string, state: ProductState) => {
@@ -358,7 +368,10 @@ export function attachViewerSocket(
             initialUnlocked,
           ),
         );
-        void ready.catch(() => ws.close(1011, 'Viewer unavailable'));
+        void ready.catch((error) => {
+          viewerLog('attach failed; closing 1011', { tenant: peer.tenant, lease, error });
+          ws.close(1011, 'Viewer unavailable');
+        });
         ws.on('pong', () => {
           peer.alive = true;
         });
@@ -436,22 +449,30 @@ export function attachViewerSocket(
                   throw new RemoteKitError('locked', 'Viewer 已锁定');
                 send(ws, { type: 'result', id: request.id, result });
               })
-              .catch((error) =>
+              .catch((error) => {
+                const failure = toRemoteKitError(error);
+                if (failure.code === 'internal')
+                  viewerLog('request failed', { tenant: peer.tenant, lease, method: request.method, error });
                 send(ws, {
                   type: 'error',
                   id: request.id,
-                  error: {
-                    code: toRemoteKitError(error).code,
-                    message: toRemoteKitError(error).message,
-                  },
-                }),
-              )
+                  error: { code: failure.code, message: failure.message },
+                });
+              })
               .finally(() => pending.delete(request.id)),
           );
         });
       });
     } catch (error) {
-      const status = httpStatus[toRemoteKitError(error).code];
+      const failure = toRemoteKitError(error);
+      viewerLog('upgrade rejected', {
+        url: req.url,
+        code: failure.code,
+        message: failure.message,
+        origin: req.headers.origin,
+        remote: req.socket.remoteAddress,
+      });
+      const status = httpStatus[failure.code];
       socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
     }
   });
@@ -462,6 +483,11 @@ export function attachViewerSocket(
   const heartbeat = setInterval(() => {
     for (const [ws, peer] of peers) {
       if (!peer.alive || !control.accounts.identity(peer.token)) {
+        viewerLog('terminate: heartbeat', {
+          tenant: peer.tenant,
+          lease: peer.lease,
+          alive: peer.alive,
+        });
         ws.terminate();
         continue;
       }

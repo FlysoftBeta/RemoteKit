@@ -12,6 +12,10 @@ import { createHttp } from './http/server';
 import { ProcessLog } from './diagnostics/process-log';
 const processLog = new ProcessLog(4 * 1024 * 1024);
 processLog.install();
+// Monitor only: Node's default crash on uncaught errors and unhandled rejections stays.
+process.on('uncaughtExceptionMonitor', (error, origin) =>
+  console.error(`${new Date().toISOString()} [process] fatal ${origin} (pid ${process.pid})`, error),
+);
 const config = runtimeConfig();
 mkdirSync(dirname(config.dbPath), { recursive: true });
 const database = open(config.dbPath);
