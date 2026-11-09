@@ -87,6 +87,7 @@ void ChannelController::FlushSignals() {
         });
   data_router.Drain();
   peer_controller.FlushSignals();
+  direct_services.Viewports(peer_controller.Handle(), output.Slots().LatestMetadata());
   direct_services.Editable(peer_controller.Handle(), output.Slots().LatestMetadata(),
                            output.Suspended());
   direct_services.Selection(peer_controller.Handle(), output.Slots().LatestMetadata(),

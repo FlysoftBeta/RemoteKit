@@ -190,6 +190,12 @@ export class ViewerHub {
           typeof w.visible !== 'boolean' ||
           !Number.isInteger(w.width) ||
           !Number.isInteger(w.height) ||
+          !Number.isInteger(w.occludedBottom) ||
+          w.occludedBottom < 0 ||
+          w.occludedBottom > w.height ||
+          typeof w.occlusionRevision !== 'string' ||
+          !/^[1-9]\d{0,19}$/.test(w.occlusionRevision) ||
+          BigInt(w.occlusionRevision) > 0xffffffffffffffffn ||
           w.width < 1 ||
           w.height < 1 ||
           w.width > 8192 ||
@@ -198,6 +204,15 @@ export class ViewerHub {
           throw new RemoteKitError('invalid_request', '无效的窗口显示区域');
         ids.add(w.windowId);
       }
+      const previous = runtime.viewer!.viewport;
+      if (
+        previous &&
+        body.windows.some((w: any) => {
+          const old = previous.windows.find((item) => item.windowId === w.windowId);
+          return old && BigInt(w.occlusionRevision) < BigInt(old.occlusionRevision);
+        })
+      )
+        return this.productState(tenant);
       // Preflight cannot mutate live observations or replace a valid viewport.
       const feasibility = new QualityState().snapshot(state, body);
       if (feasibility.resourceLimitation)
@@ -209,6 +224,8 @@ export class ViewerHub {
           windowId: w.windowId,
           width: w.width,
           height: w.height,
+          occludedBottom: w.visible ? w.occludedBottom : 0,
+          occlusionRevision: w.occlusionRevision,
           visible: w.visible,
         })),
       };

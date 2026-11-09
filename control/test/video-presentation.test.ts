@@ -413,3 +413,33 @@ test('video callbacks retain UI snapshot identity and notify only their register
   assert.equal(firstFrames, 1);
   assert.equal(secondFrames, 0);
 });
+
+test('page viewport feedback preserves layout, RTP readiness and the presentation barrier', (t) => {
+  const e = environment(t);
+  e.authorize();
+  const before = JSON.stringify(e.presentation.layout);
+  const sent = e.sent.length;
+  const barrier = e.presentation.presentationBarrier;
+  const viewport = {
+    type: 'view.viewport',
+    viewId: '1',
+    session: 's',
+    instance: 'i',
+    document: 'd',
+    outputGeneration: '12',
+    pageHeight: 240,
+    occlusionRevision: '2',
+  };
+  e.message(viewport);
+  assert.equal(e.presentation.pageHeight('1'), 240);
+  assert.equal(JSON.stringify(e.presentation.layout), before);
+  assert.equal(e.presentation.presentationBarrier, barrier);
+  assert.equal(e.presentation.canInput('1')?.pageHeight, 240);
+  assert.equal(e.sent.length, sent);
+  e.message({ ...viewport, pageHeight: 300, occlusionRevision: '1' });
+  e.message({ ...viewport, pageHeight: 300, outputGeneration: '11', occlusionRevision: '3' });
+  e.message({ ...viewport, pageHeight: 300, document: 'retired', occlusionRevision: '4' });
+  assert.equal(e.presentation.pageHeight('1'), 240);
+  e.message({ ...viewport, pageHeight: 480, occlusionRevision: '3' });
+  assert.equal(e.presentation.pageHeight('1'), 480);
+});

@@ -407,7 +407,14 @@ export type ProductAction =
 export interface ViewerViewport {
   devicePixelRatio: number;
   refreshHz?: number;
-  windows: { windowId: string; width: number; height: number; visible: boolean }[];
+  windows: {
+    windowId: string;
+    width: number;
+    height: number;
+    visible: boolean;
+    occludedBottom: number;
+    occlusionRevision: string;
+  }[];
 }
 export interface ProductActionResult {
   state: ProductState;

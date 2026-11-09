@@ -34,6 +34,14 @@ Result<OutputConfigureRequest> DecodeOutputConfigure(const base::DictValue& wire
           (*device != "desktop" && *device != "tablet") || !scale ||
           (!scale->is_double() && !scale->is_int()) || !visible)
         return {{}, {ErrorCode::kInvalidRequest, "Invalid view configuration"}};
+      const auto occlusion = config->FindInt("occludedBottom");
+      const auto* revision = config->FindString("occlusionRevision");
+      if (occlusion || revision) {
+        if (!occlusion || *occlusion < 0 || !revision ||
+            !base::StringToUint64(*revision, &decoded.viewport.revision))
+          return {{}, {ErrorCode::kInvalidRequest, "Invalid page viewport"}};
+        decoded.viewport.occluded_bottom = *occlusion;
+      }
       decoded.width = *width;
       decoded.height = *height;
       decoded.scale = scale->is_int() ? scale->GetInt() : scale->GetDouble();
@@ -153,6 +161,13 @@ ControlResult ControlDispatcher::HandleOutputConfigure(const OutputConfigureRequ
                                                          next_height, next_scale, next_alignment);
   if (!next_layout)
     return ControlResult::Failure(id, *next_layout.status.error, next_layout.status.message);
+  if (request.viewConfigs) {
+    for (const auto& config : *request.viewConfigs) {
+      auto* record = runtime_.views.Find(config.session, config.view);
+      if (config.viewport.revision >= record->viewport.revision)
+        record->viewport = config.viewport;
+    }
+  }
   runtime_.layout_transaction.Commit(std::move(next_layout.value));
   runtime_.output_enabled = next_enabled;
   runtime_.UpdateOutput();

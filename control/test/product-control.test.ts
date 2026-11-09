@@ -189,8 +189,8 @@ test('offline startup does not create Browsers; multi-window mutations preserve 
     await requestViewer(control, user.tenantId, 'lease', 'viewport', {
       devicePixelRatio: 2,
       windows: [
-        { windowId: a.id, width: 800, height: 600, visible: true },
-        { windowId: b.id, width: 700, height: 600, visible: true },
+        { windowId: a.id, width: 800, height: 600, visible: true, occludedBottom: 0, occlusionRevision: '1' },
+        { windowId: b.id, width: 700, height: 600, visible: true, occludedBottom: 0, occlusionRevision: '1' },
       ],
     });
     assert.equal(endpoint.views.get(user.tenantId)!.get(tabA.webviewId).visible, false);
@@ -487,7 +487,16 @@ test('memory saver uses hidden age and canDiscard; activating a discarded page w
     assert.equal(view.actual, 2);
     await requestViewer(control, user.tenantId, 'lease', 'viewport', {
       devicePixelRatio: 1,
-      windows: [{ windowId: w.id, width: 1200, height: 800, visible: true }],
+      windows: [
+        {
+          windowId: w.id,
+          width: 1200,
+          height: 800,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     });
     assert.equal(view.visible, false);
     assert.equal(view.pending, true);
@@ -532,7 +541,16 @@ async function uncertainTab() {
     window = workspace.windows[0];
   const viewport = {
     devicePixelRatio: 1,
-    windows: [{ windowId: window.id, width: 1200, height: 800, visible: true }],
+    windows: [
+      {
+        windowId: window.id,
+        width: 1200,
+        height: 800,
+        visible: true,
+        occludedBottom: 0,
+        occlusionRevision: '1',
+      },
+    ],
   };
   await requestViewer(f.control, tenant, 'lease', 'viewport', viewport);
   const view = f.endpoint.views.get(tenant)!.get(tab.webviewId);
@@ -1291,7 +1309,16 @@ test('product media policy precedes ensure and feedback only updates diagnostic 
     ).state.workspace;
     await requestViewer(control, user.tenantId, 'lease', 'viewport', {
       devicePixelRatio: 1,
-      windows: [{ windowId: ws.windows[0].id, width: 800, height: 600, visible: true }],
+      windows: [
+        {
+          windowId: ws.windows[0].id,
+          width: 800,
+          height: 600,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     });
     endpoint.calls = [];
     let now = clock.wallMs();
@@ -1344,7 +1371,16 @@ test('quality preference updates only WebRTC degradation policy while client dis
     await requestViewer(control, user.tenantId, 'lease', 'viewport', {
       devicePixelRatio: 2,
       refreshHz: 120,
-      windows: [{ windowId: ws.windows[0].id, width: 800, height: 600, visible: true }],
+      windows: [
+        {
+          windowId: ws.windows[0].id,
+          width: 800,
+          height: 600,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     });
     for (const [qualityPreference, degradationPreference] of [
       ['quality', 'maintain-resolution'],
@@ -1465,7 +1501,16 @@ test('offline observation never restarts a lost Browser or recreates missing vie
     ).state.workspace;
     await requestViewer(control, user.tenantId, 'lease', 'viewport', {
       devicePixelRatio: 1,
-      windows: [{ windowId: workspace.windows[0].id, width: 900, height: 700, visible: true }],
+      windows: [
+        {
+          windowId: workspace.windows[0].id,
+          width: 900,
+          height: 700,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     });
     endpoint.stopBeforeMaintenance = true;
     endpoint.calls = [];
@@ -1635,7 +1680,16 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     assert.equal(scope.error.code, 'invalid_request');
     await a.request('4', 'viewport', {
       devicePixelRatio: 1,
-      windows: [{ windowId: win.id, width: 900, height: 700, visible: true }],
+      windows: [
+        {
+          windowId: win.id,
+          width: 900,
+          height: 700,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     });
     assert.equal(endpoint.views.get(stateA.workspace.tenantId)!.get(tab.webviewId).visible, true);
     const replacement = connect(socketUrl, cookieA);
@@ -1655,7 +1709,16 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     );
     await replacement.request('5', 'viewport', {
       devicePixelRatio: 1,
-      windows: [{ windowId: win.id, width: 901, height: 700, visible: true }],
+      windows: [
+        {
+          windowId: win.id,
+          width: 901,
+          height: 700,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     });
     const detached = new Promise<void>((resolve) => {
       const observed = (tenant: string, state: any) => {
@@ -1832,12 +1895,23 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
       tab = state.tabs[0];
     await requestViewer(control, user.tenantId, 'lease', 'viewport', {
       devicePixelRatio: 1,
-      windows: [{ windowId: w.id, width: 800, height: 600, visible: true }],
+      windows: [
+        { windowId: w.id, width: 800, height: 600, visible: true, occludedBottom: 0, occlusionRevision: '1' },
+      ],
     });
     await assert.rejects(
       requestViewer(control, user.tenantId, 'lease', 'viewport', {
         devicePixelRatio: 1,
-        windows: [{ windowId: w.id, width: 8192, height: 8192, visible: true }],
+        windows: [
+          {
+            windowId: w.id,
+            width: 8192,
+            height: 8192,
+            visible: true,
+            occludedBottom: 0,
+            occlusionRevision: '1',
+          },
+        ],
       }),
       (error: any) => error.code === 'limit_exceeded',
     );
@@ -1848,7 +1922,16 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
     await control.operations.productAction(user.tenantId, { type: 'tab.close', tabId: tab.id }, 'lease');
     await requestViewer(control, user.tenantId, 'lease', 'viewport', {
       devicePixelRatio: 1,
-      windows: [{ windowId: w.id, width: 8192, height: 8192, visible: true }],
+      windows: [
+        {
+          windowId: w.id,
+          width: 8192,
+          height: 8192,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     });
     endpoint.calls = [];
     const limited = (
@@ -1876,7 +1959,9 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
     assert.ok(control.viewers.productState(user.tenantId).quality.resourceLimitation);
     await requestViewer(control, user.tenantId, 'lease', 'viewport', {
       devicePixelRatio: 1,
-      windows: [{ windowId: w.id, width: 900, height: 700, visible: true }],
+      windows: [
+        { windowId: w.id, width: 900, height: 700, visible: true, occludedBottom: 0, occlusionRevision: '1' },
+      ],
     });
     assert.equal(control.viewers.productState(user.tenantId).quality.resourceLimitation, null);
     assert.equal(control.viewers.productState(user.tenantId).endpointError, null);
@@ -1916,7 +2001,16 @@ test('start tabs stay local, first navigation ensures the real target, and expli
     );
     await requestViewer(control, user.tenantId, 'lease', 'viewport', {
       devicePixelRatio: 1,
-      windows: [{ windowId: win.id, width: 800, height: 600, visible: true }],
+      windows: [
+        {
+          windowId: win.id,
+          width: 800,
+          height: 600,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     });
     assert.equal(
       endpoint.calls.some((c) => c.method === 'view.ensure'),
@@ -2076,6 +2170,70 @@ test('native file chooser anchor exposes only viewport bounds bound to the pendi
     assert.equal('binding' in requests[0], false);
   } finally {
     await control.viewers.detachViewer(tenant, lease);
+    await control.close();
+    store.db.close();
+  }
+});
+
+test('viewport revisions reject stale occlusion without changing stable geometry or plan budget', async () => {
+  const { store, endpoint, control, user } = await fixture();
+  try {
+    await control.viewers.attachViewer(
+      user.tenantId,
+      'lease',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
+    const { state } = await control.operations.productAction(
+      user.tenantId,
+      { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
+      'lease',
+    );
+    const win = state.workspace.windows[0];
+    const tab = state.workspace.tabs[0];
+    const viewport = {
+      devicePixelRatio: 2,
+      windows: [
+        {
+          windowId: win.id,
+          width: 800,
+          height: 900,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '10',
+        },
+      ],
+    };
+    await requestViewer(control, user.tenantId, 'lease', 'viewport', viewport);
+    const closed = control.viewers.productState(user.tenantId).quality;
+    viewport.windows[0].occludedBottom = 380;
+    viewport.windows[0].occlusionRevision = '11';
+    await requestViewer(control, user.tenantId, 'lease', 'viewport', viewport);
+    const view = endpoint.views.get(user.tenantId)!.get(tab.webviewId);
+    assert.equal(view.height, 900);
+    assert.equal(view.occludedBottom, 380);
+    assert.equal(view.occlusionRevision, '11');
+    assert.equal(control.viewers.productState(user.tenantId).quality.effectiveDpr, closed.effectiveDpr);
+    assert.equal(
+      control.viewers.productState(user.tenantId).quality.resourceLimitation,
+      closed.resourceLimitation,
+    );
+    await requestViewer(control, user.tenantId, 'lease', 'viewport', {
+      ...viewport,
+      windows: [{ ...viewport.windows[0], occludedBottom: 0, occlusionRevision: '10' }],
+    });
+    assert.equal(view.occludedBottom, 380);
+    assert.equal(view.occlusionRevision, '11');
+    await assert.rejects(
+      requestViewer(control, user.tenantId, 'lease', 'viewport', {
+        ...viewport,
+        windows: [{ ...viewport.windows[0], occlusionRevision: '18446744073709551616' }],
+      }),
+      (error: any) => error.code === 'invalid_request',
+    );
+  } finally {
+    await control.viewers.detachViewer(user.tenantId, 'lease');
     await control.close();
     store.db.close();
   }

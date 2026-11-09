@@ -53,6 +53,14 @@ Client:   每个 video 观察到自己的真实 RTP 并匹配当前 epoch → �
 - `generation:"0", views:[]` 表示输出暂不可用（暂停、故障、重建），立即撤销客户端的旧 ready；它不是"文档已销毁"的证据（见[移动编辑](mobile-editing.md)）。
 - 布局换代的字段比较必须是完整规范化的布局身份。曾经候选布局漏了 `clientGestures` 字段，与实际布局永远不相等，2.4 秒内发出约 1000 次 prepare，客户端的两次 rAF 一直被重启，ACK 永远完不成。
 
+## 稳定平面与键盘遮挡
+
+atlas 计划和规范化布局身份只由稳定窗口尺寸、DPR、采样规划、成员顺序、矩形、padding 与对齐决定。`occludedBottom / occlusionRevision` 位于该身份之外；同一平面的矩形不因键盘缩小或移动，其他窗口也不重新打包。Viewer 的 video 保持稳定尺寸，编辑窗口的页面 viewport 在平面顶部原地缩短，下方传白色空带。
+
+仅遮挡变化时 Endpoint 保持输出与编码管线，Browser 原地 resize WebContents；不更新 generation/layoutEpoch、不重发 layout、不触发 prepare/ready，也不为遮挡请求关键帧。`view.viewport` 只更新页面高度和输入边界，不改变呈现 ready。逐帧 `viewports` 将页面高度/revision 绑定真实 RTP，用于判断哪一帧已反映新高度。
+
+窗口 resize、旋转、DPR/UI scale、可见成员或 atlas/编码规划变化仍按完整布局身份建立新代次和屏障；同时携带当前遮挡，让新代次首帧使用正确的页面高度。焦点、文档与授权边界保留各自的输入/呈现门禁。普通尺寸变化使用过渡快照，键盘遮挡直接使用稳定视频。
+
 ## 帧与 RTP 匹配
 
 - Endpoint 对每个成功发布的帧发 `frame{rtp, layoutEpoch, 编码信息}`，rtp 取自发布回调的实际 wire RTP 时间戳，不是调用方设定的值。

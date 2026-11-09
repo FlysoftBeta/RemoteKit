@@ -46,6 +46,7 @@ type PresentationErrorCode =
   | 'invalid-presentation-barrier';
 
 export interface InputAuthority {
+  pageHeight?: number;
   surface: Surface;
   layout: Layout;
   attempt: number;
@@ -63,11 +64,25 @@ export interface PresentationSnapshot {
   barrier: BarrierState;
   views: Readonly<Record<string, ViewReadiness>>;
   layout: Layout | null;
+  pageHeights: Record<string, number>;
   error?: RemoteKitError;
   canRetry: boolean;
 }
 
 export class PresentationSession {
+  private readonly pageViewports = new Map<string, import('../rtc/protocol').ViewViewportMessage>();
+  pageHeight(viewId: string) {
+    const value = this.pageViewports.get(viewId);
+    const surface = this.layout?.views.find((view) => view.id === viewId);
+    return value &&
+      surface &&
+      value.outputGeneration === this.layout?.generation &&
+      value.session === surface.session &&
+      value.instance === surface.instance &&
+      value.document === surface.document
+      ? value.pageHeight
+      : undefined;
+  }
   acceptFocus(viewId: string, token: string) {
     const view = this.layout?.views.find((view) => view.id === viewId);
     if (view) {
@@ -785,7 +800,12 @@ export class PresentationSession {
     const frame = this.videoPlaneFor(viewId)?.plane.ready;
     const surface = this.layout?.views.find((view) => view.id === viewId);
     return frame && surface && !this.ports.authorization.productLocked && !this.transitionBlocks.has(viewId)
-      ? { surface, layout: this.layout!, attempt: this.ports.rtc.attempt }
+      ? {
+          surface,
+          layout: this.layout!,
+          attempt: this.ports.rtc.attempt,
+          pageHeight: this.pageHeight(viewId),
+        }
       : null;
   }
 
@@ -813,6 +833,24 @@ export class PresentationSession {
       if (!key || !barrierMatchesLayout(key, this.layout))
         this.failPresentation('invalid-presentation-barrier');
       else this.preparePresentation(key, channel);
+    }
+    if (message.type === 'view.viewport') {
+      const old = this.pageViewports.get(message.viewId);
+      const view = this.layout?.views.find((item) => item.id === message.viewId);
+      if (
+        (!this.layout || BigInt(message.outputGeneration) >= BigInt(this.layout.generation)) &&
+        (message.outputGeneration !== this.layout?.generation ||
+          (view?.session === message.session &&
+            view.instance === message.instance &&
+            view.document === message.document)) &&
+        (!old ||
+          BigInt(message.outputGeneration) > BigInt(old.outputGeneration) ||
+          (message.outputGeneration === old.outputGeneration &&
+            BigInt(message.occlusionRevision) >= BigInt(old.occlusionRevision)))
+      ) {
+        this.pageViewports.set(message.viewId, message);
+        this.notify();
+      }
     }
     if (message.type === 'layout' && Array.isArray(message.views)) {
       if (
@@ -884,6 +922,7 @@ export class PresentationSession {
       registration.remove = undefined;
     }
     this.layout = null;
+    this.pageViewports.clear();
     this.notify();
   }
 
@@ -896,6 +935,12 @@ export class PresentationSession {
 
   private notify() {
     const next: PresentationSnapshot = {
+      pageHeights: Object.fromEntries(
+        [...this.pageViewports.keys()].flatMap((id) => {
+          const height = this.pageHeight(id);
+          return height === undefined ? [] : [[id, height]];
+        }),
+      ),
       error: this.presentationError,
       canRetry: this.canRetryPresentation,
       backend: this.backendState,
@@ -923,6 +968,7 @@ export class PresentationSession {
     backend: { phase: 'pending' },
     barrier: { phase: 'none' },
     views: {},
+    pageHeights: {},
     layout: null,
     canRetry: false,
   };

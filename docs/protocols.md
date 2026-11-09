@@ -34,7 +34,7 @@ POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字
 
 | 方法 | 用途 |
 |---|---|
-| `viewport` | 各 Window 内容区的实际尺寸与 DPR |
+| `viewport` | devicePixelRatio、refreshHz?、windows（最多 16 项，每项 windowId、稳定 width/height、visible、occludedBottom、occlusionRevision）；遮挡不进入 atlas 计划 |
 | `rtc.offer` / `rtc.ice` / `rtc.close` | 信令（trickle） |
 | `clock.ping` | Control 时钟（产品新鲜度） |
 | `operation.status` | 查询操作收据 |
@@ -47,7 +47,7 @@ POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字
 | `admin.deleteDiagnostic/downloadDiagnostic` | 管理员：按诊断 `id`；下载返回一次性 URL |
 | `admin.publishAnnouncement/updateAnnouncement/deleteAnnouncement` | 管理员：发布 `{title, body}`、按 `id` 编辑（`republish` 清空已读）或删除，返回新的公告列表 |
 | `announcement.read` | 当前用户把公告 `id` 标为已读（幂等） |
-| `library.get/import/replace/basket/group/move/delete/prepare/finish` | 文件目录与选择事务 |
+| `library.get/import/replace/basket/group/move/delete/prepare/finish` | 文件目录与选择事务；条目 kind 为 file 或 snippet |
 | `library.snippet` / `library.copySnippet` | `{id}` → `{text}` / `{revision,text}`；取片段全文或复制回应用剪贴板 |
 | `clipboard.get` / `clipboard.set` | `{}` → `{revision,text}` / `{text}` → `{revision}`，当前用户剪贴板 |
 | `diagnostics.start/sample/stop/status` | 诊断收集 |
@@ -67,11 +67,12 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 | `presentation.mode` | `{version:1, backend:"video"}` |
 | `layout` | generation/epoch、编码尺寸、views（身份、atlas 矩形、DPR、mediaScaleX/Y）、`clientGestures` |
 | `presentation.prepare` | `{version:1, barrierId, outputGeneration, layoutEpoch}` |
-| `frame` | 实际 wire RTP、layoutEpoch、编码信息；有有效源完成时间时附 captureWallTimeMs 等 |
+| `frame` | 可选 viewports:[{viewId,pageHeight,occlusionRevision}]、实际 wire RTP、layoutEpoch、编码信息；有有效源完成时间时附 captureWallTimeMs 等 |
 | `focus` | 焦点请求结果与新 token |
 | `input.result` | clientSequence、browserSequence、ok/error；触控使用普通有序输入结果 |
-| `input.editable` | revision、页面编辑身份、type/flags/selection/composition/caret、`editable.target`、focusSource、focusRevision |
+| `input.editable` | revision、页面编辑身份、type/flags/selection/composition/caret、`editable.target`、`focusSource:pointer/keyboard/script/other`、`focusRevision` |
 | `input.selection` | revision、页面身份（session/id/instance/document）或 null；outputGeneration/layoutEpoch；handles:{start,end,insertion}（各为 null 或根 DIP 的 {x,y,lineHeight}）；`menu`：null 或 {id、根 DIP 锚点 x/y/width/height、handleHeight、commands（cut/copy/paste/selectAll 中可用者，固定顺序）、more} |
+| `view.viewport` | viewId、session/instance/document、outputGeneration、pageHeight（DIP）、occlusionRevision；可靠去重反馈，不改变呈现 ready |
 | `input.contextMenu` | revision、页面身份或 null；`menu`：null 或 {id、根 DIP 按下点 x/y、source mouse/touch/keyboard、link {url,text}?、image {src}?、selection?、editable {undo,redo,cut,copy,paste,selectAll}?} |
 | `product.result` | `{operationId, operationGeneration, connectionId, result:收据}`；失败只在收据里表达（`status:"failed"` + `error`，或 `status:"unknown"`） |
 | `files.result` | 文件 RPC 结果 |
@@ -88,7 +89,7 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 | `media.feedback` | 约 1.5 秒一次的诊断反馈（不驱动码率/DPR） |
 | `focus` | focusRequestId、页面完整身份、layoutEpoch、focused |
 | `input` | 完整身份、outputGeneration、layoutEpoch、sequence、event |
-| `editing.dismiss` | 完整 InputTarget、sequence、target/revision；用户收起远端元素焦点 |
+| `editing.dismiss` | 完整 InputTarget、outputGeneration/layoutEpoch、sequence、target、revision；与 input 共享顺序，用户收起时 blur 远端元素 |
 | `keyboard.layout` | Session 级 `entries: [[code,key], ...]`，最多 256 项，由当前已授权连接提供 |
 | `product.action` | `{version:1, operationId, operationGeneration, action}` |
 | `files.request` | `{version:1, requestId, method, params}`：asset.begin/chunk/seal/cancel/describe/read、document.open{assetId}/document.resource{documentId, contentId, offset}（见[文件与相机 · 文档预览](files-and-camera.md#文档预览)）、selection.commit、photo.burst.begin/sample/end/cancel、photo.thumbnail/process |
@@ -104,9 +105,9 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 | `ime_set` / `ime_commit` / `ime_cancel` / `ime_finish` | text、selection_start/end（UTF-16）；附 `editableTarget` |
 | `touch` | action start/move/end/cancel、points（≤16）、gestureMode `client-v1`、sequenceId、clockMode、sampleElapsedUs、startServerWallUs、samples（≤32）、gestures（≤8） |
 | `gesture` | action momentum/momentumEnd/cancel、sequenceId、sampleElapsedUs、cumulativeX/Y；action longPress、sequenceId、sampleElapsedUs、x/y（根 DIP） |
-| `selection_command` | menu（菜单 ID）、command cut/copy/paste/selectAll/contextMenu/dismiss；需要焦点，过期菜单返回 `conflict` |
+| `selection_command` | menu（菜单 ID）、command cut/copy/paste/selectAll/contextMenu/dismiss；非 dismiss 需要焦点，过期菜单返回 `conflict`；dismiss 可用 menu:"0" 清理手柄 |
 | `selection.extent` | which start/end/insertion、x/y（根 DIP），完整有序输入门禁 |
-| `context_command` | menu（菜单 ID）、command undo/redo/cut/copy/paste/selectAll/copyLinkAddress/copyImage/copyImageAddress/dismiss；需要焦点，过期菜单返回 `conflict` |
+| `context_command` | menu（菜单 ID）、command undo/redo/cut/copy/paste/selectAll/copyLinkAddress/copyImage/copyImageAddress/dismiss；非 dismiss 需要焦点，过期执行返回 `conflict`，旧 dismiss 成功但不操作 |
 
 **`remotekit-auth`**：`auth.camera.ready/config/accept/frame` JSON 消息，加 68 字节头的 RGB24 二进制块，见[认证](auth.md#人脸验证)。
 
@@ -143,7 +144,7 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 | `session.events.ack` | 确认已处理的自然关闭、下载导入与登录视图事件 |
 | `session.files.authorize` | 授权原生选择器与文件库的 DC 文件操作 |
 | `session.library.describe/prepare/selectionStatus` | 文件资产描述与选择事务 |
-| `view.ensure` / `view.configure` | 稳定 viewId、URL、viewport、device、visible；`requireRunning` 防止维护请求拉起 Browser；`signIn: changyan \| xinjiaoyu` 创建专用登录视图（见[学习与题库 · 登录](learning.md#登录)） |
+| `view.ensure` / `view.configure` | 稳定 viewId、URL、稳定 viewport、device、visible、occludedBottom/occlusionRevision；`requireRunning` 防止维护请求拉起 Browser；`signIn: changyan \| xinjiaoyu` 创建专用登录视图（见[学习与题库 · 登录](learning.md#登录)） |
 | `view.navigate` / `view.command` / `view.navigation.ack` | 导航与 history 命令（带 operationId/Generation/Sequence）；终态确认 |
 | `view.lifecycle` | freeze/discard/unload/restore；不确定恢复带 requireRunning、browserIncarnation、lifecycleGeneration |
 | `view.close` / `view.close.reply` | 关闭；对 beforeunload 的回复带完整身份 |
@@ -202,4 +203,10 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 - `set_playout_delay` 两个值都是 10ms 的倍数，`0 ≤ min ≤ max ≤ 40950`；已安装后不能取消（需重建 peer）。
 - `set_av_sync` 只能在 `set_remote_description` 之前调用，决定音频发送器的 stream id（与视频相同即接收端唇音同步），之后返回 INVALID_STATE。`set_audio_enabled` 运行期生效：音频发送器只在"媒体已授权且音频启用"时活动，禁用期间 `submit_audio` 接受并丢弃 PCM。
 
-Browser `clipboard.read` 返回 sequence/viewId/excludeFromHistory/text/html；Endpoint `clipboard.changed` 保留 Tenant/Session/browserSequence 并携带 viewId?、excludeFromHistory。正文仅在剪贴板与片段链路传递。
+## 编辑、选择与遮挡的 Browser 边界
+
+Endpoint 的 `clipboard.changed` 管理事件保留 Tenant/Session/browserSequence，增加写入 `viewId?` 与 `excludeFromHistory`。Browser `clipboard.read` 返回 sequence/viewId/excludeFromHistory/text/html；正文只在剪贴板与片段链路传递。
+
+Endpoint 把 DC `editing.dismiss` 转为 Browser `input` 请求的 `event:{type:editing.dismiss,target,revision}`，保留完整身份并分配 browser sequence。Session 收尾使用 `input {session,event:{type:menus.close}}`，不携带 view 或 output_generation。
+
+Browser 原地 `view.configure` 使用 `occludedBottom / occlusionRevision / outputGeneration`，稳定尺寸变化走完整 `output.configure.viewConfigs` 并携带相同遮挡字段；过期代次/revision 返回 ignored。共享映射 ABI 为 v8：focus 来源和观测、水滴几何、page_height_dip 与 occlusion_revision 与帧快照一起发布。Viz 配置 `target_size` 是稳定纹理尺寸，Begin token 的 `page_height_pixels` 是当前页面范围，二者不能互换。

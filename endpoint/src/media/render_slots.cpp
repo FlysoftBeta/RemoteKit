@@ -1,3 +1,4 @@
+#include "media/tail_refresh.hpp"
 #include "render_slots.hpp"
 #include "render_event_queue.hpp"
 #include "media/comp_pacing.hpp"
@@ -485,6 +486,19 @@ std::optional<uint64_t> RenderSlots::ClipboardSequence() const {
     return std::nullopt;
   return static_cast<uint64_t>(InterlockedCompareExchange64(
       reinterpret_cast<volatile LONG64*>(&state->mapping->clipboard_sequence), 0, 0));
+}
+SharedAtlasFrame RenderSlots::Metadata(const remotekit_rtc_frame& frame) {
+  const auto* source = &frame;
+  while (auto* wrapped = TailRefreshLease::From(*source))
+    source = &wrapped->Source();
+  if (source->release != State::Release)
+    return {};
+  const auto* slot = static_cast<const State::Slot*>(source->release_context);
+  return slot && slot->cookie == source->frame_id ? slot->metadata : SharedAtlasFrame{};
+}
+uint64_t RenderSlots::Generation() const {
+  const auto state = clipboard_state_.load();
+  return state ? state->setup.generation : 0;
 }
 SharedAtlasFrame RenderSlots::LatestMetadata() const {
   return state_ ? state_->latest : SharedAtlasFrame{};

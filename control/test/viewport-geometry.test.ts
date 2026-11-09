@@ -33,6 +33,8 @@ const editable: EditableMessage = {
   revision: '1',
   view: surface,
   editable: {
+    focusSource: 'pointer',
+    focusRevision: '1',
     active: true,
     type: 1,
     target: '1',

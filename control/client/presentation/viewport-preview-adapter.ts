@@ -1,3 +1,4 @@
+import { KeyboardViewport } from '../editing/keyboard-viewport';
 import type { CSSProperties } from 'react';
 import { uiScale } from '../app/ui-scale';
 import { RemoteKitError } from '../../shared/errors';
@@ -6,8 +7,6 @@ import type { Surface } from './types';
 import { Store } from '../util/store';
 import type { PresentationSession } from './presentation-session';
 import {
-  KeyboardViewport,
-  ResizePreview,
   ViewportTransition,
   pixelAlignedViewportBounds,
   resizeSnapshotSize,
@@ -21,27 +20,24 @@ export interface ResizeSnapshot {
   style?: CSSProperties;
   frozen: boolean;
   waiting: boolean;
-  keyboard: boolean;
   keyboardOpen: boolean;
   keyboardDismissals: number;
 }
 export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
   private readonly transition = new ViewportTransition();
   private readonly geometry = new KeyboardViewport();
-  private readonly preview = new ResizePreview();
   private bitmap?: HTMLCanvasElement;
   private get blocked() {
     return this.transition.state.phase !== 'stable';
   }
   private set blocked(blocked: boolean) {
-    if (blocked) this.transition.wait(this.preview.keyboard ? 'keyboard' : 'layout');
+    if (blocked) this.transition.wait('layout');
     else this.transition.settled();
     this.presentation.setTransitionBlocked(this.viewId, blocked);
   }
   private style?: CSSProperties;
   private frozen = false;
   private waiting = false;
-  private keyboard = false;
   private keyboardOpen = false;
   private keyboardDismissals = 0;
   private surface?: Surface;
@@ -63,7 +59,7 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
     private readonly host: HTMLElement,
     private readonly editor: HTMLTextAreaElement,
   ) {
-    super({ frozen: false, waiting: false, keyboard: false, keyboardOpen: false, keyboardDismissals: 0 });
+    super({ frozen: false, waiting: false, keyboardOpen: false, keyboardDismissals: 0 });
     this.remove = this.attach();
   }
   private changed() {
@@ -71,7 +67,6 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
       style: this.style,
       frozen: this.frozen,
       waiting: this.waiting,
-      keyboard: this.keyboard,
       keyboardOpen: this.keyboardOpen,
       keyboardDismissals: this.keyboardDismissals,
     };
@@ -89,9 +84,6 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
   setWaiting = (value: ResizeSnapshot['waiting']) => {
     this.waiting = value;
   };
-  setKeyboard = (value: ResizeSnapshot['keyboard']) => {
-    this.keyboard = value;
-  };
   setKeyboardOpen = (value: ResizeSnapshot['keyboardOpen']) => {
     this.keyboardOpen = value;
   };
@@ -101,10 +93,6 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
   setStyle = (value: ResizeSnapshot['style']) => {
     this.style = value;
   };
-  private measured = (_: unknown) => {
-    this.confirm();
-    this.changed();
-  };
   blocksInput = () => this.blocked;
   configure(surface: Surface | undefined, frameReady: boolean, owner: string | undefined) {
     this.surface = surface;
@@ -112,11 +100,9 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
     if (owner !== this.owner) {
       this.owner = owner;
       this.transition.clear();
-      this.preview.clear();
       this.dispose();
       this.blocked = false;
       this.waiting = false;
-      this.keyboard = false;
     }
     this.measure();
     this.confirm();
@@ -146,16 +132,6 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
           height: number;
         }
       | undefined;
-    const paintPreview = () => {
-      const state = this.transition,
-        image = this.bitmap;
-      if (!image || !state.freeze || !state.desired) return;
-      image.classList.toggle('keyboard-peek', this.preview.keyboard);
-      image.style.setProperty(
-        '--resize-peek-height',
-        `${(state.desired.width * state.freeze.bounds.height) / state.freeze.bounds.width}px`,
-      );
-    };
     const suspend = (mediaBarrier: boolean) => {
       const state = this.transition,
         bounds = state.desired;
@@ -192,7 +168,6 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
         canvas.style.setProperty('--resize-from-y', String(old.height / Math.max(1, bounds.height)));
         this.bitmap = canvas;
         node.append(canvas);
-        paintPreview();
         this.presentation.recordResizeFreezeCopy();
         this.setFrozen(true);
         this.changed();
@@ -239,24 +214,22 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
       const changed = !!state.desired && !sameViewportSize(state.desired, bounds);
       const focused =
         !!this.editor && this.editor.inputMode !== 'none' && document.activeElement === this.editor;
-      const change = this.geometry.measure(
+      this.geometry.measure(
         {
           visual: vv ?? undefined,
           scale: visual?.scale ?? 1,
           layoutWidth: window.innerWidth,
           layoutHeight: window.innerHeight,
+          screen: { width: window.screen.width, height: window.screen.height },
         },
         focused,
         window.matchMedia('(pointer: coarse)').matches,
         now,
       );
-      this.preview.measure(changed, change, now);
       if (this.geometry.settle(now)) this.setKeyboardDismissals(this.geometry.dismissals);
       this.setKeyboardOpen(this.geometry.open);
       state.desired = bounds;
       if (changed && state.confirmed && !sameViewportSize(state.confirmed.bounds, bounds)) suspend(false);
-      paintPreview();
-      this.setKeyboard(this.blocked && this.preview.keyboard);
       if (!position || !sameViewportBounds(position, next)) {
         position = next;
         this.setStyle({ inset: 'auto', ...next });
@@ -264,17 +237,8 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
       this.confirm();
       this.changed();
       clearTimeout(timer);
-      const deadlines = [this.geometry.deadline, this.preview.deadline].filter(
-        (at): at is number => at !== undefined && at > now,
-      );
-      if (deadlines.length)
-        timer = setTimeout(
-          () => {
-            measure();
-            this.measured(undefined);
-          },
-          Math.ceil(Math.min(...deadlines) - now),
-        );
+      const deadlines = [this.geometry.deadline].filter((at): at is number => at !== undefined && at > now);
+      if (deadlines.length) timer = setTimeout(measure, Math.ceil(Math.min(...deadlines) - now));
     };
     this.measure = measure;
     const observer = new ResizeObserver(measure);
@@ -307,14 +271,11 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
     }
     // Late RTP metadata can authorize this layout without identifying current
     // pixels. Only the preview copy needs an exact compositor observation.
-    if (performance.now() < this.preview.deadline) return;
     state.ready(this.owner, `${layout.generation}:${layout.epoch}`, bounds);
     if (!state.freeze) {
       this.dispose();
-      this.preview.complete();
       this.blocked = false;
       this.setWaiting(false);
-      this.setKeyboard(false);
     }
   };
   detach() {

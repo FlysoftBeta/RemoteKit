@@ -34,7 +34,9 @@ test('axis constraints lower real DPR without shrinking DIP; minimum failure is 
   state.activeSpaceId = 'space';
   const viewport = {
     devicePixelRatio: 4,
-    windows: [{ windowId: 'w', width: 8192, height: 400, visible: true }],
+    windows: [
+      { windowId: 'w', width: 8192, height: 400, visible: true, occludedBottom: 0, occlusionRevision: '1' },
+    ],
   };
   const quality = new QualityState().snapshot(state, viewport);
   assert.ok(quality.effectiveDpr < 1);
@@ -51,4 +53,21 @@ test('axis constraints lower real DPR without shrinking DIP; minimum failure is 
       ),
     { code: 'limit_exceeded' },
   );
+});
+
+test('occlusion does not change packing, allocation, DPR or resource limitation', () => {
+  const stable = [
+    { width: 1200, height: 900 },
+    { width: 800, height: 1200 },
+  ];
+  const plan = planAtlas(stable, 1.25);
+  const dpr = feasibleDpr(stable, 1.25);
+  for (const occludedBottom of [0, 100, 400, 780]) {
+    const windows = stable.map((item, index) => ({
+      ...item,
+      occludedBottom: index === 0 ? occludedBottom : 0,
+    }));
+    assert.deepEqual(planAtlas(windows, 1.25), plan);
+    assert.equal(feasibleDpr(windows, 1.25), dpr);
+  }
 });

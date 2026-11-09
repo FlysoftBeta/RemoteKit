@@ -73,6 +73,7 @@ export async function startStack({
   browser = defaultBrowser,
   endpoint = defaultEndpoint,
   dev = true,
+  nodeDefaults = {},
   run = join(root, 'develop/tmp/e2e', `${scenario}-${Date.now()}`),
 } = {}) {
   mkdirSync(run, { recursive: true });
@@ -125,7 +126,10 @@ export async function startStack({
         endpoint,
         browser,
         dev,
-        nodeDefaults: { peer: { listen: `127.0.0.1:${ports.peer}`, address: `127.0.0.1:${ports.peer}` } },
+        nodeDefaults: {
+          ...nodeDefaults,
+          peer: { listen: `127.0.0.1:${ports.peer}`, address: `127.0.0.1:${ports.peer}` },
+        },
         configOverrides: {
           http: {
             listen: `127.0.0.1:${ports.control}`,

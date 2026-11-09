@@ -10,6 +10,14 @@ import { currentWindowFullscreen } from '../app/window-fullscreen';
 
 export class ViewportRequests extends Store<string> {
   private readonly geometry = new Map<string, { width: number; height: number }>();
+  private occlusion = { viewId: '', bottom: 0 };
+  private readonly revisions = new Map<string, { key: string; revision: string }>();
+  private revision = BigInt(Date.now()) * 1000n;
+  setOcclusion(viewId: string, bottom: number) {
+    if (this.occlusion.viewId === viewId && this.occlusion.bottom === bottom) return;
+    this.occlusion = { viewId, bottom };
+    this.schedule();
+  }
   private timer?: ReturnType<typeof setTimeout>;
   private serial = 0;
   private acknowledged?: string;
@@ -71,15 +79,34 @@ export class ViewportRequests extends Store<string> {
       const visibility = selectVisibility(state, this.bounds.width, currentWindowFullscreen());
       const params: ViewerViewport = {
         devicePixelRatio: this.dpr,
-        windows: state.workspace.windows.map((window) => ({
-          windowId: window.id,
-          width: this.geometry.get(window.id)?.width ?? Math.max(1, Math.round(this.bounds.width)),
-          height: this.geometry.get(window.id)?.height ?? Math.max(1, Math.round(this.bounds.height) - 88),
-          visible:
+        windows: state.workspace.windows.map((window) => {
+          const width = this.geometry.get(window.id)?.width ?? Math.max(1, Math.round(this.bounds.width));
+          const height =
+            this.geometry.get(window.id)?.height ?? Math.max(1, Math.round(this.bounds.height) - 88);
+          const visible =
             this.visible &&
             visibility.visibleWindowIds.includes(window.id) &&
-            state.workspace.tabs.some((tab) => tab.id === window.activeTabId && tab.kind === 'remote'),
-        })),
+            state.workspace.tabs.some((tab) => tab.id === window.activeTabId && tab.kind === 'remote');
+          const ownsKeyboard = state.workspace.tabs.some(
+            (tab) => tab.id === window.activeTabId && tab.webviewId === this.occlusion.viewId,
+          );
+          const occludedBottom =
+            visible && ownsKeyboard ? Math.min(height, Math.max(0, Math.round(this.occlusion.bottom))) : 0;
+          const key = canonicalJson([width, height, visible, occludedBottom]);
+          let revision = this.revisions.get(window.id);
+          if (revision?.key !== key) {
+            revision = { key, revision: String(++this.revision) };
+            this.revisions.set(window.id, revision);
+          }
+          return {
+            windowId: window.id,
+            width,
+            height,
+            visible,
+            occludedBottom,
+            occlusionRevision: revision.revision,
+          };
+        }),
       };
       const key = canonicalJson(params);
       if (

@@ -46,6 +46,11 @@
       "id": "pointer-refocus-observation",
       "path": "0020-pointer-refocus-observation.patch",
       "sha256": "0c45bbe4dfad0800e5e2d16fb45c0d1d54096309cdc94b7e6847a7bc7118019a"
+    },
+    {
+      "id": "occlusion-plane",
+      "path": "0021-occlusion-plane.patch",
+      "sha256": "9e4c379ace64d7cabd1120600a235585793e20e41e703b455ca10344cc3443fb"
     }
   ]
 }

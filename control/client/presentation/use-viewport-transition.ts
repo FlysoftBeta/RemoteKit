@@ -31,7 +31,6 @@ export function useViewportTransition(
 const initial: import('./viewport-preview-adapter').ResizeSnapshot = {
   frozen: false,
   waiting: false,
-  keyboard: false,
   keyboardOpen: false,
   keyboardDismissals: 0,
 };

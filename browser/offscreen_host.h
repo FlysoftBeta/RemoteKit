@@ -46,6 +46,13 @@ class OffscreenHost final : public aura::WindowTreeHost,
   explicit OffscreenHost(content::WebContents* contents, const gfx::Size& viewport);
   ~OffscreenHost() override;
   void SetViewport(const gfx::Size& viewport);
+  void SetPlaneSize(const gfx::Size& size);
+  void SetOcclusionRevision(uint64_t revision) { occlusion_revision_ = revision; }
+  uint64_t occlusion_revision() const { return occlusion_revision_; }
+  const gfx::Size& page_viewport() const { return viewport_; }
+  const gfx::Size& plane_size() const { return plane_size_; }
+  gfx::Size plane_target_size() const;
+  bool PageFrameReady() const;
   void SetScreenConfiguration(const gfx::Size& viewport, float scale);
   static void UpdateIdentity(content::WebContents* contents, bool tablet);
   static void SetKeyboardLayoutMap(base::flat_map<std::string, std::string> layout);
@@ -92,6 +99,9 @@ class OffscreenHost final : public aura::WindowTreeHost,
  private:
   gfx::Rect bounds_;
   gfx::Size viewport_;
+  gfx::Size plane_size_;
+  uint64_t occlusion_revision_ = 0;
+  raw_ptr<content::WebContents> contents_ = nullptr;
   float output_scale_ = 1.f;
   float screen_scale_ = 1.f;
   bool tablet_identity_ = false;

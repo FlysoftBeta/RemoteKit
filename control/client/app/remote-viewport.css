@@ -25,12 +25,6 @@
   filter: blur(5px);
   animation: remote-resize-stretch 160ms ease-out both;
 }
-.remote-viewport canvas.remote-resize-freeze.keyboard-peek {
-  bottom: auto;
-  height: var(--resize-peek-height);
-  filter: none;
-  animation: none;
-}
 @keyframes remote-resize-stretch {
   from {
     transform: scale(var(--resize-from-x), var(--resize-from-y));

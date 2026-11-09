@@ -1,8 +1,7 @@
+import { KeyboardViewport } from '../client/editing/keyboard-viewport';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  KeyboardViewport,
-  ResizePreview,
   ViewportTransition,
   pixelAlignedViewportBounds,
   resizeSnapshotSize,
@@ -63,7 +62,7 @@ test('visual viewport offset and size intersect actual content bounds', () => {
     small,
   );
 });
-test('one fixed copy spans keyboard animation and clears only on the new desired presentation', () => {
+test('one fixed copy spans ordinary resizing and clears only on the new desired presentation', () => {
   const state = new ViewportTransition();
   state.ready('peer/doc', '1', old);
   assert.ok(state.begin('peer/doc', small, 390 * 764, true));
@@ -140,26 +139,6 @@ test('simultaneous layout and visual viewport shrink is classified on coarse poi
   assert.equal(keyboard.settle(145), true);
 });
 
-test('viewport event followed by repeated geometry and then content resize keeps the peek', () => {
-  const preview = new ResizePreview();
-  assert.equal(preview.measure(false, 'keyboard', 1), false);
-  preview.complete(); // An old ready frame before content resize is not completion.
-  assert.equal(preview.measure(false, undefined, 2), false);
-  assert.equal(preview.measure(true, undefined, 3), true);
-  assert.equal(preview.measure(false, undefined, 4), true);
-  assert.equal(preview.measure(true, undefined, 2000), true, 'delayed content updates retain the IME cause');
-  preview.clear(); // A matching new frame completes the transition.
-  assert.equal(preview.measure(true, undefined, 200), false, 'unrelated content resize uses stretch');
-});
-
-test('viewport event can reclassify a content-first preview without copying again', () => {
-  const preview = new ResizePreview();
-  assert.equal(preview.measure(true, undefined, 1), false);
-  assert.equal(preview.measure(false, 'keyboard', 2), true);
-  assert.equal(preview.measure(false, undefined, 3), true);
-  assert.equal(preview.measure(true, 'ordinary', 4), false);
-});
-
 test('resize reversal can return to the authorized size without waiting for a new server layout', () => {
   const state = new ViewportTransition();
   state.ready('doc', '1', old);
@@ -195,3 +174,47 @@ test('oversized preview downscales within its pixel budget', () => {
   assert.deepEqual(resizeSnapshotSize(4096, 4096), { width: 2048, height: 2048 });
   assert.equal(resizeSnapshotSize(0, 764), undefined);
 });
+
+for (const layoutShrinks of [false, true]) {
+  test(`keyboard retains stable plane size; layout shrinks=${layoutShrinks}`, () => {
+    const keyboard = new KeyboardViewport();
+    keyboard.measure(viewport(844), true, true, 0);
+    keyboard.measure(viewport(444, layoutShrinks ? 444 : 844), true, true, 1);
+    assert.equal(keyboard.stableHeight, 844);
+    assert.equal(keyboard.occludedBottom, 400);
+    keyboard.measure(viewport(344, layoutShrinks ? 344 : 844), true, true, 2);
+    assert.equal(keyboard.stableHeight, 844);
+    assert.equal(keyboard.occludedBottom, 500);
+  });
+}
+
+test('rotation while the layout viewport is occluded starts a new stable plane with the current inset', () => {
+  const keyboard = new KeyboardViewport();
+  keyboard.measure(viewport(1040, 1040, 1100), true, true, 0);
+  keyboard.measure(viewport(680, 680, 1100), true, true, 1);
+  assert.equal(keyboard.measure(viewport(740, 740, 1040), true, true, 2), 'ordinary');
+  assert.equal(keyboard.stableHeight, 1100);
+  assert.equal(keyboard.occludedBottom, 360);
+});
+
+test('rotation retains browser chrome outside a keyboard-shrunk layout viewport', () => {
+  const keyboard = new KeyboardViewport();
+  const portrait = { width: 800, height: 1280 };
+  const landscape = { width: 1280, height: 800 };
+  keyboard.measure({ ...viewport(1224, 1224, 800), screen: portrait }, true, true, 0);
+  keyboard.measure({ ...viewport(864, 864, 800), screen: portrait }, true, true, 1);
+  keyboard.measure({ ...viewport(444, 444, 1280), screen: landscape }, true, true, 2);
+  assert.equal(keyboard.stableHeight, 744);
+  assert.equal(keyboard.occludedBottom, 300);
+});
+
+for (const layoutShrinks of [false, true]) {
+  test(`window resize carries the current inset into the new stable plane; layout shrinks=${layoutShrinks}`, () => {
+    const keyboard = new KeyboardViewport();
+    keyboard.measure(viewport(1040, 1040, 1100), true, true, 0);
+    keyboard.measure(viewport(680, layoutShrinks ? 680 : 1040, 1100), true, true, 1);
+    keyboard.measure(viewport(780, layoutShrinks ? 780 : 1140, 1200), true, true, 2);
+    assert.equal(keyboard.stableHeight, 1140);
+    assert.equal(keyboard.occludedBottom, 360);
+  });
+}

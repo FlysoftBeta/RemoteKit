@@ -13,6 +13,9 @@
 #include "base/observer_list.h"
 #include "base/scoped_observation.h"
 #include "content/public/browser/web_contents.h"
+#include "content/browser/renderer_host/render_widget_host_impl.h"
+#include "content/browser/renderer_host/render_widget_host_view_base.h"
+#include "content/browser/renderer_host/render_frame_metadata_provider_impl.h"
 #include "ui/aura/client/focus_change_observer.h"
 #include "ui/aura/client/focus_client.h"
 #include "ui/aura/client/window_parenting_client.h"
@@ -98,7 +101,7 @@ class ServiceScreen final : public display::ScreenBase {
         continue;
       display::ScreenInfo info;
       display::DisplayUtil::DisplayToScreenInfo(&info, view.display);
-      const bool landscape = view.display.bounds().width() > view.display.bounds().height();
+      const bool landscape = view.landscape;
       info.orientation_type = landscape ? display::mojom::ScreenOrientation::kLandscapePrimary
                                         : display::mojom::ScreenOrientation::kPortraitPrimary;
       // screen_win maps DMDO_90 to ROTATE_90; DisplayUtil converts it to 270.
@@ -109,16 +112,20 @@ class ServiceScreen final : public display::ScreenBase {
     }
     return display::ScreenBase::GetScreenInfosNearestDisplay(id);
   }
-  void SetViewDisplay(aura::Window* root, const gfx::Size& viewport, float scale, bool tablet) {
+  void SetViewDisplay(aura::Window* root,
+                      const gfx::Size& viewport,
+                      float scale,
+                      bool tablet,
+                      bool landscape) {
     auto [it, inserted] = views_.try_emplace(root);
     auto& view = it->second;
     if (inserted)
       view.display.set_id(++next_display_id_);
     view.tablet = tablet;
+    view.landscape = landscape;
     view.display.set_bounds(gfx::Rect(viewport));
     view.display.set_work_area(gfx::Rect(viewport));
     view.display.set_device_scale_factor(scale);
-    const bool landscape = viewport.width() > viewport.height();
     view.display.set_rotation(
         tablet ? (landscape ? display::Display::ROTATE_270 : display::Display::ROTATE_0)
                : (landscape ? display::Display::ROTATE_0 : display::Display::ROTATE_90));
@@ -137,6 +144,7 @@ class ServiceScreen final : public display::ScreenBase {
   struct ViewDisplay {
     display::Display display;
     bool tablet = false;
+    bool landscape = false;
   };
   std::map<aura::Window*, ViewDisplay> views_;
   int64_t next_display_id_ = 1;
@@ -219,6 +227,9 @@ OffscreenHost::OffscreenHost(content::WebContents* contents, const gfx::Size& vi
   const auto& prefs = *contents->GetMutableRendererPrefs();
   const auto& metadata = prefs.user_agent_override.ua_metadata_override;
   tablet_identity_ = metadata && metadata->platform == "Android";
+  contents_ = contents;
+  plane_size_ = viewport;
+  compositor()->SetBackgroundColor(SK_ColorWHITE);
   SetViewport(viewport);
   compositor()->SetVisible(false);
 }
@@ -238,13 +249,36 @@ void OffscreenHost::SetViewport(const gfx::Size& viewport) {
   UpdateVirtualDisplay();
   if (content_window_)
     content_window_->SetBounds(gfx::Rect(viewport));
-  SetBoundsInPixels(gfx::Rect(gfx::Size(std::lround(viewport.width() * output_scale_),
-                                        std::lround(viewport.height() * output_scale_))));
+  SetBoundsInPixels(gfx::Rect(plane_target_size()));
+}
+
+gfx::Size OffscreenHost::plane_target_size() const {
+  return gfx::Size(std::lround(plane_size_.width() * output_scale_),
+                   std::lround(plane_size_.height() * output_scale_));
+}
+
+void OffscreenHost::SetPlaneSize(const gfx::Size& size) {
+  if (plane_size_ == size)
+    return;
+  plane_size_ = size;
+  SetViewport(viewport_);
+}
+
+bool OffscreenHost::PageFrameReady() const {
+  if (!contents_ || !contents_->GetRenderWidgetHostView())
+    return false;
+  auto* view =
+      static_cast<content::RenderWidgetHostViewBase*>(contents_->GetRenderWidgetHostView());
+  auto* host = content::RenderWidgetHostImpl::From(view->GetRenderWidgetHost());
+  return host && host->render_frame_metadata_provider()
+                         ->LastRenderFrameMetadata()
+                         .viewport_size_in_pixels == view->GetRequestedRendererSizeDevicePx();
 }
 
 void OffscreenHost::UpdateVirtualDisplay() {
   static_cast<ServiceScreen*>(display::Screen::Get())
-      ->SetViewDisplay(window(), viewport_, screen_scale_, tablet_identity_);
+      ->SetViewDisplay(window(), viewport_, screen_scale_, tablet_identity_,
+                       plane_size_.width() > plane_size_.height());
 }
 
 void OffscreenHost::SetScreenConfiguration(const gfx::Size& viewport, float scale) {
@@ -288,6 +322,7 @@ void OffscreenHost::SetRenderDemand(bool enabled) {
 }
 
 void OffscreenHost::Detach() {
+  contents_ = nullptr;
   needs_begin_frame_callback_.Reset();
   begin_frame_receivers_.Clear();
   compositor()->SetExternalBeginFrameControllerClientFactory(nullptr);

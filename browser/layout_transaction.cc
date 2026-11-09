@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include "base/check.h"
+#include "browser/offscreen_host.h"
 namespace remotekit::browser {
 Result<LayoutPlan> LayoutTransaction::Prepare(ViewRegistry::Specifications specs,
                                               int width,
@@ -77,7 +78,15 @@ void LayoutTransaction::Commit(LayoutPlan plan) {
       record.webview->InvalidateLayoutInput(visible);
     CHECK(record.webview->SetVisible(visible));
     record.placement = placement;
-    record.webview->ConfigureDevice(record.spec.width, record.spec.height, PageScale(record.spec));
+    if (auto* host = record.webview->offscreen_host()) {
+      host->SetPlaneSize(gfx::Size(record.spec.width, record.spec.height));
+      host->SetOcclusionRevision(record.viewport.revision);
+    }
+    record.webview->ConfigureDevice(
+        record.spec.width,
+        protocol::PageViewportHeight(record.spec.height,
+                                     visible ? record.viewport.occluded_bottom : 0),
+        PageScale(record.spec));
   }
 }
 }  // namespace remotekit::browser

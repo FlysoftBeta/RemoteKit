@@ -1,3 +1,4 @@
+#include <cmath>
 #include "remotekit/browser/osr/generation.h"
 #include "services/viz/privileged/mojom/compositing/remotekit_output.mojom.h"
 #include "base/check.h"
@@ -83,7 +84,10 @@ void Scheduler::Pump() {
   bool ready = true;
   for (auto id : owner_.plane_pool_.order_) {
     auto plane = owner_.plane_pool_.planes_.at(id);
-    work->reads.push_back({plane, plane->metadata, plane->latest, plane->enabled});
+    auto latest = plane->latest;
+    if (latest && latest->occlusion_revision != plane->metadata.occlusion_revision)
+      latest.reset();
+    work->reads.push_back({plane, plane->metadata, std::move(latest), plane->enabled});
     if (plane->enabled && !owner_.Configure(plane))
       ready = false;
   }
@@ -125,6 +129,9 @@ void Scheduler::Pump() {
     token->slot = work->begin.identity.slot;
     token->value = work->begin.identity.value;
     token->target_index = target_index;
+    token->page_height_pixels =
+        std::lround(double(plane.size.height()) * read.metadata.page_height_dip /
+                    plane.host->plane_size().height());
     const auto args = plane.host->CreateBeginFrameArgs(now, interval);
     owner_.trace_.Add("rend_plane_issue", work->begin.identity, read.metadata.webview_id);
     plane.host->compositor()->IssueRemoteKitBeginFrame(
@@ -215,7 +222,10 @@ base::DictValue Scheduler::Status() const {
       .Set("error", owner_.error_)
       .Set("reason", owner_.failed_ ? "hardware_output_unavailable" : "")
       .Set("retryable", !owner_.failed_)
-      .Set("message", owner_.failed_ ? "当前会话没有可用的硬件 GPU 输出（RDP 会话默认使用 Microsoft Basic Render Driver）：" + owner_.error_ : "")
+      .Set("message", owner_.failed_ ? "当前会话没有可用的硬件 GPU 输出（RDP 会话默认使用 "
+                                       "Microsoft Basic Render Driver）：" +
+                                           owner_.error_
+                                     : "")
       .Set("slotCount", int(kRenderSlotCount))
       .Set("submitted", Number(submitted_))
       .Set("rejected", Number(rejected_))

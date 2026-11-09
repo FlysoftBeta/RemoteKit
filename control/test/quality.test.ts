@@ -10,7 +10,9 @@ const workspace = () => ({
 });
 const viewport = {
   devicePixelRatio: 1,
-  windows: [{ windowId: 'w', width: 800, height: 600, visible: true }],
+  windows: [
+    { windowId: 'w', width: 800, height: 600, visible: true, occludedBottom: 0, occlusionRevision: '1' },
+  ],
 };
 const feedback = (sequence: number, now: number, latency = 400) => ({
   sequence,
@@ -30,7 +32,16 @@ test('quality choices only select WebRTC degradation preference', () => {
     measured = {
       ...viewport,
       devicePixelRatio: 2,
-      windows: [{ windowId: 'w', width: 1920, height: 1080, visible: true }],
+      windows: [
+        {
+          windowId: 'w',
+          width: 1920,
+          height: 1080,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     };
   for (const [preference, degradationPreference] of [
     ['quality', 'maintain-resolution'],
@@ -93,7 +104,16 @@ test('all preferences retain client DPR until the physical atlas allocation boun
   const state = workspace(),
     measured = {
       devicePixelRatio: 2,
-      windows: [{ windowId: 'w', width: 2560, height: 1440, visible: true }],
+      windows: [
+        {
+          windowId: 'w',
+          width: 2560,
+          height: 1440,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     };
   for (const preference of ['quality', 'auto', 'smooth'] as const) {
     state.settings.workspace.qualityPreference = preference;
@@ -101,7 +121,16 @@ test('all preferences retain client DPR until the physical atlas allocation boun
     assert.ok(
       new QualityState().snapshot(state, {
         ...measured,
-        windows: [{ windowId: 'w', width: 8192, height: 4096, visible: true }],
+        windows: [
+          {
+            windowId: 'w',
+            width: 8192,
+            height: 4096,
+            visible: true,
+            occludedBottom: 0,
+            occlusionRevision: '1',
+          },
+        ],
       }).effectiveDpr < 1,
     );
   }

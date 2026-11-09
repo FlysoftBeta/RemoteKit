@@ -245,3 +245,44 @@ test('launcher falls back to a new group at capacity and settings always focuses
   state.activeSpaceId = null;
   assert.deepEqual(launcherPlacement(state), { mode: 'space' });
 });
+
+test('occlusion moves between editing windows without changing either stable content size', async () => {
+  const state = workspace();
+  state.workspace.windows[1].appId = 'browser';
+  state.workspace.windows[1].activeTabId = 'b';
+  state.workspace.tabs.push({ ...state.workspace.tabs[0], id: 'b', windowId: 'b', webviewId: 'b' });
+  const reports: ViewerViewport[] = [];
+  const requests = new ViewportRequests(async (viewport) => {
+    reports.push(viewport);
+  });
+  requests.observe(state, true);
+  requests.measure(1600, 900, 1.25, true);
+  requests.setGeometry('a', 1000, 800);
+  requests.setGeometry('b', 600, 800);
+  requests.setOcclusion('a', 400);
+  await new Promise((resolve) => setTimeout(resolve, 140));
+  const first = reports[reports.length - 1]!;
+  assert.deepEqual(
+    first.windows.slice(0, 2).map((window) => [window.width, window.height, window.occludedBottom]),
+    [
+      [1000, 800, 400],
+      [600, 800, 0],
+    ],
+  );
+  requests.setOcclusion('b', 900);
+  await new Promise((resolve) => setTimeout(resolve, 140));
+  const second = reports[reports.length - 1]!;
+  assert.deepEqual(
+    second.windows.slice(0, 2).map((window) => [window.width, window.height, window.occludedBottom]),
+    [
+      [1000, 800, 0],
+      [600, 800, 800],
+    ],
+  );
+  assert.ok(BigInt(second.windows[0].occlusionRevision) > BigInt(first.windows[0].occlusionRevision));
+  assert.ok(BigInt(second.windows[1].occlusionRevision) > BigInt(first.windows[1].occlusionRevision));
+  requests.setOcclusion('c', 400);
+  await new Promise((resolve) => setTimeout(resolve, 140));
+  assert.ok(reports[reports.length - 1]!.windows.every((window) => window.occludedBottom === 0));
+  requests.reset();
+});

@@ -1,3 +1,4 @@
+#include "protocol/page_viewport.hpp"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "session/views.hpp"
@@ -338,7 +339,9 @@ Result<void> ViewController::GeometryConfig(const Geometry& value) {
                        {"height", config.value("height", device.value("height", 900))},
                        {"device", device.value("mode", std::string("desktop"))},
                        {"device_scale_factor", device.value("deviceScaleFactor", 1.0f)},
-                       {"visible", visible}});
+                       {"visible", visible},
+                       {"occludedBottom", visible ? config.value("occludedBottom", 0) : 0},
+                       {"occlusionRevision", config.value("occlusionRevision", std::string("0"))}});
   }
   {
     auto output_configure_result = output.Configure(value.width, value.height, value.scale,
@@ -433,6 +436,43 @@ Result<Json> ViewController::ApplyView(const Json& config, bool create, bool rec
   if (!geometry) {
     rollback();
     return geometry.error();
+  }
+  const auto stable_configuration = [&](Json value) {
+    value = normalized(std::move(value));
+    value.erase("occludedBottom");
+    value.erase("occlusionRevision");
+    return value;
+  };
+  if (!create && !recovering && !navigation.Recovering(view) && !previous.is_null() &&
+      !reconciliation_pending && !output.Suspended() &&
+      stable_configuration(previous) == stable_configuration(config)) {
+    const auto generation = output.Slots().Generation();
+    if (generation) {
+      auto result = browser.Rpc().Request(
+          {{"method", "view.configure"},
+           {"session", id},
+           {"view", view},
+           {"occludedBottom",
+            config.value("visible", false) ? config.value("occludedBottom", 0) : 0},
+           {"occlusionRevision", config.value("occlusionRevision", std::string("0"))},
+           {"outputGeneration", std::to_string(generation)}});
+      if (!result) {
+        rollback();
+        return result.error();
+      }
+      if (result.value().value("ignored", false)) {
+        reconciliation_pending = true;
+        next_reconciliation = QpcNow();
+        RK_RETURN_IF_ERROR(Save());
+        return Json{{"accepted", true}, {"completed", false}};
+      }
+      auto saved = Save();
+      if (!saved) {
+        reconciliation_pending = true;
+        return saved.error();
+      }
+      return Json{{"accepted", true}, {"completed", true}};
+    }
   }
   bool source_applied = false;
   const bool reconfiguring = !create && !recovering && !navigation.Recovering(view) &&
@@ -1154,8 +1194,22 @@ Result<Json> ViewController::ManageViewConfigure(const Json& request) {
   if (!desired.contains(view))
     return Error{ErrorCode::kNotFound, "view not found"};
   auto config = desired.at(view);
+  bool older_viewport = false;
+  if (request.contains("occlusionRevision") || request.contains("occludedBottom")) {
+    if (!request.contains("occlusionRevision") || !request["occlusionRevision"].is_string() ||
+        !request.contains("occludedBottom") || !request["occludedBottom"].is_number_integer() ||
+        request["occludedBottom"].get<int>() < 0)
+      return Error{ErrorCode::kInvalidRequest, "invalid page viewport"};
+    const auto text = request["occlusionRevision"].get<std::string>();
+    uint64_t revision = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), revision);
+    if (parsed.ec != std::errc() || parsed.ptr != text.data() + text.size())
+      return Error{ErrorCode::kInvalidRequest, "invalid occlusion revision"};
+    older_viewport = revision < std::stoull(config.value("occlusionRevision", std::string("0")));
+  }
   for (auto& [key, value] : request.items())
-    if (key != "id" && key != "method" && key != "requireRunning")
+    if (key != "id" && key != "method" && key != "requireRunning" &&
+        !(older_viewport && (key == "occludedBottom" || key == "occlusionRevision")))
       config[key] = value;
   return ApplyView(config, false);
 }

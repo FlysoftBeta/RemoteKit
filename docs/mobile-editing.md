@@ -67,18 +67,21 @@ grace     → dismissed 200ms 到期
 
 命令、点外部、Escape、切 view 或失活都要关闭远端菜单：`selection_command {command:dismiss}` 或 `context_command {command:dismiss}` 走有序输入；过期菜单的 dismiss 成功但不操作。关闭同时清理 selection controller 的拖动/触控状态和页面 context-menu 状态。Endpoint 在 DataChannel 关闭、授权撤销和 peer 清理时发 Session 级 `menus.close` 并释放远端输入。收尾仍校验连接与授权，允许跨媒体屏障送达；旧文档请求不操作新页面。
 
-## resize 事务
+## 键盘遮挡
 
-1. 本地内容 bounds 开始变化，或者 Transport 即将撤销旧帧时（在清除 ready、RTP、布局信息之前同步通知），抓取最后一个合法 ROI 的快照。
-2. 每个 viewport 最多一张快照，最多 4Mi 像素，超过时按比例缩小。不做逐帧拷贝。
-3. 过渡原因贯穿整个事务：键盘引起的过渡用顶部锚定、保持比例并裁剪的 peek；其他 resize（分栏拖动、窗口变化、旋转）用最后一帧的模糊拉伸。visualViewport 和 ResizeObserver 先后到达、跨帧到达都不丢失原因。
-4. 快照一直保留到新布局真实呈现、且两个轴都与最终期望 DIP 相差不超过 1 DIP。短暂的 settle 只用于等待动画停止，不决定快照寿命。文档/连接/授权边界和组件卸载立即释放。
-5. 普通 resize 不显示"正在恢复页面"。连接失败、视频错误、休眠标签页唤醒各有自己的状态显示。
-6. 快照永远不授予媒体 ready 或坐标输入资格。
+Viewer 为每个 Window 上报稳定 `width / height`，另带 `occludedBottom / occlusionRevision`。仅拥有 active 编辑目标的窗口得到遮挡量；切换编辑窗口时原窗口恢复、目标窗口缩短，邻窗不重排。隐藏窗口和全屏切换期间不应用遮挡。页面高度为 `max(stableHeight − occludedBottom, min(120, stableHeight))`。
 
-**键盘遮挡判断**（`KeyboardViewport`）：在稳定的无遮挡基线上，2px 以内视为噪声；visual viewport 被遮挡 48px 以上，或粗指针设备的布局高度下降 80px 以上，判为键盘。宽度变化或缩放偏差 ≥0.02 重置为普通 resize。高度完全恢复后 140ms settle。这些判断不授予新的键盘意图。
+`KeyboardViewport` 保存无遮挡基线，适配只缩 visual viewport 与 layout/visual 一起缩的模式。2px 以内是噪声；代理聚焦时 visual 遮挡达到 48px，或粗指针布局高度下降超过 2px，进入键盘状态。高度恢复后等待 140ms settle。宽度、旋转或缩放变化走正常几何更新并重新确定基线；`offsetTop/Left` 只表示平移，不另加遮挡，也不授予键盘意图。
 
-**外壳**：Viewer 外壳按 visualViewport 的宽高布局，`offsetTop/Left` 只移动外壳。远端 DIP 取 Window 内容区实际大小；可视区域平移（光标平移）不提交 resize、不启动新的输入屏障。曾经把内容矩形与移动中的 visualViewport 求交，导致光标平移期间远端尺寸来回变化。视口提交在约 100ms 内合并；浮层 UI（对话框、文件篮、连接与同步提示）覆盖在工作区上，不占用内容布局，因此打开设置或出现"正在恢复连接"之类的提示不会让远端页面 resize；外壳提示统一叠放在工具栏下方的通知栈里。
+Endpoint 比较完整稳定配置，仅遮挡变化时原地 `view.configure`。Browser 保持 Aura 根和 plane target 的稳定尺寸，只缩 WebContents；Viz 清白整张目标，绘制后再次清理页面下方空带，再合成完整 plane 矩形。atlas 计划、位置、DPR、mediaScale、纹理/Fence、encoder、generation 与 layoutEpoch 不因遮挡变化重建；无新 prepare/ready 或强制关键帧。空闲补帧策略照常运行。
+
+遮挡 revision 按窗口单调递增；原地更新带 `outputGeneration`，旧代次或旧 revision 被忽略。普通换代同时携带当前遮挡，首帧即使用新页面高度。`view.viewport` 与 frame 的逐 view 元数据报告页面高度和 revision，不参与布局身份。客户端按本地可见高度与已确认页面高度的交集限制输入；Browser 丢弃空带中的新 down/wheel/long-press，把已有接触的收尾钳制到页面内。
+
+## 普通 resize 事务
+
+分栏、窗口尺寸、旋转、DPR/UI scale、可见集合或输出规划变化仍使用完整布局事务和[呈现屏障](presentation.md#布局屏障)。改变 bounds 或撤销旧媒体前抓取最后一个合法 ROI；每 viewport 最多一张快照、最多 4Mi 像素，超出等比缩小。过渡显示模糊拉伸，直到新布局真实呈现且两轴与目标 DIP 相差不超过 1 DIP。连接、文档、授权边界或卸载立即释放快照；快照不授予媒体 ready 或坐标输入资格。键盘遮挡使用稳定视频，不启动快照事务。
+
+外壳位置跟随 visualViewport 与顶部留空，键盘期间保持稳定高度；设置、文件篮和提示覆盖内容，不挤占页面布局。视口提交合并约 100ms。
 
 **悬浮按钮**：开始、键盘开关、退出全屏（×）、开启声音、停止诊断都是 36px 的圆形图标按钮，由所属组件按需登记（`FloatingActions`），标签放在 tooltip 与隐藏文本里。每个按钮停靠在八个边缘槽位之一（四角、四边中点），可以拖动到它允许的槽位：退出全屏只允许上沿三处，其他按钮四周都可以；拖动时显示可停靠的目标，松手吸附到最近的槽位，同槽位的按钮沿边缘排开。位置只保存在当前页面内存里。需要注意的操作有提示样式（自动播放被拦截时脉冲，收集诊断时红点）。按钮在 pointerdown 时阻止默认行为，不抢走远端编辑代理的焦点，点键盘按钮不会让输入法失焦；没有移动的按下在按钮自己的 click 上执行（键盘激活同样走 click），拖动不会触发；不在 pointerup 上执行，因为那时打开的叠层（例如开始屏幕）会位于手指下方，触摸点按随后的 click 会落到叠层背景上把它立即关掉。
 

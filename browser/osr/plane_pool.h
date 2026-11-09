@@ -16,6 +16,7 @@ struct Target {
   ComPtr<ID3D11Fence> ready;
   base::win::ScopedHandle texture_handle, ready_handle;
   uint64_t value = 0;
+  uint64_t occlusion_revision = 0;
   bool writing = false;
 };
 struct Plane {

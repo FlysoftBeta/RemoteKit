@@ -23,6 +23,7 @@ class TailRefreshLease {
     return frame.release == Release ? static_cast<TailRefreshLease*>(frame.release_context)
                                     : nullptr;
   }
+  const remotekit_rtc_frame& Source() const { return source_; }
   static bool BeginEncoding(const remotekit_rtc_frame& frame) {
     auto* lease = From(frame);
     return !lease || lease->attempt_->BeginEncoding();

@@ -807,6 +807,7 @@ test('GC follows library and selection references, derivatives and only the newe
       entries: [
         {
           id: 'entry',
+          kind: 'file' as const,
           assetId: id(1),
           name: 'file',
           type: 'text/plain',
@@ -1280,6 +1281,7 @@ test('GC rechecks references after asynchronous deletes and checkpoints cannot a
       entries: [
         {
           id: 'entry',
+          kind: 'file' as const,
           assetId: id(2),
           name: 'file',
           type: 'text/plain',
@@ -1460,6 +1462,7 @@ test('durable reference removal starts its own grace even without a GC tick whil
       entries: [
         {
           id: 'entry',
+          kind: 'file' as const,
           assetId: id(1),
           name: 'file',
           type: 'text/plain',

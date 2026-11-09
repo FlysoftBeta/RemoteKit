@@ -94,7 +94,16 @@ for (const initial of ['start', 'remote'] as const) {
       const tab = f.store.workspaces.workspace(f.tenant).tabs[0];
       await requestViewer(f.control, f.tenant, 'lease', 'viewport', {
         devicePixelRatio: 1,
-        windows: [{ windowId: tab.windowId, width: 900, height: 600, visible: true }],
+        windows: [
+          {
+            windowId: tab.windowId,
+            width: 900,
+            height: 600,
+            visible: true,
+            occludedBottom: 0,
+            occlusionRevision: '1',
+          },
+        ],
       });
       const navigate = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://slow.test/' });
       await f.control.operations.submitOperation(f.tenant, navigate, 'lease');
@@ -581,7 +590,16 @@ test('provisional start rollback hides its existing Native plane, retries failur
     const tab = f.store.workspaces.workspace(f.tenant).tabs[0];
     await requestViewer(f.control, f.tenant, 'lease', 'viewport', {
       devicePixelRatio: 1,
-      windows: [{ windowId: tab.windowId, width: 900, height: 600, visible: true }],
+      windows: [
+        {
+          windowId: tab.windowId,
+          width: 900,
+          height: 600,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     });
     const op = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://provisional.test/' });
     await f.control.operations.submitOperation(f.tenant, op, 'lease');
@@ -652,7 +670,16 @@ test('a local start page hides an existing Native plane during resource limitati
     ).state.workspace.windows[1];
     await requestViewer(f.control, f.tenant, 'lease', 'viewport', {
       devicePixelRatio: 1,
-      windows: [{ windowId: other.id, width: 8192, height: 8192, visible: true }],
+      windows: [
+        {
+          windowId: other.id,
+          width: 8192,
+          height: 8192,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     });
     await f.control.operations.productAction(
       f.tenant,

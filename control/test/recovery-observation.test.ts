@@ -83,7 +83,16 @@ test('pending recovery preserves product URL/title/history and desired visibilit
   try {
     await requestViewer(control, tenant, 'lease', 'viewport', {
       devicePixelRatio: 1,
-      windows: [{ windowId: tab.windowId, width: 1000, height: 600, visible: true }],
+      windows: [
+        {
+          windowId: tab.windowId,
+          width: 1000,
+          height: 600,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
     });
     let current = store.workspaces.workspace(tenant).tabs[0];
     assert.equal(current.url, 'https://saved.test/history');

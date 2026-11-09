@@ -406,6 +406,11 @@ export class Reconciler {
           viewId: t.webviewId,
           width: region?.width ?? 1440,
           height: region?.height ?? 900,
+          occludedBottom:
+            visible && state.windows.some((w) => w.id === t.windowId && w.activeTabId === t.id)
+              ? (region?.occludedBottom ?? 0)
+              : 0,
+          occlusionRevision: region?.occlusionRevision ?? '1',
           device: { mode: 'desktop', deviceScaleFactor: dpr },
           visible: !lifecycleBlocked && visible && (recovering || readyToShow),
         };

@@ -1,3 +1,4 @@
+#include "browser/offscreen_host.h"
 #include "browser/control_dispatcher.h"
 #include "browser/signin_result.h"
 #include "browser/control_requests.h"
@@ -104,6 +105,9 @@ Result<ConfigureViewRequest> DecodeConfigureView(const base::DictValue& wire,
   ConfigureViewRequest request;
   static_cast<RequestEnvelope&>(request) = envelope;
   RequestDecoder decoder(wire);
+  request.occluded_bottom = decoder.Optional<int>("occludedBottom");
+  request.occlusion_revision = decoder.Optional<uint64_t>("occlusionRevision");
+  request.output_generation = decoder.Optional<uint64_t>("outputGeneration");
   request.visible = decoder.Optional<bool>("visible");
   request.width = decoder.Optional<int>("width");
   request.height = decoder.Optional<int>("height");
@@ -440,6 +444,32 @@ ControlResult ControlDispatcher::HandleConfigureView(const ConfigureViewRequest&
   }
   if (spec.width < 1 || spec.height < 1 || spec.width > 8192 || spec.height > 8192)
     return error(ErrorCode::kInvalidRequest, "invalid_viewport");
+  if (request.occluded_bottom || request.occlusion_revision) {
+    if (!request.occluded_bottom || !request.occlusion_revision || !request.output_generation ||
+        *request.occluded_bottom < 0)
+      return error(ErrorCode::kInvalidRequest, "invalid_page_viewport");
+    if ((!runtime_.output || *request.output_generation != runtime_.output_generation) ||
+        *request.occlusion_revision < record->viewport.revision) {
+      reply.Set("ok", true);
+      reply.Set("ignored", true);
+      return reply;
+    }
+    if (spec != record->spec)
+      return error(ErrorCode::kConflict, "page_viewport_requires_stable_plane");
+    record->viewport = {*request.occluded_bottom, *request.occlusion_revision};
+    if (auto* host = record->webview->offscreen_host())
+      host->SetOcclusionRevision(record->viewport.revision);
+    record->webview->ConfigureDevice(
+        spec.width,
+        protocol::PageViewportHeight(spec.height,
+                                     spec.visible ? record->viewport.occluded_bottom : 0),
+        runtime_.layout_transaction.PageScale(spec));
+    runtime_.UpdateOutput();
+    reply.Set("ok", true);
+    reply.Set("accepted", true);
+    reply.Set("completed", true);
+    return reply;
+  }
   if (spec == record->spec) {
     reply.Set("ok", true);
     reply.Set("accepted", true);

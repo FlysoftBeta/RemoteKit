@@ -131,6 +131,8 @@ export type DownloadEvent = {
   | { type: 'download.failed'; error: NativeError }
 );
 export interface ViewConfiguration {
+  occludedBottom?: number;
+  occlusionRevision?: string;
   viewId: string;
   width?: number;
   height?: number;

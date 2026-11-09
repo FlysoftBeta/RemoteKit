@@ -4,6 +4,7 @@
 #include <string>
 #include "browser/webview.h"
 #include "browser/page_requests.h"
+#include "protocol/page_viewport.hpp"
 
 namespace remotekit::browser {
 struct ViewSpec {
@@ -18,6 +19,7 @@ struct ViewRecord {
   std::unique_ptr<WebView> webview;
   std::unique_ptr<PageRequests> requests;
   ViewSpec spec;
+  protocol::PageViewport viewport;
   protocol::Placement placement;
 };
 class ViewRegistry {

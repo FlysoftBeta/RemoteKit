@@ -1,4 +1,5 @@
 import { useLayoutEffect, useState, type RefObject } from 'react';
+import { uiScale } from './ui-scale';
 import type { ViewportGeometry } from './viewport-geometry';
 
 export function useViewportGeometry(
@@ -13,7 +14,15 @@ export function useViewportGeometry(
     const measure = () => {
       const next = {
         width: section.clientWidth,
-        height: section.clientHeight,
+        height: Math.min(
+          section.clientHeight,
+          Math.max(
+            0,
+            ((window.visualViewport?.height ?? window.innerHeight) -
+              (section.getBoundingClientRect().top - (window.visualViewport?.offsetTop ?? 0))) /
+              uiScale(),
+          ),
+        ),
         canvas: {
           left: plane.offsetLeft,
           top: plane.offsetTop,
@@ -37,7 +46,13 @@ export function useViewportGeometry(
     const observer = new ResizeObserver(measure);
     observer.observe(section);
     observer.observe(plane);
-    return () => observer.disconnect();
+    window.visualViewport?.addEventListener('resize', measure);
+    window.visualViewport?.addEventListener('scroll', measure);
+    return () => {
+      observer.disconnect();
+      window.visualViewport?.removeEventListener('resize', measure);
+      window.visualViewport?.removeEventListener('scroll', measure);
+    };
   }, [viewport, canvas]);
   return geometry;
 }

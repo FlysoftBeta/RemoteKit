@@ -99,7 +99,7 @@ Begin/Reject/Stop/Stopped/Wake 走一条独立的 Mojo message pipe（编解码�
 
 ## 共享映射
 
-`SharedRenderMapping` v5（`protocol/shared_render_slots.h`）只承载元数据：最新布局、剪贴板序号，以及每个 Slot 独立的帧快照（最多 64 个 view，每个 view 包含 Session/WebView/instance/document/focus 身份、atlas 像素矩形、输出像素每 DIP、页面 DPR、stale 标记、文本输入状态与稳定的编辑目标 ID、触控选择快捷菜单、上下文菜单 ID）。全局布局和每个 Slot 的快照各有独立的 seqlock。seqlock 读到一致数据只证明元数据一致，不证明 GPU 写入完成。
+`SharedRenderMapping` v8（`protocol/shared_render_slots.h`）只承载元数据：最新布局、剪贴板序号，以及每个 Slot 独立的帧快照（最多 64 个 view，每个 view 包含 Session/WebView/instance/document/focus 身份、atlas 像素矩形、输出像素每 DIP、页面 DPR、stale 标记、文本输入状态与稳定的编辑目标 ID、focusSource/focusObservation、Viewer 手柄几何与快捷菜单、上下文菜单 ID、页面高度与 occlusionRevision）。全局布局和每个 Slot 的快照各有独立的 seqlock。seqlock 读到一致数据只证明元数据一致，不证明 GPU 写入完成。
 
 ## Slot 与 Fence
 
@@ -116,7 +116,7 @@ Endpoint 侧 Slot 状态：`free → rendering → leased → consuming → free
 
 ## 换代、停止与退役
 
-resize、停止输出、断链、GPU 故障都会结束当前代次。
+稳定平面 resize、DPR/atlas 规划或可见集合变化、停止输出、断链和 GPU 故障会结束当前代次。键盘遮挡只原地更新页面 viewport，不结束代次。
 
 1. Comp 发送 Stop，当前状态移入退役集合，同时可以导入下一代资源。
 2. Rend 在同一个有序通道上把 Stop 之前的请求处理完（Reject 或已排 Signal）后回复 Stopped。Stopped 只证明请求的终态已确定，不证明 GPU 工作完成。
@@ -144,6 +144,12 @@ Browser 渲染、纹理导入、VPP 和硬件编码必须在同一块物理 GPU 
 | mediaScaleX/Y | atlas 像素到编码像素的逐轴比例 | 两轴分别记录，覆盖偶数/对齐取整造成的轴向差异 |
 
 **打包**：确定性的、不旋转的 MaxRects，按输入顺序放置，评分依次为短边、长边、y、x，然后切分并裁剪空闲矩形。每个 plane 四边各留 padding（单个 1920×1080 plane 加 4px padding 需要 1928×1088）。物理轴 = `ceil(DIP × scale)` 向上取偶；单轴不超过 8192，面积不超过 16,777,216 像素。规划同时约束面积、单轴、padding 和对齐，Control 与 Endpoint 用同一份 fixture（`protocol/atlas-plan-fixtures.txt`）验证结果一致。最低 DPR 也放不下时返回 `resourceLimitation`，保留旧的有效布局。
+
+**稳定平面与页面 viewport**：plane target 与 atlas 矩形按无遮挡的稳定 DIP 尺寸分配。遮挡量不进入 `PlanAtlas`，也不参与输出布局身份。仅编辑窗口的页面高度为 `max(stableHeight − occludedBottom, min(120, stableHeight))`，Aura compositor 根保持稳定尺寸，WebContents 在原点缩短，虚拟屏幕方向仍取稳定尺寸。
+
+原地 `view.configure` 带 `outputGeneration` 和单调 `occlusionRevision`；旧代次/旧 revision 被忽略，不轮换输入 token、不 pause/import 输出、不改变 encoder。patch `0021` 用显式 `target_size` 配置 Viz 目标，Begin token 另带 `page_height_pixels`。每次根绘制前清白目标，绘制后清白页面下方空带，再拷贝完整 plane，避免轮转目标残留旧像素。
+
+Work 快照与目标缓存记录页面高度/revision，不能把旧像素重新贴上新 revision。Browser 只有在 renderer 已提交请求尺寸的 surface 时才采用新目标；旧 revision 的在途目标仍按 Fence/租约规则保留。`view.viewport` 和 frame 元数据用于反馈页面尺寸，不参与布局身份。稳定几何变化的完整事务同时带当前遮挡。
 
 **原子提交**：`output.configure` 带 `viewConfigs` 时，先验证全部候选配置、物理预算和完整打包可行性，再一次性提交页面几何与 atlas 几何；任何一步失败都保持原状。新建或收养的页面先隐藏创建，再加入最终事务。这样横竖屏切换不会产生超限的中间矩形。
 

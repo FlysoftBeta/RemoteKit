@@ -43,6 +43,8 @@ class RenderSlots {
   HANDLE EventHandle() const;
   Result Poll(remotekit_rtc_frame&, SharedAtlasFrame&, std::string&);
   SharedAtlasFrame LatestMetadata() const;
+  static SharedAtlasFrame Metadata(const remotekit_rtc_frame& frame);
+  uint64_t Generation() const;
   std::optional<uint64_t> ClipboardSequence() const;
   bool Close(std::string&);
   int64_t MonotonicMicros() const;

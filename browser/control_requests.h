@@ -7,6 +7,7 @@
 #include "base/values.h"
 #include "base/strings/string_number_conversions.h"
 #include <type_traits>
+#include "protocol/page_viewport.hpp"
 
 namespace remotekit::browser {
 struct RequestEnvelope {
@@ -34,6 +35,7 @@ struct ViewConfiguration {
   int width = 0, height = 0;
   float scale = 1;
   bool visible = false;
+  protocol::PageViewport viewport;
 };
 struct OutputConfigureRequest : RequestEnvelope {
   std::optional<std::vector<ViewConfiguration>> viewConfigs;
@@ -92,6 +94,9 @@ struct RecreateViewRequest : RequestEnvelope {
   std::optional<NavigationOperations::Identity> operation;
 };
 struct ConfigureViewRequest : RequestEnvelope {
+  std::optional<int> occluded_bottom;
+  std::optional<uint64_t> occlusion_revision;
+  std::optional<uint64_t> output_generation;
   std::optional<bool> visible;
   std::optional<int> width;
   std::optional<int> height;

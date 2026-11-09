@@ -10,3 +10,6 @@ empty 1 16 - 16 16 16 16
 wide-pair 1 16 4096x600,4096x600 4104 1216 4112 1216
 tall-pair 1 16 600x4096,600x4096 1216 4104 1216 4112
 mixed-reversed 1.25 16 800x1200,1200x900 2016 1208 2528 1520
+# Occlusion is side metadata; closed/open use identical stable item dimensions.
+occlusion-closed 1.25 16 1200x900,800x1200 2016 1208 2528 1520
+occlusion-open 1.25 16 1200x900,800x1200 2016 1208 2528 1520

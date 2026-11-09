@@ -1,3 +1,4 @@
+import { KeyboardViewport } from '../editing/keyboard-viewport';
 import './stage.css';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Add, AdminPanelSettingsOutlined, Logout, WebAssetOutlined } from '@mui/icons-material';
@@ -35,6 +36,7 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
   }, [stageNotice]);
   const [width, setWidth] = useState(0);
   const shell = useRef<HTMLElement>(null);
+  const keyboardViewport = useRef(new KeyboardViewport());
   const previousSpace = useRef<{ id: string | null; windowIds: string[] } | undefined>(undefined);
   const contentWidth = width;
   const windowFullscreen = useWindowFullscreen();
@@ -56,10 +58,51 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
       node.style.left = `${(visual?.offsetLeft ?? 0) / scale}px`;
       node.style.top = `${((visual?.offsetTop ?? 0) + deadZone) / scale}px`;
     };
+    let transitioning = true;
+    let transitionFrame = 0;
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
     const measure = () => {
+      const active = document.activeElement;
+      const focused =
+        active instanceof HTMLTextAreaElement &&
+        active.classList.contains('remote-input') &&
+        active.inputMode !== 'none';
+      const keyboard = keyboardViewport.current;
+      const now = performance.now();
+      keyboard.measure(
+        {
+          visual: visual
+            ? {
+                width: visual.width,
+                height: visual.height,
+                offsetLeft: visual.offsetLeft,
+                offsetTop: visual.offsetTop,
+              }
+            : undefined,
+          scale: visual?.scale ?? 1,
+          layoutWidth: window.innerWidth,
+          layoutHeight: window.innerHeight,
+          screen: { width: window.screen.width, height: window.screen.height },
+        },
+        focused,
+        window.matchMedia('(pointer: coarse)').matches,
+        now,
+      );
+      keyboard.settle(now);
+      const editing = media.editing.mobileEditing;
+      const owner = editing.views.find((view) => editing.forKeyboard(view))?.id ?? '';
+      media.viewport.setOcclusion(owner, transitioning ? 0 : keyboard.occludedBottom / scale);
+      clearTimeout(settleTimer);
+      if (keyboard.deadline !== undefined)
+        settleTimer = setTimeout(measure, Math.max(1, keyboard.deadline - now));
       const width = (visual?.width ?? document.documentElement.clientWidth) / scale;
       const height =
-        Math.max(1, (visual?.height ?? document.documentElement.clientHeight) - deadZone) / scale;
+        Math.max(
+          1,
+          (keyboard.open
+            ? keyboard.stableHeight
+            : (visual?.height ?? document.documentElement.clientHeight)) - deadZone,
+        ) / scale;
       node.style.width = `${width}px`;
       node.style.height = `${height}px`;
       setWidth(width);
@@ -71,6 +114,13 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
       );
       position();
     };
+    transitionFrame = requestAnimationFrame(() => {
+      transitionFrame = requestAnimationFrame(() => {
+        transitioning = false;
+        measure();
+      });
+    });
+    const unsubscribeEditing = media.editing.subscribe(measure);
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     visual?.addEventListener('resize', measure);
@@ -80,6 +130,9 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
     measure();
     return () => {
       observer.disconnect();
+      unsubscribeEditing();
+      cancelAnimationFrame(transitionFrame);
+      clearTimeout(settleTimer);
       visual?.removeEventListener('resize', measure);
       visual?.removeEventListener('scroll', position);
       window.removeEventListener('resize', measure);

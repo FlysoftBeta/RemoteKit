@@ -37,6 +37,15 @@ int EncoderRegistry::CreateEncoder(void* context, uint64_t encoder_peer, uint64_
                             {"layoutEpoch", std::to_string(epoch)},
                             {"encodedBytes", encoded_bytes},
                             {"keyframe", keyframe}};
+            const auto metadata = media::RenderSlots::Metadata(source);
+            message["viewports"] = Json::array();
+            for (uint32_t i = 0; i < metadata.view_count; ++i) {
+              const auto& view = metadata.views[i];
+              message["viewports"].push_back(
+                  {{"viewId", std::to_string(view.webview_id)},
+                   {"pageHeight", view.page_height_dip},
+                   {"occlusionRevision", std::to_string(view.occlusion_revision)}});
+            }
             LARGE_INTEGER before{}, after{};
             FILETIME utc{};
             QueryPerformanceCounter(&before);

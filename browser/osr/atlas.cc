@@ -11,7 +11,8 @@ bool SamePixelIdentity(const SharedAtlasView& a, const SharedAtlasView& b) {
          a.document_generation == b.document_generation && a.x_pixels == b.x_pixels &&
          a.y_pixels == b.y_pixels && a.width_pixels == b.width_pixels &&
          a.height_pixels == b.height_pixels && a.atlas_pixels_per_dip == b.atlas_pixels_per_dip &&
-         a.page_device_scale_factor == b.page_device_scale_factor;
+         a.page_device_scale_factor == b.page_device_scale_factor &&
+         a.page_height_dip == b.page_height_dip && a.occlusion_revision == b.occlusion_revision;
 }
 uint64_t HandleValue(HANDLE handle) {
   return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(handle));

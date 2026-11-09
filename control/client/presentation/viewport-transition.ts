@@ -12,12 +12,6 @@ export interface VisualBounds {
   width: number;
   height: number;
 }
-export interface ViewportMetrics {
-  visual: VisualBounds | undefined;
-  scale: number;
-  layoutWidth: number;
-  layoutHeight: number;
-}
 export function pixelAlignedViewportBounds(
   bounds: ViewportBounds,
   scale: number,
@@ -63,118 +57,6 @@ export function resizeSnapshotSize(width: number, height: number) {
   const scale = Math.min(1, Math.sqrt(FREEZE_MAX_PIXELS / pixels));
   return { width: Math.max(1, Math.floor(width * scale)), height: Math.max(1, Math.floor(height * scale)) };
 }
-export const KEYBOARD_SETTLE_MS = 140;
-const VIEWPORT_NOISE_PX = 2;
-const VISUAL_OCCLUSION_PX = 48;
-const LAYOUT_OCCLUSION_PX = 80;
-type ViewportChange = 'keyboard' | 'ordinary' | undefined;
-
-/** Classifies browser viewport geometry without touching editor focus. */
-export class KeyboardViewport {
-  private width?: number;
-  private height?: number;
-  private baseline?: number;
-  private restoreAt?: number;
-  private observedOpen = false;
-  dismissals = 0;
-
-  get open() {
-    return this.observedOpen;
-  }
-  get deadline() {
-    return this.restoreAt;
-  }
-
-  measure(metrics: ViewportMetrics, focused: boolean, coarse: boolean, now: number): ViewportChange {
-    const { visual, layoutWidth, layoutHeight, scale } = metrics;
-    const height = Math.min(visual?.height ?? layoutHeight, layoutHeight);
-    const width = Math.min(visual?.width ?? layoutWidth, layoutWidth);
-    const previous = this.height;
-    if (
-      Math.abs(scale - 1) >= 0.02 ||
-      (this.width !== undefined && Math.abs(this.width - width) > VIEWPORT_NOISE_PX)
-    ) {
-      this.clear();
-      return 'ordinary';
-    }
-
-    this.width ??= width;
-    const occlusion = layoutHeight - height;
-    const meaningful = previous !== undefined && Math.abs(height - previous) > VIEWPORT_NOISE_PX;
-    if (previous === undefined || meaningful) this.height = height;
-
-    // Without a prior sample, the layout viewport still supplies the full
-    // height on browsers that resize only their visual viewport.
-    this.baseline ??= Math.max(height, layoutHeight);
-    if (this.open) {
-      if (height >= this.baseline - VIEWPORT_NOISE_PX) this.restoreAt ??= now + KEYBOARD_SETTLE_MS;
-      else this.restoreAt = undefined;
-      return meaningful ? 'keyboard' : undefined;
-    }
-
-    const drop = this.baseline - height;
-    if (focused && (occlusion >= VISUAL_OCCLUSION_PX || (coarse && drop >= LAYOUT_OCCLUSION_PX))) {
-      this.observedOpen = true;
-      return 'keyboard';
-    }
-    // Preserve the unoccluded baseline through small steps during a possible
-    // keyboard animation. Grow it immediately for browser chrome restoration.
-    if (!focused || (!coarse && occlusion <= VIEWPORT_NOISE_PX)) this.baseline = height;
-    else this.baseline = Math.max(this.baseline, height);
-    return meaningful ? 'ordinary' : undefined;
-  }
-
-  settle(now: number) {
-    if (this.restoreAt === undefined || now < this.restoreAt) return false;
-    this.observedOpen = false;
-    this.restoreAt = undefined;
-    ++this.dismissals;
-    return true;
-  }
-
-  clear() {
-    this.width = this.height = this.baseline = this.restoreAt = undefined;
-    this.observedOpen = false;
-  }
-}
-
-/** A viewport event may precede or follow the content observer in one resize. */
-export class ResizePreview {
-  private keyboardHint = false;
-  private active = false;
-  private settleAt = 0;
-  keyboard = false;
-  get deadline() {
-    return this.active && this.keyboard ? this.settleAt : 0;
-  }
-
-  measure(changed: boolean, change: ViewportChange, now: number) {
-    if (change === 'keyboard') {
-      this.keyboardHint = true;
-      if (this.active) this.keyboard = true;
-      this.settleAt = now + KEYBOARD_SETTLE_MS;
-    } else if (change === 'ordinary') {
-      this.keyboardHint = this.keyboard = false;
-    }
-    if (changed) {
-      // An IME inset and the resulting content bounds need not arrive in the
-      // same frame. Keep the cause until presentation completes the transition.
-      this.keyboard = this.keyboardHint || (this.active && this.keyboard);
-      this.active = true;
-      this.settleAt = now + KEYBOARD_SETTLE_MS;
-      this.keyboardHint = false;
-    }
-    return this.keyboard;
-  }
-
-  clear() {
-    this.active = this.keyboard = this.keyboardHint = false;
-    this.settleAt = 0;
-  }
-  complete() {
-    if (this.active) this.clear();
-  }
-}
 export const FREEZE_MAX_PIXELS = 4 * 1024 * 1024;
 export interface ResizeFreeze {
   owner: string;
@@ -183,13 +65,11 @@ export interface ResizeFreeze {
 }
 export type ResizeState =
   | { phase: 'stable' }
-  | { phase: 'waiting'; snapshot?: ResizeFreeze; cause: 'keyboard' | 'layout' }
+  | { phase: 'waiting'; snapshot?: ResizeFreeze; cause: 'layout' }
   | { phase: 'settling' };
 export function transitionResize(
   state: ResizeState,
-  event:
-    | { phase: 'stable' | 'settling' }
-    | { phase: 'waiting'; cause: 'keyboard' | 'layout'; snapshot?: ResizeFreeze },
+  event: { phase: 'stable' | 'settling' } | { phase: 'waiting'; cause: 'layout'; snapshot?: ResizeFreeze },
 ): ResizeState {
   if (event.phase === 'waiting')
     return { ...event, snapshot: event.snapshot ?? (state.phase === 'waiting' ? state.snapshot : undefined) };
@@ -198,7 +78,7 @@ export function transitionResize(
 /** A freeze only retains old pixels; it never supplies media/input readiness. */
 export class ViewportTransition {
   state: ResizeState = { phase: 'stable' };
-  wait(cause: 'keyboard' | 'layout') {
+  wait(cause: 'layout') {
     this.state = transitionResize(this.state, { phase: 'waiting', cause, snapshot: this.freeze });
   }
   settled() {
@@ -212,7 +92,7 @@ export class ViewportTransition {
   freeze?: ResizeFreeze;
   begin(owner: string, bounds: ViewportBounds, pixels: number, ready: boolean, mediaBarrier = false) {
     this.desired = { ...bounds };
-    if (this.freeze) return false; // One bounded copy for the complete keyboard animation.
+    if (this.freeze) return false;
     const previous = this.confirmed;
     if (
       !ready ||

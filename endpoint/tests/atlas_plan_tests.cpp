@@ -1,4 +1,5 @@
 #include "protocol/atlas_plan.hpp"
+#include "protocol/page_viewport.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -48,5 +49,20 @@ int main(int argc, char** argv) {
       remotekit::protocol::AtlasAllocationDimensions(std::max(wide->width, tall->width),
                                                      std::max(wide->height, tall->height), 1, 16))
     return 4;
+  if (remotekit::protocol::PageViewportHeight(900, 1000) != 120 ||
+      remotekit::protocol::PageViewportHeight(80, 50) != 80 ||
+      remotekit::protocol::PageViewportHeight(900, 400) != 500)
+    return 5;
+  std::vector<remotekit::protocol::PackItem> stable{{1, 1200, 900, 1}, {2, 800, 1200, 1}};
+  const auto closed = remotekit::protocol::PlanAtlas(stable, 1.25f, 16);
+  for (int occlusion : {0, 100, 400, 780}) {
+    const int page_height = remotekit::protocol::PageViewportHeight(900, occlusion);
+    const auto open = remotekit::protocol::PlanAtlas(stable, 1.25f, 16);
+    if (!closed || !open || page_height < 120 || closed->width != open->width ||
+        closed->height != open->height || closed->scale != open->scale ||
+        closed->physical.width != open->physical.width ||
+        closed->physical.height != open->physical.height)
+      return 6;
+  }
   std::cout << count << " shared atlas fixtures passed\n";
 }

@@ -42,7 +42,11 @@ void PlanePool::SetViews(std::vector<View> views) {
   std::vector<uint64_t> order;
   bool changed = views.size() != planes_.size();
   for (const auto& view : views) {
-    const auto& v = view.metadata;
+    auto v = view.metadata;
+    if (view.offscreen_host) {
+      v.page_height_dip = view.offscreen_host->page_viewport().height();
+      v.occlusion_revision = view.offscreen_host->occlusion_revision();
+    }
     if (!v.webview_id || !v.width_pixels || !v.height_pixels || v.x_pixels < 0 || v.y_pixels < 0 ||
         uint64_t(v.x_pixels) + v.width_pixels > owner_.width_ ||
         uint64_t(v.y_pixels) + v.height_pixels > owner_.height_ || next.contains(v.webview_id)) {
@@ -59,7 +63,7 @@ void PlanePool::SetViews(std::vector<View> views) {
     }
     gfx::Size size;
     if (view.offscreen_host && view.offscreen_host->compositor())
-      size = view.offscreen_host->compositor()->size();
+      size = view.offscreen_host->plane_target_size();
     auto old = planes_.find(v.webview_id);
     std::shared_ptr<Plane> plane;
     if (old != planes_.end() && old->second->host.get() == view.offscreen_host &&
@@ -145,7 +149,7 @@ bool PlanePool::Configure(const std::shared_ptr<Plane>& plane) {
   config->generation = plane->generation;
   config->adapter_luid =
       (uint64_t(uint32_t(owner_.device_.luid.HighPart)) << 32) | owner_.device_.luid.LowPart;
-  config->size = plane->size;
+  config->target_size = plane->size;
   for (auto& target : plane->targets) {
     // A failed Configure has submitted no writes to this pool. Keep its
     // textures/fences and duplicate handles again instead of allocating five
@@ -229,9 +233,13 @@ void PlanePool::PlaneResult(std::shared_ptr<Work> work,
       case viz::mojom::RemoteKitFrameStatus::kSubmitted:
         target->writing = false;
         target->value = work->begin.identity.value;
-        read.plane->latest = target;
-        read.target = target;
-        work->updated = true;
+        target->occlusion_revision = read.metadata.occlusion_revision;
+        if (read.plane->metadata.occlusion_revision == read.metadata.occlusion_revision &&
+            read.plane->host && read.plane->host->PageFrameReady()) {
+          read.plane->latest = target;
+          read.target = target;
+          work->updated = true;
+        }
         break;
       case viz::mojom::RemoteKitFrameStatus::kIdle:
         target->writing = false;
@@ -286,7 +294,7 @@ void PlanePool::OnDemandChanged(base::WeakPtr<OffscreenHost> notified_host) {
     fresh->host = current->host;
     fresh->host_identity = identity;
     fresh->binding_epoch = epoch;
-    fresh->size = current->host->compositor()->size();
+    fresh->size = current->host->plane_target_size();
     fresh->generation = NextPlaneGeneration();
     fresh->metadata = current->metadata;
     fresh->enabled = current->enabled;

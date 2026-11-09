@@ -1,0 +1,304 @@
+diff --git a/services/viz/privileged/mojom/compositing/remotekit_output.mojom b/services/viz/privileged/mojom/compositing/remotekit_output.mojom
+--- a/services/viz/privileged/mojom/compositing/remotekit_output.mojom
++++ b/services/viz/privileged/mojom/compositing/remotekit_output.mojom
+@@ -10,7 +10,7 @@
+ struct RemoteKitOutputConfig {
+   uint64 generation;
+   uint64 adapter_luid;
+-  gfx.mojom.Size size;
++  gfx.mojom.Size target_size;
+   array<gfx.mojom.GpuMemoryBufferHandle> targets;
+   array<handle<platform>> ready_fences;
+ };
+@@ -20,6 +20,7 @@
+   uint32 slot;
+   uint64 value;
+   uint32 target_index;
++  uint32 page_height_pixels;
+ };
+ 
+ enum RemoteKitFrameStatus {
+diff --git a/components/viz/service/display_embedder/skia_output_device_remotekit.h b/components/viz/service/display_embedder/skia_output_device_remotekit.h
+--- a/components/viz/service/display_embedder/skia_output_device_remotekit.h
++++ b/components/viz/service/display_embedder/skia_output_device_remotekit.h
+@@ -44,6 +44,7 @@
+ 
+   // Reject a stale resize grant before any target write, without losing GL.
+   bool PreparePaint();
++  void ClearPageBand();
+   bool Reshape(const ReshapeParams& params) override;
+   void Submit(scoped_refptr<gpu::SharedContextState> context_state,
+               bool sync_cpu,
+@@ -76,7 +77,8 @@
+   gfx::Size reshape_size_;
+   mojom::RemoteKitFrameTokenPtr token_;
+   FrameCallback callback_;
+-  std::unique_ptr<gpu::SkiaImageRepresentation::ScopedWriteAccess> write_access_;
++  std::unique_ptr<gpu::SkiaImageRepresentation::ScopedWriteAccess>
++      write_access_;
+   bool painted_ = false;
+   bool submitted_ = false;
+   bool has_submitted_content_ = false;
+diff --git a/components/viz/service/display_embedder/skia_output_device_remotekit.cc b/components/viz/service/display_embedder/skia_output_device_remotekit.cc
+--- a/components/viz/service/display_embedder/skia_output_device_remotekit.cc
++++ b/components/viz/service/display_embedder/skia_output_device_remotekit.cc
+@@ -14,6 +14,8 @@
+ #include "gpu/command_buffer/service/shared_context_state.h"
+ #include "gpu/command_buffer/service/shared_image/shared_image_factory.h"
+ #include "mojo/public/cpp/platform/platform_handle.h"
++#include "third_party/skia/include/core/SkCanvas.h"
++#include "third_party/skia/include/core/SkPaint.h"
+ #include "third_party/skia/include/core/SkSurface.h"
+ #include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
+ #include "ui/gl/gl_angle_util_win.h"
+@@ -83,7 +85,7 @@
+ bool SkiaOutputDeviceRemoteKit::Configure(
+     mojom::RemoteKitOutputConfigPtr config) {
+   if (token_ || write_access_ || !config || config->generation == 0 ||
+-      config->generation <= generation_ || config->size.IsEmpty() ||
++      config->generation <= generation_ || config->target_size.IsEmpty() ||
+       config->targets.empty() || config->targets.size() > kMaximumTargets ||
+       config->ready_fences.size() != config->targets.size() ||
+       !context_state_->GrContextIsGL() || !context_state_->gr_context() ||
+@@ -114,7 +116,7 @@
+     Microsoft::WRL::ComPtr<ID3D11Fence> fence;
+     if (!platform_handle.is_valid() ||
+         FAILED(device->OpenSharedFence(platform_handle.GetHandle().Get(),
+-                                      IID_PPV_ARGS(&fence))) ||
++                                       IID_PPV_ARGS(&fence))) ||
+         fence->GetCompletedValue() == std::numeric_limits<uint64_t>::max()) {
+       return false;
+     }
+@@ -126,13 +128,13 @@
+     if (handle.type != gfx::DXGI_SHARED_HANDLE ||
+         !handle.dxgi_handle().IsValid() ||
+         FAILED(device->OpenSharedResource1(handle.dxgi_handle().buffer_handle(),
+-                                          IID_PPV_ARGS(&texture)))) {
++                                           IID_PPV_ARGS(&texture)))) {
+       return false;
+     }
+     D3D11_TEXTURE2D_DESC desc = {};
+     texture->GetDesc(&desc);
+-    if (desc.Width != static_cast<UINT>(config->size.width()) ||
+-        desc.Height != static_cast<UINT>(config->size.height()) ||
++    if (desc.Width != static_cast<UINT>(config->target_size.width()) ||
++        desc.Height != static_cast<UINT>(config->target_size.height()) ||
+         desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM || desc.ArraySize != 1 ||
+         desc.MipLevels != 1 || desc.SampleDesc.Count != 1 ||
+         desc.Usage != D3D11_USAGE_DEFAULT ||
+@@ -160,19 +162,18 @@
+   ClearTargets();
+   device_ = std::move(device);
+   immediate_context_ = std::move(context);
+-  target_size_ = config->size;
++  target_size_ = config->target_size;
+   for (auto& handle : config->targets) {
+     auto target = std::make_unique<Target>();
+     target->mailbox = gpu::Mailbox::Generate();
+-    gpu::SharedImageInfo info(
+-        SinglePlaneFormat::kBGRA_8888, target_size_,
+-        gfx::ColorSpace::CreateSRGB(), kTopLeft_GrSurfaceOrigin,
+-        kPremul_SkAlphaType,
+-        gpu::SHARED_IMAGE_USAGE_DISPLAY_WRITE |
+-            gpu::SHARED_IMAGE_USAGE_DISPLAY_READ,
+-        "RemoteKitRootTarget");
++    gpu::SharedImageInfo info(SinglePlaneFormat::kBGRA_8888, target_size_,
++                              gfx::ColorSpace::CreateSRGB(),
++                              kTopLeft_GrSurfaceOrigin, kPremul_SkAlphaType,
++                              gpu::SHARED_IMAGE_USAGE_DISPLAY_WRITE |
++                                  gpu::SHARED_IMAGE_USAGE_DISPLAY_READ,
++                              "RemoteKitRootTarget");
+     if (!shared_image_factory_->CreateSharedImage(target->mailbox, info,
+-                                                 std::move(handle))) {
++                                                  std::move(handle))) {
+       ClearTargets();
+       lost_ = true;
+       return false;
+@@ -198,13 +199,11 @@
+   return true;
+ }
+ 
+-void SkiaOutputDeviceRemoteKit::BeginFrame(
+-    mojom::RemoteKitFrameTokenPtr token,
+-    FrameCallback callback) {
++void SkiaOutputDeviceRemoteKit::BeginFrame(mojom::RemoteKitFrameTokenPtr token,
++                                           FrameCallback callback) {
+   if (!token || token_ || lost_ || context_state_->context_lost() ||
+       token->generation != generation_ ||
+-      token->target_index >= targets_.size() ||
+-      token->value == 0 ||
++      token->target_index >= targets_.size() || token->value == 0 ||
+       token->value == std::numeric_limits<uint64_t>::max() ||
+       token->value <= last_values_[token->target_index]) {
+     std::move(callback).Run(mojom::RemoteKitFrameResult::New(
+@@ -254,7 +253,8 @@
+   auto& representation = targets_[token_->target_index]->representation;
+   write_access_ = representation->BeginScopedWriteAccess(
+       1, SkSurfaceProps(), gfx::Rect(target_size_), &begin_semaphores,
+-      end_semaphores, gpu::SharedImageRepresentation::AllowUnclearedAccess::kYes);
++      end_semaphores,
++      gpu::SharedImageRepresentation::AllowUnclearedAccess::kYes);
+   if (!write_access_ || !write_access_->surface() ||
+       (!begin_semaphores.empty() &&
+        !write_access_->surface()->wait(begin_semaphores.size(),
+@@ -263,8 +263,27 @@
+     Complete(mojom::RemoteKitFrameStatus::kLost);
+     return nullptr;
+   }
++  write_access_->surface()->getCanvas()->clear(SK_ColorWHITE);
+   painted_ = true;
+   return write_access_->surface();
++}
++
++void SkiaOutputDeviceRemoteKit::ClearPageBand() {
++  if (!token_ || !write_access_) {
++    return;
++  }
++  const int height =
++      std::min<int>(token_->page_height_pixels, target_size_.height());
++  SkPaint white;
++  white.setColor(SK_ColorWHITE);
++  white.setBlendMode(SkBlendMode::kSrc);
++  auto* canvas = write_access_->surface()->getCanvas();
++  canvas->save();
++  canvas->resetMatrix();
++  canvas->drawRect(
++      SkRect::MakeLTRB(0, height, target_size_.width(), target_size_.height()),
++      white);
++  canvas->restore();
+ }
+ 
+ void SkiaOutputDeviceRemoteKit::Submit(
+@@ -276,8 +295,8 @@
+     write_access_->ApplyBackendSurfaceEndState();
+   }
+   submitted_ = !context_state_->context_lost() &&
+-               context_state_->gr_context()->submit(
+-                   sync_cpu ? GrSyncCpu::kYes : GrSyncCpu::kNo);
++               context_state_->gr_context()->submit(sync_cpu ? GrSyncCpu::kYes
++                                                             : GrSyncCpu::kNo);
+   // PostSubmit destroys ScopedPaint, invoking EndPaint below only after the
+   // Ganesh command stream has been submitted to the ANGLE immediate context.
+   std::move(callback).Run();
+@@ -310,8 +329,8 @@
+   if (!drawn || !painted_ || !submitted_ || write_access_ ||
+       context_state_->context_lost() ||
+       FAILED(device_->GetDeviceRemovedReason()) ||
+-      FAILED(immediate_context_->Signal(ready_fences_[token_->target_index].Get(),
+-                                         token_->value))) {
++      FAILED(immediate_context_->Signal(
++          ready_fences_[token_->target_index].Get(), token_->value))) {
+     lost_ = true;
+     Complete(mojom::RemoteKitFrameStatus::kLost);
+     return;
+diff --git a/components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.cc b/components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.cc
+--- a/components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.cc
++++ b/components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.cc
+@@ -490,14 +490,17 @@
+ 
+ #if BUILDFLAG(IS_WIN)
+   if (is_remotekit_output_ &&
+-      !static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())->PreparePaint()) {
++      !static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())
++           ->PreparePaint()) {
+     // A resize can overtake the Browser's grant. No root commands have touched
+     // the old target, so reject this frame without poisoning the GL context.
+     draw_render_pass_failed_ = true;
+-    if (on_finished)
++    if (on_finished) {
+       std::move(on_finished).Run();
+-    if (return_release_fence_cb)
++    }
++    if (return_release_fence_cb) {
+       std::move(return_release_fence_cb).Run(gfx::GpuFenceHandle());
++    }
+     return;
+   }
+ #endif
+@@ -552,6 +555,12 @@
+     // Draw will only fail if the SkSurface and SkDDL are incompatible.
+     bool draw_success = scoped_output_device_paint_->Draw(ddl);
+     DCHECK(draw_success);
++#if BUILDFLAG(IS_WIN)
++    if (is_remotekit_output_) {
++      static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())
++          ->ClearPageBand();
++    }
++#endif
+ 
+     destroy_after_swap_.emplace_back(std::move(ddl));
+ 
+@@ -1674,9 +1683,11 @@
+   }
+ 
+   bool from_framebuffer = mailbox.IsZero();
+-  if (is_remotekit_output_ && from_framebuffer && !scoped_output_device_paint_) {
++  if (is_remotekit_output_ && from_framebuffer &&
++      !scoped_output_device_paint_) {
+     // A stale resize grant can reject root painting before this queued request.
+-    // Dropping the request reports an empty result without reading an old target.
++    // Dropping the request reports an empty result without reading an old
++    // target.
+     return;
+   }
+   DCHECK(scoped_output_device_paint_ || !from_framebuffer);
+@@ -1993,10 +2004,13 @@
+ }
+ 
+ void SkiaOutputSurfaceImplOnGpu::ConfigureRemoteKitOutput(
+-    mojom::RemoteKitOutputConfigPtr config, base::OnceCallback<void(bool)> callback) {
++    mojom::RemoteKitOutputConfigPtr config,
++    base::OnceCallback<void(bool)> callback) {
+ #if BUILDFLAG(IS_WIN)
+   if (is_remotekit_output_) {
+-    std::move(callback).Run(static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())->Configure(std::move(config)));
++    std::move(callback).Run(
++        static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())
++            ->Configure(std::move(config)));
+     return;
+   }
+ #endif
+@@ -2007,28 +2021,34 @@
+     base::OnceCallback<void(mojom::RemoteKitFrameResultPtr)> callback) {
+ #if BUILDFLAG(IS_WIN)
+   if (is_remotekit_output_) {
+-    static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())->BeginFrame(std::move(token), std::move(callback));
+-    return;
+-  }
+-#endif
+-  std::move(callback).Run(mojom::RemoteKitFrameResult::New(std::move(token), mojom::RemoteKitFrameStatus::kNotReady));
++    static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())
++        ->BeginFrame(std::move(token), std::move(callback));
++    return;
++  }
++#endif
++  std::move(callback).Run(mojom::RemoteKitFrameResult::New(
++      std::move(token), mojom::RemoteKitFrameStatus::kNotReady));
+ }
+ void SkiaOutputSurfaceImplOnGpu::FinishRemoteKitFrame(bool drawn) {
+ #if BUILDFLAG(IS_WIN)
+-  if (is_remotekit_output_)
+-    static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())->FinishFrame(drawn);
++  if (is_remotekit_output_) {
++    static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())
++        ->FinishFrame(drawn);
++  }
+ #endif
+ }
+ 
+ bool SkiaOutputSurfaceImplOnGpu::InitializeForGL() {
+ #if BUILDFLAG(IS_WIN)
+   static BASE_FEATURE(kRemoteKitOsrOutput, base::FEATURE_DISABLED_BY_DEFAULT);
+-  if (dependency_->IsOffscreen() && base::FeatureList::IsEnabled(kRemoteKitOsrOutput)) {
++  if (dependency_->IsOffscreen() &&
++      base::FeatureList::IsEnabled(kRemoteKitOsrOutput)) {
+     is_remotekit_output_ = true;
+     output_device_ = std::make_unique<SkiaOutputDeviceRemoteKit>(
+         context_state_, shared_image_factory_.get(),
+         shared_image_representation_factory_.get(),
+-        shared_gpu_deps_->memory_tracker(), GetDidSwapBuffersCompleteCallback());
++        shared_gpu_deps_->memory_tracker(),
++        GetDidSwapBuffersCompleteCallback());
+     return true;
+   }
+ #endif

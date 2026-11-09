@@ -353,6 +353,49 @@ void InputController::RenderFrameHostChanged(content::RenderFrameHost* old_frame
 }
 Status InputController::DispatchInput(const InputEvent& original, bool* admitted) {
   InputEvent input = original;
+  if (auto* host = owner_.offscreen_host();
+      host && host->page_viewport().height() < host->plane_size().height()) {
+    const double bottom = host->page_viewport().height();
+    const auto clip = [bottom](auto& point) {
+      point.y = std::min(point.y, std::max(0.0, bottom - 0.001));
+    };
+    const bool outside = std::visit(
+        [&](auto& value) {
+          using T = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<T, MouseInput>) {
+            if (value.action == MouseInput::Action::down && value.y >= bottom)
+              return true;
+            clip(value);
+          } else if constexpr (std::is_same_v<T, WheelInput>) {
+            return value.y >= bottom;
+          } else if constexpr (std::is_same_v<T, SelectionExtent>) {
+            clip(value);
+          } else if constexpr (std::is_same_v<T, GestureInput>) {
+            if (value.action == GestureInput::Action::long_press && value.y >= bottom)
+              return true;
+            clip(value);
+          } else if constexpr (std::is_same_v<T, TouchInput>) {
+            if (value.action == TouchInput::Action::start &&
+                std::ranges::any_of(value.points,
+                                    [bottom](const auto& point) { return point.y >= bottom; }))
+              return true;
+            for (auto& point : value.points)
+              clip(point);
+            for (auto& sample : value.samples)
+              for (auto& point : sample.points)
+                clip(point);
+            for (auto& gesture : value.gestures)
+              clip(gesture);
+          }
+          return false;
+        },
+        input.payload);
+    if (outside) {
+      if (admitted)
+        *admitted = false;
+      return Fail(ErrorCode::kConflict, "input_in_occluded_band");
+    }
+  }
   if (admitted)
     *admitted = false;
   static_assert(kMouseButtonModifiers ==

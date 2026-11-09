@@ -30,6 +30,7 @@
 | 0018 host-device-isolation | `AllowHostDeviceAccess()`：媒体设备、蓝牙、WebAuthn、语音识别不使用宿主设备；`ScreenOrientationDelegate::IsOrientationLockAllowed` |
 | 0019 non-backed-clipboard-privacy | 非系统剪贴板保留保密与排除历史标记 |
 | 0020 pointer-refocus-observation | 点按已聚焦元素时再次报告 pointer focus，脚本来源保持独立 |
+| 0021 occlusion-plane | 稳定 Viz target 与页面高度分离，每帧清理键盘下方空带 |
 
 **SDK 导出**：`tools/export-sdk.py --out C:/src/chromium/src/out/dev --destination sdk/dist/dev` 导出公共头、import lib、DLL 以及 GN 生成的 `remotekit_sdk.runtime_deps` 中的全部文件（component 构建需要整套依赖 DLL），并写 manifest（Chromium HEAD、args.gn hash、PE 架构、编译器、ABI 版本）。`tools\verify-sdk.cmd` 用独立的 CMake 消费者（`sdk/`）构建并运行 SDK smoke。Browser、SDK、Endpoint 的 ABI 与映射版本必须一起更新。
 

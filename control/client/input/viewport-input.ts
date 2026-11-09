@@ -218,6 +218,15 @@ export class ViewportInput {
       action,
       captured || !!pressed,
     );
+    const pageHeight = this.ports.presentation.canInput(this.viewId)?.pageHeight;
+    if (point && pageHeight !== undefined && point.y >= pageHeight) {
+      if (action === 'down' || (action === 'move' && !captured && !pressed)) {
+        event.preventDefault();
+        release();
+        return;
+      }
+      point.y = Math.max(0, pageHeight - 0.001);
+    }
     if (!point) {
       release();
       return;
@@ -310,7 +319,7 @@ export class ViewportInput {
       event.clientX,
       event.clientY,
     );
-    if (!point) return;
+    if (!point || point.y >= (this.ports.presentation.canInput(this.viewId)?.pageHeight ?? Infinity)) return;
     event.preventDefault();
     this.ports.input.ensureInputFocus(surface);
     const delta = wheelDeltaToDip(surface, event.deltaX, event.deltaY, event.deltaMode);
