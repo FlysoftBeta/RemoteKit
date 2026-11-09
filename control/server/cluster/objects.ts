@@ -146,9 +146,11 @@ export class ObjectIndex {
     }
     return id ? { id } : null;
   }
+  // Nodes run Control's build, so a failure recorded by another build may be fixed by this one.
   private renderFailure(id: string) {
-    return this.store.db.prepare('SELECT * FROM object_render_failures WHERE source_id=?').get(id) as
-      RenderFailure | undefined;
+    return this.store.db
+      .prepare('SELECT * FROM object_render_failures WHERE source_id=? AND build_id=?')
+      .get(id, this.nodes.options.buildId) as RenderFailure | undefined;
   }
   private failRender(id: string, error: unknown, node?: NodeLink) {
     const value = error as { code?: ErrorCode; message?: string };
@@ -161,9 +163,10 @@ export class ObjectIndex {
     const nodeId = reason === 'outcome_unknown' ? node?.nodeId : this.renderFailure(id)?.node_id;
     this.store.db
       .prepare(
-        `INSERT INTO object_render_failures VALUES (?,'failed',?,?,?,?,?,?)
+        `INSERT INTO object_render_failures VALUES (?,'failed',?,?,?,?,?,?,?)
       ON CONFLICT(source_id) DO UPDATE SET reason=excluded.reason,message=excluded.message,
-      failed_at=excluded.failed_at,attempts=excluded.attempts,retry_at=excluded.retry_at,node_id=excluded.node_id`,
+      failed_at=excluded.failed_at,attempts=excluded.attempts,retry_at=excluded.retry_at,
+      node_id=excluded.node_id,build_id=excluded.build_id`,
       )
       .run(
         id,
@@ -173,6 +176,7 @@ export class ObjectIndex {
         attempts,
         retryAt,
         nodeId ?? null,
+        this.nodes.options.buildId,
       );
     console.error('object.render failed', id, error);
   }

@@ -303,10 +303,12 @@ struct RenderArchive::Impl {
       Require(list.is_array(), "invalid document dependencies");
       std::vector<std::string> ids;
       std::set<std::string> unique;
+      // pdfrender lists an image once per use, and identical images share a content ID.
       for (const auto& value : list) {
         auto id = value.get<std::string>();
-        Require(objects.contains(id) && unique.insert(id).second, "invalid resource reference");
-        ids.push_back(std::move(id));
+        Require(objects.contains(id), "invalid resource reference");
+        if (unique.insert(id).second)
+          ids.push_back(std::move(id));
       }
       return ids;
     };

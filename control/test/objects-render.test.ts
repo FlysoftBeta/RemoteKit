@@ -38,6 +38,7 @@ function fixture() {
     all: () => nodes,
     get: (id: string) => nodes.find((node) => node.nodeId === id),
     isRemoved: () => false,
+    options: { buildId: 'build-a' },
   }) as unknown as NodeRegistry;
   const makeIndex = () =>
     new ObjectIndex(
@@ -61,6 +62,7 @@ function fixture() {
   store.db.prepare('INSERT INTO object_replicas VALUES (?,?)').run(source, 'alpha');
   return {
     store,
+    registry,
     nodes,
     requests,
     get index() {
@@ -166,6 +168,10 @@ test('deterministic failures persist across Control restart and never retry for 
       { code: 'rejected', message: 'corrupt document' },
     );
     assert.deepEqual(f.requests, ['alpha']);
+    f.registry.options.buildId = 'build-b';
+    f.index.render(source);
+    await settle();
+    assert.deepEqual(f.requests, ['alpha', 'alpha'], 'a new build retries a deterministic failure');
     f.store.db.exec('DELETE FROM object_claims; UPDATE objects SET created_at=0');
     await f.index.gc(Date.now() + 365 * 24 * HOUR);
     assert.equal(f.failure(), undefined);

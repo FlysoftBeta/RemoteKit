@@ -246,6 +246,12 @@ void ArchiveTests(const fs::path& fixtures) {
 
   Bundle bundle(bytes);
   Take(Open(bundle.Build()));
+  auto repeated = Take(Open(bundle.Build([](Json& m) {
+    auto shared = m["document"]["shared"][0];
+    m["document"]["items"][0]["dependencies"] = Json::array({shared, shared});
+  })));
+  Check(Take(repeated.Info()).pages[0].dependencies.size() == 1,
+        "a resource drawn twice on a page was not listed once");
   auto central = static_cast<size_t>(Get(bytes, bytes.size() - 42 + 8, 8));
   central = static_cast<size_t>(Get(bytes, central + 48, 8));
   auto bad_method = bytes;

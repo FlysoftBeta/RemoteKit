@@ -54,11 +54,11 @@
 
 我的文件和学习 App 用同一个阅读器预览文档：PDF、Word/WPS 文字、PowerPoint/WPS 演示、Excel/WPS 表格、OpenDocument、RTF 与纯文本。图片用图片预览，音视频用浏览器原生播放器，其他类型显示文件卡片。
 
-**转换**（Endpoint，`endpoint/src/documents/`）：非 PDF 先用无界面的 LibreOffice 转成 PDF，再用 pdfrender（FlysoftBeta/pdf-render，poppler 的派生）渲染成 `classapp-render-archive` v2 归档：每页是绝对定位的可选择 HTML 文字层叠在 Cairo SVG 背景上，图片转为 WebP，文本资源各自 zstd 压缩（可带字典），整个归档是只用 STORED 的 ZIP64，可按偏移直接读。选 LibreOffice 是因为节点上没有、也不能假设有 MS Office，而它对 Office 与 WPS 格式的保真度在可部署的方案里最好；pdfrender 的输出在 Chrome 89 上也能还原排版、保留文字选择。
+**转换**（Endpoint，`endpoint/src/documents/`）：非 PDF 先用无界面的 LibreOffice 转成 PDF，再用 pdfrender（FlysoftBeta/pdf-render，poppler 的派生）渲染成 `classapp-render-archive` v2 归档：每页是绝对定位的可选择 HTML 文字层叠在 Cairo SVG 背景上，图片转为 WebP，文本资源各自 zstd 压缩（可带字典），整个归档是只用 STORED 的 ZIP64，可按偏移直接读。Endpoint 打开归档时严格校验清单（路径、偏移、大小、hash、引用的资源必须存在），只有一处宽松：页面依赖里同一资源可以出现多次——pdfrender 每使用一次图片就列一次，相同的图片内容寻址后是同一个 ID（Word 文档里重复的徽标、装饰图很常见）——读取时去重保留一次。选 LibreOffice 是因为节点上没有、也不能假设有 MS Office，而它对 Office 与 WPS 格式的保真度在可部署的方案里最好；pdfrender 的输出在 Chrome 89 上也能还原排版、保留文字选择。
 
 - 每个节点一个渲染队列：最多 2 个并发，队列 64，同一源对象的并发请求合并为一次。LibreOffice 与 pdfrender 各自运行在 Job Object 里（关闭即杀、内存 2GiB、无窗口），超时 180 秒；LibreOffice 使用 Endpoint 数据目录下 2 个常驻的用户配置（不按任务新建，热启动的 DOCX 约 7 秒，冷启动约 30 秒），输入先复制到私有临时目录并改成 ASCII 文件名。PDF 渲染通常不到 0.1 秒。
 - 结果是一个以源对象为 `derivedFrom`、`kind: 'document'` 的派生对象，随源对象一起被引用和回收；因为对象存储跨 Tenant 去重，同一份课件全集群只转换一次。转换失败按源对象缓存 10 分钟，加密、损坏、超时给出简短原因。
-- 学习 App 下载附件后由 Control 请求预渲染（`object.render{id}`，交给持有副本的节点），用户打开时通常已经就绪。Control 是学习附件转换的唯一发起者：同一源对象在全集群同时只有一个转换；结果记在 `object_render_failures`——确定性失败（损坏、加密、不支持）不再自动重试，任何 Tenant 的同步都不会再次转换它；暂时性失败（unavailable、busy、超时）按 1、2、4、8、16 小时退避，最长 24 小时；结果未知时只在原节点重试（它的队列按源对象合并）。源对象删除或派生完成时清掉记录。
+- 学习 App 下载附件后由 Control 请求预渲染（`object.render{id}`，交给持有副本的节点），用户打开时通常已经就绪。Control 是学习附件转换的唯一发起者：同一源对象在全集群同时只有一个转换；结果记在 `object_render_failures`——确定性失败（损坏、加密、不支持）在同一构建内不再自动重试，任何 Tenant 的同步都不会再次转换它；记录带构建 ID，节点与 Control 版本锁定，换了构建（可能修好了转换器）后按没有失败处理；暂时性失败（unavailable、busy、超时）按 1、2、4、8、16 小时退避，最长 24 小时；结果未知时只在原节点重试（它的队列按源对象合并）。源对象删除或派生完成时清掉记录。
 - Viewer 打开这类源对象时，Endpoint 向 Control 查询派生对象；Control 的转换仍在进行时回复 `busy`，Endpoint 把它作为 `{state:'converting'}` 交给 Viewer 继续轮询，而不是在本节点再转换一次；本节点渲染队列已满（`busy`）同样报告为 converting。
 - 转换失败的 Endpoint 日志写明工具（soffice / pdfrender）、退出码与 stderr 最后几行（去掉路径与文件名），不写文件内容。
 
