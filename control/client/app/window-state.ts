@@ -1,3 +1,4 @@
+import { canonicalJson } from '../util/canonical-json';
 import type { ViewerSession } from '../viewer-session';
 import { useEffect, useRef, useState } from 'react';
 import type { ProductWindow, SocketMethods } from '../../shared/product';
@@ -11,18 +12,23 @@ export function useWindowState(win: ProductWindow, call: WorkspaceCall, report: 
   const [value, setValue] = useState<Record<string, unknown>>(win.state ?? {});
   const dirty = useRef(false);
   const latest = useRef(value);
-  const saved = useRef(JSON.stringify(win.state ?? {}));
+  const saved = useRef(canonicalJson(win.state ?? {}));
   useEffect(() => {
     if (!dirty.current) {
-      saved.current = JSON.stringify(win.state ?? {});
-      setValue(win.state ?? {});
+      saved.current = canonicalJson(win.state ?? {});
+      setValue((current) => {
+        const next = win.state ?? {};
+        if (canonicalJson(current) === canonicalJson(next)) return current;
+        latest.current = next;
+        return next;
+      });
     }
   }, [win.state]);
   useEffect(() => {
     if (!dirty.current || win.id.startsWith('pending-')) return;
     const timer = setTimeout(() => {
       const state = latest.current;
-      const serialized = JSON.stringify(state);
+      const serialized = canonicalJson(state);
       if (serialized === saved.current) {
         dirty.current = false;
         return;

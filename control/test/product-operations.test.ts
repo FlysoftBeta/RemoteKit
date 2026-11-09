@@ -806,7 +806,7 @@ test('lease is checked at queued acceptance; fast clock does not queue behind a 
     f.store.db.close();
   }
 });
-test('equal revision runtime snapshots order independently and pending close projection retains actual tab', async () => {
+test('no-op runtime snapshots retain sequence and pending close projection retains actual tab', async () => {
   const f = await fixture();
   try {
     await f.control.operations.productAction(
@@ -818,7 +818,8 @@ test('equal revision runtime snapshots order independently and pending close pro
       next = f.control.viewers.productState(f.tenant);
     assert.equal(first.workspace.revision, next.workspace.revision);
     assert.equal(snapshotNewer(first, next), false);
-    assert.equal(snapshotNewer(next, first), true);
+    assert.equal(snapshotNewer(next, first), false);
+    assert.strictEqual(next, first);
     const op = f.op({ type: 'tab.close', tabId: first.workspace.tabs[0].id });
     assert.equal(projectOperations(first, [op])!.workspace.tabs.length, 1);
     const create = f.op({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
@@ -1033,6 +1034,27 @@ test('retired Browser resolves resource eligibility while retaining unknown navi
       f.endpoint.calls.filter((call) => call.method === 'view.ensure').slice(-1)[0]?.args.url,
       'https://old.test/',
     );
+  } finally {
+    await f.control.close();
+    f.store.db.close();
+  }
+});
+
+test('unchanged viewport skips reconciliation and no-op pushes publish no state', async () => {
+  const f = await fixture();
+  try {
+    const viewport = { devicePixelRatio: 2, windows: [] };
+    await requestViewer(f.control, f.tenant, 'lease', 'viewport', viewport);
+    f.control.viewers.push(f.tenant);
+    const before = f.control.viewers.productState(f.tenant);
+    const calls = f.endpoint.calls.length;
+    let publications = 0;
+    f.control.events.on('state', () => publications++);
+    await requestViewer(f.control, f.tenant, 'lease', 'viewport', { windows: [], devicePixelRatio: 2 });
+    f.control.viewers.push(f.tenant);
+    assert.strictEqual(f.control.viewers.productState(f.tenant), before);
+    assert.equal(f.endpoint.calls.length, calls);
+    assert.equal(publications, 0);
   } finally {
     await f.control.close();
     f.store.db.close();

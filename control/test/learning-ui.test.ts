@@ -6,10 +6,15 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { learningSanitizer, isControlMediaUrl, stripOptionLabel } from '../client/learning/html';
 import { QuestionCard } from '../client/learning/question-card';
 import { LearningQueries, usePaged } from '../client/learning/queries';
-import { VirtualList } from '../client/ui/virtual-list';
+import { useViewerSessionSelector, shallowEqual } from '../client/app/use-viewer-session';
+import { Store } from '../client/util/store';
+import { SizeIndex } from '../client/ui/virtual-scroll';
+import { VirtualScroller, VirtualList } from '../client/ui/virtual-list';
 import { StudyApp } from '../client/learning/study/study-app';
 import { QuestionsApp } from '../client/learning/questions/questions-app';
 import { SignInCard } from '../client/learning/sign-in-card';
+import { OverflowText } from '../client/app/overflow-text';
+import { LibraryTab } from '../client/files/library-tab';
 import { FileLibraryContext, type FileLibrary } from '../client/files/file-library-state';
 import { FileChannel } from '../client/files/file-channel';
 import { isDocumentFile } from '../client/files/file-preview';
@@ -442,3 +447,191 @@ test('sign-in card sends credentials once and clears the password after submissi
 function localStorageAvailable() {
   return dom.window.localStorage.length > 0;
 }
+
+test('session selectors isolate stats ticks and cache object selections', async () => {
+  class TestStore<T> extends Store<T> {
+    update(value: T) {
+      this.publish(value);
+    }
+  }
+  const rtc = new TestStore({ phase: 'connected' });
+  const observations = new TestStore({ framesDecoded: 0 });
+  let observationSubscribers = 0;
+  const subscribeObservations = observations.subscribe;
+  observations.subscribe = (listener) => {
+    observationSubscribers++;
+    const remove = subscribeObservations(listener);
+    return () => {
+      observationSubscribers--;
+      remove();
+    };
+  };
+  const other = new TestStore({});
+  const session = {
+    rtc,
+    observations,
+    presentation: other,
+    editing: other,
+    authorization: other,
+  } as unknown as ViewerSession;
+  let stageRenders = 0,
+    statsRenders = 0;
+  function StageSelection() {
+    const value = useViewerSessionSelector(
+      session,
+      (snapshot) => ({ phase: snapshot.rtc.phase }),
+      shallowEqual,
+    );
+    stageRenders++;
+    return createElement('span', null, value.phase);
+  }
+  function StatsSelection() {
+    useViewerSessionSelector(session, (snapshot) => snapshot.observations);
+    statsRenders++;
+    return null;
+  }
+  const root = createRoot(document.getElementById('app')!);
+  await act(async () =>
+    root.render(createElement('div', null, createElement(StageSelection), createElement(StatsSelection))),
+  );
+  await act(async () => observations.update({ framesDecoded: 1 }));
+  assert.equal(stageRenders, 1);
+  assert.equal(observationSubscribers, 1);
+  assert.equal(statsRenders, 2);
+  await act(async () => rtc.update({ phase: 'exhausted' }));
+  assert.equal(stageRenders, 2);
+  function ConditionalSelection() {
+    const frames = useViewerSessionSelector(session, (snapshot) =>
+      snapshot.rtc.phase === 'connected' ? (snapshot.observations.framesDecoded ?? 0) : 0,
+    );
+    return createElement('span', null, frames);
+  }
+  await act(async () => root.render(createElement(ConditionalSelection)));
+  assert.equal(observationSubscribers, 0);
+  await act(async () => observations.update({ framesDecoded: 0 }));
+  await act(async () => rtc.update({ phase: 'connected' }));
+  assert.equal(observationSubscribers, 1);
+  await act(async () => observations.update({ framesDecoded: 2 }));
+  assert.equal(document.getElementById('app')!.textContent, '2');
+  await act(async () => root.unmount());
+});
+
+test('fixed virtual rows bound mounts, retain keyboard focus and reach the final item', async () => {
+  const items = Array.from({ length: 320 }, (_, index) => String(index));
+  const sizes = new SizeIndex(items.map(() => 74));
+  const root = createRoot(document.getElementById('app')!);
+  await act(async () =>
+    root.render(
+      createElement(VirtualScroller<string>, {
+        viewportRef: null,
+        items,
+        sizes,
+        enabled: true,
+        contentWidth: 0,
+        itemKey: (item) => item,
+        renderItem: (item) => createElement('button', null, item),
+        onWidth: () => {},
+        onScroll: () => {},
+        className: 'fixed-virtual-test',
+        label: 'Files',
+      }),
+    ),
+  );
+  const viewport = document.querySelector<HTMLElement>('.fixed-virtual-test')!;
+  const first = viewport.querySelector<HTMLButtonElement>('button')!;
+  await act(async () => first.focus());
+  await act(async () => {
+    viewport.scrollTop = 20000;
+    viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+  });
+  assert.strictEqual(document.activeElement, first);
+  assert.ok(first.isConnected);
+  assert.ok(viewport.querySelectorAll('button').length < 40);
+  await act(async () => {
+    first.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+  });
+  assert.equal(document.activeElement?.textContent, '1');
+  await act(async () => {
+    viewport.scrollTop = sizes.total - viewport.clientHeight;
+    viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+  });
+  assert.ok([...viewport.querySelectorAll('button')].some((button) => button.textContent === '319'));
+  await act(async () => root.unmount());
+});
+
+test('library virtual rows keep selection and basket actions scoped to entry ids', async () => {
+  const transport = new LearningFakeTransport();
+  const entries = Array.from({ length: 320 }, (_, index) => ({
+    id: 'file-' + index,
+    name: 'File ' + index + '.txt',
+    type: 'text/plain',
+    assetId: 'asset-' + index,
+    size: 12,
+    createdAt: Date.now() - index * 86400000,
+    source: null,
+    partitionId: null,
+    collected: true,
+  }));
+  const mutations: { method: string; params: any }[] = [];
+  const library = {
+    online: true,
+    apps: [],
+    snapshot: { ...transport.library, entries, basket: [] },
+    photos: { jobs: [] },
+    rpc: new FileChannel(() => null),
+    thumbnails: { get: () => undefined, subscribe: () => () => {} },
+    mutate: async (method: string, params: unknown) => {
+      mutations.push({ method, params });
+    },
+  } as unknown as FileLibrary;
+  const props = {
+    windowId: 'files',
+    view: 'all' as const,
+    query: '',
+    layout: 'list' as const,
+    onView: () => {},
+    onQuery: () => {},
+    onLayout: () => {},
+    onOpen: () => {},
+  };
+  const root = createRoot(document.getElementById('app')!);
+  await act(async () =>
+    root.render(
+      createElement(FileLibraryContext.Provider, { value: library }, createElement(LibraryTab, props)),
+    ),
+  );
+  assert.ok(document.querySelectorAll('[data-file-row]').length < 40);
+  const first = document.querySelector('[data-file-row]')!;
+  const id = first.getAttribute('data-file-row');
+  const basket = first.querySelector<HTMLButtonElement>('button[aria-pressed]')!;
+  await act(async () => basket.click());
+  assert.equal(mutations[0].method, 'library.basket');
+  assert.deepEqual(mutations[0].params.ids, [id]);
+  const checkbox = first.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  await act(async () => checkbox.click());
+  assert.equal(checkbox.checked, true);
+  const controls = first.querySelectorAll<HTMLButtonElement>('button');
+  const lastControl = controls[controls.length - 1];
+  await act(async () => lastControl.focus());
+  await act(async () => {
+    lastControl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  });
+  assert.notEqual(document.activeElement?.closest('[data-file-row]')?.getAttribute('data-file-row'), id);
+  assert.ok(document.activeElement?.closest('[data-file-row]'));
+  await act(async () => root.unmount());
+});
+
+test('overflow tooltips measure the mounted text after the opening delay', async () => {
+  const root = createRoot(document.getElementById('app')!);
+  await act(async () => root.render(createElement(OverflowText, null, 'Full file name')));
+  const text = document.querySelector<HTMLElement>('#app .MuiTypography-root')!;
+  Object.defineProperty(text, 'scrollWidth', { value: 2000 });
+  await act(async () => {
+    text.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  });
+  assert.equal(document.querySelector('[role="tooltip"]')?.textContent, 'Full file name');
+  await act(async () => root.unmount());
+});

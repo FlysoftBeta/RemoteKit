@@ -1,3 +1,4 @@
+import { canonicalJson } from '../config';
 import { RemoteKitError } from '../../shared/errors';
 
 import type { ProductState } from '../../shared/product';
@@ -7,6 +8,8 @@ import { type ViewerSecurityState } from '../auth/viewer-security';
 import { QualityState } from '../quality';
 
 export class ViewerHub {
+  private readonly snapshots = new WeakMap<object, { content: string; state: ProductState }>();
+  private readonly publications = new WeakMap<object, { state: ProductState; scope: string }>();
   constructor(
     private readonly context: DomainContext,
     private readonly services: Pick<
@@ -16,13 +19,12 @@ export class ViewerHub {
   ) {}
   productState(tenant: string): ProductState {
     const runtime = this.context.tenants.get(tenant);
-    runtime.snapshotSequence = (runtime.snapshotSequence ?? 0) + 1;
     const workspace = this.context.store.workspaces.workspace(tenant);
     const user = this.context.store.accounts.userForTenant(tenant);
-    return {
+    const state: ProductState = {
       operationReceipts: this.context.store.operations.recentOperations(tenant),
       serverIncarnation: this.context.serverIncarnation,
-      snapshotSequence: runtime.snapshotSequence!,
+      snapshotSequence: runtime.snapshotSequence ?? 0,
       operationGeneration: this.context.store.operations.operationGeneration(tenant),
       user: user!,
       workspace,
@@ -41,9 +43,25 @@ export class ViewerHub {
       announcements: user ? this.context.store.announcements.forUser(user.id) : [],
       integrations: { siteUa: true, lifecycle: true, popupAdoption: true },
     };
+    const content = canonicalJson({ ...state, snapshotSequence: undefined });
+    const previous = this.snapshots.get(runtime);
+    if (previous?.content === content) return previous.state;
+    state.snapshotSequence = runtime.snapshotSequence = (runtime.snapshotSequence ?? 0) + 1;
+    this.snapshots.set(runtime, { content, state });
+    return state;
   }
   push(tenant: string) {
-    this.context.events.emit('state', tenant, this.productState(tenant));
+    const runtime = this.context.tenants.get(tenant);
+    const state = this.productState(tenant);
+    const scope = JSON.stringify([
+      runtime.viewer?.id,
+      runtime.viewer?.security?.epoch,
+      runtime.viewer?.security?.locked,
+    ]);
+    const previous = this.publications.get(runtime);
+    if (previous?.state === state && previous.scope === scope) return;
+    this.publications.set(runtime, { state, scope });
+    this.context.events.emit('state', tenant, state);
   }
   assertViewer(tenant: string, lease: string) {
     const viewer = this.context.tenants.get(tenant).viewer;
@@ -182,7 +200,7 @@ export class ViewerHub {
       const feasibility = new QualityState().snapshot(state, body);
       if (feasibility.resourceLimitation)
         throw new RemoteKitError('limit_exceeded', feasibility.resourceLimitation);
-      runtime.viewer!.viewport = {
+      const viewport = {
         devicePixelRatio: body.devicePixelRatio,
         refreshHz: body.refreshHz,
         windows: body.windows.map((w: any) => ({
@@ -192,7 +210,10 @@ export class ViewerHub {
           visible: w.visible,
         })),
       };
-      runtime.lastViewport = runtime.viewer!.viewport!;
+      if (canonicalJson(runtime.viewer!.viewport) === canonicalJson(viewport))
+        return this.productState(tenant);
+      runtime.viewer!.viewport = viewport;
+      runtime.lastViewport = viewport;
       try {
         await this.services.reconciler.reconcileProduct(tenant);
       } catch {}

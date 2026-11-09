@@ -6,7 +6,8 @@ import { useFloatingAction } from './floating-actions';
 import { PageOverlay } from './page-overlay';
 import { ViewportInput } from '../input/viewport-input';
 import { StatsOverlay } from './stats-overlay';
-import { useViewerSession } from './use-viewer-session';
+import { canonicalJson } from '../util/canonical-json';
+import { useViewerSessionSelector } from './use-viewer-session';
 import { useViewportTransition } from '../presentation/use-viewport-transition';
 import type { ViewerSession } from '../viewer-session';
 import { sameEditingDocument } from '../editing/mobile-editing-state';
@@ -34,7 +35,22 @@ export function RemoteViewport({
   onFrameReady?: (ready: boolean) => void;
   showConnectingOverlay?: boolean;
 }) {
-  const snapshot = useViewerSession(transport);
+  const snapshot = useViewerSessionSelector(
+    transport,
+    (snapshot) => ({
+      surface: snapshot.presentation.layout?.views.find((view) => view.id === viewId),
+      presentationError: snapshot.presentation.error,
+      canRetry: snapshot.presentation.canRetry,
+      editingSurface: snapshot.editing.views.find((view) => view.id === viewId),
+      attempt: snapshot.editing.attempt,
+      current: snapshot.editing.current?.view?.id === viewId ? snapshot.editing.current : undefined,
+      selection: snapshot.editing.selection?.view?.id === viewId ? snapshot.editing.selection : undefined,
+      contextMenu:
+        snapshot.editing.contextMenu?.view?.id === viewId ? snapshot.editing.contextMenu : undefined,
+      rtcPhase: snapshot.rtc.phase,
+    }),
+    (previous, next) => canonicalJson(previous) === canonicalJson(next),
+  );
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewport = useRef<HTMLElement>(null);
   const editor = useRef<HTMLTextAreaElement>(null);
@@ -47,11 +63,11 @@ export function RemoteViewport({
   const [dismissedContextMenu, setDismissedContextMenu] = useState<string>();
   const product = useSyncExternalStore(transport.operations.subscribe, transport.operations.getSnapshot);
   const geometry = useViewportGeometry(viewport, canvas);
-  const surface = snapshot.presentation.layout?.views.find((view) => view.id === viewId);
-  const editingSurface = snapshot.editing.views.find((view) => view.id === viewId);
+  const surface = snapshot.surface;
+  const editingSurface = snapshot.editingSurface;
   const owner =
     editingSurface &&
-    `${snapshot.editing.attempt}:${editingSurface.session}:${editingSurface.id}:${editingSurface.instance}:${editingSurface.document}`;
+    `${snapshot.attempt}:${editingSurface.session}:${editingSurface.id}:${editingSurface.instance}:${editingSurface.document}`;
   const resize = useViewportTransition(viewport, transport, viewId, surface, frameReady, owner, editor);
   useLayoutEffect(() => {
     if (!canvas.current || !editor.current) return;
@@ -87,7 +103,7 @@ export function RemoteViewport({
     const position = () => {
       const caret =
         document.activeElement === node && surface && geometry
-          ? projectEditableCaret(surface, snapshot.editing.current, geometry)
+          ? projectEditableCaret(surface, snapshot.current, geometry)
           : undefined;
       Object.assign(node.style, {
         left: caret ? `${caret.left}px` : '',
@@ -104,8 +120,8 @@ export function RemoteViewport({
       node.removeEventListener('focus', position);
       node.removeEventListener('blur', position);
     };
-  }, [surface, geometry, snapshot.editing.current, resize.waiting]);
-  const selection = snapshot.editing.selection;
+  }, [surface, geometry, snapshot.current, resize.waiting]);
+  const selection = snapshot.selection;
   const menu =
     selection?.view &&
     surface &&
@@ -115,7 +131,7 @@ export function RemoteViewport({
     `${owner}:${selection.menu?.id}` !== dismissedMenu
       ? selection.menu
       : undefined;
-  const context = snapshot.editing.contextMenu;
+  const context = snapshot.contextMenu;
   const contextMenu =
     context?.view &&
     surface &&
@@ -196,20 +212,20 @@ export function RemoteViewport({
           {editing.error}
         </div>
       )}
-      {snapshot.presentation.error ? (
+      {snapshot.presentationError ? (
         <PageOverlay
           kind="error"
           action={
-            snapshot.presentation.canRetry && (
+            snapshot.canRetry && (
               <Button variant="outlined" onClick={() => transport.presentation.retryPresentation()}>
                 重试视频
               </Button>
             )
           }
         >
-          {formatError(snapshot.presentation.error)}
+          {formatError(snapshot.presentationError)}
         </PageOverlay>
-      ) : snapshot.rtc.phase === 'exhausted' ? (
+      ) : snapshot.rtcPhase === 'exhausted' ? (
         <PageOverlay
           kind="error"
           action={
@@ -222,13 +238,24 @@ export function RemoteViewport({
         </PageOverlay>
       ) : (
         showConnectingOverlay &&
-        snapshot.rtc.phase !== 'connected' &&
+        snapshot.rtcPhase !== 'connected' &&
         !resize.frozen && <PageOverlay kind="progress">正在连接浏览器…</PageOverlay>
       )}
-      {overlay && <StatsOverlay diagnostics={snapshot.observations} surface={surface} />}
+      {overlay && <ViewportStats transport={transport} surface={surface} />}
     </section>
   );
 }
 const emptySubscribe = () => () => {};
 const initialEditing = { keyboardEnabled: false, keyboardShown: false, keyboardReady: false };
 const emptyEditing = (): import('../editing/editing-view').EditingViewSnapshot => initialEditing;
+
+function ViewportStats({
+  transport,
+  surface,
+}: {
+  transport: ViewerSession;
+  surface?: import('../presentation/types').Surface;
+}) {
+  const diagnostics = useViewerSessionSelector(transport, (snapshot) => snapshot.observations);
+  return <StatsOverlay diagnostics={diagnostics} surface={surface} />;
+}

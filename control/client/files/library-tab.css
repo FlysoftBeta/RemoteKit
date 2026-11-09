@@ -4,3 +4,16 @@
   color: var(--text-primary);
   background: var(--surface);
 }
+
+.library-virtual-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.library-virtual-list [data-file-row] {
+  height: 72px;
+}
+.library-virtual-list .virtual-list-sticky > div {
+  padding: 10px 0;
+  background: var(--surface);
+}

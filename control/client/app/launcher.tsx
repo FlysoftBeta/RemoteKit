@@ -90,10 +90,14 @@ export function Launcher({
   const [menu, setMenu] = useState<{ item: LauncherItem; anchor: HTMLElement }>();
   const host = useRef<HTMLDivElement>(null);
   const groupsHost = useRef<HTMLDivElement>(null);
+  const rowsHost = useRef<HTMLDivElement>(null);
+  const edgeSizes = useRef({ width: 0, contentWidth: 0 });
   const [edges, setEdges] = useState({ left: false, right: false });
   const measureEdges = () => {
     const node = groupsHost.current!;
-    setEdges({ left: node.scrollLeft > 1, right: node.scrollLeft + node.clientWidth < node.scrollWidth - 1 });
+    const left = node.scrollLeft > 1;
+    const right = node.scrollLeft + edgeSizes.current.width < edgeSizes.current.contentWidth - 1;
+    setEdges((previous) => (previous.left === left && previous.right === right ? previous : { left, right }));
   };
   const library = useLibrary();
   useEffect(() => {
@@ -101,9 +105,11 @@ export function Launcher({
     const wheel = (event: WheelEvent) => {
       if (!event.deltaY || event.deltaX) return;
       const delta =
-        event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? node.clientWidth : 1);
+        event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? edgeSizes.current.width : 1);
       const canScroll =
-        delta > 0 ? node.scrollLeft + node.clientWidth < node.scrollWidth - 1 : node.scrollLeft > 1;
+        delta > 0
+          ? node.scrollLeft + edgeSizes.current.width < edgeSizes.current.contentWidth - 1
+          : node.scrollLeft > 1;
       if (canScroll) {
         event.preventDefault();
         node.scrollLeft += delta;
@@ -113,19 +119,23 @@ export function Launcher({
     return () => node.removeEventListener('wheel', wheel);
   }, []);
   useLayoutEffect(() => {
-    const node = host.current!;
     const groups = groupsHost.current!;
-    const measure = () => {
-      const bottom = parseFloat(getComputedStyle(groups).paddingBottom);
-      setBounds({ width: groups.clientWidth, height: Math.max(0, groups.clientHeight - bottom) });
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (entry.target === groups) {
+          edgeSizes.current.width = width;
+          setBounds((previous) =>
+            previous.width === width && previous.height === height ? previous : { width, height },
+          );
+        } else edgeSizes.current.contentWidth = width;
+      }
       measureEdges();
-    };
-    const observer = new ResizeObserver(measure);
-    observer.observe(node);
+    });
     observer.observe(groups);
-    measure();
+    observer.observe(rowsHost.current!);
     return () => observer.disconnect();
-  }, [items]);
+  }, []);
   useEffect(() => {
     let disposed = false;
     const timer = setTimeout(
@@ -149,7 +159,6 @@ export function Launcher({
     };
   }, [call, query]);
   const layout = launcherLayout(items, bounds.height, query, bounds.width);
-  useLayoutEffect(measureEdges, [layout.unit, items]);
   const perform = (task: () => Promise<void>) => {
     if (busy || !online) return;
     setBusy(true);
@@ -261,7 +270,7 @@ export function Launcher({
             if (!(event.target as Element).closest('.launcher-tile')) close();
           }}
         >
-          <div className="launcher-rows">
+          <div ref={rowsHost} className="launcher-rows">
             {layout.groups.map((group) => (
               <section className="launcher-group" key={group.id}>
                 <Typography variant="subtitle1">{group.title}</Typography>

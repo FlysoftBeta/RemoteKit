@@ -395,3 +395,21 @@ test('viewport registrations survive reset but old element callbacks cannot auth
   s.videos[s.videos.length - 2]?.frame(10);
   assert.ok(s.presentation.canInput('1'));
 });
+
+test('video callbacks retain UI snapshot identity and notify only their registered view', (t) => {
+  const s = environment(t);
+  s.authorize();
+  const before = s.presentation.getSnapshot();
+  let ui = 0,
+    firstFrames = 0,
+    secondFrames = 0;
+  s.presentation.subscribe(() => ui++);
+  s.presentation.subscribeFrames(() => firstFrames++, '1');
+  s.presentation.subscribeFrames(() => secondFrames++, '2');
+  s.message({ type: 'frame', rtpTimestamp: 11, layoutEpoch: '20' });
+  s.videos[1].frame(11, 2);
+  assert.strictEqual(s.presentation.getSnapshot(), before);
+  assert.equal(ui, 0);
+  assert.equal(firstFrames, 1);
+  assert.equal(secondFrames, 0);
+});

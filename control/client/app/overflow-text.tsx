@@ -1,5 +1,5 @@
 import { Tooltip, Typography, type TypographyProps } from '@mui/material';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 /** Single-line text whose tooltip shows the full text, only while it is actually truncated. */
 export function OverflowText({
@@ -8,17 +8,18 @@ export function OverflowText({
   ...props
 }: Omit<TypographyProps, 'title' | 'noWrap'> & { tip?: string }) {
   const [open, setOpen] = useState(false);
+  const text = useRef<HTMLElement>(null);
   return (
     <Tooltip
       title={tip ?? children}
       open={open}
-      onOpen={(event) => {
-        const text = event.currentTarget as HTMLElement;
-        if (text.scrollWidth > text.clientWidth) setOpen(true);
+      onOpen={() => {
+        const node = text.current;
+        if (node && node.scrollWidth > node.clientWidth) setOpen(true);
       }}
       onClose={() => setOpen(false)}
     >
-      <Typography noWrap {...props}>
+      <Typography noWrap {...props} ref={text}>
         {children}
       </Typography>
     </Tooltip>

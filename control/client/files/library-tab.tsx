@@ -35,7 +35,19 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import React, { type JSX, useCallback, useEffect, useRef, useState } from 'react';
+import React, {
+  type JSX,
+  memo,
+  useMemo,
+  useLayoutEffect,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
+import { canonicalJson } from '../util/canonical-json';
+import { VirtualScroller, type VirtualViewport } from '../ui/virtual-list';
+import { SizeIndex } from '../ui/virtual-scroll';
 import type { LibraryEntry } from '../../shared/file-library';
 import { scaledAnchor } from '../app/ui-scale';
 import { operationId } from '../control/product-operations';
@@ -60,7 +72,6 @@ import { PhotoOptions } from './photo-options';
 import { filesInView, sourceAppName, sourceChannelName, type FilesView } from './files-app-state';
 import { FilesOrganization } from './files-organization';
 
-const PAGE_SIZE = 60;
 const MAX_BASKET = 64;
 
 export function LibraryTab({
@@ -90,7 +101,6 @@ export function LibraryTab({
   const compact = paneWidth < 900;
   const setQuery = (query: string) => onQuery(query.slice(0, 256));
   const [searching, setSearching] = useState(false);
-  const [limit, setLimit] = useState(PAGE_SIZE);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string[]>();
@@ -179,7 +189,6 @@ export function LibraryTab({
   }
   const selectFilter = (next: FilesView) => {
     onView(next);
-    setLimit(PAGE_SIZE);
     setSelected(undefined);
   };
   const toggleSelected = (id: string) =>
@@ -219,10 +228,9 @@ export function LibraryTab({
   const removeFromBasket = (id: string) =>
     void saveBasket(basket.map((entry) => entry.id).filter((value) => value !== id));
   const startCamera = () => setCamera({ partitionId: currentPartition?.id ?? null });
-  const visibleEntries = entries.slice(0, limit);
   const sections = new Map<string, { entries: LibraryEntry[]; jobs: PhotoJob[] }>();
   if (pending.length) sections.set('今天', { entries: [], jobs: pending });
-  for (const entry of visibleEntries) {
+  for (const entry of entries) {
     const key = dayLabel(entry.createdAt);
     const section = sections.get(key) ?? { entries: [], jobs: [] };
     section.entries.push(entry);
@@ -247,45 +255,6 @@ export function LibraryTab({
       void recordUsage(entry.id, windowId).catch((failure) => diagnostics.record('file-usage', failure));
     } else onOpen(entry);
   };
-  const entryCheckbox = (entry: LibraryEntry, tile: boolean) => (
-    <Checkbox
-      className="library-check"
-      checked={chosen.has(entry.id)}
-      disabled={disabled}
-      onChange={() => toggleSelected(entry.id)}
-      slotProps={{ input: { 'aria-label': `选择 ${entry.name}` } }}
-      sx={
-        tile
-          ? {
-              width: 40,
-              height: 40,
-              '& svg': { bgcolor: 'rgb(255 255 255 / 92%)', borderRadius: '4px' },
-            }
-          : { width: 40, height: 40 }
-      }
-    />
-  );
-  const basketMarker = (entry: LibraryEntry) =>
-    inBasket.has(entry.id) ? (
-      <Tooltip title="已在文件篮">
-        <Box
-          component="span"
-          aria-label="已在文件篮"
-          sx={{
-            width: 24,
-            height: 24,
-            display: 'grid',
-            placeItems: 'center',
-            borderRadius: '50%',
-            bgcolor: 'primary.main',
-            color: '#fff',
-            boxShadow: '0 1px 3px rgb(15 23 42 / 25%)',
-          }}
-        >
-          <ShoppingBasket sx={{ fontSize: 14 }} />
-        </Box>
-      </Tooltip>
-    ) : undefined;
   const openEntry = (entry: LibraryEntry, anchor: HTMLElement) => {
     if (selecting) toggleSelected(entry.id);
     else if (entry.photo?.pending) openPreview(entry);
@@ -302,6 +271,53 @@ export function LibraryTab({
     ]
       .filter(Boolean)
       .join(' · ');
+
+  const latestActions = useRef({ openEntry, toggleSelected, addToBasket, removeFromBasket, catalog });
+  latestActions.current = { openEntry, toggleSelected, addToBasket, removeFromBasket, catalog };
+  const entryActions = useMemo(
+    () => ({
+      open: (id: string, anchor: HTMLElement) => {
+        const entry = latestActions.current.catalog.find((entry) => entry.id === id);
+        if (entry) latestActions.current.openEntry(entry, anchor);
+      },
+      select: (id: string) => latestActions.current.toggleSelected(id),
+      longPress: (id: string) =>
+        setSelected((current = []) => (current.includes(id) ? current : [...current, id])),
+      basket: (id: string) =>
+        latestActions.current.catalog.some((entry) => entry.id === id) &&
+        (basketRef.current.has(id)
+          ? latestActions.current.removeFromBasket(id)
+          : latestActions.current.addToBasket([id])),
+      menu: (id: string, anchor: HTMLElement) => setMenu({ id, anchor }),
+    }),
+    [],
+  );
+  const basketRef = useRef(inBasket);
+  basketRef.current = inBasket;
+  const listViewport = useRef<VirtualViewport>(null);
+  const [listWidth, setListWidth] = useState(0);
+  const columns =
+    layout === 'list' ? 1 : Math.max(1, Math.floor((listWidth + 12) / ((narrow ? 136 : 160) + 12)));
+  const cardHeight = ((listWidth - (columns - 1) * 12) / columns) * 0.75 + 46;
+  const virtualRows: LibraryRow[] = [];
+  for (const [label, section] of sections) {
+    virtualRows.push({ key: label, label, header: true, entries: [], jobs: [] });
+    const items = [...section.jobs.map((job) => ({ job })), ...section.entries.map((entry) => ({ entry }))];
+    for (let index = 0; index < items.length; index += columns) {
+      const group = items.slice(index, index + columns);
+      virtualRows.push({
+        key: label + ':' + index,
+        label,
+        header: false,
+        entries: group.flatMap((item) => ('entry' in item ? [item.entry] : [])),
+        jobs: group.flatMap((item) => ('job' in item ? [item.job] : [])),
+      });
+    }
+  }
+  const rowSizes = new SizeIndex(
+    virtualRows.map((row) => (row.header ? 38 : layout === 'list' ? 74 : cardHeight + 12)),
+  );
+  useLayoutEffect(() => listViewport.current?.scrollTo(0), [query, filter, layout]);
 
   const header = selecting ? (
     <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 1, minHeight: 40 }}>
@@ -471,7 +487,17 @@ export function LibraryTab({
           onFiles={upload.add}
           sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}
         >
-          <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: narrow ? 1.5 : 3, pb: 3 }}>
+          <Box
+            sx={{
+              flex: 1,
+              minHeight: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              overflowY: filter === 'settings' ? 'auto' : undefined,
+              px: narrow ? 1.5 : 3,
+              pb: 3,
+            }}
+          >
             {(busy || upload.busy) && <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />}
             {error && (
               <Alert severity="warning" onClose={() => setError('')} sx={{ mt: 1.5 }}>
@@ -514,157 +540,77 @@ export function LibraryTab({
             {filter === 'settings' && (
               <FilesOrganization mode="settings" view={filter} onView={selectFilter} />
             )}
-            {[...sections].map(([label, section]) => (
-              <Box key={label} component="section" aria-label={label}>
-                <Typography
-                  variant="overline"
-                  color="text.secondary"
-                  sx={{
-                    display: 'block',
-                    position: 'sticky',
-                    top: 0,
-                    zIndex: 2,
-                    bgcolor: 'background.paper',
-                    pt: 1.5,
-                    pb: 0.75,
-                    lineHeight: '20px',
-                    fontWeight: 600,
-                    letterSpacing: 0.5,
-                  }}
-                >
-                  {label}
-                </Typography>
-                {view.mode === 'cards' ? (
-                  <Box
-                    sx={{
-                      display: 'grid',
-                      gridTemplateColumns: `repeat(auto-fill, minmax(${narrow ? 136 : 160}px, 1fr))`,
-                      gap: 1.5,
-                    }}
-                  >
-                    {section.jobs.map((job) => (
-                      <FileTile
-                        key={job.id}
-                        id={job.id}
-                        name="照片"
-                        type="image/png"
-                        assetId={job.id}
-                        blob={job.preview}
-                        localOnly
-                        meta={partitionOf(job.origin.kind === 'files' ? job.origin.partitionId : null)}
-                        status={photoStatus(undefined, job)}
-                        onOpen={() => setPhoto(job.id)}
-                      />
-                    ))}
-                    {section.entries.map((entry) => (
-                      <FileTile
-                        key={entry.id}
-                        id={entry.id}
-                        name={entry.name}
-                        type={entry.type}
-                        assetId={entry.assetId}
-                        meta={entryMeta(entry)}
-                        status={photoStatus(entry)}
-                        selected={chosen.has(entry.id)}
-                        pressed={selecting ? chosen.has(entry.id) : undefined}
-                        open={menu?.id === entry.id}
-                        disabled={disabled}
-                        marker={basketMarker(entry)}
-                        start={entryCheckbox(entry, true)}
-                        onOpen={(anchor) => openEntry(entry, anchor)}
-                        onLongPress={() =>
-                          setSelected((current = []) =>
-                            current.includes(entry.id) ? current : [...current, entry.id],
-                          )
-                        }
-                      />
-                    ))}
-                  </Box>
-                ) : (
-                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                    {section.jobs.map((job) => (
-                      <FileRow
-                        key={job.id}
-                        id={job.id}
-                        name="照片"
-                        type="image/png"
-                        assetId={job.id}
-                        blob={job.preview}
-                        localOnly
-                        meta={partitionOf(job.origin.kind === 'files' ? job.origin.partitionId : null)}
-                        status={photoStatus(undefined, job)}
-                        leading={<Box sx={{ width: 40 }} />}
-                        onOpen={() => setPhoto(job.id)}
-                      />
-                    ))}
-                    {section.entries.map((entry) => (
-                      <FileRow
-                        key={entry.id}
-                        id={entry.id}
-                        name={entry.name}
-                        type={entry.type}
-                        assetId={entry.assetId}
-                        meta={entryMeta(entry)}
-                        detail={entry.detail}
-                        status={photoStatus(entry)}
-                        selected={chosen.has(entry.id)}
-                        pressed={selecting ? chosen.has(entry.id) : undefined}
-                        disabled={disabled}
-                        leading={entryCheckbox(entry, false)}
-                        onOpen={(anchor) => openEntry(entry, anchor)}
-                        onLongPress={() =>
-                          setSelected((current = []) =>
-                            current.includes(entry.id) ? current : [...current, entry.id],
-                          )
-                        }
-                        trailing={
-                          !selecting && (
-                            <>
-                              <Tooltip title={inBasket.has(entry.id) ? '从文件篮移除' : '加入文件篮'}>
-                                <span>
-                                  <IconButton
-                                    aria-label={
-                                      inBasket.has(entry.id)
-                                        ? `从文件篮移除 ${entry.name}`
-                                        : `加入文件篮 ${entry.name}`
-                                    }
-                                    aria-pressed={inBasket.has(entry.id)}
-                                    color={inBasket.has(entry.id) ? 'primary' : 'default'}
-                                    disabled={
-                                      disabled || (!inBasket.has(entry.id) && basket.length >= MAX_BASKET)
-                                    }
-                                    onClick={() =>
-                                      inBasket.has(entry.id)
-                                        ? removeFromBasket(entry.id)
-                                        : addToBasket([entry.id])
-                                    }
-                                  >
-                                    {inBasket.has(entry.id) ? (
-                                      <ShoppingBasket fontSize="small" />
-                                    ) : (
-                                      <ShoppingBasketOutlined fontSize="small" />
-                                    )}
-                                  </IconButton>
-                                </span>
-                              </Tooltip>
-                              <IconButton
-                                aria-label={`更多操作 ${entry.name}`}
-                                aria-haspopup="menu"
-                                disabled={disabled}
-                                onClick={(event) => setMenu({ anchor: event.currentTarget, id: entry.id })}
-                              >
-                                <MoreVert fontSize="small" />
-                              </IconButton>
-                            </>
-                          )
-                        }
-                      />
-                    ))}
-                  </Box>
-                )}
-              </Box>
-            ))}
-            {entries.length > limit && <LoadMore onVisible={() => setLimit((value) => value + PAGE_SIZE)} />}
+            {filter !== 'settings' && (
+              <VirtualScroller
+                viewportRef={listViewport}
+                items={virtualRows}
+                sizes={rowSizes}
+                enabled
+                contentWidth={0}
+                className="library-virtual-list"
+                label="我的文件"
+                itemKey={(item) => item.key}
+                onWidth={setListWidth}
+                onScroll={() => {}}
+                stickyHeader={(item) => item.label}
+                renderItem={(item) =>
+                  item.header ? (
+                    <Typography
+                      variant="overline"
+                      color="text.secondary"
+                      sx={{ display: 'block', lineHeight: '38px' }}
+                    >
+                      {item.label}
+                    </Typography>
+                  ) : (
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+                        gap: 12,
+                      }}
+                    >
+                      {item.jobs.map((job) => {
+                        const Component = layout === 'grid' ? FileTile : FileRow;
+                        return (
+                          <Component
+                            key={job.id}
+                            id={job.id}
+                            name="照片"
+                            type="image/png"
+                            assetId={job.id}
+                            blob={job.preview}
+                            localOnly
+                            meta={partitionOf(job.origin.kind === 'files' ? job.origin.partitionId : null)}
+                            status={photoStatus(undefined, job)}
+                            onOpen={() => setPhoto(job.id)}
+                          />
+                        );
+                      })}
+                      {item.entries.map((entry) => (
+                        <LibraryEntryView
+                          key={entry.id}
+                          entry={entry}
+                          mode={layout}
+                          meta={entryMeta(entry)}
+                          selected={chosen.has(entry.id)}
+                          selecting={selecting}
+                          open={menu?.id === entry.id}
+                          disabled={disabled}
+                          inBasket={inBasket.has(entry.id)}
+                          basketFull={basket.length >= MAX_BASKET}
+                          onOpen={entryActions.open}
+                          onSelect={entryActions.select}
+                          onLongPress={entryActions.longPress}
+                          onBasket={entryActions.basket}
+                          onMenu={entryActions.menu}
+                        />
+                      ))}
+                    </div>
+                  )
+                }
+              />
+            )}
           </Box>
         </FileDropZone>
       </Box>
@@ -917,24 +863,6 @@ function EmptyLibrary({
   );
 }
 
-function LoadMore({ onVisible }: { onVisible: () => void }) {
-  const sentinel = useRef<HTMLDivElement>(null);
-  const latest = useRef(onVisible);
-  latest.current = onVisible;
-  useEffect(() => {
-    const node = sentinel.current;
-    if (!node || typeof IntersectionObserver === 'undefined') return;
-    const observer = new IntersectionObserver(([entry]) => entry.isIntersecting && latest.current());
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-  return (
-    <Box ref={sentinel} sx={{ py: 2, textAlign: 'center' }}>
-      <Button onClick={() => latest.current()}>显示更多</Button>
-    </Box>
-  );
-}
-
 export function PhotoDialog({
   entry,
   job,
@@ -988,3 +916,157 @@ export function PhotoDialog({
     </Dialog>
   );
 }
+
+interface LibraryRow {
+  key: string;
+  label: string;
+  header: boolean;
+  entries: LibraryEntry[];
+  jobs: PhotoJob[];
+}
+interface LibraryEntryProps {
+  entry: LibraryEntry;
+  mode: 'grid' | 'list';
+  meta: string;
+  selected: boolean;
+  selecting: boolean;
+  open: boolean;
+  disabled: boolean;
+  inBasket: boolean;
+  basketFull: boolean;
+  onOpen(id: string, anchor: HTMLElement): void;
+  onSelect(id: string): void;
+  onLongPress(id: string): void;
+  onBasket(id: string): void;
+  onMenu(id: string, anchor: HTMLElement): void;
+}
+const LibraryEntryView = memo(
+  function LibraryEntryView({
+    entry,
+    mode,
+    meta,
+    selected,
+    selecting,
+    open,
+    disabled,
+    inBasket,
+    basketFull,
+    onOpen,
+    onSelect,
+    onLongPress,
+    onBasket,
+    onMenu,
+  }: LibraryEntryProps) {
+    const entryCheckbox = (entry: LibraryEntry, tile: boolean) => (
+      <Checkbox
+        className="library-check"
+        checked={selected}
+        disabled={disabled}
+        onChange={() => onSelect(entry.id)}
+        slotProps={{ input: { 'aria-label': `选择 ${entry.name}` } }}
+        sx={
+          tile
+            ? {
+                width: 40,
+                height: 40,
+                '& svg': { bgcolor: 'rgb(255 255 255 / 92%)', borderRadius: '4px' },
+              }
+            : { width: 40, height: 40 }
+        }
+      />
+    );
+    const basketMarker = (entry: LibraryEntry) =>
+      inBasket ? (
+        <Tooltip title="已在文件篮">
+          <Box
+            component="span"
+            aria-label="已在文件篮"
+            sx={{
+              width: 24,
+              height: 24,
+              display: 'grid',
+              placeItems: 'center',
+              borderRadius: '50%',
+              bgcolor: 'primary.main',
+              color: '#fff',
+              boxShadow: '0 1px 3px rgb(15 23 42 / 25%)',
+            }}
+          >
+            <ShoppingBasket sx={{ fontSize: 14 }} />
+          </Box>
+        </Tooltip>
+      ) : undefined;
+
+    return mode === 'grid' ? (
+      <FileTile
+        id={entry.id}
+        name={entry.name}
+        type={entry.type}
+        assetId={entry.assetId}
+        meta={meta}
+        status={photoStatus(entry)}
+        selected={selected}
+        pressed={selecting ? selected : undefined}
+        open={open}
+        disabled={disabled}
+        marker={basketMarker(entry)}
+        start={entryCheckbox(entry, true)}
+        onOpen={(anchor) => onOpen(entry.id, anchor)}
+        onLongPress={() => onLongPress(entry.id)}
+      />
+    ) : (
+      <FileRow
+        id={entry.id}
+        name={entry.name}
+        type={entry.type}
+        assetId={entry.assetId}
+        meta={meta}
+        detail={entry.detail}
+        status={photoStatus(entry)}
+        selected={selected}
+        pressed={selecting ? selected : undefined}
+        disabled={disabled}
+        leading={entryCheckbox(entry, false)}
+        onOpen={(anchor) => onOpen(entry.id, anchor)}
+        onLongPress={() => onLongPress(entry.id)}
+        trailing={
+          !selecting && (
+            <>
+              <Tooltip title={inBasket ? '从文件篮移除' : '加入文件篮'}>
+                <span>
+                  <IconButton
+                    aria-label={inBasket ? `从文件篮移除 ${entry.name}` : `加入文件篮 ${entry.name}`}
+                    aria-pressed={inBasket}
+                    color={inBasket ? 'primary' : 'default'}
+                    disabled={disabled || (!inBasket && basketFull)}
+                    onClick={() => onBasket(entry.id)}
+                  >
+                    {inBasket ? (
+                      <ShoppingBasket fontSize="small" />
+                    ) : (
+                      <ShoppingBasketOutlined fontSize="small" />
+                    )}
+                  </IconButton>
+                </span>
+              </Tooltip>
+              <IconButton
+                aria-label={`更多操作 ${entry.name}`}
+                aria-haspopup="menu"
+                disabled={disabled}
+                onClick={(event) => onMenu(entry.id, event.currentTarget)}
+              >
+                <MoreVert fontSize="small" />
+              </IconButton>
+            </>
+          )
+        }
+      />
+    );
+  },
+  (previous, next) =>
+    Object.keys(previous).every((key) =>
+      key === 'entry'
+        ? canonicalJson(previous.entry) === canonicalJson(next.entry)
+        : previous[key as keyof LibraryEntryProps] === next[key as keyof LibraryEntryProps],
+    ),
+);

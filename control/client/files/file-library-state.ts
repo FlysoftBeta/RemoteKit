@@ -1,4 +1,5 @@
-import { createContext, useContext, useEffect, useState, useSyncExternalStore } from 'react';
+import { canonicalJson } from '../util/canonical-json';
+import { createContext, useContext, useMemo, useEffect, useState, useSyncExternalStore } from 'react';
 import type { FileChannel } from './file-channel';
 import { LibraryStore, type LibraryRequest } from './library-store';
 import type { ProductState } from '../../shared/product';
@@ -27,27 +28,32 @@ export function useFileLibrary(
     store.photos.getSnapshot,
     store.photos.getSnapshot,
   );
-  return {
-    ...state,
-    apps: product?.workspace.apps ?? [],
-    refresh: store.refresh,
-    recordUsage: store.recordUsage,
-    mutate: store.mutate,
-    select: store.select,
-    cancelSelection: store.cancelSelection,
-    checkout: (id: string) => state.checkouts[id],
-    photos: {
-      jobs,
-      reserve: store.photos.reserve,
-      update: store.photos.update,
-      cancel: store.photos.cancel,
-      capture: store.photos.capture,
-      retry: store.photos.retry,
-      resolve: store.photos.resolve,
-    },
-    thumbnails: store.thumbnails,
-    rpc,
-  };
+  const apps = product?.workspace.apps;
+  const stableApps = useMemo(() => apps ?? [], [canonicalJson(apps)]);
+  return useMemo(
+    () => ({
+      ...state,
+      apps: stableApps,
+      refresh: store.refresh,
+      recordUsage: store.recordUsage,
+      mutate: store.mutate,
+      select: store.select,
+      cancelSelection: store.cancelSelection,
+      checkout: (id: string) => state.checkouts[id],
+      photos: {
+        jobs,
+        reserve: store.photos.reserve,
+        update: store.photos.update,
+        cancel: store.photos.cancel,
+        capture: store.photos.capture,
+        retry: store.photos.retry,
+        resolve: store.photos.resolve,
+      },
+      thumbnails: store.thumbnails,
+      rpc,
+    }),
+    [state, stableApps, store, jobs, rpc],
+  );
 }
 export type FileLibrary = ReturnType<typeof useFileLibrary>;
 export const FileLibraryContext = createContext<FileLibrary | null>(null);

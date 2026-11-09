@@ -7,7 +7,6 @@ import { FileLibraryContext, useFileLibrary, type LibraryRequest } from '../file
 import type { AdminCall } from './admin/shared';
 import type { SessionImportCall } from './session-import';
 import { FloatingActions, FloatingActionsContext } from './floating-actions';
-import { useViewerSession } from './use-viewer-session';
 import { Stage, useWorkspaceStage } from './stage';
 import { OverlayHost, openLauncherItem, useWorkspaceOverlays } from './overlay-host';
 import { useSystemControls } from './system-controls';
@@ -21,7 +20,6 @@ const AdminApp = lazy(() => import('./admin/console').then((m) => ({ default: m.
 export function WorkspaceView({ logout, expired }: { logout(): void; expired(): void }) {
   const [media] = useState(() => new ViewerSession());
   const [floatingActions] = useState(() => new FloatingActions());
-  const snapshot = useViewerSession(media);
   const workspaceState = useSyncExternalStore(media.workspace.subscribe, media.workspace.getSnapshot);
   const operationState = useSyncExternalStore(media.operations.subscribe, media.operations.getSnapshot);
   const viewportNotice = useSyncExternalStore(media.viewport.subscribe, media.viewport.getSnapshot);
@@ -33,7 +31,6 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
     media,
     workspaceState,
     operationState,
-    snapshot,
     action: stage.action,
     showShell,
     floatingActions,
@@ -133,7 +130,6 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
                 floatingActions={floatingActions}
                 workspaceState={workspaceState}
                 operationState={operationState}
-                snapshot={snapshot}
                 viewportNotice={viewportNotice}
                 obscured={overlays.launcherOpen}
                 foreground={foreground}

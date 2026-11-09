@@ -1,5 +1,7 @@
 import { Alert, Button, LinearProgress } from '@mui/material';
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, memo, useEffect, useMemo, useRef, useState } from 'react';
+import { canonicalJson } from '../util/canonical-json';
+import type { FileChannel } from './file-channel';
 import type { LibraryEntry } from '../../shared/file-library';
 import { ChannelDocumentSource } from '../documents/channel-source';
 import type { DocumentProgress } from '../documents/document-source';
@@ -66,110 +68,127 @@ function MediaPreview({ entry }: { entry: LibraryEntry }) {
   );
 }
 
-export function FilePreview({
-  entry,
-  call,
-  onBasket,
-  onFiles,
-}: {
-  entry: LibraryEntry;
-  call?: LearningCall;
-  onBasket?: () => void;
-  onFiles?: () => void;
-}) {
+export function FilePreview(props: Omit<React.ComponentProps<typeof PreviewContent>, 'rpc' | 'online'>) {
   const { rpc, online } = useLibrary();
-  const source = useMemo(() => new ChannelDocumentSource(rpc, entry.assetId), [rpc, entry.assetId]);
-  const [unsupported, setUnsupported] = useState(false);
-  const [progress, setProgress] = useState<DocumentProgress | null | undefined>();
-  const [progressError, setProgressError] = useState('');
-  const pendingProgress = useRef<DocumentProgress>(undefined);
-  const [attempt, setAttempt] = useState(0);
-  const document = isDocumentFile(entry);
-  useEffect(() => {
-    setUnsupported(false);
-    setProgress(undefined);
-    setProgressError('');
-    pendingProgress.current = undefined;
-    let active = true;
-    if (!document || !call || !online) return;
-    void call('document.progress.get', { assetId: entry.assetId }).then(
-      (value) => {
-        if (active) setProgress(value);
-      },
-      (error) => {
-        if (active) setProgressError(error instanceof Error ? error.message : '阅读进度加载失败');
-      },
-    );
-    return () => {
-      active = false;
-    };
-  }, [entry.assetId, call, document, online, attempt]);
-  const saveProgress = (value: DocumentProgress) => {
-    if (!call) return;
-    pendingProgress.current = value;
-    void call('document.progress.set', { assetId: entry.assetId, ...value }).then(
-      () => setProgressError(''),
-      (error) => setProgressError(error instanceof Error ? error.message : '阅读进度保存失败'),
-    );
-  };
-  if (!online) return <Alert severity="info">连接已断开，恢复后继续预览</Alert>;
-  if (document && !unsupported)
-    return (
-      <div className="file-document-preview">
-        {progressError && (
-          <Alert
-            severity="error"
-            action={
-              <Button
-                onClick={() =>
-                  pendingProgress.current ? saveProgress(pendingProgress.current) : setAttempt(attempt + 1)
-                }
-              >
-                重试
-              </Button>
-            }
-          >
-            {progressError}
-          </Alert>
-        )}
-        {call && progress === undefined ? (
-          !progressError && <LinearProgress aria-label="正在读取阅读进度" />
-        ) : (
-          <Suspense fallback={<LinearProgress aria-label="正在打开文档" />}>
-            <DocumentViewer
-              source={source}
-              title={entry.name}
-              type={entry.type}
-              hideTitle
-              initialProgress={progress ?? undefined}
-              onUnsupported={() => setUnsupported(true)}
-              onProgress={saveProgress}
-            />
-          </Suspense>
-        )}
-      </div>
-    );
-  if (entry.type.startsWith('image/'))
-    return (
-      <div className="file-image-content">
-        <FileImagePreview entry={entry} inline onClose={() => {}} hideBack fullSize />
-      </div>
-    );
-  if (['audio', 'video'].includes(fileKind(entry.type, entry.name))) return <MediaPreview entry={entry} />;
-  return (
-    <div className="file-plain-preview">
-      <span className="file-plain-icon">
-        <FileTypeIcon name={entry.name} type={entry.type} />
-      </span>
-      <strong>{entry.name}</strong>
-      <span>{formatFileSize(entry.size)}</span>
-      <p>此类型暂不支持内容预览</p>
-      {onBasket && (
-        <Button variant="outlined" onClick={onBasket}>
-          加入文件篮
-        </Button>
-      )}
-      {onFiles && <Button onClick={onFiles}>在我的文件中查看</Button>}
-    </div>
-  );
+  return <PreviewContent {...props} rpc={rpc} online={online} />;
 }
+
+const PreviewContent = memo(
+  function PreviewContent({
+    entry,
+    call,
+    onBasket,
+    onFiles,
+    rpc,
+    online,
+  }: {
+    entry: LibraryEntry;
+    rpc: FileChannel;
+    online: boolean;
+    call?: LearningCall;
+    onBasket?: () => void;
+    onFiles?: () => void;
+  }) {
+    const source = useMemo(() => new ChannelDocumentSource(rpc, entry.assetId), [rpc, entry.assetId]);
+    const [unsupported, setUnsupported] = useState(false);
+    const [progress, setProgress] = useState<DocumentProgress | null | undefined>();
+    const [progressError, setProgressError] = useState('');
+    const pendingProgress = useRef<DocumentProgress>(undefined);
+    const [attempt, setAttempt] = useState(0);
+    const document = isDocumentFile(entry);
+    useEffect(() => {
+      setUnsupported(false);
+      setProgress(undefined);
+      setProgressError('');
+      pendingProgress.current = undefined;
+      let active = true;
+      if (!document || !call || !online) return;
+      void call('document.progress.get', { assetId: entry.assetId }).then(
+        (value) => {
+          if (active) setProgress(value);
+        },
+        (error) => {
+          if (active) setProgressError(error instanceof Error ? error.message : '阅读进度加载失败');
+        },
+      );
+      return () => {
+        active = false;
+      };
+    }, [entry.assetId, call, document, online, attempt]);
+    const saveProgress = (value: DocumentProgress) => {
+      if (!call) return;
+      pendingProgress.current = value;
+      void call('document.progress.set', { assetId: entry.assetId, ...value }).then(
+        () => setProgressError(''),
+        (error) => setProgressError(error instanceof Error ? error.message : '阅读进度保存失败'),
+      );
+    };
+    if (!online) return <Alert severity="info">连接已断开，恢复后继续预览</Alert>;
+    if (document && !unsupported)
+      return (
+        <div className="file-document-preview">
+          {progressError && (
+            <Alert
+              severity="error"
+              action={
+                <Button
+                  onClick={() =>
+                    pendingProgress.current ? saveProgress(pendingProgress.current) : setAttempt(attempt + 1)
+                  }
+                >
+                  重试
+                </Button>
+              }
+            >
+              {progressError}
+            </Alert>
+          )}
+          {call && progress === undefined ? (
+            !progressError && <LinearProgress aria-label="正在读取阅读进度" />
+          ) : (
+            <Suspense fallback={<LinearProgress aria-label="正在打开文档" />}>
+              <DocumentViewer
+                source={source}
+                title={entry.name}
+                type={entry.type}
+                hideTitle
+                initialProgress={progress ?? undefined}
+                onUnsupported={() => setUnsupported(true)}
+                onProgress={saveProgress}
+              />
+            </Suspense>
+          )}
+        </div>
+      );
+    if (entry.type.startsWith('image/'))
+      return (
+        <div className="file-image-content">
+          <FileImagePreview entry={entry} inline onClose={() => {}} hideBack fullSize />
+        </div>
+      );
+    if (['audio', 'video'].includes(fileKind(entry.type, entry.name))) return <MediaPreview entry={entry} />;
+    return (
+      <div className="file-plain-preview">
+        <span className="file-plain-icon">
+          <FileTypeIcon name={entry.name} type={entry.type} />
+        </span>
+        <strong>{entry.name}</strong>
+        <span>{formatFileSize(entry.size)}</span>
+        <p>此类型暂不支持内容预览</p>
+        {onBasket && (
+          <Button variant="outlined" onClick={onBasket}>
+            加入文件篮
+          </Button>
+        )}
+        {onFiles && <Button onClick={onFiles}>在我的文件中查看</Button>}
+      </div>
+    );
+  },
+  (previous, next) =>
+    previous.rpc === next.rpc &&
+    previous.online === next.online &&
+    previous.call === next.call &&
+    previous.onBasket === next.onBasket &&
+    previous.onFiles === next.onFiles &&
+    canonicalJson(previous.entry) === canonicalJson(next.entry),
+);

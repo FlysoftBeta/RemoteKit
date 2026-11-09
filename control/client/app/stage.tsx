@@ -6,7 +6,7 @@ import type { ProductState } from '../../shared/product';
 import type { ViewerSession } from '../viewer-session';
 import type { WorkspaceSnapshot } from '../control/workspace-session';
 import type { OperationsSnapshot } from '../control/operations-store';
-import type { useViewerSession } from './use-viewer-session';
+import { useViewerSessionSelector } from './use-viewer-session';
 import { formatError } from '../util/format-error';
 import { FileChooserDialog } from '../files/file-chooser-dialog';
 import { DiagnosticCollectionView } from './diagnostic-collection-view';
@@ -151,7 +151,6 @@ export function Stage({
   floatingActions,
   workspaceState,
   operationState,
-  snapshot,
   viewportNotice,
   obscured,
   foreground,
@@ -170,7 +169,6 @@ export function Stage({
   floatingActions: FloatingActions;
   workspaceState: WorkspaceSnapshot;
   operationState: OperationsSnapshot;
-  snapshot: ReturnType<typeof useViewerSession>;
   viewportNotice: string;
   obscured: boolean;
   foreground: ReturnType<typeof selectVisibility>['foreground'];
@@ -179,6 +177,7 @@ export function Stage({
   logout(): void;
   children: React.ReactNode;
 }) {
+  const rtcPhase = useViewerSessionSelector(media, (snapshot) => snapshot.rtc.phase);
   const { shell, width: contentWidth, stageNotice, call, action } = stage;
   const { fullscreen, productReady, diagnosticState, diagnostics } = controls;
   const { status, error } = workspaceState;
@@ -230,16 +229,16 @@ export function Stage({
         )}
         {status === 'online' && !productReady && (
           <Alert
-            severity={snapshot.rtc.phase === 'exhausted' ? 'warning' : 'info'}
+            severity={rtcPhase === 'exhausted' ? 'warning' : 'info'}
             action={
-              snapshot.rtc.phase === 'exhausted' && (
+              rtcPhase === 'exhausted' && (
                 <Button color="inherit" size="small" onClick={() => void media.rtc.connect()}>
                   重试
                 </Button>
               )
             }
           >
-            {snapshot.rtc.phase === 'exhausted' ? '浏览器连接失败' : '正在连接浏览器…'}
+            {rtcPhase === 'exhausted' ? '浏览器连接失败' : '正在连接浏览器…'}
           </Alert>
         )}
         {(error || operationState.error || viewportNotice || state.endpointError) && (

@@ -6,6 +6,15 @@ import { EditingInput, EDITOR_SENTINEL } from './editing-input';
 import type { EditingSession } from './editing-session';
 import { KeyboardSession } from './keyboard-session';
 import { DeferredEditingInput, editableInputMode } from './mobile-editing-state';
+const pointerMedia = new WeakMap<Window, { coarse: MediaQueryList; fine: MediaQueryList }>();
+function pointerQueries() {
+  let queries = pointerMedia.get(window);
+  if (!queries) {
+    queries = { coarse: window.matchMedia('(pointer: coarse)'), fine: window.matchMedia('(pointer: fine)') };
+    pointerMedia.set(window, queries);
+  }
+  return queries;
+}
 export interface EditingViewPorts {
   input: Pick<InputPipeline, 'sendInput' | 'ensureInputFocus' | 'focus'>;
   editing: Pick<EditingSession, 'mobileEditing' | 'editingSurface' | 'editingIdentity'>;
@@ -39,6 +48,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
   private systemDismissalSeen = 0;
   private error?: string;
   private enabled = true;
+  private configured = false;
   private autoOpen = false;
   private resize: ResizeObservation = {
     waiting: false,
@@ -53,12 +63,24 @@ export class EditingView extends Store<EditingViewSnapshot> {
   ) {
     super({ keyboardShown: false, keyboardReady: false, keyboardEnabled: false });
     this.resetEditor();
+    const queries = pointerQueries();
+    queries.coarse.addEventListener?.('change', this.observe);
+    queries.fine.addEventListener?.('change', this.observe);
   }
   configure(enabled: boolean, autoOpen: boolean, resize: ResizeObservation) {
+    const changed =
+      !this.configured ||
+      this.enabled !== enabled ||
+      this.autoOpen !== autoOpen ||
+      this.resize.waiting !== resize.waiting ||
+      this.resize.keyboardOpen !== resize.keyboardOpen ||
+      this.resize.keyboardDismissals !== resize.keyboardDismissals ||
+      this.resize.blocksInput() !== resize.blocksInput();
+    this.configured = true;
     this.enabled = enabled;
     this.autoOpen = autoOpen;
     this.resize = resize;
-    this.observe();
+    if (changed) this.observe();
   }
   get surface() {
     return this.ports.editing.editingSurface(this.viewId);
@@ -110,7 +132,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     );
   }
   get coarsePointer() {
-    return window.matchMedia('(pointer: coarse)').matches;
+    return pointerQueries().coarse.matches;
   }
   get keyboardShown() {
     return this.keyboardSession.shown(this.softInputFocused, this.resize.keyboardOpen, this.coarsePointer);
@@ -202,11 +224,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     this.restoreHardwareFocus = undefined;
     const closing = focused && (replaced || !this.keyboardEnabled || close);
     if (closing) {
-      if (
-        close === 'editor-lost' &&
-        !this.resize.keyboardOpen &&
-        window.matchMedia('(pointer: fine)').matches
-      )
+      if (close === 'editor-lost' && !this.resize.keyboardOpen && pointerQueries().fine.matches)
         this.restoreHardwareFocus = this.editingIdentity;
       this.hideKeyboard(false);
     } else {
@@ -250,6 +268,9 @@ export class EditingView extends Store<EditingViewSnapshot> {
     this.hideKeyboard();
   }
   dispose() {
+    const queries = pointerQueries();
+    queries.coarse.removeEventListener?.('change', this.observe);
+    queries.fine.removeEventListener?.('change', this.observe);
     this.release();
     clearTimeout(this.policyTimer);
     clearTimeout(this.deferredEditingTimer);

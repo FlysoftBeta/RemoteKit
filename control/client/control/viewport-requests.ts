@@ -2,6 +2,7 @@ import { RemoteKitError } from '../../shared/errors';
 import type { ProductState, ViewerViewport } from '../../shared/product';
 import { formatError } from '../util/format-error';
 import { diagnostics } from '../media/diagnostics';
+import { canonicalJson } from '../util/canonical-json';
 import { Store } from '../util/store';
 import { selectVisibility } from '../app/visibility';
 import { currentWindowFullscreen } from '../app/window-fullscreen';
@@ -10,6 +11,8 @@ export class ViewportRequests extends Store<string> {
   private readonly geometry = new Map<string, { width: number; height: number }>();
   private timer?: ReturnType<typeof setTimeout>;
   private serial = 0;
+  private acknowledged?: string;
+  private pending?: string;
   private state: ProductState | null = null;
   private bounds = { width: 0, height: 0 };
   private dpr = 1;
@@ -38,6 +41,8 @@ export class ViewportRequests extends Store<string> {
   };
   reset() {
     this.serial++;
+    this.acknowledged = undefined;
+    this.pending = undefined;
     clearTimeout(this.timer);
     this.timer = undefined;
     this.state = null;
@@ -67,12 +72,24 @@ export class ViewportRequests extends Store<string> {
             state.workspace.tabs.some((tab) => tab.id === window.activeTabId && tab.kind === 'remote'),
         })),
       };
+      const key = canonicalJson(params);
+      if (key === this.pending || (this.pending === undefined && key === this.acknowledged)) return;
+      this.pending = key;
       const serial = ++this.serial;
       void this.request(params)
         .then(() => {
-          if (serial === this.serial) this.publish('');
+          if (serial === this.serial) {
+            this.pending = undefined;
+            this.acknowledged = key;
+            this.publish('');
+            this.schedule();
+          }
         })
         .catch((error) => {
+          if (serial === this.serial) {
+            this.pending = undefined;
+            this.acknowledged = undefined;
+          }
           diagnostics.record('viewport', error);
           if (serial === this.serial && this.available)
             this.publish(

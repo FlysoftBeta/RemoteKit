@@ -40,6 +40,7 @@ export function VirtualScroller<T>({
 }) {
   const scroll = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ top: 0, height: 0 });
+  const [focusedKey, setFocusedKey] = useState<string>();
   const currentSizes = useRef(sizes);
   currentSizes.current = sizes;
   const callbacks = useRef({ onWidth, onScroll, onResize });
@@ -83,6 +84,10 @@ export function VirtualScroller<T>({
     return () => observer.disconnect();
   }, []);
   const range = virtualRange(sizes, view.top, view.height);
+  const indexes = Array.from({ length: range.end - range.start }, (_, index) => range.start + index);
+  const focusedIndex = items.findIndex((item) => itemKey(item) === focusedKey);
+  if (focusedIndex >= 0 && !indexes.includes(focusedIndex)) indexes.push(focusedIndex);
+  indexes.sort((left, right) => left - right);
   return (
     <div
       ref={scroll}
@@ -90,6 +95,42 @@ export function VirtualScroller<T>({
       role="region"
       aria-label={label}
       tabIndex={0}
+      onFocusCapture={(event) => {
+        const row = (event.target as HTMLElement).closest<HTMLElement>('[data-virtual-key]');
+        if (row) setFocusedKey(row.dataset.virtualKey);
+      }}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusedKey(undefined);
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Tab' || !focusedKey) return;
+        const row = (event.target as HTMLElement).closest<HTMLElement>('[data-virtual-key]');
+        if (!row) return;
+        const selector = 'button:not(:disabled), input:not(:disabled), [tabindex="0"], a[href]';
+        const controls = [...row.querySelectorAll<HTMLElement>(selector)];
+        const edge = event.shiftKey ? controls[0] : controls[controls.length - 1];
+        if (event.target !== edge) return;
+        const direction = event.shiftKey ? -1 : 1;
+        const next = focusedIndex + direction;
+        if (next < 0 || next >= items.length) return;
+        event.preventDefault();
+        const node = scroll.current!;
+        const focusRow = (index: number) => {
+          if (index < 0 || index >= items.length) return;
+          node.scrollTop = sizes.prefix(index);
+          updateRange(node);
+          requestAnimationFrame(() => {
+            const target = [...node.querySelectorAll<HTMLElement>('[data-virtual-key]')].find(
+              (element) => element.dataset.virtualKey === itemKey(items[index]),
+            );
+            const candidates = target?.querySelectorAll<HTMLElement>(selector);
+            const control = direction < 0 ? candidates?.[candidates.length - 1] : candidates?.[0];
+            if (control) control.focus();
+            else focusRow(index + direction);
+          });
+        };
+        focusRow(next);
+      }}
       onScroll={(event) => {
         const top = event.currentTarget.scrollTop;
         updateRange(event.currentTarget);
@@ -102,18 +143,18 @@ export function VirtualScroller<T>({
             <div>{stickyHeader(items[Math.max(0, sizes.find(view.top))])}</div>
           </div>
         )}
-        <div className="virtual-list-layer" style={{ top: range.offset }}>
-          {enabled &&
-            items.slice(range.start, range.end).map((item, index) => (
-              <div
-                key={itemKey(item)}
-                role="presentation"
-                style={{ height: sizes.size(range.start + index) }}
-              >
-                {renderItem(item, range.start + index)}
-              </div>
-            ))}
-        </div>
+        {enabled &&
+          indexes.map((index) => (
+            <div
+              key={itemKey(items[index])}
+              data-virtual-key={itemKey(items[index])}
+              className="virtual-list-layer"
+              role="presentation"
+              style={{ top: sizes.prefix(index), height: sizes.size(index) }}
+            >
+              {renderItem(items[index], index)}
+            </div>
+          ))}
       </div>
     </div>
   );

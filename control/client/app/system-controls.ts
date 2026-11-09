@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ViewerSession } from '../viewer-session';
 import type { WorkspaceSnapshot } from '../control/workspace-session';
 import type { OperationsSnapshot } from '../control/operations-store';
-import type { useViewerSession } from './use-viewer-session';
+import { useViewerSessionSelector, shallowEqual } from './use-viewer-session';
 import { useAuthCamera, type AuthRequest } from '../auth/auth-camera';
 import { useAutoLock } from '../auth/auth-idle';
 import type { AudioChannels } from '../media/audio-output';
@@ -17,7 +17,6 @@ export function useSystemControls({
   media,
   workspaceState,
   operationState,
-  snapshot,
   action,
   showShell,
   floatingActions,
@@ -25,11 +24,19 @@ export function useSystemControls({
   media: ViewerSession;
   workspaceState: WorkspaceSnapshot;
   operationState: OperationsSnapshot;
-  snapshot: ReturnType<typeof useViewerSession>;
   action: Action;
   showShell: boolean;
   floatingActions: FloatingActions;
 }) {
+  const { ready, channelReady, audioPlayback } = useViewerSessionSelector(
+    media,
+    (snapshot) => ({
+      ready: snapshot.authorization.ready,
+      channelReady: snapshot.observations.channel === '已连接',
+      audioPlayback: media.observations.audio.state,
+    }),
+    shallowEqual,
+  );
   const { auth, localLock, manualLock, status, idleRearmed } = workspaceState;
   const { state, pending: pendingOperations } = operationState;
   const [browserFullscreen, setBrowserFullscreen] = useState(!!document.fullscreenElement);
@@ -69,7 +76,7 @@ export function useSystemControls({
   useEffect(() => () => diagnostics.dispose(), [diagnostics]);
   useAutoFullscreen(showShell && state?.workspace.settings.workspace.autoFullscreen === true);
   const saveAudio = (channels: AudioChannels) => {
-    if (audioPending.current || status !== 'online' || !snapshot.authorization.ready) return;
+    if (audioPending.current || status !== 'online' || !ready) return;
     audioPending.current = true;
     setAudioSaving(true);
     setAudioError('');
@@ -82,7 +89,7 @@ export function useSystemControls({
         setAudioSaving(false);
       });
   };
-  const productReady = status === 'online' && snapshot.authorization.ready;
+  const productReady = status === 'online' && ready;
   const pageFullscreen = state?.pageFullscreen;
   const fullscreenTarget = pageFullscreen?.target;
   const chosenFullscreen = useWindowFullscreen();
@@ -127,7 +134,7 @@ export function useSystemControls({
   }, [fullscreenTarget]);
   const audioBlocked =
     productReady &&
-    media.observations.audio.state === 'blocked' &&
+    audioPlayback === 'blocked' &&
     (state?.workspace.settings.workspace.audioChannels?.left !== false ||
       state?.workspace.settings.workspace.audioChannels?.right !== false);
   useFloatingAction(
@@ -212,7 +219,7 @@ export function useSystemControls({
       ? {
           channels: state.workspace.settings.workspace.audioChannels,
           online: productReady,
-          playback: media.observations.audio.state,
+          playback: audioPlayback,
           resume: () => media.observations.audio.resume(),
           save: saveAudio,
           busy: audioSaving,
@@ -222,7 +229,7 @@ export function useSystemControls({
     sync: {
       pending: pendingOperations.length,
       unknown: pendingOperations.some((entry) => entry.receipt?.status === 'unknown'),
-      channelReady: snapshot.observations.channel === '已连接',
+      channelReady,
       dismissUnknown: () => media.operations.dismissUnknown(),
     },
   };

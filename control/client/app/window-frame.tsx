@@ -1,5 +1,6 @@
 import './window-frame.css';
 import { useDropTarget, useWindowDragging } from './window-drag';
+import { useViewerSessionSelector } from './use-viewer-session';
 import { diagnostics } from '../media/diagnostics';
 import { Typography } from '@mui/material';
 import React, { Suspense, lazy, useEffect, useMemo, useRef } from 'react';
@@ -54,6 +55,7 @@ export function WindowFrame({
   visible: boolean;
   fullscreen: boolean;
 }) {
+  const presentationError = useViewerSessionSelector(transport, (snapshot) => snapshot.presentation.error);
   const drop = useDropTarget('window', win.id);
   const dragging = useWindowDragging();
   const source = dragging && 'windowId' in dragging && dragging.windowId === win.id;
@@ -76,17 +78,13 @@ export function WindowFrame({
   useEffect(() => {
     const node = content.current;
     if (!node) return;
-    const measure = () => {
-      // Layout px: the remote page's DIP size, independent of the UI scale transform.
-      const width = node.offsetWidth,
-        height = node.offsetHeight;
-      if (!width || !height) return;
-      onGeometry(win.id, width, height);
-    };
-    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : undefined;
-    observer?.observe(node);
-    measure();
-    return () => observer?.disconnect();
+    const observer = new ResizeObserver(([entry]) => {
+      const width = Math.round(entry.contentRect.width);
+      const height = Math.round(entry.contentRect.height);
+      if (width > 0 && height > 0) onGeometry(win.id, width, height);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
   }, [win.id, onGeometry, local]);
   const signInHost = useMemo(
     () => ({
@@ -239,7 +237,7 @@ export function WindowFrame({
                 ) : active.lifecycleRecoveryError ? (
                   <PageOverlay kind="error">{active.lifecycleRecoveryError}</PageOverlay>
                 ) : (
-                  !transport.presentation.presentationError &&
+                  !presentationError &&
                   (active.restoring || (active.residency && active.residency !== 'live')) && (
                     <PageOverlay kind="progress">正在唤醒已休眠的标签页…</PageOverlay>
                   )

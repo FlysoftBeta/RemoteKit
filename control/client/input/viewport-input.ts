@@ -1,3 +1,4 @@
+import { canonicalJson } from '../util/canonical-json';
 import type { EditingSession } from '../editing/editing-session';
 import { EditingView, type ResizeObservation } from '../editing/editing-view';
 import type { PresentationSession } from '../presentation/presentation-session';
@@ -94,13 +95,36 @@ export class ViewportInput {
     this.listen(document, 'visibilitychange', () => {
       if (document.hidden) this.release();
     });
+    let observed: string | undefined;
+    const observeEditing = () => {
+      const surface = ports.editing.editingSurface(viewId);
+      const mobile = ports.editing.mobileEditing;
+      const next = canonicalJson({
+        identity: surface && ports.editing.editingIdentity(surface),
+        ready: !!ports.presentation.canInput(viewId),
+        keyboard: mobile.forKeyboard(surface),
+        editable: mobile.forView(surface),
+        observation: mobile.keyboardObservation(surface),
+        deadline: mobile.keyboardCandidateDeadline(surface),
+      });
+      if (observed === next) return;
+      observed = next;
+      this.editing.observe();
+    };
+    let ready = !!ports.presentation.canInput(viewId);
     this.remove.push(
-      ports.input.subscribe(this.editing.observe),
-      ports.editing.subscribe(this.editing.observe),
-      ports.presentation.subscribeFrames(this.editing.observe),
+      ports.input.subscribe(observeEditing),
+      ports.editing.subscribe(observeEditing),
+      ports.presentation.subscribeFrames(() => {
+        const next = !!ports.presentation.canInput(viewId);
+        if (next === ready) return;
+        ready = next;
+        observeEditing();
+      }, viewId),
       ports.presentation.subscribe(() => {
         this.touch.syncTouchOwner();
-        this.editing.observe();
+        ready = !!ports.presentation.canInput(viewId);
+        observeEditing();
       }),
     );
   }

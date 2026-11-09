@@ -4,6 +4,7 @@ import { recordedAction, type RecordedAction } from '../../shared/recorded-actio
 import { diagnostics } from '../media/diagnostics';
 import type { Incoming, Outgoing } from '../rtc/protocol';
 import { RequestTracker } from '../util/request-tracker';
+import { canonicalJson } from '../util/canonical-json';
 import { Store } from '../util/store';
 import { operationId, projectOperations, snapshotNewer, type PendingOperation } from './product-operations';
 
@@ -29,6 +30,8 @@ export class OperationsStore extends Store<OperationsSnapshot> {
   private readonly requests = new RequestTracker<OperationReceipt>();
   private timer?: ReturnType<typeof setTimeout>;
   private scope = 0;
+  private accepted: ProductState | null = null;
+  private acceptedContent?: string;
   private pollingScope?: number;
   constructor(private readonly port: OperationsPort) {
     super({ authoritative: null, state: null, pending: [] });
@@ -36,7 +39,11 @@ export class OperationsStore extends Store<OperationsSnapshot> {
 
   acceptSnapshot(state: ProductState) {
     const previous = this.getSnapshot();
-    if (!snapshotNewer(state, previous.authoritative)) return;
+    if (!snapshotNewer(state, this.accepted)) return;
+    this.accepted = state;
+    const content = canonicalJson({ ...state, snapshotSequence: undefined });
+    if (content === this.acceptedContent) return;
+    this.acceptedContent = content;
     const pending = previous.pending
       .map((entry) => {
         const receipt = state.operationReceipts?.find(
@@ -143,6 +150,8 @@ export class OperationsStore extends Store<OperationsSnapshot> {
 
   reset(scope = this.scope + 1) {
     this.scope = scope;
+    this.accepted = null;
+    this.acceptedContent = undefined;
     this.pollingScope = undefined;
     clearTimeout(this.timer);
     this.timer = undefined;

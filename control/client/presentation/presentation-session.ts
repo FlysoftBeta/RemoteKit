@@ -3,6 +3,7 @@ import { projectFileInput } from '../files/file-chooser-anchor';
 import { uiScale } from '../app/ui-scale';
 import { PresentationDiagnostics } from '../media/presentation-diagnostics';
 import { type Layout, type Surface, type VideoPresentation } from './types';
+import { canonicalJson } from '../util/canonical-json';
 import { freezeSnapshot } from '../util/store';
 import { FrameEpochGate } from './frame-epoch';
 import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneSource } from './plane-source';
@@ -38,8 +39,7 @@ export type BarrierState =
   | { phase: 'none' }
   | { phase: 'hiding'; key: PresentationBarrier; turn: 0 | 1 | 2 }
   | { phase: 'acknowledged'; key: PresentationBarrier };
-export type ViewReadiness =
-  { phase: 'hidden' } | { phase: 'awaitingFrame' } | { phase: 'ready'; rtp?: number };
+export type ViewReadiness = { phase: 'hidden' } | { phase: 'awaitingFrame' } | { phase: 'ready' };
 export interface PresentationSnapshot {
   backend: PresentationBackend;
   barrier: BarrierState;
@@ -259,7 +259,7 @@ export class PresentationSession {
 
   layout: Layout | null = null;
 
-  private frameListeners = new Set<() => void>();
+  private frameListeners = new Set<(viewId: string) => void>();
 
   private presentedListeners = new Set<(frame: VideoPresentation) => void>();
 
@@ -568,12 +568,12 @@ export class PresentationSession {
       // frame in this interval. This recovers layout authorization, not the
       // autonomous element's current RTP or a new compositor observation.
       const wasReady = plane.show(undefined, true);
-      this.notify();
+      if (!wasReady) this.notify();
       this.presentation.authorize(performance.now(), observation.rtp, epoch);
       this.observations.emit({ rtp: observation.rtp, epoch, at: observation.at, wall: observation.wall });
       this.ports.rtc.markConnection('firstVideoCompositor');
       if (!wasReady) renderer.ready(true);
-      this.frameListeners.forEach((listener) => listener());
+      this.frameListeners.forEach((listener) => listener(renderer.view.id));
     }
   }
 
@@ -659,13 +659,19 @@ export class PresentationSession {
     }
     if (!wasReady) renderer.ready(true);
     if (!wasReady) this.notify();
-    this.frameListeners.forEach((listener) => listener());
+    this.frameListeners.forEach((listener) => listener(renderer.view.id));
   }
 
-  subscribeFrames = (listener: () => void) => {
-    this.frameListeners.add(listener);
+  subscribeFrames = (listener: (viewId: string) => void, viewId?: string) => {
+    const callback =
+      viewId === undefined
+        ? listener
+        : (id: string) => {
+            if (id === viewId) listener(id);
+          };
+    this.frameListeners.add(callback);
     return () => {
-      this.frameListeners.delete(listener);
+      this.frameListeners.delete(callback);
     };
   };
 
@@ -867,7 +873,7 @@ export class PresentationSession {
   }
 
   private notify() {
-    this.snapshot = freezeSnapshot({
+    const next: PresentationSnapshot = {
       error: this.presentationError,
       canRetry: this.canRetryPresentation,
       backend: this.backendState,
@@ -877,13 +883,15 @@ export class PresentationSession {
         [...this.videoPlanes].map(([renderer, plane]) => [
           renderer.view.id,
           plane.ready
-            ? { phase: 'ready' as const, rtp: plane.rtp }
+            ? { phase: 'ready' as const }
             : this.rendererCurrent(renderer) && this.presentationBarrierAcknowledged
               ? { phase: 'awaitingFrame' as const }
               : { phase: 'hidden' as const },
         ]),
       ),
-    });
+    };
+    if (canonicalJson(next) === canonicalJson(this.snapshot)) return;
+    this.snapshot = freezeSnapshot(next);
     this.listeners.forEach((listener) => listener());
   }
 
