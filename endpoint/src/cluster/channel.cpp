@@ -488,6 +488,10 @@ Result<Established> ConnectStdio(const Key& key, const Hello& hello) {
   }
   return ConnectCarrier(HandleCarrier(read, write), key, hello);
 }
+Error WinHttpFailure(const char* stage) {
+  return {ErrorCode::kUnavailable, std::string("cluster connect failed at ") + stage +
+                                       ", Win32 error " + std::to_string(GetLastError())};
+}
 Result<Established> ConnectWebSocket(const std::string& url, const Key& key, const Hello& hello) {
   auto address = ParseControlUrl(url);
   if (!address)
@@ -498,43 +502,56 @@ Result<Established> ConnectWebSocket(const std::string& url, const Key& key, con
       L"RemoteKit Node", tls ? WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY : WINHTTP_ACCESS_TYPE_NO_PROXY,
       WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
   if (!ws->session.value)
-    return Closed();
+    return WinHttpFailure("open");
   WinHttpSetTimeouts(ws->session.value, 5000, 5000, 5000, 5000);
   ws->connection.value =
       WinHttpConnect(ws->session.value, address.value().host.c_str(), address.value().port, 0);
   if (!ws->connection.value)
-    return Closed();
+    return WinHttpFailure("connect");
   HttpHandle request{WinHttpOpenRequest(ws->connection.value, L"GET", L"/api/node", nullptr,
                                         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                         tls ? WINHTTP_FLAG_SECURE : 0)};
+  if (!request.value)
+    return WinHttpFailure("request");
   DWORD redirects = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+  if (!WinHttpSetOption(request.value, WINHTTP_OPTION_REDIRECT_POLICY, &redirects,
+                        sizeof(redirects)) ||
+      !WinHttpSetOption(request.value, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0))
+    return WinHttpFailure("options");
   // The Noise handshake authenticates Control with the cluster key, so the TLS layer is only
   // transport cover: self-signed, private-CA and mismatched-name certificates are accepted.
-  DWORD ignored = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                  SECURITY_FLAG_IGNORE_CERT_CN_INVALID | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-  if (!request.value ||
-      (tls && !WinHttpSetOption(request.value, WINHTTP_OPTION_SECURITY_FLAGS, &ignored,
-                                sizeof(ignored))) ||
-      !WinHttpSetOption(request.value, WINHTTP_OPTION_REDIRECT_POLICY, &redirects,
-                        sizeof(redirects)) ||
-      !WinHttpSetOption(request.value, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0) ||
-      !WinHttpSendRequest(request.value, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA,
-                          0, 0, 0) ||
-      !WinHttpReceiveResponse(request.value, nullptr))
-    return Closed();
+  if (tls) {
+    DWORD ignored = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                    SECURITY_FLAG_IGNORE_CERT_CN_INVALID | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+    if (!WinHttpSetOption(request.value, WINHTTP_OPTION_SECURITY_FLAGS, &ignored,
+                          sizeof(ignored)))
+      return WinHttpFailure("tls options");
+  }
+  if (!WinHttpSendRequest(request.value, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA,
+                          0, 0, 0))
+    return WinHttpFailure(tls ? "send request (TLS or network)" : "send request");
+  if (!WinHttpReceiveResponse(request.value, nullptr))
+    return WinHttpFailure("receive response");
   DWORD status = 0, size = sizeof(status);
   if (!WinHttpQueryHeaders(request.value, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                           WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX) ||
-      status != 101)
-    return Closed();
+                           WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX))
+    return WinHttpFailure("query status");
+  if (status != 101)
+    return Error{ErrorCode::kUnavailable,
+                 "cluster connect: HTTP " + std::to_string(status) + " instead of 101 upgrade"};
   ws->socket = WinHttpWebSocketCompleteUpgrade(request.value, 0);
   if (!ws->socket)
-    return Closed();
+    return WinHttpFailure("websocket upgrade");
   DWORD timeout = 5000;
   WinHttpSetOption(ws->socket, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
   timeout = 60000;
   WinHttpSetOption(ws->socket, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
   ws->Open();
-  return ConnectCarrier(std::move(ws), key, hello);
+  auto established = ConnectCarrier(std::move(ws), key, hello);
+  if (!established && established.error().message == "cluster channel closed")
+    return Error{ErrorCode::kUnavailable,
+                 "Control closed the connection during the cluster handshake "
+                 "(cluster key mismatch with Control, or not a RemoteKit Control endpoint)"};
+  return established;
 }
 }  // namespace remotekit::cluster
