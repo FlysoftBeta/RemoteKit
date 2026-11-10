@@ -60,11 +60,12 @@
   background: var(--primary);
   transform: rotate(45deg);
 }
+/* The sharp corner starts at the top left; each range handle points it at its selection edge. */
 .selection-handle-start::before {
-  transform: translateX(-9px) rotate(0deg);
+  transform: translateX(-10px) rotate(90deg);
 }
 .selection-handle-end::before {
-  transform: translateX(9px) rotate(90deg);
+  transform: translateX(10px);
 }
 .selection-error {
   position: absolute;

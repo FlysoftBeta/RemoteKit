@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ButtonBase, Paper } from '@mui/material';
 import { MoreHoriz } from '@mui/icons-material';
+import { unscaledLayer } from '../app/ui-scale';
 import { placeViewportSelectionMenu } from '../app/viewport-geometry';
 import type { SelectionAction } from '../rtc/protocol';
 import type { HandleKind, SelectionTarget } from './target';
@@ -170,6 +171,6 @@ export function SelectionUI({
         </div>
       )}
     </div>,
-    document.documentElement,
+    unscaledLayer(),
   );
 }
