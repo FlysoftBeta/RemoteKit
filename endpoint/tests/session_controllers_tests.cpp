@@ -11,6 +11,7 @@
 #include "management/methods.hpp"
 #include "persistence/session_store.hpp"
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <vector>
@@ -148,6 +149,20 @@ void RouterClassificationAndAdmission() {
   CHECK(DataRouter::Boundary([]() -> Result<void> { throw std::runtime_error("private detail"); })
             .error()
             .message == "internal DataChannel error");
+  const std::vector<std::pair<std::function<void()>, std::string>> invalid_arguments{
+      {[] { Required(Json::object(), "name"); }, "required string: name"},
+      {[] { Required({{"name", nullptr}}, "name"); }, "required string: name"},
+      {[] { ViewId({{"viewId", "01"}}); }, "viewId must be nonzero uint64 decimal"},
+      {[] { DecodedSize("!"); }, "invalid navigation base64"},
+      {[] { LibraryController::FileUnsigned(nullptr); }, "invalid_file_integer"}};
+  for (const auto& [operation, message] : invalid_arguments) {
+    const auto result = DataRouter::Boundary([&]() -> Result<void> {
+      operation();
+      return {};
+    });
+    CHECK(!result && result.error().code == ErrorCode::kInvalidRequest);
+    CHECK(result.error().message == message);
+  }
 }
 
 void OutboxPriorityAndEpoch() {
@@ -277,6 +292,16 @@ void AuthorizationTokens() {
                                      .files_opened = [](uint64_t) {}});
   auth.Bind();
   Json request = {{"connectionId", "connection"}, {"epoch", uint64_t(1)}, {"unlocked", true}};
+  for (const auto* field : {"epoch", "unlocked"}) {
+    auto invalid = request;
+    invalid.erase(field);
+    CHECK(auth.Authorize(invalid, 9, [] { return true; }).error().code ==
+          ErrorCode::kInvalidRequest);
+    invalid[field] = nullptr;
+    CHECK(auth.Authorize(invalid, 9, [] { return true; }).error().code ==
+          ErrorCode::kInvalidRequest);
+    CHECK(opened == 0 && revoked == 0);
+  }
   CHECK(auth.Authorize(request, 9, [] { return true; }));
   const auto token = auth.Admit();
   CHECK(auth.Current(token));
@@ -339,6 +364,40 @@ void SessionManagementRequests() {
   const auto session_directory = parsed.value().data / "sessions" / session.Id();
   fs::create_directories(session_directory);
   CHECK(SessionStore(session_directory).Save("views.json", Json::array({Json{{"viewId", "1"}}})));
+  CHECK(session.Views().Initialize());
+  SessionStore persisted(session_directory);
+  const Json valid_views = Json::array({Json{{"viewId", "1"}}});
+  for (const auto& invalid :
+       {Json(), Json::object(), Json::array({nullptr}), Json::array({{{"viewId", 1}}}),
+        Json::array({{{"viewId", "01"}}}), Json::array({{{"viewId", "1"}, {"device", nullptr}}}),
+        Json::array({{{"viewId", "1"}, {"width", "800"}}}),
+        Json::array({{{"viewId", "1"}, {"visible", nullptr}}})}) {
+    CHECK(persisted.Save("views.json", invalid));
+    const auto loaded = session.Views().Initialize();
+    CHECK(!loaded && loaded.error().code == ErrorCode::kUnavailable);
+    CHECK(loaded.error().message.find("views.json") != std::string::npos);
+    CHECK(session.Views().Contains("1") && persisted.Load("views.json") == invalid);
+  }
+  {
+    std::ofstream malformed(session_directory / "views.json");
+    malformed << '{';
+  }
+  CHECK(session.Views().Initialize().error().message == "invalid views.json");
+  CHECK(persisted.Save("views.json", valid_views));
+  for (const auto& invalid :
+       {Json(), Json::array(), Json::object(), Json{{"next", nullptr}, {"events", Json::array()}},
+        Json{{"next", 0}, {"events", Json::array()}}, Json{{"next", 1}, {"events", nullptr}},
+        Json{{"next", 1}, {"events", Json::array({nullptr})}},
+        Json{{"next", 2},
+             {"events",
+              Json::array({{{"eventId", "1"}, {"type", "view.closed"}, {"viewId", nullptr}}})}}}) {
+    CHECK(persisted.Save("events.json", invalid));
+    const auto loaded = session.Views().Initialize();
+    CHECK(!loaded && loaded.error().code == ErrorCode::kUnavailable);
+    CHECK(loaded.error().message.find("events.json") != std::string::npos);
+    CHECK(session.Views().Contains("1") && persisted.Load("events.json") == invalid);
+  }
+  CHECK(persisted.Save("events.json", {{"next", 1}, {"events", Json::array()}}));
   CHECK(session.Views().Initialize());
   const Json handler = {
       {"protocol", "web+notes"}, {"url", "https://example.test/open?url=%s"}, {"allowed", true}};
@@ -477,6 +536,11 @@ void SessionManagementRequests() {
   missing.erase("audio");
   auto result = session.Media().ManageSessionMediaPolicy(missing);
   CHECK(!result && result.error().code == ErrorCode::kInvalidRequest);
+  missing = request;
+  missing.erase("maxFps");
+  result = session.Media().ManageSessionMediaPolicy(missing);
+  CHECK(!result && result.error().code == ErrorCode::kInvalidRequest);
+  CHECK(result.error().message == "invalid media policy maxFps");
   auto enabled = request;
   enabled["audio"] = true;
   CHECK(session.Media().ManageSessionMediaPolicy(enabled));

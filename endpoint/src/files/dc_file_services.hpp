@@ -371,6 +371,9 @@ class DcFileServices {
                   executed = execute(job);
                 reply = executed ? Reply(job.message, true, executed.value())
                                  : Reply(job.message, false, WireError(executed.error()));
+              } catch (const InvalidRequest& error) {
+                reply = Reply(job.message, false,
+                              WireError({ErrorCode::kInvalidRequest, error.what()}));
               } catch (const ServiceJson::exception& error) {
                 fprintf(stderr, "file router invalid request: %s\n", error.what());
                 reply = Reply(job.message, false,

@@ -131,6 +131,8 @@ Result<void> PeerController::Policy(uint32_t fps, uint32_t degradation, bool aud
   return {};
 }
 Result<Json> PeerController::Ice(const Json& request) {
+  if (!request.contains("candidate"))
+    return Error{ErrorCode::kInvalidRequest, "Malformed ICE candidate"};
   if (!Handle() || Required(request, "connectionId") != Connection())
     return Error{ErrorCode::kConflict, "stale RTC connection"};
   const auto& ice = request.at("candidate");

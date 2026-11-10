@@ -313,8 +313,14 @@ bool Service::HandleRequest(Json request, uint64_t generation) {
     if (request.is_object())
       response["id"] = request.value("id", Json(nullptr));
     result = Dispatch(request, generation);
-  } catch (const Json::exception&) {
-    result = Error{ErrorCode::kInternal, "Unexpected JSON failure while processing request"};
+  } catch (const InvalidRequest& error) {
+    result = Error{ErrorCode::kInvalidRequest, error.what()};
+  } catch (const Json::exception& error) {
+    const auto method = request.is_object() && request.value("method", Json()).is_string()
+                            ? request["method"].get<std::string>()
+                            : "?";
+    fprintf(stderr, "endpoint json failure: %s: %s\n", method.c_str(), error.what());
+    result = Error{ErrorCode::kInternal, "Unexpected JSON failure in " + method};
   } catch (const std::filesystem::filesystem_error& error) {
     result = Error{ErrorCode::kUnavailable, error.what()};
   } catch (const std::exception& error) {

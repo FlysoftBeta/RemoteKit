@@ -370,6 +370,8 @@ Result<Json> Session::ReadLog(const Json& request) const {
       return Error{ErrorCode::kNotFound, "crash dump not found"};
   } else
     return Error{ErrorCode::kInvalidRequest, "unknown log"};
+  if (!request.contains("maxBytes"))
+    return Error{ErrorCode::kInvalidRequest, "invalid log window"};
   const auto& max = request.at("maxBytes");
   const auto* end = request.contains("end") ? &request.at("end") : nullptr;
   if (!max.is_number_unsigned() || (end && !end->is_number_unsigned()))

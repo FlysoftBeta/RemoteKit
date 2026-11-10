@@ -155,6 +155,8 @@ Result<Json> FaceController::FaceCommand(const std::string& method,
   const bool unlocked = authorization.Stamp() != 0;
   if ((kind == Purpose::enroll && !unlocked) || (kind == Purpose::verify && unlocked))
     return Error{ErrorCode::kForbidden, "invalid_face_authorization"};
+  if (!request.contains("timeoutMs"))
+    return Error{ErrorCode::kInvalidRequest, "invalid_face_timeout"};
   const auto& timeout = request.at("timeoutMs");
   if (!timeout.is_number_unsigned() || !timeout.get<uint64_t>() ||
       timeout.get<uint64_t>() > maximum)

@@ -526,6 +526,8 @@ Result<Json> MediaPipeline::ManageSessionMediaPolicy(const Json& request) {
   if (!request.contains("audio") || !request.at("audio").is_boolean())
     return Error{ErrorCode::kInvalidRequest, "invalid media policy audio"};
   const bool audio = request.at("audio").get<bool>();
+  if (!request.contains("maxFps"))
+    return Error{ErrorCode::kInvalidRequest, "invalid media policy maxFps"};
   const auto& value = request.at("maxFps");
   if (!value.is_number_integer() || value.get<int64_t>() < 1 || value.get<int64_t>() > 240)
     return Error{ErrorCode::kInvalidRequest, "invalid media policy maxFps"};

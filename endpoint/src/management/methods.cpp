@@ -101,6 +101,8 @@ ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
        }},
       {"session.snapshot",
        [](Session& session, const Json& request) -> Result<Json> {
+         if (request.contains("outputDiagnostics") && !request["outputDiagnostics"].is_boolean())
+           return Error{ErrorCode::kInvalidRequest, "outputDiagnostics boolean required"};
          return session.Snapshot(request.value("outputDiagnostics", false));
        }},
       {"view.adopt",

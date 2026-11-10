@@ -210,8 +210,33 @@ void CheckDocumentErrorReplies() {
   }
   services.Stop();
 }
+void CheckValidationErrorReply() {
+  DcFileServices services;
+  services.Start(
+      [](const DcFileServices::Job&) -> Result<ServiceJson> {
+        throw InvalidRequest("invalid_file_integer");
+      },
+      [] {});
+  services.Bind(7, "connection");
+  Take(services.Authorize("connection", 99, {}, true));
+  auto request = Request("00000000-0000-4000-8000-000000000001", "asset.read");
+  request["params"]["requestId"] = "library";
+  services.Admit(7, request);
+  ServiceJson reply;
+  Until([&] {
+    services.Flush(7, [&](const std::string& wire) {
+      reply = ServiceJson::parse(wire);
+      return 0;
+    });
+    return !reply.is_null();
+  });
+  CHECK(reply["ok"] == false);
+  CHECK(reply["error"] == WireError({ErrorCode::kInvalidRequest, "invalid_file_integer"}));
+  services.Stop();
+}
 
 int main() {
+  CheckValidationErrorReply();
   CheckDocumentErrorReplies();
   CheckSelectionCancellationGrant();
   CheckBursts();

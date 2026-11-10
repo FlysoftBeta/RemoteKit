@@ -212,7 +212,7 @@ Result<Json> ChannelController::Offer(const Json& request, uint64_t generation) 
 }
 
 Result<Json> ChannelController::ManageRtcActionResult(const Json& request) {
-  if (request.value("connectionId", std::string()) != peer_controller.Connection() ||
+  if (Required(request, "connectionId") != peer_controller.Connection() ||
       !peer_controller.Handle() || !authorization.Stamp())
     return Json{{"accepted", false}};
   if (request.value("authEpoch", Json()) != authorization.Epoch())
@@ -250,7 +250,7 @@ Result<Json> ChannelController::ManageRtcOffer(const Json& request) {
 }
 
 Result<Json> ChannelController::ManageRtcClose(const Json& request) {
-  if (request.value("connectionId", std::string()) == peer_controller.Connection())
+  if (Required(request, "connectionId") == peer_controller.Connection())
     peer_controller.Close();
   return Json{{"closed", true}};
 }

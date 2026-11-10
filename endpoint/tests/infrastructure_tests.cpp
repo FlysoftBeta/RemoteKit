@@ -221,8 +221,10 @@ class FixtureLink final : public ManagementLink {
   SessionStore& store;
   fs::path directory;
   std::string checkpoint;
+  std::mutex replies_mutex;
   std::vector<Json> replies;
   size_t index = 0;
+  bool fail_json = false;
   explicit FixtureLink(SessionStore& value, fs::path path, std::string manifest)
       : store(value), directory(std::move(path)), checkpoint(std::move(manifest)) {}
   bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
@@ -276,6 +278,30 @@ class FixtureLink final : public ManagementLink {
         {{"id", 3}, {"method", "session.snapshot"}, {"tenantId", "tenant"}},
         {{"id", 4}, {"method", "session.events.ack"}, {"tenantId", "tenant"}, {"eventIds", {"1"}}},
         {{"id", 5}, {"method", "session.snapshot"}, {"tenantId", "tenant"}},
+        {{"id", 200}, {"method", "session.mediaPolicy"}, {"tenantId", "tenant"}, {"audio", true}},
+        {{"id", 201}, {"method", "view.appInfo"}, {"tenantId", "tenant"}},
+        {{"id", 202}, {"method", "view.appInfo"}, {"tenantId", "tenant"}, {"viewId", "01"}},
+        {{"id", 203}, {"method", "session.events.ack"}, {"tenantId", "tenant"}},
+        {{"id", 204},
+         {"method", "session.snapshot"},
+         {"tenantId", "tenant"},
+         {"outputDiagnostics", nullptr}},
+        {{"id", 205}, {"method", "session.logs.read"}, {"tenantId", "tenant"}, {"log", "browser"}},
+        {{"id", 206}, {"method", "rtc.close"}, {"tenantId", "tenant"}, {"connectionId", nullptr}},
+        {{"id", 207}, {"method", "session.files.authorize"}, {"tenantId", "tenant"}},
+        {{"id", 208}, {"method", "rtc.authorize"}, {"tenantId", "tenant"}, {"unlocked", nullptr}},
+        {{"id", 209},
+         {"method", "rtc.ice"},
+         {"tenantId", "tenant"},
+         {"connectionId", "connection"}},
+        {{"id", 210}, {"method", "object.put.cancel"}, {"tenantId", ""}, {"putId", nullptr}},
+        {{"id", 211}, {"method", "session.library.describe"}, {"tenantId", "tenant"}},
+        {{"id", 109},
+         {"method", "session.open"},
+         {"tenantId", "json-failure"},
+         {"sessionId", "2123456789abcdef0123456789abcdef"},
+         {"placementEpoch", 2},
+         {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
         {{"id", 6}, {"method", "shutdown"}}};
     eof = index == requests.size();
     if (eof)
@@ -284,6 +310,7 @@ class FixtureLink final : public ManagementLink {
       fs::create_directory(directory / "sessions/0123456789abcdef0123456789abcdef/events.json.new");
     generation = 7;
     auto request = requests[index++];
+    fail_json = request["id"] == 109;
     if (request.value("method", std::string()) == "session.open") {
       request["checkpoint"] = checkpoint;
       request["placementEpoch"] = request["id"] == 106 ? 1 : 2;
@@ -294,6 +321,7 @@ class FixtureLink final : public ManagementLink {
   bool Current(uint64_t generation) override { return generation == 7; }
   bool SendReply(uint64_t generation, const Json& reply) override {
     Check(generation == 7, "request link generation");
+    std::lock_guard lock(replies_mutex);
     replies.push_back(reply);
     return true;
   }
@@ -304,6 +332,8 @@ class FixtureLink final : public ManagementLink {
   }
   void OnDisconnect(Disconnect) override {}
   Result<Json> Request(const std::string& method, Json fields) override {
+    if (fail_json)
+      return Json::object().at("missing");
     Check(method == "object.locate" && fields["tenantId"] == "tenant" &&
               fields["ids"] == Json::array({checkpoint}),
           "warm restore authorization");
@@ -353,6 +383,26 @@ void ManagementDispatch() {
         "failed acknowledgement reports persistence failure");
   Check(reply(3)["result"]["events"].size() == 1, "failed acknowledgement preserves memory");
   Check(reply(5)["result"]["events"].empty(), "acknowledged events removed");
+  const std::vector<std::pair<int, std::string>> invalid_requests{
+      {200, "invalid media policy maxFps"},
+      {201, "required string: viewId"},
+      {202, "viewId must be nonzero uint64 decimal"},
+      {203, "invalid event ids"},
+      {204, "outputDiagnostics boolean required"},
+      {205, "invalid log window"},
+      {206, "required string: connectionId"},
+      {207, "invalid_file_authorization_count"},
+      {208, "unlocked boolean required"},
+      {209, "Malformed ICE candidate"},
+      {210, "required string: putId"},
+      {211, "required string: assetId"}};
+  for (const auto& [id, message] : invalid_requests)
+    Check(
+        reply(id)["error"]["code"] == "invalid_request" && reply(id)["error"]["message"] == message,
+        "malformed management arguments retain their validation error");
+  Check(reply(109)["error"]["code"] == "internal" &&
+            reply(109)["error"]["message"] == "Unexpected JSON failure in session.open",
+        "unexpected JSON failure identifies the method");
   Check(store.Load("sessions/0123456789abcdef0123456789abcdef/events.json")["events"].empty(),
         "acknowledgement committed");
   Check(!fs::exists(directory.path / "sessions.json"), "no numeric registry");

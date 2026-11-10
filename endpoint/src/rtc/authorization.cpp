@@ -21,6 +21,8 @@ int AuthorizationController::RevokeProduct() {
 }
 
 Result<uint64_t> AuthorizationController::AuthorizationEpoch(const Json& request) {
+  if (!request.contains("epoch"))
+    return Error{ErrorCode::kInvalidRequest, "invalid_authorization_epoch"};
   const auto& value = request.at("epoch");
   if (!value.is_number_unsigned() || !value.get<uint64_t>() ||
       value.get<uint64_t>() > 9007199254740991ULL)
@@ -38,6 +40,8 @@ Result<void> AuthorizationController::RequireAuthPeer(const Json& request) {
 Result<Json> AuthorizationController::Authorize(const Json& request,
                                                 uint64_t generation,
                                                 const std::function<bool()>& management_current) {
+  if (!request.contains("unlocked") || !request["unlocked"].is_boolean())
+    return Error{ErrorCode::kInvalidRequest, "unlocked boolean required"};
   auto transition = LockTransition();
   {
     auto require_auth_peer_result = RequireAuthPeer(request);

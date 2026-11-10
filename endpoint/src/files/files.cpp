@@ -43,6 +43,10 @@ Result<Json> FileController::DirectFileCommand(const FileJob& job) {
 
 Result<Json> FileController::AuthorizeFiles(const Json& request) {
   std::map<std::string, FileBinding> bindings;
+  if (!request.contains("requests"))
+    return Error{ErrorCode::kInvalidRequest, "invalid_file_authorization_count"};
+  if (request.contains("library") && !request["library"].is_boolean())
+    return Error{ErrorCode::kInvalidRequest, "library boolean required"};
   const auto& requests = request.at("requests");
   if (!requests.is_array() || requests.size() > 64)
     return Error{ErrorCode::kInvalidRequest, "invalid_file_authorization_count"};
@@ -50,6 +54,8 @@ Result<Json> FileController::AuthorizeFiles(const Json& request) {
     const auto token = Required(item, "id");
     if (token.size() > 128 || token == "library")
       return Error{ErrorCode::kInvalidRequest, "invalid_file_request_id"};
+    if (!item.contains("binding"))
+      return Error{ErrorCode::kInvalidRequest, "file binding required"};
     auto parse_file_binding_result = library.ParseFileBinding(item.at("binding"));
     if (!parse_file_binding_result)
       return parse_file_binding_result.error();
@@ -133,7 +139,7 @@ Result<void> LibraryController::SweepDirectFiles() {
 
 uint64_t LibraryController::FileUnsigned(const Json& value) {
   if (!value.is_number_unsigned() && (!value.is_number_integer() || value.get<int64_t>() < 0))
-    throw Json::type_error::create(302, "invalid_file_integer", &value);
+    throw InvalidRequest("invalid_file_integer");
   return value.get<uint64_t>();
 }
 
@@ -381,11 +387,15 @@ Result<Json> LibraryController::LibraryCommand(const std::string& method, const 
   }
   const auto selection_id = Required(request, "selectionId");
   if (method == "session.library.prepare") {
-    auto binding = ParseFileBinding(request.at("binding"));
+    auto binding = ParseFileBinding(request.value("binding", Json()));
     if (!binding)
       return binding.error();
     LibrarySelection selection{
         selection_id, Required(request, "requestId"), std::move(binding).value(), {}};
+    if (!request.contains("limits") || !request["limits"].is_object() ||
+        !request["limits"].contains("maxFileBytes") ||
+        !request["limits"].contains("maxBatchBytes") || !request["limits"].contains("maxFiles"))
+      return Error{ErrorCode::kInvalidRequest, "invalid_file_limits"};
     const auto& limits = request.at("limits");
     selection.limits.file_bytes = FileUnsigned(limits.at("maxFileBytes"));
     selection.limits.batch_bytes = FileUnsigned(limits.at("maxBatchBytes"));
@@ -401,6 +411,8 @@ Result<Json> LibraryController::LibraryCommand(const std::string& method, const 
       RK_ASSIGN_OR_RETURN(accept, views.FileChooserAccept(selection.binding));
       selection.accept = std::move(accept);
     }
+    if (!request.contains("files"))
+      return Error{ErrorCode::kInvalidRequest, "invalid_file_count"};
     const auto& values = request.at("files");
     if (!values.is_array() || values.empty() || values.size() > 64)
       return Error{ErrorCode::kInvalidRequest, "invalid_file_count"};

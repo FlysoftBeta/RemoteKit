@@ -275,7 +275,9 @@ Result<void> ObjectService::Configure(const Json& config) {
   return {};
 }
 Result<Json> ObjectService::Dispatch(const Json& request) {
-  const auto method = request.value("method", std::string());
+  if (!request.is_object() || !request.contains("method") || !request["method"].is_string())
+    return Error{ErrorCode::kInvalidRequest, "required string: method"};
+  const auto method = request["method"].get<std::string>();
   if (method == "object.render") {
     const auto params = request.value("params", Json::object());
     if (!params.is_object() || !params.contains("id") || !params["id"].is_string() ||
@@ -318,8 +320,10 @@ Result<Json> ObjectService::Dispatch(const Json& request) {
   return Json{{"accepted", true}};
 }
 Result<Json> ObjectService::DispatchPut(const Json& request) {
-  const auto method = request.value("method", std::string());
-  const auto id = request.value("putId", std::string());
+  const auto method = request["method"].get<std::string>();
+  if (!request.contains("putId") || !request["putId"].is_string())
+    return Error{ErrorCode::kInvalidRequest, "required string: putId"};
+  const auto id = request["putId"].get<std::string>();
   if (id.size() != 36 || !std::all_of(id.begin(), id.end(), [](char c) {
         return (c >= 'a' && c <= 'f') || (c >= '0' && c <= '9') || c == '-';
       }))
@@ -329,7 +333,9 @@ Result<Json> ObjectService::DispatchPut(const Json& request) {
   if (method == "object.put.begin") {
     if (!configured_)
       return Error{ErrorCode::kUnavailable, "object store is not configured"};
-    const auto tenant = request.value("tenantId", std::string());
+    if (!request.contains("tenantId") || !request["tenantId"].is_string())
+      return Error{ErrorCode::kInvalidRequest, "required string: tenantId"};
+    const auto tenant = request["tenantId"].get<std::string>();
     if (!ValidTenant(tenant))
       return Error{ErrorCode::kInvalidRequest, "invalid tenant identity"};
     if (request.contains("sizeHint") &&
@@ -392,6 +398,8 @@ Result<Json> ObjectService::DispatchPut(const Json& request) {
   return info.Committed();
 }
 Result<void> ObjectService::PutChunk(const Json& header, std::span<const uint8_t> bytes) {
+  if (!header.is_object() || !header.contains("putId") || !header["putId"].is_string())
+    return Error{ErrorCode::kInvalidRequest, "required string: putId"};
   const auto id = header.value("putId", std::string());
   std::lock_guard lock(puts_mutex_);
   auto found = puts_.find(id);

@@ -109,6 +109,8 @@ bool DataRouter::Number(const Json& message, const char* field, uint64_t& result
 Result<void> DataRouter::Boundary(const std::function<Result<void>()>& fn) {
   try {
     return fn();
+  } catch (const InvalidRequest& error) {
+    return Error{ErrorCode::kInvalidRequest, error.what()};
   } catch (const Json::exception& error) {
     fprintf(stderr, "data router invalid request: %s\n", error.what());
     return Error{ErrorCode::kInternal, "Unexpected DataChannel JSON failure"};

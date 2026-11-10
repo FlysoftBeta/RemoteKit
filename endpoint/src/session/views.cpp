@@ -4,6 +4,7 @@
 #include "session/views.hpp"
 #include "session/signin.hpp"
 #include <charconv>
+#include <cmath>
 #include <regex>
 #include <winhttp.h>
 #include "util/wire_error.hpp"
@@ -22,6 +23,48 @@ namespace remotekit {
 using ConnectionPhase = ConnectionTiming::ConnectionPhase;
 using Event = RtcEvent;
 namespace {
+Result<void> ValidateViewConfiguration(const Json& config) {
+  if (!config.is_object())
+    return Error{ErrorCode::kInvalidRequest, "view configuration must be an object"};
+  for (const auto* name : {"visible", "requireRunning"})
+    if (config.contains(name) && !config[name].is_boolean())
+      return Error{ErrorCode::kInvalidRequest, std::string("required boolean: ") + name};
+  for (const auto* name : {"url", "method"})
+    if (config.contains(name) && !config[name].is_string())
+      return Error{ErrorCode::kInvalidRequest, std::string("required string: ") + name};
+  for (const auto* name : {"width", "height", "occludedBottom"})
+    if (config.contains(name) &&
+        (!config[name].is_number_integer() ||
+         config[name] < (std::string_view(name) == "occludedBottom" ? 0 : 1) ||
+         config[name] > 8192))
+      return Error{ErrorCode::kInvalidRequest, std::string("invalid viewport ") + name};
+  if (config.contains("occlusionRevision")) {
+    if (!config["occlusionRevision"].is_string())
+      return Error{ErrorCode::kInvalidRequest, "invalid occlusion revision"};
+    const auto& text = config["occlusionRevision"].get_ref<const std::string&>();
+    uint64_t revision = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), revision);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+      return Error{ErrorCode::kInvalidRequest, "invalid occlusion revision"};
+  }
+  if (config.contains("device")) {
+    const auto& device = config["device"];
+    if (!device.is_object())
+      return Error{ErrorCode::kInvalidRequest, "device must be an object"};
+    for (const auto* name : {"width", "height"})
+      if (device.contains(name) &&
+          (!device[name].is_number_integer() || device[name] < 1 || device[name] > 8192))
+        return Error{ErrorCode::kInvalidRequest, std::string("invalid device ") + name};
+    if (device.contains("mode") && !device["mode"].is_string())
+      return Error{ErrorCode::kInvalidRequest, "required string: device.mode"};
+    if (device.contains("deviceScaleFactor") &&
+        (!device["deviceScaleFactor"].is_number() ||
+         !std::isfinite(device["deviceScaleFactor"].get<double>()) ||
+         device["deviceScaleFactor"] <= 0))
+      return Error{ErrorCode::kInvalidRequest, "invalid deviceScaleFactor"};
+  }
+  return ValidateSignIn(config);
+}
 bool SiteOrigin(const std::string& origin) {
   if (origin.size() > 2048)
     return false;
@@ -404,7 +447,7 @@ Result<void> ViewController::ReconcileOutput() {
 }
 
 Result<Json> ViewController::ApplyView(const Json& config, bool create, bool recovering) {
-  RK_RETURN_IF_ERROR(ValidateSignIn(config));
+  RK_RETURN_IF_ERROR(ValidateViewConfiguration(config));
   const auto view = ViewId(config);
   const auto old = desired.find(view);
   if (old != desired.end() &&
@@ -772,7 +815,7 @@ Result<std::string> ViewController::PrepareViewCommand(const Json& request,
     return Error{ErrorCode::kConflict, "stale_browser_incarnation"};
   const bool lifecycle = method == "view.lifecycle";
   const bool guarded_lifecycle = lifecycle && (request.contains("lifecycleGeneration") ||
-                                               request.value("action", std::string()) == "unload");
+                                               request.value("action", Json()) == "unload");
   if (guarded_lifecycle &&
       (!request.value("requireRunning", false) ||
        request.value("browserIncarnation", std::string()) != browser.Incarnation() ||
@@ -867,6 +910,8 @@ Result<Json> ViewController::ManageSessionIdentity(const Json&) {
 }
 
 Result<Json> ViewController::ManageSessionEventsAck(const Json& request) {
+  if (!request.contains("eventIds"))
+    return Error{ErrorCode::kInvalidRequest, "invalid event ids"};
   const auto ids = request.at("eventIds");
   if (!ids.is_array() || ids.size() > 256)
     return Error{ErrorCode::kInvalidRequest, "invalid event ids"};
@@ -930,7 +975,7 @@ Result<Json> ViewController::ManageViewNavigationAck(const Json& request) {
 }
 
 Result<Json> ViewController::ManageViewEnsure(const Json& request) {
-  RK_RETURN_IF_ERROR(ValidateSignIn(request));
+  RK_RETURN_IF_ERROR(ValidateViewConfiguration(request));
   const auto method = Required(request, "method");
   auto prepare_view_command_result = PrepareViewCommand(request, Required(request, "method"));
   if (!prepare_view_command_result)
@@ -1145,14 +1190,13 @@ Result<Json> ViewController::ManageViewCommand(const Json& request) {
 }
 
 Result<Json> ViewController::ManageViewLifecycle(const Json& request) {
-  const bool guarded_lifecycle =
-      request.contains("lifecycleGeneration") || request.value("action", std::string()) == "unload";
+  const auto action = Required(request, "action");
+  const bool guarded_lifecycle = request.contains("lifecycleGeneration") || action == "unload";
   auto prepare_view_command_result_7 = PrepareViewCommand(request, Required(request, "method"));
   if (!prepare_view_command_result_7)
     return prepare_view_command_result_7.error();
   const auto view = std::move(prepare_view_command_result_7).value();
 
-  const auto action = Required(request, "action");
   if (guarded_lifecycle && action != "unload" && action != "restore")
     return Error{ErrorCode::kInvalidRequest, "unsupported guarded lifecycle action"};
   if (action != "discard" && action != "freeze" && action != "restore" && action != "unload")
@@ -1212,6 +1256,7 @@ Result<Json> ViewController::ManageViewNavigate(const Json& request) {
 }
 
 Result<Json> ViewController::ManageViewConfigure(const Json& request) {
+  RK_RETURN_IF_ERROR(ValidateViewConfiguration(request));
   auto prepare_view_command_result_9 = PrepareViewCommand(request, Required(request, "method"));
   if (!prepare_view_command_result_9)
     return prepare_view_command_result_9.error();
@@ -1244,14 +1289,56 @@ Result<Json> ViewController::ManageViewConfigure(const Json& request) {
 namespace remotekit {
 Result<void> ViewController::Initialize() {
   RK_RETURN_IF_ERROR(CreateDirectories(directory));
-  auto saved = store.Load("views.json", Json::array());
-  site_preferences = store.Load("site-preferences.json", Json::object());
-  auto event_state = store.Load("events.json", {{"next", 1}, {"events", Json::array()}});
-  next_event = event_state.value("next", uint64_t(1));
-  durable_events = event_state.value("events", Json::array());
+  const auto load = [&](const char* name, Json initial) -> Result<Json> {
+    try {
+      return store.Load(name, std::move(initial));
+    } catch (const Json::exception&) {
+      return Error{ErrorCode::kUnavailable, std::string("invalid ") + name};
+    }
+  };
+  RK_ASSIGN_OR_RETURN(saved, load("views.json", Json::array()));
+  RK_ASSIGN_OR_RETURN(sites, load("site-preferences.json", Json::object()));
+  RK_ASSIGN_OR_RETURN(event_state, load("events.json", {{"next", 1}, {"events", Json::array()}}));
+  if (!saved.is_array())
+    return Error{ErrorCode::kUnavailable, "invalid views.json"};
+  std::map<std::string, Json> loaded_views;
+  for (const auto& view : saved) {
+    const auto valid = ValidateViewConfiguration(view);
+    if (!valid)
+      return Error{ErrorCode::kUnavailable, "invalid views.json: " + valid.error().message};
+    try {
+      if (!loaded_views.emplace(ViewId(view), view).second)
+        return Error{ErrorCode::kUnavailable, "duplicate viewId in views.json"};
+    } catch (const InvalidRequest& error) {
+      return Error{ErrorCode::kUnavailable, "invalid views.json: " + std::string(error.what())};
+    }
+  }
+  if (!sites.is_object())
+    return Error{ErrorCode::kUnavailable, "invalid site-preferences.json"};
+  for (const auto& [origin, value] : sites.items())
+    if (!SiteEntry(origin, value))
+      return Error{ErrorCode::kUnavailable, "invalid site-preferences.json"};
+  if (!event_state.is_object() || !event_state.contains("next") ||
+      !event_state["next"].is_number_integer() || event_state["next"] < 1 ||
+      !event_state.contains("events") || !event_state["events"].is_array())
+    return Error{ErrorCode::kUnavailable, "invalid events.json"};
+  for (const auto& event : event_state["events"]) {
+    if (!event.is_object() || !event.contains("eventId") || !event["eventId"].is_string() ||
+        event["eventId"] == "" || !event.contains("type") || !event["type"].is_string())
+      return Error{ErrorCode::kUnavailable, "invalid events.json event"};
+    if (event["type"] == "view.closed") {
+      try {
+        ViewId(event);
+      } catch (const InvalidRequest& error) {
+        return Error{ErrorCode::kUnavailable, "invalid events.json: " + std::string(error.what())};
+      }
+    }
+  }
   downloads.Initialize();
-  for (auto& view : saved)
-    desired[ViewId(view)] = view;
+  desired = std::move(loaded_views);
+  site_preferences = std::move(sites);
+  next_event = event_state["next"].get<uint64_t>();
+  durable_events = std::move(event_state["events"]);
   bool reconciled_closed = false;
   for (const auto& event : durable_events)
     if (event.value("type", std::string()) == "view.closed")
