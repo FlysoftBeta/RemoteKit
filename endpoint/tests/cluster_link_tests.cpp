@@ -110,6 +110,37 @@ uint64_t Request(ClusterLink& link, Channel& server, int id) {
         "request delivered with current generation");
   return generation;
 }
+class IdleChannel final : public Channel {
+ public:
+  explicit IdleChannel(std::atomic<bool>& retired_by_receiver)
+      : retired_by_receiver_(retired_by_receiver), receiver_(GetCurrentThreadId()) {}
+  Result<void> Send(const Json&) override { return {}; }
+  Result<void> SendBinary(const Json&, std::span<const uint8_t>) override { return {}; }
+  Result<Message> Receive(std::chrono::milliseconds) override {
+    std::this_thread::yield();
+    return Error{ErrorCode::kBusy, "idle channel"};
+  }
+  void Close() override { retired_by_receiver_ = GetCurrentThreadId() == receiver_; }
+
+ private:
+  std::atomic<bool>& retired_by_receiver_;
+  DWORD receiver_;
+};
+void Shutdown() {
+  const auto ready = Ready();
+  for (int i = 0; i < 1000; ++i) {
+    std::atomic<bool> retired_by_receiver{false};
+    {
+      ClusterLink link(
+          [&]() -> Result<Established> {
+            return Established{std::make_unique<IdleChannel>(retired_by_receiver), ready};
+          },
+          true, "dev", Validate);
+      Take(link.WaitReady());
+    }
+    Check(retired_by_receiver, "receiver retires its channel before shutdown joins it");
+  }
+}
 void Local() {
   Responder responder({Ready()});
   ClusterLink link([&] { return responder.Connect(); }, true, "dev", Validate);
@@ -342,6 +373,7 @@ void ReadySessions() {
 }  // namespace
 int main() {
   try {
+    Shutdown();
     Local();
     Reconnect();
     ExitRules();

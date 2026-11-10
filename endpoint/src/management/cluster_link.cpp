@@ -316,7 +316,7 @@ ClusterLink::~ClusterLink() {
     impl_->disconnected = {};
   }
   impl_->Finish(ExitCode());
-  impl_->DisconnectChannel();
+  // The receiver retires the channel after leaving its receive loop.
   impl_->receiver.join();
   impl_->sender.join();
 }
