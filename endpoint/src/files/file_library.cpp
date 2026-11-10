@@ -11,6 +11,7 @@
 #include <chrono>
 #include <charconv>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <span>
 #include "util/result_macros.hpp"
@@ -98,24 +99,36 @@ Result<void> Save(const fs::path& path, const Json& value, const FileLibrary::Ch
   return {};
 }
 
-template <class Visit>
-Result<void> Records(const fs::path& directory, std::size_t maximum, Visit visit) {
+template <class Visit, class Invalid>
+Result<void> Records(const fs::path& directory, std::size_t maximum, Visit visit, Invalid invalid) {
   std::size_t count = 0;
   RK_ASSIGN_OR_RETURN(entries, DirectoryEntries(directory));
   for (const auto& entry : entries) {
     if (++count > maximum * 2 + 1)
       return Error{ErrorCode::kLimitExceeded, "file_metadata_limit"};
-    if (!Plain(entry.path()))
-      return Error{ErrorCode::kInvalidRequest, "invalid_file_metadata"};
+    if (!Plain(entry.path())) {
+      RK_RETURN_IF_ERROR(
+          invalid(entry.path(), Error{ErrorCode::kInvalidRequest, "invalid_file_metadata"}));
+      continue;
+    }
     if (entry.path().extension() == L".new") {
       Remove(entry.path());
       continue;
     }
-    RK_ASSIGN_OR_RETURN(size, FileSize(entry.path()));
-    if (entry.path().extension() != L".json" || size > 256 * 1024)
-      return Error{ErrorCode::kInvalidRequest, "invalid_file_metadata"};
+    const auto size = FileSize(entry.path());
+    if (!size) {
+      RK_RETURN_IF_ERROR(invalid(entry.path(), size.error()));
+      continue;
+    }
+    if (entry.path().extension() != L".json" || size.value() > 256 * 1024) {
+      RK_RETURN_IF_ERROR(
+          invalid(entry.path(), Error{ErrorCode::kInvalidRequest, "invalid_file_metadata"}));
+      continue;
+    }
     std::ifstream input(entry.path(), std::ios::binary);
-    RK_RETURN_IF_ERROR(visit(entry.path().stem().string(), Json::parse(input)));
+    const auto value = Json::parse(input, nullptr, false);
+    input.close();
+    RK_RETURN_IF_ERROR(visit(entry.path().stem().string(), value));
   }
 
   return {};
@@ -138,6 +151,41 @@ Result<State> ParseState(const std::string& state) {
     if (state == StateName(value))
       return value;
   return Error{ErrorCode::kInvalidRequest, "invalid_selection_state"};
+}
+Result<FileLibrary::Selection> ParseSelection(const std::string& id, const Json& value) {
+  if (!HexId(id, 32))
+    return Error{ErrorCode::kInternal, "invalid_selection_id"};
+  if (value.is_discarded())
+    return Error{ErrorCode::kInternal, "invalid_selection_json"};
+  try {
+    const auto& binding = value.at("binding");
+    RK_ASSIGN_OR_RETURN(state, ParseState(value.at("state").get<std::string>()));
+    FileLibrary::Selection selection{
+        id,
+        value.at("requestId").get<std::string>(),
+        {binding.at("browserIncarnation").get<std::string>(), binding.at("view").get<std::string>(),
+         binding.at("instance").get<std::string>(), binding.at("document").get<std::string>(),
+         binding.at("request").get<std::string>()},
+        {},
+        state};
+    selection.accept = value.at("accept").get<std::vector<std::string>>();
+    const auto& limits = value.at("limits");
+    selection.limits.file_bytes = limits.at("maxFileBytes").get<std::uint64_t>();
+    selection.limits.batch_bytes = limits.at("maxBatchBytes").get<std::uint64_t>();
+    selection.limits.files = limits.at("maxFiles").get<std::size_t>();
+    const auto& files = value.at("files");
+    if (!files.is_array() || files.empty() || files.size() > 64)
+      return Error{ErrorCode::kInternal, "invalid_selection_files"};
+    for (const auto& file : files) {
+      selection.files.push_back({file.at("assetId").get<std::string>(),
+                                 file.at("name").get<std::string>(),
+                                 file.at("type").get<std::string>()});
+    }
+    return selection;
+  } catch (const Json::exception& error) {
+    return Error{ErrorCode::kInternal,
+                 "invalid_selection_fields: json_exception_" + std::to_string(error.id)};
+  }
 }
 bool ValidSpec(const FileUploadStore::Spec& spec) {
   if (spec.name.empty() || spec.name == "." || spec.name == ".." || spec.name.size() > 1024 ||
@@ -186,69 +234,77 @@ Result<void> FileLibrary::Initialize() {
     if (!Plain(directory, true))
       return Error{ErrorCode::kUnavailable, "unsafe_library_root"};
   }
-  RK_RETURN_IF_ERROR(
-      Records(root_ / "metadata", kAssets, [&](const auto& id, const Json& value) -> Result<void> {
-        Asset asset{id, value.at("type").get<std::string>(), value.at("size").get<std::uint64_t>(),
-                    value.value("width", 0u), value.value("height", 0u)};
-        if (!HexId(id, 64) || !ValidSpec({"asset", asset.type, asset.size}) ||
-            entries_.size() >= kAssets)
-          return Error{ErrorCode::kInternal, "invalid_asset_record"};
-        entries_.emplace(id, Entry{std::move(asset)});
-        return {};
-      }));
-  RK_RETURN_IF_ERROR(
-      Records(root_ / "drafts", kDrafts, [&](const auto& id, const Json& value) -> Result<void> {
-        Draft draft{id,
-                    value.at("operation").get<std::string>(),
-                    value.at("sealed").get<std::string>(),
-                    {value.at("name").get<std::string>(), value.at("type").get<std::string>(),
-                     value.at("size").get<std::uint64_t>()},
-                    value.at("expires").get<std::int64_t>()};
-        if (!HexId(id, 32) || !BoundedServiceId(draft.operation) || !ValidSpec(draft.spec) ||
-            drafts_.size() >= kDrafts)
-          return Error{ErrorCode::kInternal, "invalid_asset_draft"};
-        if (draft.sealed.empty()) {
-          const auto path = DraftData(id);
-          RK_ASSIGN_OR_RETURN(size, FileSize(path));
-          if (!Plain(path) || size > draft.spec.size ||
-              draft.spec.size > kDraftBytes - draft_bytes_)
-            return Error{ErrorCode::kInternal, "invalid_asset_draft"};
-          draft_bytes_ += draft.spec.size;
-        } else if (!HexId(draft.sealed, 64)) {
-          return Error{ErrorCode::kInternal, "invalid_asset_draft"};
-        }
-        drafts_.emplace(id, std::move(draft));
-        return {};
-      }));
+  const auto fail = [](const fs::path&, const Error& error) -> Result<void> { return error; };
   RK_RETURN_IF_ERROR(Records(
-      root_ / "selections", kSelections, [&](const auto& id, const Json& value) -> Result<void> {
-        const auto& binding = value.at("binding");
-        RK_ASSIGN_OR_RETURN(state, ParseState(value.at("state").get<std::string>()));
-        Selection selection{
-            id,
-            value.at("requestId").get<std::string>(),
-            {binding.at("browserIncarnation").get<std::string>(),
-             binding.at("view").get<std::string>(), binding.at("instance").get<std::string>(),
-             binding.at("document").get<std::string>(), binding.at("request").get<std::string>()},
-            {},
-            state};
-        selection.accept = value.at("accept").get<std::vector<std::string>>();
-        const auto& limits = value.at("limits");
-        selection.limits.file_bytes = limits.at("maxFileBytes").get<std::uint64_t>();
-        selection.limits.batch_bytes = limits.at("maxBatchBytes").get<std::uint64_t>();
-        selection.limits.files = limits.at("maxFiles").get<std::size_t>();
-        const auto& files = value.at("files");
-        if (!HexId(id, 32) || selections_.size() >= kSelections || !files.is_array() ||
-            files.empty() || files.size() > 64)
-          return Error{ErrorCode::kInternal, "invalid_selection_record"};
-        for (const auto& file : files) {
-          selection.files.push_back({file.at("assetId").get<std::string>(),
-                                     file.at("name").get<std::string>(),
-                                     file.at("type").get<std::string>()});
+      root_ / "metadata", kAssets,
+      [&](const auto& id, const Json& value) -> Result<void> {
+        if (value.is_discarded())
+          return Error{ErrorCode::kInternal, "invalid_asset_metadata: invalid_json"};
+        try {
+          Asset asset{id, value.at("type").get<std::string>(),
+                      value.at("size").get<std::uint64_t>(), value.value("width", 0u),
+                      value.value("height", 0u)};
+          if (!HexId(id, 64) || !ValidSpec({"asset", asset.type, asset.size}) ||
+              entries_.size() >= kAssets)
+            return Error{ErrorCode::kInternal, "invalid_asset_record"};
+          entries_.emplace(id, Entry{std::move(asset)});
+          return {};
+        } catch (const Json::exception& error) {
+          return Error{ErrorCode::kInternal,
+                       std::string("invalid_asset_metadata: ") + error.what()};
         }
-        selections_.emplace(id, std::move(selection));
+      },
+      fail));
+  RK_RETURN_IF_ERROR(Records(
+      root_ / "drafts", kDrafts,
+      [&](const auto& id, const Json& value) -> Result<void> {
+        if (value.is_discarded())
+          return Error{ErrorCode::kInternal, "invalid_asset_draft: invalid_json"};
+        try {
+          Draft draft{id,
+                      value.at("operation").get<std::string>(),
+                      value.at("sealed").get<std::string>(),
+                      {value.at("name").get<std::string>(), value.at("type").get<std::string>(),
+                       value.at("size").get<std::uint64_t>()},
+                      value.at("expires").get<std::int64_t>()};
+          if (!HexId(id, 32) || !BoundedServiceId(draft.operation) || !ValidSpec(draft.spec) ||
+              drafts_.size() >= kDrafts)
+            return Error{ErrorCode::kInternal, "invalid_asset_draft"};
+          if (draft.sealed.empty()) {
+            const auto path = DraftData(id);
+            RK_ASSIGN_OR_RETURN(size, FileSize(path));
+            if (!Plain(path) || size > draft.spec.size ||
+                draft.spec.size > kDraftBytes - draft_bytes_)
+              return Error{ErrorCode::kInternal, "invalid_asset_draft"};
+            draft_bytes_ += draft.spec.size;
+          } else if (!HexId(draft.sealed, 64)) {
+            return Error{ErrorCode::kInternal, "invalid_asset_draft"};
+          }
+          drafts_.emplace(id, std::move(draft));
+          return {};
+        } catch (const Json::exception& error) {
+          return Error{ErrorCode::kInternal, std::string("invalid_asset_draft: ") + error.what()};
+        }
+      },
+      fail));
+  const auto discard_selection = [](const fs::path& path, const Error& error) -> Result<void> {
+    const bool removed = Remove(path);
+    std::cerr << "selection " << Json(path.stem().string()).dump() << ": " << error.message
+              << (removed ? "" : " delete_failed") << '\n';
+    return {};
+  };
+  RK_RETURN_IF_ERROR(Records(
+      root_ / "selections", kSelections,
+      [&](const auto& id, const Json& value) -> Result<void> {
+        if (selections_.size() >= kSelections)
+          return Error{ErrorCode::kInternal, "invalid_selection_record"};
+        auto selection = ParseSelection(id, value);
+        if (!selection)
+          return discard_selection(root_ / "selections" / (id + ".json"), selection.error());
+        selections_.emplace(id, std::move(selection).value());
         return {};
-      }));
+      },
+      discard_selection));
   const auto clean = [&](const fs::path& directory, std::size_t maximum,
                          auto keep) -> Result<void> {
     std::size_t count = 0;

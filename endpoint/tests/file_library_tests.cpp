@@ -3,11 +3,13 @@
 #include "files/dc_file_services.hpp"
 #include "files/file_selection.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 
 using remotekit::FileLibrary;
 using remotekit::FileUploadStore;
@@ -101,6 +103,99 @@ class Control final : public remotekit::ManagementLink {
   }
 };
 #include "download_imports_tests.hpp"
+
+void PersistedRecords(const fs::path& root, remotekit::objects::ObjectService& objects) {
+  const auto directory = root / "selections";
+  fs::create_directories(directory);
+  const std::string valid_id(32, 'a');
+  const remotekit::Json complete{
+      {"requestId", "chooser"},
+      {"binding",
+       {{"browserIncarnation", "browser"},
+        {"view", "1"},
+        {"instance", "2"},
+        {"document", "3"},
+        {"request", "4"}}},
+      {"state", "selected"},
+      {"accept", {"text/plain"}},
+      {"limits", {{"maxFileBytes", 1024}, {"maxBatchBytes", 2048}, {"maxFiles", 2}}},
+      {"files", remotekit::Json::array({{{"assetId", std::string(64, 'b')},
+                                         {"name", "private-receipt-content.txt"},
+                                         {"type", "text/plain"}}})}};
+  std::ofstream(directory / (valid_id + ".json")) << complete.dump();
+  auto missing_fields = complete;
+  missing_fields.erase("accept");
+  missing_fields.erase("limits");
+  auto missing_limits = complete;
+  missing_limits.erase("limits");
+  auto wrong_type = complete;
+  wrong_type["accept"] = 1;
+  auto empty_files = complete;
+  empty_files["files"] = remotekit::Json::array();
+  auto excess_files = complete;
+  excess_files["files"] = remotekit::Json::array();
+  for (int i = 0; i < 65; ++i)
+    excess_files["files"].push_back(complete["files"][0]);
+  auto invalid_state = complete;
+  invalid_state["state"] = "private-receipt-content";
+  const std::vector<std::pair<std::string, std::string>> invalid{
+      {std::string(32, 'c'), missing_fields.dump()},
+      {std::string(32, 'd'), "{private-receipt-content"},
+      {std::string(32, 'e'), missing_limits.dump()},
+      {std::string(32, 'f'), wrong_type.dump()},
+      {std::string(32, '1'), empty_files.dump()},
+      {std::string(32, '2'), excess_files.dump()},
+      {std::string(32, '3'), invalid_state.dump()},
+      {"invalid-id", complete.dump()}};
+  for (const auto& [id, contents] : invalid)
+    std::ofstream(directory / (id + ".json")) << contents;
+
+  FileLibrary library(root, objects, "tenant");
+  std::ostringstream diagnostics;
+  auto* previous = std::cerr.rdbuf(diagnostics.rdbuf());
+  const auto initialized = library.Initialize();
+  std::cerr.rdbuf(previous);
+  Take(initialized);
+  for (const auto& [id, contents] : invalid) {
+    CHECK(!fs::exists(directory / (id + ".json")));
+    CHECK(!library.FindSelection(id));
+    CHECK(diagnostics.str().find("selection \"" + id + "\": ") != std::string::npos);
+  }
+  const auto output = diagnostics.str();
+  CHECK(std::count(output.begin(), output.end(), '\n') == invalid.size());
+  CHECK(output.find(".json") == std::string::npos);
+  CHECK(output.find("private-receipt-content") == std::string::npos);
+  CHECK(output.find(root.string()) == std::string::npos);
+  CHECK(fs::exists(directory / (valid_id + ".json")));
+  const auto loaded = library.FindSelection(valid_id);
+  CHECK(loaded && loaded->request_id == "chooser");
+  CHECK(loaded->state == FileLibrary::Selection::State::selected);
+  CHECK(loaded->binding == (FileUploadStore::Binding{"browser", "1", "2", "3", "4"}));
+  CHECK(loaded->accept == std::vector<std::string>{"text/plain"});
+  CHECK(loaded->limits.file_bytes == 1024 && loaded->limits.batch_bytes == 2048 &&
+        loaded->limits.files == 2);
+  CHECK(loaded->files == (std::vector<FileLibrary::SelectionFile>{
+                             {std::string(64, 'b'), "private-receipt-content.txt", "text/plain"}}));
+
+  for (const auto& kind : {"metadata", "drafts"}) {
+    const std::string category =
+        std::string(kind) == "metadata" ? "invalid_asset_metadata" : "invalid_asset_draft";
+    const std::string id(std::string(kind) == "metadata" ? 64 : 32, 'a');
+    const std::vector<std::string> contents{"{}", "{\"type\":1,\"operation\":1}", "{"};
+    for (std::size_t i = 0; i < contents.size(); ++i) {
+      const auto invalid_root = root / (std::string(kind) + std::to_string(i));
+      const auto path = invalid_root / kind / (id + ".json");
+      fs::create_directories(path.parent_path());
+      std::ofstream(path) << contents[i];
+      FileLibrary invalid_library(invalid_root, objects, "tenant");
+      const auto result = invalid_library.Initialize();
+      CHECK(!result && result.error().code == remotekit::ErrorCode::kInternal);
+      CHECK(result.error().message.starts_with(category + ": "));
+      CHECK(result.error().message.size() > category.size() + 2);
+      CHECK(fs::exists(path));
+    }
+  }
+}
 
 void Documents(const fs::path& root) {
   Control control;
@@ -293,6 +388,7 @@ int main(int argc, char** argv) {
   Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
                           {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
   remotekit::objects::PeerServer peer(objects.Store(), remotekit::cluster::Key{}, "source", "dev");
+  PersistedRecords(root / "persisted-records", objects);
   Take(peer.Start("127.0.0.1:0"));
   const std::string hash = "fd7adb152c05ef80dccf50a1fa4c05d5a3ec6da95575fc312ae7c5d091836351";
   const FileUploadStore::Spec spec{"photo.jpeg", "image/jpeg", 3};
