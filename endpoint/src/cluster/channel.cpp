@@ -508,7 +508,13 @@ Result<Established> ConnectWebSocket(const std::string& url, const Key& key, con
                                         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                         tls ? WINHTTP_FLAG_SECURE : 0)};
   DWORD redirects = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+  // The Noise handshake authenticates Control with the cluster key, so the TLS layer is only
+  // transport cover: self-signed, private-CA and mismatched-name certificates are accepted.
+  DWORD ignored = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                  SECURITY_FLAG_IGNORE_CERT_CN_INVALID | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
   if (!request.value ||
+      (tls && !WinHttpSetOption(request.value, WINHTTP_OPTION_SECURITY_FLAGS, &ignored,
+                                sizeof(ignored))) ||
       !WinHttpSetOption(request.value, WINHTTP_OPTION_REDIRECT_POLICY, &redirects,
                         sizeof(redirects)) ||
       !WinHttpSetOption(request.value, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0) ||
