@@ -83,7 +83,7 @@ struct remotekit_sdk_token {
   uint64_t session, view, instance, document, focus;
 };
 
-#define REMOTEKIT_SDK_ABI_VERSION 3
+#define REMOTEKIT_SDK_ABI_VERSION 4
 #define REMOTEKIT_SDK_RENDER_SLOT_COUNT 4
 struct remotekit_sdk_render_setup {
   uint32_t struct_size, width, height, mapping_size;

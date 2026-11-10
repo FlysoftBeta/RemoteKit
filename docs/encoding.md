@@ -131,7 +131,9 @@ level 同时约束单帧大小（MaxFS）和宏块吞吐（MaxMBPS）。一个 l
 
 ### 码控声明
 
-外部编码器的 `EncoderInfo`：native handle 输入、硬件加速、对齐 2、缩放 QP 阈值 24/37、`is_qp_trusted = true`（硬件返回 qp=-1 时用官方 H.264 解析器补 QP）、**`has_trusted_rate_controller = false`**。
+外部编码器的 `EncoderInfo`：native handle 输入、硬件加速、对齐 2、缩放 QP 阈值 24/37、`is_qp_trusted = true`、**`has_trusted_rate_controller = false`**。
+
+**QP 来源**：QualityScaler 只看编码器报告的 QP。QSV 通过 `mfxExtEncodedFrameInfo` 返回整帧平均亮度 QP（初始化时 Query 确认驱动支持，不支持即初始化失败），NVENC 返回帧平均 QP，SDK 原样交给 WebRTC，不再解析码流。曾经 QSV 不报 QP、SDK 用 H.264 解析器取最后一个 slice 头的 QP 代替：slice 头 QP 不含宏块级量化，静态文字上恒为 26，而硬件整帧 QP 是 10–16。26 高于升档阈值 24，即使样本足够，Auto 下被降下来的分辨率也永远不会恢复。
 
 后者很关键。现场诊断发现硬件编码的实际输出超出码率预算，而当时声明了可信码控，WebRTC 的编码前超发丢帧保护因此被关掉了。改为不可信后保护恢复。仅这一项把发送队列均值从 72ms 降到约 69ms、marker p95 从 463ms 降到 425ms，最差窗口反而从 269ms 升到 329ms——声明正确是必要条件，但单独并不够，配合时基去抖才得到上面的结果。硬件"速率更新成功"不代表实际输出已经跟上预算，仍需观测编码字节和发送排队。
 

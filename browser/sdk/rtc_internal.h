@@ -39,7 +39,6 @@
 #include "third_party/webrtc/api/environment/environment_factory.h"
 #include "third_party/webrtc/api/jsep.h"
 #include "third_party/webrtc/api/field_trials_view.h"
-#include "third_party/webrtc/common_video/h264/h264_bitstream_parser.h"
 #include "third_party/webrtc/api/make_ref_counted.h"
 #include "third_party/webrtc/api/peer_connection_interface.h"
 #include "third_party/webrtc/api/rtp_transceiver_interface.h"
@@ -106,6 +105,7 @@ class TextureSource : public webrtc::AdaptedVideoTrackSource {
   bool is_screencast() const override;
   std::optional<bool> needs_denoising() const override;
   void RequestRefreshFrame() override;
+  remotekit_rtc_source_restrictions Restrictions();
   remotekit_rtc_adaptation Adapt(int width, int height, int64_t timestamp_us);
   void Submit(const remotekit_rtc_frame& input,
               int64_t media_timestamp_us,
@@ -131,7 +131,6 @@ struct EncoderState {
   webrtc::EncodedImageCallback* callback = nullptr;
   bool active = true;
   bool logged_sps = false;
-  webrtc::H264BitstreamParser qp_parser;
   std::shared_ptr<RequestedPlayoutDelay> playout_delay;
   std::shared_ptr<SdkTrace> trace;
   std::shared_ptr<MediaAuthorization> authorization;

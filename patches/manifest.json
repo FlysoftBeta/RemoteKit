@@ -15,7 +15,7 @@
     {
       "id": "webrtc-screenshare-adaptation",
       "path": "0014-webrtc-screenshare-adaptation.patch",
-      "sha256": "678bcd7c6a48a6c1754b25e36857554f4963a816e8cbceebb05ca06847eaecc6"
+      "sha256": "2a6d7118fe9ce67f5f54181dfefa6619dd34084fb89947d1bdc348c2992b6395"
     },
     {
       "id": "page-lifecycle-ack",

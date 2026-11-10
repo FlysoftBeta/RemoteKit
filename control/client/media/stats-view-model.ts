@@ -1,9 +1,17 @@
-import type { Diagnostics } from './types';
+import type { Diagnostics, SenderRtcStats } from './types';
+
+export function physicalPlaneSize(width: number, height: number, pixelRatio: number) {
+  return { width: Math.round(width * pixelRatio), height: Math.round(height * pixelRatio) };
+}
 
 export function statsViewModel(diagnostics: Diagnostics, viewId?: string) {
   const endpoint = diagnostics.endpoint;
   const requested = endpoint?.rtcPlayoutDelayRequested as { maxMs?: number } | undefined;
+  const sender = endpoint?.senderRtcStats as SenderRtcStats | undefined;
   return {
+    sender,
+    qualityLimitationReason: sender?.outbound?.find((stream) => stream.kind === 'video')
+      ?.qualityLimitationReason,
     presentationFps: viewId ? diagnostics.paintFpsByView?.[viewId] : diagnostics.displayFramesPerSecond,
     videoTiming: viewId ? diagnostics.videoTimingByView?.[viewId] : undefined,
     receiverTiming: diagnostics.receiverVideoTiming,

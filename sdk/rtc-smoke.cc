@@ -106,6 +106,14 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "create A failed %d\n", status);
     return 3;
   }
+  remotekit_rtc_source_restrictions restrictions{};
+  if (remotekit_rtc_get_source_restrictions(a, nullptr) != REMOTEKIT_SDK_INVALID_ARGUMENT ||
+      remotekit_rtc_get_source_restrictions(a, &restrictions) != REMOTEKIT_SDK_INVALID_ARGUMENT)
+    return 39;
+  restrictions.struct_size = sizeof(restrictions);
+  if (remotekit_rtc_get_source_restrictions(a, &restrictions) != REMOTEKIT_SDK_OK ||
+      restrictions.target_pixels != 0)
+    return 39;
   if (remotekit_rtc_set_degradation_preference(a, REMOTEKIT_RTC_MAINTAIN_RESOLUTION) !=
           REMOTEKIT_SDK_OK ||
       remotekit_rtc_set_degradation_preference(a, REMOTEKIT_RTC_BALANCED) != REMOTEKIT_SDK_OK ||

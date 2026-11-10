@@ -38,6 +38,11 @@ void SourceAdapter() {
   wants.resolution_alignment = 2;
   wants.is_active = true;
   source_interface->AddOrUpdateSink(&sink, wants);
+  for (int i = 0; i < 10; ++i) {
+    const auto restrictions = source->Restrictions();
+    CHECK_EQ(restrictions.target_pixels, 1200000u);
+    CHECK_EQ(restrictions.max_fps, 15u);
+  }
   auto selected = source->Adapt(1938, 1090, 1000000);
   CHECK(!selected.drop);
   CHECK_EQ(selected.max_fps, 15u);
@@ -69,11 +74,21 @@ void SourceAdapter() {
   CHECK_EQ(leases->active, 0u);
   CHECK_GT(sink.drops, 0);
   CHECK(!source->Adapt(1938, 1090, 1100000).drop);
+  wants.max_pixel_count = std::numeric_limits<int>::max();
+  wants.target_pixel_count.reset();
+  wants.max_framerate_fps = 30;
+  source_interface->AddOrUpdateSink(&sink, wants);
+  CHECK_EQ(source->Restrictions().target_pixels, 0u);
+  CHECK_EQ(source->Restrictions().max_fps, 30u);
+  const auto restored = source->Adapt(1938, 1090, 1200000);
+  CHECK(!restored.drop);
+  CHECK_EQ(restored.width, 1938u);
+  CHECK_EQ(restored.height, 1090u);
   source_interface->RemoveSink(&sink);
-  CHECK(source->Adapt(1938, 1090, 1200000).drop);
+  CHECK(source->Adapt(1938, 1090, 1300000).drop);
 }
-void ParsedHardwareQp() {
-  // Upstream H264BitstreamParser's canonical constrained-baseline sample.
+void HardwareFrameQp() {
+  // The supplied frame QP must take precedence over this sample's slice QP.
   const uint8_t au[] = {0,    0,    0,    1,    0x67, 0x42, 0x80, 0x20, 0xda, 0x01, 0x40, 0x16,
                         0xe8, 0x06, 0xd0, 0xa1, 0x35, 0,    0,    0,    1,    0x68, 0xce, 0x06,
                         0xe2, 0,    0,    0,    1,    0x65, 0xb8, 0x40, 0xf0, 0x8c, 0x03, 0xf2,
@@ -107,17 +122,19 @@ void ParsedHardwareQp() {
   frame.qp = -1;
   state->pending.emplace(frame.rtp_timestamp, 1);
   CHECK_EQ(remotekit_rtc_encoded(id, &frame, nullptr), REMOTEKIT_SDK_OK);
-  CHECK_EQ(callback.qp, 35);
-  frame.qp = 28;
+  CHECK_EQ(callback.qp, -1);
+  frame.qp = 14;
   state->pending.emplace(frame.rtp_timestamp, 1);
   CHECK_EQ(remotekit_rtc_encoded(id, &frame, nullptr), REMOTEKIT_SDK_OK);
-  CHECK_EQ(callback.qp, 28);
+  CHECK_EQ(callback.qp, 14);
+  frame.qp = 52;
+  CHECK_EQ(remotekit_rtc_encoded(id, &frame, nullptr), REMOTEKIT_SDK_INVALID_ARGUMENT);
   frame.qp = 26;
   state->pending.emplace(frame.rtp_timestamp, 1);
   state->authorization->epoch.store(3);  // Revoked and subsequently restored.
   CHECK_EQ(remotekit_rtc_encoded(id, &frame, nullptr), REMOTEKIT_SDK_INVALID_STATE);
   CHECK_EQ(callback.drops, 1);
-  CHECK_EQ(callback.qp, 28);
+  CHECK_EQ(callback.qp, 14);
   state->pending.emplace(frame.rtp_timestamp, 3);
   CHECK_EQ(remotekit_rtc_encoded(id, &frame, nullptr), REMOTEKIT_SDK_OK);
   CHECK_EQ(callback.qp, 26);
@@ -241,7 +258,7 @@ int main(int argc, char** argv) {
   base::AtExitManager at_exit;
   base::CommandLine::Init(argc, argv);
   SourceAdapter();
-  ParsedHardwareQp();
+  HardwareFrameQp();
   SenderPreference();
   AuthMessageLimit();
   std::puts("RTC adaptation production probe passed");

@@ -53,6 +53,7 @@ struct Sdk {
   RK_SDK_FUNCTION(remotekit_sdk_render_stop)
   RK_SDK_FUNCTION(remotekit_rtc_set_source_max_fps)
   RK_SDK_FUNCTION(remotekit_rtc_adapt_frame)
+  RK_SDK_FUNCTION(remotekit_rtc_get_source_restrictions)
   RK_SDK_FUNCTION(remotekit_rtc_get_receive_level)
   RK_SDK_FUNCTION(remotekit_rtc_set_playout_delay)
   RK_SDK_FUNCTION(remotekit_rtc_create)
@@ -79,35 +80,41 @@ struct Sdk {
   name = reinterpret_cast<decltype(name)>(GetProcAddress(module, #name)); \
   if (!name)                                                              \
     return Error{ErrorCode::kUnavailable, "SDK missing " #name};
-    RK_LOAD(remotekit_sdk_abi_version)
+    RK_LOAD(remotekit_sdk_abi_version);
     if (remotekit_sdk_abi_version() != REMOTEKIT_SDK_ABI_VERSION)
       return Error{ErrorCode::kUnavailable, "Browser SDK ABI version mismatch"};
-    RK_LOAD(remotekit_sdk_initialize)
-    RK_LOAD(remotekit_sdk_shutdown)
-    RK_LOAD(remotekit_sdk_control_connect)
-    RK_LOAD(remotekit_sdk_control_close)
-    RK_LOAD(remotekit_sdk_control_request)
-    RK_LOAD(remotekit_sdk_control_open_render)
-    RK_LOAD(remotekit_rtc_set_av_sync)
-    RK_LOAD(remotekit_rtc_set_audio_enabled)
-    RK_LOAD(remotekit_rtc_create)
-    RK_LOAD(remotekit_rtc_close)
-    RK_LOAD(remotekit_rtc_set_media_authorized)
-    RK_LOAD(remotekit_rtc_set_remote_description)
-    RK_LOAD(remotekit_rtc_add_ice)
-    RK_LOAD(remotekit_rtc_send_data)
-    RK_LOAD(remotekit_rtc_send_auth_data) RK_LOAD(remotekit_rtc_get_receive_level)
-        RK_LOAD(remotekit_sdk_render_connect) RK_LOAD(remotekit_sdk_render_begin)
-            RK_LOAD(remotekit_sdk_render_close) RK_LOAD(remotekit_sdk_render_observe_signal)
-                RK_LOAD(remotekit_sdk_render_stop) RK_LOAD(remotekit_rtc_set_source_max_fps)
-                    RK_LOAD(remotekit_rtc_adapt_frame)
-                        RK_LOAD(remotekit_rtc_set_degradation_preference)
-                            RK_LOAD(remotekit_rtc_set_playout_delay)
-                                RK_LOAD(remotekit_rtc_submit_texture) RK_LOAD(remotekit_rtc_encoded)
-                                    RK_LOAD(remotekit_rtc_submit_audio)
+    RK_LOAD(remotekit_sdk_initialize);
+    RK_LOAD(remotekit_sdk_shutdown);
+    RK_LOAD(remotekit_sdk_control_connect);
+    RK_LOAD(remotekit_sdk_control_close);
+    RK_LOAD(remotekit_sdk_control_request);
+    RK_LOAD(remotekit_sdk_control_open_render);
+    RK_LOAD(remotekit_rtc_set_av_sync);
+    RK_LOAD(remotekit_rtc_set_audio_enabled);
+    RK_LOAD(remotekit_rtc_create);
+    RK_LOAD(remotekit_rtc_close);
+    RK_LOAD(remotekit_rtc_set_media_authorized);
+    RK_LOAD(remotekit_rtc_set_remote_description);
+    RK_LOAD(remotekit_rtc_add_ice);
+    RK_LOAD(remotekit_rtc_send_data);
+    RK_LOAD(remotekit_rtc_send_auth_data);
+    RK_LOAD(remotekit_rtc_get_receive_level);
+    RK_LOAD(remotekit_sdk_render_connect);
+    RK_LOAD(remotekit_sdk_render_begin);
+    RK_LOAD(remotekit_sdk_render_close);
+    RK_LOAD(remotekit_sdk_render_observe_signal);
+    RK_LOAD(remotekit_sdk_render_stop);
+    RK_LOAD(remotekit_rtc_set_source_max_fps);
+    RK_LOAD(remotekit_rtc_adapt_frame);
+    RK_LOAD(remotekit_rtc_get_source_restrictions);
+    RK_LOAD(remotekit_rtc_set_degradation_preference);
+    RK_LOAD(remotekit_rtc_set_playout_delay);
+    RK_LOAD(remotekit_rtc_submit_texture);
+    RK_LOAD(remotekit_rtc_encoded);
+    RK_LOAD(remotekit_rtc_submit_audio);
 #undef RK_LOAD
-                                        sample_clock = reinterpret_cast<decltype(sample_clock)>(
-                                            GetProcAddress(module, "remotekit_rtc_sample_clock"));
+    sample_clock = reinterpret_cast<decltype(sample_clock)>(
+        GetProcAddress(module, "remotekit_rtc_sample_clock"));
     request_stats = reinterpret_cast<decltype(request_stats)>(
         GetProcAddress(module, "remotekit_rtc_request_stats"));
     encoder_drop = reinterpret_cast<decltype(encoder_drop)>(

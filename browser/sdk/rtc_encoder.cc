@@ -59,7 +59,6 @@ class ExternalEncoder : public webrtc::VideoEncoder {
     if (configured == 0) {
       std::lock_guard lock(state_->mutex);
       state_->logged_sps = false;
-      state_->qp_parser = webrtc::H264BitstreamParser();
     }
     return configured == 0 ? WEBRTC_VIDEO_CODEC_OK : WEBRTC_VIDEO_CODEC_ERROR;
   }
@@ -135,8 +134,8 @@ class ExternalEncoder : public webrtc::VideoEncoder {
     // External hardware rate control cannot guarantee fast target tracking.
     // Keep WebRTC's frame dropper active to protect against overshoot.
     info.has_trusted_rate_controller = false;
-    // Same H264 QP thresholds as WebRTC's official H264EncoderImpl. QP is
-    // parsed from Annex B when the hardware callback cannot provide it.
+    // Hardware frame QP includes block-level quantization that a slice header
+    // alone cannot report. Use WebRTC's H264 quality thresholds.
     info.scaling_settings = ScalingSettings(24, 37);
     info.is_qp_trusted = true;
     info.requested_resolution_alignment = 2;
@@ -239,7 +238,7 @@ int remotekit_rtc_encoded(uint64_t id,
     *wire_rtp_timestamp = 0;
   if (!frame || frame->struct_size != sizeof(*frame) ||
       !ValidBytes(frame->annex_b, frame->size, kMaxAccessUnit) || !frame->width || !frame->height ||
-      frame->width > 16384 || frame->height > 16384)
+      frame->width > 16384 || frame->height > 16384 || frame->qp < -1 || frame->qp > 51)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   std::shared_ptr<EncoderState> s;
   {
@@ -294,10 +293,7 @@ int remotekit_rtc_encoded(uint64_t id,
   image.capture_time_ms_ = frame->capture_time_us / 1000;
   image._frameType = frame->keyframe ? webrtc::VideoFrameType::kVideoFrameKey
                                      : webrtc::VideoFrameType::kVideoFrameDelta;
-  // Maintain SPS/PPS state even when this AU already has a hardware QP.
-  s->qp_parser.ParseBitstream(
-      std::span<const uint8_t>(static_cast<const uint8_t*>(frame->annex_b), frame->size));
-  image.qp_ = frame->qp >= 0 ? frame->qp : s->qp_parser.GetLastSliceQp().value_or(-1);
+  image.qp_ = frame->qp;
   image.content_type_ = webrtc::VideoContentType::SCREENSHARE;
   const uint64_t requested_playout = s->playout_delay->packed.load();
   if (requested_playout != UINT64_MAX) {

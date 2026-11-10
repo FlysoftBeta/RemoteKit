@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <deque>
 #include <map>
+#include <limits>
 #include <thread>
 #include <utility>
 namespace remotekit::media {
@@ -27,6 +28,8 @@ class Qsv final : public HardwareEncoder {
   struct Packet {
     uint64_t submit_cookie = 0;
     mfxBitstream bitstream{};
+    mfxExtEncodedFrameInfo frame_info{};
+    mfxExtBuffer* frame_info_extension = nullptr;
     std::vector<mfxU8> storage;
     mfxSyncPoint sync = nullptr;
   };
@@ -164,6 +167,11 @@ class Qsv final : public HardwareEncoder {
   }
   std::unique_ptr<Packet> NewPacket() const {
     auto packet = std::make_unique<Packet>();
+    packet->frame_info.Header = {MFX_EXTBUFF_ENCODED_FRAME_INFO, sizeof(packet->frame_info)};
+    packet->frame_info.QP = std::numeric_limits<mfxU16>::max();
+    packet->frame_info_extension = &packet->frame_info.Header;
+    packet->bitstream.ExtParam = &packet->frame_info_extension;
+    packet->bitstream.NumExtParam = 1;
     packet->storage.resize(
         std::max({size_t(4 * 1024 * 1024), size_t(settings_.width) * settings_.height * 2,
                   size_t(params_.mfx.BufferSizeInKB) * 1000 + 65536}));
@@ -424,6 +432,16 @@ class Qsv final : public HardwareEncoder {
     extensions_[3] = reinterpret_cast<mfxExtBuffer*>(&options3_);
     params_.ExtParam = extensions_.data();
     params_.NumExtParam = static_cast<mfxU16>(extensions_.size());
+    mfxExtEncodedFrameInfo frame_info{};
+    frame_info.Header = {MFX_EXTBUFF_ENCODED_FRAME_INFO, sizeof(frame_info)};
+    mfxExtBuffer* frame_info_extension = &frame_info.Header;
+    mfxVideoParam capabilities{};
+    capabilities.mfx.CodecId = MFX_CODEC_AVC;
+    capabilities.ExtParam = &frame_info_extension;
+    capabilities.NumExtParam = 1;
+    if (!Exact(MFXVideoENCODE_Query(session_, nullptr, &capabilities),
+               "MFX H264 encoded frame info Query", error))
+      return false;
     const auto query_status = MFXVideoENCODE_Query(session_, &params_, &params_);
     low_power_.query_status = query_status;
     if (query_status >= 0)
@@ -622,7 +640,12 @@ class Qsv final : public HardwareEncoder {
         packet.bitstream.Data + packet.bitstream.DataOffset,
         packet.bitstream.Data + packet.bitstream.DataOffset + packet.bitstream.DataLength);
     output.keyframe = (packet.bitstream.FrameType & MFX_FRAMETYPE_IDR) != 0;
-    output.qp = -1;
+    if (packet.frame_info.QP > 51) {
+      error = "QSV returned an invalid frame QP";
+      deferred_error_ = error;
+      return CodecResult::error;
+    }
+    output.qp = packet.frame_info.QP;
     jobs_.erase(found);
     packets_.pop_front();
     return CodecResult::ready;

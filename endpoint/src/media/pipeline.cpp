@@ -2,6 +2,7 @@
 #include "diagnostics/stats.hpp"
 #include "diagnostics/timing.hpp"
 #include "media/encoders.hpp"
+#include "media/comp_recovery.hpp"
 #include "media/output.hpp"
 #include "media/presentation.hpp"
 #include "media/render_slots.hpp"
@@ -58,6 +59,7 @@ void MediaPipeline::MediaLoop() {
   int64_t last_stats = QpcNow();
   uint32_t official_max_fps = 240, codec_max_fps = 240;
   remotekit::CompCadence cadence;
+  remotekit::CompRecoverySampling recovery;
   uint64_t previous_encoded = registry.Completed(), previous_bytes = registry.Bytes();
   uint64_t previous_delivered = output.Slots().delivered_frames();
   remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
@@ -128,6 +130,26 @@ void MediaPipeline::MediaLoop() {
       authorization.SetFrame(stamp);
       if (stamp)
         refresh_connected = true;
+    }
+    if (begin_schedule.Due(QpcNow())) {
+      if (peer_controller.Connected() && authorization.Current(active_authorization) &&
+          !output.Suspended()) {
+        remotekit_rtc_source_restrictions restrictions{};
+        restrictions.struct_size = sizeof(restrictions);
+        const int status =
+            sdk.remotekit_rtc_get_source_restrictions(peer_controller.Handle(), &restrictions);
+        if (status != REMOTEKIT_SDK_OK) {
+          registry.SetError("RTC source restrictions failed " + std::to_string(status));
+          break;
+        }
+        const auto native = output.Slots().LatestMetadata();
+        recovery.Update(policy_degradation.load() == REMOTEKIT_RTC_BALANCED,
+                        uint64_t{native.width_pixels} * native.height_pixels,
+                        restrictions.target_pixels);
+        official_max_fps = restrictions.max_fps ? restrictions.max_fps : 240;
+      } else {
+        recovery.Update(false, 0, 0);
+      }
     }
     sampling_fps =
         cadence.Update(comp_bitrate.load(), comp_fps.load(), policy_max_fps.load(),
@@ -288,7 +310,8 @@ void MediaPipeline::MediaLoop() {
       const bool force_tail = tail_ready && tail_begins < 3;
       const bool force_refresh =
           result != RenderSlots::Result::ready && presentation_refresh.CanForce(now_ms);
-      if (!output.Slots().Begin(interval, force_tail || force_refresh, error, &sent)) {
+      if (!output.Slots().Begin(interval, force_tail || force_refresh || recovery.active(), error,
+                                &sent)) {
         if (frame.release)
           frame.release(frame.release_context, frame.frame_id);
         {
@@ -438,8 +461,11 @@ void MediaPipeline::MediaLoop() {
                                : 1;
         if (status != 0)
           frame.release(frame.release_context, frame.frame_id);
-        else if (tail)
-          ++tail_submissions;
+        else {
+          recovery.Submitted();
+          if (tail)
+            ++tail_submissions;
+        }
       }
     }
     if (now - last_stats >= QpcFrequency()) {

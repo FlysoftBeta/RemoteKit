@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define REMOTEKIT_RTC_ABI_VERSION 6u
+#define REMOTEKIT_RTC_ABI_VERSION 7u
 enum remotekit_rtc_event_type {
   REMOTEKIT_RTC_SDP_OFFER = 1,
   REMOTEKIT_RTC_SDP_ANSWER = 2,
@@ -106,7 +106,7 @@ struct remotekit_rtc_encoded_frame {
   uint32_t width, height, rtp_timestamp;
   int64_t capture_time_us;
   uint32_t keyframe;
-  int32_t qp; /* -1 if unavailable */
+  int32_t qp; /* frame luma QP, 0..51; -1 if unavailable */
 };
 struct remotekit_rtc_clock_sample {
   uint32_t struct_size, consistent_across_processes, high_resolution;
@@ -144,6 +144,16 @@ struct remotekit_rtc_adaptation {
   uint32_t struct_size, width, height, drop;
   uint32_t max_fps; /* official source restriction, 0 = unlimited; also on drop */
 };
+struct remotekit_rtc_source_restrictions {
+  uint32_t struct_size;
+  uint32_t target_pixels; /* sink pixel target, 0 = unlimited */
+  uint32_t max_fps;       /* source framerate limit, 0 = unlimited */
+};
+/* Reads current WebRTC sink wants without admitting or dropping a frame.
+ * The source can request recovery samples while its pixels are restricted. */
+REMOTEKIT_SDK_API int remotekit_rtc_get_source_restrictions(
+    uint64_t peer,
+    struct remotekit_rtc_source_restrictions* restrictions);
 /* Calls WebRTC's source adapter exactly once before selecting a native frame.
  * Always pass the original full atlas dimensions, never an adapted size.
  * timestamp_us is an increasing SDK monotonic media time, including refreshes.

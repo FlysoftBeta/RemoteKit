@@ -70,12 +70,20 @@ void TextureSource::RequestRefreshFrame() {
   refresh_();
 }
 
-remotekit_rtc_adaptation TextureSource::Adapt(int width, int height, int64_t timestamp_us) {
-  remotekit_rtc_adaptation result{sizeof(result), 0, 0, 1, 0};
+remotekit_rtc_source_restrictions TextureSource::Restrictions() {
+  remotekit_rtc_source_restrictions result{sizeof(result), 0, 0};
+  const int pixels = video_adapter()->GetTargetPixels();
+  if (pixels < std::numeric_limits<int>::max())
+    result.target_pixels = static_cast<uint32_t>(std::max(0, pixels));
   const float max_fps = video_adapter()->GetMaxFramerate();
   if (std::isfinite(max_fps) &&
       static_cast<double>(max_fps) < static_cast<double>(std::numeric_limits<int>::max()))
     result.max_fps = static_cast<uint32_t>(std::max(1.0f, std::floor(max_fps)));
+  return result;
+}
+
+remotekit_rtc_adaptation TextureSource::Adapt(int width, int height, int64_t timestamp_us) {
+  remotekit_rtc_adaptation result{sizeof(result), 0, 0, 1, Restrictions().max_fps};
   int out_width = 0, out_height = 0, crop_width = 0, crop_height = 0;
   int crop_x = 0, crop_y = 0;
   if (AdaptFrame(width, height, timestamp_us, &out_width, &out_height, &crop_width, &crop_height,
@@ -114,6 +122,19 @@ std::optional<webrtc::DegradationPreference> remotekit::rtc::DegradationPreferen
       return std::nullopt;
   }
 }
+int remotekit_rtc_get_source_restrictions(uint64_t id,
+                                          remotekit_rtc_source_restrictions* restrictions) {
+  if (!restrictions || restrictions->struct_size != sizeof(*restrictions))
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  *restrictions = {sizeof(*restrictions), 0, 0};
+  return WithPeer(id, [&](Peer& peer) {
+    if (!peer.source)
+      return REMOTEKIT_SDK_INVALID_STATE;
+    *restrictions = peer.source->Restrictions();
+    return REMOTEKIT_SDK_OK;
+  });
+}
+
 int remotekit_rtc_adapt_frame(uint64_t id,
                               uint32_t width,
                               uint32_t height,

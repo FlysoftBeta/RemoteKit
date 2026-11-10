@@ -1,6 +1,6 @@
 import './stats-overlay.css';
 import { useEffect, useRef, useState } from 'react';
-import { statsViewModel } from '../media/stats-view-model';
+import { physicalPlaneSize, statsViewModel } from '../media/stats-view-model';
 import type { Diagnostics } from '../media/types';
 import type { Surface } from '../presentation/types';
 const measured = (value: unknown, suffix: string, digits = 1) =>
@@ -39,14 +39,26 @@ const resolutionReason: Record<string, string> = {
   'receiver-level-axis-limit': '接收端尺寸上限',
   'encoder-axis-limit': '编码器尺寸上限',
 };
+const qualityLimitationReason: Record<string, string> = {
+  none: '无',
+  cpu: '编码负载',
+  bandwidth: '带宽',
+  other: '其他',
+};
 export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostics; surface?: Surface }) {
   const overlay = useRef<HTMLDivElement>(null),
     [scale, setScale] = useState(1);
+  const [planeSize, setPlaneSize] = useState({ width: 0, height: 0 });
   useEffect(() => {
     const node = overlay.current,
       parent = node?.parentElement;
     if (!node || !parent || typeof ResizeObserver !== 'function') return;
-    const resize = () =>
+    const resize = () => {
+      const bounds = parent.getBoundingClientRect();
+      const next = physicalPlaneSize(bounds.width, bounds.height, window.devicePixelRatio);
+      setPlaneSize((current) =>
+        current.width === next.width && current.height === next.height ? current : next,
+      );
       setScale(
         Math.max(
           0.1,
@@ -57,11 +69,16 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
           ),
         ),
       );
+    };
     const observer = new ResizeObserver(resize);
     observer.observe(parent);
     observer.observe(node);
+    window.addEventListener('resize', resize);
     resize();
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', resize);
+    };
   }, []);
   const endpoint = diagnostics.endpoint;
   const model = statsViewModel(diagnostics, surface?.id);
@@ -77,8 +94,7 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
       }
     | undefined;
   const comp = endpoint?.comp as { codecMaxFps?: unknown; officialMaxFps?: unknown } | undefined;
-  const sender = endpoint?.senderRtcStats as
-    { selectedPair?: { availableOutgoingBitrate?: number } } | undefined;
+  const sender = model.sender;
   return (
     <div
       ref={overlay}
@@ -181,6 +197,14 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
         <dd>
           {diagnostics.videoWidth && diagnostics.videoHeight
             ? `${diagnostics.videoWidth}×${diagnostics.videoHeight}`
+            : '—'}
+        </dd>
+        <dt>平面物理像素</dt>
+        <dd>{planeSize.width && planeSize.height ? `${planeSize.width}×${planeSize.height}` : '—'}</dd>
+        <dt>WebRTC 画质限制</dt>
+        <dd>
+          {model.qualityLimitationReason
+            ? (qualityLimitationReason[model.qualityLimitationReason] ?? model.qualityLimitationReason)
             : '—'}
         </dd>
         <dt>媒体采样 X / Y</dt>

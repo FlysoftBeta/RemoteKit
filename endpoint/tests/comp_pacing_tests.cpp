@@ -1,4 +1,5 @@
 #include "media/comp_pacing.hpp"
+#include "media/comp_recovery.hpp"
 #include "browser/osr/cache_policy.h"
 #include "browser/osr_wake_state.h"
 #include <cstdio>
@@ -11,6 +12,39 @@ void Require(bool value, const char* message) {
   }
 }
 int main() {
+  remotekit::CompRecoverySampling recovery;
+  CompPacing recovery_slots;
+  recovery_slots.Reset(100);
+  auto static_begin = recovery_slots.Reserve();
+  Require(static_begin && recovery_slots.Reject(*static_begin) &&
+              recovery_slots.IdleRejected(*static_begin),
+          "static source enters Idle before spatial recovery");
+  recovery.Update(true, 1920u * 1080u, 640u * 360u);
+  Require(
+      recovery.active() && recovery.state() == remotekit::CompRecoverySampling::State::kSampling,
+      "balanced spatial restriction creates recovery demand");
+  auto sample = recovery_slots.Reserve(recovery.active());
+  Require(sample && !recovery_slots.Reserve(recovery.active()),
+          "recovery bypasses Idle but cannot bypass occupied capacity");
+  Require(recovery_slots.Reject(*sample), "recovery returns the sampling slot");
+  recovery.Update(true, 1920u * 1080u, 0);
+  Require(recovery.state() == remotekit::CompRecoverySampling::State::kRestoring,
+          "lifting the restriction retains one native-frame demand");
+  sample = recovery_slots.Reserve(recovery.active());
+  Require(sample && recovery_slots.Reject(*sample), "native restoration uses a legal slot");
+  recovery.Submitted();
+  Require(!recovery.active() && !recovery_slots.Reserve(recovery.active()),
+          "submitted native frame returns the static source to Idle");
+  recovery.Update(true, 1920u * 1080u, 640u * 360u);
+  recovery.Update(false, 1920u * 1080u, 640u * 360u);
+  Require(!recovery.active(), "other degradation preferences do not force recovery samples");
+  recovery.Update(true, 1920u * 1080u, 640u * 360u);
+  recovery_slots.Stop();
+  Require(!recovery_slots.Reserve(recovery.active()), "recovery cannot bypass Stop");
+  recovery.Update(true, 0, 640u * 360u);
+  Require(!recovery.active(), "an output without native metadata has no recovery demand");
+  recovery.Update(true, 1920u * 1080u, 1920u * 1080u);
+  Require(!recovery.active(), "a pixel target at native size preserves ordinary pacing");
   using namespace remotekit::browser::osr;
   Require(CachedWorkReject(false, false, false, true) == remotekit::RenderRejectReason::kIdle,
           "usable unchanged cached pixels are Idle even when producer demand is unknown");

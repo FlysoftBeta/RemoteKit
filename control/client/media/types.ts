@@ -23,6 +23,13 @@ export interface RenderingDiagnostics {
   freezeCopies: number;
   mediaRefreshRequests: number;
 }
+export interface SenderRtcStats {
+  selectedPair?: { availableOutgoingBitrate?: number };
+  outbound?: {
+    kind?: string;
+    qualityLimitationReason?: string;
+  }[];
+}
 export interface Diagnostics {
   receiverPlayout?: Partial<Record<'video' | 'audio', ReceiverPlayout>>;
   rendering?: RenderingDiagnostics;

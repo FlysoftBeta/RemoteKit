@@ -23,7 +23,7 @@
 |---|---|
 | 0010 client-gesture-arbitration | 客户端手势候选的 touch-action/preventDefault 与逐包 ACK 仲裁、惯性期间保持 touch-action |
 | 0013 remotekit-osr-output | 离屏 OSR 输出设备：完整 token、Begin 到 GPU 的顺序、完整重绘、真实 ANGLE Fence |
-| 0014 webrtc-screenshare-adaptation | RemoteKit screencast 的 BALANCED/质量缩放资格；导出 H.264 解析器 |
+| 0014 webrtc-screenshare-adaptation | RemoteKit screencast 的 BALANCED/质量缩放资格 |
 | 0015 page-lifecycle-ack | 冻结/解冻的精确 renderer 回执与连接代次 |
 | 0016 file-chooser-input-anchor | 报告文件输入框的实时位置用于锚定文件篮 |
 | 0017 origin-worker-identity | 按 worker 自身 origin 选择 UA/UA-CH/`WorkerNavigator.platform`（`OverrideWorkerIdentity`），覆盖 worker 启动、主脚本与 fetch |
