@@ -50,7 +50,7 @@ Control 与所有节点之间、节点与节点之间用同一个握手：`Noise
 - 第二条消息的载荷是 `node.ready`（connectionEpoch、buildId、生效配置、configHash、该节点上的活跃会话清单）、`node.release`（给 updater）或 `node.reject{code: build_mismatch | unknown_node | no_release}`。
 - 握手后使用 Noise Split 得到的两个方向 AES-256-GCM 状态。与 Noise 规范的唯一差异：单条传输消息上限 4MiB（规范为 65535 字节）。nonce 用尽或任一次解密失败即断开。
 - 明文首字节区分 JSON（≤1MiB 的请求/回复/事件）与 BINARY（u32 头长度 + JSON 头 + 原始字节，用于更新包和对象数据）。
-- 载体：远端节点用 Control HTTP(S) 监听上的 WebSocket `/api/node`，一个 Noise 消息对应一个二进制帧；通道自带认证与加密，所以普通 `ws://` 也安全，不再依赖 Bearer、TLS 代理或 loopback 规则；节点用 `wss://` 连接时不校验服务器证书（自签名、私有 CA、域名不符、过期都接受），Control 的身份由 Noise PSK 握手证明。本地节点用 stdio，`u32le 长度 + 消息`，密钥只经子进程环境变量传入且立即清除——同机部署不经过网络栈，但握手与语义完全相同。节点之间用 TCP，帧格式同 stdio。
+- 载体：远端节点用 Control HTTP(S) 监听上的 WebSocket `/api/node`，一个 Noise 消息对应一个二进制帧；通道自带认证与加密，所以普通 `ws://` 也安全，不再依赖 Bearer、TLS 代理或 loopback 规则；节点自带 WebSocket 客户端（`stream_socket.cpp` 的 Schannel TLS，不经 WinHTTP），`wss://` 不校验服务器证书与吊销状态（自签名、私有 CA、域名不符、过期、已吊销都接受），也不使用系统代理；Control 的身份由 Noise PSK 握手证明。WinHTTP 的忽略标志没有"忽略吊销"，所以不能用它承载这条通道。连接失败的日志带阶段与错误码（DNS、TCP、TLS 握手、HTTP 状态、Noise 握手）。本地节点用 stdio，`u32le 长度 + 消息`，密钥只经子进程环境变量传入且立即清除——同机部署不经过网络栈，但握手与语义完全相同。节点之间用 TCP，帧格式同 stdio。
 - 双向请求：Control → Endpoint 是管理方法（20 秒超时为 `outcome_unknown`，每节点最多 256 个在途）；Endpoint → Control 只有 `object.committed`、`object.locate` 等少数请求，同样的超时语义，在独立工作线程上等待，不阻塞管理分发。
 - 节点每 15 秒 `node.ping`，任一侧 45 秒没收到任何消息即断开。同一 nodeId 的新连接替换旧连接。
 

@@ -1,18 +1,20 @@
 if(WIN32)
   add_library(remotekit_cluster STATIC src/cluster/noise.cpp src/cluster/frames.cpp
-    src/cluster/channel.cpp src/cluster/node_files.cpp src/cluster/tcp.cpp)
+    src/cluster/channel.cpp src/cluster/node_files.cpp src/cluster/tcp.cpp
+    src/cluster/stream_socket.cpp)
   target_include_directories(remotekit_cluster PUBLIC ${PROJECT_SOURCE_DIR} src ${RK_DEPS})
   target_compile_features(remotekit_cluster PUBLIC cxx_std_20)
   target_compile_definitions(remotekit_cluster PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
   target_compile_options(remotekit_cluster PRIVATE /W4 /utf-8)
-  target_link_libraries(remotekit_cluster PUBLIC bcrypt winhttp ws2_32)
+  target_link_libraries(remotekit_cluster PUBLIC bcrypt winhttp ws2_32 secur32)
   add_library(remotekit_cluster_static STATIC src/cluster/noise.cpp src/cluster/frames.cpp
-    src/cluster/channel.cpp src/cluster/node_files.cpp src/cluster/tcp.cpp)
+    src/cluster/channel.cpp src/cluster/node_files.cpp src/cluster/tcp.cpp
+    src/cluster/stream_socket.cpp)
   target_include_directories(remotekit_cluster_static PUBLIC ${PROJECT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} src ${RK_DEPS})
   target_compile_features(remotekit_cluster_static PUBLIC cxx_std_20)
   target_compile_definitions(remotekit_cluster_static PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
   target_compile_options(remotekit_cluster_static PRIVATE /W4 /utf-8)
-  target_link_libraries(remotekit_cluster_static PUBLIC bcrypt winhttp ws2_32)
+  target_link_libraries(remotekit_cluster_static PUBLIC bcrypt winhttp ws2_32 secur32)
   set_property(TARGET remotekit_cluster_static PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
   file(GLOB RK_ZSTD_COMMON CONFIGURE_DEPENDS "${RK_DEPS}/zstd-1.5.7/lib/common/*.c")
   file(GLOB RK_ZSTD_DECOMPRESS CONFIGURE_DEPENDS "${RK_DEPS}/zstd-1.5.7/lib/decompress/*.c")

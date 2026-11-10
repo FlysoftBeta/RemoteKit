@@ -1,7 +1,8 @@
 #include "cluster/channel.hpp"
 #include "cluster/node_files.hpp"
+#include "cluster/stream_socket.hpp"
 #include <windows.h>
-#include <winhttp.h>
+#include <bcrypt.h>
 #include <fcntl.h>
 #include <io.h>
 #include <atomic>
@@ -171,17 +172,29 @@ class Pipes final : public BufferedCarrier {
     return bytes;
   }
 };
-struct HttpHandle {
-  HINTERNET value = nullptr;
-  ~HttpHandle() {
-    if (value)
-      WinHttpCloseHandle(value);
+bool RandomBytes(std::span<uint8_t> out) {
+  return BCryptGenRandom(nullptr, out.data(), static_cast<ULONG>(out.size()),
+                         BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+}
+std::string Base64(std::span<const uint8_t> bytes) {
+  static constexpr char kAlphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  for (size_t i = 0; i < bytes.size(); i += 3) {
+    uint32_t chunk = bytes[i] << 16 | (i + 1 < bytes.size() ? bytes[i + 1] << 8 : 0) |
+                     (i + 2 < bytes.size() ? bytes[i + 2] : 0);
+    out += kAlphabet[chunk >> 18 & 63];
+    out += kAlphabet[chunk >> 12 & 63];
+    out += i + 1 < bytes.size() ? kAlphabet[chunk >> 6 & 63] : '=';
+    out += i + 2 < bytes.size() ? kAlphabet[chunk & 63] : '=';
   }
-};
+  return out;
+}
+// RFC 6455 client over a StreamSocket: one binary message per Noise message.
 class WebSocket final : public BufferedCarrier {
  public:
-  HttpHandle session, connection;
-  std::atomic<HINTERNET> socket{nullptr};
+  std::unique_ptr<StreamSocket> stream;
+  Bytes pending;
   ~WebSocket() override {
     Close();
     if (reader_.joinable())
@@ -191,39 +204,101 @@ class WebSocket final : public BufferedCarrier {
   void Close() override {
     closed_ = true;
     wake_.notify_all();
-    std::lock_guard lock(send_mutex_);
-    if (auto ws = socket.exchange(nullptr))
-      WinHttpCloseHandle(ws);
+    if (stream)
+      stream->Shutdown();
   }
   Result<void> Send(std::span<const uint8_t> bytes) override {
-    std::lock_guard lock(send_mutex_);
-    if (closed_ || !socket || bytes.size() > kMaxCiphertext)
+    if (bytes.size() > kMaxCiphertext)
       return Closed();
-    if (WinHttpWebSocketSend(socket.load(), WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE,
-                             const_cast<uint8_t*>(bytes.data()), static_cast<DWORD>(bytes.size())))
-      return Closed();
-    return {};
+    return SendFrame(0x2, bytes);
   }
 
  private:
+  Result<void> SendFrame(uint8_t opcode, std::span<const uint8_t> payload) {
+    std::lock_guard lock(send_mutex_);
+    if (closed_)
+      return Closed();
+    Bytes frame{static_cast<uint8_t>(0x80 | opcode)};
+    if (payload.size() < 126) {
+      frame.push_back(0x80 | static_cast<uint8_t>(payload.size()));
+    } else if (payload.size() <= 0xFFFF) {
+      frame.push_back(0x80 | 126);
+      frame.push_back(static_cast<uint8_t>(payload.size() >> 8));
+      frame.push_back(static_cast<uint8_t>(payload.size()));
+    } else {
+      frame.push_back(0x80 | 127);
+      for (int shift = 56; shift >= 0; shift -= 8)
+        frame.push_back(static_cast<uint8_t>(static_cast<uint64_t>(payload.size()) >> shift));
+    }
+    std::array<uint8_t, 4> mask;
+    if (!RandomBytes(mask))
+      return Closed();
+    frame.insert(frame.end(), mask.begin(), mask.end());
+    for (size_t i = 0; i < payload.size(); ++i)
+      frame.push_back(payload[i] ^ mask[i % 4]);
+    if (!stream->WriteAll(frame))
+      return Closed();
+    return {};
+  }
+  bool ReadExact(std::span<uint8_t> out) {
+    while (!out.empty()) {
+      if (!pending.empty()) {
+        size_t n = std::min(out.size(), pending.size());
+        std::copy_n(pending.begin(), n, out.begin());
+        pending.erase(pending.begin(), pending.begin() + n);
+        out = out.subspan(n);
+        continue;
+      }
+      auto n = stream->Read(out);
+      if (!n)
+        return false;
+      out = out.subspan(n.value());
+    }
+    return true;
+  }
   Result<Bytes> Read() override {
-    Bytes out;
-    std::array<uint8_t, 16384> buffer;
-    HINTERNET ws = socket.load();
+    Bytes message;
+    bool started = false;
     while (!closed_) {
-      DWORD count = 0;
-      WINHTTP_WEB_SOCKET_BUFFER_TYPE type;
-      if (WinHttpWebSocketReceive(ws, buffer.data(), static_cast<DWORD>(buffer.size()), &count,
-                                  &type))
+      std::array<uint8_t, 2> head;
+      if (!ReadExact(head))
         return Closed();
-      if (type != WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE &&
-          type != WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE)
+      bool fin = head[0] & 0x80;
+      uint8_t opcode = head[0] & 0x0F;
+      uint64_t length = head[1] & 0x7F;
+      if ((head[0] & 0x70) || (head[1] & 0x80))
         return Closed();
-      if (out.size() + count > kMaxCiphertext)
+      int extension = length == 126 ? 2 : length == 127 ? 8 : 0;
+      if (extension) {
+        std::array<uint8_t, 8> size{};
+        if (!ReadExact(std::span(size).first(extension)))
+          return Closed();
+        length = 0;
+        for (int i = 0; i < extension; ++i)
+          length = length << 8 | size[i];
+      }
+      if (length > kMaxCiphertext)
         return Closed();
-      out.insert(out.end(), buffer.begin(), buffer.begin() + count);
-      if (type == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE)
-        return out;
+      Bytes payload(static_cast<size_t>(length));
+      if (!ReadExact(payload))
+        return Closed();
+      if (opcode == 0x9) {
+        if (!SendFrame(0xA, payload))
+          return Closed();
+        continue;
+      }
+      if (opcode == 0xA)
+        continue;
+      if (opcode != 0x2 && opcode != 0x0)
+        return Closed();
+      if ((opcode == 0x2) == started)
+        return Closed();
+      started = true;
+      if (message.size() + payload.size() > kMaxCiphertext)
+        return Closed();
+      message.insert(message.end(), payload.begin(), payload.end());
+      if (fin)
+        return message;
     }
     return Closed();
   }
@@ -488,91 +563,50 @@ Result<Established> ConnectStdio(const Key& key, const Hello& hello) {
   }
   return ConnectCarrier(HandleCarrier(read, write), key, hello);
 }
-// WinHTTP reports TLS failures synchronously on the calling thread; the flags say which check failed
-// (0 means the handshake itself failed, e.g. the server does not speak TLS or no common protocol).
-thread_local DWORD g_secure_failure = 0;
-void CALLBACK SecureFailureCallback(HINTERNET, DWORD_PTR, DWORD status, LPVOID info, DWORD length) {
-  if (status == WINHTTP_CALLBACK_STATUS_SECURE_FAILURE && info && length == sizeof(DWORD))
-    g_secure_failure = *static_cast<DWORD*>(info);
-}
-std::string ToHex(DWORD value) {
-  char text[9];
-  snprintf(text, sizeof(text), "%X", value);
-  return text;
-}
-Error WinHttpFailure(const char* stage) {
-  DWORD code = GetLastError();
-  std::string message = std::string("cluster connect failed at ") + stage + ", Win32 error " +
-                        std::to_string(code);
-  if (code == ERROR_WINHTTP_SECURE_FAILURE)
-    message += ", TLS failure flags 0x" + ToHex(g_secure_failure);
-  return {ErrorCode::kUnavailable, std::move(message)};
-}
 Result<Established> ConnectWebSocket(const std::string& url, const Key& key, const Hello& hello) {
   auto address = ParseControlUrl(url);
   if (!address)
     return address.error();
-  bool tls = address.value().secure;
-  auto ws = std::make_unique<WebSocket>();
-  ws->session.value = WinHttpOpen(
-      L"RemoteKit Node", tls ? WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY : WINHTTP_ACCESS_TYPE_NO_PROXY,
-      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-  if (!ws->session.value)
-    return WinHttpFailure("open");
-  WinHttpSetTimeouts(ws->session.value, 5000, 5000, 5000, 5000);
-  g_secure_failure = 0;
-  WinHttpSetStatusCallback(ws->session.value, SecureFailureCallback,
-                           WINHTTP_CALLBACK_FLAG_SECURE_FAILURE, 0);
-  // Older Windows builds leave TLS 1.2 off by default; TLS 1.3 is not available everywhere.
-  DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
-  if (!WinHttpSetOption(ws->session.value, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols,
-                        sizeof(protocols))) {
-    protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
-    WinHttpSetOption(ws->session.value, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols,
-                     sizeof(protocols));
+  auto stream = ConnectStream(address.value().host, address.value().port, address.value().secure);
+  if (!stream)
+    return stream.error();
+  int length = WideCharToMultiByte(CP_UTF8, 0, address.value().host.c_str(), -1, nullptr, 0,
+                                   nullptr, nullptr);
+  std::string host(length > 0 ? length - 1 : 0, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, address.value().host.c_str(), -1, host.data(), length, nullptr,
+                      nullptr);
+  if (host.find(':') != std::string::npos && !host.starts_with('['))
+    host = "[" + host + "]";
+  std::array<uint8_t, 16> nonce;
+  if (!RandomBytes(nonce))
+    return Closed();
+  std::string request = "GET /api/node HTTP/1.1\r\nHost: " + host + ":" +
+                        std::to_string(address.value().port) +
+                        "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " +
+                        Base64(nonce) + "\r\nSec-WebSocket-Version: 13\r\n\r\n";
+  if (!stream.value()->WriteAll({reinterpret_cast<const uint8_t*>(request.data()), request.size()}))
+    return Error{ErrorCode::kUnavailable, "cluster connect failed sending the upgrade request"};
+  std::string response;
+  std::array<uint8_t, 4096> chunk;
+  size_t end = std::string::npos;
+  while ((end = response.find("\r\n\r\n")) == std::string::npos) {
+    if (response.size() > 16384)
+      return Error{ErrorCode::kUnavailable, "cluster connect: oversized upgrade response"};
+    auto n = stream.value()->Read(chunk);
+    if (!n)
+      return Error{ErrorCode::kUnavailable,
+                   "cluster connect: the server closed the connection before answering the "
+                   "WebSocket upgrade (not a RemoteKit Control endpoint, or a proxy dropped it)"};
+    response.append(reinterpret_cast<const char*>(chunk.data()), n.value());
   }
-  ws->connection.value =
-      WinHttpConnect(ws->session.value, address.value().host.c_str(), address.value().port, 0);
-  if (!ws->connection.value)
-    return WinHttpFailure("connect");
-  HttpHandle request{WinHttpOpenRequest(ws->connection.value, L"GET", L"/api/node", nullptr,
-                                        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                        tls ? WINHTTP_FLAG_SECURE : 0)};
-  if (!request.value)
-    return WinHttpFailure("request");
-  DWORD redirects = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
-  if (!WinHttpSetOption(request.value, WINHTTP_OPTION_REDIRECT_POLICY, &redirects,
-                        sizeof(redirects)) ||
-      !WinHttpSetOption(request.value, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0))
-    return WinHttpFailure("options");
-  // The Noise handshake authenticates Control with the cluster key, so the TLS layer is only
-  // transport cover: self-signed, private-CA and mismatched-name certificates are accepted.
-  if (tls) {
-    DWORD ignored = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                    SECURITY_FLAG_IGNORE_CERT_CN_INVALID | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-    if (!WinHttpSetOption(request.value, WINHTTP_OPTION_SECURITY_FLAGS, &ignored,
-                          sizeof(ignored)))
-      return WinHttpFailure("tls options");
-  }
-  if (!WinHttpSendRequest(request.value, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA,
-                          0, 0, 0))
-    return WinHttpFailure(tls ? "send request (TLS or network)" : "send request");
-  if (!WinHttpReceiveResponse(request.value, nullptr))
-    return WinHttpFailure("receive response");
-  DWORD status = 0, size = sizeof(status);
-  if (!WinHttpQueryHeaders(request.value, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                           WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX))
-    return WinHttpFailure("query status");
-  if (status != 101)
+  if (!response.starts_with("HTTP/1.1 101"))
     return Error{ErrorCode::kUnavailable,
-                 "cluster connect: HTTP " + std::to_string(status) + " instead of 101 upgrade"};
-  ws->socket = WinHttpWebSocketCompleteUpgrade(request.value, 0);
-  if (!ws->socket)
-    return WinHttpFailure("websocket upgrade");
-  DWORD timeout = 5000;
-  WinHttpSetOption(ws->socket, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
-  timeout = 60000;
-  WinHttpSetOption(ws->socket, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+                 "cluster connect: " + response.substr(0, response.find("\r\n")) +
+                     " instead of a 101 upgrade"};
+  auto ws = std::make_unique<WebSocket>();
+  ws->pending.assign(response.begin() + end + 4, response.end());
+  stream.value()->SetReceiveTimeout(60s);
+  ws->stream = std::move(stream).value();
   ws->Open();
   auto established = ConnectCarrier(std::move(ws), key, hello);
   if (!established && established.error().message == "cluster channel closed")
