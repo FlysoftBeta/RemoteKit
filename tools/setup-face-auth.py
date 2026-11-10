@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision the Windows x64 Endpoint face models and OpenCV runtime."""
+"""Provision Windows x64 Endpoint imaging libraries and inference models."""
 
 import argparse
 import hashlib
@@ -11,13 +11,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import urllib.request
 import zipfile
 
 TOOLS = Path(__file__).resolve().parent
 MANIFEST = TOOLS / "face-auth-deps.json"
 DEPS = TOOLS.parent / "build" / "dependencies" / "face-auth"
-MODELS = DEPS / "face-models"
+MODELS = DEPS / "models"
 CACHE = DEPS / "cache"
 CONFIG = json.loads(MANIFEST.read_text(encoding="utf-8"))
 
@@ -59,8 +60,16 @@ def runtime_files():
     for name, expected in models.items():
         source = MODELS / name
         verify(source, expected)
-        entries.append((source, Path("bin/face-models") / name))
-    entries.append((MANIFEST, Path("bin/face-models/provenance.json")))
+        entries.append((source, Path("bin/models") / name))
+    entries.append((MANIFEST, Path("bin/models/provenance.json")))
+    for name, (_, expected) in CONFIG["photo_models"].items():
+        source = MODELS / name
+        verify(source, expected)
+        entries.append((source, Path("bin/models") / name))
+    for name, (path, expected) in CONFIG["webp"]["licenses"].items():
+        source = CACHE / f'libwebp-{CONFIG["webp"]["version"]}' / path
+        verify(source, expected)
+        entries.append((source, Path("licenses") / name))
     return entries
 
 
@@ -120,6 +129,34 @@ def install_opencv():
                     "--target", "install"], check=True, env=env)
 
 
+def install_webp():
+    config = CONFIG["webp"]
+    source = CACHE / f'libwebp-{config["version"]}'
+    archive = CACHE / f"{source.name}.tar.gz"
+    download(config["url"], archive, config["sha256"])
+    marker = source / ".remotekit-source-sha256"
+    if not marker.is_file() or marker.read_text(encoding="ascii") != config["sha256"]:
+        with tarfile.open(archive) as package:
+            package.extractall(CACHE, filter="data")
+        marker.write_text(config["sha256"], encoding="ascii")
+    for path, expected in config["licenses"].values():
+        verify(source / path, expected)
+    cmake, ninja, env = msvc_tools()
+    build = DEPS / "webp-build"
+    install = DEPS / "webp-static"
+    disabled = ("BUILD_SHARED_LIBS", "WEBP_BUILD_ANIM_UTILS", "WEBP_BUILD_CWEBP",
+                "WEBP_BUILD_DWEBP", "WEBP_BUILD_GIF2WEBP", "WEBP_BUILD_IMG2WEBP",
+                "WEBP_BUILD_VWEBP", "WEBP_BUILD_WEBPINFO", "WEBP_BUILD_WEBPMUX",
+                "WEBP_BUILD_EXTRAS", "WEBP_BUILD_LIBWEBPMUX")
+    subprocess.run([str(cmake), "-S", str(source), "-B", str(build), "-G", "Ninja",
+                    f"-DCMAKE_MAKE_PROGRAM={ninja}", "-DCMAKE_BUILD_TYPE=Release",
+                    "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL",
+                    f"-DCMAKE_INSTALL_PREFIX={install}",
+                    *[f"-D{option}=OFF" for option in disabled]], check=True, env=env)
+    subprocess.run([str(cmake), "--build", str(build), "--parallel", str(os.cpu_count() or 1),
+                    "--target", "install"], check=True, env=env)
+
+
 def export_minifas(source, output):
     import cv2
     import numpy as np
@@ -162,6 +199,8 @@ def export_minifas(source, output):
 
 
 def install_models():
+    for name, (url, expected) in CONFIG["photo_models"].items():
+        download(url, MODELS / name, expected)
     commit = CONFIG["zoo_commit"]
     for name, (path, expected) in CONFIG["zoo"].items():
         if name.endswith(".onnx"):
@@ -207,8 +246,9 @@ def main():
     args = parser.parse_args()
     if not args.verify:
         install_opencv()
+        install_webp()
         install_models()
-    print(f"Verified {len(runtime_files())} face-auth runtime files in {DEPS}")
+    print(f"Verified {len(runtime_files())} imaging runtime files in {DEPS}")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import type { FileRequest } from '../../shared/product';
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
@@ -41,6 +42,7 @@ export interface Selection {
   binding: FileBinding;
   entryIds: string[];
   files: Pick<LibraryFileEntry, 'assetId' | 'name' | 'type'>[];
+  limits: FileRequest['limits'];
   prepared: boolean;
 }
 

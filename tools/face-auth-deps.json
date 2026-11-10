@@ -1,5 +1,18 @@
 {
   "model_version": "yunet-2023mar+sface-2021dec+minifas-v1se-v2",
+  "webp": {
+    "version": "1.5.0",
+    "url": "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.5.0.tar.gz",
+    "sha256": "7d6fab70cf844bf6769077bd5d7a74893f8ffd4dfb42861745750c63c2a5c92c",
+    "licenses": {
+      "libwebp-COPYING.txt": ["COPYING", "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf"],
+      "libwebp-PATENTS.txt": ["PATENTS", "cc3273e0694ea5896145e0677699b53471b03ea43021ddc50e7923fbb9f5023c"]
+    }
+  },
+  "photo_models": {
+    "doc-orientation.onnx": ["https://huggingface.co/PaddlePaddle/PP-LCNet_x1_0_doc_ori_onnx/resolve/7330ab7039123e46af2dc03154b9969aa412c61d/inference.onnx", "af9a0a4f317ff0709ce752067807f819cb15d883f8ecad89f28df1c6ee2d9c92"],
+    "doc-orientation-LICENSE.txt": ["https://raw.githubusercontent.com/PaddlePaddle/PaddleX/v3.0.0/LICENSE", "accc36c817ac5ede473d05732e14afc11cb6e55ef5919bc826b653f631165043"]
+  },
   "opencv": {
     "version": "4.11.0",
     "commit": "31b0eeea0b44b370fd0712312df4214d4ae1b158",

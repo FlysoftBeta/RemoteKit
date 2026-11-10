@@ -181,7 +181,7 @@ Result<void> FileLibrary::Initialize() {
     root_ = native.starts_with(LR"(\\)") ? fs::path(LR"(\\?\UNC\)" + native.substr(2))
                                          : fs::path(LR"(\\?\)" + native);
   for (const auto& directory : {root_, root_ / "metadata", root_ / "staging", root_ / "drafts",
-                                root_ / "incoming", root_ / "selections"}) {
+                                root_ / "incoming", root_ / "selections", root_ / "derivatives"}) {
     RK_RETURN_IF_ERROR(CreateDirectories(directory));
     if (!Plain(directory, true))
       return Error{ErrorCode::kUnavailable, "unsafe_library_root"};
@@ -232,6 +232,11 @@ Result<void> FileLibrary::Initialize() {
              binding.at("document").get<std::string>(), binding.at("request").get<std::string>()},
             {},
             state};
+        selection.accept = value.at("accept").get<std::vector<std::string>>();
+        const auto& limits = value.at("limits");
+        selection.limits.file_bytes = limits.at("maxFileBytes").get<std::uint64_t>();
+        selection.limits.batch_bytes = limits.at("maxBatchBytes").get<std::uint64_t>();
+        selection.limits.files = limits.at("maxFiles").get<std::size_t>();
         const auto& files = value.at("files");
         if (!HexId(id, 32) || selections_.size() >= kSelections || !files.is_array() ||
             files.empty() || files.size() > 64)
@@ -314,6 +319,11 @@ Result<void> FileLibrary::SaveSelection(const Selection& selection, const Check&
   RK_RETURN_IF_ERROR(Save(root_ / "selections" / (selection.id + ".json"),
                           {{"requestId", selection.request_id},
                            {"files", files},
+                           {"accept", selection.accept},
+                           {"limits",
+                            {{"maxFileBytes", selection.limits.file_bytes},
+                             {"maxBatchBytes", selection.limits.batch_bytes},
+                             {"maxFiles", selection.limits.files}}},
                            {"binding",
                             {{"browserIncarnation", binding.browser_incarnation},
                              {"view", binding.view},
@@ -619,14 +629,18 @@ Result<FileLibrary::Asset> FileLibrary::CreateDerivative(const Render& render,
                                                          const Check& check,
                                                          DerivativeFormat format,
                                                          const std::string& derived_from) {
-  const bool png = format == DerivativeFormat::png;
-  const auto budget = png ? kPngDerivativeBytes : kJpegDerivativeBytes;
+  const bool jpeg = format == DerivativeFormat::jpeg;
+  const auto budget = jpeg ? kJpegDerivativeBytes : kPngDerivativeBytes;
+  const char* extension = jpeg ? ".jpg" : format == DerivativeFormat::png ? ".png" : ".webp";
+  const char* type = jpeg                              ? "image/jpeg"
+                     : format == DerivativeFormat::png ? "image/png"
+                                                       : "image/webp";
   {
     std::lock_guard lock(mutex_);
     RK_RETURN_IF_ERROR(check());
   }
   RK_ASSIGN_OR_RETURN(random, RandomId());
-  const auto path = DraftData(random + (png ? ".png" : ".jpg"));
+  const auto path = DraftData(random + extension);
   struct Cleanup {
     fs::path path;
     ~Cleanup() { Remove(path); }
@@ -638,12 +652,34 @@ Result<FileLibrary::Asset> FileLibrary::CreateDerivative(const Render& render,
     RK_ASSIGN_OR_RETURN(size, FileSize(path));
     if (size > budget)
       return Error{ErrorCode::kLimitExceeded, "photo_output_too_large", ErrorReason::kFileTooLarge};
-    auto result = Publish(
-        path, {{}, png ? "image/png" : "image/jpeg", size, dimensions.width, dimensions.height},
-        check, derived_from);
+    auto result =
+        Publish(path, {{}, type, size, dimensions.width, dimensions.height}, check, derived_from);
     Remove(path);
     return result;
   }
+}
+Result<FileLibrary::Asset> FileLibrary::CachedDerivative(const std::string& source,
+                                                         DerivativeFormat format,
+                                                         const Render& render,
+                                                         const Check& check) {
+  std::lock_guard lock(derivatives_mutex_);
+  RK_RETURN_IF_ERROR(check());
+  RK_ASSIGN_OR_RETURN(original, Describe(source));
+  const auto path = root_ / "derivatives" /
+                    (original.id + (format == DerivativeFormat::jpeg  ? "-jpeg.json"
+                                    : format == DerivativeFormat::png ? "-png.json"
+                                                                      : "-webp.json"));
+  RK_ASSIGN_OR_RETURN(exists, FileExists(path));
+  if (exists) {
+    std::ifstream input(path, std::ios::binary);
+    const auto record = Json::parse(input, nullptr, false);
+    if (record.is_discarded() || !record.contains("assetId") || !record["assetId"].is_string())
+      return Error{ErrorCode::kInternal, "invalid_derivative_record"};
+    return Describe(record["assetId"].get<std::string>());
+  }
+  RK_ASSIGN_OR_RETURN(asset, CreateDerivative(render, check, format, source));
+  RK_RETURN_IF_ERROR(Save(path, {{"assetId", asset.id}}, check));
+  return asset;
 }
 Result<void> FileLibrary::Sweep() {
   std::lock_guard lock(mutex_);
@@ -665,13 +701,19 @@ Result<void> FileLibrary::Sweep() {
 }
 Result<void> FileLibrary::Prepare(const Selection& selection) {
   if (!HexId(selection.id, 32) || !BoundedServiceId(selection.request_id) ||
-      selection.request_id == "library" || selection.files.empty() || selection.files.size() > 64)
+      selection.request_id == "library" || selection.files.empty() || selection.files.size() > 64 ||
+      selection.files.size() > selection.limits.files || !selection.limits.file_bytes ||
+      !selection.limits.batch_bytes)
     return Error{ErrorCode::kInvalidRequest, "invalid_selection_manifest"};
   std::lock_guard lock(mutex_);
   const auto found = selections_.find(selection.id);
   if (found != selections_.end()) {
     if (found->second.binding != selection.binding || found->second.files != selection.files ||
-        found->second.request_id != selection.request_id)
+        found->second.request_id != selection.request_id ||
+        found->second.accept != selection.accept ||
+        found->second.limits.file_bytes != selection.limits.file_bytes ||
+        found->second.limits.batch_bytes != selection.limits.batch_bytes ||
+        found->second.limits.files != selection.limits.files)
       return Error{ErrorCode::kConflict, "selection_manifest_conflict"};
     return {};
   }

@@ -58,10 +58,10 @@ function fixture(t: TestContext) {
     }
   }
   const canvases: Canvas[] = [];
-  const encodes: { width: number; height: number; type: string; source: number }[] = [];
+  const encodes: { width: number; height: number; type: string; quality?: number; source: number }[] = [];
   const sourceRects: number[][] = [];
-  const heldPng: (() => void)[] = [];
-  let holdPng = false;
+  const heldOriginals: (() => void)[] = [];
+  let holdOriginals = false;
   let peakPixels = 0;
   let peakOriginals = 0;
   class Canvas {
@@ -90,10 +90,10 @@ function fixture(t: TestContext) {
         },
       };
     }
-    toBlob(callback: (blob: Blob) => void, type: string) {
-      encodes.push({ width: this.width, height: this.height, type, source: this.source });
+    toBlob(callback: (blob: Blob) => void, type: string, quality?: number) {
+      encodes.push({ width: this.width, height: this.height, type, quality, source: this.source });
       const blob = new Blob([String(this.source)], { type });
-      if (holdPng && type === 'image/png') heldPng.push(() => callback(blob));
+      if (holdOriginals && quality === 0.92) heldOriginals.push(() => callback(blob));
       else callback(blob);
     }
   }
@@ -130,11 +130,11 @@ function fixture(t: TestContext) {
     stats,
     options,
     previews,
-    heldPng,
+    heldOriginals,
     peakPixels: () => peakPixels,
     peakOriginals: () => peakOriginals,
-    holdPng: () => {
-      holdPng = true;
+    holdOriginals: () => {
+      holdOriginals = true;
     },
   };
 }
@@ -196,7 +196,7 @@ test('quality stops immediately, preserves scored frame identity and encodes onl
       return decision('3', ['3', '2'], true, true);
     },
   });
-  f.holdPng();
+  f.holdOriginals();
   const run = capturePhotoBurst(f.video, new AbortController().signal, rpc, f.options);
   await flush();
   f.frame(11);
@@ -229,9 +229,9 @@ test('quality stops immediately, preserves scored frame identity and encodes onl
         rect[0] === crop.x && rect[1] === crop.y && rect[2] === crop.cropWidth && rect[3] === crop.cropHeight,
     ),
   );
-  f.heldPng.shift()?.();
+  f.heldOriginals.shift()?.();
   await flush();
-  f.heldPng.shift()?.();
+  f.heldOriginals.shift()?.();
   const result = await run;
   assert.deepEqual(
     await Promise.all(
@@ -249,12 +249,12 @@ test('quality stops immediately, preserves scored frame identity and encodes onl
     ],
   );
   assert.deepEqual(
-    f.encodes.filter((e) => e.type === 'image/png').map((e) => e.source),
+    f.encodes.filter((e) => e.quality === 0.92).map((e) => e.source),
     [14, 12],
   );
-  assert.ok(
-    f.encodes.filter((e) => e.type === 'image/jpeg').every((e) => Math.max(e.width, e.height) <= 512),
-  );
+  assert.ok(f.encodes.filter((e) => e.quality !== 0.92).every((e) => Math.max(e.width, e.height) <= 512));
+  assert.ok(f.encodes.every((e) => e.type === 'image/jpeg'));
+  assert.ok(result.frames.every((frame) => frame.blob.type === 'image/jpeg'));
   assert.ok(f.released());
 });
 

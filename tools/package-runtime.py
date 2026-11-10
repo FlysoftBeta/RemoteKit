@@ -178,7 +178,7 @@ def copy_endpoint(source, binary):
     return target
 
 
-def face_runtime_files():
+def imaging_runtime_files():
     spec = importlib.util.spec_from_file_location(
         'setup_face_auth', ROOT / 'tools/setup-face-auth.py'
     )
@@ -196,7 +196,7 @@ def document_runtime_trees():
     return module.runtime_trees()
 
 
-def copy_face_runtime(files, package):
+def copy_imaging_runtime(files, package):
     """Copy only the verified, enumerated release assets."""
     for source, relative in files:
         target = package / relative
@@ -316,7 +316,7 @@ def package_runtime(args, node_runtime):
         raise FileNotFoundError(
             'Build the Release endpoint first: tools\\build-endpoint.cmd package'
         )
-    face_files = face_runtime_files()
+    imaging_files = imaging_runtime_files()
     runtime = []
     targets = [browser_target]
     targets.append('//remotekit/browser/sdk:remotekit_sdk')
@@ -490,7 +490,7 @@ def package_runtime(args, node_runtime):
     (licenses / 'NVENC-header-notice.txt').write_text(
         header[: header.index('*/') + 2], encoding='utf-8'
     )
-    copy_face_runtime(face_files, node_runtime)
+    copy_imaging_runtime(imaging_files, node_runtime)
     (node_runtime / 'licenses').mkdir(exist_ok=True)
     for file in licenses.iterdir():
         if file.name != 'Node-LICENSE':

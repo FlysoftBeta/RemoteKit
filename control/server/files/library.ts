@@ -82,14 +82,16 @@ function importOrigin(value: unknown): Params<'library.import'>['origin'] {
 function photoMetadata(value: unknown): PhotoMetadata | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== 'object') throw invalid('无效的照片信息');
-  const { mode, pending, warning, candidateAssetIds } = value as Partial<PhotoMetadata>;
+  const { mode, pending, warning, candidateAssetIds, quarterTurns } = value as Partial<PhotoMetadata>;
   if (mode !== 'photo' && mode !== 'scan') throw invalid('无效的拍摄模式');
+  if (quarterTurns !== undefined && ![1, 2, 3].includes(quarterTurns)) throw invalid('无效的照片旋转角度');
   if (pending !== undefined && pending !== 'choice' && pending !== 'scan-error')
     throw invalid('无效的照片状态');
   if (warning !== undefined && (typeof warning !== 'string' || warning.length > 256))
     throw invalid('无效的照片警告');
   return {
     mode,
+    ...(quarterTurns !== undefined ? { quarterTurns } : {}),
     ...(candidateAssetIds !== undefined ? { candidateAssetIds: ids(candidateAssetIds, 2) } : {}),
     ...(pending !== undefined ? { pending } : {}),
     ...(warning !== undefined ? { warning } : {}),
@@ -458,6 +460,7 @@ export class FileLibrary {
       const entry = validate(snapshot);
       entry.assetId = assetId;
       entry.type = asset.type;
+      if (photo && asset.type === 'image/webp') entry.name = entry.name.replace(/\.[^.]*$/, '') + '.webp';
       entry.size = asset.size;
       if (originalAssetId) entry.originalAssetId = originalAssetId;
       else delete entry.originalAssetId;
@@ -506,15 +509,17 @@ export class FileLibrary {
         binding: request.binding,
         entryIds,
         files: selected.map(({ assetId, name, type }) => ({ assetId, name, type })),
+        limits: request.limits,
         prepared: false,
       };
       this.repository.insertSelection(tenant, manifest, operationId, payload);
     }
-    const { selectionId, binding, files } = manifest;
+    const { selectionId, binding, files, limits } = manifest;
     const accepted = await this.endpoint.prepareSelection(tenant, {
       selectionId,
       binding,
       files,
+      limits,
       requestId,
     });
     authorize();

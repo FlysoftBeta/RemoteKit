@@ -8,6 +8,13 @@ import type { Incoming } from '../rtc/protocol';
 import type { DocumentInfo } from '../documents/document-source';
 import { RequestTracker } from '../util/request-tracker';
 
+export interface ProcessedPhoto extends Asset {
+  type: 'image/webp';
+  geometry: 'perspective' | 'deskew' | 'unchanged';
+  quarterTurns: 0 | 1 | 2 | 3;
+  orientation: 'text' | 'manual' | 'none';
+}
+
 export interface PhotoBurstDecision {
   selectedFrameId: string;
   keepFrameIds: string[];
@@ -407,8 +414,17 @@ export class FileChannel {
       throw new RemoteKitError('internal', '照片缩略图数据无效');
     return this.readPhoto(asset, signal);
   }
-  processPhoto(assetId: string, mode: 'rectify' | 'scan', signal?: AbortSignal): Promise<Asset> {
-    return this.call('photo.process', { ...libraryBinding, assetId, mode }, { signal });
+  processPhoto(
+    assetId: string,
+    mode: 'photo' | 'scan',
+    quarterTurns?: 0 | 1 | 2 | 3,
+    signal?: AbortSignal,
+  ): Promise<ProcessedPhoto> {
+    return this.call(
+      'photo.process',
+      { ...libraryBinding, assetId, mode, ...(quarterTurns !== undefined ? { quarterTurns } : {}) },
+      { signal },
+    );
   }
   cancelSelection(requestId: string): Promise<{ state: SelectionState }> {
     return this.call('selection.cancel', { requestId });

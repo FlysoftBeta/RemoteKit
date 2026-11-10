@@ -271,7 +271,8 @@ export function LibraryTab({
         await copySnippet(entry.id);
         setCopied(true);
       });
-    else if (entry.photo?.pending) openPreview(entry);
+    else if (entry.photo?.pending || photos.jobs.some((job) => job.replace?.id === entry.id))
+      openPreview(entry);
     else setMenu({ anchor, id: entry.id });
   };
   const entryMeta = (entry: LibraryEntry) =>
@@ -617,7 +618,7 @@ export function LibraryTab({
                             key={job.id}
                             id={job.id}
                             name="照片"
-                            type="image/png"
+                            type="image/jpeg"
                             assetId={job.id}
                             blob={job.preview}
                             localOnly
@@ -929,15 +930,13 @@ export function PhotoDialog({
     <Dialog open fullWidth maxWidth="xs" onClose={onClose}>
       <DialogTitle sx={{ overflowWrap: 'anywhere' }}>{entry?.name ?? '照片'}</DialogTitle>
       <DialogContent>
-        {entry ? (
-          <PhotoOptions key={entry.id} entry={entry} job={job} destination="library" disabled={disabled} />
-        ) : job?.error ? (
-          <Alert severity="warning">{job.error}</Alert>
-        ) : (
-          <Typography variant="body2" role="status">
-            正在处理照片
-          </Typography>
-        )}
+        <PhotoOptions
+          key={entry?.id ?? job?.id}
+          entry={entry}
+          job={job}
+          destination="library"
+          disabled={disabled}
+        />
       </DialogContent>
       <DialogActions>
         {job?.retryable && job.state === 'error' && (
@@ -1005,6 +1004,8 @@ const LibraryEntryView = memo(
     onBasket,
     onMenu,
   }: LibraryEntryProps) {
+    const { photos } = useLibrary();
+    const job = photos.jobs.find((item) => item.replace?.id === entry.id);
     if (entry.kind === 'snippet')
       return (
         <SnippetView
@@ -1066,7 +1067,7 @@ const LibraryEntryView = memo(
         type={entry.type}
         assetId={entry.assetId}
         meta={meta}
-        status={photoStatus(entry)}
+        status={photoStatus(entry, job)}
         selected={selected}
         pressed={selecting ? selected : undefined}
         open={open}
@@ -1084,7 +1085,7 @@ const LibraryEntryView = memo(
         assetId={entry.assetId}
         meta={meta}
         detail={entry.detail}
-        status={photoStatus(entry)}
+        status={photoStatus(entry, job)}
         selected={selected}
         pressed={selecting ? selected : undefined}
         disabled={disabled}

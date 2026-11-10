@@ -5,6 +5,7 @@ import type { Asset, LibraryMethods, LibrarySnapshot, SelectionState } from '../
 import type { CapturedBurst } from '../client/files/camera-capture';
 import { ImportQueue } from '../client/files/import-queue';
 import { LibraryStore, type LibraryRequest } from '../client/files/library-store';
+import type { ProcessedPhoto } from '../client/files/file-channel';
 import { PhotoJobStore } from '../client/files/photo-job-store';
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -17,12 +18,20 @@ const snapshot = (revision: number): LibrarySnapshot => ({
   excludedSources: [],
   basketPartitionId: null,
 });
-const asset: Asset = { assetId: 'a'.repeat(64), size: 1, type: 'image/png' };
+const asset: Asset = { assetId: 'a'.repeat(64), size: 1, type: 'image/jpeg' };
+const processed: ProcessedPhoto = {
+  assetId: 'b'.repeat(64),
+  size: 1,
+  type: 'image/webp',
+  geometry: 'unchanged',
+  quarterTurns: 0,
+  orientation: 'none',
+};
 function libraryPort() {
   return {
     photoThumbnail: async () => new Blob(),
     uploadAsset: async () => asset,
-    processPhoto: async () => asset,
+    processPhoto: async () => processed,
     commitSelection: async (_requestId: string, selectionId: string) => ({
       state: 'unknown' as const,
       selectionId,
@@ -413,7 +422,7 @@ test('photo retry commits the same mutation without reuploading captured frames'
         uploads++;
         return asset;
       },
-      processPhoto: async () => asset,
+      processPhoto: async () => processed,
     },
     mutate: async (_method, params) => {
       operations.push(params.operationId);
@@ -446,7 +455,7 @@ test('photo scope reset ignores a late capture and publishes immutable job snaps
         uploads++;
         return asset;
       },
-      processPhoto: async () => asset,
+      processPhoto: async () => processed,
     },
     mutate: async () => snapshot(1),
   });

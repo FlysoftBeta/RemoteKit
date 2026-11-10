@@ -1,3 +1,4 @@
+import type { FileRequest } from '../../shared/product';
 import type {
   AppliedMediaPolicy,
   OperationReceipt,
@@ -192,6 +193,7 @@ export interface PrepareSelection {
   requestId: string;
   binding: FileBinding;
   files: { assetId: string; name: string; type: string }[];
+  limits: FileRequest['limits'];
 }
 export interface LifecycleRequest {
   viewId: string;

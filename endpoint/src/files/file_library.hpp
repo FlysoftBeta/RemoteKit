@@ -30,11 +30,13 @@ class FileLibrary {
     FileUploadStore::Binding binding;
     std::vector<SelectionFile> files;
     enum class State { pending, submitted, selected, cancelled } state = State::pending;
+    std::vector<std::string> accept;
+    FileUploadStore::Limits limits;
   };
   struct Derivative {
     std::uint32_t width, height;
   };
-  enum class DerivativeFormat { jpeg, png };
+  enum class DerivativeFormat { jpeg, png, webp };
   using Render = std::function<Result<Derivative>(const std::filesystem::path&)>;
 
   FileLibrary(std::filesystem::path root,
@@ -67,6 +69,10 @@ class FileLibrary {
                                  const Check&,
                                  DerivativeFormat = DerivativeFormat::jpeg,
                                  const std::string& derived_from = {});
+  Result<Asset> CachedDerivative(const std::string& source,
+                                 DerivativeFormat,
+                                 const Render&,
+                                 const Check&);
   Result<void> Sweep();
   ServiceJson Hibernation(const std::function<bool(uint64_t)>& current) const;
 
@@ -94,6 +100,7 @@ class FileLibrary {
   const std::string tenant_;
   std::shared_ptr<objects::SessionObjects> access_;
   mutable std::mutex mutex_;
+  std::mutex derivatives_mutex_;
   mutable std::map<std::string, Entry> entries_;
   std::map<std::string, Draft> drafts_;
   std::map<std::string, Selection> selections_;

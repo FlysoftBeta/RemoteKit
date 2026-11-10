@@ -1,6 +1,7 @@
 #include "files/file_library.hpp"
 #include "documents/object_documents.hpp"
 #include "files/dc_file_services.hpp"
+#include "files/file_selection.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -257,6 +258,25 @@ void Puts(const fs::path& root) {
 }
 
 int main(int argc, char** argv) {
+  using remotekit::PhotoTranscode;
+  using remotekit::SelectionWebpTranscode;
+  CHECK(SelectionWebpTranscode({"image/png"}) == PhotoTranscode::kPng);
+  CHECK(SelectionWebpTranscode({" .JpG "}) == PhotoTranscode::kJpeg);
+  CHECK(SelectionWebpTranscode({"image/png", "image/jpeg"}) == PhotoTranscode::kJpeg);
+  CHECK(SelectionWebpTranscode({"IMAGE/PJPEG"}) == PhotoTranscode::kJpeg);
+  CHECK(SelectionWebpTranscode({".jfif"}) == PhotoTranscode::kJpeg);
+  CHECK(!SelectionWebpTranscode({"image/*", "image/png"}));
+  CHECK(!SelectionWebpTranscode({" .WEBP ", ".jpg"}));
+  CHECK(!SelectionWebpTranscode({"image/webp", ".png"}));
+  CHECK(!SelectionWebpTranscode({}));
+  CHECK(!SelectionWebpTranscode({"application/pdf"}));
+  FileUploadStore::Limits request_limits;
+  request_limits.file_bytes = 10;
+  request_limits.batch_bytes = 15;
+  CHECK(remotekit::CheckSelectionSources({{{"photo.jpg", "image/jpeg", 8}, {}}}, request_limits));
+  CHECK(!remotekit::CheckSelectionSources({{{"photo.png", "image/png", 11}, {}}}, request_limits));
+  CHECK(!remotekit::CheckSelectionSources(
+      {{{"a.jpg", "image/jpeg", 8}, {}}, {{"b.jpg", "image/jpeg", 8}, {}}}, request_limits));
   CHECK(argc == 2);
   const auto root = fs::path(argv[1]) /
                     ("remotekit-file-library-" +
@@ -279,6 +299,8 @@ int main(int argc, char** argv) {
   const std::vector<std::uint8_t> png_signature{137, 80, 78, 71, 13, 10, 26, 10};
   std::string upload;
   std::string derivative_id;
+  std::string cached_id;
+  std::map<FileLibrary::DerivativeFormat, std::string> transcode_cache;
   FileLibrary::Selection selection{"aabbccddaabbccddaabbccddaabbccdd",
                                    "chooser",
                                    {"browser", "1", "2", "3", "4"},
@@ -333,6 +355,38 @@ int main(int argc, char** argv) {
     CHECK(control.committed.back()["derivedFrom"] == hash);
     CHECK(!derivative.Json().contains("hash"));
     CHECK(Take(library.Read(derivative_id, 0)).second == png_signature);
+    unsigned renders = 0;
+    const auto render = [&](const fs::path& path) -> remotekit::Result<FileLibrary::Derivative> {
+      ++renders;
+      CHECK(path.extension() == ".webp");
+      std::ofstream(path, std::ios::binary) << "webp-derivative-cache";
+      return FileLibrary::Derivative{320, 240};
+    };
+    const auto cached =
+        Take(library.CachedDerivative(hash, FileLibrary::DerivativeFormat::webp, render, live));
+    cached_id = cached.id;
+    CHECK(cached.type == "image/webp" && cached.width == 320 && cached.height == 240);
+    CHECK(Take(library.CachedDerivative(hash, FileLibrary::DerivativeFormat::webp, render, live))
+              .id == cached.id);
+    CHECK(renders == 1);
+    for (const auto format :
+         {FileLibrary::DerivativeFormat::jpeg, FileLibrary::DerivativeFormat::png}) {
+      unsigned transcodes = 0;
+      const auto render_transcode =
+          [&](const fs::path& path) -> remotekit::Result<FileLibrary::Derivative> {
+        ++transcodes;
+        CHECK(path.extension() ==
+              (format == FileLibrary::DerivativeFormat::jpeg ? ".jpg" : ".png"));
+        std::ofstream(path, std::ios::binary) << "selection-transcode-" << static_cast<int>(format);
+        return FileLibrary::Derivative{320, 240};
+      };
+      const auto first = Take(library.CachedDerivative(hash, format, render_transcode, live));
+      CHECK(first.type ==
+            (format == FileLibrary::DerivativeFormat::jpeg ? "image/jpeg" : "image/png"));
+      CHECK(Take(library.CachedDerivative(hash, format, render_transcode, live)).id == first.id);
+      CHECK(transcodes == 1);
+      transcode_cache[format] = first.id;
+    }
     CHECK(Fails([&] { return library.Read(hash, 4); }));
     FileLibrary other(root / "other-session", objects, "other-tenant");
     CHECK(other.Initialize());
@@ -383,6 +437,24 @@ int main(int argc, char** argv) {
     using State = FileLibrary::Selection::State;
     CHECK(Take(library.Describe(hash)).size == 3);
     CHECK(Take(library.Describe(derivative_id)).type == "image/png");
+    CHECK(Take(library.CachedDerivative(
+                   hash, FileLibrary::DerivativeFormat::webp,
+                   [&](const fs::path&) -> remotekit::Result<FileLibrary::Derivative> {
+                     CHECK(false);
+                     return FileLibrary::Derivative{};
+                   },
+                   live))
+              .id == cached_id);
+    for (const auto& [format, id] : transcode_cache) {
+      CHECK(Take(library.CachedDerivative(
+                     hash, format,
+                     [&](const fs::path&) -> remotekit::Result<FileLibrary::Derivative> {
+                       CHECK(false);
+                       return FileLibrary::Derivative{};
+                     },
+                     live))
+                .id == id);
+    }
     CHECK(Take(library.Begin(1, "operation", spec, live))["offset"] == 3);
     CHECK(Take(library.Seal(1, upload, live)).id == hash);
     CHECK(library.FindSelection(selection.id)->state == State::submitted);

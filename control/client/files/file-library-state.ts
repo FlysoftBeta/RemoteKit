@@ -50,6 +50,7 @@ export function useFileLibrary(
         capture: store.photos.capture,
         retry: store.photos.retry,
         resolve: store.photos.resolve,
+        rotate: store.photos.rotate,
       },
       thumbnails: store.thumbnails,
       rpc,

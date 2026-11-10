@@ -12,7 +12,7 @@ export function PhotoOptions({
   destination,
   disabled,
 }: {
-  entry: LibraryEntry;
+  entry?: LibraryEntry;
   job?: PhotoJob;
   destination: PhotoDestination['destination'];
   disabled: boolean;
@@ -20,11 +20,11 @@ export function PhotoOptions({
   const { photos } = useLibrary();
   const [chosen, setChosen] = useState<string>();
   const [preview, setPreview] = useState<string>();
-  if (entry.kind !== 'file') return null;
-  const candidates = job?.candidates ?? entry.photo?.candidateAssetIds ?? [];
-  const pending = job ? job.state : entry.photo?.pending;
+  if (entry?.kind === 'snippet') return null;
+  const candidates = job?.candidates ?? entry?.photo?.candidateAssetIds ?? [];
+  const pending = job ? job.state : entry?.photo?.pending;
   const selected = chosen && candidates.includes(chosen) ? chosen : candidates[0];
-  const original = job?.originalId ?? entry.assetId;
+  const original = job?.originalId ?? entry?.originalAssetId ?? entry?.assetId;
   if (pending === 'processing' || pending === 'committing' || pending === 'sampling') {
     return (
       <Typography variant="caption" role="status">
@@ -42,6 +42,8 @@ export function PhotoOptions({
         onClose={() => setPreview(undefined)}
       />
     );
+  if (pending === 'error') return <Alert severity="warning">{job?.error}</Alert>;
+  if (!entry) return null;
   if (pending === 'choice' && selected)
     return (
       <>
@@ -53,7 +55,7 @@ export function PhotoOptions({
         >
           <FileThumbnail
             assetId={selected}
-            type="image/png"
+            type="image/jpeg"
             name="候选照片"
             fit="contain"
             sx={{ height: 'min(calc(var(--layout-vh) * 0.26), 180px)', borderRadius: 1 }}
@@ -77,7 +79,7 @@ export function PhotoOptions({
             >
               <FileThumbnail
                 assetId={id}
-                type="image/png"
+                type="image/jpeg"
                 name="候选照片"
                 size="small"
                 sx={{ width: '100%', height: '100%' }}
@@ -93,10 +95,10 @@ export function PhotoOptions({
         </Box>
       </>
     );
-  if (pending === 'scan-error')
+  if (pending === 'scan-error' && original)
     return (
       <>
-        <Alert severity="warning">文档扫描未完成。{job?.error ?? entry.photo?.warning}</Alert>
+        <Alert severity="warning">文档扫描未完成。{job?.error ?? entry?.photo?.warning}</Alert>
         <Button
           disabled={disabled}
           onClick={() => photos.resolve(entry, destination, original, true, job?.id)}
@@ -111,14 +113,23 @@ export function PhotoOptions({
         </Button>
       </>
     );
-  if (pending === 'error') return <Alert severity="warning">{job?.error}</Alert>;
   return (
     <>
-      {entry.photo?.warning && <Alert severity="warning">{entry.photo.warning}</Alert>}
-      {entry.originalAssetId && (
-        <Button disabled={disabled} onClick={() => setPreview(entry.originalAssetId)}>
-          查看原图
-        </Button>
+      {entry?.photo?.warning && <Alert severity="warning">{entry?.photo?.warning}</Alert>}
+      {entry?.originalAssetId && (
+        <>
+          <Button disabled={disabled} onClick={() => setPreview(entry.originalAssetId)}>
+            查看原图
+          </Button>
+          {entry.photo?.mode === 'scan' && (
+            <Button
+              disabled={disabled || !!job}
+              onClick={() => photos.resolve(entry, destination, entry.originalAssetId!, true)}
+            >
+              使用原图
+            </Button>
+          )}
+        </>
       )}
     </>
   );

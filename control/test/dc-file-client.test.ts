@@ -3,6 +3,50 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { FileChannel } from '../client/files/file-channel';
 
+test('photo processing sends the selected mode and optional absolute turns with the library binding', async () => {
+  const messages: any[] = [];
+  const result = {
+    assetId: 'b'.repeat(64),
+    type: 'image/webp',
+    size: 12,
+    geometry: 'unchanged',
+    quarterTurns: 0,
+    orientation: 'manual',
+  };
+  const channel = {
+    readyState: 'open',
+    bufferedAmount: 0,
+    send(text: string) {
+      const message = JSON.parse(text);
+      messages.push(message);
+      queueMicrotask(() =>
+        client.handle({
+          type: 'files.result',
+          version: 1,
+          requestId: message.requestId,
+          ok: true,
+          result,
+        }),
+      );
+    },
+  } as RTCDataChannel;
+  const client = new FileChannel(
+    () => channel,
+    () => 9,
+  );
+  const signal = new AbortController().signal;
+  assert.deepEqual(await client.processPhoto('original', 'photo', 0, signal), result);
+  await client.processPhoto('original', 'scan', undefined, signal);
+  assert.equal(messages[0].method, 'photo.process');
+  assert.deepEqual(messages[0].params, {
+    requestId: 'library',
+    assetId: 'original',
+    mode: 'photo',
+    quarterTurns: 0,
+  });
+  assert.deepEqual(messages[1].params, { requestId: 'library', assetId: 'original', mode: 'scan' });
+});
+
 test('library asset transfer resumes from the Endpoint offset and uses the library binding only', async () => {
   const data = new Uint8Array(40000).map((_, index) => index % 251);
   const file = new File([data], '照片.jpg', { type: 'image/jpeg' });

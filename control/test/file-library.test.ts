@@ -38,7 +38,7 @@ const request: InternalFileRequest = {
   },
 };
 
-function fixture() {
+function fixture(assetType = 'image/jpeg') {
   const db = new Database(':memory:');
   db.defaultSafeIntegers(true);
   createSchema(db);
@@ -63,7 +63,7 @@ function fixture() {
         return {
           assetId: args.assetId,
           size: assets.get(args.assetId),
-          type: 'image/jpeg',
+          type: assetType,
         };
       }
       if (method === 'session.library.prepare') {
@@ -262,6 +262,7 @@ test('prepared selection retries its immutable manifest and consumes only confir
     requestId: 'chooser',
     binding: request.binding,
     files: [{ assetId: ASSETS.draft, name: ASSETS.draft + '.jpg', type: 'image/jpeg' }],
+    limits: request.limits,
   });
   await assert.rejects(f.run('prepare', { ...params, entryIds: [extra] }), { code: 'conflict' });
   await assert.rejects(f.run('finish', prepared, 'other'), { code: 'not_found' });
@@ -447,6 +448,56 @@ test('photo choice and scan failure remain blocked until confirmed in place', as
     partitionId,
     collected: false,
   });
+});
+
+test('photo turns validate on import and replace and WebP replacement preserves entry identity and name stem', async (t) => {
+  const f = fixture('image/webp');
+  t.after(() => f.db.close());
+  for (const quarterTurns of [0, -1, 4, 1.5, NaN, Infinity, '1', null, true]) {
+    await assert.rejects(
+      f.add(ASSETS.photo, 'basket', {
+        photo: { mode: 'photo', quarterTurns },
+      }),
+      { code: 'invalid_request' },
+    );
+  }
+  const initial = await f.add(ASSETS.photo, 'basket', {
+    name: 'receipt.original.jpg',
+    originalAssetId: ASSETS.original,
+    photo: { mode: 'scan', quarterTurns: 1 },
+  });
+  assert.equal(initial.entries[0].type, 'image/webp');
+  assert.equal(initial.entries[0].photo?.quarterTurns, 1);
+  const replace = {
+    operationId: 'rotate',
+    entryId: initial.entries[0].id,
+    expectedRevision: initial.revision,
+    assetId: ASSETS.extra,
+    originalAssetId: ASSETS.original,
+  };
+  for (const quarterTurns of [0, -1, 4, 1.5, NaN, Infinity, '1', null, true]) {
+    await assert.rejects(f.run('replace', { ...replace, photo: { mode: 'scan', quarterTurns } }), {
+      code: 'invalid_request',
+    });
+  }
+  let next = await f.run('replace', { ...replace, photo: { mode: 'scan', quarterTurns: 2 } });
+  assert.deepEqual(next.entries[0], {
+    ...initial.entries[0],
+    assetId: ASSETS.extra,
+    size: 4,
+    name: 'receipt.original.webp',
+    photo: { mode: 'scan', quarterTurns: 2 },
+  });
+  assert.deepEqual(next.basket, initial.basket);
+  next = await f.run('replace', {
+    ...replace,
+    operationId: 'rotate-three',
+    expectedRevision: next.revision,
+    photo: { mode: 'scan', quarterTurns: 3 },
+  });
+  assert.equal(next.entries[0].photo?.quarterTurns, 3);
+  f.reopen();
+  assert.deepEqual(await f.run('get'), next);
 });
 
 test('photo metadata validates candidate references and prunes them when an entry is removed', async (t) => {

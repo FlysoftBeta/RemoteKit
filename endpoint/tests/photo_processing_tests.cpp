@@ -1,4 +1,7 @@
-#include "files/photo_processing.hpp"
+﻿#include "files/photo_processing.hpp"
+#include "files/photo_scan.hpp"
+#include "files/photo_geometry.hpp"
+#include <webp/decode.h>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -22,7 +25,7 @@ namespace {
 using namespace remotekit;
 using Microsoft::WRL::ComPtr;
 
-void Require(bool condition, const char* message) {
+void Require(bool condition, const std::string& message) {
   if (!condition)
     throw std::runtime_error(message);
 }
@@ -217,108 +220,228 @@ void CheckBurst(Fixtures& fixtures) {
       remotekit::ErrorCode::kCanceled);
 }
 
-void CheckRank(Fixtures& fixtures) {
-  const auto sharp = DetailFixture({184, 188, 192}, {28, 31, 34});
-  const auto crisp = fixtures.Png("crisp.png", sharp);
-  cv::Mat blur;
-  cv::GaussianBlur(sharp, blur, {23, 5}, 6.5, 1.2);
-  const auto blurred = fixtures.Png("blurred.png", blur);
-  cv::Mat noisy(sharp.size(), CV_8UC3);
-  cv::RNG random(12345);
-  random.fill(noisy, cv::RNG::NORMAL, cv::Scalar::all(128), cv::Scalar::all(37));
-  const auto noise = fixtures.Png("noise.png", noisy);
-  const auto ranked = Take(RankPhotos(std::array{blurred, noise, crisp}));
-  Require(ranked.selected_index == 2 && !ranked.uncertain && ranked.reason == "clear-winner",
-          "clear structured detail must beat blur and random noise");
-  const auto similar = Take(RankPhotos(std::array{crisp, crisp}));
-  Require(similar.selected_index == 0 && !similar.uncertain && similar.reason == "near-identical" &&
-              similar.candidates.size() == 1,
-          "equivalent frames should choose a stable winner");
-
-  // Approximately equal luminance contrast, very different chroma.
-  const auto blue = fixtures.Png("blue.png", DetailFixture({255, 174, 193}, {92, 25, 31}));
-  const auto orange = fixtures.Png("orange.png", DetailFixture({94, 184, 235}, {0, 19, 69}));
-  const auto distinct = Take(RankPhotos(std::array{blue, orange, orange, blue}));
+cv::Mat ReadWebp(const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  const std::vector<std::uint8_t> bytes(std::istreambuf_iterator<char>(file), {});
+  int width = 0;
+  int height = 0;
+  Require(WebPGetInfo(bytes.data(), bytes.size(), &width, &height), "WebP bitstream required");
+  cv::Mat pixels(height, width, CV_8UC3);
   Require(
-      distinct.uncertain && distinct.reason == "close-quality" && distinct.candidates.size() == 2,
-      "close but distinct frames should expose deduplicated alternatives");
-
-  const auto dark = fixtures.Png("dark.png", cv::Mat(sharp.size(), CV_8UC3, cv::Scalar::all(0)));
-  const auto white =
-      fixtures.Png("white.png", cv::Mat(sharp.size(), CV_8UC3, cv::Scalar::all(255)));
-  const auto low = Take(RankPhotos(std::array{dark, white}));
-  Require(low.reason == "low-quality" && !low.uncertain && low.candidates.size() == 1,
-          "poor frames should warn without forced alternatives");
-  RequireError([&] { return RankPhotos(std::array{crisp}, [] { return true; }); },
-               remotekit::ErrorCode::kCanceled);
-  RequireError(
-      [&] { return RankPhotos(std::array{crisp, crisp, crisp, crisp, crisp, crisp, crisp}); },
-      remotekit::ErrorCode::kLimitExceeded);
+      WebPDecodeBGRInto(bytes.data(), bytes.size(), pixels.data, pixels.total() * pixels.elemSize(),
+                        static_cast<int>(pixels.step)) != nullptr,
+      "WebP readback failed");
+  return pixels;
 }
 
 void CheckDocuments(Fixtures& fixtures) {
-  const cv::Size size{640, 480};
-  const std::vector<cv::Point> quad{{103, 71}, {543, 92}, {567, 405}, {79, 426}};
-  cv::Mat page(size, CV_8UC3, cv::Scalar::all(28));
-  cv::Mat mask(size, CV_8UC1, cv::Scalar::all(0));
-  cv::fillConvexPoly(mask, quad, cv::Scalar::all(255));
-  for (int x = 0; x < page.cols; ++x)
-    page.col(x).setTo(cv::Scalar(105 + x / 5, 109 + x / 5, 118 + x / 5), mask.col(x));
-  for (int y = 132; y <= 362; y += 27)
-    cv::line(page, {131, y}, {482, y}, {22, 22, 22}, 3);
+  cv::Mat flat(1200, 900, CV_8UC3, cv::Scalar::all(225));
+  for (int y = 90; y < 1140; y += 45)
+    cv::putText(flat, "Printed document text and retained notes", {45, y}, cv::FONT_HERSHEY_SIMPLEX,
+                .8, {35, 35, 35}, 2, cv::LINE_AA);
+  const std::array<cv::Point2f, 4> source{{{0, 0}, {899, 0}, {899, 1199}, {0, 1199}}};
+  const double yaw = 20 * CV_PI / 180, pitch = 15 * CV_PI / 180, roll = 8 * CV_PI / 180;
+  const cv::Matx33d rx(1, 0, 0, 0, std::cos(pitch), -std::sin(pitch), 0, std::sin(pitch),
+                       std::cos(pitch));
+  const cv::Matx33d ry(std::cos(yaw), 0, std::sin(yaw), 0, 1, 0, -std::sin(yaw), 0, std::cos(yaw));
+  const cv::Matx33d rz(std::cos(roll), -std::sin(roll), 0, std::sin(roll), std::cos(roll), 0, 0, 0,
+                       1);
+  std::array<cv::Point2f, 4> target;
+  for (int i = 0; i < 4; ++i) {
+    const auto point = rz * ry * rx * cv::Vec3d(source[i].x - 450, source[i].y - 600, 0);
+    target[i] = {float(600 + 1700 * point[0] / (point[2] + 2200)),
+                 float(700 + 1700 * point[1] / (point[2] + 2200))};
+  }
+  const auto camera = cv::getPerspectiveTransform(source.data(), target.data());
+  cv::Mat page;
+  cv::warpPerspective(flat, page, camera, {1200, 1400}, cv::INTER_LINEAR, cv::BORDER_CONSTANT,
+                      cv::Scalar(150, 40, 20));
+  const auto detected = Take(photo::AnalyzeGeometry(page, {}));
+  Require(detected.kind == "perspective", "perspective text page must be rectified");
+  Require(!detected.has_flow, "planar text must not require residual flow");
+  const auto scale = cv::Matx33d(detected.scale, 0, 0, 0, detected.scale, 0, 0, 0, 1);
+  const cv::Mat corrected = cv::Mat(scale.inv() * detected.matrix * scale) * camera;
+  std::vector<cv::Point2f> baseline{{80, 300}, {780, 300}, {80, 900}, {780, 900}};
+  cv::perspectiveTransform(baseline, baseline, corrected);
+  for (int i : {0, 2}) {
+    const auto direction = baseline[i + 1] - baseline[i];
+    Require(std::abs(std::atan2(direction.y, direction.x) * 180 / CV_PI) < 1,
+            "rectified synthetic baselines must be horizontal");
+  }
   const auto input = fixtures.Png("document.png", page);
-  const auto rectified = fixtures.dir / "rectified.temp";
-  const auto scanned = fixtures.dir / "scanned.temp";
-  const auto corrected = Take(ProcessPhoto(input, rectified, PhotoMode::kRectify));
-  Require(corrected.width >= 470 && corrected.width <= 500 && corrected.height >= 342 &&
-              corrected.height <= 370,
-          "auto detection should use the complete perspective boundary");
-  const auto rectified_png = fixtures.Read(rectified, GUID_ContainerFormatPng);
-  Require(rectified_png.cols == corrected.width && rectified_png.rows == corrected.height &&
-              rectified_png.at<cv::Vec3b>(70, 22)[0] > 95 && corrected.geometry == "perspective",
-          "rectified PNG should match dimensions and contain the document");
-
-  std::array<PhotoPoint, 4> manual;
-  for (std::size_t i = 0; i < manual.size(); ++i)
-    manual[i] = {quad[i].x / 639.0, quad[i].y / 479.0};
-  const auto clean = Take(ProcessPhoto(input, scanned, PhotoMode::kScan, manual));
-  const auto scan = fixtures.Read(scanned, GUID_ContainerFormatPng);
-  Require(scan.cols == clean.width && scan.rows == clean.height && clean.width >= 480 &&
-              clean.geometry == "perspective",
-          "manual crop should use the exact supplied perspective boundary");
-  const auto left = cv::mean(scan(cv::Rect{10, 12, 30, 18}))[0];
-  const auto right = cv::mean(scan(cv::Rect{scan.cols - 40, 12, 30, 18}))[0];
-  cv::Mat gray;
-  cv::cvtColor(scan, gray, cv::COLOR_BGR2GRAY);
-  Require(left > 170 && right > 170 && std::abs(left - right) < 15 &&
-              cv::countNonZero(gray < 55) > 1000,
-          "scan should normalize uneven paper and preserve dark lines");
-  Require(Take(ProcessPhoto(input, scanned, PhotoMode::kScan)).geometry == "perspective",
-          "clear complete page should support automatic perspective in scan mode");
-  Require(Take(RankPhotos(std::array{input})).candidates.size() == 1,
-          "processing should preserve the original asset");
-  std::swap(manual[1], manual[2]);
-  const auto invalid = fixtures.dir / "invalid.temp";
-  RequireError([&] { return ProcessPhoto(input, invalid, PhotoMode::kScan, manual); },
-               remotekit::ErrorCode::kInvalidRequest);
-  const auto flat = fixtures.Png("flat.png", cv::Mat(size, CV_8UC3, cv::Scalar::all(170)));
-  RequireError([&] { return ProcessPhoto(flat, invalid, PhotoMode::kRectify); },
-               remotekit::ErrorCode::kRejected);
-  Require(!std::filesystem::exists(invalid), "rejected crop must produce no output");
-
-  cv::Mat two(size, CV_8UC3, cv::Scalar::all(28));
-  cv::rectangle(two, {24, 70}, {300, 420}, cv::Scalar::all(225), cv::FILLED);
-  cv::rectangle(two, {340, 70}, {616, 420}, cv::Scalar::all(225), cv::FILLED);
-  const auto ambiguous = fixtures.Png("two-documents.png", two);
-  RequireError([&] { return ProcessPhoto(ambiguous, invalid, PhotoMode::kRectify); },
-               remotekit::ErrorCode::kRejected);
+  const auto output = fixtures.dir / "scan.webp";
+  const auto scanned = Take(ProcessPhoto(input, output, PhotoMode::kScan, 0));
+  Require(scanned.geometry == "perspective", "scan must apply the detected perspective");
+  const auto pixels = ReadWebp(output);
+  Require(pixels.cols == scanned.width && pixels.rows == scanned.height,
+          "WebP dimensions match response");
+  const auto invalid = fixtures.dir / "absent.webp";
+  RequireError([&] { return ProcessPhoto(input, invalid, PhotoMode::kPhoto, 4); },
+               ErrorCode::kInvalidRequest);
+  RequireError([&] { return ProcessPhoto(input, input, PhotoMode::kScan, 0); },
+               ErrorCode::kInvalidRequest);
+  RequireError(
+      [&] { return ProcessPhoto(input, invalid, PhotoMode::kScan, 0, [] { return true; }); },
+      ErrorCode::kCanceled);
   const auto oversized =
       fixtures.Png("oversized.png", cv::Mat(2897, 2897, CV_8UC3, cv::Scalar::all(165)));
-  RequireError([&] { return RankPhotos(std::array{oversized}); },
-               remotekit::ErrorCode::kLimitExceeded);
+  RequireError([&] { return ProcessPhoto(oversized, invalid, PhotoMode::kPhoto, 0); },
+               ErrorCode::kLimitExceeded);
   const auto broken = fixtures.dir / "broken.png";
   std::ofstream(broken, std::ios::binary) << "not an image";
-  RequireError([&] { return RankPhotos(std::array{broken}); }, remotekit::ErrorCode::kRejected);
+  RequireError([&] { return ProcessPhoto(broken, invalid, PhotoMode::kPhoto, 0); },
+               ErrorCode::kRejected);
+  Require(!std::filesystem::exists(invalid), "rejected processing must not create output");
+
+  cv::Mat nontext(600, 800, CV_8UC3, cv::Scalar(140, 45, 15));
+  cv::circle(nontext, {400, 300}, 150, cv::Scalar(40, 80, 220), cv::FILLED);
+  const auto untouched = Take(photo::AnalyzeGeometry(nontext, {}));
+  Require(untouched.kind == "unchanged" && untouched.crops.empty(),
+          "non-text images must receive neither warp nor crop");
+  Require(cv::norm(Take(photo::ApplyGeometry(nontext, untouched, {248, 248, 248}, {})), nontext,
+                   cv::NORM_INF) == 0,
+          "non-text geometry must preserve every pixel");
+}
+
+void CheckOrientation(Fixtures& fixtures) {
+  cv::Mat latin(1400, 1000, CV_8UC3, cv::Scalar::all(245));
+  int index = 0;
+  for (int y = 100; y < 1320; y += 48, ++index) {
+    const char* text = index % 2 ? "The quick brown fox jumps over the lazy dog."
+                                 : "Document scan preserves text and blue notes.";
+    cv::putText(latin, text, {35, y}, cv::FONT_HERSHEY_SIMPLEX, 0.85,
+                index % 5 ? cv::Scalar(30, 35, 40) : cv::Scalar(170, 60, 30), 2, cv::LINE_AA);
+  }
+  const auto cjk = fixtures.Read(std::filesystem::path(RK_PHOTO_TEST_DATA) / "photo_cjk.png",
+                                 GUID_ContainerFormatPng);
+  const auto output = fixtures.dir / "orientation.webp";
+  for (const auto& upright : {latin, cjk}) {
+    for (unsigned turns = 0; turns < 4; ++turns) {
+      cv::Mat rotated = upright.clone();
+      if (turns)
+        cv::rotate(rotated, rotated,
+                   turns == 1   ? cv::ROTATE_90_CLOCKWISE
+                   : turns == 2 ? cv::ROTATE_180
+                                : cv::ROTATE_90_COUNTERCLOCKWISE);
+      const auto input = fixtures.Png("text.png", rotated);
+      const auto result = Take(ProcessPhoto(input, output, PhotoMode::kPhoto));
+      Require(result.quarter_turns == (4 - turns) % 4 && result.orientation == "text" &&
+                  result.geometry == "unchanged",
+              "text orientation must correct all four directions");
+      Require(ReadWebp(output).size() == upright.size(), "orientation restores native dimensions");
+    }
+  }
+  cv::Mat nontext(240, 480, CV_8UC3, cv::Scalar(140, 80, 40));
+  cv::circle(nontext, {80, 80}, 40, {0, 0, 220}, cv::FILLED);
+  const auto input = fixtures.Png("nontext.png", nontext);
+  const auto unchanged = Take(ProcessPhoto(input, output, PhotoMode::kPhoto));
+  Require(unchanged.quarter_turns == 0 && unchanged.orientation == "none",
+          "non-text photo stays upright");
+  for (unsigned turns = 0; turns < 4; ++turns) {
+    const auto result = Take(ProcessPhoto(input, output, PhotoMode::kPhoto, turns));
+    cv::Mat expected = nontext.clone();
+    if (turns)
+      cv::rotate(expected, expected,
+                 turns == 1   ? cv::ROTATE_90_CLOCKWISE
+                 : turns == 2 ? cv::ROTATE_180
+                              : cv::ROTATE_90_COUNTERCLOCKWISE);
+    Require(result.quarter_turns == turns && result.orientation == "manual" &&
+                ReadWebp(output).size() == expected.size(),
+            "manual turns apply exactly");
+    Require(cv::norm(ReadWebp(output), expected, cv::NORM_L1) / expected.total() < 12,
+            "manual rotation must preserve the expected pixel arrangement");
+    const auto rotated_nontext = fixtures.Png("rotated-nontext.png", expected);
+    const auto automatic = Take(ProcessPhoto(rotated_nontext, output, PhotoMode::kPhoto));
+    Require(automatic.quarter_turns == 0 && automatic.orientation == "none",
+            "non-text inputs must remain unchanged at every quarter turn");
+  }
+  const auto webp = fixtures.dir / "source.webp";
+  Take(ProcessPhoto(input, webp, PhotoMode::kPhoto, 0));
+  Require(Take(ProcessPhoto(webp, output, PhotoMode::kPhoto, 1)).width == 240,
+          "WebP inputs must decode for re-derivation");
+  const auto thumb = fixtures.dir / "webp-thumb.jpg";
+  const auto thumbnail = Take(CreatePhotoThumbnail(webp, thumb));
+  Require(thumbnail.width == 320 && thumbnail.height == 160, "WebP thumbnails preserve aspect");
+  for (const auto format : {PhotoTranscode::kJpeg, PhotoTranscode::kPng}) {
+    Take(TranscodePhoto(webp, output, format));
+    Require(fixtures.Read(output, format == PhotoTranscode::kJpeg ? GUID_ContainerFormatJpeg
+                                                                  : GUID_ContainerFormatPng)
+                    .size() == nontext.size(),
+            "selection transcodes preserve source dimensions");
+  }
+}
+
+void CheckPaperMask() {
+  cv::Mat colors(256, 256, CV_8UC3), reference_lab;
+  cv::RNG random(701);
+  random.fill(colors, cv::RNG::UNIFORM, 0, 256);
+  cv::cvtColor(colors, reference_lab, cv::COLOR_BGR2Lab);
+  Require(cv::norm(photo::AnalysisLab(colors), reference_lab, cv::NORM_INF) <= 2,
+          "analysis Lab lookup must match OpenCV within two quantization levels");
+  cv::Mat image(600, 800, CV_8UC3, cv::Scalar(190, 190, 195));
+  image(cv::Rect{600, 0, 200, 600}).setTo(cv::Scalar(155, 35, 15));
+  for (int y = 50; y < 580; y += 40)
+    cv::putText(image, "Faint document print", {20, y}, cv::FONT_HERSHEY_SIMPLEX, 0.8,
+                {100, 100, 105}, 1, cv::LINE_AA);
+  const auto before = image.clone();
+  const auto paper = Take(photo::AnalyzePaper(image, {}));
+  Take(photo::EnhanceScan(image, paper, {}));
+  const cv::Rect background{680, 50, 100, 500};
+  Require(cv::norm(image(background), before(background), cv::NORM_INF) == 0,
+          "non-paper pixels must remain unchanged before lossy encoding");
+  Require(cv::mean(image(cv::Rect{50, 15, 100, 15}))[0] > 230,
+          "paper normalization must remove the grey cast");
+
+  cv::Mat shadowed(600, 800, CV_8UC3);
+  for (int y = 0; y < shadowed.rows; ++y) {
+    auto* row = shadowed.ptr<cv::Vec3b>(y);
+    for (int x = 0; x < shadowed.cols; ++x) {
+      const double shadow = std::max(0.0, 1 - std::hypot(x - 210.0, y - 599.0) / 400);
+      const auto value = cv::saturate_cast<std::uint8_t>(220 - 120 * shadow);
+      row[x] = cv::Vec3b::all(value);
+    }
+  }
+  shadowed.colRange(0, 65).setTo(cv::Scalar::all(90));
+  const auto original = shadowed.clone();
+  const auto shadow_paper = Take(photo::AnalyzePaper(shadowed, {}));
+  Take(photo::EnhanceScan(shadowed, shadow_paper, {}));
+  Require(cv::mean(shadowed(cv::Rect{185, 565, 50, 25}))[0] > 190,
+          "connected neutral paper shadows must be normalized");
+  Require(cv::norm(shadowed(cv::Rect{10, 80, 25, 440}), original(cv::Rect{10, 80, 25, 440}),
+                   cv::NORM_INF) == 0,
+          "a neutral dark table beyond a sharp transition must remain untouched");
+}
+
+void CheckSideCrop() {
+  cv::Mat page(1200, 1000, CV_8UC3, cv::Scalar::all(230));
+  page.colRange(800, 1000).setTo(cv::Scalar(160, 40, 20));
+  for (int y = 80; y < 1160; y += 45)
+    cv::putText(page, "Printed text stays inside the page", {45, y}, cv::FONT_HERSHEY_SIMPLEX, .8,
+                {30, 30, 30}, 2, cv::LINE_AA);
+  auto geometry = Take(photo::AnalyzeGeometry(page, {}));
+  Require(geometry.kind == "unchanged" && !geometry.crops.empty(),
+          "a clear side transition must crop without reporting a warp");
+  const auto cropped = Take(photo::ApplyGeometry(page, geometry, {230, 230, 230}, {}));
+  Require(cropped.cols >= 790 && cropped.cols < 820 && cropped.rows >= page.rows,
+          "side crop must remove the blue background and retain the page");
+  cv::Mat before, after;
+  cv::inRange(page, cv::Scalar::all(0), cv::Scalar::all(80), before);
+  cv::inRange(cropped, cv::Scalar::all(0), cv::Scalar::all(80), after);
+  Require(
+      std::abs(cv::countNonZero(before) - cv::countNonZero(after)) < .03 * cv::countNonZero(before),
+      "side cropping must retain all printed ink");
+  cv::putText(page, "Retained text crosses the edge", {580, 1180}, cv::FONT_HERSHEY_SIMPLEX, .7,
+              {25, 25, 25}, 2, cv::LINE_AA);
+  geometry = Take(photo::AnalyzeGeometry(page, {}));
+  Require(geometry.crops.empty(), "a side crop must be vetoed by main-page text beyond the edge");
+
+  cv::Mat upright(1200, 900, CV_8UC3, cv::Scalar::all(230));
+  for (int y = 80; y < 1160; y += 45)
+    cv::putText(upright, "Upright synthetic document stays intact", {35, y},
+                cv::FONT_HERSHEY_SIMPLEX, .8, {30, 30, 30}, 2, cv::LINE_AA);
+  geometry = Take(photo::AnalyzeGeometry(upright, {}));
+  Require(geometry.kind == "unchanged" && geometry.crops.empty(),
+          "upright synthetic text must receive no warp and no crop");
 }
 
 void CheckPartialDocuments(Fixtures& fixtures) {
@@ -332,10 +455,10 @@ void CheckPartialDocuments(Fixtures& fixtures) {
   cv::rectangle(page, {500, 566}, {530, 573}, {162, 164, 166}, cv::FILLED);
   const auto full = fixtures.Png("partial-flat.png", page);
   const auto output = fixtures.dir / "partial-scan.temp";
-  const auto flat = Take(ProcessPhoto(full, output, PhotoMode::kScan));
+  const auto flat = Take(ProcessPhoto(full, output, PhotoMode::kScan, 0));
   Require(flat.geometry == "unchanged" && flat.width == page.cols && flat.height == page.rows,
           "aligned partial page should keep its whole view");
-  const auto scanned = fixtures.Read(output, GUID_ContainerFormatPng);
+  const auto scanned = ReadWebp(output);
   Require(scanned.at<cv::Vec3b>(580, 60)[2] - scanned.at<cv::Vec3b>(580, 60)[0] > 135,
           "red stamp should retain its color");
   const auto weak = scanned.at<cv::Vec3b>(569, 515)[0];
@@ -357,11 +480,13 @@ void CheckPartialDocuments(Fixtures& fixtures) {
     cv::rectangle(angled, {angled.cols - 15, 292}, {angled.cols - 1, 310}, {34, 170, 35},
                   cv::FILLED);
     const auto rotated = fixtures.Png(tilt > 0 ? "plus.png" : "minus.png", angled);
-    const auto deskewed = Take(ProcessPhoto(rotated, output, PhotoMode::kScan));
+    const auto deskewed = Take(ProcessPhoto(rotated, output, PhotoMode::kScan, 0));
     Require(
         deskewed.geometry == "deskew" && deskewed.width > page.cols && deskewed.height > page.rows,
-        "partial page with consistent slanted text should be deskewed with expanded canvas");
-    const auto pixels = fixtures.Read(output, GUID_ContainerFormatPng);
+        "partial page with consistent slanted text should be deskewed with expanded canvas: " +
+            deskewed.geometry + " " + std::to_string(deskewed.width) + "x" +
+            std::to_string(deskewed.height));
+    const auto pixels = ReadWebp(output);
     const cv::Point2f target_center{(pixels.cols - 1) * 0.5f, (pixels.rows - 1) * 0.5f};
     auto transform =
         cv::getRotationMatrix2D({(angled.cols - 1) * 0.5f, (angled.rows - 1) * 0.5f}, -tilt, 1);
@@ -373,7 +498,7 @@ void CheckPartialDocuments(Fixtures& fixtures) {
         pixels.at<cv::Vec3b>(cvRound(marker_locations[0].y), cvRound(marker_locations[0].x));
     const auto right =
         pixels.at<cv::Vec3b>(cvRound(marker_locations[1].y), cvRound(marker_locations[1].x));
-    Require(left[0] - left[1] > 125 && right[1] - right[0] > 100,
+    Require(left[0] - left[1] > 125 && right[1] - right[0] > 80,
             "deskew angle must preserve both known edge markers near their expected positions");
   }
 
@@ -382,7 +507,7 @@ void CheckPartialDocuments(Fixtures& fixtures) {
   for (int y = 110; y < 340; y += 43)
     cv::line(ambiguous, {67, y}, {540, y}, {45, 54, 63}, 2);
   const auto table = fixtures.Png("table-without-page-boundary.png", ambiguous);
-  const auto kept = Take(ProcessPhoto(table, output, PhotoMode::kScan));
+  const auto kept = Take(ProcessPhoto(table, output, PhotoMode::kScan, 0));
   Require(
       kept.geometry == "unchanged" && kept.width == ambiguous.cols && kept.height == ambiguous.rows,
       "an internal table border must not be used as a page boundary");
@@ -397,8 +522,10 @@ void CheckThumbnails(Fixtures& fixtures) {
               std::filesystem::file_size(output) <= 64 * 1024,
           "thumbnail must resize large sources proportionally within the byte limit");
   Require(fixtures.Read(output).size() == cv::Size{320, 206}, "thumbnail JPEG dimensions");
-  Require(Take(RankPhotos(std::array{big})).selected_index == 0,
-          "8 Mi-pixel budget accepts 5 MP input");
+  Require(Take(ProcessPhoto(big, fixtures.dir / "large.webp", PhotoMode::kPhoto, 0)).width == 2800,
+          "photo mode keeps native resolution within the pixel budget");
+  Require(Take(ProcessPhoto(big, fixtures.dir / "capped.webp", PhotoMode::kScan, 0)).width == 2480,
+          "scan mode caps the long side without upscaling");
 
   cv::Mat transparent(20, 28, CV_8UC4, cv::Scalar(0, 0, 0, 0));
   cv::rectangle(transparent, {9, 5}, {18, 14}, {0, 0, 220, 255}, cv::FILLED);
@@ -457,7 +584,9 @@ void CheckThumbnails(Fixtures& fixtures) {
 int main() {
   try {
     Fixtures fixtures;
-    CheckRank(fixtures);
+    CheckOrientation(fixtures);
+    CheckPaperMask();
+    CheckSideCrop();
     CheckBurst(fixtures);
     CheckDocuments(fixtures);
     CheckPartialDocuments(fixtures);

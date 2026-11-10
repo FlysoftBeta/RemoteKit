@@ -33,7 +33,7 @@ def main():
     expected = {k: v[1] for k, v in manifest["zoo"].items() if k.endswith(".onnx")}
     expected.update(manifest["converted"])
     for name, digest in expected.items():
-        with (deps / "face-models" / name).open("rb") as f:
+        with (deps / "models" / name).open("rb") as f:
             if hashlib.file_digest(f, "sha256").hexdigest() != digest:
                 raise ValueError("model digest mismatch")
     if not args.skip_build:
@@ -44,7 +44,7 @@ def main():
                         "-DCMAKE_BUILD_TYPE=Release"], env=env, check=True)
         subprocess.run([str(cmake), "--build", str(build), "--parallel", "2"], env=env, check=True)
     exe = build / "face-eval.exe"
-    models = deps / "face-models"
+    models = deps / "models"
     if not args.skip_photos:
         subprocess.run([str(exe), "--photos", str(models), str(private / "img"), str(output)], check=True)
     lfw = repo / "develop/tmp/face-public-benchmark"

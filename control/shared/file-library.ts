@@ -8,6 +8,7 @@ export interface Asset {
 
 export interface PhotoMetadata {
   mode: 'photo' | 'scan';
+  quarterTurns?: 1 | 2 | 3;
   candidateAssetIds?: string[];
   pending?: 'choice' | 'scan-error';
   warning?: string;

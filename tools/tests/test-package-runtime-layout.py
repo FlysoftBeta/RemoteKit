@@ -78,7 +78,7 @@ class EndpointLayout(unittest.TestCase):
                  patch.object(packager, 'check_freshness'), \
                  patch.object(packager, 'source_provenance', return_value={'commit': 'a' * 40, 'dirty': False}), \
                  patch.object(packager, 'pinned_node', return_value=node), \
-                 patch.object(packager, 'face_runtime_files', return_value=[]), \
+                 patch.object(packager, 'imaging_runtime_files', return_value=[]), \
                  patch.object(packager, 'document_runtime_trees', return_value=[]), \
                  patch.object(packager, 'run_startup_smoke', return_value=validation) as smoke, \
                  patch.object(packager.subprocess, 'run') as install, \
@@ -134,17 +134,17 @@ class EndpointLayout(unittest.TestCase):
             result = next((root / 'evidence').glob('*/result.json'))
             self.assertIn('current', result.read_text(encoding='utf-8'))
 
-    def test_face_runtime_copies_only_catalogued_paths(self):
+    def test_imaging_runtime_copies_only_catalogued_paths(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
             root = Path(temporary)
             source = root / 'model.onnx'
             source.write_bytes(b'model')
             package = root / 'package'
-            files = [(source, Path('bin/face-models/recognition.onnx'))]
-            packager.copy_face_runtime(files, package)
+            files = [(source, Path('bin/models/recognition.onnx'))]
+            packager.copy_imaging_runtime(files, package)
             self.assertEqual((package / files[0][1]).read_bytes(), b'model')
             with self.assertRaisesRegex(RuntimeError, 'collides with a runtime file'):
-                packager.copy_face_runtime(files, package)
+                packager.copy_imaging_runtime(files, package)
 
 
 if __name__ == '__main__':

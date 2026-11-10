@@ -668,6 +668,13 @@ Result<Json> ViewController::Snapshot(bool output_diagnostics) {
         if (view.value("close_state", std::string()) == "closing")
           AddCloseRequest(item, requests);
         item["pageRequests"] = requests.value("requests", requests);
+        {
+          std::lock_guard lock(chooser_mutex);
+          chooser_requests[view_id] = {{"instance", view.at("instance")},
+                                       {"document", view.at("document")},
+                                       {"browserIncarnation", browser.Incarnation()},
+                                       {"pending", item["pageRequests"].at("pending")}};
+        }
         navigation.CaptureNavigation(view);
         views.push_back(std::move(item));
       }
@@ -715,6 +722,25 @@ Result<Json> ViewController::Snapshot(bool output_diagnostics) {
         {"recovery", navigation.RecoverySnapshot()},
         {"outputDiagnostics", std::move(output_status)}};
   }
+}
+
+Result<std::vector<std::string>> ViewController::FileChooserAccept(
+    const FileUploadStore::Binding& binding) const {
+  std::lock_guard lock(chooser_mutex);
+  const auto found = chooser_requests.find(binding.view);
+  if (found != chooser_requests.end() && found->second.at("instance") == binding.instance &&
+      found->second.at("document") == binding.document &&
+      found->second.at("browserIncarnation") == binding.browser_incarnation) {
+    for (const auto& request : found->second.at("pending")) {
+      if (request.value("request", std::string()) == binding.request &&
+          request.value("kind", std::string()) == "file_chooser") {
+        if (request.value("accept_types_omitted", false))
+          return std::vector<std::string>{};
+        return request.at("accept_types").get<std::vector<std::string>>();
+      }
+    }
+  }
+  return Error{ErrorCode::kConflict, "stale_file_request_target"};
 }
 
 void ViewController::AddCloseRequest(Json& output, const Json& requests) {
@@ -1239,6 +1265,10 @@ Result<void> ViewController::Initialize() {
   return {};
 }
 void ViewController::Reset() {
+  {
+    std::lock_guard lock(chooser_mutex);
+    chooser_requests.clear();
+  }
   reconciliation_pending = false;
   output.SetVisible(false);
 }

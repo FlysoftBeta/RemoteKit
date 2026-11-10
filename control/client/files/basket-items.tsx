@@ -5,14 +5,13 @@ import {
   PhotoCameraOutlined,
   RadioButtonUnchecked,
   RemoveCircleOutline,
+  RotateRightOutlined,
   TuneOutlined,
   VisibilityOutlined,
 } from '@mui/icons-material';
 import {
-  Alert,
   Box,
   Button,
-  CircularProgress,
   Divider,
   IconButton,
   ListItemIcon,
@@ -32,6 +31,7 @@ import { useLibrary } from './file-library-state';
 import { FileRow, FileTile, type FileStatus } from './file-tile';
 import type { PhotoJob } from './photo-job-store';
 import { PhotoOptions } from './photo-options';
+import { PhotoRotateButton } from './photo-rotate-button';
 import { BasketPartitionMenu } from './partition-menu';
 import { SortableFileItems, type FileView } from './sortable-file-items';
 import { OverflowText } from '../app/overflow-text';
@@ -50,7 +50,11 @@ export function photoStatus(entry?: LibraryEntry, job?: PhotoJob): FileStatus | 
   if (state === 'choice') return { label: '待选片', tone: 'warning' };
   if (state === 'scan-error') return { label: '扫描未完成', tone: 'warning' };
   if (state === 'error') return { label: '处理失败', tone: 'warning' };
-  if (state) return { label: job?.replace ? '重拍处理中' : '处理中', tone: 'progress' };
+  if (state)
+    return {
+      label: job?.replace && job.rotationTurns === undefined ? '重拍处理中' : '处理中',
+      tone: 'progress',
+    };
   if (entry?.photo?.warning) return { label: '可能不清晰', tone: 'warning' };
 }
 
@@ -187,7 +191,7 @@ export function BasketItems({
             const common = {
               id: item.id,
               name: item.name,
-              type: entry?.type ?? 'image/png',
+              type: entry?.type ?? 'image/jpeg',
               assetId: entry?.assetId ?? item.id,
               blob: entry ? undefined : job?.preview,
               localOnly: !entry,
@@ -288,6 +292,23 @@ export function BasketItems({
               <ListItemText>查看大图</ListItemText>
             </MenuItem>
           ),
+          menuItem.entry.photo &&
+            !menuItem.entry.photo.pending &&
+            (!menuItem.job ||
+              (menuItem.job.rotationTurns !== undefined && menuItem.job.state === 'processing')) && (
+              <MenuItem
+                key="rotate"
+                onClick={() => {
+                  setMenu(undefined);
+                  if (menuItem.entry) photos.rotate(menuItem.entry, 'basket');
+                }}
+              >
+                <ListItemIcon>
+                  <RotateRightOutlined fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>向右旋转</ListItemText>
+              </MenuItem>
+            ),
           (menuItem.entry.photo?.warning || menuItem.entry.originalAssetId) && (
             <MenuItem
               key="photo"
@@ -352,17 +373,32 @@ export function BasketItems({
             <OverflowText variant="subtitle2" sx={{ flex: 1, minWidth: 0 }}>
               {active.name}
             </OverflowText>
+            {panel?.view === 'image' && active.entry && (
+              <PhotoRotateButton entry={active.entry} destination="basket" disabled={locked} />
+            )}
             <IconButton aria-label="收起项目" onClick={() => setPanel(undefined)}>
               <Close fontSize="small" />
             </IconButton>
           </Box>
           {panel?.view === 'image' && active.entry?.kind === 'file' ? (
-            <FileImagePreview
-              key={active.entry.assetId}
-              inline
-              entry={active.entry}
-              onClose={() => setPanel(undefined)}
-            />
+            <>
+              <FileImagePreview
+                key={active.entry.assetId}
+                inline
+                showRotation={false}
+                entry={active.entry}
+                onClose={() => setPanel(undefined)}
+              />
+              {active.job?.state === 'error' && (
+                <PhotoPanel
+                  item={active}
+                  locked={locked}
+                  onRemove={() => remove(active)}
+                  onRetake={onRetake}
+                  onClose={() => setPanel(undefined)}
+                />
+              )}
+            </>
           ) : (
             <PhotoPanel
               item={active}
@@ -395,19 +431,15 @@ function PhotoPanel({
   const { entry, job } = item;
   return (
     <>
-      {entry && (
-        <PhotoOptions key={entry.id} entry={entry} job={job} destination="basket" disabled={locked} />
+      {(entry || job) && (
+        <PhotoOptions
+          key={entry?.id ?? job?.id}
+          entry={entry}
+          job={job}
+          destination="basket"
+          disabled={locked}
+        />
       )}
-      {job &&
-        !entry &&
-        (job.error ? (
-          <Alert severity="warning">{job.error}</Alert>
-        ) : (
-          <Typography variant="body2" role="status" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <CircularProgress size={14} />
-            正在处理照片
-          </Typography>
-        ))}
       <Box sx={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 0.5, mt: 1 }}>
         {job?.state === 'error' && job.retryable && (
           <Button disabled={locked} onClick={() => photos.retry(job.id)}>

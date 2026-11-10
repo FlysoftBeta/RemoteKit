@@ -1,4 +1,8 @@
 #include "files/photo_processing.hpp"
+#include "files/photo_scan.hpp"
+#include "files/photo_geometry.hpp"
+#include <webp/decode.h>
+#include <webp/encode.h>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -14,6 +18,9 @@
 #include <cmath>
 #include <fstream>
 #include <numeric>
+#include <cstring>
+#include <chrono>
+#include <semaphore>
 #include "util/result_macros.hpp"
 #include <utility>
 
@@ -21,8 +28,6 @@ namespace remotekit {
 namespace {
 
 using Microsoft::WRL::ComPtr;
-using Quad = std::array<cv::Point2f, 4>;
-
 constexpr int kMaxPixels = 8 * 1024 * 1024;
 constexpr int kMaxDimension = 8192;
 constexpr std::streamoff kMaxCompressedBytes = 64 * 1024 * 1024;
@@ -89,45 +94,60 @@ unsigned Orientation(IWICBitmapFrameDecode& frame) {
   return orientation;
 }
 
+unsigned TiffOrientation(std::span<const BYTE> tiff) {
+  if (tiff.size() >= 6 && std::memcmp(tiff.data(), "Exif\0\0", 6) == 0)
+    tiff = tiff.subspan(6);
+  if (tiff.size() < 8)
+    return 1;
+  const bool little = tiff[0] == 'I' && tiff[1] == 'I';
+  if (!little && !(tiff[0] == 'M' && tiff[1] == 'M'))
+    return 1;
+  const auto number = [&](std::size_t start, std::size_t bytes) {
+    std::uint32_t value = 0;
+    for (std::size_t index = 0; index < bytes; ++index)
+      value = value * 256 + tiff[start + (little ? bytes - index - 1 : index)];
+    return value;
+  };
+  if (number(2, 2) != 42)
+    return 1;
+  const std::size_t ifd = number(4, 4);
+  if (ifd < 8 || ifd > tiff.size() - 2)
+    return 1;
+  const auto count = number(ifd, 2);
+  if (count > (tiff.size() - ifd - 2) / 12)
+    return 1;
+  for (std::size_t index = 0; index < count; ++index) {
+    const auto entry = ifd + 2 + index * 12;
+    if (number(entry, 2) == 274 && number(entry + 2, 2) == 3 && number(entry + 4, 4) == 1)
+      return number(entry + 8, 2);
+  }
+  return 1;
+}
+
 unsigned PngOrientation(std::span<const BYTE> png) {
-  // WIC's PNG metadata readers do not expose TIFF tags consistently. Read
-  // only the inline orientation short from IFD0 in a bounded eXIf chunk.
-  for (std::size_t offset = 8; png.size() - offset >= 12;) {
+  for (std::size_t offset = 8; offset <= png.size() && png.size() - offset >= 12;) {
     std::size_t length = 0;
-    for (std::size_t i = 0; i < 4; ++i)
-      length = length * 256 + png[offset + i];
+    for (int index = 0; index < 4; ++index)
+      length = length * 256 + png[offset + index];
     if (length > png.size() - offset - 12)
       break;
-    const auto* tag = png.data() + offset + 4;
-    if (tag[0] == 'e' && tag[1] == 'X' && tag[2] == 'I' && tag[3] == 'f') {
-      const auto tiff = png.subspan(offset + 8, length);
-      if (tiff.size() < 8)
-        break;
-      const bool little = tiff[0] == 'I' && tiff[1] == 'I';
-      if (!little && !(tiff[0] == 'M' && tiff[1] == 'M'))
-        break;
-      const auto number = [&](std::size_t start, std::size_t bytes) {
-        std::uint32_t value = 0;
-        for (std::size_t i = 0; i < bytes; ++i)
-          value = value * 256 + tiff[start + (little ? bytes - i - 1 : i)];
-        return value;
-      };
-      if (number(2, 2) != 42)
-        break;
-      const std::size_t ifd = number(4, 4);
-      if (ifd < 8 || ifd > tiff.size() - 2)
-        break;
-      const auto count = number(ifd, 2);
-      if (count > (tiff.size() - ifd - 2) / 12)
-        break;
-      for (std::size_t i = 0; i < count; ++i) {
-        const auto entry = ifd + 2 + i * 12;
-        if (number(entry, 2) == 274 && number(entry + 2, 2) == 3 && number(entry + 4, 4) == 1)
-          return number(entry + 8, 2);
-      }
-      break;
-    }
+    if (std::memcmp(png.data() + offset + 4, "eXIf", 4) == 0)
+      return TiffOrientation(png.subspan(offset + 8, length));
     offset += length + 12;
+  }
+  return 1;
+}
+
+unsigned WebpOrientation(std::span<const BYTE> bytes) {
+  for (std::size_t offset = 12; offset <= bytes.size() && bytes.size() - offset >= 8;) {
+    const std::size_t length = bytes[offset + 4] | (bytes[offset + 5] << 8) |
+                               (bytes[offset + 6] << 16) |
+                               (static_cast<std::size_t>(bytes[offset + 7]) << 24);
+    if (length > bytes.size() - offset - 8)
+      break;
+    if (std::memcmp(bytes.data() + offset, "EXIF", 4) == 0)
+      return TiffOrientation(bytes.subspan(offset + 8, length));
+    offset += 8 + length + (length & 1);
   }
   return 1;
 }
@@ -165,6 +185,63 @@ void Orient(cv::Mat& image, unsigned orientation) {
   }
 }
 
+Result<cv::Mat> DecodeWebp(std::span<const BYTE> bytes,
+                           bool thumbnail,
+                           const PhotoCancelled& cancelled) {
+  WebPBitstreamFeatures features{};
+  if (WebPGetFeatures(bytes.data(), bytes.size(), &features) != VP8_STATUS_OK ||
+      features.has_animation)
+    return Error{ErrorCode::kRejected, "invalid-photo"};
+  const int maximum = thumbnail ? 16384 : kMaxDimension;
+  const auto pixels = static_cast<std::uint64_t>(features.width) * features.height;
+  if (features.width > maximum || features.height > maximum ||
+      pixels > static_cast<std::uint64_t>(thumbnail ? 32 * 1024 * 1024 : kMaxPixels))
+    return Error{ErrorCode::kLimitExceeded, "photo-too-large"};
+  if (features.width < (thumbnail ? 1 : 32) || features.height < (thumbnail ? 1 : 32))
+    return Error{ErrorCode::kRejected, "invalid-photo"};
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  WebPDecoderConfig config;
+  if (!WebPInitDecoderConfig(&config))
+    return Error{ErrorCode::kUnavailable, "photo-imaging-unavailable"};
+  int width = features.width;
+  int height = features.height;
+  if (thumbnail && std::max(width, height) > kThumbnailSide) {
+    const int longest = std::max(width, height);
+    width = static_cast<int>(ScaleSide(width, longest, kThumbnailSide));
+    height = static_cast<int>(ScaleSide(height, longest, kThumbnailSide));
+    config.options.use_scaling = 1;
+    config.options.scaled_width = width;
+    config.options.scaled_height = height;
+  }
+  cv::Mat decoded(height, width, features.has_alpha ? CV_8UC4 : CV_8UC3);
+  config.output.colorspace = features.has_alpha ? MODE_BGRA : MODE_BGR;
+  config.output.is_external_memory = 1;
+  config.output.u.RGBA.rgba = decoded.data;
+  config.output.u.RGBA.stride = static_cast<int>(decoded.step);
+  config.output.u.RGBA.size = decoded.total() * decoded.elemSize();
+  const auto status = WebPDecode(bytes.data(), bytes.size(), &config);
+  WebPFreeDecBuffer(&config.output);
+  if (status != VP8_STATUS_OK)
+    return Error{ErrorCode::kRejected, "invalid-photo"};
+  if (features.has_alpha) {
+    cv::Mat opaque(decoded.size(), CV_8UC3);
+    for (int row = 0; row < decoded.rows; ++row) {
+      if (row % 32 == 0)
+        RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+      const auto* source = decoded.ptr<cv::Vec4b>(row);
+      auto* output = opaque.ptr<cv::Vec3b>(row);
+      for (int col = 0; col < decoded.cols; ++col)
+        for (int channel = 0; channel < 3; ++channel)
+          output[col][channel] = static_cast<std::uint8_t>(
+              (source[col][channel] * source[col][3] + 255 * (255 - source[col][3]) + 127) / 255);
+    }
+    decoded = std::move(opaque);
+  }
+  Orient(decoded, WebpOrientation(bytes));
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  return decoded;
+}
+
 Result<cv::Mat> DecodeMemory(IWICImagingFactory& factory,
                              std::span<const BYTE> compressed,
                              const PhotoCancelled& cancelled,
@@ -177,6 +254,9 @@ Result<cv::Mat> DecodeMemory(IWICImagingFactory& factory,
     return Error{ErrorCode::kRejected, invalid};
   constexpr std::array<BYTE, 8> png_signature{137, 80, 78, 71, 13, 10, 26, 10};
   const bool jpeg = compressed[0] == 0xff && compressed[1] == 0xd8 && compressed[2] == 0xff;
+  if (!analysis && compressed.size() >= 12 && std::memcmp(compressed.data(), "RIFF", 4) == 0 &&
+      std::memcmp(compressed.data() + 8, "WEBP", 4) == 0)
+    return DecodeWebp(compressed, thumbnail, cancelled);
   if (!jpeg &&
       (analysis || !std::equal(png_signature.begin(), png_signature.end(), compressed.begin())))
     return Error{ErrorCode::kRejected, invalid};
@@ -352,6 +432,55 @@ Result<void> EncodePng(IWICImagingFactory& factory,
   return {};
 }
 
+Result<void> EncodeWebp(const std::filesystem::path& path,
+                        const cv::Mat& image,
+                        const PhotoCancelled& cancelled) {
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  WebPConfig config;
+  WebPPicture picture;
+  if (!WebPConfigInit(&config) || !WebPPictureInit(&picture))
+    return Error{ErrorCode::kUnavailable, "photo-imaging-unavailable"};
+  struct PictureCleanup {
+    WebPPicture& picture;
+    ~PictureCleanup() { WebPPictureFree(&picture); }
+  } cleanup{picture};
+  config.quality = 85;
+  config.method = 2;
+  config.use_sharp_yuv = 0;
+  config.thread_level = 0;
+  picture.width = image.cols;
+  picture.height = image.rows;
+  picture.use_argb = 1;
+  if (!WebPPictureImportBGR(&picture, image.data, static_cast<int>(image.step)))
+    return Error{ErrorCode::kUnavailable, "photo-output-failed"};
+  struct Output {
+    std::ofstream file;
+    std::size_t bytes = 0;
+    const PhotoCancelled& cancelled;
+  } output{std::ofstream(path, std::ios::binary | std::ios::trunc), 0, cancelled};
+  if (!output.file)
+    return Error{ErrorCode::kUnavailable, "photo-output-failed"};
+  picture.custom_ptr = &output;
+  picture.writer = [](const std::uint8_t* data, std::size_t size, const WebPPicture* picture) {
+    auto& output = *static_cast<Output*>(picture->custom_ptr);
+    if ((output.cancelled && output.cancelled()) || size > kMaxCompressedBytes - output.bytes)
+      return 0;
+    output.file.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+    output.bytes += size;
+    return output.file ? 1 : 0;
+  };
+  picture.progress_hook = [](int, const WebPPicture* picture) {
+    const auto& output = *static_cast<const Output*>(picture->custom_ptr);
+    return output.cancelled && output.cancelled() ? 0 : 1;
+  };
+  const int encoded = WebPEncode(&config, &picture);
+  output.file.close();
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  if (!encoded || !output.file)
+    return Error{ErrorCode::kUnavailable, "photo-output-failed"};
+  return {};
+}
+
 cv::Mat LimitSide(const cv::Mat& image, int side) {
   const int longest = std::max(image.cols, image.rows);
   if (longest <= side)
@@ -461,11 +590,6 @@ Detail AnalyzeDetail(const cv::Mat& gray) {
           noise_regions.empty() ? 0.0 : Median(noise_regions)};
 }
 
-struct Quality {
-  PhotoRankCandidate rank;
-  cv::Mat signature;
-};
-
 cv::Mat CompositionSignature(const cv::Mat& image) {
   cv::Mat signature;
   cv::resize(image, signature, {kSignatureSize, kSignatureSize}, 0, 0, cv::INTER_AREA);
@@ -474,26 +598,6 @@ cv::Mat CompositionSignature(const cv::Mat& image) {
   // A small exposure difference does not make a separate scene.
   signature -= cv::Scalar(cv::mean(signature)[0], 0, 0);
   return signature;
-}
-
-Quality Measure(const cv::Mat& image, std::size_t index) {
-  cv::Mat gray;
-  cv::cvtColor(LimitSide(image, 768), gray, cv::COLOR_BGR2GRAY);
-  const auto detail = AnalyzeDetail(gray);
-  const auto coarse = AnalyzeDetail(LimitSide(gray, 384));
-  const double black = static_cast<double>(cv::countNonZero(gray <= 5)) / gray.total();
-  const double white = static_cast<double>(cv::countNonZero(gray >= 250)) / gray.total();
-  const double midtone = cv::mean(gray)[0];
-  const double exposure_loss = std::max({(black - 0.15) / 0.85, (white - 0.35) / 0.65,
-                                         (48 - midtone) / 48, (midtone - 225) / 30, 0.0});
-  const double noise_loss = std::clamp((detail.noise - 2.5) / 11, 0.0, 1.0);
-  const double structure = 0.6 * detail.strength + 0.4 * coarse.strength;
-  const double crispness =
-      std::sqrt(structure) * (0.7 * detail.fine_ratio + 0.3 * coarse.fine_ratio);
-  const double score = std::clamp(
-      0.64 * std::sqrt(structure) + 0.36 * crispness - 0.23 * exposure_loss - 0.24 * noise_loss,
-      0.0, 1.0);
-  return {{index, score}, CompositionSignature(image)};
 }
 
 double MeasureBurstQuality(const cv::Mat& image) {
@@ -534,341 +638,6 @@ bool NearIdentical(const cv::Mat& a, const cv::Mat& b) {
     }
   }
   return false;
-}
-
-float Length(cv::Point2f vector) {
-  return std::hypot(vector.x, vector.y);
-}
-
-bool ValidQuad(const Quad& quad, double minimum_area, double minimum_side) {
-  double area = 0;
-  for (std::size_t i = 0; i < quad.size(); ++i) {
-    const auto& a = quad[i];
-    const auto& b = quad[(i + 1) % 4];
-    const auto& c = quad[(i + 2) % 4];
-    const auto edge = b - a;
-    const auto next = c - b;
-    const double lengths = Length(edge) * Length(next);
-    // A clockwise screen-space quad has positive cross products. Reject
-    // self-intersections, pinched corners and extremely acute angles.
-    if (Length(edge) < minimum_side || edge.cross(next) <= 0.26 * lengths)
-      return false;
-    area += a.cross(b);
-  }
-  return area * 0.5 >= minimum_area;
-}
-
-void StartAtTopLeft(Quad& quad) {
-  const auto first = std::min_element(quad.begin(), quad.end(),
-                                      [](auto a, auto b) { return a.x + a.y < b.x + b.y; });
-  std::rotate(quad.begin(), first, quad.end());
-}
-
-double BoundaryScore(const cv::Mat& gray, const Quad& quad, bool conservative) {
-  double weakest = 1;
-  double mean_contrast = 0;
-  for (std::size_t i = 0; i < quad.size(); ++i) {
-    const auto a = quad[i], edge = quad[(i + 1) % 4] - a;
-    const auto normal = cv::Point2f{-edge.y, edge.x} * (4.0f / Length(edge));
-    int supporting = 0;
-    for (int sample = 1; sample <= 19; ++sample) {
-      const auto point = a + edge * (sample / 20.0f);
-      const auto inside = point + normal, outside = point - normal;
-      const int signed_difference = gray.at<std::uint8_t>(cvRound(inside.y), cvRound(inside.x)) -
-                                    gray.at<std::uint8_t>(cvRound(outside.y), cvRound(outside.x));
-      const int difference = conservative ? signed_difference : std::abs(signed_difference);
-      supporting += difference >= (conservative ? 20 : 14);
-      mean_contrast += std::clamp(difference, 0, 65) / 65.0;
-    }
-    weakest = std::min(weakest, supporting / 19.0);
-  }
-  if (weakest < (conservative ? 0.73 : 0.58))
-    return 0;
-  return 0.6 * weakest + 0.4 * mean_contrast / 76;
-}
-
-struct DocumentCandidate {
-  Quad quad;
-  double score;
-};
-
-void CollectDocuments(const cv::Mat& gray,
-                      cv::Mat mask,
-                      std::vector<DocumentCandidate>& candidates,
-                      bool conservative) {
-  std::vector<std::vector<cv::Point>> contours;
-  cv::findContours(mask, contours, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
-  const double frame_area = gray.total();
-  for (const auto& contour : contours) {
-    const double coverage = std::abs(cv::contourArea(contour)) / frame_area;
-    if (coverage < (conservative ? 0.28 : 0.16) || coverage > 0.94)
-      continue;
-    std::vector<cv::Point> polygon;
-    cv::approxPolyDP(contour, polygon, 0.018 * cv::arcLength(contour, true), true);
-    if (polygon.size() != 4 || !cv::isContourConvex(polygon))
-      continue;
-    if (cv::contourArea(polygon, true) < 0)
-      std::reverse(polygon.begin(), polygon.end());
-    Quad quad;
-    std::copy(polygon.begin(), polygon.end(), quad.begin());
-    if (!ValidQuad(quad, 0.15 * frame_area, 0.12 * std::min(gray.cols, gray.rows)) ||
-        std::any_of(quad.begin(), quad.end(), [&](auto p) {
-          return p.x < 5 || p.y < 5 || p.x >= gray.cols - 5 || p.y >= gray.rows - 5;
-        }))
-      continue;
-    const auto boundary = BoundaryScore(gray, quad, conservative);
-    if (boundary < 0.58)
-      continue;
-    StartAtTopLeft(quad);
-    candidates.push_back({quad, boundary + 0.25 * coverage});
-  }
-}
-
-std::optional<Quad> DetectDocument(const cv::Mat& image, bool conservative) {
-  cv::Mat gray, mask;
-  cv::cvtColor(LimitSide(image, 800), gray, cv::COLOR_BGR2GRAY);
-  cv::GaussianBlur(gray, gray, {5, 5}, 1.0);
-  std::vector<DocumentCandidate> candidates;
-  cv::Canny(gray, mask, 32, 96);
-  cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, cv::getStructuringElement(cv::MORPH_RECT, {5, 5}));
-  CollectDocuments(gray, mask, candidates, conservative);
-  cv::threshold(gray, mask, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
-  CollectDocuments(gray, mask, candidates, conservative);
-  if (candidates.empty())
-    return {};
-  std::sort(candidates.begin(), candidates.end(),
-            [](const auto& a, const auto& b) { return a.score > b.score; });
-  auto quad = candidates.front().quad;
-  for (std::size_t i = 1; i < candidates.size() && candidates.front().score - candidates[i].score <
-                                                       (conservative ? 0.20 : 0.12);
-       ++i) {
-    const auto& other = candidates[i].quad;
-    const std::vector<cv::Point2f> a(quad.begin(), quad.end()), b(other.begin(), other.end());
-    std::vector<cv::Point2f> overlap;
-    const double intersection = cv::intersectConvexConvex(a, b, overlap);
-    const double union_area = cv::contourArea(a) + cv::contourArea(b) - intersection;
-    if (intersection < 0.84 * union_area)
-      return {};
-  }
-  if (conservative) {
-    const auto center = (quad[0] + quad[1] + quad[2] + quad[3]) * 0.25f;
-    // Leave a small allowance for the analysis-scale contour fit.
-    for (auto& point : quad) {
-      const auto outward = point - center;
-      point += outward * (3.0f / Length(outward));
-    }
-  }
-  for (auto& point : quad) {
-    point.x *= static_cast<float>(image.cols - 1) / (gray.cols - 1);
-    point.y *= static_cast<float>(image.rows - 1) / (gray.rows - 1);
-  }
-  return quad;
-}
-
-Result<Quad> ManualQuad(const cv::Mat& image, const std::array<PhotoPoint, 4>& corners) {
-  Quad quad;
-  for (std::size_t i = 0; i < quad.size(); ++i) {
-    const auto [x, y] = corners[i];
-    if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || x > 1 || y < 0 || y > 1)
-      return Error{ErrorCode::kInvalidRequest, "invalid-corners"};
-    quad[i] = {static_cast<float>(x * (image.cols - 1)), static_cast<float>(y * (image.rows - 1))};
-  }
-  if (!ValidQuad(quad, 32 * 32, 24))
-    return Error{ErrorCode::kInvalidRequest, "invalid-corners"};
-  StartAtTopLeft(quad);
-  return quad;
-}
-
-Result<cv::Mat> Rectify(const cv::Mat& image, const Quad& quad) {
-  const int width = cvRound(std::max(Length(quad[1] - quad[0]), Length(quad[2] - quad[3])));
-  const int height = cvRound(std::max(Length(quad[3] - quad[0]), Length(quad[2] - quad[1])));
-  const double scale = std::min({1.0, std::sqrt(static_cast<double>(kMaxPixels) / (width * height)),
-                                 static_cast<double>(kMaxDimension) / std::max(width, height)});
-  const int out_width = static_cast<int>(width * scale);
-  const int out_height = static_cast<int>(height * scale);
-  if (out_width < 32 || out_height < 32)
-    return Error{ErrorCode::kInvalidRequest, "invalid-corners"};
-  const float x = static_cast<float>(out_width - 1), y = static_cast<float>(out_height - 1);
-  const Quad destination{{{0, 0}, {x, 0}, {x, y}, {0, y}}};
-  cv::Mat result;
-  cv::warpPerspective(image, result, cv::getPerspectiveTransform(quad.data(), destination.data()),
-                      {out_width, out_height}, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
-  return result;
-}
-
-cv::Mat SmallGray(const cv::Mat& image) {
-  cv::Mat gray;
-  cv::cvtColor(LimitSide(image, kAnalysisSide), gray, cv::COLOR_BGR2GRAY);
-  return gray;
-}
-
-unsigned Percentile(const cv::Mat& image, double percentile) {
-  std::array<unsigned, 256> histogram{};
-  for (int y = 0; y < image.rows; ++y) {
-    const auto* pixels = image.ptr<std::uint8_t>(y);
-    for (int x = 0; x < image.cols; ++x)
-      ++histogram[pixels[x]];
-  }
-  auto remaining = static_cast<int>(image.total() * percentile);
-  for (unsigned i = 0; i < histogram.size(); ++i) {
-    remaining -= static_cast<int>(histogram[i]);
-    if (remaining < 0)
-      return i;
-  }
-  return 255;
-}
-
-struct TextDirection {
-  double degrees;
-  double dominance;
-  int lines;
-};
-
-TextDirection EstimateTextDirection(const std::vector<cv::Point2d>& letters) {
-  constexpr int kSteps = 61;
-  std::array<double, kSteps> scores{};
-  std::array<int, kSteps> lines{};
-  for (int step = 0; step < kSteps; ++step) {
-    const double angle = (step * 0.5 - 15) * CV_PI / 180;
-    const double slope = std::tan(angle);
-    // Projected coordinate spans [-137, 648] for a 512 px input.
-    std::array<int, 420> bins{};
-    for (const auto& p : letters) {
-      const int bin = cvRound((p.y - p.x * slope) / 2) + 72;
-      ++bins[bin];
-    }
-    std::array<int, 420> smoothed{};
-    for (std::size_t bin = 1; bin + 1 < bins.size(); ++bin) {
-      smoothed[bin] = bins[bin - 1] + 2 * bins[bin] + bins[bin + 1];
-      scores[step] += smoothed[bin] * smoothed[bin];
-    }
-    for (std::size_t bin = 4; bin + 4 < bins.size(); ++bin) {
-      const auto begin = smoothed.begin() + bin - 3;
-      if (smoothed[bin] >= 12 && std::max_element(begin, begin + 7) == smoothed.begin() + bin)
-        ++lines[step];
-    }
-  }
-  const auto best = std::max_element(scores.begin(), scores.end());
-  const auto index = best - scores.begin();
-  double competing = 1;
-  for (int i = 0; i < kSteps; ++i)
-    if (std::abs(i - index) >= 4)
-      competing = std::max(competing, scores[i]);
-  return {index * 0.5 - 15, *best / competing, lines[index]};
-}
-
-Result<std::optional<double>> DeskewAngle(const cv::Mat& image, const PhotoCancelled& cancelled) {
-  const auto gray = SmallGray(image);
-  if (std::min(gray.cols, gray.rows) < 96)
-    return std::optional<double>{};
-  cv::Mat dark;
-  cv::morphologyEx(gray, dark, cv::MORPH_BLACKHAT,
-                   cv::getStructuringElement(cv::MORPH_RECT, {9, 9}));
-  cv::threshold(dark, dark, std::max(6.0, 0.65 * Percentile(dark, 0.90)), 255, cv::THRESH_BINARY);
-  cv::Mat labels, stats, centers;
-  const int count = cv::connectedComponentsWithStats(dark, labels, stats, centers, 8);
-  std::vector<cv::Point2d> letters, left, right;
-  int upper = 0, lower = 0;
-  for (int i = 1; i < count; ++i) {
-    const auto* box = stats.ptr<int>(i);
-    if (box[cv::CC_STAT_AREA] < 5 || box[cv::CC_STAT_WIDTH] < 2 || box[cv::CC_STAT_WIDTH] > 32 ||
-        box[cv::CC_STAT_HEIGHT] < 3 || box[cv::CC_STAT_HEIGHT] > 24)
-      continue;
-    const cv::Point2d point{centers.at<double>(i, 0), centers.at<double>(i, 1)};
-    if (point.x < 8 || point.x >= gray.cols - 8 || point.y < 8 || point.y >= gray.rows - 8)
-      continue;
-    letters.push_back(point);
-    (point.x < gray.cols * 0.5 ? left : right).push_back(point);
-    if (point.y < gray.rows * 0.5)
-      ++upper;
-    else
-      ++lower;
-  }
-  if (left.size() < 35 || right.size() < 35 || upper < 24 || lower < 24)
-    return std::optional<double>{};
-  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-  const auto full = EstimateTextDirection(letters);
-  if (std::abs(full.degrees) < 1 || std::abs(full.degrees) > 13 || full.dominance < 1.18 ||
-      full.lines < 3)
-    return std::optional<double>{};
-  for (const auto* region : {&left, &right}) {
-    const auto direction = EstimateTextDirection(*region);
-    if (direction.dominance < 1.10 || direction.lines < 3 ||
-        std::abs(direction.degrees - full.degrees) > 1.5)
-      return std::optional<double>{};
-  }
-  return std::optional<double>{full.degrees};
-}
-
-cv::Mat Deskew(const cv::Mat& image, double angle) {
-  const cv::Point2f center{(image.cols - 1) * 0.5f, (image.rows - 1) * 0.5f};
-  auto transform = cv::getRotationMatrix2D(center, angle, 1);
-  const auto cosine = std::abs(transform.at<double>(0, 0));
-  const auto sine = std::abs(transform.at<double>(0, 1));
-  const double width = cosine * image.cols + sine * image.rows;
-  const double height = sine * image.cols + cosine * image.rows;
-  // Reserve the extra pixel per side needed for the integer canvas.
-  const double scale =
-      std::min({1.0, std::sqrt(static_cast<double>(kMaxPixels) / ((width + 1) * (height + 1))),
-                (kMaxDimension - 1.0) / std::max(width, height)});
-  const cv::Size size{static_cast<int>(std::ceil(width * scale)),
-                      static_cast<int>(std::ceil(height * scale))};
-  transform *= scale;
-  transform.at<double>(0, 2) += (size.width - 1) * 0.5 - center.x * scale;
-  transform.at<double>(1, 2) += (size.height - 1) * 0.5 - center.y * scale;
-  cv::Mat result;
-  cv::warpAffine(image, result, transform, size, cv::INTER_LINEAR, cv::BORDER_CONSTANT,
-                 cv::Scalar::all(242));
-  return result;
-}
-
-Result<void> EnhanceScan(cv::Mat& image, const PhotoCancelled& cancelled) {
-  cv::Mat paper = SmallGray(image);
-  const int neighborhood = std::clamp(std::min(paper.cols, paper.rows) / 10, 7, 25) | 1;
-  cv::morphologyEx(paper, paper, cv::MORPH_CLOSE,
-                   cv::getStructuringElement(cv::MORPH_RECT, {neighborhood, neighborhood}));
-  cv::GaussianBlur(paper, paper, {}, std::max(1.0, neighborhood / 8.0));
-  const float reference = static_cast<float>(std::min(242u, Percentile(paper, 0.85)));
-  if (reference < 96)
-    return {};
-  cv::Mat high, low;
-  const auto edge_kernel = cv::getStructuringElement(cv::MORPH_RECT, {5, 5});
-  cv::dilate(paper, high, edge_kernel);
-  cv::erode(paper, low, edge_kernel);
-  cv::Mat gain(paper.size(), CV_8UC1);
-  for (int y = 0; y < paper.rows; ++y) {
-    for (int x = 0; x < paper.cols; ++x) {
-      const float local = paper.at<std::uint8_t>(y, x);
-      const float jump = high.at<std::uint8_t>(y, x) - low.at<std::uint8_t>(y, x);
-      const float confidence =
-          std::clamp((local - 58) / 48, 0.0f, 1.0f) * std::clamp(1 - (jump - 12) / 60, 0.25f, 1.0f);
-      const float lift = std::clamp(reference / std::max(local, 64.0f) - 1, 0.0f, 0.70f);
-      gain.at<std::uint8_t>(y, x) = cv::saturate_cast<std::uint8_t>(255 * lift * confidence);
-    }
-  }
-  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-  cv::resize(gain, gain, image.size(), 0, 0, cv::INTER_LINEAR);
-  for (int y = 0; y < image.rows; ++y) {
-    if (y % 32 == 0)
-      RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-    auto* pixels = image.ptr<cv::Vec3b>(y);
-    const auto* lifts = gain.ptr<std::uint8_t>(y);
-    for (int x = 0; x < image.cols; ++x) {
-      const auto& pixel = pixels[x];
-      const float peak = std::max({pixel[0], pixel[1], pixel[2]});
-      const float trough = std::min({pixel[0], pixel[1], pixel[2]});
-      // Use one multiplier for all channels. Reserve headroom and reduce
-      // correction on saturated inks, very dark subjects and near highlights.
-      const float color = 1 - 0.65f * (peak - trough) / std::max(peak, 1.0f);
-      const float dark = std::clamp((peak - 25) / 75, 0.0f, 1.0f);
-      const float desired = lifts[x] * (1.0f / 255) * color * dark;
-      const float room = std::max(0.0f, 247 / std::max(peak, 1.0f) - 1);
-      const float scale = 1 + std::min(desired, room * 0.85f);
-      pixels[x] = pixel * scale;
-    }
-  }
-
-  return {};
 }
 
 }  // namespace
@@ -977,100 +746,89 @@ Result<PhotoBurstDecision> PhotoBurstAnalyzer::Finish(const std::vector<std::str
   return impl_->Decide(false);
 }
 
-Result<PhotoRankResult> RankPhotos(std::span<const std::filesystem::path> inputs,
-                                   const PhotoCancelled& cancelled) {
-  if (inputs.size() > 6)
-    return Error{ErrorCode::kLimitExceeded, "Too many photos"};
-  if (inputs.empty())
-    return Error{ErrorCode::kInvalidRequest, "invalid-photo-count"};
-  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-  Imaging imaging;
-  RK_RETURN_IF_ERROR(imaging.Open());
-  std::vector<Quality> qualities;
-  qualities.reserve(inputs.size());
-  for (std::size_t i = 0; i < inputs.size(); ++i) {
-    RK_ASSIGN_OR_RETURN(image, Decode(*imaging.factory.Get(), inputs[i], cancelled));
-    RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-    qualities.push_back(Measure(image, i));
-  }
-  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-  std::stable_sort(qualities.begin(), qualities.end(),
-                   [](const Quality& a, const Quality& b) { return a.rank.score > b.rank.score; });
-  const auto& best = qualities.front().rank;
-  PhotoRankResult result{best.index, false, {best}, "clear-winner"};
-  if (best.score < 0.23) {
-    result.reason = "low-quality";
-    return result;
-  }
-  std::vector<std::size_t> selected{0};
-  for (std::size_t i = 1; i < qualities.size() && selected.size() < 3; ++i) {
-    const auto& candidate = qualities[i];
-    if (candidate.rank.score < 0.23 || best.score - candidate.rank.score > 0.085)
-      break;
-    const bool duplicate = std::any_of(selected.begin(), selected.end(), [&](auto j) {
-      return NearIdentical(candidate.signature, qualities[j].signature);
-    });
-    if (duplicate) {
-      result.reason = "near-identical";
-      continue;
-    }
-    selected.push_back(i);
-    result.candidates.push_back(candidate.rank);
-  }
-  if (result.candidates.size() > 1) {
-    result.uncertain = true;
-    result.reason = "close-quality";
-  }
-  return result;
-}
-
 Result<PhotoProcessResult> ProcessPhoto(const std::filesystem::path& input,
                                         const std::filesystem::path& output,
                                         PhotoMode mode,
-                                        const std::optional<std::array<PhotoPoint, 4>>& corners,
+                                        std::optional<unsigned> quarter_turns,
                                         const PhotoCancelled& cancelled) {
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  if (quarter_turns && *quarter_turns > 3)
+    return Error{ErrorCode::kInvalidRequest, "invalid-photo-quarter-turns"};
+  std::error_code equivalent_error;
+  if (std::filesystem::equivalent(input, output, equivalent_error))
+    return Error{ErrorCode::kInvalidRequest, "Photo input and output refer to the same file"};
+  static std::counting_semaphore<2> jobs(2);
+  while (!jobs.try_acquire_for(std::chrono::milliseconds(25)))
+    RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  struct ReleaseJob {
+    ~ReleaseJob() { jobs.release(); }
+  } release_job;
+  try {
+    Imaging imaging;
+    RK_RETURN_IF_ERROR(imaging.Open());
+    RK_ASSIGN_OR_RETURN(image, Decode(*imaging.factory.Get(), input, cancelled));
+    unsigned turns = 0;
+    bool text_orientation = false;
+    if (quarter_turns) {
+      turns = *quarter_turns;
+    } else {
+      RK_ASSIGN_OR_RETURN(automatic, photo::AutomaticQuarterTurns(image, cancelled));
+      turns = automatic.value_or(0);
+      text_orientation = automatic.has_value();
+    }
+    RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+    if (turns)
+      cv::rotate(image, image,
+                 turns == 1   ? cv::ROTATE_90_CLOCKWISE
+                 : turns == 2 ? cv::ROTATE_180
+                              : cv::ROTATE_90_COUNTERCLOCKWISE);
+    std::string geometry = "unchanged";
+    if (mode == PhotoMode::kScan) {
+      RK_ASSIGN_OR_RETURN(page, photo::AnalyzeGeometry(image, cancelled));
+      RK_ASSIGN_OR_RETURN(rectified,
+                          photo::ApplyGeometry(image, page, page.paper_color, cancelled));
+      image = std::move(rectified);
+      geometry = page.kind;
+      RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+      image = LimitSide(image, 2480);
+      RK_ASSIGN_OR_RETURN(paper, photo::AnalyzePaper(image, cancelled));
+      RK_RETURN_IF_ERROR(photo::EnhanceScan(image, paper, cancelled));
+    }
+    RK_RETURN_IF_ERROR(EncodeWebp(output, image, cancelled));
+    return PhotoProcessResult{static_cast<std::uint32_t>(image.cols),
+                              static_cast<std::uint32_t>(image.rows), geometry, turns,
+                              quarter_turns      ? "manual"
+                              : text_orientation ? "text"
+                                                 : "none"};
+  } catch (const cv::Exception&) {
+    return Error{ErrorCode::kUnavailable, "photo-processing-failed"};
+  } catch (const std::bad_alloc&) {
+    return Error{ErrorCode::kUnavailable, "photo-processing-failed"};
+  }
+}
+
+Result<PhotoProcessResult> TranscodePhoto(const std::filesystem::path& input,
+                                          const std::filesystem::path& output,
+                                          PhotoTranscode format,
+                                          const PhotoCancelled& cancelled) {
   std::error_code equivalent_error;
   if (std::filesystem::equivalent(input, output, equivalent_error))
     return Error{ErrorCode::kInvalidRequest, "Photo input and output refer to the same file"};
   Imaging imaging;
   RK_RETURN_IF_ERROR(imaging.Open());
   RK_ASSIGN_OR_RETURN(image, Decode(*imaging.factory.Get(), input, cancelled));
-  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-  std::optional<Quad> quad;
-  if (corners) {
-    RK_ASSIGN_OR_RETURN(manual, ManualQuad(image, *corners));
-    quad = manual;
-  } else
-    quad = DetectDocument(image, mode == PhotoMode::kScan);
-  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-  std::string geometry = "unchanged";
-  std::optional<double> angle;
-  if (quad) {
-    RK_ASSIGN_OR_RETURN(rectified, Rectify(image, *quad));
-    image = std::move(rectified);
-    geometry = "perspective";
-  } else if (mode == PhotoMode::kRectify) {
-    return Error{ErrorCode::kRejected, "No document contour found",
-                 ErrorReason::kNoDocumentContour};
+  if (format == PhotoTranscode::kPng) {
+    RK_RETURN_IF_ERROR(EncodePng(*imaging.factory.Get(), output, image, cancelled));
   } else {
-    RK_ASSIGN_OR_RETURN(deskew_angle, DeskewAngle(image, cancelled));
-    angle = deskew_angle;
+    ComPtr<IWICStream> stream;
+    RK_RETURN_IF_ERROR(Check(imaging.factory->CreateStream(&stream)));
+    RK_RETURN_IF_ERROR(Check(stream->InitializeFromFilename(output.c_str(), GENERIC_WRITE)));
+    RK_RETURN_IF_ERROR(
+        EncodeJpeg(*imaging.factory.Get(), *stream.Get(), image, 0.92f, "photo-output-failed"));
   }
-  if (mode == PhotoMode::kScan) {
-    RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-    RK_RETURN_IF_ERROR(EnhanceScan(image, cancelled));
-    if (angle) {
-      RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-      image = Deskew(image, *angle);
-      geometry = "deskew";
-    }
-  }
-  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-  RK_RETURN_IF_ERROR(EncodePng(*imaging.factory.Get(), output, image, cancelled));
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   return PhotoProcessResult{static_cast<std::uint32_t>(image.cols),
-                            static_cast<std::uint32_t>(image.rows), std::move(geometry)};
+                            static_cast<std::uint32_t>(image.rows), "unchanged"};
 }
 
 Result<PhotoProcessResult> CreatePhotoThumbnail(const std::filesystem::path& input,

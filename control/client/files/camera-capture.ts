@@ -76,11 +76,7 @@ function release(canvas: HTMLCanvasElement) {
   canvas.width = canvas.height = 1;
 }
 
-function encode(
-  canvas: HTMLCanvasElement,
-  format: 'image/jpeg' | 'image/png',
-  quality?: number,
-): Promise<Blob> {
+function encode(canvas: HTMLCanvasElement, format: 'image/jpeg', quality?: number): Promise<Blob> {
   return new Promise((resolve, reject) => {
     canvas.toBlob(
       (blob) => (blob?.type === format && blob.size ? resolve(blob) : reject(new Error('无法生成照片'))),
@@ -133,7 +129,7 @@ function validateDecision(decision: PhotoBurstDecision, available: Map<string, S
 }
 
 /** Freeze distinct source frames during the shutter window. Only retained
- * originals survive to PNG encoding, after releasing the shutter. */
+ * originals survive to JPEG encoding, after releasing the shutter. */
 export async function capturePhotoBurst(
   video: HTMLVideoElement,
   signal: AbortSignal,
@@ -339,7 +335,7 @@ export async function capturePhotoBurst(
     }
     for (const frameId of selectedIds) {
       const snapshot = snapshots.get(frameId)!;
-      const blob = await Promise.race([encode(snapshot.canvas, 'image/png'), aborted]);
+      const blob = await Promise.race([encode(snapshot.canvas, 'image/jpeg', 0.92), aborted]);
       release(snapshot.canvas);
       snapshots.delete(frameId);
       frames.push({ frameId, blob, preview: snapshot.preview!, width: crop.width, height: crop.height });

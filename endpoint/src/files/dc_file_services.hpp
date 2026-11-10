@@ -22,8 +22,8 @@ inline bool PhotoBurstMethod(const ServiceJson& method) {
 inline bool LibraryFileMethod(const ServiceJson& method) {
   return method == "asset.begin" || method == "asset.chunk" || method == "asset.seal" ||
          method == "asset.cancel" || method == "asset.read" || method == "asset.describe" ||
-         method == "document.open" || method == "document.resource" || method == "photo.rank" ||
-         method == "photo.process" || method == "photo.thumbnail" || PhotoBurstMethod(method);
+         method == "document.open" || method == "document.resource" || method == "photo.process" ||
+         method == "photo.thumbnail" || PhotoBurstMethod(method);
 }
 inline std::string EncodeFileChunk(const std::vector<std::uint8_t>& bytes) {
   constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

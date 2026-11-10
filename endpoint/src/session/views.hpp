@@ -3,6 +3,7 @@
 #include "protocol/atlas_dimensions.hpp"
 #include "session/context.hpp"
 #include "files/download_imports.hpp"
+#include "files/file_upload.hpp"
 namespace remotekit {
 class PeerController;
 class PresentationController;
@@ -73,6 +74,7 @@ class ViewController : private ControllerContext {
   Result<Json> InactiveSnapshot();
   Result<Json> Snapshot(bool output_diagnostics = false);
   static void AddCloseRequest(Json& output, const Json& requests);
+  Result<std::vector<std::string>> FileChooserAccept(const FileUploadStore::Binding&) const;
   Result<std::string> PrepareViewCommand(const Json& request, const std::string& method);
   Result<Json> ManageSessionEnsure(const Json& request);
   Result<Json> ManageSessionStorageImport(const Json& request);
@@ -104,6 +106,8 @@ class ViewController : private ControllerContext {
   DownloadImports downloads;
   bool download_reconciliation_failed = false;
   std::map<std::string, Json> desired;
+  mutable std::mutex chooser_mutex;
+  std::map<std::string, Json> chooser_requests;
   int atlas_width = 1920, atlas_height = 1080;
   float atlas_scale = 1;
   Json site_preferences = Json::object();

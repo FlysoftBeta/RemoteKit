@@ -14,6 +14,7 @@ import { Box, Skeleton, Typography, type SxProps, type Theme } from '@mui/materi
 import React, { useEffect, useRef, useState } from 'react';
 import { fileExtension, fileKind, type FileKind } from './file-format';
 import { useLibrary } from './file-library-state';
+import { RotatedImage } from './rotated-image';
 
 const KINDS: Record<FileKind, { icon: React.ElementType; color: string; background: string }> = {
   image: { icon: ImageOutlined, color: '#1967d2', background: '#e8f0fe' },
@@ -40,6 +41,7 @@ export function fileTypeColor(type: string, name: string): string {
 // A file's visual: the cached thumbnail for decodable images (cropped to fill unless `fit` says
 // otherwise), or a tinted icon for its kind with the extension underneath when there is room.
 export function FileThumbnail({
+  entryId,
   assetId,
   type,
   name,
@@ -49,6 +51,7 @@ export function FileThumbnail({
   fit = 'cover',
   localOnly = false,
 }: {
+  entryId?: string;
   assetId: string;
   type: string;
   name: string;
@@ -58,8 +61,11 @@ export function FileThumbnail({
   fit?: 'cover' | 'contain';
   localOnly?: boolean;
 }) {
-  const { online, thumbnails } = useLibrary();
-  const decodable = /^(image\/jpeg|image\/png)$/i.test(type);
+  const { online, thumbnails, photos } = useLibrary();
+  const rotationTurns =
+    photos.jobs.find((job) => job.replace?.id === entryId && job.replace?.assetId === assetId)
+      ?.rotationTurns ?? 0;
+  const decodable = /^image\/(jpeg|png|webp)$/i.test(type);
   const kind = KINDS[fileKind(type, name)];
   const Icon = kind.icon;
   const extension = fileExtension(name).slice(0, 6).toUpperCase();
@@ -120,20 +126,12 @@ export function FileThumbnail({
       ]}
     >
       {shown ? (
-        <Box
-          component="img"
+        <RotatedImage
           src={url}
           alt=""
-          draggable={false}
+          turns={rotationTurns}
+          fit={fit}
           onError={() => setImageUrl(undefined)}
-          sx={{
-            position: 'absolute',
-            inset: 0,
-            display: 'block',
-            width: '100%',
-            height: '100%',
-            objectFit: fit,
-          }}
         />
       ) : visible && loading ? (
         <Skeleton variant="rectangular" sx={{ position: 'absolute', inset: 0, height: '100%' }} />

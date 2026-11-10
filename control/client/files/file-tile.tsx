@@ -165,6 +165,7 @@ export function FileTile({
       >
         <Box sx={{ position: 'relative' }}>
           <FileThumbnail
+            entryId={id}
             assetId={assetId}
             type={type}
             name={name}
@@ -269,6 +270,7 @@ export function FileRow({
   const body = (
     <>
       <FileThumbnail
+        entryId={id}
         assetId={assetId}
         type={type}
         name={name}

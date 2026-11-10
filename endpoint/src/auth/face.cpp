@@ -9,7 +9,7 @@ using Event = RtcEvent;
 fs::path FaceController::FaceModels() {
   wchar_t executable[32768]{};
   GetModuleFileNameW(nullptr, executable, 32768);
-  return fs::path(executable).parent_path() / "face-models";
+  return fs::path(executable).parent_path() / "models";
 }
 
 int64_t FaceController::CameraNow() {

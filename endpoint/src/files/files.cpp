@@ -1,4 +1,5 @@
 #include "files/files.hpp"
+#include "files/file_selection.hpp"
 #include "rtc/authorization.hpp"
 #include "rtc/peer.hpp"
 #include "session/views.hpp"
@@ -218,9 +219,38 @@ Result<Json> LibraryController::DirectSelectionCommit(const FileJob& job,
   std::vector<remotekit::FileUploadStore::Source> sources;
   for (const auto& file : selection->files) {
     RK_ASSIGN_OR_RETURN(asset, file_library.Describe(file.asset_id));
-    RK_ASSIGN_OR_RETURN(path, file_library.Path(file.asset_id));
-    sources.push_back({{file.name, file.type, asset.size}, path});
+    std::string name = file.name;
+    if (asset.type == "image/webp") {
+      const auto format = SelectionWebpTranscode(selection->accept);
+      if (format) {
+#ifdef RK_FILE_PHOTO
+        RK_ASSIGN_OR_RETURN(original, file_library.Path(file.asset_id));
+        const auto check = [&] { return files.RequireFileJob(job); };
+        const auto cancelled = [&] { return !check(); };
+        RK_ASSIGN_OR_RETURN(
+            transcoded, file_library.CachedDerivative(
+                            file.asset_id,
+                            *format == PhotoTranscode::kJpeg ? FileLibrary::DerivativeFormat::jpeg
+                                                             : FileLibrary::DerivativeFormat::png,
+                            [&](const fs::path& output) -> Result<FileLibrary::Derivative> {
+                              RK_ASSIGN_OR_RETURN(
+                                  dimensions, TranscodePhoto(original, output, *format, cancelled));
+                              return FileLibrary::Derivative{dimensions.width, dimensions.height};
+                            },
+                            check));
+        asset = std::move(transcoded);
+        auto filename = fs::u8path(name);
+        filename.replace_extension(*format == PhotoTranscode::kJpeg ? ".jpg" : ".png");
+        name = Utf8(filename);
+#else
+        return Error{ErrorCode::kUnavailable, "photo_processing_unavailable"};
+#endif
+      }
+    }
+    RK_ASSIGN_OR_RETURN(path, file_library.Path(asset.id));
+    sources.push_back({{name, asset.type, asset.size}, path});
   }
+  RK_RETURN_IF_ERROR(CheckSelectionSources(sources, selection->limits));
   Json selected_files = Json::array();
   {
     std::lock_guard lock(file_store_mutex);
@@ -356,6 +386,21 @@ Result<Json> LibraryController::LibraryCommand(const std::string& method, const 
       return binding.error();
     LibrarySelection selection{
         selection_id, Required(request, "requestId"), std::move(binding).value(), {}};
+    const auto& limits = request.at("limits");
+    selection.limits.file_bytes = FileUnsigned(limits.at("maxFileBytes"));
+    selection.limits.batch_bytes = FileUnsigned(limits.at("maxBatchBytes"));
+    selection.limits.files = static_cast<std::size_t>(FileUnsigned(limits.at("maxFiles")));
+    if (!selection.limits.file_bytes || !selection.limits.batch_bytes || !selection.limits.files ||
+        selection.limits.file_bytes > 256ULL * 1024 * 1024 ||
+        selection.limits.batch_bytes > 512ULL * 1024 * 1024 || selection.limits.files > 64)
+      return Error{ErrorCode::kInvalidRequest, "invalid_file_limits"};
+    const auto previous = file_library.FindSelection(selection_id);
+    if (previous) {
+      selection.accept = previous->accept;
+    } else {
+      RK_ASSIGN_OR_RETURN(accept, views.FileChooserAccept(selection.binding));
+      selection.accept = std::move(accept);
+    }
     const auto& values = request.at("files");
     if (!values.is_array() || values.empty() || values.size() > 64)
       return Error{ErrorCode::kInvalidRequest, "invalid_file_count"};
@@ -480,55 +525,34 @@ Result<Json> PhotoService::Execute(const FileJob& job,
                              PhotoThumbnail{thumbnail.id, QpcNow() + QpcFrequency() * 3600});
     return thumbnail.Json();
   }
-  if (method == "photo.rank") {
-    const auto& ids = params.at("assetIds");
-    if (ids.is_array() && ids.size() > 6)
-      return Error{ErrorCode::kLimitExceeded, "Too many photos"};
-    if (!ids.is_array() || ids.empty())
-      return Error{ErrorCode::kInvalidRequest, "invalid_photo_count"};
-    std::vector<fs::path> paths;
-    for (const auto& asset : ids) {
-      RK_ASSIGN_OR_RETURN(path, file_library.Path(asset.get<std::string>()));
-      paths.push_back(path);
-    }
-    RK_ASSIGN_OR_RETURN(ranked, remotekit::RankPhotos(paths, cancelled));
-    RK_RETURN_IF_ERROR(check());
-    Json candidates = Json::array();
-    for (const auto& candidate : ranked.candidates)
-      candidates.push_back({{"assetId", ids.at(candidate.index)}, {"score", candidate.score}});
-    return Json{{"selectedAssetId", ids.at(ranked.selected_index)},
-                {"uncertain", ranked.uncertain},
-                {"candidates", std::move(candidates)},
-                {"reason", ranked.reason}};
-  }
   if (method == "photo.process") {
     RK_ASSIGN_OR_RETURN(source, file_library.Path(Required(params, "assetId")));
     const auto mode = Required(params, "mode");
-    if (mode != "rectify" && mode != "scan")
+    if (mode != "photo" && mode != "scan")
       return Error{ErrorCode::kInvalidRequest, "invalid_photo_mode"};
-    std::optional<std::array<remotekit::PhotoPoint, 4>> corners;
-    if (const auto found = params.find("corners"); found != params.end()) {
-      if (!found->is_array() || found->size() != 4)
-        return Error{ErrorCode::kInvalidRequest, "invalid_photo_corners"};
-      corners.emplace();
-      for (size_t i = 0; i < 4; ++i)
-        (*corners)[i] = {found->at(i).at("x").get<double>(), found->at(i).at("y").get<double>()};
+    std::optional<unsigned> turns;
+    if (const auto found = params.find("quarterTurns"); found != params.end()) {
+      if ((!found->is_number_integer() && !found->is_number_unsigned()) || *found < 0 || *found > 3)
+        return Error{ErrorCode::kInvalidRequest, "invalid_photo_quarter_turns"};
+      turns = found->get<unsigned>();
     }
-    std::string geometry;
+    PhotoProcessResult processed;
     RK_ASSIGN_OR_RETURN(
         derivative, file_library.CreateDerivative(
                         [&](const fs::path& output) -> Result<FileLibrary::Derivative> {
                           RK_ASSIGN_OR_RETURN(
                               dimensions,
                               ProcessPhoto(source, output,
-                                           mode == "scan" ? PhotoMode::kScan : PhotoMode::kRectify,
-                                           corners, cancelled));
-                          geometry = dimensions.geometry;
-                          return FileLibrary::Derivative{dimensions.width, dimensions.height};
+                                           mode == "scan" ? PhotoMode::kScan : PhotoMode::kPhoto,
+                                           turns, cancelled));
+                          processed = std::move(dimensions);
+                          return FileLibrary::Derivative{processed.width, processed.height};
                         },
-                        check, FileLibrary::DerivativeFormat::png, Required(params, "assetId")));
+                        check, FileLibrary::DerivativeFormat::webp, Required(params, "assetId")));
     auto asset = derivative.Json();
-    asset["geometry"] = std::move(geometry);
+    asset["geometry"] = processed.geometry;
+    asset["quarterTurns"] = processed.quarter_turns;
+    asset["orientation"] = processed.orientation;
     return asset;
   }
 #endif
