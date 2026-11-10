@@ -488,9 +488,25 @@ Result<Established> ConnectStdio(const Key& key, const Hello& hello) {
   }
   return ConnectCarrier(HandleCarrier(read, write), key, hello);
 }
+// WinHTTP reports TLS failures synchronously on the calling thread; the flags say which check failed
+// (0 means the handshake itself failed, e.g. the server does not speak TLS or no common protocol).
+thread_local DWORD g_secure_failure = 0;
+void CALLBACK SecureFailureCallback(HINTERNET, DWORD_PTR, DWORD status, LPVOID info, DWORD length) {
+  if (status == WINHTTP_CALLBACK_STATUS_SECURE_FAILURE && info && length == sizeof(DWORD))
+    g_secure_failure = *static_cast<DWORD*>(info);
+}
+std::string ToHex(DWORD value) {
+  char text[9];
+  snprintf(text, sizeof(text), "%X", value);
+  return text;
+}
 Error WinHttpFailure(const char* stage) {
-  return {ErrorCode::kUnavailable, std::string("cluster connect failed at ") + stage +
-                                       ", Win32 error " + std::to_string(GetLastError())};
+  DWORD code = GetLastError();
+  std::string message = std::string("cluster connect failed at ") + stage + ", Win32 error " +
+                        std::to_string(code);
+  if (code == ERROR_WINHTTP_SECURE_FAILURE)
+    message += ", TLS failure flags 0x" + ToHex(g_secure_failure);
+  return {ErrorCode::kUnavailable, std::move(message)};
 }
 Result<Established> ConnectWebSocket(const std::string& url, const Key& key, const Hello& hello) {
   auto address = ParseControlUrl(url);
@@ -504,6 +520,17 @@ Result<Established> ConnectWebSocket(const std::string& url, const Key& key, con
   if (!ws->session.value)
     return WinHttpFailure("open");
   WinHttpSetTimeouts(ws->session.value, 5000, 5000, 5000, 5000);
+  g_secure_failure = 0;
+  WinHttpSetStatusCallback(ws->session.value, SecureFailureCallback,
+                           WINHTTP_CALLBACK_FLAG_SECURE_FAILURE, 0);
+  // Older Windows builds leave TLS 1.2 off by default; TLS 1.3 is not available everywhere.
+  DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+  if (!WinHttpSetOption(ws->session.value, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols,
+                        sizeof(protocols))) {
+    protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+    WinHttpSetOption(ws->session.value, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols,
+                     sizeof(protocols));
+  }
   ws->connection.value =
       WinHttpConnect(ws->session.value, address.value().host.c_str(), address.value().port, 0);
   if (!ws->connection.value)
