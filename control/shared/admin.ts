@@ -68,6 +68,16 @@ export interface AdminStorage {
   users: AdminUserStorage[];
 }
 export interface AdminOverview {
+  integrity: {
+    checkedAt: number;
+    problemCount: number;
+    problems: {
+      kind: 'integrity' | 'foreign_key' | 'corrupt_record';
+      table: string;
+      key: string;
+      detail: string;
+    }[];
+  };
   buildId: string;
   release: { buildId: string; size: number } | null;
   nodes: { total: number; ready: number; mismatched: number };

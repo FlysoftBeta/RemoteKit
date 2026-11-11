@@ -51,7 +51,7 @@ test('optional HTTPS serves trusted local test TLS, secure cookies and configure
     }
     throw error;
   }
-  const store = new ControlDatabase(':memory:'),
+  const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     control = createApplication(store, testGateway({ request: async () => ({ views: [] }) })),
     origins: string[] = [];
   const cert = await readFile(certPath),

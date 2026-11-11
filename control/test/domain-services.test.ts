@@ -81,7 +81,7 @@ test('memory saver advances through public observations and pure next decisions 
 });
 
 test('a blocked tenant does not stop later reconciliation ticks for another tenant', async () => {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   let blockedTenant: string | undefined;
   let blocked = false;
   let release!: () => void;

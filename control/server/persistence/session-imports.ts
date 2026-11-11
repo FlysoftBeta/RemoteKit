@@ -1,3 +1,5 @@
+import { decodeJson, encodeJson } from './codec';
+import * as codecs from './documents';
 import type Database from 'better-sqlite3';
 import type {
   ControlEvent,
@@ -48,15 +50,19 @@ function record(row: any): StoredImport {
     id: row.id,
     tenant: row.tenant,
     keyId: row.key_id,
-    sites: JSON.parse(row.sites),
+    sites: decodeJson(row.sites, codecs.sites, `session_imports.sites ${row.id}`),
     state: row.state,
     cookies: Number(row.cookies),
     origins: Number(row.origins),
     rejectedItems: Number(row.rejected_items),
     error: row.error,
-    storageJob: row.storage_job ? JSON.parse(row.storage_job) : undefined,
-    chunkIndex: Number(row.chunk_index ?? 0),
-    applyCounts: row.apply_counts ? JSON.parse(row.apply_counts) : undefined,
+    storageJob: row.storage_job
+      ? decodeJson(row.storage_job, codecs.storageJob, `session_imports.storage_job ${row.id}`)
+      : undefined,
+    chunkIndex: Number(row.chunk_index),
+    applyCounts: row.apply_counts
+      ? decodeJson(row.apply_counts, codecs.applyCounts, `session_imports.apply_counts ${row.id}`)
+      : undefined,
     errorCode: row.error_code ?? undefined,
     retryAt: row.retry_at === null ? undefined : Number(row.retry_at),
     receivedAt: Number(row.received_at),
@@ -80,6 +86,18 @@ export class SessionImportsRepository {
     private readonly db: Database.Database,
     private readonly key: AtRestKey,
   ) {}
+  saveApplyCounts(id: string, chunkIndex: number, counts: NonNullable<StoredImport['applyCounts']>) {
+    this.db
+      .prepare(
+        'UPDATE session_imports SET chunk_index=?,apply_counts=?,storage_job=NULL,error_code=NULL,retry_at=NULL WHERE id=?',
+      )
+      .run(chunkIndex, encodeJson(counts, codecs.applyCounts, `session_imports.apply_counts ${id}`), id);
+  }
+  saveStorageJob(id: string, job: import('../../shared/session-import').StorageImportJob) {
+    this.db
+      .prepare('UPDATE session_imports SET storage_job=? WHERE id=?')
+      .run(encodeJson(job, codecs.storageJob, `session_imports.storage_job ${id}`), id);
+  }
   keys(): { publicKey: Buffer; privateKey: Buffer; keyId: string } | undefined {
     const row = this.db.prepare('SELECT * FROM session_import_keys WHERE id=1').get() as any;
     if (row)
@@ -117,7 +135,11 @@ export class SessionImportsRepository {
     return {
       open: !!row?.code,
       code: row?.code
-        ? JSON.parse(this.key.open('session-import-pairing:' + tenant, row.code).toString('utf8'))
+        ? decodeJson(
+            this.key.open('session-import-pairing:' + tenant, row.code).toString('utf8'),
+            codecs.pairingCode,
+            `session_import_pairing.code ${tenant}`,
+          )
         : null,
       expiresAt: row?.code ? Number(row.expires_at) : null,
       failures: Number(row?.failures ?? 0),
@@ -131,7 +153,10 @@ export class SessionImportsRepository {
       )
       .run(
         tenant,
-        this.key.seal('session-import-pairing:' + tenant, Buffer.from(JSON.stringify(code))),
+        this.key.seal(
+          'session-import-pairing:' + tenant,
+          Buffer.from(encodeJson(code, codecs.pairingCode, `session_import_pairing.code ${tenant}`)),
+        ),
         now,
         now + 3 * 86400000,
       );
@@ -212,33 +237,40 @@ export class SessionImportsRepository {
     event: DeviceEvent,
     receivedAt: number,
   ) {
-    let request: TimelineRequest;
-    if (event.type === 'pair') request = { type: 'pair', device: event.device };
-    else if (event.type === 'withdraw') request = { type: 'withdraw', id: event.id.toLowerCase() };
-    else
-      request = {
-        type: 'import',
-        id: event.id.toLowerCase(),
-        sites: Array.isArray(event.sites)
-          ? event.sites
-              .filter((s) => s && typeof s.name === 'string' && typeof s.url === 'string')
-              .map(({ name, url }) => ({ name, url }))
-          : [],
-        cookies: Array.isArray(event.cookies) ? event.cookies.length : 0,
-        origins: Array.isArray(event.localStorage) ? event.localStorage.length : 0,
-      };
-    const body = {
-      ...request,
+    const identity = {
       seq: event.seq,
       at: event.at,
       receivedAt,
       device: name,
       publicKey: publicKey.toString('base64url'),
-      ...(event.type === 'pair' ? { username: event.username } : {}),
     };
+    const body =
+      event.type === 'pair'
+        ? { ...identity, type: 'pair' as const, username: event.username }
+        : event.type === 'withdraw'
+          ? { ...identity, type: 'withdraw' as const, id: event.id.toLowerCase() }
+          : {
+              ...identity,
+              type: 'import' as const,
+              id: event.id.toLowerCase(),
+              sites: Array.isArray(event.sites)
+                ? event.sites
+                    .filter((site) => site && typeof site.name === 'string' && typeof site.url === 'string')
+                    .map(({ name, url }) => ({ name, url }))
+                : [],
+              cookies: Array.isArray(event.cookies) ? event.cookies.length : 0,
+              origins: Array.isArray(event.localStorage) ? event.localStorage.length : 0,
+            };
     this.db
       .prepare("INSERT INTO session_import_events VALUES (?,?,'in',?,?,?,NULL,?,NULL)")
-      .run(tenant, keyId, event.seq, event.at, event.type, JSON.stringify(body));
+      .run(
+        tenant,
+        keyId,
+        event.seq,
+        event.at,
+        event.type,
+        encodeJson(body, codecs.incomingEvent, `session_import_events.body ${tenant}/${event.seq}`),
+      );
   }
   reply(tenant: string, keyId: string, reply: Reply, now: number): ControlEvent {
     const device = this.device(keyId);
@@ -247,7 +279,15 @@ export class SessionImportsRepository {
     const event = { ...reply, seq, at: now } as ControlEvent;
     this.db
       .prepare("INSERT INTO session_import_events VALUES (?,?,'out',?,?,?,?,?,NULL)")
-      .run(tenant, keyId, seq, now, event.type, 'ref' in event ? event.ref : null, JSON.stringify(event));
+      .run(
+        tenant,
+        keyId,
+        seq,
+        now,
+        event.type,
+        'ref' in event ? event.ref : null,
+        encodeJson(event, codecs.controlEvent, `session_import_events.body ${tenant}/${seq}`),
+      );
     if (seq) this.db.prepare('UPDATE session_import_devices SET out_seq=? WHERE key_id=?').run(seq, keyId);
     return event;
   }
@@ -261,14 +301,9 @@ export class SessionImportsRepository {
     const imported = this.db
       .prepare("SELECT tenant,payload FROM session_imports WHERE key_id=? AND id=? AND state='pending'")
       .get(keyId, id) as any;
-    return imported
-      ? JSON.parse(
-          this.key
-            .open(JSON.stringify(['session-import', imported.tenant, id]), imported.payload)
-            .toString('utf8'),
-        ).ref
-      : 0;
+    return imported ? (this.payload(imported.tenant, id)?.ref ?? 0) : 0;
   }
+
   rememberRef(tenant: string, id: string, ref: number) {
     const payload = this.payload(tenant, id);
     if (payload)
@@ -277,7 +312,13 @@ export class SessionImportsRepository {
         .run(
           this.key.seal(
             JSON.stringify(['session-import', tenant, id]),
-            Buffer.from(JSON.stringify({ ...payload, ref })),
+            Buffer.from(
+              encodeJson(
+                { ...payload, ref },
+                codecs.importPayload,
+                `session_imports.payload ${tenant}/${id}`,
+              ),
+            ),
           ),
           tenant,
           id,
@@ -289,7 +330,12 @@ export class SessionImportsRepository {
         "SELECT body FROM session_import_events WHERE key_id=? AND direction='out' AND type='importApplied' AND json_extract(body,'$.id')=? ORDER BY rowid DESC LIMIT 1",
       )
       .get(keyId, id) as any;
-    return row ? JSON.parse(row.body) : undefined;
+    return row
+      ? (decodeJson(row.body, codecs.controlEvent, `session_import_events.body ${keyId}/${id}`) as Extract<
+          ControlEvent,
+          { type: 'importApplied' }
+        >)
+      : undefined;
   }
   failedRetryable(keyId: string, id: string): boolean {
     const row = this.db
@@ -297,7 +343,9 @@ export class SessionImportsRepository {
         "SELECT body FROM session_import_events WHERE key_id=? AND direction='out' AND type='importFailed' AND json_extract(body,'$.id')=? ORDER BY rowid DESC LIMIT 1",
       )
       .get(keyId, id) as any;
-    return row ? JSON.parse(row.body).retryable : false;
+    if (!row) return false;
+    const event = decodeJson(row.body, codecs.controlEvent, `session_import_events.body ${keyId}/${id}`);
+    return event.type === 'importFailed' && event.retryable;
   }
   get(id: string): StoredImport | undefined {
     const row = this.db.prepare('SELECT * FROM session_imports WHERE id=?').get(id) as any;
@@ -317,7 +365,11 @@ export class SessionImportsRepository {
       : this.key.seal(
           JSON.stringify(['session-import', tenant, id]),
           Buffer.from(
-            JSON.stringify({ cookies: event.cookies, localStorage: event.localStorage, ref: event.seq }),
+            encodeJson(
+              { cookies: event.cookies, localStorage: event.localStorage, ref: event.seq },
+              codecs.importPayload,
+              `session_imports.payload ${tenant}/${id}`,
+            ),
           ),
         );
     const sites = Array.isArray(event.sites)
@@ -333,7 +385,7 @@ export class SessionImportsRepository {
         id,
         tenant,
         keyId,
-        JSON.stringify(sites),
+        encodeJson(sites, codecs.sites, `session_imports.sites ${id}`),
         error ? 'failed' : 'pending',
         payload,
         Array.isArray(event.cookies) ? event.cookies.length : 0,
@@ -361,13 +413,15 @@ export class SessionImportsRepository {
         .all(tenant) as any[]
     ).map(record);
   }
-  payload(tenant: string, id: string): ImportChunk | undefined {
+  payload(tenant: string, id: string): (ImportChunk & { ref: number }) | undefined {
     const row = this.db
       .prepare("SELECT payload FROM session_imports WHERE tenant=? AND id=? AND state='pending'")
       .get(tenant, id) as any;
     if (row)
-      return JSON.parse(
+      return decodeJson(
         this.key.open(JSON.stringify(['session-import', tenant, id]), row.payload).toString('utf8'),
+        codecs.importPayload,
+        `session_imports.payload ${tenant}/${id}`,
       );
   }
   isPending(tenant: string, id: string) {
@@ -408,7 +462,11 @@ export class SessionImportsRepository {
       )
       .all(tenant) as any[];
     return rows.map((row) => {
-      const body = JSON.parse(row.body);
+      const body = decodeJson(
+        row.body,
+        codecs.incomingEvent,
+        `session_import_events.body ${tenant}/${row.key_id}/${row.seq}`,
+      );
       const device = this.device(row.key_id);
       const replies = (
         this.db
@@ -416,7 +474,13 @@ export class SessionImportsRepository {
             "SELECT body FROM session_import_events WHERE tenant=? AND key_id=? AND direction='out' AND ref=? ORDER BY at,rowid",
           )
           .all(tenant, row.key_id, row.seq) as any[]
-      ).map((r) => JSON.parse(r.body));
+      ).map((r) =>
+        decodeJson(
+          r.body,
+          codecs.controlEvent,
+          `session_import_events.body ${tenant}/${row.key_id}/${row.seq}`,
+        ),
+      );
       const imported = body.type === 'import' ? this.get(body.id) : undefined;
       const request: TimelineRequest =
         body.type === 'pair'
@@ -451,7 +515,7 @@ export class SessionImportsRepository {
           "SELECT body FROM session_import_events WHERE key_id=? AND direction='out' AND seq>? ORDER BY seq",
         )
         .all(keyId, device.ackedSeq) as { body: string }[]
-    ).map((row) => JSON.parse(row.body));
+    ).map((row) => decodeJson(row.body, codecs.controlEvent, `session_import_events.body ${keyId}`));
   }
   outgoing(): OutgoingEvent[] {
     return (
@@ -464,7 +528,7 @@ export class SessionImportsRepository {
       rowId: Number(row.rowid),
       tenant: row.tenant,
       keyId: row.key_id,
-      event: JSON.parse(row.body),
+      event: decodeJson(row.body, codecs.controlEvent, `session_import_events.body ${row.key_id}`),
     }));
   }
   lastInSeq(keyId: string): number {
@@ -481,14 +545,25 @@ export class SessionImportsRepository {
         "SELECT body FROM session_import_events WHERE key_id=? AND direction='in' ORDER BY rowid DESC LIMIT 1",
       )
       .get(keyId) as any;
-    return row ? Buffer.from(JSON.parse(row.body).publicKey, 'base64url') : undefined;
+    return row
+      ? Buffer.from(
+          decodeJson(row.body, codecs.incomingEvent, `session_import_events.body ${keyId}`).publicKey,
+          'base64url',
+        )
+      : undefined;
   }
   mailed(row: OutgoingEvent, now: number) {
     this.db
       .prepare(
         "UPDATE session_import_events SET mailed_at=? WHERE rowid=? AND tenant=? AND key_id=? AND direction='out' AND body=?",
       )
-      .run(now, row.rowId, row.tenant, row.keyId, JSON.stringify(row.event));
+      .run(
+        now,
+        row.rowId,
+        row.tenant,
+        row.keyId,
+        encodeJson(row.event, codecs.controlEvent, `session_import_events.body ${row.tenant}/${row.rowId}`),
+      );
   }
   retain(now: number) {
     const cutoff = now - 180 * 86400000;

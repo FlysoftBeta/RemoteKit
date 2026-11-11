@@ -20,8 +20,8 @@ using cluster::Bytes;
 Error Corrupt() {
   return {ErrorCode::kInternal, "Corrupt local object"};
 }
-Error Io() {
-  return {ErrorCode::kUnavailable, "object I/O failed"};
+Error Io(DWORD code = GetLastError()) {
+  return WithOsError(ErrorCode::kUnavailable, "object I/O failed", OsError::Kind::kWin32, code);
 }
 struct Handle {
   HANDLE value = INVALID_HANDLE_VALUE;
@@ -193,14 +193,23 @@ Result<ObjectInfo> ObjectStore::Inspect(const std::string& id) const {
   RK_ASSIGN_OR_RETURN(path, StoredPath(id));
   auto lock = Lock(id);
   std::ifstream input(path, std::ios::binary);
-  if (!input)
-    return Error{ErrorCode::kNotFound, "object not found"};
+  if (!input) {
+    unsigned long code = 0;
+    _get_doserrno(&code);
+    return Error{code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND
+                     ? ErrorCode::kNotFound
+                     : ErrorCode::kUnavailable,
+                 "object open failed: Windows " + std::to_string(code),
+                 {},
+                 {},
+                 OsError{OsError::Kind::kWin32, code}};
+  }
   RK_ASSIGN_OR_RETURN(header, ReadHeader(input));
   RK_ASSIGN_OR_RETURN(digest, cluster::Sha256File(path));
   std::error_code error;
   const auto size = fs::file_size(path, error);
   if (error)
-    return Io();
+    return Io(error.value());
   return ObjectInfo{id, header.size, size, cluster::Hex(digest)};
 }
 Result<ObjectInfo> ObjectStore::Write(const Keys& keys,
@@ -375,8 +384,17 @@ Result<void> ObjectStore::Read(const Keys& keys,
   RK_ASSIGN_OR_RETURN(path, StoredPath(id));
   auto lock = Lock(id);
   std::ifstream input(path, std::ios::binary);
-  if (!input)
-    return Error{ErrorCode::kNotFound, "object not found"};
+  if (!input) {
+    unsigned long code = 0;
+    _get_doserrno(&code);
+    return Error{code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND
+                     ? ErrorCode::kNotFound
+                     : ErrorCode::kUnavailable,
+                 "object open failed: Windows " + std::to_string(code),
+                 {},
+                 {},
+                 OsError{OsError::Kind::kWin32, code}};
+  }
   RK_ASSIGN_OR_RETURN(header, ReadHeader(input));
   Digest digest(&keys.id);
   for (uint32_t index = 0; index < header.count; ++index) {
@@ -399,8 +417,17 @@ Result<Bytes> ObjectStore::ReadRange(const Keys& keys,
   RK_ASSIGN_OR_RETURN(path, StoredPath(id));
   auto lock = Lock(id);
   std::ifstream input(path, std::ios::binary);
-  if (!input)
-    return Error{ErrorCode::kNotFound, "object not found"};
+  if (!input) {
+    unsigned long code = 0;
+    _get_doserrno(&code);
+    return Error{code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND
+                     ? ErrorCode::kNotFound
+                     : ErrorCode::kUnavailable,
+                 "object open failed: Windows " + std::to_string(code),
+                 {},
+                 {},
+                 OsError{OsError::Kind::kWin32, code}};
+  }
   RK_ASSIGN_OR_RETURN(header, ReadHeader(input));
   if (offset > header.size)
     return Error{ErrorCode::kInvalidRequest, "invalid object offset"};
@@ -467,11 +494,11 @@ Result<void> ObjectStore::Delete(const std::string& id) {
   std::error_code error;
   fs::remove(path, error);
   if (error)
-    return Io();
+    return Io(error.value());
   path += ".partial";
   fs::remove(path, error);
   if (error)
-    return Io();
+    return Io(error.value());
   return {};
 }
 Result<Json> ObjectStore::Inventory(const Json& cursor) const {

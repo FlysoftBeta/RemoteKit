@@ -33,7 +33,9 @@ export function usePagePreviews(
         const image = frame && encodePagePreview(frame);
         if (!image) continue;
         uploaded.current.set(tab.id, now);
-        void call('page.preview', { url: tab.url, image }).catch(() => {});
+        void call('page.preview', { url: tab.url, image }).catch((err) =>
+          console.warn('page.preview_failed', { tabId: tab.id, err }),
+        );
       }
     },
     [call, root],

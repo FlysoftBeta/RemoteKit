@@ -8,7 +8,7 @@ import { createApplication, startApplication } from '../../control/server/applic
 import { createHttp } from '../../control/server/http/server';
 
 const config = runtimeConfig();
-const store = open(config.dbPath);
+const store = open(config.dbPath, { buildId: config.buildId });
 const nodes = new NodeRegistry({
   nodes: config.nodes,
   key: config.cluster.key,

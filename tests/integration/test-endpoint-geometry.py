@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise atomic atlas transactions and persistence retry in a real Browser."""
+import sqlite3
 import argparse, importlib.util, json, time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
@@ -26,19 +27,21 @@ def main():
         snapshot,_=service.call('session.snapshot');view=snapshot['views'][0]
         assert (view['width'],view['height'])==(7000,800) and token==(view['instance'],view['document'])
         failed,_=service.call('view.configure',viewId='1',width=8192,height=8192,visible=True,device=device,ok=False)
-        assert 'resource budget' in failed['error'],failed
+        assert 'resource budget' in failed['error']['message'],failed
         unchanged,_=service.call('session.snapshot');view=unchanged['views'][0]
         assert (view['width'],view['height'])==(7000,800) and token==(view['instance'],view['document'])
         # Commit succeeds but persistence fails. Keep new desired/source specs;
         # retrying the identical request must repair disk and output state.
-        block=run/'state/sessions'/sid/'views.json.new';block.mkdir()
+        database=sqlite3.connect(run/'state/sessions'/sid/'session.db',timeout=0)
+        database.execute('BEGIN IMMEDIATE')
         service.call('view.configure',viewId='1',width=1600,height=1200,visible=True,device=device,ok=False)
         snapshot,_=service.call('session.snapshot');view=snapshot['views'][0]
         assert (view['width'],view['height'])==(1600,1200) and snapshot['stats']['reconciliationPending']
-        block.rmdir()
+        database.rollback()
         service.call('view.configure',viewId='1',width=1600,height=1200,visible=True,device=device)
         snapshot,_=service.call('session.snapshot');assert not snapshot['stats']['reconciliationPending']
-        saved=json.loads((run/'state/sessions'/sid/'views.json').read_text())
+        saved=[json.loads(row[0]) for row in database.execute('SELECT config FROM views')]
+        database.close()
         assert saved[0]['width']==1600 and saved[0]['height']==1200,saved
         # Logical width may exceed physical 8192 at DPR .5, while each viewport
         # retains its requested dimensions and the Browser identity stays stable.

@@ -1,6 +1,7 @@
 import { Alert, Button, LinearProgress } from '@mui/material';
 import { Suspense, lazy, memo, useEffect, useMemo, useRef, useState } from 'react';
 import { canonicalJson } from '../util/canonical-json';
+import { formatError } from '../util/format-error';
 import type { FileChannel } from './file-channel';
 import type { LibraryEntry, LibraryFileEntry } from '../../shared/file-library';
 import { ChannelDocumentSource } from '../documents/channel-source';
@@ -39,7 +40,7 @@ function MediaPreview({ entry }: { entry: LibraryFileEntry }) {
         setUrl(objectUrl);
       },
       (failure) => {
-        if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : '预览失败');
+        if (!controller.signal.aborted) setError(formatError(failure));
       },
     );
     return () => {
@@ -112,7 +113,7 @@ const PreviewContent = memo(
           if (active) setProgress(value);
         },
         (error) => {
-          if (active) setProgressError(error instanceof Error ? error.message : '阅读进度加载失败');
+          if (active) setProgressError(formatError(error));
         },
       );
       return () => {
@@ -124,7 +125,7 @@ const PreviewContent = memo(
       pendingProgress.current = value;
       void call('document.progress.set', { assetId: entry.assetId, ...value }).then(
         () => setProgressError(''),
-        (error) => setProgressError(error instanceof Error ? error.message : '阅读进度保存失败'),
+        (error) => setProgressError(formatError(error)),
       );
     };
     if (!online) return <Alert severity="info">连接已断开，恢复后继续预览</Alert>;

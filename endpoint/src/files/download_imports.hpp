@@ -1,5 +1,5 @@
 #pragma once
-#include "persistence/session_store.hpp"
+#include "persistence/session_db.hpp"
 #include "util/result_macros.hpp"
 #include "util/error_policy.hpp"
 #include "util/wire_error.hpp"
@@ -14,9 +14,11 @@ class DownloadImports {
  public:
   using Import = std::function<Result<Json>(const Json&)>;
   using Rpc = std::function<Result<Json>(Json)>;
-  explicit DownloadImports(SessionStore& store) : store_(store) {}
-  void Initialize() {
-    state_ = store_.Load("download-imports.json", {{"records", Json::array()}});
+  explicit DownloadImports(DownloadStore store) : store_(store) {}
+  Result<void> Initialize() {
+    RK_ASSIGN_OR_RETURN(state, store_.Load());
+    state_ = std::move(state);
+    return {};
   }
   void SetImport(Import import) { import_ = std::move(import); }
   size_t Pending() const {
@@ -29,18 +31,6 @@ class DownloadImports {
       if (row.value("browserAck", false))
         events.push_back(row.at("result"));
     return events;
-  }
-  Result<void> Acknowledge(const std::set<std::string>& ids) {
-    auto next = state_;
-    auto& records = next["records"];
-    records.erase(
-        std::remove_if(records.begin(), records.end(),
-                       [&](const Json& row) {
-                         return row.value("browserAck", false) &&
-                                ids.contains(row.at("result").at("eventId").get<std::string>());
-                       }),
-        records.end());
-    return Save(std::move(next));
   }
   Result<void> Observe(const std::string& incarnation,
                        const Json& events,
@@ -127,11 +117,11 @@ class DownloadImports {
 
  private:
   Result<void> Save(Json next) {
-    RK_RETURN_IF_ERROR(store_.Save("download-imports.json", next));
+    RK_RETURN_IF_ERROR(store_.Save(next));
     state_ = std::move(next);
     return {};
   }
-  SessionStore& store_;
+  DownloadStore store_;
   Import import_;
   Json state_ = {{"records", Json::array()}};
 };

@@ -72,7 +72,7 @@ class Session {
   media::Sdk& sdk;
   ManagementLink& management;
   BrowserRuntime browser;
-  SessionStore store;
+  SessionDb store;
   CheckpointCache checkpoint_cache;
   const std::shared_ptr<media::ServerTrace> trace;
   ControllerContext context;

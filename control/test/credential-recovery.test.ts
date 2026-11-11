@@ -41,7 +41,7 @@ function damage(path: string, tables: string[]) {
 test('current databases recover passwords, PINs, faces and tokens despite damaged pages', async () => {
   await withDirectory(async (directory) => {
     const source = join(directory, 'old.db');
-    const old = new ControlDatabase(source);
+    const old = new ControlDatabase(source, { buildId: 'test' });
     const admin = await registerUser(old, 'admin', 'admin-password1');
     const member = await registerUser(old, 'member', 'member-password1');
     old.db
@@ -77,7 +77,7 @@ test('current databases recover passwords, PINs, faces and tokens despite damage
     assert.equal(plan.users[1].settings.faceEnabled, false);
 
     const target = join(directory, 'new.db');
-    const store = new ControlDatabase(target);
+    const store = new ControlDatabase(target, { buildId: 'test' });
     try {
       applyRecovery(store, plan);
       await store.security.verifyPassword(admin.user.id, 'admin-password1');

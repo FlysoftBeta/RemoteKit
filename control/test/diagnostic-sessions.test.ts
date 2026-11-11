@@ -145,7 +145,10 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
     origins: ['http://test.local'],
     clientDir: '.',
     diagnosticDir: directory,
+    logDir: directory,
   });
+  await writeFile(join(directory, 'control.jsonl.1'), 'older control record\n');
+  await writeFile(join(directory, 'control.jsonl'), 'latest control record\n');
   t.after(async () => {
     await server.shutdown();
     await rm(directory, { recursive: true, force: true });
@@ -245,8 +248,17 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   const files = entries(bytes);
   assert.deepEqual(
     [...files.keys()],
-    ['manifest.json', 'client.jsonl', 'control.jsonl', 'endpoint.jsonl', 'events.jsonl', 'logs/browser.log'],
+    [
+      'manifest.json',
+      'client.jsonl',
+      'control.jsonl',
+      'endpoint.jsonl',
+      'events.jsonl',
+      'logs/control.jsonl',
+      'logs/browser.log',
+    ],
   );
+  assert.equal(files.get('logs/control.jsonl'), 'older control record\nlatest control record\n');
   assert.equal(files.get('logs/browser.log'), browserLog.toString());
   assert.deepEqual(
     logReads.map((read) => (read as { log: string }).log),
@@ -254,7 +266,7 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   );
   const manifest = JSON.parse(files.get('manifest.json')!);
   assert.deepEqual(manifest.logs, {
-    control: { available: false },
+    control: { bytes: Buffer.byteLength('older control record\nlatest control record\n'), droppedBefore: 0 },
     browser: { exists: true, size: browserLog.length, start: 0, bytes: browserLog.length },
     endpoint: { exists: false, size: 0, start: 0, bytes: 0 },
     'endpoint.1': { exists: false, size: 0, start: 0, bytes: 0 },

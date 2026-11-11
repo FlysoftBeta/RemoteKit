@@ -9,7 +9,7 @@ import { extname, resolve, sep } from 'node:path';
 import { RemoteKitError, httpStatus, toRemoteKitError, wireError } from '../../shared/errors';
 
 import type { DomainServices } from '../application';
-import type { ProcessLog } from '../diagnostics/process-log';
+import { reportError } from '../log';
 import { DiagnosticSessions } from '../diagnostics/sessions';
 import type { NodeRegistry } from '../cluster/node-link';
 import { attachViewerSocket } from './viewer-socket';
@@ -22,7 +22,7 @@ export function createHttp(
     diagnosticDir?: string;
     tls?: { key: Buffer; cert: Buffer };
     nodes?: NodeRegistry;
-    processLog?: ProcessLog;
+    logDir?: string;
   },
 ) {
   let closing = false;
@@ -54,7 +54,7 @@ export function createHttp(
         },
         endpoint: (tenant) => control.endpoint.snapshot(tenant, { outputDiagnostics: true }),
         endpointLog: (tenant, request) => control.endpoint.readLog(tenant, request),
-        controlLog: options.processLog && (() => options.processLog!.snapshot()),
+        logDir: options.logDir,
       })
     : undefined;
   const inflight = new Set<Promise<unknown>>();
@@ -199,10 +199,12 @@ export function createHttp(
       res.setHeader('Content-Type', mime[extname(file)] ?? 'application/octet-stream');
       res.end(req.method === 'HEAD' ? undefined : content);
     } catch (error) {
-      const failure = toRemoteKitError(error);
+      const failure = reportError(toRemoteKitError(error), 'http.failed', {
+        method: req.method,
+        route: new URL(req.url ?? '/', 'http://localhost').pathname,
+      });
       if (failure.retryAfterMs !== undefined)
         res.setHeader('Retry-After', String(Math.ceil(failure.retryAfterMs / 1000)));
-      if (failure.code === 'internal') console.error('HTTP request failed', failure.detail);
       json(res, httpStatus[failure.code], { error: wireError(failure) });
     }
   };

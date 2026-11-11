@@ -1,3 +1,4 @@
+import { log } from '../log';
 import { canonicalJson } from '../config';
 import { RemoteKitError } from '../../shared/errors';
 
@@ -93,6 +94,7 @@ export class ViewerHub {
       throw new RemoteKitError('locked', 'Viewer 已锁定');
   }
   async pollFaceAuth() {
+    await this.services.security.retryRevocations();
     await Promise.all(
       this.context.tenants
         .withViewers()
@@ -110,8 +112,7 @@ export class ViewerHub {
     this.services.policy.qualityState(tenant).resetFeedback();
     const old = runtime.viewer;
     if (old?.security) {
-      void this.services.security.lock(tenant, old.security).catch(() => {});
-      this.services.security.forgetPeer(tenant, old.security);
+      void this.services.security.revokePeer(tenant, old.security);
     }
     const user = this.context.store.accounts.userForTenant(tenant);
     if (!user)
@@ -128,8 +129,8 @@ export class ViewerHub {
       await this.services.rtc.closeMedia(tenant);
       try {
         await this.services.reconciler.reconcileProduct(tenant);
-      } catch {
-        /* State carries Endpoint error; controls still work offline. */
+      } catch (err) {
+        log.warn('viewer.reconcile_failed', { tenant, err });
       }
       void this.services.security.capabilities(tenant, security);
       this.push(tenant);
@@ -144,8 +145,7 @@ export class ViewerHub {
     runtime.viewerAbsentSince = this.context.clock.monotonicMs();
     delete runtime.pageRequests.fullscreen;
     if (viewer.security) {
-      void this.services.security.lock(tenant, viewer.security).catch(() => {});
-      this.services.security.forgetPeer(tenant, viewer.security);
+      void this.services.security.revokePeer(tenant, viewer.security);
     }
     const previous = runtime.connectionId;
     if (previous) this.services.rtc.clearSignal(previous);
@@ -155,7 +155,9 @@ export class ViewerHub {
       await this.services.rtc.closeMedia(tenant);
       try {
         await this.services.reconciler.reconcileProduct(tenant);
-      } catch {}
+      } catch (err) {
+        log.warn('viewer.reconcile_failed', { tenant, err });
+      }
       this.push(tenant);
     });
   }
@@ -236,7 +238,9 @@ export class ViewerHub {
       runtime.lastViewport = viewport;
       try {
         await this.services.reconciler.reconcileProduct(tenant);
-      } catch {}
+      } catch (err) {
+        log.warn('viewer.reconcile_failed', { tenant, err });
+      }
       this.push(tenant);
       return this.productState(tenant);
     });

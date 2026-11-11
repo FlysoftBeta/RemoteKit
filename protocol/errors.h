@@ -95,7 +95,8 @@ enum class ErrorReason {
   kFileTooLarge,
   kStorageQuotaExceeded,
   kBrowserStateTooLarge,
-  kNoDocumentContour
+  kNoDocumentContour,
+  kCorruptState
 };
 constexpr std::string_view ErrorReasonName(ErrorReason value) {
   switch (value) {
@@ -121,6 +122,8 @@ constexpr std::string_view ErrorReasonName(ErrorReason value) {
       return "browser_state_too_large";
     case ErrorReason::kNoDocumentContour:
       return "no_document_contour";
+    case ErrorReason::kCorruptState:
+      return "corrupt_state";
   }
   return "";
 }
@@ -147,6 +150,8 @@ constexpr std::optional<ErrorReason> ParseErrorReason(std::string_view name) {
     return ErrorReason::kBrowserStateTooLarge;
   if (name == "no_document_contour")
     return ErrorReason::kNoDocumentContour;
+  if (name == "corrupt_state")
+    return ErrorReason::kCorruptState;
   return std::nullopt;
 }
 }  // namespace remotekit::protocol

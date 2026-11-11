@@ -1,3 +1,4 @@
+import { log } from '../log';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { endpointError } from '../endpoint/gateway';
 import type { EndpointSnapshot } from '../endpoint/types';
@@ -70,9 +71,7 @@ export class UncertainRecovery {
           : 'relief';
       const tracking = state;
       tracking.inflight = this.relieveNode(node, tracking, reason)
-        .catch((error) =>
-          console.warn('Memory Saver relief failed', node.nodeId, toRemoteKitError(error).message),
-        )
+        .catch((error) => log.warn('hibernate.relief_failed', { nodeId: node.nodeId, err: error }))
         .finally(() => {
           tracking.inflight = undefined;
         });
@@ -176,16 +175,13 @@ export class UncertainRecovery {
     } finally {
       this.hibernatingNodes.delete(placement!.nodeId);
     }
-    console.info(
-      'Memory Saver hibernate',
-      JSON.stringify({
-        tenant,
-        node: placement!.nodeId,
-        reason,
-        pressure: sample?.pressure ?? null,
-        predicted: predicted ?? null,
-      }),
-    );
+    log.info('hibernate.auto', {
+      tenant,
+      node: placement!.nodeId,
+      reason,
+      pressure: sample?.pressure ?? null,
+      predicted: predicted ?? null,
+    });
     this.finishHibernation(tenant);
     return true;
   }

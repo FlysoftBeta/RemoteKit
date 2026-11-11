@@ -17,7 +17,18 @@ Result<bool> ReplaceExecutable(const fs::path& installed,
     return new_hash.error();
   if (old_hash.value() == new_hash.value())
     return false;
-  auto old = fs::path(installed.wstring() + L".old");
+  const auto staged = fs::path(installed.wstring() + L".new");
+  if (!CopyFileW(replacement.c_str(), staged.c_str(), FALSE))
+    return Error{ErrorCode::kUnavailable, "cannot stage new supervisor"};
+  const auto file = CreateFileW(staged.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE)
+    return Error{ErrorCode::kUnavailable, "cannot open staged supervisor"};
+  const bool flushed = FlushFileBuffers(file) != FALSE;
+  CloseHandle(file);
+  if (!flushed)
+    return Error{ErrorCode::kUnavailable, "cannot flush staged supervisor"};
+  const auto old = fs::path(installed.wstring() + L".old");
   if (!MoveFileExW(installed.c_str(), old.c_str(),
                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     return Error{ErrorCode::kUnavailable, "cannot rename installed supervisor"};
@@ -26,8 +37,8 @@ Result<bool> ReplaceExecutable(const fs::path& installed,
     return MoveFileExW(old.c_str(), installed.c_str(),
                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
   };
-  if (!CopyFileW(replacement.c_str(), installed.c_str(), TRUE)) {
-    bool restored = restore() != FALSE;
+  if (!MoveFileExW(staged.c_str(), installed.c_str(), MOVEFILE_WRITE_THROUGH)) {
+    const bool restored = restore() != FALSE;
     return Error{ErrorCode::kUnavailable,
                  restored ? "cannot install new supervisor" : "cannot restore supervisor"};
   }
@@ -45,7 +56,7 @@ Result<bool> ReplaceExecutable(const fs::path& installed,
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
   }
-  log.Line("installed updated supervisor");
+  log.Event(LogLevel::kInfo, "supervisor.replaced");
   return true;
 }
 void CleanupRuntime(const fs::path& root, const std::string& current, bool downloads) {

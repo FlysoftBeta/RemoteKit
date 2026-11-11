@@ -32,7 +32,7 @@ export async function createClusterControl(options: {
     }),
   );
   const config = runtimeConfig({ REMOTEKIT_CONTROL_CONFIG: configPath }, []);
-  const store = new ControlDatabase(config.dbPath);
+  const store = new ControlDatabase(config.dbPath, { buildId: config.buildId });
   const endpoint = new NodeRegistry({
     nodes: config.nodes,
     key: config.cluster.key,

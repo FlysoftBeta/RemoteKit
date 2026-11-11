@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "hardware_encoder.hpp"
 #include "qsv_cadence_policy.hpp"
 #include "server_trace.hpp"
@@ -91,12 +92,13 @@ class Qsv final : public HardwareEncoder {
     rate_control_ = QsvRateControlInfo{options3_.LowDelayBRC,      options_.MaxFrameSize,
                                        options3_.MaxFrameSizeI,    options3_.MaxFrameSizeP,
                                        params_.mfx.BufferSizeInKB, params_.mfx.InitialDelayInKB};
-    fprintf(stderr,
-            "QSV actual frame budget: LowDelayBRC=%u MaxFrameSize=%u I=%u P=%u VBV_KB=%u "
-            "InitialDelay_KB=%u\n",
-            rate_control_->low_delay_brc, rate_control_->max_frame_size,
-            rate_control_->max_frame_size_i, rate_control_->max_frame_size_p,
-            rate_control_->buffer_size_kb, rate_control_->initial_delay_kb);
+    LogEvent(LogLevel::kInfo, "qsv.frame_budget",
+             {{"lowDelayBrc", rate_control_->low_delay_brc},
+              {"maxFrameSize", rate_control_->max_frame_size},
+              {"maxFrameSizeI", rate_control_->max_frame_size_i},
+              {"maxFrameSizeP", rate_control_->max_frame_size_p},
+              {"bufferSizeKb", rate_control_->buffer_size_kb},
+              {"initialDelayKb", rate_control_->initial_delay_kb}});
   }
   static mfxStatus MFX_CDECL Allocate(mfxHDL context,
                                       mfxFrameAllocRequest* request,
@@ -345,8 +347,9 @@ class Qsv final : public HardwareEncoder {
       error = "software MFX implementation rejected";
       return false;
     }
-    fprintf(stderr, "QSV runtime API %u.%u implementation=0x%x\n", version.Major, version.Minor,
-            implementation);
+    LogEvent(
+        LogLevel::kInfo, "qsv.runtime",
+        {{"major", version.Major}, {"minor", version.Minor}, {"implementation", implementation}});
     if (!Status(MFXVideoCORE_SetHandle(session_, MFX_HANDLE_D3D11_DEVICE, device_.Get()),
                 "MFX SetHandle", error))
       return false;
@@ -446,8 +449,10 @@ class Qsv final : public HardwareEncoder {
     low_power_.query_status = query_status;
     if (query_status >= 0)
       low_power_.queried = params_.mfx.LowPower;
-    fprintf(stderr, "QSV LowPower: requested=%u queried=%d queryStatus=%d\n",
-            settings.qsv_low_power, low_power_.queried.value_or(-1), query_status);
+    LogEvent(LogLevel::kInfo, "qsv.low_power_queried",
+             {{"requested", settings.qsv_low_power},
+              {"queried", low_power_.queried.value_or(-1)},
+              {"status", query_status}});
     if (!Status(query_status, "MFX H264 Query", error))
       return false;
     if (settings.qsv_low_power && params_.mfx.LowPower != settings.qsv_low_power) {
@@ -462,7 +467,7 @@ class Qsv final : public HardwareEncoder {
     ClearFrameBudgetReadback();
     const auto init_status = MFXVideoENCODE_Init(session_, &params_);
     low_power_.init_status = init_status;
-    fprintf(stderr, "QSV LowPower: initStatus=%d\n", init_status);
+    LogEvent(LogLevel::kInfo, "qsv.low_power_initialized", {{"status", init_status}});
     if (!Status(init_status, "MFX H264 Init", error))
       return false;
     initialized_ = true;
@@ -470,8 +475,8 @@ class Qsv final : public HardwareEncoder {
     low_power_.get_video_param_status = get_status;
     if (get_status >= 0)
       low_power_.initialized = params_.mfx.LowPower;
-    fprintf(stderr, "QSV LowPower: initialized=%d getVideoParamStatus=%d\n",
-            low_power_.initialized.value_or(-1), get_status);
+    LogEvent(LogLevel::kInfo, "qsv.parameters_read",
+             {{"lowPower", low_power_.initialized.value_or(-1)}, {"status", get_status}});
     if (!Status(get_status, "MFX GetVideoParam", error))
       return false;
     ReadRateControl();
@@ -486,29 +491,38 @@ class Qsv final : public HardwareEncoder {
     }
     if (!CheckSignal(error))
       return false;
-    fprintf(stderr,
-            "QSV actual VUI: fullRange=%u description=%u primaries=%u transfer=%u matrix=%u\n",
-            signal_.VideoFullRange, signal_.ColourDescriptionPresent, signal_.ColourPrimaries,
-            signal_.TransferCharacteristics, signal_.MatrixCoefficients);
-    fprintf(stderr, "QSV actual HRD: nalConformance=%u nalVui=%u vclVui=%u\n",
-            hrd_options_.NalHrdConformance, hrd_options_.VuiNalHrdParameters,
-            hrd_options_.VuiVclHrdParameters);
+    LogEvent(LogLevel::kInfo, "qsv.vui",
+             {{"fullRange", signal_.VideoFullRange},
+              {"description", signal_.ColourDescriptionPresent},
+              {"primaries", signal_.ColourPrimaries},
+              {"transfer", signal_.TransferCharacteristics},
+              {"matrix", signal_.MatrixCoefficients}});
+    LogEvent(LogLevel::kInfo, "qsv.hrd",
+             {{"nalConformance", hrd_options_.NalHrdConformance},
+              {"nalVui", hrd_options_.VuiNalHrdParameters},
+              {"vclVui", hrd_options_.VuiVclHrdParameters}});
     allocated_buffer_kb_ = params_.mfx.BufferSizeInKB;
     if (params_.mfx.CodecLevel > settings.level_idc) {
       error = "QSV actual H264 level " + std::to_string(params_.mfx.CodecLevel) +
               " exceeds negotiated level " + std::to_string(settings.level_idc);
       return false;
     }
-    fprintf(stderr, "QSV negotiated level=%u\n", settings.level_idc);
-    fprintf(stderr,
-            "QSV actual: %ux%u %u/%u fps TU=%u RC=%u TargetKbps=%u MaxKbps=%u VBV_KB=%u "
-            "AsyncDepth=%u Gop=%u RefDist=%u Profile=%u Level=%u\n",
-            params_.mfx.FrameInfo.CropW, params_.mfx.FrameInfo.CropH,
-            params_.mfx.FrameInfo.FrameRateExtN, params_.mfx.FrameInfo.FrameRateExtD,
-            params_.mfx.TargetUsage, params_.mfx.RateControlMethod, params_.mfx.TargetKbps,
-            params_.mfx.MaxKbps, params_.mfx.BufferSizeInKB, params_.AsyncDepth,
-            params_.mfx.GopPicSize, params_.mfx.GopRefDist, params_.mfx.CodecProfile,
-            params_.mfx.CodecLevel);
+    LogEvent(LogLevel::kInfo, "qsv.level", {{"level", settings.level_idc}});
+    LogEvent(LogLevel::kInfo, "qsv.parameters",
+             {{"width", params_.mfx.FrameInfo.CropW},
+              {"height", params_.mfx.FrameInfo.CropH},
+              {"fpsNumerator", params_.mfx.FrameInfo.FrameRateExtN},
+              {"fpsDenominator", params_.mfx.FrameInfo.FrameRateExtD},
+              {"targetUsage", params_.mfx.TargetUsage},
+              {"rateControl", params_.mfx.RateControlMethod},
+              {"targetKbps", params_.mfx.TargetKbps},
+              {"maxKbps", params_.mfx.MaxKbps},
+              {"bufferSizeKb", params_.mfx.BufferSizeInKB},
+              {"asyncDepth", params_.AsyncDepth},
+              {"gop", params_.mfx.GopPicSize},
+              {"referenceDistance", params_.mfx.GopRefDist},
+              {"profile", params_.mfx.CodecProfile},
+              {"level", params_.mfx.CodecLevel}});
     return true;
   }
 
@@ -709,8 +723,8 @@ class Qsv final : public HardwareEncoder {
       // The worker has drained accepted jobs. Keep the same session and device
       // while rebuilding the encode component from the requested settings.
       const auto geometry = params_.mfx.FrameInfo;
-      fprintf(stderr, "QSV rate Reset requires reinit: requested=%u fps=%u status=%d\n", bitrate,
-              fps, status);
+      LogEvent(LogLevel::kWarn, "qsv.reinit_required",
+               {{"bitrate", bitrate}, {"fps", fps}, {"status", status}});
       if (!Exact(MFXVideoENCODE_Close(session_), "MFX Encode Close for rate reinit", error))
         return false;
       initialized_ = false;
@@ -763,10 +777,14 @@ class Qsv final : public HardwareEncoder {
     settings_.max_bitrate = next_max;
     if (cadence_changed || reinitialize)
       keyframe_requested_ = true;
-    fprintf(stderr, "QSV rate %s: requested=%u actual=%u fps=%u/%u newSequence=%s status=%d\n",
-            reinitialize ? "reinit" : "Reset", bitrate, params_.mfx.TargetKbps * 1000u,
-            params_.mfx.FrameInfo.FrameRateExtN, params_.mfx.FrameInfo.FrameRateExtD,
-            (cadence_changed || reinitialize) ? "ON" : "OFF", status);
+    LogEvent(LogLevel::kInfo, "qsv.rate_changed",
+             {{"reinitialize", reinitialize},
+              {"requestedBitrate", bitrate},
+              {"actualBitrate", params_.mfx.TargetKbps * 1000u},
+              {"fpsNumerator", params_.mfx.FrameInfo.FrameRateExtN},
+              {"fpsDenominator", params_.mfx.FrameInfo.FrameRateExtD},
+              {"newSequence", cadence_changed || reinitialize},
+              {"status", status}});
     return true;
   }
   bool Drain(std::vector<AccessUnit>& result, std::string& error) override {

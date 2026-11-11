@@ -215,7 +215,7 @@ Result<bool> Update(const fs::path& root, HANDLE stop, Log& log, bool service) {
     auto activated = SetCurrent(root, id);
     if (!activated)
       return activated.error();
-    log.Line("activated runtime " + id);
+    log.Event(LogLevel::kInfo, "runtime.activated", {{"buildId", id}});
     auto replaced =
         ReplaceExecutable(root / L"remotekit_node.exe", runtime / L"bin/remotekit_node.exe", root,
                           L"run --root=" + Quote(root.wstring()), service, log);

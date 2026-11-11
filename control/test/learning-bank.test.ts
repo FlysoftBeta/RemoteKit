@@ -9,7 +9,7 @@ import { createApplication } from '../server/application';
 import { registerUser, testGateway } from './server-fixture';
 
 test('bank maps every filter, subtype, difficulty, catalog, rich field and media through the provider transport', async () => {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const accounts = new LearningAccounts(store, () => {}, undefined, undefined, Buffer.alloc(32));
   accounts.save('tenant', 'xinjiaoyu', {
     token: 'token',
@@ -143,7 +143,7 @@ test('bank maps every filter, subtype, difficulty, catalog, rich field and media
 });
 
 test('document progress enforces object ownership, validates offsets and keeps the latest 500', async () => {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const user = await registerUser(store, 'progress-user', 'progress-password123');
   const app = createApplication(store, testGateway({ request: async () => ({}) }));
   const asset = 'a'.repeat(64);

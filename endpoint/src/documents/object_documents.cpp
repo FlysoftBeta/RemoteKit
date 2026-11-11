@@ -49,7 +49,8 @@ ObjectDocuments::Future ObjectDocuments::Submit(const std::string& source,
         try {
           result = Convert(source, tenant, temporary, media_type);
         } catch (const std::filesystem::filesystem_error& error) {
-          result = Error{ErrorCode::kUnavailable, error.what()};
+          result = WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                               error.code().value());
         } catch (const std::exception& error) {
           result = Error{ErrorCode::kInternal, error.what()};
         }

@@ -1,3 +1,4 @@
+import { formatError } from '../../util/format-error';
 import { ArrowBack, AttachFileOutlined, MoreHoriz, SyncOutlined, SchoolOutlined } from '@mui/icons-material';
 import {
   Alert,
@@ -170,7 +171,7 @@ export function StudyApp(
     try {
       await operation();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : '操作失败');
+      setError(formatError(failure));
     }
   };
   const back = () => {
@@ -208,7 +209,7 @@ export function StudyApp(
       if (active) setPreview(entry);
     };
     void open().catch((failure) => {
-      if (active) setMaterialError(failure instanceof Error ? failure.message : '预览失败');
+      if (active) setMaterialError(formatError(failure));
     });
     return () => {
       active = false;

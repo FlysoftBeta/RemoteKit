@@ -453,8 +453,10 @@ void ProcessTests(const fs::path& output) {
   Check(!failure && failure.error().code == ErrorCode::kRejected, "tool failure accepted");
   auto log_bytes = Read(directory.path() / "failure.log");
   const std::string log(log_bytes.begin(), log_bytes.end());
-  Check(log.find("tool=endpoint_documents_tests.exe exit_code=37") != log.npos &&
-            log.find("Error: final diagnostic") != log.npos,
+  const auto record = nlohmann::json::parse(log);
+  Check(record.at("ev") == "document.tool_failed" &&
+            record.at("tool") == "endpoint_documents_tests.exe" && record.at("exitCode") == "37" &&
+            record.at("stderrTail").get<std::string>().find("Error: final diagnostic") != log.npos,
         "tool failure lacks exit code or stderr tail");
   for (auto secret : {"private-source.docx", "private document text", "stdout secret", "early"})
     Check(log.find(secret) == log.npos, "tool failure leaks private output or reads log head");

@@ -1,0 +1,155 @@
+-- Generated from commit 86175d45fc97b1d4b288b5679c03dd9962c5a4ad.
+CREATE TABLE announcement_reads (
+      announcement_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(announcement_id,user_id));
+CREATE TABLE announcements (
+      id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
+      published_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE auth_tokens (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
+CREATE TABLE checkpoint_objects (
+        tenant TEXT NOT NULL, manifest_id TEXT NOT NULL, id TEXT NOT NULL,
+        PRIMARY KEY(tenant,manifest_id,id));
+CREATE TABLE checkpoints (
+        tenant TEXT NOT NULL, id INTEGER NOT NULL, placement_epoch INTEGER NOT NULL, manifest_id TEXT NOT NULL,
+        build_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(tenant,id));
+CREATE TABLE clipboards (user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL, text TEXT NOT NULL, html TEXT NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE cluster_object_secret (id INTEGER PRIMARY KEY CHECK(id=1), ciphertext TEXT NOT NULL);
+CREATE TABLE document_progress (
+    tenant TEXT NOT NULL, asset_id TEXT NOT NULL, page INTEGER NOT NULL,
+    offset REAL NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(tenant,asset_id));
+CREATE TABLE download_import_failures (tenant TEXT NOT NULL, event_id TEXT NOT NULL, name TEXT NOT NULL, origin TEXT NOT NULL, error TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(tenant,event_id));
+CREATE TABLE favorites (
+      tenant TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL,
+      PRIMARY KEY(tenant,id));
+CREATE TABLE file_library (tenant TEXT PRIMARY KEY, snapshot TEXT NOT NULL);
+CREATE TABLE file_library_operations (
+        tenant TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, selection_id TEXT, PRIMARY KEY(tenant,id));
+CREATE TABLE file_library_selections (
+        tenant TEXT NOT NULL, id TEXT NOT NULL, manifest TEXT NOT NULL, terminal TEXT, checked INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(tenant,id));
+CREATE TABLE installed_apps (
+      tenant TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL,
+      icon BLOB, icon_hash TEXT, PRIMARY KEY(tenant,id));
+CREATE TABLE learning_accounts (
+    tenant TEXT NOT NULL, provider TEXT NOT NULL, sealed TEXT NOT NULL,
+    display_name TEXT NOT NULL, username TEXT NOT NULL, status TEXT NOT NULL,
+    updated_at INTEGER NOT NULL, PRIMARY KEY(tenant,provider));
+CREATE TABLE learning_downloads (
+    tenant TEXT NOT NULL, key TEXT NOT NULL, published_at INTEGER NOT NULL,
+    saved_at INTEGER NOT NULL, entry_id TEXT, object_id TEXT, state TEXT NOT NULL, document INTEGER NOT NULL DEFAULT 0, error_code TEXT, error_message TEXT, retry_at INTEGER, failed_usage INTEGER,
+    PRIMARY KEY(tenant,key));
+CREATE TABLE learning_settings (
+    tenant TEXT PRIMARY KEY, retention_days INTEGER NOT NULL DEFAULT 7,
+    last_sync_at INTEGER);
+CREATE TABLE library_snippets (
+    entry_id TEXT PRIMARY KEY, tenant TEXT NOT NULL, text TEXT NOT NULL,
+    hash TEXT NOT NULL, origin TEXT NOT NULL, copied_at INTEGER NOT NULL,
+    UNIQUE(tenant,hash));
+CREATE TABLE object_claims (
+        tenant TEXT NOT NULL, id TEXT NOT NULL, claimed_at INTEGER NOT NULL, PRIMARY KEY(tenant,id));
+CREATE TABLE object_derivations (
+        id TEXT NOT NULL, source_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('thumbnail','document')),
+        PRIMARY KEY(id,source_id,kind));
+CREATE TABLE object_gc (id TEXT PRIMARY KEY, unreferenced_at INTEGER NOT NULL);
+CREATE TABLE object_inventory_orphans (
+        node_id TEXT NOT NULL, id TEXT NOT NULL, first_seen INTEGER NOT NULL,
+        PRIMARY KEY(node_id,id));
+CREATE TABLE object_render_failures (
+    source_id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state='failed'),
+    reason TEXT NOT NULL, message TEXT NOT NULL, failed_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL, retry_at INTEGER, node_id TEXT, build_id TEXT NOT NULL, display_reason TEXT);
+CREATE TABLE object_replicas (
+        id TEXT NOT NULL, node_id TEXT NOT NULL, PRIMARY KEY(id,node_id));
+CREATE TABLE objects (
+        id TEXT PRIMARY KEY, size INTEGER NOT NULL, stored_size INTEGER NOT NULL,
+        stored_sha256 TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE operation_generations (tenant TEXT PRIMARY KEY, generation TEXT NOT NULL);
+CREATE TABLE operation_receipts (tenant TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(tenant,id));
+CREATE TABLE operation_sequences (tenant TEXT PRIMARY KEY, sequence TEXT NOT NULL);
+CREATE TABLE page_previews (
+    tenant TEXT NOT NULL, key TEXT NOT NULL, image BLOB NOT NULL, hash TEXT NOT NULL,
+    updated_at INTEGER NOT NULL, PRIMARY KEY(tenant,key));
+CREATE TABLE popup_receipts (tenant TEXT NOT NULL, provisional_id TEXT NOT NULL, tab_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(tenant,provisional_id));
+CREATE TABLE removed_nodes (node_id TEXT PRIMARY KEY, removed_at INTEGER NOT NULL);
+CREATE TABLE schema_version (version INTEGER NOT NULL CHECK(version=16));
+CREATE TABLE session_deletions (
+        session_id TEXT NOT NULL, node_id TEXT NOT NULL, error_code TEXT, error_message TEXT, PRIMARY KEY(session_id,node_id));
+CREATE TABLE session_import_devices (
+        key_id TEXT PRIMARY KEY, tenant TEXT NOT NULL, public_key BLOB NOT NULL, name TEXT NOT NULL,
+        paired_at INTEGER NOT NULL, in_seq INTEGER NOT NULL, out_seq INTEGER NOT NULL,
+        acked_seq INTEGER NOT NULL, resent_at INTEGER);
+CREATE TABLE session_import_events (
+        tenant TEXT NOT NULL, key_id TEXT NOT NULL, direction TEXT NOT NULL CHECK(direction IN ('in','out')),
+        seq INTEGER NOT NULL, at INTEGER NOT NULL, type TEXT NOT NULL, ref INTEGER, body TEXT NOT NULL, mailed_at INTEGER);
+CREATE TABLE session_import_keys (
+      id INTEGER PRIMARY KEY CHECK(id=1), public_key BLOB NOT NULL, private_key TEXT NOT NULL, key_id TEXT NOT NULL);
+CREATE TABLE session_import_mailbox (
+        id INTEGER PRIMARY KEY CHECK(id=1), since INTEGER NOT NULL, uid_validity TEXT, uid INTEGER);
+CREATE TABLE session_import_pairing (
+        tenant TEXT PRIMARY KEY, code TEXT, opened_at INTEGER, expires_at INTEGER,
+        failures INTEGER NOT NULL, closed_reason TEXT);
+CREATE TABLE session_imports (
+        id TEXT PRIMARY KEY, tenant TEXT NOT NULL, key_id TEXT NOT NULL, sites TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','applied','failed','discarded')), payload TEXT,
+        cookies INTEGER NOT NULL, origins INTEGER NOT NULL, rejected_items INTEGER NOT NULL,
+        error TEXT, received_at INTEGER NOT NULL, finished_at INTEGER, error_code TEXT, retry_at INTEGER, storage_job TEXT, apply_counts TEXT, chunk_index INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE session_placements (
+  tenant TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, node_id TEXT NOT NULL,
+  placement_epoch INTEGER NOT NULL, key_ciphertext TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','hibernating','hibernated')), checkpoint_id INTEGER);
+CREATE TABLE site_preferences (tenant TEXT NOT NULL, origin TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(tenant,origin));
+CREATE TABLE usage_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, tenant TEXT NOT NULL, at INTEGER NOT NULL,
+      item TEXT NOT NULL, window_id TEXT NOT NULL, context TEXT NOT NULL, chain TEXT NOT NULL, title TEXT);
+CREATE TABLE user_security (user_id TEXT PRIMARY KEY REFERENCES users(id), settings TEXT NOT NULL, pin_salt TEXT, pin_hash TEXT, face_ciphertext TEXT, face_model TEXT);
+CREATE TABLE user_settings (tenant TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, tenant TEXT NOT NULL UNIQUE, salt TEXT NOT NULL, password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, last_login_at INTEGER, disabled_at INTEGER);
+CREATE TABLE view_ids (id INTEGER PRIMARY KEY AUTOINCREMENT);
+CREATE TABLE warm_session_copies (
+        tenant TEXT NOT NULL, node_id TEXT NOT NULL, manifest_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(tenant,node_id));
+CREATE TABLE workspace_spaces (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE workspace_tabs (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, window_id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE workspace_windows (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL, app_id TEXT NOT NULL, active_tab TEXT, state TEXT, last_active_at INTEGER NOT NULL);
+CREATE TABLE workspaces (tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL, active_space TEXT, pending TEXT);
+INSERT INTO users (id,username,tenant,salt,password_hash,is_admin,last_login_at,disabled_at) VALUES ('user','fixture','tenant','00000000000000000000000000000000','00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',1,NULL,NULL);
+INSERT INTO download_import_failures (tenant,event_id,name,origin,error,at) VALUES ('tenant','download','lesson.pdf','https://example.test','{"code":"unavailable","message":"Unavailable"}',100);
+INSERT INTO favorites (tenant,id,position,data) VALUES ('tenant','favorite',0,'{"id":"favorite","url":"https://example.test/","title":"Lessons","createdAt":100}');
+INSERT INTO file_library (tenant,snapshot) VALUES ('tenant','{"revision":3,"entries":[{"id":"entry","name":"lesson.pdf","type":"application/pdf","size":42,"createdAt":100,"source":{"app":"study","channel":"class"},"partitionId":"saved","collected":true,"kind":"file","assetId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","originalAssetId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","photo":{"mode":"scan","candidateAssetIds":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]}},{"kind":"snippet","id":"snippet","name":"","type":"text/plain","size":6,"createdAt":101,"source":{"app":"clipboard","channel":""},"partitionId":null,"collected":true,"preview":"Copied","origin":{"kind":"device"}}],"basket":["entry"],"partitions":[{"id":"saved","name":"Saved"}],"sources":[],"excludedSources":[{"app":"download","channel":"example.test"}],"basketPartitionId":"saved"}');
+INSERT INTO file_library_selections (tenant,id,manifest,terminal,checked) VALUES ('tenant','selection','{"selectionId":"selection","requestId":"request","binding":{"browserIncarnation":"browser","view":"1","instance":"instance","document":"document","request":"request"},"entryIds":["entry"],"files":[{"assetId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"lesson.pdf","type":"application/pdf"}],"prepared":true}',NULL,0);
+INSERT INTO installed_apps (tenant,id,position,data,icon,icon_hash) VALUES ('tenant','app',0,'{"id":"app","name":"Lessons","startUrl":"https://example.test/","scope":"https://example.test/","display":"standalone","createdAt":100,"updatedAt":100}',NULL,NULL);
+INSERT INTO learning_accounts (tenant,provider,sealed,display_name,username,status,updated_at) VALUES ('tenant','changyan','6XuxbfNc+ZCS9XQwHjbH++OobWS0VHE6ZNS72iUBk+3ZhksXJZNfX9JAyUE6UaXH2K/Qs4qgLSCL3LdBHi/RCD1zkz4fVAQl+4/u9D/mCw2ObbwmTP2Ns2n3ZrVFQgZoxGBnAffbTBqDWdCjgQaCFuOEHGiXxgLx0NKgscp8ffbySh8FpqP8QSAlvsgSrP73DJ3sJD5y789f51NGef7luMDHXagoN/Yx0gr5G8PORrw=','Student','student','signed_in',100);
+INSERT INTO learning_accounts (tenant,provider,sealed,display_name,username,status,updated_at) VALUES ('tenant','xinjiaoyu','YNZB4JcFMUIkyuglsxLMAPV4ZbBeR1vm1w0xkhMQNsAjjdkwVuEJDXBqZDELTY+IevvZn1OrM2iAt3mUItA0goH9i8cfO7+GRVnGde7krSMTRwoODRhoZb0DCBpv/+8nvaM65Nv87Cv2ELHdl1HaTang5FHn3rQq0m1Z//tN94GM4uX8b/J3bjwS1Lnrg1CnQRXVFPJmdNxZClpKlHJTH4s7pCz6GWXA6Rb3pnh2NWuFl8W2MPZXj40Jhkr3ZkiCADc+XURke35x7mmZT6jRMG2TuqYvQmU=','Xinjiaoyu Student','xinjiaoyu-student','signed_in',101);
+INSERT INTO learning_downloads (tenant,key,published_at,saved_at,entry_id,object_id,state,document,error_code,error_message,retry_at,failed_usage) VALUES ('tenant','lesson',90,100,'entry','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','saved',0,NULL,NULL,NULL,NULL);
+INSERT INTO library_snippets (entry_id,tenant,text,hash,origin,copied_at) VALUES ('snippet','tenant','Copied','8d525e5f158b9afe05f3122af363ac67763bdc4e1395b46597b320c289766ce3','{"kind":"device"}',101);
+INSERT INTO operation_receipts (tenant,id,payload,receipt) VALUES ('tenant','failed','{"type":"tab.navigate","tabId":"tab","url":"https://example.test/next"}','{"operationId":"failed","operationGeneration":"generation","status":"failed","error":{"code":"rejected","message":"Navigation rejected"}}');
+INSERT INTO operation_receipts (tenant,id,payload,receipt) VALUES ('tenant','expired','{"type":"tab.navigate","tabId":"tab","url":"https://example.test/next"}','{"operationId":"expired","operationGeneration":"generation","status":"failed","error":{"code":"conflict","message":"Expired"}}');
+INSERT INTO operation_receipts (tenant,id,payload,receipt) VALUES ('tenant','unknown','{"type":"tab.navigate","tabId":"tab","url":"https://example.test/next"}','{"operationId":"unknown","operationGeneration":"generation","status":"unknown","error":{"code":"outcome_unknown","message":"Lost reply"}}');
+INSERT INTO operation_receipts (tenant,id,payload,receipt) VALUES ('tenant','settings','{"type":"settings.update","settings":{"memorySaverEnabled":true}}','{"operationId":"settings","operationGeneration":"generation","status":"committed"}');
+INSERT INTO schema_version (version) VALUES (16);
+INSERT INTO session_import_events (tenant,key_id,direction,seq,at,type,ref,body,mailed_at) VALUES ('tenant','device','out',1,100,'importFailed',1,'{"seq":1,"at":100,"type":"importFailed","ref":1,"id":"import","reason":"Unavailable","retryable":false}',NULL);
+INSERT INTO session_import_events (tenant,key_id,direction,seq,at,type,ref,body,mailed_at) VALUES ('tenant','device','in',1,100,'import',NULL,'{"seq":1,"at":100,"receivedAt":101,"type":"import","id":"import","device":"Phone","publicKey":"a2V5","sites":[{"name":"Example","url":"https://example.test/"}],"cookies":1,"origins":1}',NULL);
+INSERT INTO session_import_pairing (tenant,code,opened_at,expires_at,failures,closed_reason) VALUES ('tenant','jNZEP0OCCqifng7tC/bDnV6T+bpGbiT7Jl4oSwWP1MTWQ9tg2/TFFJMwmzsrDwp8HQ==',100,100000,0,NULL);
+INSERT INTO session_imports (id,tenant,key_id,sites,state,payload,cookies,origins,rejected_items,error,received_at,finished_at,error_code,retry_at,storage_job,apply_counts,chunk_index) VALUES ('import','tenant','device','[{"name":"Example","url":"https://example.test/"}]','pending','cREQNKB+9EcYh8qbaa0/Vzrm0DKpgngbXyoQhhpWA0dwOVmSwuBz7DPyYKD1EEDWerfHvm4YYERUzgWdnNIxtm+dZIu0kw0D4B8az6zmlKrn2EFH0/95+bD4cBIV3s0yZHhSngpzwvmRxGJnja9NrGjcv+rQ4zfqksLccmf1L2doy5b6oSEn7isBTAxJXJXDWvQlXoL06MRPyqqLt5a+TBVUiqRRVzz1S3qCfi27x8MgHE/5dFK+lZT53SDRxdKamvxrlsORplDz/vAI2EZLrWPQpmnlPaKvUhGQlbF4HxI0+Po8p4DGaMbDGoUW8VwXiU2t/jZVNZWPqsoca85EhPWUa1v0UqCqNCz+9Mwnx6VgHOGm',1,1,0,NULL,100,NULL,NULL,NULL,'{"importId":"job"}','{"cookies":{"applied":1,"rejected":0},"localStorage":{"applied":0,"rejected":0}}',0);
+INSERT INTO site_preferences (tenant,origin,data) VALUES ('tenant','https://example.test','{"tabletUa":true,"permissions":{"clipboard_read":"allow"},"protocolHandlers":[{"protocol":"web+lesson","url":"https://example.test/%s","allowed":true}]}');
+INSERT INTO user_security (user_id,settings,pin_salt,pin_hash,face_ciphertext,face_model) VALUES ('user','{"lockOnHidden":true}',NULL,NULL,'5YekzeOZx1O53RE8CL9vRno2V4FIBwCTOmHCbJ19x25nB4o1Z9YMiuxr1rZDf9eqUI/tLl78TaS473t86VZ58TZ+7HHETdjSKJLbkyjpM2v4xCLeSTfkYEde89HqtWFWd2IugEWJ3uTmgSpfvw76/2g3szyjSewqnv55i49k0VZPZGjYDaXK+sAksUsQYG0n7wpvZ3bnEVu7I85N2PlkD5k9zVpckw1lKZYYG4uRZNByBLLop9Dcg04Bq93M1Xp8RVY1Nu4XW7cjn4x0YjGGyQP/1luF2Ve2XGcypIh0szglBi0SO2sO05kVnXQC+KQncgHVuLv8otXIHiGMRnt4Z6gMoXmY+M/+igfMB2DHzjjsNwKFLijYX+Ifu6Wl','model');
+INSERT INTO user_settings (tenant,data) VALUES ('tenant','{"workspace":{"qualityPreference":"auto","uiScale":1,"topDeadZone":"off","showStats":false,"autoFullscreen":false,"autoKeyboard":false,"clipboardSync":true,"avSync":false,"audioChannels":{"left":true,"right":true}},"browser":{"searchEngine":"google","memorySaverEnabled":true}}');
+INSERT INTO workspace_spaces (id,tenant,position,data) VALUES ('space','tenant',0,'{"id":"space","windowIds":["window"],"weights":[1],"focusedWindowId":"window","lastActiveAt":100}');
+INSERT INTO workspace_tabs (id,tenant,window_id,position,data) VALUES ('tab','tenant','window',0,'{"id":"tab","windowId":"window","webviewId":"1","kind":"remote","title":"Lesson","url":"https://example.test/"}');
+INSERT INTO workspace_windows (id,tenant,position,app_id,active_tab,state,last_active_at) VALUES ('window','tenant',0,'browser','tab','{"query":"lesson"}',100);
+INSERT INTO workspaces (tenant,revision,active_space,pending) VALUES ('tenant',3,'space','{"pendingClose":null,"pendingWindowCloseId":null}');
+CREATE INDEX announcement_reads_user ON announcement_reads(user_id);
+CREATE INDEX document_progress_recent ON document_progress(tenant,updated_at);
+CREATE INDEX file_library_open ON file_library_selections(tenant,terminal,checked);
+CREATE INDEX learning_downloads_object ON learning_downloads(object_id);
+CREATE INDEX object_derivations_source ON object_derivations(source_id,kind);
+CREATE INDEX page_previews_hash ON page_previews(tenant,hash);
+CREATE INDEX page_previews_updated ON page_previews(tenant,updated_at);
+CREATE INDEX session_import_events_outbox ON session_import_events(mailed_at) WHERE direction='out';
+CREATE INDEX session_import_events_retention ON session_import_events(CASE WHEN direction='in' THEN json_extract(body,'$.receivedAt') ELSE at END);
+CREATE INDEX session_import_events_stream ON session_import_events(key_id,direction,seq);
+CREATE INDEX session_import_events_tenant ON session_import_events(tenant,direction);
+CREATE INDEX session_imports_retention ON session_imports(finished_at) WHERE state!='pending';
+CREATE INDEX session_imports_tenant ON session_imports(tenant,state,received_at);
+CREATE UNIQUE INDEX single_admin ON users(is_admin) WHERE is_admin=1;
+CREATE INDEX usage_events_context ON usage_events(tenant,window_id,context,at,id);
+CREATE INDEX usage_events_tenant ON usage_events(tenant,at,id);

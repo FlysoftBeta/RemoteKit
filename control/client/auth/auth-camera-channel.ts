@@ -1,4 +1,4 @@
-import { endpointError } from '../../server/endpoint/gateway';
+import { endpointError } from '../../shared/errors';
 import { errorHandling } from '../../shared/error-policy';
 import { RemoteKitError } from '../../shared/errors';
 import { diagnostics } from '../media/diagnostics';

@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "session/browser.hpp"
 #include "util/file_io.hpp"
 #include "util/result_macros.hpp"
@@ -25,9 +26,8 @@ void BrowserRuntime::RecordCrash() {
     if (line.find("FATAL") != std::string::npos || line.find("Check failed") != std::string::npos)
       fatal = line.substr(0, 16384);
   }
-  const auto dumps = RecentCrashDumps(log_.parent_path() / "crashes");
-  const Json event = {{"event", "browser_crashed"},
-                      {"timestamp", std::chrono::duration_cast<std::chrono::milliseconds>(
+  const auto dumps = RecentCrashDumps(crash_directory_);
+  const Json event = {{"timestamp", std::chrono::duration_cast<std::chrono::milliseconds>(
                                         std::chrono::system_clock::now().time_since_epoch())
                                         .count()},
                       {"pid", Pid()},
@@ -36,13 +36,13 @@ void BrowserRuntime::RecordCrash() {
                       {"exitCodeDescription", DescribeExitCode(*code)},
                       {"fatal", fatal.empty() ? Json(nullptr) : Json(fatal)},
                       {"dumpPath", dumps.empty() ? Json(nullptr) : Json(Utf8(dumps.front()))}};
-  const auto encoded = event.dump();
-  fprintf(stderr, "%s\n", encoded.c_str());
-  const auto directory = log_.parent_path() / "crashes";
+  const auto encoded = FormatLogRecord(LogLevel::kError, "browser.crashed", event);
+  LogEvent(LogLevel::kError, "browser.crashed", event);
+  const auto directory = crash_directory_;
   std::error_code error;
   fs::create_directories(directory, error);
   std::ofstream events(directory / "events.jsonl", std::ios::binary | std::ios::app);
-  events << encoded << '\n';
+  events << encoded;
 }
 
 Error BrowserRuntime::Unavailable(std::string detail) const {
@@ -203,11 +203,10 @@ void BrowserRuntime::Presented(const std::string& view, int64_t at) {
   const auto found = restored_views_.find(view);
   if (found == restored_views_.end())
     return;
-  const Json event = {{"event", "session.open.presented"},
-                      {"tenantId", wake_tenant_},
+  const Json event = {{"tenantId", wake_tenant_},
                       {"viewId", view},
                       {"ms", double(at - found->second) * 1000 / QpcFrequency()}};
-  fprintf(stderr, "%s\n", event.dump().c_str());
+  LogEvent(LogLevel::kInfo, "session.open.presented", event);
   restored_views_.erase(found);
 }
 void BrowserRuntime::MarkInitialized() {
@@ -219,7 +218,11 @@ void BrowserRuntime::MarkInitialized() {
     open_timing_["total"] =
         double(now - open_timing_.value("startedQpc", launch_started_)) * 1000 / QpcFrequency();
     open_timing_.erase("startedQpc");
-    fprintf(stderr, "%s\n", open_timing_.dump().c_str());
+    {
+      const auto event = open_timing_.value("event", std::string("session.open.timing"));
+      open_timing_.erase("event");
+      LogEvent(LogLevel::kInfo, event, open_timing_);
+    }
     open_timing_ = Json::object();
   }
 }
@@ -231,7 +234,21 @@ Result<void> BrowserRuntime::Launch(const RuntimeOptions& options,
                                     const fs::path& directory,
                                     const StreamingAdapter& adapter,
                                     const std::shared_ptr<media::ServerTrace>& trace) {
-  log_ = directory / "browser.log";
+  log_ = options.node_root / "logs/browser" / (id + ".log");
+  crash_directory_ = options.node_root / "logs/crashes" / id;
+  RK_RETURN_IF_ERROR(CreateDirectories(log_.parent_path()));
+  RK_RETURN_IF_ERROR(CreateDirectories(crash_directory_));
+  RK_ASSIGN_OR_RETURN(log_exists, FileExists(log_));
+  if (log_exists) {
+    RK_ASSIGN_OR_RETURN(log_size, FileSize(log_));
+    if (log_size > 16 * 1024 * 1024) {
+      const auto rotated = fs::path(log_.wstring() + L".1");
+      if (!MoveFileExW(log_.c_str(), rotated.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        return WithOsError(ErrorCode::kUnavailable, "cannot rotate Browser log",
+                           OsError::Kind::kWin32, GetLastError());
+    }
+  }
   const auto luid = AdapterLuid(adapter.luid);
   std::string channel = "RemoteKit.service." + std::to_string(GetCurrentProcessId()) + "." + id +
                         "." + std::to_string(QpcNow());
@@ -246,6 +263,8 @@ Result<void> BrowserRuntime::Launch(const RuntimeOptions& options,
   append(L"--session-id=1");
   append(L"--tenant-id=" + std::wstring(id.begin(), id.end()));
   append(L"--data-path=" + directory.wstring());
+  append(L"--log-file=" + log_.wstring());
+  append(L"--crash-dir=" + crash_directory_.wstring());
   append(L"--atlas-width=1920");
   append(L"--atlas-height=1080");
   if (!options.browser_trace_directory.empty()) {
@@ -261,7 +280,8 @@ Result<void> BrowserRuntime::Launch(const RuntimeOptions& options,
     append(L"--trace-startup-record-mode=record-until-full");
     append(L"--default-trace-buffer-size-limit-in-kb=32768");
   }
-  fprintf(stderr, "session %s browser command %s\n", id.c_str(), Utf8(fs::path(command)).c_str());
+  LogEvent(LogLevel::kInfo, "browser.launched",
+           {{"sessionId", id}, {"command", Utf8(fs::path(command))}});
   auto started = Start(options.browser, std::move(command), channel);
   if (!started)
     return started.error();

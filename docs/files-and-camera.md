@@ -23,7 +23,7 @@
 3. 用户在篮子里确定选择后：`library.prepare`（Control 校验原生请求、multiple、数量、大小，写入不可变的选择清单）→ DC `selection.commit`（Endpoint 再校验当前 peer、授权和真实的待处理原生请求，把资产暂存为 Browser 可读的文件，回调 listener）→ `library.finish`。暂存前，WebP 资产在页面 accept 非空且不含 `image/webp`、`image/*`、`.webp` 时转码：接受 JPEG（`image/jpeg`、`.jpg` 等）就交 JPEG（质量 0.92，扩展名 `.jpg`），否则接受 PNG 就交 PNG，都不接受时原样交付（accept 只是提示）。accept 由 Endpoint 在 `session.library.prepare` 时从自己的选择器请求快照里取，转码结果作为源资产的缓存衍生，页面的大小限制按转码后的字节检查。
 4. 暂存：随机磁盘文件名，`NativeFileInfo.display_name` 带用户文件名，回复和错误从不泄露本地路径；Windows 私有绝对路径用扩展路径形式（含 UNC），随机 ID 用 32 位十六进制，避免叠加的 MAX_PATH 失败。能硬链接时复用物理内容，否则复制。
 5. 回调之前先持久化"已提交"：之后传输丢失时结果是未知，而不是"可以安全重发"。已提交但没有匹配 Browser 回执的选择保持 unknown，不重放已认领的原生回调。只有原子上仍处于 pending 时，才能在选择器退役时取消。
-   Endpoint 把选择回执持久化在文件库的 `selections/` 下。回执是绑定 Browser incarnation 的瞬时握手状态：加载时读不出或校验不通过的回执被删除并记一行日志（只含回执 ID 与原因），不阻止 Session 打开；之后查询该选择得到 unknown，按上一条不消费文件篮。资产元数据与草稿读不出时则以带原因的 internal 错误失败。
+   Endpoint 把选择回执持久化在 Session 的 `session.db`（`library_selections`）里。回执是绑定 Browser incarnation 的瞬时握手状态：加载时读不出或校验不通过的回执被删除并记一行日志（只含回执 ID 与原因），不阻止 Session 打开；之后查询该选择得到 unknown，按上一条不消费文件篮。资产元数据只是缓存：缺失时从对象惰性重建。上传草稿只在一个 Session 运行期内有效，休眠前连同 `file-library/incoming` 的字节一起删除，不进 checkpoint。
 6. selected 回执只证明文件交给了 `FileSelectListener`，不证明网站自己的上传完成。Browser 的异步文件校验检查原始 `WeakDocumentPtr`；取消会移除 pending 所有权，迟到的校验完成不能把文件选进另一个文档。
 
 **选择器锚点**：可见的主 frame 文件输入框有可靠位置时，文件篮锚定在它旁边（按输入框实际 bounds 与文档/布局身份，不按最后一次点击位置，见 patch 0016）；隐藏、移动、无效时撤销锚点；子 frame 中的输入框没有锚点，文件篮停在底部居中。浮层不会让远端页面 resize。

@@ -41,7 +41,7 @@ async function offered(endpoint: SignalEndpoint, tenant: string) {
   throw new Error('offer not accepted');
 }
 test('pending trickle offers allow other tenants and bind early candidates to connection/attempt/lease', async () => {
-  const store = new ControlDatabase(':memory:'),
+  const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     endpoint = new SignalEndpoint(),
     control = createApplication(store, testGateway(endpoint));
   try {
@@ -112,7 +112,7 @@ test('pending trickle offers allow other tenants and bind early candidates to co
   }
 });
 test('close cancels a pending answer immediately and late answers are ignored', async () => {
-  const store = new ControlDatabase(':memory:'),
+  const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     endpoint = new SignalEndpoint(),
     control = createApplication(store, testGateway(endpoint));
   try {

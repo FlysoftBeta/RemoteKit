@@ -2,7 +2,9 @@
 #include "cluster/noise.hpp"
 #include "management/link.hpp"
 #include "options.hpp"
-#include "persistence/session_store.hpp"
+#include "persistence/durable_json.hpp"
+#include "persistence/session_db.hpp"
+#include "util/file_io.hpp"
 #include "rtc/candidate_address.hpp"
 #include "platform/process.hpp"
 #include "service.hpp"
@@ -163,15 +165,13 @@ struct TemporaryDirectory {
 };
 void Durability() {
   TemporaryDirectory directory;
-  SessionStore store(directory.path);
-  Check(bool(store.Save("state.json", {{"value", 1}})), "initial durable write");
+  const auto path = directory.path / "state.json";
+  Check(bool(WriteDurableJson(path, {{"value", 1}})), "initial durable write");
   fs::create_directory(directory.path / "state.json.new");
-  Check(!store.Save("state.json", {{"value", 2}}), "failed temp write must fail the transaction");
-  Check(store.Load("state.json").at("value") == 1,
-        "failed transaction must preserve committed state");
-  Check(bool(store.Save("state.json", {{"value", 3}})), "replacement durable write");
-  Check(store.Load("state.json").at("value") == 3, "committed replacement");
-  Check(!fs::exists(directory.path / "state.json.new"), "temporary file is removed");
+  Check(!WriteDurableJson(path, {{"value", 2}}), "failed temp write");
+  Check(Json::parse(*ReadFileIfExists(path).value())["value"] == 1, "preserve committed state");
+  Check(bool(WriteDurableJson(path, {{"value", 3}})), "replacement durable write");
+  Check(Json::parse(*ReadFileIfExists(path).value())["value"] == 3, "committed replacement");
 }
 void ThreadFailure() {
   bool failed = false;
@@ -218,15 +218,16 @@ void ProcessOwnership() {
 }
 class FixtureLink final : public ManagementLink {
  public:
-  SessionStore& store;
+  sqlite::Database database;
+  std::unique_ptr<sqlite::Transaction> blocked;
   fs::path directory;
   std::string checkpoint;
   std::mutex replies_mutex;
   std::vector<Json> replies;
   size_t index = 0;
   bool fail_json = false;
-  explicit FixtureLink(SessionStore& value, fs::path path, std::string manifest)
-      : store(value), directory(std::move(path)), checkpoint(std::move(manifest)) {}
+  explicit FixtureLink(fs::path path, std::string manifest)
+      : directory(std::move(path)), checkpoint(std::move(manifest)) {}
   bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
     static const std::vector<Json> requests{
         {{"id", 100}, {"method", "session.snapshot"}, {"tenantId", "tenant"}},
@@ -306,8 +307,14 @@ class FixtureLink final : public ManagementLink {
     eof = index == requests.size();
     if (eof)
       return false;
-    if (requests[index]["id"] == 2)
-      fs::create_directory(directory / "sessions/0123456789abcdef0123456789abcdef/events.json.new");
+    if (requests[index]["id"] == 2) {
+      Check(bool(database.Open(directory / "sessions/0123456789abcdef0123456789abcdef/session.db")),
+            "open writer");
+      blocked = std::make_unique<sqlite::Transaction>(database);
+      Check(bool(blocked->Begin()), "hold writer");
+    }
+    if (requests[index]["id"] == 4)
+      blocked.reset();
     generation = 7;
     auto request = requests[index++];
     fail_json = request["id"] == 109;
@@ -342,7 +349,6 @@ class FixtureLink final : public ManagementLink {
 };
 void ManagementDispatch() {
   TemporaryDirectory directory;
-  SessionStore store(directory.path);
   objects::ObjectStore objects(directory.path);
   std::istringstream content(Json{
       {"version", 2}, {"buildId", "dev"}, {"files", Json::array()}, {"directories", Json::array()}}
@@ -350,19 +356,22 @@ void ManagementDispatch() {
   const auto object = objects.Write(objects::Keys{}, content);
   Check(bool(object), "warm manifest object");
   const auto checkpoint = object.value().id;
-  Check(bool(store.Save("sessions/0123456789abcdef0123456789abcdef.checkpoint", checkpoint)),
+  Check(bool(WriteDurableJson(
+            directory.path / "sessions/0123456789abcdef0123456789abcdef.checkpoint", checkpoint)),
         "warm copy fixture");
-  Check(bool(store.Save(
-            "sessions/0123456789abcdef0123456789abcdef/events.json",
+  Check(bool(WriteDurableJson(
+            directory.path / "sessions/0123456789abcdef0123456789abcdef/events.json",
             {{"next", 2},
-             {"events",
-              Json::array({{{"eventId", "1"}, {"type", "view.closed"}, {"viewId", "1"}}})}})),
+             {"events", Json::array({{{"eventId", "1"},
+                                      {"type", "view.closed"},
+                                      {"viewId", "1"},
+                                      {"reason", "closed"}}})}})),
         "event fixture");
   auto config = TestConfig();
   config["dataPath"] = Utf8(directory.path);
   auto parsed = Options(config);
   Check(bool(parsed), "fixture options");
-  FixtureLink link(store, directory.path, checkpoint);
+  FixtureLink link(directory.path, checkpoint);
   media::Sdk sdk;
   Service service(sdk, parsed.value(), link, cluster::Key{});
   Check(service.Run() == 0, "management dispatch");
@@ -379,8 +388,7 @@ void ManagementDispatch() {
     Check(reply(id)["error"]["code"] == "conflict", "placement/key/identity conflict");
   Check(reply(0)["error"]["code"] == "invalid_request", "unknown method error code");
   Check(reply(1)["result"]["events"].size() == 1, "event loaded");
-  Check(reply(2)["error"]["code"] == "unavailable",
-        "failed acknowledgement reports persistence failure");
+  Check(reply(2)["error"]["code"] == "busy", "failed acknowledgement reports persistence failure");
   Check(reply(3)["result"]["events"].size() == 1, "failed acknowledgement preserves memory");
   Check(reply(5)["result"]["events"].empty(), "acknowledged events removed");
   const std::vector<std::pair<int, std::string>> invalid_requests{
@@ -403,7 +411,8 @@ void ManagementDispatch() {
   Check(reply(109)["error"]["code"] == "internal" &&
             reply(109)["error"]["message"] == "Unexpected JSON failure in session.open",
         "unexpected JSON failure identifies the method");
-  Check(store.Load("sessions/0123456789abcdef0123456789abcdef/events.json")["events"].empty(),
+  SessionDb persisted(directory.path / "sessions/0123456789abcdef0123456789abcdef");
+  Check(bool(persisted.Open()) && persisted.Views().Events().value().empty(),
         "acknowledgement committed");
   Check(!fs::exists(directory.path / "sessions.json"), "no numeric registry");
 }

@@ -7,6 +7,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EndpointLog } from '../server/cluster/endpoint-log';
+import { log } from '../server/log';
 import { NodeRegistry, StdioCarrier } from '../server/cluster/node-link';
 import { nodeDefaults } from '../server/config';
 import { NoiseHandshake } from '../server/cluster/noise';
@@ -38,7 +39,7 @@ for (const outcome of ['success', 'failure', 'stopped', 'dev'] as const) {
       await rm(directory, { recursive: true, force: true });
     });
     const errors: unknown[][] = [];
-    t.mock.method(console, 'error', (...args: unknown[]) => {
+    t.mock.method(log, 'error', (...args: unknown[]) => {
       errors.push(args);
     });
     const registry = new NodeRegistry({
@@ -76,7 +77,8 @@ for (const outcome of ['success', 'failure', 'stopped', 'dev'] as const) {
       assert.equal(calls.length, 1);
       if (outcome === 'failure') {
         assert.equal(registry.get('local')!.state.state, 'offline');
-        assert.equal((errors[0][0] as { code: string }).code, 'unavailable');
+        assert.equal(errors[0][0], 'node.install_failed');
+        assert.equal((errors[0][1] as { nodeId: string }).nodeId, 'local');
       }
     }
   });

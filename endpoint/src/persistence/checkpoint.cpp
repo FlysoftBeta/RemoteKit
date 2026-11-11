@@ -1,4 +1,6 @@
 #include "persistence/checkpoint.hpp"
+#include "util/file_io.hpp"
+#include "persistence/session_db.hpp"
 #include "util/result_macros.hpp"
 #include <windows.h>
 #include <fstream>
@@ -24,9 +26,12 @@ bool SafePath(const std::string& text) {
       return false;
   return true;
 }
-Json Load(const fs::path& path) {
-  std::ifstream input(path, std::ios::binary);
-  return input ? Json::parse(input, nullptr, false) : Json();
+Result<Json> Load(const fs::path& path) {
+  RK_ASSIGN_OR_RETURN(bytes, ReadFileIfExists(path));
+  if (!bytes)
+    return Json();
+  auto value = Json::parse(*bytes, nullptr, false);
+  return value.is_discarded() ? Json() : std::move(value);
 }
 bool ExcludedPath(const fs::path& path, bool directory) {
   fs::path prefix;
@@ -139,6 +144,9 @@ class CommitStream {
           return;
         }
       }
+    } catch (const std::filesystem::filesystem_error& error) {
+      failure_ = WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                             error.code().value());
     } catch (const std::exception& error) {
       failure_ = Error{ErrorCode::kUnavailable, error.what()};
     }
@@ -158,16 +166,17 @@ class CommitStream {
 }  // namespace
 Result<Json> Checkpoints::Hibernation(const fs::path& directory) {
   const fs::path path = directory.wstring() + L".hibernation.json";
-  if (!fs::exists(path))
+  RK_ASSIGN_OR_RETURN(bytes, ReadFileIfExists(path));
+  if (!bytes)
     return Json();
-  auto journal = Load(path);
-  if (!journal.is_object() || !journal.contains("placementEpoch") ||
+  auto journal = Json::parse(*bytes, nullptr, false);
+  if (journal.is_discarded() || !journal.is_object() || !journal.contains("placementEpoch") ||
       !journal["placementEpoch"].is_number_unsigned() || journal["placementEpoch"] == 0 ||
       !journal.contains("manifestId") || !journal["manifestId"].is_string() ||
       !objects::ValidId(journal["manifestId"].get<std::string>()) || !journal.contains("objects") ||
       !journal["objects"].is_array() || !journal.contains("buildId") ||
       !journal["buildId"].is_string())
-    return Error{ErrorCode::kUnavailable, "invalid hibernation journal"};
+    return CorruptState("invalid hibernation journal");
   return journal;
 }
 Result<void> Checkpoints::Journal(const fs::path& directory,
@@ -192,11 +201,10 @@ bool Checkpoints::Excluded(const fs::path& relative, bool directory) {
                                                  L"blob_storage"};
     if (excluded.contains(name))
       return true;
-    return relative == "uploads" || relative == "file-library/drafts" ||
-           relative == "file-library/incoming" || relative == "file-library/staging";
+    return relative == "uploads" || relative == "file-library/incoming" ||
+           relative == "file-library/staging";
   }
-  return name == L"browser.log" || name == L"LOCK" || name == L"LOG" || name == L"LOG.old" ||
-         name == L".checkpoint-watcher";
+  return name == L"LOCK" || name == L"LOG" || name == L"LOG.old" || name == L".checkpoint-watcher";
 }
 Result<std::string> Checkpoints::Get(const std::string& tenant, const std::string& id) {
   if (!access_)
@@ -324,7 +332,7 @@ Result<Json> Checkpoints::Create(const fs::path& directory,
                                  const std::string& tenant,
                                  const std::string& build) {
   const fs::path index_path = directory.wstring() + L".checkpoint-index.json";
-  auto previous = Load(index_path);
+  RK_ASSIGN_OR_RETURN(previous, Load(index_path));
   if (!ValidIndex(previous))
     previous = Json::object();
   fs::create_directories(directory);
@@ -466,11 +474,14 @@ Result<void> Checkpoints::Restore(const fs::path& directory,
                  "uncommitted hibernation: checkpoint does not match journal"};
   if (checkpoint.is_null() && fs::exists(directory) && !fs::is_empty(directory))
     return Error{ErrorCode::kConflict, "null checkpoint over non-empty Session directory"};
+  RK_ASSIGN_OR_RETURN(saved_marker, Load(marker));
   const bool warm =
-      !checkpoint.is_null() && fs::is_directory(directory) && Load(marker) == checkpoint;
+      !checkpoint.is_null() && fs::is_directory(directory) && saved_marker == checkpoint;
   if (phases_)
     (*phases_)["mode"] = checkpoint.is_null() ? "new" : warm ? "warm" : "cold";
-  auto previous = warm ? Load(index_path) : Json();
+  RK_ASSIGN_OR_RETURN(previous, Load(index_path));
+  if (!warm)
+    previous = Json();
   if (!ValidIndex(previous))
     previous = Json::object();
   Json index = Json::object();

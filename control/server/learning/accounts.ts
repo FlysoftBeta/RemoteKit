@@ -1,5 +1,9 @@
-import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import {
+  learningKey,
+  learningKeyInfo,
+  openLearningSession,
+  sealLearningSession,
+} from '../persistence/sealed-documents';
 import type { LearningAccount, LearningProvider } from '../../shared/learning';
 import { RemoteKitError } from '../../shared/errors';
 import type { ControlDatabase } from '../persistence/database';
@@ -13,13 +17,11 @@ export interface Sessions {
   changyan: AccountSession;
   xinjiaoyu: XinjiaoyuSession;
 }
-interface AccountRow {
-  sealed: string;
+type AccountRow = {
   display_name: string;
   username: string;
-  status: string;
   updated_at: bigint;
-}
+} & ({ status: 'signed_in'; sealed: string } | { status: 'expired'; sealed: string | null });
 
 export class LearningAccounts {
   private readonly key: Buffer;
@@ -36,19 +38,12 @@ export class LearningAccounts {
     private readonly now = Date.now,
   ) {
     // The persistent Control key is also used by FaceVault and session-import keys.
-    if (!masterKey && store.db.name && store.db.name !== ':memory:') {
+    if (masterKey) {
+      this.key = learningKey(masterKey);
+    } else {
       store.atRestKey.seal('learning-key-initialization', Buffer.alloc(0));
-      masterKey = readFileSync(store.db.name + '.key');
+      this.key = store.atRestKey.derive(learningKeyInfo);
     }
-    this.key = Buffer.from(
-      hkdfSync(
-        'sha256',
-        masterKey ?? randomBytes(32),
-        Buffer.alloc(0),
-        'remotekit learning account key 1',
-        32,
-      ),
-    );
   }
 
   private identity(tenant: string, provider: LearningProvider) {
@@ -79,11 +74,7 @@ export class LearningAccounts {
   session<P extends LearningProvider>(tenant: string, provider: P): Sessions[P] {
     const row = this.row(tenant, provider);
     if (!row || row.status !== 'signed_in') throw new RemoteKitError('unauthenticated', '请先登录学习账号');
-    const bytes = Buffer.from(row.sealed, 'base64');
-    const decipher = createDecipheriv('aes-256-gcm', this.key, bytes.subarray(0, 12));
-    decipher.setAAD(Buffer.from(this.identity(tenant, provider)));
-    decipher.setAuthTag(bytes.subarray(12, 28));
-    return JSON.parse(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString());
+    return openLearningSession(this.key, tenant, provider, row.sealed);
   }
   save<P extends LearningProvider>(
     tenant: string,
@@ -93,11 +84,7 @@ export class LearningAccounts {
     username?: string,
   ) {
     const previous = this.row(tenant, provider);
-    const iv = randomBytes(12);
-    const cipher = createCipheriv('aes-256-gcm', this.key, iv);
-    cipher.setAAD(Buffer.from(this.identity(tenant, provider)));
-    const encrypted = Buffer.concat([cipher.update(JSON.stringify(session)), cipher.final()]);
-    const sealed = Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString('base64');
+    const sealed = sealLearningSession(this.key, tenant, provider, session);
     this.store.db
       .prepare(
         `INSERT INTO learning_accounts VALUES (?,?,?,?,?,'signed_in',?)

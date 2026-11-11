@@ -41,7 +41,7 @@ class PromptEndpoint implements EndpointLink {
   }
 }
 async function fixture() {
-  const store = new ControlDatabase(':memory:'),
+  const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     endpoint = new PromptEndpoint(),
     control = createApplication(store, testGateway(endpoint));
   const { tenantId: tenant } = await registerUser(store, 'prompt-user', 'password123');

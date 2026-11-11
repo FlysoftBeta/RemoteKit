@@ -1,3 +1,4 @@
+import { log, reportError } from '../log';
 import { endpointError } from '../endpoint/gateway';
 import { wireError } from '../../shared/errors';
 import { randomUUID } from 'node:crypto';
@@ -41,7 +42,15 @@ export class RtcSignaling {
         attemptId: binding.attemptId,
         signal:
           event.signal.type === 'error'
-            ? { type: 'error', error: wireError(endpointError(event.signal.error)) }
+            ? {
+                type: 'error',
+                error: wireError(
+                  reportError(endpointError(event.signal.error), 'rtc.signal_failed', {
+                    tenant: event.tenantId,
+                    operation: event.connectionId,
+                  }),
+                ),
+              }
             : event.signal,
       });
   }
@@ -230,7 +239,8 @@ export class RtcSignaling {
     this.clearSignal(previous);
     try {
       await this.context.endpoint.closeRtc(tenant, { connectionId: previous });
-    } catch {
+    } catch (err) {
+      log.warn('rtc.close_failed', { tenant, connectionId: previous, err });
     } finally {
       runtime.closeRtc();
     }

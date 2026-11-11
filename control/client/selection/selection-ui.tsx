@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react';
+import { formatError } from '../util/format-error';
 import { createPortal } from 'react-dom';
 import { ButtonBase, Paper } from '@mui/material';
 import { MoreHoriz } from '@mui/icons-material';
@@ -155,9 +156,7 @@ export function SelectionUI({
                     if (command === 'selectAll') update((value) => value + 1);
                     else close();
                   })
-                  .catch((failure: unknown) =>
-                    setError(failure instanceof Error ? failure.message : '剪贴板操作失败'),
-                  );
+                  .catch((failure: unknown) => setError(formatError(failure)));
               }}
             >
               {command === 'contextMenu' ? <MoreHoriz fontSize="small" /> : labels[command]}

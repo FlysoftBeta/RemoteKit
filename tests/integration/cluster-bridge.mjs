@@ -114,7 +114,16 @@ try {
       !/^[0-9a-f]{32}$/.test(hello.incarnation)
     )
       throw Error('invalid endpoint hello');
-    return { type: 'node.ready', connectionEpoch: randomUUID(), buildId, config, configHash, sessions: [] };
+    return {
+      type: 'node.ready',
+      connectionEpoch: randomUUID(),
+      buildId,
+      config,
+      configHash,
+      sessions: [],
+      objectKey: Buffer.alloc(32, 8).toString('base64'),
+      objectIdKey: Buffer.alloc(32, 9).toString('base64'),
+    };
   });
   key.fill(0);
   lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -124,6 +133,22 @@ try {
       const { json } = decode(channel.receive.decrypt(await transport.next(45000)));
       if (json.type === 'node.ping') {
         send({ type: 'node.pong' });
+        continue;
+      }
+      if (json.request === 'object.committed.batch') {
+        if (args['object-index']) {
+          const index = await objectIndex();
+          for (const object of json.objects) {
+            const identity = json.tenantId + '/' + object.objectId;
+            const entry = index[identity] ?? { ...object, tenantId: json.tenantId, sources: [] };
+            if (entry.storedSha256 !== object.storedSha256) throw Error('conflicting stored object');
+            if (!entry.sources.some((source) => source.address === config.peer.address))
+              entry.sources.push({ nodeId: config.nodeId, address: config.peer.address });
+            index[identity] = entry;
+          }
+          await writeFile(args['object-index'], JSON.stringify(index));
+        }
+        send({ id: json.id, ok: true, result: { ok: true } });
         continue;
       }
       if (json.request === 'object.committed') {

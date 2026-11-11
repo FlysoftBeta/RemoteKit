@@ -20,22 +20,33 @@ inline bool SupportsRetryHint(ErrorCode code) {
   return code == ErrorCode::kBusy || code == ErrorCode::kRateLimited ||
          code == ErrorCode::kUnavailable;
 }
+struct OsError {
+  enum class Kind { kWin32, kHresult, kSqlite } kind;
+  int64_t value;
+};
 struct Error {
   ErrorCode code;
   std::string message;
   std::optional<ErrorReason> reason;
   std::optional<uint32_t> retry_after_ms;
+  std::optional<OsError> os;
+  mutable std::string error_id;
   Error(ErrorCode code,
         std::string message,
         std::optional<ErrorReason> reason = {},
-        std::optional<uint32_t> retry_after_ms = {})
+        std::optional<uint32_t> retry_after_ms = {},
+        std::optional<OsError> os = {})
       : code(code),
         message(std::move(message)),
         reason(reason),
         retry_after_ms(SupportsRetryHint(code) && retry_after_ms && *retry_after_ms <= 86400000
                            ? retry_after_ms
-                           : std::nullopt) {}
+                           : std::nullopt),
+        os(os) {}
 };
+inline Error WithOsError(ErrorCode code, std::string message, OsError::Kind kind, int64_t value) {
+  return {code, std::move(message), {}, {}, OsError{kind, value}};
+}
 
 template <class T>
 class Result {

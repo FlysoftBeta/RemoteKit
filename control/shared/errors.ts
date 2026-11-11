@@ -13,19 +13,35 @@ export type ErrorCode =
   | 'outcome_unknown'
   | 'canceled'
   | 'internal';
+// errorId names the log record that holds this error's full diagnosis
+// (`c-` Control, `e-` Endpoint). It is assigned once and forwarded unchanged.
+const errorIdPattern = /^[ce]-[0-9a-f]{10}$/;
+export function isErrorId(value: unknown): value is string {
+  return typeof value === 'string' && errorIdPattern.test(value);
+}
 export class RemoteKitError extends Error {
   readonly detail?: string;
   readonly reason?: string;
   readonly retryAfterMs?: number;
+  readonly cause?: unknown;
+  errorId?: string;
   constructor(
     readonly code: ErrorCode,
     message: string,
-    options?: { detail?: string; reason?: string; retryAfterMs?: number },
+    options?: {
+      detail?: string;
+      reason?: string;
+      retryAfterMs?: number;
+      cause?: unknown;
+      errorId?: string;
+    },
   ) {
     super(message);
     this.name = 'RemoteKitError';
     this.detail = options?.detail;
     this.reason = options?.reason;
+    this.cause = options?.cause;
+    if (isErrorId(options?.errorId)) this.errorId = options!.errorId;
     if (supportsRetryHint(code) && validRetryHint(options?.retryAfterMs))
       this.retryAfterMs = options!.retryAfterMs;
   }
@@ -38,6 +54,7 @@ export function toRemoteKitError(e: unknown): RemoteKitError {
     ? e
     : new RemoteKitError('internal', '服务内部错误', {
         detail: e instanceof Error ? (e.stack ?? e.message) : String(e),
+        cause: e,
       });
 }
 export const httpStatus: Record<ErrorCode, number> = {
@@ -56,7 +73,12 @@ export const httpStatus: Record<ErrorCode, number> = {
   internal: 500,
   canceled: 409,
 };
-export type WireError = { code: ErrorCode; message: string; retryAfterMs?: number };
+export type WireError = {
+  code: ErrorCode;
+  message: string;
+  retryAfterMs?: number;
+  errorId?: string;
+};
 function supportsRetryHint(code: ErrorCode) {
   return code === 'busy' || code === 'rate_limited' || code === 'unavailable';
 }
@@ -74,6 +96,7 @@ export function parseWireError(value: unknown): RemoteKitError | undefined {
     return;
   return new RemoteKitError(wire.code as ErrorCode, wire.message, {
     retryAfterMs: validRetryHint(wire.retryAfterMs) ? wire.retryAfterMs : undefined,
+    errorId: isErrorId(wire.errorId) ? wire.errorId : undefined,
   });
 }
 export function wireError(error: RemoteKitError): WireError {
@@ -81,7 +104,12 @@ export function wireError(error: RemoteKitError): WireError {
     code: error.code,
     message: error.message,
     ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+    ...(error.errorId === undefined ? {} : { errorId: error.errorId }),
   };
+}
+
+export function nativeWireError(error: RemoteKitError) {
+  return { ...wireError(error), ...(error.reason === undefined ? {} : { reason: error.reason }) };
 }
 
 export type NativeErrorReason =
@@ -95,7 +123,8 @@ export type NativeErrorReason =
   | 'file_too_large'
   | 'storage_quota_exceeded'
   | 'browser_state_too_large'
-  | 'no_document_contour';
+  | 'no_document_contour'
+  | 'corrupt_state';
 const nativeMessages: Record<NativeErrorReason, string> = {
   browser_crashed: '浏览器异常退出，正在恢复…',
   browser_restarting: '浏览器正在恢复，请稍候…',
@@ -108,10 +137,11 @@ const nativeMessages: Record<NativeErrorReason, string> = {
   storage_quota_exceeded: '存储空间已满，请释放空间',
   browser_state_too_large: '浏览器状态超出同步容量',
   no_document_contour: '照片中未找到文档轮廓，请重新拍摄',
+  corrupt_state: '会话数据已损坏，请联系管理员重置浏览器数据',
 };
 const codeMessages: Record<ErrorCode, string> = {
   invalid_request: '请求格式无效',
-  unauthenticated: '请重新登录',
+  unauthenticated: '登录已过期，请重新登录',
   forbidden: '没有执行此操作的权限',
   locked: '浏览器已锁定，请先解锁',
   not_found: '请求的内容不存在，请刷新状态',
@@ -145,5 +175,14 @@ export function nativeError(wire: unknown): RemoteKitError {
     detail: typeof value?.message === 'string' ? value.message : String(wire),
     reason,
     retryAfterMs: parsed?.retryAfterMs,
+    errorId: parsed?.errorId,
   });
+}
+
+// Converts whatever an Endpoint call rejected with: our own errors pass through,
+// native wire errors become RemoteKitError.
+export function endpointError(error: unknown): RemoteKitError {
+  if (isRemoteKitError(error)) return error;
+  if (error instanceof Error) return toRemoteKitError(error);
+  return nativeError(error);
 }

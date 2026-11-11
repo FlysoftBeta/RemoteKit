@@ -28,7 +28,8 @@ class DataRouter {
     std::function<void(const RtcEvent&)> received;
     std::function<void(const Json&, uint64_t)> send;
   };
-  explicit DataRouter(Hooks hooks) : hooks_(std::move(hooks)) {}
+  explicit DataRouter(Hooks hooks, Json log_fields = Json::object())
+      : hooks_(std::move(hooks)), log_fields_(std::move(log_fields)) {}
   static Result<Kind> Classify(const Json& message);
   static bool Number(const Json& message, const char* field, uint64_t& result);
   static Result<void> Boundary(const std::function<Result<void>()>& fn);
@@ -45,6 +46,7 @@ class DataRouter {
   };
   void Dispatch(const Message& message);
   Hooks hooks_;
+  const Json log_fields_;
   std::mutex mutex_;
   std::deque<Message> pending_;
 };

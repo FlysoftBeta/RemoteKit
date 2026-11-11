@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "files/files.hpp"
 #include "files/file_selection.hpp"
 #include "rtc/authorization.hpp"
@@ -85,7 +86,7 @@ void FileController::Start() {
                       [this] {
                         auto swept = library.SweepDirectFiles();
                         if (!swept)
-                          fprintf(stderr, "file sweep: %s\n", swept.error().message.c_str());
+                          LogError(LogLevel::kWarn, "files.sweep_failed", swept.error());
                       });
 }
 

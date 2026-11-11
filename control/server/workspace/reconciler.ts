@@ -1,3 +1,4 @@
+import { log } from '../log';
 import { EndpointSnapshotError, endpointError } from '../endpoint/gateway';
 import { retryDelay, errorHandling } from '../../shared/error-policy';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
@@ -39,7 +40,11 @@ export class Reconciler {
     const hibernating = this.context.store.db
       .prepare("SELECT tenant FROM session_placements WHERE state='hibernating'")
       .all() as { tenant: string }[];
-    const saving = hibernating.map(({ tenant }) => this.reconcileHibernation(tenant).catch(() => {}));
+    const saving = hibernating.map(({ tenant }) =>
+      this.reconcileHibernation(tenant).catch((err) =>
+        log.warn('reconciler.hibernate_failed', { tenant, err }),
+      ),
+    );
     const relief = this.services.lifecycle.relieve();
     const active = this.context.store.db
       .prepare("SELECT tenant FROM session_placements WHERE state='active'")
@@ -55,7 +60,7 @@ export class Reconciler {
             await this.services.rtc.checkReconnectedRtc(tenant);
           await this.reconcileProduct(tenant);
         })
-        .catch(() => {})
+        .catch((err) => log.warn('reconciler.product_failed', { tenant, err }))
         .finally(() => delete tracking.inflight);
       tracking.inflight = task;
       return task;
@@ -115,13 +120,15 @@ export class Reconciler {
           await this.reconcileProduct(tenant);
           this.services.viewers.push(tenant);
         })
-        .catch(() => {});
+        .catch((err) => log.warn('reconciler.product_failed', { tenant, err }));
     }
   }
   async reconcileProduct(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
     if (this.context.endpoint.placement.peek(tenant)?.state === 'hibernating') {
-      void this.reconcileHibernation(tenant).catch(() => {});
+      void this.reconcileHibernation(tenant).catch((err) =>
+        log.warn('reconciler.hibernate_failed', { tenant, err }),
+      );
       runtime.lastErrorKey = 'hibernating';
       runtime.lastError = '正在保存会话，请稍候';
       this.services.viewers.push(tenant);
@@ -504,7 +511,9 @@ export class Reconciler {
   async observeOffline(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
     if (this.context.endpoint.placement.peek(tenant)?.state === 'hibernating') {
-      void this.reconcileHibernation(tenant).catch(() => {});
+      void this.reconcileHibernation(tenant).catch((err) =>
+        log.warn('reconciler.hibernate_failed', { tenant, err }),
+      );
       return;
     }
     if (this.context.endpoint.placement.peek(tenant)?.state === 'hibernated') {

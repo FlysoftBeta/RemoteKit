@@ -6,6 +6,7 @@ import {
   type DiagnosticState,
 } from '../client/media/diagnostic-collection';
 import type { DiagnosticEnvironment, DiagnosticReply } from '../shared/diagnostics';
+import { RemoteKitError } from '../shared/errors';
 
 const environment: DiagnosticEnvironment = {
   browserFamily: 'brave',
@@ -26,6 +27,23 @@ const reply = (status: DiagnosticReply['status'], reason?: string): DiagnosticRe
   reason,
 });
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test('start errors retain the original message and diagnosis ID', async () => {
+  let state: DiagnosticState | undefined;
+  const collector = new DiagnosticCollection(
+    async () => {
+      throw new RemoteKitError('unavailable', '日志磁盘不可用', { errorId: 'c-1234567890' });
+    },
+    () => ({}),
+    (next) => {
+      state = next;
+    },
+  );
+  collector.setAvailable(true);
+  assert.equal(await collector.start(environment), false);
+  assert.deepEqual(state, { phase: 'start-error', error: '日志磁盘不可用（错误 ID c-1234567890）' });
+  collector.dispose();
+});
 
 test('stop freezes capture and waits for the one pending sample before finalizing', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });

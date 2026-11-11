@@ -162,7 +162,7 @@ manifest 只含绝对 URL，管理器只认识配置里的一个 manifest URL（
   data/                   control.db、诊断、本地节点根 node/
   versions/<buildId>/     唯一的当前版本：版本树 + release/node.tar.zst + payload.tar
   work/                   下载片、中间 payload、安装暂存
-  logs/                   manager.log、control.log
+  logs/                   manager.log；control.jsonl（Control 自己写）；control.stdout.log（Control 控制台输出，只有崩溃时有内容）
 ```
 
 ```powershell
@@ -183,9 +183,9 @@ C:\RemoteKit\remotekit_control.exe install "--root=C:\RemoteKit" "--payload=D:\p
 
 **安装**：payload 中 `node/` 以外的条目解到 `work/stage-<id>/`；`node/` 下的 tar 记录原样流入多线程 zstd，生成 Control 分发给节点的 `release/node.tar.zst` 与 `release/node.json`；核对两处 `build.json`；payload 本身留作下一次增量的基准；最后改名为 `versions/<id>`。
 
-**切换**：新版本装好后才停 Control（关闭其 stdin，最多等 60 秒，再结束其作业对象），原子写 `current`，删除旧版本目录与 `work/` 残留，再启动新版 Control。版本中的 `bin/remotekit_control.exe` 与运行中的不同时先自更新：运行中的文件改名为 `.old`、复制新文件、启动后继进程（服务模式以失败退出，由服务恢复策略重启），后继启动时删除 `.old`。没有回滚：数据库只向前迁移，坏版本通过发布新版本修复。Control 异常退出按 1、2、4…30 秒退避重启，健康运行 60 秒后复位。
+**切换**：新版本装好后才停 Control（关闭其 stdin，最多等 60 秒，再结束其作业对象），原子写 `current`，删除旧版本目录与 `work/` 残留，再启动新版 Control。版本中的 `bin/remotekit_control.exe` 与运行中的不同时先自更新：运行中的文件改名为 `.old`、复制新文件、启动后继进程（服务模式以失败退出，由服务恢复策略重启），后继启动时删除 `.old`。没有二进制回滚：坏版本通过发布新版本修复；Control 迁移数据库前写出经校验的备份（见[存储与迁移](control-plane.md#存储与迁移)），迁移失败时事务整体回滚、库保持原版本。Control 异常退出按 1、2、4…30 秒退避重启，健康运行 60 秒后复位。
 
-管理器以 `REMOTEKIT_CONTROL_CONFIG=<root>/config/control.json` 启动 `versions/<id>/bin/node.exe versions/<id>/control/dist/server.mjs`。配置不存在时打包版 Control 写出默认配置：监听 `127.0.0.1:3001`，数据在 `../data/`，带本地节点 `../data/node`。不要本地节点时从配置里删掉该项。`data/control.db` 损坏或版本不被接受时，停止服务后运行 `versions\<buildId>\recover-credentials.cmd`，只保留账户与凭据重建数据库（见[凭据恢复](auth.md#凭据恢复)）。默认打开 `http://127.0.0.1:3001` 创建首个管理员账号。
+管理器以 `REMOTEKIT_CONTROL_CONFIG=<root>/config/control.json` 启动 `versions/<id>/bin/node.exe versions/<id>/control/dist/server.mjs`。配置不存在时打包版 Control 写出默认配置：监听 `127.0.0.1:3001`，数据在 `../data/`，带本地节点 `../data/node`。不要本地节点时从配置里删掉该项。`data/control.db` 损坏时，停止服务后先把 `data/backups/` 里最近的迁移前备份复制回 `data/control.db`（删除 `-wal`/`-shm`）；备份不可用或版本不被接受时运行 `versions\<buildId>\recover-credentials.cmd`，只保留账户与凭据重建数据库（见[凭据恢复](auth.md#凭据恢复)）。默认打开 `http://127.0.0.1:3001` 创建首个管理员账号。
 
 从旧的 Control 包目录迁移：停止旧服务，在同一根目录 `init`（`config/`、`data/` 原样保留），删除旧的 `bin/`、`control/`、`release/`、`run*.cmd`、`data/local/`，再 `service-install`。
 

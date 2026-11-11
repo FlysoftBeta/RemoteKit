@@ -10,7 +10,7 @@ export type ArchiveEntry =
   | 'control.jsonl'
   | 'endpoint.jsonl'
   | 'events.jsonl'
-  | 'logs/control.log'
+  | 'logs/control.jsonl'
   | 'logs/browser.log'
   | 'logs/endpoint.log'
   | 'logs/endpoint.log.1'

@@ -79,7 +79,8 @@ void PeerServer::Loop() {
       }
     } catch (const std::filesystem::filesystem_error& failure) {
       if (channel) {
-        auto error = WireError({ErrorCode::kUnavailable, failure.what()});
+        auto error = WireError(WithOsError(ErrorCode::kUnavailable, failure.what(),
+                                           OsError::Kind::kWin32, failure.code().value()));
         error["type"] = "object.error";
         channel->Send(error);
       }

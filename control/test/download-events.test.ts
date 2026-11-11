@@ -1,9 +1,11 @@
+import { log } from '../server/log';
+import { AtRestKey } from '../server/auth/crypto';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import Database from 'better-sqlite3';
 import { FileLibrary } from '../server/files/library';
 import { LibraryRepository } from '../server/persistence/library';
-import { createSchema } from '../server/persistence/schema';
+import { migrate } from '../server/persistence/schema';
 import { PageRequests } from '../server/workspace/page-requests';
 import type { DownloadEvent } from '../server/endpoint/types';
 import type { ProductWorkspace } from '../shared/product';
@@ -19,7 +21,7 @@ const imported: DownloadEvent = {
 };
 function fixture() {
   const db = new Database(':memory:');
-  createSchema(db);
+  migrate(db, { backupDirectory: '', buildId: 'test', atRestKey: new AtRestKey(null) });
   const repository = new LibraryRepository(db);
   const manager = () =>
     new FileLibrary(
@@ -128,6 +130,7 @@ test('download source origin handles default ports, empty origins and opaque ori
 });
 
 test('excluded download sources and full catalogs durably omit entries, including replay', async (t) => {
+  const warn = t.mock.method(log, 'warn', () => {});
   const f = fixture();
   t.after(() => f.db.close());
   const snapshot = f.repository.snapshot('tenant');
@@ -145,6 +148,15 @@ test('excluded download sources and full catalogs durably omit entries, includin
   f.repository.save('tenant', full);
   await f.consume([{ ...imported, eventId: 'full' }]);
   assert.equal(f.repository.snapshot('tenant').entries.length, 4096);
+  assert.deepEqual(
+    warn.mock.calls.map((call) => call.arguments),
+    [
+      [
+        'library.download_omitted_catalog_full',
+        { tenant: 'tenant', assetId: imported.assetId, name: imported.name },
+      ],
+    ],
+  );
   full.entries = [];
   f.repository.save('tenant', full);
   f.reopen();
@@ -153,6 +165,7 @@ test('excluded download sources and full catalogs durably omit entries, includin
 });
 
 test('failed downloads only log and acknowledge; a failed catalog commit never acknowledges', async (t) => {
+  const warn = t.mock.method(log, 'warn', () => {});
   const f = fixture();
   t.after(() => f.db.close());
   const failed: DownloadEvent = {
@@ -163,6 +176,15 @@ test('failed downloads only log and acknowledge; a failed catalog commit never a
     error: { code: 'limit_exceeded', message: 'Storage quota exceeded', reason: 'storage_quota_exceeded' },
   };
   await f.consume([failed]);
+  assert.deepEqual(
+    warn.mock.calls.map((call) => call.arguments),
+    [
+      [
+        'library.download_failed',
+        { tenant: 'tenant', name: failed.name, origin: failed.origin, error: failed.error },
+      ],
+    ],
+  );
   assert.equal(f.repository.snapshot('tenant').entries.length, 0);
   assert.deepEqual(f.acknowledgements, [['failed']]);
   const save = f.repository.save.bind(f.repository);

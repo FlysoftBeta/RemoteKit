@@ -1,3 +1,5 @@
+import { decodeJson, encodeJson } from './codec';
+import * as codecs from './documents';
 import type Database from 'better-sqlite3';
 import { isDeepStrictEqual } from 'node:util';
 import { RemoteKitError } from '../../shared/errors';
@@ -52,12 +54,12 @@ export class WorkspacesRepository {
     const settings = this.db.prepare('SELECT data FROM user_settings WHERE tenant=?').get(tenant) as {
       data: string;
     };
-    const productSettings = JSON.parse(settings.data);
+    const productSettings = decodeJson(settings.data, codecs.settings, `user_settings.data ${tenant}`);
     return {
       tenantId: tenant,
       revision: Number(row.revision),
       activeSpaceId: row.active_space,
-      ...JSON.parse(row.pending ?? '{}'),
+      ...decodeJson(row.pending, codecs.pending, `workspaces.pending ${tenant}`),
       settings: productSettings,
       windows: (
         this.db
@@ -76,27 +78,38 @@ export class WorkspacesRepository {
         appId: w.app_id,
         activeTabId: w.active_tab,
         lastActiveAt: Number(w.last_active_at),
-        ...(w.state === null ? {} : { state: JSON.parse(w.state) }),
+        ...(w.state === null
+          ? {}
+          : { state: decodeJson(w.state, codecs.windowState, `workspace_windows.state ${tenant}/${w.id}`) }),
       })),
       spaces: (
-        this.db.prepare('SELECT data FROM workspace_spaces WHERE tenant=? ORDER BY position').all(tenant) as {
+        this.db
+          .prepare('SELECT id,data FROM workspace_spaces WHERE tenant=? ORDER BY position')
+          .all(tenant) as {
+          id: string;
           data: string;
         }[]
-      ).map((space) => JSON.parse(space.data)),
+      ).map((space) => decodeJson(space.data, codecs.space, `workspace_spaces.data ${tenant}/${space.id}`)),
       apps: this.items.apps(tenant),
       favorites: this.items.favorites(tenant),
       tabs: (
-        this.db.prepare('SELECT data FROM workspace_tabs WHERE tenant=? ORDER BY position').all(tenant) as {
+        this.db
+          .prepare('SELECT id,data FROM workspace_tabs WHERE tenant=? ORDER BY position')
+          .all(tenant) as {
+          id: string;
           data: string;
         }[]
-      ).map((t) => JSON.parse(t.data)),
+      ).map((t) => decodeJson(t.data, codecs.tab, `workspace_tabs.data ${tenant}/${t.id}`)),
       sites: Object.fromEntries(
         (
           this.db.prepare('SELECT origin,data FROM site_preferences WHERE tenant=?').all(tenant) as {
             origin: string;
             data: string;
           }[]
-        ).map((s) => [s.origin, JSON.parse(s.data)]),
+        ).map((s) => [
+          s.origin,
+          decodeJson(s.data, codecs.site, `site_preferences.data ${tenant}/${s.origin}`),
+        ]),
       ),
     };
   }
@@ -153,16 +166,20 @@ export class WorkspacesRepository {
       state.tenantId,
       state.revision,
       state.activeSpaceId,
-      JSON.stringify({
-        pendingClose: state.pendingClose ?? null,
-        pendingWindowCloseId: state.pendingWindowCloseId ?? null,
-        ...(state.pendingWindowCloseIds === undefined
-          ? {}
-          : { pendingWindowCloseIds: state.pendingWindowCloseIds }),
-        ...(state.pendingAppUninstallId === undefined
-          ? {}
-          : { pendingAppUninstallId: state.pendingAppUninstallId }),
-      }),
+      encodeJson(
+        {
+          pendingClose: state.pendingClose ?? null,
+          pendingWindowCloseId: state.pendingWindowCloseId ?? null,
+          ...(state.pendingWindowCloseIds === undefined
+            ? {}
+            : { pendingWindowCloseIds: state.pendingWindowCloseIds }),
+          ...(state.pendingAppUninstallId === undefined
+            ? {}
+            : { pendingAppUninstallId: state.pendingAppUninstallId }),
+        },
+        codecs.pending,
+        `workspaces.pending ${state.tenantId}`,
+      ),
     );
     for (const table of ['workspace_windows', 'workspace_tabs', 'workspace_spaces', 'site_preferences'])
       this.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(state.tenantId);
@@ -175,28 +192,48 @@ export class WorkspacesRepository {
           i,
           w.appId,
           w.activeTabId,
-          w.state === undefined ? null : JSON.stringify(w.state),
+          w.state === undefined
+            ? null
+            : encodeJson(w.state, codecs.windowState, `workspace_windows.state ${state.tenantId}/${w.id}`),
           w.lastActiveAt,
         ),
     );
     state.spaces.forEach((space, i) =>
       this.db
         .prepare('INSERT INTO workspace_spaces VALUES (?,?,?,?)')
-        .run(space.id, state.tenantId, i, JSON.stringify(space)),
+        .run(
+          space.id,
+          state.tenantId,
+          i,
+          encodeJson(space, codecs.space, `workspace_spaces.data ${state.tenantId}/${space.id}`),
+        ),
     );
     this.items.save(state.tenantId, state.apps, state.favorites);
     state.tabs.forEach((t, i) =>
       this.db
         .prepare('INSERT INTO workspace_tabs VALUES (?,?,?,?,?)')
-        .run(t.id, state.tenantId, t.windowId, i, JSON.stringify(t)),
+        .run(
+          t.id,
+          state.tenantId,
+          t.windowId,
+          i,
+          encodeJson(t, codecs.tab, `workspace_tabs.data ${state.tenantId}/${t.id}`),
+        ),
     );
     this.db
       .prepare('INSERT OR REPLACE INTO user_settings VALUES (?,?)')
-      .run(state.tenantId, JSON.stringify(state.settings));
+      .run(
+        state.tenantId,
+        encodeJson(state.settings, codecs.settings, `user_settings.data ${state.tenantId}`),
+      );
     for (const [origin, data] of Object.entries(state.sites))
       this.db
         .prepare('INSERT INTO site_preferences VALUES (?,?,?)')
-        .run(state.tenantId, origin, JSON.stringify(data));
+        .run(
+          state.tenantId,
+          origin,
+          encodeJson(data, codecs.site, `site_preferences.data ${state.tenantId}/${origin}`),
+        );
   }
   all(): string[] {
     return (this.db.prepare('SELECT tenant FROM workspaces').all() as { tenant: string }[]).map(

@@ -9,7 +9,14 @@ import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import { EndpointLog } from './endpoint-log';
 import { MetricsHistory } from './metrics';
-import { RemoteKitError, toRemoteKitError, wireError, parseWireError } from '../../shared/errors';
+import {
+  RemoteKitError,
+  toRemoteKitError,
+  wireError,
+  nativeWireError,
+  parseWireError,
+} from '../../shared/errors';
+import { log } from '../log';
 import type { ConfiguredNode, NodeConfig } from '../config';
 import { readyTransition, type EndpointLink, type EndpointLinkState } from '../endpoint/link';
 import type { ClipboardChangedEvent, ClientActionEvent, RtcSignal } from '../endpoint/types';
@@ -210,9 +217,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
           });
           this.child = undefined;
         } catch (error) {
-          console.error(
-            new RemoteKitError('unavailable', 'Local node install failed', { detail: String(error) }),
-          );
+          log.error('node.install_failed', { nodeId: this.nodeId, err: error });
           exited(null);
           return;
         }
@@ -324,7 +329,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
             const failure = toRemoteKitError(error);
             respond({
               ok: false,
-              error: { ...wireError(failure), ...(failure.reason ? { reason: failure.reason } : {}) },
+              error: nativeWireError(failure),
             });
           },
         )

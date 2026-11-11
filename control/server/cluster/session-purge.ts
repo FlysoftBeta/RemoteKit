@@ -1,3 +1,4 @@
+import { log } from '../log';
 import { endpointError } from '../endpoint/gateway';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
 import type { ControlDatabase } from '../persistence/database';
@@ -71,39 +72,40 @@ export class SessionPurge {
         if (!row) return;
         try {
           await node.request('session.delete', '', { sessionId: row.session_id });
-        } catch (error) {
-          const failure = endpointError(error);
           this.store.db
-            .prepare(
-              'UPDATE session_deletions SET error_code=?,error_message=? WHERE session_id=? AND node_id=?',
-            )
-            .run(failure.code, failure.message, row.session_id, node.nodeId);
-          const attempt = this.attempts.get(node.nodeId) ?? 0;
-          const wait =
-            retryDelay(failure, attempt) ?? (errorHandling(failure.code) === 'reconcile' ? 1000 : undefined);
-          if (wait !== undefined) {
-            this.attempts.set(node.nodeId, attempt + 1);
-            clearTimeout(this.retries.get(node.nodeId));
-            const timer = setTimeout(() => {
-              this.retries.delete(node.nodeId);
-              void this.flushNode(node);
-            }, wait);
-            timer.unref();
-            this.retries.set(node.nodeId, timer);
-            return;
-          }
-          continue;
+            .prepare('DELETE FROM session_deletions WHERE session_id=? AND node_id=?')
+            .run(row.session_id, node.nodeId);
+          this.attempts.delete(node.nodeId);
+        } catch (error) {
+          if (this.recordFailure(node, row.session_id, error)) return;
         }
-        this.attempts.delete(node.nodeId);
-        this.store.db
-          .prepare('DELETE FROM session_deletions WHERE session_id=? AND node_id=?')
-          .run(row.session_id, node.nodeId);
       }
     })()
-      .catch(() => {})
+      // Rows stay queued; the next flush (node ready, retry timer) resumes them.
+      .catch((err) => log.error('session_purge.failed', { nodeId: node.nodeId, err }))
       .finally(() => this.flushing.delete(node.nodeId));
     this.flushing.set(node.nodeId, work);
     return work;
+  }
+  private recordFailure(node: NodeLink, sessionId: string, error: unknown) {
+    const failure = endpointError(error);
+    log.warn('session_purge.delete_failed', { nodeId: node.nodeId, sessionId, err: failure });
+    this.store.db
+      .prepare('UPDATE session_deletions SET error_code=?,error_message=? WHERE session_id=? AND node_id=?')
+      .run(failure.code, failure.message, sessionId, node.nodeId);
+    const attempt = this.attempts.get(node.nodeId) ?? 0;
+    const wait =
+      retryDelay(failure, attempt) ?? (errorHandling(failure.code) === 'reconcile' ? 1000 : undefined);
+    if (wait === undefined) return false;
+    this.attempts.set(node.nodeId, attempt + 1);
+    clearTimeout(this.retries.get(node.nodeId));
+    const timer = setTimeout(() => {
+      this.retries.delete(node.nodeId);
+      void this.flushNode(node);
+    }, wait);
+    timer.unref();
+    this.retries.set(node.nodeId, timer);
+    return true;
   }
   async close() {
     this.closed = true;

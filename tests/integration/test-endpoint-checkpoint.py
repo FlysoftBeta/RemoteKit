@@ -195,6 +195,7 @@ def main():
             blocked = target.call("session.snapshot")["hibernation"]
             assert blocked["lifecycleUncertain"] is True, blocked
             assert target.call("session.hibernate", ok=False, placementEpoch=2)["code"] == "conflict"
+        time.sleep(1)
         target.call("session.ensure")
         wait_for(target.state, "Browser recovery after unclean exit", timeout=60)
         final = target.call("session.hibernate", placementEpoch=2)

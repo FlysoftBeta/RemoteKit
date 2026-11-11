@@ -13,13 +13,16 @@ class AudioRing {
     const auto error = GetLastError();
     if (!handle_ || error == ERROR_ALREADY_EXISTS) {
       Close();
-      return Error{ErrorCode::kUnavailable, "audio mapping creation failed"};
+      return WithOsError(ErrorCode::kUnavailable, "audio mapping creation failed",
+                         OsError::Kind::kWin32, error);
     }
     ring_ = static_cast<SharedAudio*>(
         MapViewOfFile(handle_, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedAudio)));
     if (!ring_) {
+      const auto code = GetLastError();
       Close();
-      return Error{ErrorCode::kUnavailable, "audio mapping view failed"};
+      return WithOsError(ErrorCode::kUnavailable, "audio mapping view failed",
+                         OsError::Kind::kWin32, code);
     }
     std::memset(ring_, 0, sizeof(*ring_));
     ring_->magic = kAudioMagic;

@@ -6,7 +6,7 @@ class ViewController;
 class NavigationRecovery : private ControllerContext {
  public:
   NavigationRecovery(ControllerContext context, ViewController& views)
-      : ControllerContext(context), views(views) {}
+      : ControllerContext(context), views(views), recovery_store(context.store.Recovery()) {}
   void Reset();
   void Begin(const std::string& view);
   void Forget(const std::string& view);
@@ -17,13 +17,14 @@ class NavigationRecovery : private ControllerContext {
   Json RecoverySnapshot() const;
   bool CancelRecovery(const std::string& view);
   void MaintainRecovery();
-  void CaptureNavigation(const Json& browser_view);
+  Result<void> CaptureNavigation(const Json& browser_view);
   void MaintainNavigationExport();
   Result<void> FinalExport();
   const Json& FinalExportTiming() const { return final_export_timing_; }
 
  private:
   ViewController& views;
+  RecoveryStore recovery_store;
   std::map<std::string, std::string> recovery_revisions;
   remotekit::NavigationExport navigation_export;
   bool export_turn = false;

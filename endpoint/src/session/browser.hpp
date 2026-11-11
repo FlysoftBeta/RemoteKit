@@ -82,6 +82,7 @@ class BrowserRuntime {
   BrowserRpc rpc_;
   const cluster::Key& profile_key_;
   fs::path log_;
+  fs::path crash_directory_;
   std::string incarnation_, process_incarnation_;
   BrowserStartPolicy start_policy_;
   std::optional<Error> startup_error_;

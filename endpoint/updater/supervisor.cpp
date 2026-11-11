@@ -15,13 +15,13 @@ DWORD RunEndpoint(const fs::path& root,
   auto executable = root / L"runtime" / id / L"bin/endpoint_service.exe";
   ChildProcess child(executable, L"--node-root=" + Quote(root.wstring()), root, endpoint_log,
                      false);
-  log.Line("started endpoint");
+  log.Event(LogLevel::kInfo, "endpoint.started");
   HANDLE waits[] = {stop, child.handle()};
   DWORD result = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
   if (result == WAIT_OBJECT_0 || result == WAIT_FAILED)
     child.Stop(30000);
   DWORD code = child.ExitCode();
-  log.Line("endpoint exit " + std::to_string(code));
+  log.Event(LogLevel::kWarn, "endpoint.exited", {{"exitCode", code}});
   return code;
 }
 }  // namespace
@@ -29,10 +29,11 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
   fs::create_directories(root);
   std::error_code ec;
   fs::remove(root / L"remotekit_node.exe.old", ec);
+  fs::remove(root / L"remotekit_node.exe.new", ec);
   Log log(root / L"logs/supervisor.log"), endpoint_log(root / L"logs/endpoint.log");
   auto config = cluster::LoadNodeFiles(root);
   if (!config) {
-    log.Line(config.error().message);
+    log.Event(LogLevel::kError, "supervisor.config_failed", LogErrorFields(config.error()));
     return 1;
   }
   CleanupRuntime(root, ReadCurrent(root), true);
@@ -43,7 +44,7 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
     if (update) {
       auto result = Update(root, stop, log, service);
       if (!result) {
-        log.Line(result.error().message);
+        log.Event(LogLevel::kError, "supervisor.update_failed", LogErrorFields(result.error()));
         const auto delay = result.error().code == ErrorCode::kUnavailable ||
                                    result.error().code == ErrorCode::kBusy
                                ? RetryDelay(result.error(), update_attempt++)
@@ -72,7 +73,8 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
     try {
       code = RunEndpoint(root, id, stop, log, endpoint_log);
     } catch (const std::exception& error) {
-      log.Line(error.what());
+      log.Event(LogLevel::kError, "supervisor.failed",
+                LogErrorFields(Error{ErrorCode::kInternal, error.what()}));
     }
     if (Stopping(stop))
       break;
@@ -84,12 +86,12 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
     }
     if (code == 4)
       continue;
-    log.Line("restart delay " + std::to_string(backoff) + " s");
+    log.Event(LogLevel::kInfo, "supervisor.restart_delayed", {{"seconds", backoff}});
     if (Delay(stop, backoff * 1000))
       break;
     backoff = std::min(backoff * 2, 30u);
   }
-  log.Line("supervisor stopped");
+  log.Event(LogLevel::kInfo, "supervisor.stopped");
   return 0;
 }
 }  // namespace remotekit::updater

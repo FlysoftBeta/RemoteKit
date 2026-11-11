@@ -24,6 +24,7 @@ class InputController {
     std::function<void(const Json&, uint64_t)> send;
     std::function<void()> failed;
     std::function<std::shared_ptr<media::ServerTrace>()> trace;
+    Json log_fields = Json::object();
   };
   InputController(std::string session, Hooks hooks);
   ~InputController();

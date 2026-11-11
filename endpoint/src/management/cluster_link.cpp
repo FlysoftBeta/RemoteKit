@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "management/cluster_link.hpp"
 #include "cluster/node_files.hpp"
 #include "util/thread.hpp"
@@ -5,6 +6,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <condition_variable>
+#include <cstdio>
 #include <deque>
 #include <mutex>
 #include <map>
@@ -102,7 +104,9 @@ struct ClusterLink::Impl {
   bool Accept(cluster::Established established) {
     const auto& reply = established.reply;
     if (reply.value("type", Json()) == "node.reject") {
-      Finish(reply.value("code", Json()) == "build_mismatch" ? 3 : 1);
+      const auto code = reply.value("code", Json());
+      LogEvent(LogLevel::kError, "cluster.rejected", {{"code", code}});
+      Finish(code == "build_mismatch" ? 3 : 1);
       return false;
     }
     if (reply.value("type", Json()) != "node.ready" || !reply.contains("connectionEpoch") ||
@@ -188,6 +192,8 @@ struct ClusterLink::Impl {
       auto established = connect();
       bool accepted = false;
       bool protocol_error = false;
+      if (!established)
+        LogError(LogLevel::kWarn, "cluster.connect_failed", established.error());
       if (established) {
         accepted = Accept(std::move(established).value());
         if (accepted) {

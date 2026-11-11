@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "session/browser_rpc.hpp"
 #include "media/server_trace.hpp"
 #include "protocol/control.h"
@@ -94,14 +95,14 @@ Result<Json> BrowserRpc::Exchange(Json command,
       if (const auto handle = control_.exchange(0))
         sdk_.remotekit_sdk_control_close(handle);
     }
-    fprintf(stderr,
-            "browser RPC method=%s request_id=%llu elapsed_ms=%lld sdk_status=%d control=%llu "
-            "error=%s\n",
-            command.value("method", std::string()).c_str(), serial_,
-            static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                       std::chrono::steady_clock::now() - started)
-                                       .count()),
-            status, Control(), error.message.c_str());
+    LogError(LogLevel::kWarn, "browser.rpc_failed", error,
+             {{"method", command.value("method", std::string())},
+              {"requestId", serial_},
+              {"elapsedMs", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - started)
+                                .count()},
+              {"sdkStatus", status},
+              {"control", Control()}});
     return error;
   };
   if (status) {
@@ -165,12 +166,13 @@ Result<void> BrowserRpc::OpenRender(remotekit_sdk_render_setup& setup) {
         sdk_.remotekit_sdk_control_close(handle);
     }
     needs_health_check_ = true;
-    fprintf(stderr,
-            "browser RPC method=output.open/describe elapsed_ms=%lld sdk_status=%d control=%llu\n",
-            static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                       std::chrono::steady_clock::now() - started)
-                                       .count()),
-            status, Control());
+    LogError(LogLevel::kWarn, "browser.rpc_failed", media::SdkFailure(status, failure),
+             {{"method", "output.open"},
+              {"elapsedMs", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - started)
+                                .count()},
+              {"sdkStatus", status},
+              {"control", Control()}});
     return media::SdkFailure(status, failure);
   }
   return {};

@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "util/thread.hpp"
 #include "encoder_worker.hpp"
 #include "media/sampling.hpp"
@@ -93,7 +94,8 @@ void EncoderWorker::Error(const std::string& error) {
   failed_ = true;
   std::lock_guard lock(stats_->mutex);
   stats_->error = error;
-  fprintf(stderr, "encoder %llu: %s\n", encoder_, error.c_str());
+  LogError(LogLevel::kWarn, "encoder.failed", remotekit::Error{ErrorCode::kInternal, error},
+           {{"encoder", encoder_}});
 }
 bool EncoderWorker::RetainUnsafeInputs(Job* additional) {
   if (!hardware_ || hardware_->CanReleaseInputs())

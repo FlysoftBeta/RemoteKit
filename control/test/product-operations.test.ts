@@ -58,7 +58,7 @@ class Endpoint {
   }
 }
 async function fixture() {
-  const store = new ControlDatabase(':memory:'),
+  const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     endpoint = new Endpoint(),
     control = createApplication(store, testGateway(endpoint));
   const { tenantId: tenant } = await registerUser(store, 'operations', 'password123');
@@ -898,7 +898,7 @@ test('terminal receipt capacity rotates generation explicitly while unresolved o
         insert.run(
           f.tenant,
           'old-' + i,
-          '{}',
+          JSON.stringify({ type: 'window.focus', windowId: 'retired' }),
           JSON.stringify({ operationId: 'old-' + i, operationGeneration: generation, status: 'committed' }),
         );
     })();
@@ -916,7 +916,7 @@ test('terminal receipt capacity rotates generation explicitly while unresolved o
         insert.run(
           f.tenant,
           'unresolved-' + i,
-          '{}',
+          JSON.stringify({ type: 'window.focus', windowId: 'retired' }),
           JSON.stringify({
             operationId: 'unresolved-' + i,
             operationGeneration: currentGeneration,

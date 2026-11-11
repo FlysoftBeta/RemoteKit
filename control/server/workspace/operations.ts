@@ -1,3 +1,5 @@
+import { operationPayload } from '../persistence/operations';
+import { reportError } from '../log';
 import { randomUUID } from 'node:crypto';
 import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import { retryDelay } from '../../shared/error-policy';
@@ -14,19 +16,6 @@ import type {
 } from '../../shared/product';
 import { isLocalTab } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
-function operationPayload(value: unknown): string {
-  const canonical = (input: any): any =>
-    Array.isArray(input)
-      ? input.map(canonical)
-      : input && typeof input === 'object'
-        ? Object.fromEntries(
-            Object.keys(input)
-              .sort()
-              .map((key) => [key, canonical(input[key])]),
-          )
-        : input;
-  return JSON.stringify(canonical(value));
-}
 export class OperationPipeline {
   constructor(
     private readonly context: DomainContext,
@@ -87,7 +76,9 @@ export class OperationPipeline {
         operationId: event.operationId,
         operationGeneration: event.operationGeneration,
         status: 'failed',
-        error: wireError(toRemoteKitError(error)),
+        error: wireError(
+          reportError(toRemoteKitError(error), 'operation.failed', { tenant, operation: event.operationId }),
+        ),
       };
     }
     // A replaced peer never receives a late result from an accepted old operation.
@@ -135,8 +126,16 @@ export class OperationPipeline {
           status: 'failed',
           error: { code: 'conflict', message: '操作收据代次已过期' },
         };
-      const payload = operationPayload(recordedAction(operation.action)),
-        existing = this.context.store.operations.operation(tenant, operation.operationId);
+      const recorded = recordedAction(operation.action);
+      let payload: string;
+      try {
+        payload = operationPayload(recorded, `operation_receipts.payload ${tenant}/${operation.operationId}`);
+      } catch (error) {
+        if (error instanceof RemoteKitError && error.reason === 'corrupt_record')
+          throw new RemoteKitError('invalid_request', '无效产品操作', { detail: error.detail, cause: error });
+        throw error;
+      }
+      const existing = this.context.store.operations.operation(tenant, operation.operationId);
       if (existing) {
         if (existing.payload !== payload) throw new RemoteKitError('conflict', '同一操作ID不能用于不同内容');
         if (
@@ -164,7 +163,7 @@ export class OperationPipeline {
           ? { browserIncarnation: runtime.browserIncarnation }
           : {}),
       };
-      if (!existing && !this.context.store.operations.reserveOperation(tenant, payload, receipt)) {
+      if (!existing && !this.context.store.operations.reserveOperation(tenant, recorded, receipt)) {
         this.services.viewers.push(tenant);
         return {
           ...receipt,
@@ -211,7 +210,10 @@ export class OperationPipeline {
         if (durable && ['committed', 'failed'].includes(durable.status)) {
           settle(receipt, durable);
         } else {
-          const failure = toRemoteKitError(error);
+          const failure = reportError(toRemoteKitError(error), 'operation.failed', {
+            tenant,
+            operation: operation.operationId,
+          });
           settle(receipt, {
             status: failure.code === 'outcome_unknown' ? 'unknown' : 'failed',
             error: wireError(failure),

@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "rtc/peer.hpp"
 #include "util/wire_error.hpp"
 #include "rtc/data_router.hpp"
@@ -63,7 +64,7 @@ Result<Json> PeerController::Offer(const Json& request,
     if (auto ip = ResolveRtcAddress(options_.rtc_address))
       advertised = std::move(ip).value();
     else
-      std::fprintf(stderr, "RTC address unavailable: %s\n", ip.error().message.c_str());
+      LogError(LogLevel::kWarn, "rtc.address_failed", ip.error());
   }
   {
     std::lock_guard lock(mutex_);
@@ -251,10 +252,12 @@ void PeerController::FlushSignals() {
     else if (event.type == REMOTEKIT_RTC_ICE_COMPLETE)
       signal = {{"type", "complete"}};
     else if (event.type == REMOTEKIT_RTC_ERROR)
-      signal = {
-          {"type", "error"},
-          {"error", WireError({ParseErrorCode(event.auxiliary).value_or(ErrorCode::kOutcomeUnknown),
-                               event.bytes})}};
+      signal = {{"type", "error"},
+                {"error",
+                 WireError({ParseErrorCode(event.auxiliary).value_or(ErrorCode::kOutcomeUnknown),
+                            event.bytes},
+                           "dc.request_failed",
+                           RequestLogFields(Json{{"method", "rtc.signal"}}, hooks_.log_fields))}};
     else
       continue;
     hooks_.signal(event.management_generation, signal);

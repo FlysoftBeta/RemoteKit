@@ -1,3 +1,4 @@
+import { log, reportError } from '../log';
 import { wireError } from '../../shared/errors';
 import { endpointError } from '../endpoint/gateway';
 import { randomUUID } from 'node:crypto';
@@ -6,7 +7,8 @@ import type { AuthSettings, AuthState, FacePurpose, FaceStatus } from '../../sha
 import type { EndpointGateway } from '../endpoint/gateway';
 import type { ControlDatabase } from '../persistence/database';
 import { systemClock, type Clock } from '../util/clock';
-import { hashSecret, validFaceTemplate } from './crypto';
+import { hashSecret } from './crypto';
+import { validFaceTemplate } from '../persistence/sealed-documents';
 
 // Endpoint gate epochs are scoped to a peer and restart on its replacement.
 interface Peer {
@@ -45,6 +47,7 @@ export interface ViewerSecurityState {
 }
 
 export class ViewerSecurity {
+  private readonly revocations = new Map<ViewerSecurityState, string>();
   constructor(
     private readonly store: ControlDatabase,
     private readonly endpoint: EndpointGateway,
@@ -126,6 +129,32 @@ export class ViewerSecurity {
     viewer.face = { available: false };
   }
 
+  async revokePeer(tenant: string, viewer: ViewerSecurityState) {
+    this.revocations.set(viewer, tenant);
+    try {
+      await this.lock(tenant, viewer);
+      this.forgetPeer(tenant, viewer);
+      this.revocations.delete(viewer);
+    } catch (err) {
+      log.error('security.revoke_failed', { tenant, connectionId: viewer.peer?.connectionId, err });
+    }
+  }
+
+  async retryRevocations() {
+    await Promise.all(
+      [...this.revocations].map(async ([viewer, tenant]) => {
+        if (viewer.peer?.requests) return;
+        try {
+          await this.apply(tenant, viewer, false);
+          this.forgetPeer(tenant, viewer);
+          this.revocations.delete(viewer);
+        } catch (err) {
+          log.error('security.revoke_failed', { tenant, connectionId: viewer.peer?.connectionId, err });
+        }
+      }),
+    );
+  }
+
   async bind(tenant: string, viewer: ViewerSecurityState, connectionId: string) {
     this.forgetPeer(tenant, viewer);
     viewer.peer = { connectionId, epoch: 0, appliedEpoch: 0, requests: 0 };
@@ -158,12 +187,16 @@ export class ViewerSecurity {
     const { connectionId } = peer;
     const epoch = ++peer.epoch;
     peer.requests++;
+    peer.appliedEpoch = 0;
     try {
       const result = await this.endpoint.authorizeRtc(tenant, { connectionId, epoch, unlocked });
       if (result?.applied !== true || result.epoch !== epoch || viewer.peer !== peer || peer.epoch !== epoch)
         throw new RemoteKitError('outcome_unknown', 'Endpoint 授权结果未知');
       peer.appliedEpoch = epoch;
       this.changed(tenant, viewer, false);
+    } catch (err) {
+      if (!unlocked) log.error('security.lock_failed', { tenant, connectionId, epoch, err });
+      throw err;
     } finally {
       peer.requests--;
     }
@@ -187,7 +220,7 @@ export class ViewerSecurity {
       await this.apply(tenant, viewer, true);
     } catch (error) {
       if (this.valid(tenant, viewer) && viewer.epoch === epoch)
-        await this.lock(tenant, viewer).catch(() => {});
+        await this.lock(tenant, viewer).catch((err) => log.error('security.lock_failed', { tenant, err }));
       throw error;
     }
     this.check(tenant, viewer, epoch, true);
@@ -204,7 +237,10 @@ export class ViewerSecurity {
       delete viewer.face.status;
       if (viewer.face.available) delete viewer.face.reason;
     }
-    if (challenge && send) void this.endpoint.cancelFace(tenant, this.faceBinding(challenge)).catch(() => {});
+    if (challenge && send)
+      void this.endpoint
+        .cancelFace(tenant, this.faceBinding(challenge))
+        .catch((err) => log.warn('security.cancel_face_failed', { tenant, challengeId: challenge.id, err }));
   }
 
   private faceBinding(challenge: Challenge) {
@@ -285,7 +321,9 @@ export class ViewerSecurity {
       peer.requests === 0 &&
       this.valid(tenant, viewer)
     )
-      await this.apply(tenant, viewer, false).catch(() => {});
+      await this.apply(tenant, viewer, false).catch((err) =>
+        log.error('security.reapply_failed', { tenant, err }),
+      );
     const challenge = viewer.challenge;
     if (!challenge?.started || viewer.polling || !this.valid(tenant, viewer)) return;
     viewer.polling = true;
@@ -293,13 +331,18 @@ export class ViewerSecurity {
     try {
       const result = await this.endpoint
         .faceStatus(tenant, this.faceBinding(challenge))
-        .catch((error: unknown) => ({
-          challengeId: challenge.id,
-          status: 'failed',
-          error: wireError(endpointError(error)),
-          outcome: undefined,
-          template: undefined,
-        }));
+        .catch((error: unknown) => {
+          log.warn('security.face_status_failed', { tenant, challengeId: challenge.id, err: error });
+          return {
+            challengeId: challenge.id,
+            status: 'failed',
+            error: wireError(
+              reportError(endpointError(error), 'security.face_failed', { tenant, operation: challenge.id }),
+            ),
+            outcome: undefined,
+            template: undefined,
+          };
+        });
       if (
         !this.valid(tenant, viewer) ||
         viewer.epoch !== generation ||
@@ -336,7 +379,8 @@ export class ViewerSecurity {
             };
             record.settings.faceEnabled = true;
             this.store.security.saveSecurity(viewer.user.id, record);
-          } catch {
+          } catch (err) {
+            log.warn('security.save_face_failed', { tenant, err });
             status = 'failed';
           }
         }
@@ -346,7 +390,11 @@ export class ViewerSecurity {
       else delete viewer.face.outcome;
       if (status === 'failed')
         viewer.face.error = wireError(
-          result?.error ? endpointError(result.error) : new RemoteKitError('internal', '人脸验证失败'),
+          reportError(
+            result?.error ? endpointError(result.error) : new RemoteKitError('internal', '人脸验证失败'),
+            'security.face_failed',
+            { tenant, operation: challenge.id },
+          ),
         );
       else delete viewer.face.error;
       this.clearChallenge(tenant, viewer, true);
@@ -358,14 +406,17 @@ export class ViewerSecurity {
           await this.startFace(tenant, viewer, 'presence', generation);
         else if (status !== 'expired' && !viewer.locked) await this.lock(tenant, viewer, true);
       }
-    } catch {
+    } catch (err) {
+      log.warn('security.face_poll_failed', { tenant, challengeId: challenge.id, err });
       if (
         challenge.purpose === 'presence' &&
         !viewer.locked &&
         this.valid(tenant, viewer) &&
         viewer.epoch === generation
       )
-        await this.lock(tenant, viewer, true).catch(() => {});
+        await this.lock(tenant, viewer, true).catch((err) =>
+          log.error('security.lock_failed', { tenant, err }),
+        );
     } finally {
       viewer.polling = false;
     }

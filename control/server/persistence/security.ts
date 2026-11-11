@@ -1,3 +1,5 @@
+import { decodeJson, encodeJson } from './codec';
+import { authSettings } from './documents';
 import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
 import type { AuthSettings } from '../../shared/security';
@@ -62,7 +64,9 @@ export class SecurityRepository {
           face_model: string | null;
         }
       | undefined;
-    const settings: AuthSettings = { ...defaultAuthSettings(), ...JSON.parse(row?.settings ?? '{}') };
+    const settings: AuthSettings = row
+      ? decodeJson(row.settings, authSettings, `user_security.settings ${user}`)
+      : defaultAuthSettings();
     return {
       settings,
       pin: row?.pin_hash && row.pin_salt ? { salt: row.pin_salt, hash: row.pin_hash } : undefined,
@@ -77,7 +81,7 @@ export class SecurityRepository {
       .prepare('INSERT OR REPLACE INTO user_security VALUES (?,?,?,?,?,?)')
       .run(
         user,
-        JSON.stringify(record.settings),
+        encodeJson(record.settings, authSettings, `user_security.settings ${user}`),
         record.pin?.salt ?? null,
         record.pin?.hash ?? null,
         record.face?.sealed ?? null,

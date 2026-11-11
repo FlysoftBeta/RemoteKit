@@ -7,6 +7,7 @@ import zipfile
 import tarfile
 ROOT = Path(__file__).resolve().parents[1]
 DEPENDENCIES = [
+ ('sqlite-amalgamation-3540100.zip','https://sqlite.org/2026/sqlite-amalgamation-3540100.zip','0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9'),
  ('zstd-1.5.7.tar.gz','https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz','eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3'),
  ('json-LICENSE.MIT','https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT','46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603'),
  ('json.hpp','https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include/nlohmann/json.hpp','aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63'),
@@ -27,6 +28,12 @@ def main():
    temporary.replace(path)
   if hashlib.sha256(path.read_bytes()).hexdigest()!=expected:
    raise RuntimeError('Cached dependency SHA256 mismatch: '+str(path))
+ if not (destination/'sqlite-amalgamation-3540100').exists():
+  with zipfile.ZipFile(destination/'sqlite-amalgamation-3540100.zip') as archive:
+   for member in archive.infolist():
+    if not (destination/member.filename).resolve().is_relative_to(destination.resolve()):
+     raise RuntimeError('Archive entry escapes dependency directory')
+   archive.extractall(destination)
  source=destination/'libvpl-2.17.0'
  if not source.exists():
   with zipfile.ZipFile(destination/'libvpl-v2.17.0.zip') as archive:
@@ -37,5 +44,5 @@ def main():
  if not (destination/'zstd-1.5.7').exists():
   with tarfile.open(destination/'zstd-1.5.7.tar.gz') as archive:
    archive.extractall(destination, filter='data')
- print('Endpoint dependencies verified: libvpl 2.17.0, JSON 3.12.0, NVENC API 13.0, zstd 1.5.7')
+ print('Endpoint dependencies verified: SQLite 3.54.1, libvpl 2.17.0, JSON 3.12.0, NVENC API 13.0, zstd 1.5.7')
 if __name__=='__main__':main()

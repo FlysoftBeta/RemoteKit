@@ -18,6 +18,7 @@ import { emptyWorkspace } from '../server/persistence/workspaces';
 import { FakeNode, fakeMetrics } from './fake-node';
 import { TestClock, requestViewer } from './server-fixture';
 import { RemoteKitError } from '../shared/errors';
+import { log } from '../server/log';
 
 const id = (n: number) => n.toString(16).padStart(64, '0');
 
@@ -277,7 +278,7 @@ const clearSnapshot = (): EndpointSnapshot => ({
 });
 async function harness(quota: number | null = 4096, nodeLimits: Partial<NodeConfig> = {}) {
   const key = randomBytes(32);
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const nodes = new NodeRegistry({
     key: key.toString('base64'),
     buildId: 'dev',
@@ -735,7 +736,7 @@ test('pre-render chooses a source replica, authorizes only its operation and cre
 test('pre-render without a replica uses the least loaded ready node and logs failure once', async (t) => {
   const h = await harness();
   const failures: unknown[][] = [];
-  t.mock.method(console, 'error', (...args: unknown[]) => failures.push(args));
+  t.mock.method(log, 'error', (...args: unknown[]) => failures.push(args));
   try {
     const alpha = await h.connect('alpha', 0.6);
     const beta = await h.connect('beta', 0.1);
@@ -754,7 +755,7 @@ test('pre-render without a replica uses the least loaded ready node and logs fai
     assert.equal(beta.requests.filter((request) => request.method === 'object.render').length, 1);
     assert.equal(alpha.requests.filter((request) => request.method === 'object.render').length, 0);
     assert.equal(failures.length, 1);
-    assert.equal(failures[0][0], 'object.render failed');
+    assert.equal(failures[0][0], 'render.failed');
   } finally {
     await h.close();
   }
@@ -824,9 +825,25 @@ test('GC follows library and selection references, derivatives and only the newe
       excludedSources: [],
       basketPartitionId: null,
     });
-    h.store.db
-      .prepare('INSERT INTO file_library_selections (tenant,id,manifest) VALUES (?,?,?)')
-      .run('tenant', 'selection', JSON.stringify({ files: [{ assetId: id(3) }] }));
+    h.store.db.prepare('INSERT INTO file_library_selections (tenant,id,manifest) VALUES (?,?,?)').run(
+      'tenant',
+      'selection',
+      JSON.stringify({
+        selectionId: 'selection',
+        requestId: 'request',
+        binding: {
+          browserIncarnation: 'browser',
+          view: '1',
+          instance: 'instance',
+          document: 'document',
+          request: 'request',
+        },
+        entryIds: [],
+        files: [{ assetId: id(3), name: 'file', type: 'text/plain' }],
+        limits: { maxFileBytes: 1024, maxBatchBytes: 2048, maxFiles: 2 },
+        prepared: true,
+      }),
+    );
     for (let n = 1; n <= 3; n++) {
       h.store.db
         .prepare('INSERT INTO checkpoints VALUES (?,?,?,?,?,?)')
@@ -888,7 +905,12 @@ test('hibernation policy respects Memory Saver, ten-minute viewer absence, every
     assert.equal(await h.control.lifecycle.hibernate('tenant', { views: [] }), false);
     h.store.db
       .prepare('INSERT INTO operation_receipts VALUES (?,?,?,?)')
-      .run('tenant', 'op', '{}', JSON.stringify({ status: 'applying' }));
+      .run(
+        'tenant',
+        'op',
+        JSON.stringify({ type: 'window.focus', windowId: 'window' }),
+        JSON.stringify({ operationId: 'op', operationGeneration: 'generation', status: 'applying' }),
+      );
     assert.equal(await h.control.lifecycle.hibernate('tenant', snapshot), false);
     h.store.db.exec('DELETE FROM operation_receipts');
     assert.equal(await h.control.lifecycle.hibernate('tenant', snapshot), false);

@@ -70,7 +70,12 @@ int wmain(int argc, wchar_t** argv) {
     fs::create_directories(root / L"work/stage-obsolete");
     fs::create_directories(root / L"work/assets/keep");
     WriteText(root / L"work/payload-obsolete.tar", "old");
+    WriteText(root / L"remotekit_control.exe.old", "old");
+    WriteText(root / L"remotekit_control.exe.new", "staged");
     manager::Cleanup(root, id);
+    Check(!fs::exists(root / L"remotekit_control.exe.old") &&
+              !fs::exists(root / L"remotekit_control.exe.new"),
+          "stale supervisor executables removed");
     Check(!fs::exists(root / L"versions/obsolete") && !fs::exists(root / L"work/stage-obsolete") &&
               !fs::exists(root / L"work/payload-obsolete.tar") &&
               fs::exists(root / L"work/assets/keep"),

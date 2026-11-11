@@ -1,4 +1,5 @@
 #pragma once
+#include "util/log.hpp"
 #include "util/result_macros.hpp"
 #include "util/thread.hpp"
 #include "util/error.hpp"
@@ -278,7 +279,10 @@ class PhotoBurstSessions {
 // One Session-lifetime disk worker. No caller waits for it while holding a
 // Session/Browser lock. Admission, receipts and replay history are bounded.
 class DcFileServices {
+  const Json log_fields_;
+
  public:
+  explicit DcFileServices(Json log_fields = Json::object()) : log_fields_(std::move(log_fields)) {}
   struct Job {
     uint64_t peer{}, epoch{}, control{};
     ServiceJson message;
@@ -370,23 +374,39 @@ class DcFileServices {
                 if (Current(job))
                   executed = execute(job);
                 reply = executed ? Reply(job.message, true, executed.value())
-                                 : Reply(job.message, false, WireError(executed.error()));
+                                 : Reply(job.message, false,
+                                         WireError(executed.error(), "dc.request_failed",
+                                                   RequestLogFields(job.message, log_fields_)));
               } catch (const InvalidRequest& error) {
-                reply = Reply(job.message, false,
-                              WireError({ErrorCode::kInvalidRequest, error.what()}));
-              } catch (const ServiceJson::exception& error) {
-                fprintf(stderr, "file router invalid request: %s\n", error.what());
-                reply = Reply(job.message, false,
-                              WireError({ErrorCode::kInternal, "Invalid file worker state"}));
-              } catch (const std::filesystem::filesystem_error& error) {
                 reply =
-                    Reply(job.message, false, WireError({ErrorCode::kUnavailable, error.what()}));
+                    Reply(job.message, false,
+                          WireError({ErrorCode::kInvalidRequest, error.what()}, "dc.request_failed",
+                                    RequestLogFields(job.message, log_fields_)));
+              } catch (const ServiceJson::exception& error) {
+                LogError(LogLevel::kWarn, "files.invalid_request",
+                         Error{ErrorCode::kInvalidRequest, error.what()});
+                reply = Reply(
+                    job.message, false,
+                    WireError({ErrorCode::kInternal, "Invalid file worker state"},
+                              "dc.request_failed", RequestLogFields(job.message, log_fields_)));
+              } catch (const std::filesystem::filesystem_error& error) {
+                reply = Reply(
+                    job.message, false,
+                    WireError(WithOsError(ErrorCode::kUnavailable, error.what(),
+                                          OsError::Kind::kWin32, error.code().value()),
+                              "dc.request_failed", RequestLogFields(job.message, log_fields_)));
               } catch (const std::exception& error) {
-                fprintf(stderr, "file router internal: %s\n", error.what());
-                reply = Reply(job.message, false, WireError({ErrorCode::kInternal, "internal"}));
+                LogError(LogLevel::kWarn, "files.worker_failed",
+                         Error{ErrorCode::kInternal, error.what()});
+                reply = Reply(job.message, false,
+                              WireError({ErrorCode::kInternal, "internal"}, "dc.request_failed",
+                                        RequestLogFields(job.message, log_fields_)));
               } catch (...) {
-                fprintf(stderr, "file router internal: unknown exception\n");
-                reply = Reply(job.message, false, WireError({ErrorCode::kInternal, "internal"}));
+                LogError(LogLevel::kWarn, "files.worker_failed",
+                         Error{ErrorCode::kInternal, "unknown exception"});
+                reply = Reply(job.message, false,
+                              WireError({ErrorCode::kInternal, "internal"}, "dc.request_failed",
+                                        RequestLogFields(job.message, log_fields_)));
               }
               std::lock_guard lock(mutex_);
               if (!CurrentLocked(job))
@@ -499,7 +519,10 @@ class DcFileServices {
       return;
     const auto key = message["requestId"].get<std::string>(), fingerprint = message.dump();
     auto failure = [&](ErrorCode code, const char* error) {
-      QueueReply(Reply(message, false, WireError({code, error})), 0);
+      QueueReply(Reply(message, false,
+                       WireError({code, error}, "dc.request_failed",
+                                 RequestLogFields(message, log_fields_))),
+                 0);
     };
     const auto id = message["params"].value("requestId", std::string());
     const auto found = authorized_.find(id);

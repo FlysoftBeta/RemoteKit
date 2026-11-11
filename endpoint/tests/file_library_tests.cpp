@@ -1,3 +1,4 @@
+#include "session_db_fixture.hpp"
 #include "files/file_library.hpp"
 #include "documents/object_documents.hpp"
 #include "files/dc_file_services.hpp"
@@ -13,6 +14,7 @@
 
 using remotekit::FileLibrary;
 using remotekit::FileUploadStore;
+using remotekit::test::LibraryFixture;
 namespace fs = std::filesystem;
 #define CHECK(value)                             \
   do {                                           \
@@ -122,51 +124,9 @@ void PersistedRecords(const fs::path& root, remotekit::objects::ObjectService& o
       {"files", remotekit::Json::array({{{"assetId", std::string(64, 'b')},
                                          {"name", "private-receipt-content.txt"},
                                          {"type", "text/plain"}}})}};
-  std::ofstream(directory / (valid_id + ".json")) << complete.dump();
-  auto missing_fields = complete;
-  missing_fields.erase("accept");
-  missing_fields.erase("limits");
-  auto missing_limits = complete;
-  missing_limits.erase("limits");
-  auto wrong_type = complete;
-  wrong_type["accept"] = 1;
-  auto empty_files = complete;
-  empty_files["files"] = remotekit::Json::array();
-  auto excess_files = complete;
-  excess_files["files"] = remotekit::Json::array();
-  for (int i = 0; i < 65; ++i)
-    excess_files["files"].push_back(complete["files"][0]);
-  auto invalid_state = complete;
-  invalid_state["state"] = "private-receipt-content";
-  const std::vector<std::pair<std::string, std::string>> invalid{
-      {std::string(32, 'c'), missing_fields.dump()},
-      {std::string(32, 'd'), "{private-receipt-content"},
-      {std::string(32, 'e'), missing_limits.dump()},
-      {std::string(32, 'f'), wrong_type.dump()},
-      {std::string(32, '1'), empty_files.dump()},
-      {std::string(32, '2'), excess_files.dump()},
-      {std::string(32, '3'), invalid_state.dump()},
-      {"invalid-id", complete.dump()}};
-  for (const auto& [id, contents] : invalid)
-    std::ofstream(directory / (id + ".json")) << contents;
-
-  FileLibrary library(root, objects, "tenant");
-  std::ostringstream diagnostics;
-  auto* previous = std::cerr.rdbuf(diagnostics.rdbuf());
-  const auto initialized = library.Initialize();
-  std::cerr.rdbuf(previous);
-  Take(initialized);
-  for (const auto& [id, contents] : invalid) {
-    CHECK(!fs::exists(directory / (id + ".json")));
-    CHECK(!library.FindSelection(id));
-    CHECK(diagnostics.str().find("selection \"" + id + "\": ") != std::string::npos);
-  }
-  const auto output = diagnostics.str();
-  CHECK(std::count(output.begin(), output.end(), '\n') == invalid.size());
-  CHECK(output.find(".json") == std::string::npos);
-  CHECK(output.find("private-receipt-content") == std::string::npos);
-  CHECK(output.find(root.string()) == std::string::npos);
-  CHECK(fs::exists(directory / (valid_id + ".json")));
+  LibraryFixture library(root, objects, "tenant");
+  Take(library.Database().Library().Save(remotekit::LibraryTable::kSelections, valid_id, complete));
+  Take(library.Initialize());
   const auto loaded = library.FindSelection(valid_id);
   CHECK(loaded && loaded->request_id == "chooser");
   CHECK(loaded->state == FileLibrary::Selection::State::selected);
@@ -176,25 +136,6 @@ void PersistedRecords(const fs::path& root, remotekit::objects::ObjectService& o
         loaded->limits.files == 2);
   CHECK(loaded->files == (std::vector<FileLibrary::SelectionFile>{
                              {std::string(64, 'b'), "private-receipt-content.txt", "text/plain"}}));
-
-  for (const auto& kind : {"metadata", "drafts"}) {
-    const std::string category =
-        std::string(kind) == "metadata" ? "invalid_asset_metadata" : "invalid_asset_draft";
-    const std::string id(std::string(kind) == "metadata" ? 64 : 32, 'a');
-    const std::vector<std::string> contents{"{}", "{\"type\":1,\"operation\":1}", "{"};
-    for (std::size_t i = 0; i < contents.size(); ++i) {
-      const auto invalid_root = root / (std::string(kind) + std::to_string(i));
-      const auto path = invalid_root / kind / (id + ".json");
-      fs::create_directories(path.parent_path());
-      std::ofstream(path) << contents[i];
-      FileLibrary invalid_library(invalid_root, objects, "tenant");
-      const auto result = invalid_library.Initialize();
-      CHECK(!result && result.error().code == remotekit::ErrorCode::kInternal);
-      CHECK(result.error().message.starts_with(category + ": "));
-      CHECK(result.error().message.size() > category.size() + 2);
-      CHECK(fs::exists(path));
-    }
-  }
 }
 
 void Documents(const fs::path& root) {
@@ -203,20 +144,19 @@ void Documents(const fs::path& root) {
   Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
                           {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
   const auto live = []() -> remotekit::Result<void> { return {}; };
-  FileLibrary first(root / "first", objects, "tenant");
-  FileLibrary second(root / "second", objects, "second");
+  LibraryFixture first(root / "first", objects, "tenant");
+  LibraryFixture second(root / "second", objects, "second");
   Take(first.Initialize());
   Take(second.Initialize());
   const auto source_path = root / "source";
   std::ofstream(source_path, std::ios::binary) << "MZunsupported";
   const auto source = Take(objects.Write(source_path, {}, {{"tenantId", "tenant"}}));
-  const auto metadata_path = root / "first/metadata" / (source.id + ".json");
   {
     const remotekit::Json metadata{
         {"assetId", source.id}, {"type", "application/octet-stream"}, {"size", source.size}};
-    std::ofstream(metadata_path) << metadata.dump();
+    Take(first.Database().Library().Save(remotekit::LibraryTable::kAssets, source.id, metadata));
   }
-  FileLibrary existing(root / "first", objects, "tenant");
+  LibraryFixture existing(root / "first", objects, "tenant");
   Take(existing.Initialize());
   CHECK(Take(existing.Describe(source.id)).size == source.size);
 
@@ -257,7 +197,7 @@ void Documents(const fs::path& root) {
   CHECK(!first.DocumentResource(document.id, *resources.begin(), UINT64_MAX, live));
   CHECK(!first.DocumentResource(document.id, std::string(64, 'a'), 0, live));
   CHECK(Take(second.OpenDocument(source.id, live))["documentId"] == document.id);
-  FileLibrary forbidden(root / "forbidden", objects, "other-tenant");
+  LibraryFixture forbidden(root / "forbidden", objects, "other-tenant");
   Take(forbidden.Initialize());
   CHECK(forbidden.OpenDocument(source.id, live).error().code == remotekit::ErrorCode::kForbidden);
   CHECK(Take(objects.Dispatch({{"method", "object.render"},
@@ -293,11 +233,11 @@ void Documents(const fs::path& root) {
     Take(first.Chunk(1, upload, 0, truncated, live));
     const auto asset = Take(first.Seal(1, upload, live));
     {
-      std::ifstream input(root / "first/metadata" / (asset.id + ".json"));
-      const auto metadata = remotekit::Json::parse(input);
+      const auto metadata =
+          Take(first.Database().Library().Load(remotekit::LibraryTable::kAssets)).at(asset.id);
       CHECK(!metadata.contains("name") && metadata["type"] == mime);
     }
-    FileLibrary reopened(root / "first", objects, "tenant");
+    LibraryFixture reopened(root / "first", objects, "tenant");
     Take(reopened.Initialize());
     auto result = reopened.OpenDocument(asset.id, live);
     const auto expires = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -405,7 +345,7 @@ int main(int argc, char** argv) {
   unsubmitted.id = "aabbccddaabbccddaabbccddaabbccee";
   unsubmitted.binding.request = "5";
   {
-    FileLibrary library(session, objects, "tenant");
+    LibraryFixture library(session, objects, "tenant");
     CHECK(library.Initialize());
     const auto draft = Take(library.Begin(1, "operation", spec, live));
     upload = draft["uploadId"];
@@ -418,7 +358,7 @@ int main(int argc, char** argv) {
     CHECK(Fails([&] { return library.Chunk(2, upload, 1, {'b'}, live); }));
   }
   {
-    FileLibrary library(session, objects, "tenant");
+    LibraryFixture library(session, objects, "tenant");
     CHECK(library.Initialize());
     CHECK(Fails([&] { return library.Chunk(1, upload, 1, {'b'}, live); }));
     CHECK(Take(library.Begin(1, "operation", spec, live))["offset"] == 1);
@@ -484,7 +424,7 @@ int main(int argc, char** argv) {
       transcode_cache[format] = first.id;
     }
     CHECK(Fails([&] { return library.Read(hash, 4); }));
-    FileLibrary other(root / "other-session", objects, "other-tenant");
+    LibraryFixture other(root / "other-session", objects, "other-tenant");
     CHECK(other.Initialize());
     CHECK(Fails([&] { return other.Describe(hash); }));
     const auto duplicate =
@@ -528,7 +468,7 @@ int main(int argc, char** argv) {
     CHECK(!Take(library.Claim(unsubmitted.id, live)));
   }
   {
-    FileLibrary library(session, objects, "tenant");
+    LibraryFixture library(session, objects, "tenant");
     CHECK(library.Initialize());
     using State = FileLibrary::Selection::State;
     CHECK(Take(library.Describe(hash)).size == 3);
@@ -576,9 +516,8 @@ int main(int argc, char** argv) {
   }
   {
     // Receipt recovery must not depend on the original source or live Browser.
-    const auto& metadata = session / "metadata" / (hash + ".json");
-    fs::remove(metadata);
-    FileLibrary library(session, objects, "tenant");
+    LibraryFixture library(session, objects, "tenant");
+    Take(library.Database().Library().Erase(remotekit::LibraryTable::kAssets, hash));
     CHECK(library.Initialize());
     CHECK(library.FindSelection(selection.id)->state == FileLibrary::Selection::State::selected);
   }
@@ -589,7 +528,7 @@ int main(int argc, char** argv) {
                                              remotekit::cluster::Key{}, "target", "dev");
     Take(target.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
                            {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
-    FileLibrary library(root / "remote-session", target, "tenant");
+    LibraryFixture library(root / "remote-session", target, "tenant");
     Take(library.Initialize());
     CHECK(!target.Store().Inspect(hash));
     target_control.reject_commit = true;

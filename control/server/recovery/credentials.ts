@@ -1,3 +1,4 @@
+import { decodeJson, record, jsonValue } from '../persistence/codec';
 import Sqlite from 'better-sqlite3';
 import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -91,7 +92,11 @@ function authSettings(value: unknown, faceKept: boolean): AuthSettings {
   const defaults = defaultAuthSettings();
   let stored: Row = {};
   try {
-    const parsed = JSON.parse(typeof value === 'string' ? value : '{}');
+    const parsed = decodeJson(
+      typeof value === 'string' ? value : '{}',
+      record(jsonValue),
+      'user_security.settings recovery',
+    );
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) stored = parsed;
   } catch {}
   const settings = { ...defaults } as Record<keyof AuthSettings, unknown>;

@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "platform/process.hpp"
 #include <iomanip>
 #include <sstream>
@@ -10,8 +11,10 @@
 namespace remotekit {
 namespace {
 Error ProcessError(const char* message) {
-  return {ErrorCode::kUnavailable,
-          std::string(message) + " Windows " + std::to_string(GetLastError())};
+  const auto code = GetLastError();
+  return WithOsError(ErrorCode::kUnavailable,
+                     std::string(message) + " Windows " + std::to_string(code),
+                     OsError::Kind::kWin32, code);
 }
 }  // namespace
 std::string DescribeExitCode(DWORD code) {
@@ -178,10 +181,14 @@ Result<void> BrowserProcess::Terminate() {
   }
   state_ = State::kStopping;
   if (job_ && !TerminateJobObject(job_, 0))
-    std::fprintf(stderr, "producer job termination Windows %lu\n", GetLastError());
+    LogError(LogLevel::kWarn, "process.job_termination_failed",
+             WithOsError(ErrorCode::kUnavailable, "producer termination failed",
+                         OsError::Kind::kWin32, GetLastError()));
   if (process_) {
     if (!assigned_ && Alive() && !TerminateProcess(process_, 1))
-      std::fprintf(stderr, "unassigned producer termination Windows %lu\n", GetLastError());
+      LogError(LogLevel::kWarn, "process.termination_failed",
+               WithOsError(ErrorCode::kUnavailable, "producer termination failed",
+                           OsError::Kind::kWin32, GetLastError()));
     if (WaitForSingleObject(process_, 5000) != WAIT_OBJECT_0)
       return Error{ErrorCode::kOutcomeUnknown,
                    "producer termination not confirmed; process retained"};

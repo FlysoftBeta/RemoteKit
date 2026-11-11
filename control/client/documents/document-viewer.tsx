@@ -1,4 +1,5 @@
 import { retryDelay } from '../../shared/error-policy';
+import { formatError } from '../util/format-error';
 import { useAutoFocus } from '../editing/local-autofocus';
 // Page layout and controls adapted from FlysoftBeta/talos-ng packages/client/src/features/reader/view/viewer.tsx.
 import { ErrorOutline, ZoomInOutlined, ZoomOutOutlined } from '@mui/icons-material';
@@ -37,6 +38,7 @@ function Page({
   const host = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [attempt, setAttempt] = useState(0);
+  const [error, setError] = useState('');
   useEffect(() => {
     const controller = new AbortController();
     const leases: ResourceLease[] = [];
@@ -68,11 +70,12 @@ function Page({
       dispose = mountPage(host.current!, html, css, refs);
       setStatus('ready');
     };
-    void load().catch(() => {
+    void load().catch((error) => {
       if (controller.signal.aborted) return;
       controller.abort();
       dispose?.();
       leases.forEach((lease) => lease.release());
+      setError(formatError(error));
       setStatus('error');
     });
     return () => {
@@ -99,7 +102,7 @@ function Page({
           <div className="document-viewer-page-state" role={status === 'error' ? 'alert' : 'status'}>
             {status === 'error' ? (
               <>
-                <span>无法加载此页</span>
+                <span>{error}</span>
                 <Button size="small" onClick={() => setAttempt((value) => value + 1)}>
                   重试
                 </Button>
@@ -392,7 +395,7 @@ export function DocumentViewer({
           setStatus(undefined);
           setState({
             source,
-            error: error instanceof Error ? error.message : '无法打开此文档',
+            error: formatError(error),
             rejected: error instanceof RemoteKitError && error.code === 'rejected',
             retryable: error instanceof RemoteKitError && retryDelay(error, 0) !== undefined,
           });

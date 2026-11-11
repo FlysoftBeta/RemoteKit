@@ -49,9 +49,10 @@ class LibraryController : private ControllerContext {
         views(views),
         files(files),
         file_uploads(directory / "uploads"),
-        file_library(directory / "file-library", objects, tenant, object_access),
+        file_library(directory / "file-library", objects, tenant, store.Library(), object_access),
         photos(context, file_library, files, authorization) {}
   Result<void> Initialize();
+  Result<void> PrepareCheckpoint() { return file_library.PrepareCheckpoint(); }
   Result<Json> ImportDownload(const Json& download) {
     auto imported = file_library.ImportDownload(directory / "session-1" / "profile-1", download);
     if (!imported)
@@ -107,8 +108,10 @@ class FileController : private ControllerContext {
         authorization(authorization),
         views(views),
         peer_controller(peer_controller),
+        file_services({{"tenantId", tenant}, {"sessionId", id}}),
         library(context, authorization, views, *this) {}
   Result<void> Initialize() { return library.Initialize(); }
+  Result<void> PrepareCheckpoint() { return library.PrepareCheckpoint(); }
   void Start();
   void Stop();
   void Bind(uint64_t peer, const std::string& connection = {});

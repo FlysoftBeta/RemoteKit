@@ -52,7 +52,7 @@ export async function seedUser(database, username, password) {
   const script = `
     import { ControlDatabase } from './control/server/persistence/database.ts';
     import { registerUser } from './control/test/server-fixture.ts';
-    const store = new ControlDatabase(process.env.E2E_DATABASE);
+    const store = new ControlDatabase(process.env.E2E_DATABASE, { buildId: 'dev' });
     try { await registerUser(store, process.env.E2E_USERNAME, process.env.E2E_PASSWORD); }
     finally { store.db.close(); }
   `;

@@ -42,8 +42,8 @@ Result<void> Check(HRESULT result, const char* error = "invalid-photo") {
   if (FAILED(result)) {
     if (result == WINCODEC_ERR_BADIMAGE || result == WINCODEC_ERR_BADHEADER ||
         result == WINCODEC_ERR_UNKNOWNIMAGEFORMAT || result == WINCODEC_ERR_COMPONENTNOTFOUND)
-      return Error{ErrorCode::kRejected, error};
-    return Error{ErrorCode::kUnavailable, error};
+      return WithOsError(ErrorCode::kRejected, error, OsError::Kind::kHresult, result);
+    return WithOsError(ErrorCode::kUnavailable, error, OsError::Kind::kHresult, result);
   }
 
   return {};

@@ -186,7 +186,7 @@ Bytes Http::Get(const std::string& url, uint64_t limit) const {
 }
 void Http::LogFailure(const Error& error) const {
   if (log_)
-    log_->Line(error.message);
+    log_->Event(LogLevel::kWarn, "release.http_failed", LogErrorFields(error));
 }
 void Http::Download(const std::string& url, const fs::path& partial, uint64_t expected) const {
   uint64_t offset = fs::exists(partial) ? fs::file_size(partial) : 0;
@@ -217,9 +217,10 @@ void Http::Download(const std::string& url, const fs::path& partial, uint64_t ex
   file.close();
   Io(!file.fail() && offset == expected, "release slice transfer interrupted");
   if (log_)
-    log_->Line(
-        "slice " + partial.filename().string() + " bytes " + std::to_string(offset) + " rate " +
-        std::to_string(received * 1000 / std::max<ULONGLONG>(1, GetTickCount64() - started)) +
-        " B/s");
+    log_->Event(
+        LogLevel::kInfo, "release.slice_downloaded",
+        {{"file", partial.filename().string()},
+         {"bytes", offset},
+         {"bytesPerSecond", received * 1000 / std::max<ULONGLONG>(1, GetTickCount64() - started)}});
 }
 }  // namespace remotekit::release

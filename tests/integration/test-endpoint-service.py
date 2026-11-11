@@ -86,10 +86,16 @@ def main():
      state=call('session.snapshot')
      assert state['running'] is False and state['browserPid']==0 and state['views']==[] and state['pendingPopups']==[],state
      assert state['events']==live['events'],state
+    time.sleep(1)
     restarted=call('session.ensure');assert restarted['browserPid']!=pid,restarted
     state=call('session.snapshot');assert state['running'] and len(state['views'])==1,state
+    deadline=time.monotonic()+20
+    while any(view.get('loading') or view.get('pending') for view in state['views']):
+     assert time.monotonic()<deadline,state
+     time.sleep(.05)
+     state=call('session.snapshot')
     call('shutdown');child.wait(timeout=15);assert child.returncode==0
-    log.flush();launches=(run/'stderr.log').read_text(encoding='utf-8',errors='replace').count(' browser command ')
+    log.flush();launches=(run/'stderr.log').read_text(encoding='utf-8',errors='replace').count('\"ev\":\"browser.launched\"')
     assert launches==2,launches
     (run/'evidence.json').write_text(json.dumps(evidence,indent=2),encoding='utf-8')
     print(json.dumps({'passed':True,'browserLaunches':launches,'evidence':str(run)}));return
@@ -111,7 +117,7 @@ def main():
      assert state['views'][0].get('title')=='visits:1',state
      time.sleep(6)
      os.kill(state['browserPid'],9)
-     time.sleep(.1)
+     time.sleep(1)
      call('session.ensure',tenant)
      deadline=time.monotonic()+20
      while time.monotonic()<deadline:

@@ -1,3 +1,5 @@
+import { log, reportError } from '../log';
+import { findError } from '../diagnostics/error-search';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -9,12 +11,10 @@ import type { NodeRegistry } from '../cluster/node-link';
 import type { ViewerAuthority } from '../viewers/viewer-hub';
 import { learningMethods } from '../learning/service';
 
-const viewerLog = (event: string, fields: Record<string, unknown>) =>
-  console.warn(`${new Date().toISOString()} [viewer] ${event}`, fields);
-
 type DiagnosticAuthority = { sessions?: DiagnosticSessions; identity: string; allowed: () => boolean };
 type RequestContext = {
   host?: string;
+  logs?: { directory?: string; nodes: Pick<NodeRegistry, 'all'> };
   services: DomainServices;
   authority: ViewerAuthority;
   diagnostics?: DiagnosticAuthority;
@@ -142,6 +142,11 @@ Object.assign(handlers, {
       storage = services.objects.usage(),
       release = services.endpoint.nodes.options.release?.descriptor;
     return {
+      integrity: {
+        checkedAt: services.store.integrity.checkedAt,
+        problemCount: services.store.integrity.problems.length,
+        problems: services.store.integrity.problems.slice(0, 20),
+      },
       buildId: services.endpoint.nodes.options.buildId,
       release: release ? { buildId: release.buildId, size: release.size } : null,
       nodes: {
@@ -201,6 +206,9 @@ Object.assign(handlers, {
   'admin.nodes': admin(({ services }) => services.nodeAdmin.list()),
   'admin.removeNode': admin(({ services }, params) => services.nodeAdmin.remove(nodeId(params))),
   'admin.readdNode': admin(({ services }, params) => services.nodeAdmin.readd(nodeId(params))),
+  'admin.findError': admin((ctx, params) =>
+    findError(params.errorId, ctx.logs?.directory, ctx.logs?.nodes ?? { all: () => [] }),
+  ),
   'admin.diagnostics': admin((ctx) => archives(ctx).archives(tenants(ctx))),
   'admin.deleteDiagnostic': admin(async (ctx, params) => {
     await archives(ctx).deleteArchive(params.id);
@@ -270,6 +278,7 @@ export async function dispatchViewerRequest(
   params: any,
   diagnostics?: DiagnosticAuthority,
   host?: string,
+  logs?: RequestContext['logs'],
 ): Promise<any> {
   services.viewers.assertViewer(authority.tenantId, authority.leaseId);
   if (!params || typeof params !== 'object' || Array.isArray(params))
@@ -279,7 +288,7 @@ export async function dispatchViewerRequest(
   const handler = Object.prototype.hasOwnProperty.call(handlers, method) ? handlers[method] : undefined;
   if (!handler) throw new RemoteKitError('invalid_request', '未知 WebSocket 方法');
   try {
-    return await handler({ services, authority, diagnostics, host }, params);
+    return await handler({ services, authority, diagnostics, host, logs }, params);
   } catch (error) {
     throw toRemoteKitError(error);
   }
@@ -288,7 +297,7 @@ export async function dispatchViewerRequest(
 export function attachViewerSocket(
   control: DomainServices,
   server: Server,
-  options: { nodes?: NodeRegistry },
+  options: { nodes?: NodeRegistry; logDir?: string },
   helpers: {
     diagnosticSessions?: DiagnosticSessions;
     firstViewer: Map<string, number>;
@@ -318,7 +327,7 @@ export function attachViewerSocket(
     if (ws.readyState === WebSocket.OPEN) {
       if (ws.bufferedAmount > 2 * 1024 * 1024) {
         const peer = peers.get(ws);
-        viewerLog('terminate: send buffer full', {
+        log.warn('viewer.send_buffer_full', {
           tenant: peer?.tenant,
           lease: peer?.lease,
           bufferedAmount: ws.bufferedAmount,
@@ -385,7 +394,7 @@ export function attachViewerSocket(
           ),
         );
         void ready.catch((error) => {
-          viewerLog('attach failed; closing 1011', { tenant: peer.tenant, lease, error });
+          log.warn('viewer.attach_failed', { tenant: peer.tenant, lease, err: error });
           ws.close(1011, 'Viewer unavailable');
         });
         ws.on('pong', () => {
@@ -394,7 +403,10 @@ export function attachViewerSocket(
         ws.on('error', () => {});
         ws.on('close', () => {
           diagnosticSessions?.detachViewer(peer.tenant, lease, 'disconnected');
-          if (peers.delete(ws)) void track(control.viewers.detachViewer(peer.tenant, lease)).catch(() => {});
+          if (peers.delete(ws))
+            void track(control.viewers.detachViewer(peer.tenant, lease)).catch((err) =>
+              log.warn('viewer.detach_failed', { tenant: peer.tenant, lease, err }),
+            );
         });
         ws.on('message', (data, binary) => {
           if (isClosing()) return;
@@ -473,6 +485,7 @@ export function attachViewerSocket(
                       control.viewers.productEpoch(peer.tenant, lease) === epoch,
                   },
                   req.headers.host,
+                  { directory: options.logDir, nodes: options.nodes ?? { all: () => [] } },
                 );
                 if (
                   !maintenance &&
@@ -483,12 +496,11 @@ export function attachViewerSocket(
                 send(ws, { type: 'result', id: request.id, result });
               })
               .catch((error) => {
-                const failure = toRemoteKitError(error);
-                if (
-                  failure.code === 'internal' &&
-                  !['clipboard.set', 'library.snippet', 'library.copySnippet'].includes(request.method)
-                )
-                  viewerLog('request failed', { tenant: peer.tenant, lease, method: request.method, error });
+                const failure = reportError(toRemoteKitError(error), 'viewer.request_failed', {
+                  tenant: peer.tenant,
+                  lease,
+                  method: request.method,
+                });
                 send(ws, {
                   type: 'error',
                   id: request.id,
@@ -500,8 +512,8 @@ export function attachViewerSocket(
         });
       });
     } catch (error) {
-      const failure = toRemoteKitError(error);
-      viewerLog('upgrade rejected', {
+      const failure = reportError(toRemoteKitError(error), 'viewer.upgrade_failed', { route: '/api/socket' });
+      log.warn('viewer.upgrade_rejected', {
         url: req.url,
         code: failure.code,
         message: failure.message,
@@ -526,7 +538,7 @@ export function attachViewerSocket(
   const heartbeat = setInterval(() => {
     for (const [ws, peer] of peers) {
       if (!peer.alive || !control.accounts.identity(peer.token)) {
-        viewerLog('terminate: heartbeat', {
+        log.warn('viewer.heartbeat_failed', {
           tenant: peer.tenant,
           lease: peer.lease,
           alive: peer.alive,
@@ -551,7 +563,9 @@ export function attachViewerSocket(
       control.events.off('rtc.signal', signal);
       for (const [ws, peer] of peers) {
         peers.delete(ws);
-        void track(control.viewers.detachViewer(peer.tenant, peer.lease)).catch(() => {});
+        void track(control.viewers.detachViewer(peer.tenant, peer.lease)).catch((err) =>
+          log.warn('viewer.detach_failed', { tenant: peer.tenant, lease: peer.lease, err }),
+        );
         ws.terminate();
       }
       sockets.close();

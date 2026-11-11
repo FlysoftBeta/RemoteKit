@@ -61,7 +61,8 @@ int wmain(int argc, wchar_t** argv) {
     stop_event = nullptr;
     return code;
   } catch (const std::exception& error) {
-    std::cerr << error.what() << '\n';
+    remotekit::LogError(remotekit::LogLevel::kError, "supervisor.failed",
+                        remotekit::Error{remotekit::ErrorCode::kInternal, error.what()});
     return 1;
   }
 }

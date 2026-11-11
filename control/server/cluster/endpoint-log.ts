@@ -1,3 +1,4 @@
+import { log } from '../log';
 import { appendFile, mkdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
@@ -9,13 +10,22 @@ const rotations = 4;
 export class EndpointLog {
   private queue: Promise<void>;
   private size?: number;
+  private failed = false;
 
   constructor(private readonly path: string) {
     this.queue = mkdir(dirname(path), { recursive: true }).then(() => {});
   }
 
   write(bytes: Buffer) {
-    this.queue = this.queue.then(() => this.append(bytes)).catch(() => {});
+    this.queue = this.queue
+      .then(async () => {
+        await this.append(bytes);
+        this.failed = false;
+      })
+      .catch((err) => {
+        if (!this.failed) log.warn('endpoint_log.write_failed', { path: this.path, err });
+        this.failed = true;
+      });
   }
 
   flush() {
@@ -25,7 +35,10 @@ export class EndpointLog {
   private async append(bytes: Buffer) {
     this.size ??= await stat(this.path).then(
       (info) => info.size,
-      () => 0,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return 0;
+        throw error;
+      },
     );
     while (bytes.length) {
       if (this.size >= limit) {

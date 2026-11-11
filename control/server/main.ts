@@ -9,16 +9,18 @@ import { open } from './persistence/database';
 
 import { createApplication, startApplication } from './application';
 import { createHttp } from './http/server';
-import { ProcessLog } from './diagnostics/process-log';
-const processLog = new ProcessLog(4 * 1024 * 1024);
-processLog.install();
+import { configureLog, FileLogSink, log } from './log';
 // Monitor only: Node's default crash on uncaught errors and unhandled rejections stays.
-process.on('uncaughtExceptionMonitor', (error, origin) =>
-  console.error(`${new Date().toISOString()} [process] fatal ${origin} (pid ${process.pid})`, error),
-);
+process.on('uncaughtExceptionMonitor', (err, origin) => {
+  log.error('process.fatal', { origin, pid: process.pid, err });
+  process.stderr.write(
+    `${new Date().toISOString()} [process] fatal ${origin} (pid ${process.pid}) ${err.stack ?? err}\n`,
+  );
+});
 const config = runtimeConfig();
+configureLog(new FileLogSink(config.logDir));
 mkdirSync(dirname(config.dbPath), { recursive: true });
-const database = open(config.dbPath);
+const database = open(config.dbPath, { buildId: config.buildId });
 const nodes = new NodeRegistry({
   nodes: config.nodes,
   key: config.cluster.key,
@@ -39,6 +41,6 @@ const server = createHttp(control, {
   origins: [...config.origins],
   clientDir: config.clientDir,
   diagnosticDir: config.diagnosticDir,
-  processLog,
+  logDir: config.logDir,
 });
 startApplication(config, database, nodes, control, server);

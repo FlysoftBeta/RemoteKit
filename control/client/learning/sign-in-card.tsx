@@ -1,3 +1,4 @@
+import { formatError } from '../util/format-error';
 import { QuizOutlined, SchoolOutlined, VisibilityOffOutlined, VisibilityOutlined } from '@mui/icons-material';
 import { Button, IconButton, InputAdornment, LinearProgress, TextField } from '@mui/material';
 import { useState } from 'react';
@@ -44,7 +45,7 @@ export function SignInCard({
           : { provider: 'xinjiaoyu', windowId },
       );
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : '登录失败');
+      setError(formatError(failure));
     } finally {
       setBusy(false);
     }
@@ -53,7 +54,7 @@ export function SignInCard({
     try {
       await call('learning.signInCancel', { provider });
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : '取消失败');
+      setError(formatError(failure));
     }
   };
   return (

@@ -1,5 +1,5 @@
 import Download from '@mui/icons-material/Download';
-import { Alert, Box, Button, Paper, Typography } from '@mui/material';
+import { Alert, AlertTitle, Box, Button, Paper, Typography } from '@mui/material';
 import { useState } from 'react';
 import type { AdminOverview } from '../../../shared/admin';
 import {
@@ -131,13 +131,41 @@ function SessionImportPanel({
 }
 
 export function AdminOverviewSection({ online, call }: { online: boolean; call: AdminCall }) {
-  const { data, error } = useAdminResource(online, () => call('admin.overview', {}));
+  const { data, error } = useAdminResource<AdminOverview>(online, () => call('admin.overview', {}));
   return (
     <Box className="admin-section">
       <SectionHeader title="概览" detail="集群、用户与存储的当前状态" />
       <LoadState error={error} loading={!data} />
       {data && (
         <>
+          {data.integrity.problemCount > 0 && (
+            <Alert severity="error">
+              <AlertTitle>数据完整性问题（{data.integrity.problemCount}）</AlertTitle>
+              <Box
+                component="pre"
+                sx={{
+                  fontFamily: 'monospace',
+                  fontSize: '0.75rem',
+                  whiteSpace: 'pre-wrap',
+                  overflowWrap: 'anywhere',
+                  m: 0,
+                }}
+              >
+                {data.integrity.problems
+                  .slice(0, 20)
+                  .map(
+                    (problem) =>
+                      `${problem.table} · ${problem.key} · ${problem.detail.replace(/[\r\n]+/g, ' ')}`,
+                  )
+                  .join('\n')}
+              </Box>
+              {data.integrity.problemCount > 20 && (
+                <Typography variant="caption">
+                  其余 {data.integrity.problemCount - 20} 条见 Control 日志
+                </Typography>
+              )}
+            </Alert>
+          )}
           <Box className="admin-stat-grid">
             <StatTile
               label="节点"

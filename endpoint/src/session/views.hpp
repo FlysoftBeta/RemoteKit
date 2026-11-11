@@ -27,7 +27,9 @@ class ViewController : private ControllerContext {
         registry(registry),
         navigation(navigation),
         diagnostics(diagnostics),
-        downloads(context.store) {}
+        downloads(context.store.Downloads()),
+        view_store(context.store.Views()),
+        recovery_store(context.store.Recovery()) {}
   struct Geometry {
     int width = 16, height = 16;
     float scale = 1;
@@ -104,6 +106,8 @@ class ViewController : private ControllerContext {
   NavigationRecovery& navigation;
   Diagnostics& diagnostics;
   DownloadImports downloads;
+  ViewStore view_store;
+  RecoveryStore recovery_store;
   bool download_reconciliation_failed = false;
   std::map<std::string, Json> desired;
   mutable std::mutex chooser_mutex;
@@ -112,7 +116,6 @@ class ViewController : private ControllerContext {
   float atlas_scale = 1;
   Json site_preferences = Json::object();
   Json durable_events = Json::array();
-  uint64_t next_event = 1;
   Json sign_in_acknowledged = Json::array();
   std::string sign_in_incarnation;
   int64_t next_sign_in_poll = 0;

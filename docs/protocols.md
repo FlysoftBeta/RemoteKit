@@ -138,7 +138,8 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 | `session.hibernate` | 优雅关闭 Browser 并生成 checkpoint，回复 manifest id；有阻塞项时 `conflict` |
 | `session.ensure` | 启动/取得 Session，幂等；返回 browserIncarnation 与恢复状态，不等导航 |
 | `session.snapshot` | 只读：views、stats、pendingPopups、未确认事件、导航操作；不启动 Browser；`outputDiagnostics:true` 附输出状态 |
-| `session.logs.read` | 诊断用原始日志窗口：`{log: browser \| endpoint \| endpoint.1, end?, maxBytes ≤ 512 KiB}` → `{exists, size, start, end, data(base64)}`，读取 `[max(0, end−maxBytes), end)`，`end` 缺省为当前大小；`browser` 是本 Session 的 `browser.log`，`endpoint` 是节点的 `logs/endpoint.log` |
+| `session.logs.read` | 诊断用原始日志窗口：`{log: browser \| endpoint \| endpoint.1, end?, maxBytes ≤ 512 KiB}` → `{exists, size, start, end, data(base64)}`，读取 `[max(0, end−maxBytes), end)`，`end` 缺省为当前大小；`browser` 是节点 `logs/browser/<sessionId>.log`，`endpoint` 是节点的 `logs/endpoint.log`，`crashes`/`dump/<name>` 来自节点 `logs/crashes/<sessionId>/` |
+| `node.logs.search` | 节点级（不属于任何 Session）：`{errorId}` → `{lines}`，在 `logs/endpoint.log` 与 `.1`–`.4` 中找顶层或 `err.errorId` 等于该 ID 的 JSON 行，最多 50 行，按时间从旧到新 |
 | `session.sitePreferences` | 完整 origin→UA、持久权限决定和协议处理器规则表 |
 | `session.mediaPolicy` | `{degradationPreference, maxFps, audio}`；`audio` 为 false 时音频发送器停用、PCM 不进编码器 |
 | `session.events.ack` | 确认已处理的自然关闭、下载导入与登录视图事件 |

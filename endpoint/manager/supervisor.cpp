@@ -56,7 +56,7 @@ std::unique_ptr<updater::ChildProcess> StartControl(const fs::path& root,
       version / L"bin/node.exe", updater::Quote((version / L"control/dist/server.mjs").wstring()),
       root, control_log, true,
       L"REMOTEKIT_CONTROL_CONFIG=" + (root / L"config/control.json").wstring());
-  manager_log.Line("started Control " + id);
+  manager_log.Event(LogLevel::kInfo, "control.started", {{"buildId", id}});
   return child;
 }
 }  // namespace
@@ -100,6 +100,7 @@ std::string Current(const fs::path& root) {
 void Cleanup(const fs::path& root, const std::string& current) {
   std::error_code ec;
   fs::remove(root / L"remotekit_control.exe.old", ec);
+  fs::remove(root / L"remotekit_control.exe.new", ec);
   if (fs::exists(root / L"versions"))
     for (auto& entry : fs::directory_iterator(root / L"versions"))
       if (entry.path().filename().string() != current)
@@ -113,7 +114,7 @@ void Cleanup(const fs::path& root, const std::string& current) {
 }
 int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
   auto lock = Lock(root, stop, 30000);
-  updater::Log log(root / L"logs/manager.log"), control_log(root / L"logs/control.log");
+  updater::Log log(root / L"logs/manager.log"), control_log(root / L"logs/control.stdout.log");
   auto config = LoadConfig(root);
   auto key = LoadKey(root / L"config/release.key");
   auto id = Current(root);
@@ -131,7 +132,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
     if (child) {
       child->Stop(60000);
       child.reset();
-      log.Line("stopped Control");
+      log.Event(LogLevel::kInfo, "control.stopped");
     }
   };
   try {
@@ -140,7 +141,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
       if (worker.joinable() && done.load()) {
         worker.join();
         if (error) {
-          log.Line(error->message);
+          log.Event(LogLevel::kWarn, "manager.update_failed", LogErrorFields(*error));
           auto delay = RetryDelay(*error, attempt++);
           check_at = now + (delay ? delay->count() : config.interval);
         } else {
@@ -158,7 +159,8 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
                 root / L"versions" / id / L"bin/remotekit_control.exe", root,
                 L"run --root=" + updater::Quote(root.wstring()), service, log);
             if (!replaced)
-              log.Line(replaced.error().message);
+              log.Event(LogLevel::kError, "manager.replacement_failed",
+                        LogErrorFields(replaced.error()));
             else if (replaced.value()) {
               SecureZeroMemory(key.data(), key.size());
               return service ? 1 : 0;
@@ -169,7 +171,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
         }
       }
       if (child && WaitForSingleObject(child->handle(), 0) == WAIT_OBJECT_0) {
-        log.Line("Control exit " + std::to_string(child->ExitCode()));
+        log.Event(LogLevel::kWarn, "control.exited", {{"exitCode", child->ExitCode()}});
         child.reset();
         if (now - started >= 60000)
           backoff = 1;
@@ -181,7 +183,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
           child = StartControl(root, id, log, control_log);
           started = GetTickCount64();
         } catch (const std::exception&) {
-          log.Line("cannot start Control");
+          log.Event(LogLevel::kError, "control.start_failed");
           restart_at = now + backoff * 1000;
           backoff = std::min(30u, backoff * 2);
         }
@@ -223,7 +225,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
   if (worker.joinable())
     worker.join();
   SecureZeroMemory(key.data(), key.size());
-  log.Line("manager stopped");
+  log.Event(LogLevel::kInfo, "manager.stopped");
   return 0;
 }
 int Supervise(const fs::path& root, HANDLE stop, bool service) {
@@ -231,11 +233,11 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
   try {
     return SuperviseLoop(root, stop, service);
   } catch (const Failure& failure) {
-    log.Line(failure.error.message);
+    log.Event(LogLevel::kError, "manager.failed", LogErrorFields(failure.error));
   } catch (const fs::filesystem_error&) {
-    log.Line("manager filesystem operation failed");
+    log.Event(LogLevel::kError, "manager.filesystem_failed");
   } catch (...) {
-    log.Line("manager failed");
+    log.Event(LogLevel::kError, "manager.failed");
   }
   return 1;
 }

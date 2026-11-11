@@ -1,3 +1,4 @@
+#include "session_db_fixture.hpp"
 #include "runtime_config_fixture.hpp"
 #include "diagnostics/node_metrics.hpp"
 #include "persistence/checkpoint.hpp"
@@ -120,7 +121,9 @@ void RoundTrip(const fs::path& root) {
   Take(target.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
   media::Sdk sdk;
-  Session first(sdk, options, "tenant", session, 1, cluster::Key{}, source_link, source);
+  media::FrameAdmission first_admission;
+  Session first(sdk, options, "tenant", session, 1, cluster::Key{}, source_link, source,
+                first_admission);
   Take(first.Initialize());
   Write(directory / "small", "persistent");
   Write(directory / "large", std::string(2 * 1024 * 1024 + 13, 'x'));
@@ -131,7 +134,6 @@ void RoundTrip(const fs::path& root) {
   Write(directory / "profile/Cookies-wal", "keep wal");
   Write(directory / "profile/Cookies-journal", "keep journal");
   Write(directory / "profile/Cache/value", "omit");
-  Write(directory / "browser.log", "omit");
   fs::create_directories(directory / "empty-directory");
   const auto checkpoint = Take(first.Hibernate(source));
   Check(source_link.committed.size() == checkpoint["objects"].size(), "all objects committed");
@@ -158,8 +160,7 @@ void RoundTrip(const fs::path& root) {
   Take(Checkpoints(source).Restore(directory, "tenant", manifest));
   for (const auto& [path, bytes] : expected)
     Check(Read(directory / path) == bytes, "local restored bytes");
-  Check(!fs::exists(directory / "profile/Cache") && !fs::exists(directory / "browser.log") &&
-            fs::is_directory(directory / "empty-directory"),
+  Check(!fs::exists(directory / "profile/Cache") && fs::is_directory(directory / "empty-directory"),
         "exclusions and empty directories");
   objects::PeerServer peer(source.Store(), cluster_key, "source", "dev");
   Take(peer.Start("127.0.0.1:0"));
@@ -232,6 +233,57 @@ void RoundTrip(const fs::path& root) {
         "unavailable warm repair preserves directory");
   Take(Checkpoints(target).Restore(root / "new-session", "tenant", nullptr));
   Check(fs::is_empty(root / "new-session"), "null restore creates new Profile");
+}
+void DraftCheckpoint(const fs::path& root) {
+  const auto data = root / "draft-node";
+  const std::string session_id(32, 'd');
+  const auto directory = data / "sessions" / session_id;
+  Link link;
+  objects::ObjectService objects(data, link, {}, "draft-node", "dev");
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  {
+    SessionDb seed(directory);
+    Take(seed.Open());
+    for (const auto& upload : {std::string(32, 'a'), std::string(32, 'b')}) {
+      Take(seed.Library().Save(LibraryTable::kDrafts, upload,
+                               {{"operation", upload},
+                                {"name", "a"},
+                                {"type", "text/plain"},
+                                {"size", 3},
+                                {"expires", 2000000000},
+                                {"sealed", upload.front() == 'a' ? "" : std::string(64, 'c')}}));
+      Write(directory / "file-library/incoming" / upload, "abc");
+    }
+  }
+  auto config = TestConfig();
+  config["dataPath"] = Utf8(data);
+  const auto options = Take(RuntimeOptions::FromConfig(config, root, "dev", "test"));
+  media::Sdk sdk;
+  media::FrameAdmission admission;
+  Json checkpoint;
+  {
+    Session session(sdk, options, "tenant", session_id, 1, {}, link, objects, admission);
+    Take(session.Initialize());
+    checkpoint = Take(session.Hibernate(objects));
+  }
+  Check(!fs::exists(directory / "file-library/incoming"),
+        "draft payloads discarded at hibernation");
+  const auto restored_data = root / "draft-restored";
+  const auto restored_directory = restored_data / "sessions" / session_id;
+  Take(Checkpoints(objects).Restore(restored_directory, "tenant", checkpoint["manifestId"]));
+  config["dataPath"] = Utf8(restored_data);
+  const auto restored_options = Take(RuntimeOptions::FromConfig(config, root, "dev", "test"));
+  {
+    Session restored(sdk, restored_options, "tenant", session_id, 2, {}, link, objects, admission);
+    Take(restored.Initialize());
+  }
+  SessionDb verify(restored_directory);
+  Take(verify.Open());
+  Check(Take(verify.Library().Load(LibraryTable::kDrafts)).empty(),
+        "draft rows absent after restore");
+  Check(fs::is_empty(restored_directory / "file-library/incoming"),
+        "restored incoming directory is empty");
 }
 void IncrementalEquality(const fs::path& root) {
   const auto directory = root / "incremental";
@@ -377,8 +429,9 @@ void Blockers(const fs::path& root) {
   const auto options = Take(RuntimeOptions::FromConfig(TestConfig(), root, "dev", "test"));
   objects::ObjectService objects(options.data, link, cluster::Key{}, "test", "dev");
   media::Sdk sdk;
+  media::FrameAdmission admission;
   Session session(sdk, options, "tenant", std::string(32, 'b'), 1, cluster::Key{}, link, objects,
-                  nullptr);
+                  admission);
   Take(session.Initialize());
   Take(session.Views().RecordClosed("1", "closed"));
   const auto snapshot = Take(session.Snapshot());
@@ -387,7 +440,7 @@ void Blockers(const fs::path& root) {
   Check(!hibernated && hibernated.error().code == ErrorCode::kConflict, "close event blocks");
   Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
                           {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
-  FileLibrary library(root / "library", objects, "tenant");
+  test::LibraryFixture library(root / "library", objects, "tenant");
   Take(library.Initialize());
   const auto upload = Take(
       library.Begin(7, "sealed-upload", {"asset", "text/plain", 3}, [] { return Result<void>(); }));
@@ -605,6 +658,7 @@ int main(int argc, char** argv) {
                       ("checkpoint-native-" + std::to_string(GetCurrentProcessId()));
     fs::create_directories(root);
     RoundTrip(root);
+    DraftCheckpoint(root);
     IncrementalEquality(root);
     BatchesAndPipeline(root);
     PreStageIdentity(root);

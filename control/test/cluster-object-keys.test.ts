@@ -12,7 +12,7 @@ test('cluster object keys are sealed by the database key and survive reopening',
     mkdtempSync(fileURLToPath(new URL('../../develop/tmp/object-keys-', import.meta.url))),
     'control.db',
   );
-  let store = new ControlDatabase(path);
+  let store = new ControlDatabase(path, { buildId: 'test' });
   let keys;
   try {
     keys = clusterObjectKeys(store);
@@ -27,14 +27,14 @@ test('cluster object keys are sealed by the database key and survive reopening',
   } finally {
     store.db.close();
   }
-  store = new ControlDatabase(path);
+  store = new ControlDatabase(path, { buildId: 'test' });
   try {
     assert.deepEqual(clusterObjectKeys(store), keys);
   } finally {
     store.db.close();
   }
   writeFileSync(path + '.key', randomBytes(32));
-  store = new ControlDatabase(path);
+  store = new ControlDatabase(path, { buildId: 'test' });
   try {
     assert.throws(() => clusterObjectKeys(store));
   } finally {

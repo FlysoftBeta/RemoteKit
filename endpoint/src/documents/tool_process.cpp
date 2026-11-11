@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "documents/tool_process.hpp"
 
 #include <windows.h>
@@ -109,9 +110,11 @@ void LogToolFailure(const std::filesystem::path& executable,
                     std::string_view reason) {
   const auto tool = executable.filename().string();
   const auto tail = StderrTail(log);
-  fprintf(stderr, "document conversion failed tool=%s exit_code=%.*s reason=%.*s stderr_tail=%s\n",
-          tool.c_str(), static_cast<int>(exit_code.size()), exit_code.data(),
-          static_cast<int>(reason.size()), reason.data(), tail.c_str());
+  LogEvent(LogLevel::kWarn, "document.tool_failed",
+           {{"tool", tool},
+            {"exitCode", std::string(exit_code)},
+            {"reason", std::string(reason)},
+            {"stderrTail", tail}});
 }
 
 }  // namespace

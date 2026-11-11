@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "nvenc_encoder.hpp"
 
 #include <nvEncodeAPI.h>
@@ -95,9 +96,9 @@ class Nvenc final : public HardwareEncoder {
     std::lock_guard lock(registry.mutex);
     registry.unavailable = true;
     registry.sessions.push_back(std::move(retired));
-    fprintf(stderr, "NVENC session quarantined until Endpoint exit (%zu/%zu): %s\n",
-            registry.sessions.size(), QuarantineRegistry::kMaximumSessions,
-            terminal_error_.c_str());
+    LogError(LogLevel::kWarn, "nvenc.quarantined", Error{ErrorCode::kInternal, terminal_error_},
+             {{"sessions", registry.sessions.size()},
+              {"maximum", QuarantineRegistry::kMaximumSessions}});
     module_ = nullptr;
     encoder_ = nullptr;
     eos_event_ = nullptr;

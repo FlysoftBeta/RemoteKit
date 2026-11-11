@@ -1,6 +1,7 @@
 #pragma once
 #include "util/error.hpp"
 #include <algorithm>
+#include <filesystem>
 #include <atomic>
 #include <mutex>
 #include <optional>
@@ -28,6 +29,11 @@ Result<void> CheckpointParallel(size_t count, size_t workers, Task task) {
           std::lock_guard lock(mutex);
           if (!failure)
             failure = result.error();
+        } catch (const std::filesystem::filesystem_error& error) {
+          std::lock_guard lock(mutex);
+          if (!failure)
+            failure = WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                                  error.code().value());
         } catch (const std::exception& error) {
           std::lock_guard lock(mutex);
           if (!failure)

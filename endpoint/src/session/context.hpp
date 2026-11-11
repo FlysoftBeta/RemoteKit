@@ -4,7 +4,7 @@
 #include "management/link.hpp"
 #include "media/adapter.hpp"
 #include "media/server_trace.hpp"
-#include "persistence/session_store.hpp"
+#include "persistence/session_db.hpp"
 #include "session/browser.hpp"
 #include "util/thread.hpp"
 #include "objects/service.hpp"
@@ -35,7 +35,7 @@ struct ControllerContext {
   const std::string& id;
   const fs::path& directory;
   BrowserRuntime& browser;
-  SessionStore& store;
+  SessionDb& store;
   ManagementLink& management;
   const std::shared_ptr<media::ServerTrace> trace;
   objects::ObjectService& objects;

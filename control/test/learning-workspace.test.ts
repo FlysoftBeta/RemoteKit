@@ -8,7 +8,7 @@ import { applyCommand } from '../server/workspace/commands';
 
 test('sign-in tabs pass purpose to Endpoint, skip usage, previews, popups and Memory Saver and close with the window', async () => {
   const clock = new TestClock();
-  const store = new ControlDatabase(':memory:', clock);
+  const store = new ControlDatabase(':memory:', { clock, buildId: 'test' });
   const calls: { method: string; args: any }[] = [];
   const views: any[] = [];
   const endpoint = testGateway({
@@ -91,7 +91,7 @@ test('sign-in tabs pass purpose to Endpoint, skip usage, previews, popups and Me
 });
 
 test('Control restart removes interrupted sign-in tabs before any navigation restore', async () => {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const user = await registerUser(store, 'restart-user', 'learning-password123');
   const state = store.workspaces.workspace(user.tenantId);
   state.windows.push({ id: 'questions', appId: 'questions', activeTabId: null, lastActiveAt: 1 });

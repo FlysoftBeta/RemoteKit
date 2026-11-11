@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "rtc/data_router.hpp"
 #include <filesystem>
 #include "input/wire_validation.hpp"
@@ -112,15 +113,17 @@ Result<void> DataRouter::Boundary(const std::function<Result<void>()>& fn) {
   } catch (const InvalidRequest& error) {
     return Error{ErrorCode::kInvalidRequest, error.what()};
   } catch (const Json::exception& error) {
-    fprintf(stderr, "data router invalid request: %s\n", error.what());
+    LogError(LogLevel::kWarn, "dc.invalid_request",
+             Error{ErrorCode::kInvalidRequest, error.what()});
     return Error{ErrorCode::kInternal, "Unexpected DataChannel JSON failure"};
   } catch (const std::filesystem::filesystem_error& error) {
-    return Error{ErrorCode::kUnavailable, error.what()};
+    return WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                       error.code().value());
   } catch (const std::exception& error) {
-    fprintf(stderr, "data router internal: %s\n", error.what());
+    LogError(LogLevel::kWarn, "dc.exception", Error{ErrorCode::kInternal, error.what()});
     return Error{ErrorCode::kInternal, "internal DataChannel error"};
   } catch (...) {
-    fprintf(stderr, "data router internal: unknown exception\n");
+    LogError(LogLevel::kWarn, "dc.exception", Error{ErrorCode::kInternal, "unknown exception"});
     return Error{ErrorCode::kInternal, "internal DataChannel error"};
   }
 }
@@ -179,7 +182,9 @@ void DataRouter::Drain() {
       if (message.error) {
         if (!hooks_.current(event))
           return {};
-        Json reply = {{"type", "error"}, {"error", WireError(*message.error)}};
+        Json reply = {{"type", "error"},
+                      {"error", WireError(*message.error, "dc.request_failed",
+                                          RequestLogFields(event.message, log_fields_))}};
         if (event.message.is_object() &&
             (event.message.value("type", Json()) == "input" ||
              event.message.value("type", Json()) == "editing.dismiss")) {
@@ -200,7 +205,10 @@ void DataRouter::Drain() {
       return {};
     });
     if (!result)
-      hooks_.send({{"type", "error"}, {"error", WireError(result.error())}}, event.authorization);
+      hooks_.send({{"type", "error"},
+                   {"error", WireError(result.error(), "dc.request_failed",
+                                       RequestLogFields(event.message, log_fields_))}},
+                  event.authorization);
   }
 }
 void DataRouter::Dispatch(const Message& message) {

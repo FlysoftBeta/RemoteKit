@@ -1,8 +1,10 @@
+#include "util/log.hpp"
 #include "files/file_upload.hpp"
 #include <algorithm>
 #include <array>
 #include <fstream>
 #include <limits>
+#include <sstream>
 #include "util/result_macros.hpp"
 #include "util/file_io.hpp"
 #include <windows.h>
@@ -85,20 +87,27 @@ Result<std::pair<std::uint64_t, std::uint64_t>> RetainedUsage(const std::filesys
       RK_ASSIGN_OR_RETURN(batches, DirectoryEntries(owner.path()));
       for (const auto& batch : batches) {
         if (++visited > 65536 || !OwnedId(batch.path()) || !PlainDirectory(batch.path()))
-          return Error{ErrorCode::kInvalidRequest, "invalid_upload_batch"};
+          return Error{ErrorCode::kInternal, "invalid_upload_batch", ErrorReason::kCorruptState};
         const auto record = batch.path() / ".reservation";
         RK_ASSIGN_OR_RETURN(size, FileSize(record));
         if (!RegularFile(record) || size > 128)
-          return Error{ErrorCode::kInvalidRequest, "invalid_upload_reservation"};
+          return Error{ErrorCode::kInternal, "invalid_upload_reservation",
+                       ErrorReason::kCorruptState};
         std::string version;
         std::uint64_t declared_bytes{}, declared_files{};
-        std::ifstream input(record);
+        RK_ASSIGN_OR_RETURN(contents, ReadFileIfExists(record));
+        if (!contents)
+          return Error{ErrorCode::kInternal, "missing_upload_reservation",
+                       ErrorReason::kCorruptState};
+        std::istringstream input(*contents);
         if (!(input >> version >> declared_bytes >> declared_files) || version != "v1" ||
             !declared_files)
-          return Error{ErrorCode::kInvalidRequest, "invalid_upload_reservation"};
+          return Error{ErrorCode::kInternal, "invalid_upload_reservation",
+                       ErrorReason::kCorruptState};
         input >> std::ws;
         if (!input.eof())
-          return Error{ErrorCode::kInvalidRequest, "invalid_upload_reservation"};
+          return Error{ErrorCode::kInternal, "invalid_upload_reservation",
+                       ErrorReason::kCorruptState};
         std::uint64_t actual_bytes = 0, actual_files = 0;
         RK_ASSIGN_OR_RETURN(payloads, DirectoryEntries(batch.path()));
         for (const auto& file : payloads) {
@@ -185,7 +194,7 @@ Result<FileUploadStore::Batch> FileUploadStore::Begin(const Binding& binding,
       if (!committed) {
         auto removed = RemoveTree(path);
         if (!removed)
-          fprintf(stderr, "upload rollback: %s\n", removed.error().message.c_str());
+          LogError(LogLevel::kWarn, "upload.rollback_failed", removed.error());
       }
     }
   } cleanup{directory};
@@ -234,7 +243,8 @@ Result<FileUploadStore::Batch> FileUploadStore::Seal(const std::string& id,
       std::error_code rename_error;
       std::filesystem::rename(file.path, sealed, rename_error);
       if (rename_error)
-        return Error{ErrorCode::kUnavailable, "cannot seal upload: " + rename_error.message()};
+        return WithOsError(ErrorCode::kUnavailable, "cannot seal upload: " + rename_error.message(),
+                           OsError::Kind::kWin32, rename_error.value());
       file.path = sealed;
     }
   }
@@ -258,7 +268,7 @@ Result<FileUploadStore::Batch> FileUploadStore::Stage(const Binding& binding,
       if (!committed) {
         auto cancelled = store.Cancel(id);
         if (!cancelled)
-          fprintf(stderr, "upload cancellation: %s\n", cancelled.error().message.c_str());
+          LogError(LogLevel::kWarn, "upload.cancel_failed", cancelled.error());
       }
     }
   } cleanup{*this, id};
@@ -274,7 +284,9 @@ Result<FileUploadStore::Batch> FileUploadStore::Stage(const Binding& binding,
       std::error_code error;
       std::filesystem::create_hard_link(source.path, path, error);
       if (error)
-        return Error{ErrorCode::kUnavailable, "cannot link selection payload: " + error.message()};
+        return WithOsError(ErrorCode::kUnavailable,
+                           "cannot link selection payload: " + error.message(),
+                           OsError::Kind::kWin32, error.value());
     }
     RK_RETURN_IF_ERROR(check());
     RK_ASSIGN_OR_RETURN(sealed, Seal(id, binding));

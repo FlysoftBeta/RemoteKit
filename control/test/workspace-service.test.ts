@@ -70,7 +70,7 @@ class Endpoint {
 
 async function fixture() {
   const clock = new TestClock();
-  const store = new ControlDatabase(':memory:', clock);
+  const store = new ControlDatabase(':memory:', { clock, buildId: 'test' });
   const endpoint = new Endpoint();
   const control = createApplication(store, testGateway(endpoint), undefined, clock);
   const user = await registerUser(store, 'workspace-user', 'password123');

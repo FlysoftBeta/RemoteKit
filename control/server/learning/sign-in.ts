@@ -1,3 +1,4 @@
+import { log } from '../log';
 import { randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type { LearningProvider, LearningSocketMethods } from '../../shared/learning';
@@ -51,7 +52,9 @@ export class SignIn {
   }
   private run(job: Promise<unknown>) {
     this.jobs.add(job);
-    void job.catch(() => {}).finally(() => this.jobs.delete(job));
+    void job
+      .catch((err) => log.warn('learning.sign_in_failed', { err }))
+      .finally(() => this.jobs.delete(job));
   }
   start(tenant: string, params: LearningSocketMethods['learning.signIn']['params']) {
     this.tabs.validate(tenant, params.provider, params.windowId);
@@ -209,7 +212,12 @@ export class SignIn {
     this.flows.delete(this.key(flow.tenant, flow.provider));
     clearTimeout(flow.timer);
     delete flow.password;
-    if (flow.tabId) await this.tabs.close(flow.tenant, flow.tabId).catch(() => {});
+    if (flow.tabId)
+      await this.tabs
+        .close(flow.tenant, flow.tabId)
+        .catch((err) =>
+          log.warn('learning.close_tab_failed', { tenant: flow.tenant, tabId: flow.tabId, err }),
+        );
     this.accounts.setState(
       flow.tenant,
       flow.provider,

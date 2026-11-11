@@ -1,4 +1,5 @@
 import { endpointError } from '../endpoint/gateway';
+import { reportError } from '../log';
 import { wireError } from '../../shared/errors';
 import { isLocalTab, type ProductTab, type ProductWorkspace } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
@@ -140,7 +141,12 @@ export class Navigation {
               : {
                   status: 'failed',
                   error: terminal.error
-                    ? wireError(endpointError(terminal.error))
+                    ? wireError(
+                        reportError(endpointError(terminal.error), 'navigation.failed', {
+                          tenant,
+                          operation: terminal.operationId,
+                        }),
+                      )
                     : {
                         code: terminal.state === 'cancelled' ? 'canceled' : 'conflict',
                         message: '导航未完成',
@@ -162,8 +168,9 @@ export class Navigation {
             saved.receipt.browserIncarnation !== snapshot.browserIncarnation)
         )
           continue;
-        const action = JSON.parse(saved.payload);
-        if (!['tab.navigate', 'tab.command'].includes(action.type) || action.tabId !== t.id) continue;
+        const action = saved.action;
+        if ((action.type !== 'tab.navigate' && action.type !== 'tab.command') || action.tabId !== t.id)
+          continue;
         if (!['committed', 'failed'].includes(saved.receipt.status)) {
           settle(
             saved.receipt,
@@ -172,7 +179,12 @@ export class Navigation {
               : {
                   status: 'failed',
                   error: terminal.error
-                    ? wireError(endpointError(terminal.error))
+                    ? wireError(
+                        reportError(endpointError(terminal.error), 'navigation.failed', {
+                          tenant,
+                          operation: terminal.operationId,
+                        }),
+                      )
                     : {
                         code: terminal.state === 'cancelled' ? 'canceled' : 'conflict',
                         message: '导航未完成',

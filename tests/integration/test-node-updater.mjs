@@ -131,6 +131,7 @@ async function prepare(name, sequence, current) {
   );
   await writeFile(path.join(root, 'dummy.json'), JSON.stringify(sequence));
   await writeFile(path.join(root, 'remotekit_node.exe.old'), 'leftover');
+  await writeFile(path.join(root, 'remotekit_node.exe.new'), 'staged');
   if (current) {
     const bin = path.join(root, 'runtime', current, 'bin');
     await mkdir(bin, { recursive: true });
@@ -181,6 +182,7 @@ try {
   assert.deepEqual((await readdir(path.join(root, 'runtime'))).sort(), [ids[1]]);
   assert.deepEqual(await readdir(path.join(root, 'downloads')), []);
   assert.equal(await exists(path.join(root, 'remotekit_node.exe.old')), false);
+  assert.equal(await exists(path.join(root, 'remotekit_node.exe.new')), false);
   const runs = (await readFile(path.join(root, 'dummy-runs.jsonl'), 'utf8'))
     .trim()
     .split('\n')
@@ -201,8 +203,20 @@ try {
   await stop(root, running);
   assert.equal(await readFile(path.join(root, 'dummy-stopped'), 'utf8'), 'stdin EOF');
   const log = await readFile(path.join(root, 'logs/supervisor.log'), 'utf8');
-  assert(log.includes('endpoint exit 3'));
-  assert(log.includes('activated runtime ' + ids[1]));
+  assert(
+    log
+      .split('\n')
+      .filter(Boolean)
+      .map(JSON.parse)
+      .some((record) => record.ev === 'endpoint.exited' && record.exitCode === 3),
+  );
+  assert(
+    log
+      .split('\n')
+      .filter(Boolean)
+      .map(JSON.parse)
+      .some((record) => record.ev === 'runtime.activated' && record.buildId === ids[1]),
+  );
   assert(!log.includes(key.toString('base64')));
   assert((await readFile(path.join(root, 'logs/endpoint.log'), 'utf8')).includes('dummy endpoint step 4'));
   for (const mode of ['equal', 'no-release']) {

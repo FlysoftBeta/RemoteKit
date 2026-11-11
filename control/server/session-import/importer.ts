@@ -1,3 +1,4 @@
+import { log as structuredLog } from '../log';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { generateKeyPairSync } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -91,7 +92,8 @@ export class SessionImporter {
     private readonly config?: SessionImportConfig,
     factory?: MailClientFactory,
     private readonly clock: Clock = systemClock,
-    private readonly log: (message: string) => void = console.error,
+    private readonly log: (message: string) => void = (message) =>
+      structuredLog.warn('session_import.importer_failed', { message }),
     transportFactory?: TransportFactory,
   ) {
     this.outbox = new ImportOutbox(
@@ -523,11 +525,7 @@ export class SessionImporter {
               counts[field].applied += result[field].applied;
               counts[field].rejected += result[field].rejected;
             }
-            this.store.db
-              .prepare(
-                'UPDATE session_imports SET chunk_index=?,apply_counts=?,storage_job=NULL,error_code=NULL,retry_at=NULL WHERE id=?',
-              )
-              .run(index + 1, JSON.stringify(counts), record.id);
+            this.store.sessionImports.saveApplyCounts(record.id, index + 1, counts);
             record.storageJob = undefined;
           } finally {
             timeout.abort();
@@ -608,9 +606,7 @@ export class SessionImporter {
         throw new RemoteKitError('outcome_unknown', 'Import is awaiting recovery');
     };
     check();
-    this.store.db
-      .prepare('UPDATE session_imports SET storage_job=? WHERE id=?')
-      .run(JSON.stringify({ importId }), id);
+    this.store.sessionImports.saveStorageJob(id, { importId });
     let begin = true;
     let recoveryAttempts = 0;
     for (;;) {

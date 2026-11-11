@@ -3,7 +3,8 @@ import zhixue from '../test/fixtures/learning/zhixue.json';
 import rendition from '../test/fixtures/pdfrender-smoke.json';
 import type { BankQuestion, HomeworkDetail, LearningPage } from '../shared/learning';
 import type { LibrarySnapshot } from '../shared/file-library';
-import type { ProductState, SocketMethods } from '../shared/product';
+import type { ProductState } from '../shared/product';
+import type { SocketMethods } from './control/socket-methods';
 
 export const LEARNING_MOCK_MARKER = 'remotekit-learning-dev-fixture';
 const now = new Date(2026, 10, 9, 16).getTime();

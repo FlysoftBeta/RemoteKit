@@ -74,8 +74,8 @@ struct Sdk {
     module = LoadLibraryExW(path.c_str(), nullptr,
                             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!module)
-      return Error{ErrorCode::kUnavailable, "Cannot load SDK runtime beside browser: Windows " +
-                                                std::to_string(GetLastError())};
+      return WithOsError(ErrorCode::kUnavailable, "Cannot load SDK runtime beside browser",
+                         OsError::Kind::kWin32, GetLastError());
 #define RK_LOAD(name)                                                     \
   name = reinterpret_cast<decltype(name)>(GetProcAddress(module, #name)); \
   if (!name)                                                              \

@@ -1,5 +1,6 @@
 #pragma once
 #include "util/error.hpp"
+#include "persistence/session_db.hpp"
 #include "files/file_upload.hpp"
 #include "objects/service.hpp"
 #include "rtc/dc_services.hpp"
@@ -42,8 +43,10 @@ class FileLibrary {
   FileLibrary(std::filesystem::path root,
               objects::ObjectService& objects,
               std::string tenant,
+              LibraryStore store,
               std::shared_ptr<objects::SessionObjects> access = {});
   Result<void> Initialize();
+  Result<void> PrepareCheckpoint();
   Result<ServiceJson> Begin(std::uint64_t grant,
                             const std::string& operation,
                             const FileUploadStore::Spec&,
@@ -68,7 +71,8 @@ class FileLibrary {
   Result<Asset> CreateDerivative(const Render&,
                                  const Check&,
                                  DerivativeFormat = DerivativeFormat::jpeg,
-                                 const std::string& derived_from = {});
+                                 const std::string& derived_from = {},
+                                 const std::string& derivative = {});
   Result<Asset> CachedDerivative(const std::string& source,
                                  DerivativeFormat,
                                  const Render&,
@@ -96,6 +100,7 @@ class FileLibrary {
     std::uint64_t grant{};  // Runtime only. A new grant must explicitly Begin.
   };
   std::filesystem::path root_;
+  mutable LibraryStore store_;
   objects::ObjectService& objects_;
   const std::string tenant_;
   std::shared_ptr<objects::SessionObjects> access_;
@@ -118,6 +123,7 @@ class FileLibrary {
   Result<Asset> Publish(const std::filesystem::path&,
                         Asset,
                         const Check&,
-                        const std::string& derived_from = {});
+                        const std::string& derived_from = {},
+                        const std::string& derivative = {});
 };
 }  // namespace remotekit

@@ -1,7 +1,8 @@
 import { RemoteKitError, parseWireError } from '../../shared/errors';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { request as httpRequest } from './http-request';
-import type { ProductState, RtcServerSignal, SocketMessage, SocketMethods } from '../../shared/product';
+import type { ProductState, RtcServerSignal, SocketMessage } from '../../shared/product';
+import type { SocketMethods } from './socket-methods';
 import type { AuthState } from '../../shared/security';
 import { diagnostics } from '../media/diagnostics';
 import { RequestTracker } from '../util/request-tracker';

@@ -1,3 +1,4 @@
+import { log } from '../log';
 import { RemoteKitError } from '../../shared/errors';
 import type { AdminNode } from '../../shared/admin';
 import type { ControlDatabase } from '../persistence/database';
@@ -63,7 +64,7 @@ export class NodeAdmin {
       this.objects.forgetNode(nodeId);
     });
     node.evict();
-    void this.objects.tick().catch(() => {});
+    void this.objects.tick().catch((err) => log.warn('node.objects_failed', { nodeId, err }));
     return this.list();
   }
   readd(nodeId: string) {

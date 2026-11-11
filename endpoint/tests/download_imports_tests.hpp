@@ -21,7 +21,7 @@ void DownloadImportTests(const fs::path& root,
                 {"mimeType", "text/plain"},
                 {"size", "8"},
                 {"origin", "https://example.test:8443"}};
-  FileLibrary library(directory / "file-library", objects, "tenant");
+  LibraryFixture library(directory / "file-library", objects, "tenant");
   Take(library.Initialize());
   const auto imported = Take(library.ImportDownload(profile, event));
   CHECK(imported.size == 8 && imported.type == "text/plain");
@@ -58,7 +58,8 @@ void DownloadImportTests(const fs::path& root,
   CHECK(library.ImportDownload(profile, event).error().reason == ErrorReason::kFileTooLarge);
   write();
 
-  SessionStore store(directory);
+  SessionDb store(directory);
+  Take(store.Open());
   unsigned imports = 0;
   std::vector<std::string> order;
   const auto import = [&](const Json& download) -> Result<Json> {
@@ -88,7 +89,7 @@ void DownloadImportTests(const fs::path& root,
     return Json{{"ok", true}};
   };
   {
-    DownloadImports downloads(store);
+    DownloadImports downloads(store.Downloads());
     downloads.Initialize();
     downloads.SetImport(import);
     CHECK(!downloads.Observe("incarnation", Json::array({event}), "1", rpc));
@@ -96,7 +97,7 @@ void DownloadImportTests(const fs::path& root,
   }
   fail_remove = false;
   {
-    DownloadImports downloads(store);
+    DownloadImports downloads(store.Downloads());
     downloads.Initialize();
     downloads.SetImport(import);
     CHECK(!downloads.Observe("incarnation", Json::array({event}), "1", rpc));
@@ -105,7 +106,7 @@ void DownloadImportTests(const fs::path& root,
   fail_ack = false;
   std::string endpoint_event;
   {
-    DownloadImports downloads(store);
+    DownloadImports downloads(store.Downloads());
     downloads.Initialize();
     downloads.SetImport(import);
     Take(downloads.Observe("incarnation", Json::array({event}), "1", rpc));
@@ -117,24 +118,26 @@ void DownloadImportTests(const fs::path& root,
     endpoint_event = result.at("eventId");
   }
   {
-    DownloadImports downloads(store);
+    DownloadImports downloads(store.Downloads());
     downloads.Initialize();
     CHECK(downloads.Events().size() == 1);
-    Take(downloads.Acknowledge({endpoint_event}));
+    Take(store.Views().Acknowledge({endpoint_event}));
+    Take(downloads.Initialize());
     CHECK(downloads.Events().empty());
   }
   write();
   control.reject_commit = true;
   control.reject_code = ErrorCode::kLimitExceeded;
   {
-    DownloadImports downloads(store);
+    DownloadImports downloads(store.Downloads());
     downloads.Initialize();
     downloads.SetImport(import);
     Take(downloads.Observe("next-incarnation", Json::array({event}), "1", rpc));
     CHECK(imports == 2 && downloads.Events().at(0).at("type") == "download.failed");
     CHECK(downloads.Events().at(0).at("error").at("code") == "limit_exceeded");
     CHECK(downloads.Pending() == 0 && !fs::exists(target));
-    Take(downloads.Acknowledge({downloads.Events().at(0).at("eventId").get<std::string>()}));
+    Take(store.Views().Acknowledge({downloads.Events().at(0).at("eventId").get<std::string>()}));
+    Take(downloads.Initialize());
   }
   control.reject_commit = false;
   control.reject_code = ErrorCode::kUnavailable;
@@ -145,7 +148,7 @@ void DownloadImportTests(const fs::path& root,
                                                  {mismatch, "internal"},
                                                  {linked, "not_found"}}) {
     write();
-    DownloadImports downloads(store);
+    DownloadImports downloads(store.Downloads());
     downloads.Initialize();
     downloads.SetImport(import);
     Take(downloads.Observe("failure-" + std::to_string(++serial), Json::array({download}), "1",
@@ -154,11 +157,12 @@ void DownloadImportTests(const fs::path& root,
     CHECK(result.at("type") == "download.failed" && result.at("error").at("code") == reason);
     CHECK(result.size() == 5 && !result.contains("fileReference"));
     CHECK(!fs::exists(target) && downloads.Pending() == 0);
-    Take(downloads.Acknowledge({result.at("eventId").get<std::string>()}));
+    Take(store.Views().Acknowledge({result.at("eventId").get<std::string>()}));
+    Take(downloads.Initialize());
   }
   write();
   unsigned attempts = 0, cleanup = 0;
-  DownloadImports retrying(store);
+  DownloadImports retrying(store.Downloads());
   retrying.Initialize();
   retrying.SetImport([&](const Json&) -> Result<Json> {
     if (++attempts == 1)

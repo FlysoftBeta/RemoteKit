@@ -32,13 +32,15 @@ void Log::Write(std::span<const uint8_t> bytes) {
     bytes = bytes.subspan(n);
   }
 }
-void Log::Line(const std::string& message) {
-  SYSTEMTIME time;
-  GetSystemTime(&time);
-  char stamp[64];
-  snprintf(stamp, sizeof(stamp), "%04u-%02u-%02uT%02u:%02u:%02uZ ", time.wYear, time.wMonth,
-           time.wDay, time.wHour, time.wMinute, time.wSecond);
-  auto text = std::string(stamp) + message + "\r\n";
-  Write({reinterpret_cast<const uint8_t*>(text.data()), text.size()});
+void Log::Event(LogLevel level, std::string_view event, Json fields) {
+  const auto line = FormatLogRecord(level, event, std::move(fields));
+  std::lock_guard lock(mutex_);
+  if (fs::exists(path_) && fs::file_size(path_) >= kLimit)
+    Rotate();
+  std::ofstream file(path_, std::ios::binary | std::ios::app);
+  if (!file.write(line.data(), static_cast<std::streamsize>(line.size())))
+    throw std::runtime_error("cannot write log");
+  file.flush();
 }
+
 }  // namespace remotekit::updater

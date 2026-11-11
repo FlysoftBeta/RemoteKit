@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "media/audio.hpp"
 #include "diagnostics/timing.hpp"
 #include "rtc/authorization.hpp"
@@ -84,7 +85,7 @@ void AudioOutput::Stop() {
   if (had_audio && browser.Rpc().Control() && browser.Alive()) {
     auto closed = browser.Rpc().Request({{"method", "audio.close"}});
     if (!closed)
-      fprintf(stderr, "audio close: %s\n", closed.error().message.c_str());
+      LogError(LogLevel::kWarn, "audio.close_failed", closed.error());
   }
   audio_ring.Close();
   state = State::kStopped;

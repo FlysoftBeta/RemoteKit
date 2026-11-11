@@ -1,11 +1,13 @@
-#include "persistence/session_store.hpp"
+#include "persistence/durable_json.hpp"
 #include <windows.h>
-#include <fstream>
+#include <algorithm>
 namespace remotekit {
 namespace {
 Error IoError(const char* operation) {
-  return {ErrorCode::kUnavailable,
-          std::string(operation) + " Windows " + std::to_string(GetLastError())};
+  const auto code = GetLastError();
+  return WithOsError(ErrorCode::kUnavailable,
+                     std::string(operation) + " Windows " + std::to_string(code),
+                     OsError::Kind::kWin32, code);
 }
 }  // namespace
 Result<void> FlushFile(const fs::path& path) {
@@ -26,7 +28,8 @@ Result<void> WriteDurableJson(const fs::path& path,
   std::error_code directory_error;
   fs::create_directories(path.parent_path(), directory_error);
   if (directory_error)
-    return Error{ErrorCode::kUnavailable, "state directory unavailable"};
+    return WithOsError(ErrorCode::kUnavailable, "state directory unavailable",
+                       OsError::Kind::kWin32, directory_error.value());
   auto temporary = path;
   temporary += L".new";
   struct Cleanup {
@@ -36,14 +39,23 @@ Result<void> WriteDurableJson(const fs::path& path,
       fs::remove(path, ignored);
     }
   } cleanup{temporary};
+  const auto bytes = value.dump(2);
   {
-    std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
-    const auto bytes = value.dump(2);
-    file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    file.flush();
-    file.close();
-    if (!file)
-      return Error{ErrorCode::kUnavailable, "state write failed"};
+    const auto file = CreateFileW(temporary.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+      return IoError("state open failed");
+    struct Close {
+      HANDLE file;
+      ~Close() { CloseHandle(file); }
+    } close{file};
+    for (size_t offset = 0; offset < bytes.size();) {
+      const auto count = static_cast<DWORD>(std::min<size_t>(65536, bytes.size() - offset));
+      DWORD written = 0;
+      if (!WriteFile(file, bytes.data() + offset, count, &written, nullptr))
+        return IoError("state write failed");
+      offset += written;
+    }
   }
   auto flushed = FlushFile(temporary);
   if (!flushed)
@@ -57,16 +69,5 @@ Result<void> WriteDurableJson(const fs::path& path,
                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     return IoError("state commit failed");
   return {};
-}
-Json SessionStore::Load(const fs::path& name, Json fallback) const {
-  std::ifstream file(directory_ / name, std::ios::binary);
-  if (!file)
-    return fallback;
-  Json value;
-  file >> value;
-  return value;
-}
-Result<void> SessionStore::Save(const fs::path& name, const Json& value) const {
-  return WriteDurableJson(directory_ / name, value);
 }
 }  // namespace remotekit

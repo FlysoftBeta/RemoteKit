@@ -96,7 +96,8 @@ function report(plan: RecoveryPlan, dryRun: boolean) {
 
 function main() {
   const options = parse(process.argv.slice(2));
-  const database = runtimeConfig(process.env, []).dbPath;
+  const config = runtimeConfig(process.env, []);
+  const database = config.dbPath;
   const now = new Date();
   let source = options.from ?? database;
   if (!existsSync(source)) fail(`${source} 不存在`);
@@ -111,7 +112,7 @@ function main() {
     console.log(`旧库已移到 ${dirname(source)}`);
   }
   mkdirSync(dirname(database), { recursive: true });
-  const store = open(database);
+  const store = open(database, { buildId: config.buildId });
   let failure: Error | undefined;
   try {
     applyRecovery(store, plan);

@@ -1,3 +1,4 @@
+import { formatError } from '../util/format-error';
 import { RemoteKitError } from '../../shared/errors';
 import { retryDelay, errorHandling } from '../../shared/error-policy';
 import type { LearningPage, LearningSocketMethods } from '../../shared/learning';
@@ -59,7 +60,7 @@ export function useQuery<T>(key: string, load: () => Promise<T>, enabled = true)
         active &&
         setState({
           key,
-          error: error instanceof Error ? error.message : '加载失败',
+          error: formatError(error),
           retryable:
             error instanceof RemoteKitError &&
             (retryDelay(error, 0) !== undefined || errorHandling(error.code) === 'reconcile'),

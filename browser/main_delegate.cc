@@ -74,6 +74,11 @@ class ContentClient final : public content::ContentClient {
 };
 class BrowserClient final : public ServicesBrowserClient {
  public:
+  void AppendExtraCommandLineSwitches(base::CommandLine* command, int child_process_id) override {
+    ServicesBrowserClient::AppendExtraCommandLineSwitches(command, child_process_id);
+    constexpr const char* switches[] = {"crash-dir"};
+    command->CopySwitchesFrom(*base::CommandLine::ForCurrentProcess(), switches);
+  }
   std::unique_ptr<media::AudioManager> CreateAudioManager(media::AudioLogFactory* log) override {
     return CreateAudioTarget(log);
   }
@@ -205,8 +210,6 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
       settings.log_file = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(log_handle));
     }
   }
-  if (log_path.empty() && command.HasSwitch("data-path"))
-    log_path = command.GetSwitchValuePath("data-path").AppendASCII("browser.log");
   if (!log_path.empty() && log_path.IsAbsolute() && base::CreateDirectory(log_path.DirName())) {
     settings.logging_dest |= logging::LOG_TO_FILE;
     settings.log_file_path = log_path.value().c_str();

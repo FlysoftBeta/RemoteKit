@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createApplication } from '../server/application';
+import { log } from '../server/log';
 import { ControlDatabase } from '../server/persistence/database';
 import { emptyWorkspace } from '../server/persistence/workspaces';
 import { requestViewer } from './server-fixture';
@@ -26,7 +27,7 @@ function addUser(store: ControlDatabase, id: string) {
 
 test('clipboard repository stores the latest value, empty writes, timestamps and per-user revisions', () => {
   const clock = new TestClock();
-  const store = new ControlDatabase(':memory:', clock);
+  const store = new ControlDatabase(':memory:', { clock, buildId: 'test' });
   try {
     for (const user of ['one', 'two']) addUser(store, user);
     assert.equal(store.clipboards.latest('one'), undefined);
@@ -60,8 +61,8 @@ test('clipboard repository stores the latest value, empty writes, timestamps and
 });
 
 test('clipboard limits count UTF-8 bytes and rejected writes log only sizes', (t) => {
-  const warn = t.mock.method(console, 'warn', () => {});
-  const store = new ControlDatabase(':memory:');
+  const warn = t.mock.method(log, 'warn', () => {});
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   try {
     addUser(store, 'one');
     const value = {
@@ -76,11 +77,11 @@ test('clipboard limits count UTF-8 bytes and rejected writes log only sizes', (t
       warn.mock.calls.map((call) => call.arguments),
       [
         [
-          'Clipboard write exceeds limits',
+          'clipboard.write_exceeds_limits',
           { textBytes: clipboardLimits.text + 2, htmlBytes: clipboardLimits.html },
         ],
         [
-          'Clipboard write exceeds limits',
+          'clipboard.write_exceeds_limits',
           { textBytes: clipboardLimits.text, htmlBytes: clipboardLimits.html + 4 },
         ],
       ],
@@ -91,7 +92,7 @@ test('clipboard limits count UTF-8 bytes and rejected writes log only sizes', (t
 });
 
 function stack() {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   for (const user of ['one', 'two', 'empty']) addUser(store, user);
   const gateway = testGateway({ request: async () => ({}) });
   const requests: { method: string; tenant: string; args: any }[] = [];
@@ -194,7 +195,7 @@ test('clipboard events follow tenant mutation order, isolate revisions and never
 });
 
 test('oversize and failed clipboard events keep content out of logs and preserve the previous value', async (t) => {
-  const warn = t.mock.method(console, 'warn', () => {});
+  const warn = t.mock.method(log, 'warn', () => {});
   const h = stack();
   try {
     h.gateway.placement.resolve('one');
@@ -212,7 +213,7 @@ test('oversize and failed clipboard events keep content out of logs and preserve
     await h.control.tenants.drain();
     const logged = JSON.stringify(warn.mock.calls.map((call) => call.arguments));
     assert.match(logged, /textBytes/);
-    assert.match(logged, /Clipboard write failed/);
+    assert.match(logged, /clipboard.write_failed/);
     assert.doesNotMatch(logged, /private|<b>/);
   } finally {
     await h.close();

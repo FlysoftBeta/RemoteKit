@@ -12,20 +12,18 @@ import {
 } from '@mui/material';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AdminSocketMethods } from '../../../shared/admin';
-import { RemoteKitError } from '../../../shared/errors';
+import type { ErrorSearchMethods } from '../../control/socket-methods';
+export type { ErrorSearchResult } from '../../control/socket-methods';
 import { formatError } from '../../util/format-error';
 
-export type AdminCall = <K extends keyof AdminSocketMethods>(
+type AdminMethods = AdminSocketMethods & ErrorSearchMethods;
+export type AdminCall = <K extends keyof AdminMethods>(
   method: K,
-  params: AdminSocketMethods[K]['params'],
-) => Promise<AdminSocketMethods[K]['result']>;
+  params: AdminMethods[K]['params'],
+) => Promise<AdminMethods[K]['result']>;
 
-// Administrative refusals carry messages written for the administrator.
 export function adminError(error: unknown) {
-  return error instanceof RemoteKitError &&
-    ['invalid_request', 'forbidden', 'not_found', 'conflict'].includes(error.code)
-    ? error.message
-    : formatError(error);
+  return formatError(error);
 }
 
 export function formatBytes(bytes: number) {

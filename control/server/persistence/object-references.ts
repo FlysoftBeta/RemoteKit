@@ -1,3 +1,5 @@
+import { decodeJson } from './codec';
+import { selection } from './documents';
 import type Database from 'better-sqlite3';
 export const OBJECT_GRACE_MS = 2 * 60 * 60 * 1000;
 export function tenantObjects(db: Database.Database, claims = true, now = Date.now()) {
@@ -11,19 +13,20 @@ export function tenantObjects(db: Database.Database, claims = true, now = Date.n
     }
     ids.add(id);
   };
-  for (const row of db.prepare('SELECT tenant,snapshot FROM file_library').all() as {
+  for (const row of db.prepare('SELECT DISTINCT tenant,object_id FROM library_entry_objects').all() as {
     tenant: string;
-    snapshot: string;
+    object_id: string;
   }[])
-    for (const entry of JSON.parse(row.snapshot).entries) {
-      add(row.tenant, entry.assetId);
-      add(row.tenant, entry.originalAssetId);
-      for (const id of entry.photo?.candidateAssetIds ?? []) add(row.tenant, id);
-    }
+    add(row.tenant, row.object_id);
   for (const row of db
-    .prepare('SELECT tenant,manifest FROM file_library_selections WHERE terminal IS NULL')
-    .all() as { tenant: string; manifest: string }[])
-    for (const file of JSON.parse(row.manifest).files) add(row.tenant, file.assetId);
+    .prepare('SELECT tenant,id,manifest FROM file_library_selections WHERE terminal IS NULL')
+    .all() as { tenant: string; id: string; manifest: string }[])
+    for (const file of decodeJson(
+      row.manifest,
+      selection,
+      `file_library_selections.manifest ${row.tenant}/${row.id}`,
+    ).files)
+      add(row.tenant, file.assetId);
   for (const row of db
     .prepare(
       `SELECT o.tenant,o.id FROM checkpoint_objects o WHERE o.manifest_id IN

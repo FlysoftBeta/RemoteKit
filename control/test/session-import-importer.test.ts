@@ -37,7 +37,7 @@ function last<T>(values: T[]): T {
 }
 async function harness(window = 30) {
   const clock = new TestClock();
-  const store = new ControlDatabase(':memory:', clock);
+  const store = new ControlDatabase(':memory:', { clock, buildId: 'test' });
   const user = await registerUser(store, 'import-user', 'import-password');
   store.sessionImports.saveKeys(controlPublic, controlPrivate, controlKeyId);
   const client = new FakeMailClient();
@@ -800,7 +800,7 @@ test('WS methods require the product lease, deployment is admin-only and overvie
   }
 });
 test('disabled importer state and deployment do not expose or generate keys', async () => {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const importer = new SessionImporter(
     store,
     testGateway({

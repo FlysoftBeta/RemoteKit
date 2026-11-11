@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "media/pipeline.hpp"
 #include "diagnostics/stats.hpp"
 #include "diagnostics/timing.hpp"
@@ -23,7 +24,7 @@ void MediaPipeline::MediaLoop() {
         tail->CancelWaiting();
       std::string error;
       if (!owner.output.Slots().Close(error))
-        fprintf(stderr, "media exit render drain: %s\n", error.c_str());
+        LogError(LogLevel::kWarn, "media.render_drain_failed", Error{ErrorCode::kInternal, error});
     }
   } render_exit{*this, tail_attempt};
   remotekit::PresentationRefresh presentation_refresh;
@@ -86,7 +87,7 @@ void MediaPipeline::MediaLoop() {
   while (state == State::kRunning) {
     auto clipboard_result = output.PollClipboard();
     if (!clipboard_result)
-      fprintf(stderr, "clipboard synchronization unavailable\n");
+      LogEvent(LogLevel::kWarn, "clipboard.sync_failed");
     const auto stamp = authorization.Stamp();
     if (stamp != active_authorization) {
       authorization.SetFrame(0);
@@ -105,14 +106,14 @@ void MediaPipeline::MediaLoop() {
               auto output_close_result = output.Close();
               if (!output_close_result) {
                 const Error error = output_close_result.error();
-                fprintf(stderr, "authorization output transition: %s\n", error.message.c_str());
+                LogError(LogLevel::kWarn, "authorization.output_failed", error);
                 return;
               }
             }
             std::string drain_error;
             if (!output.Slots().Close(drain_error)) {
               Error error{ErrorCode::kOutcomeUnknown, drain_error};
-              fprintf(stderr, "authorization output transition: %s\n", error.message.c_str());
+              LogError(LogLevel::kWarn, "authorization.output_failed", error);
               return;
             };
           }
@@ -120,7 +121,7 @@ void MediaPipeline::MediaLoop() {
             auto open_output_result = output.OpenOutput();
             if (!open_output_result) {
               const Error error = open_output_result.error();
-              fprintf(stderr, "authorization output transition: %s\n", error.message.c_str());
+              LogError(LogLevel::kWarn, "authorization.output_failed", error);
               return;
             }
           }
@@ -202,11 +203,10 @@ void MediaPipeline::MediaLoop() {
                   {
                     auto closed = output.Close();
                     if (!closed)
-                      fprintf(stderr, "output close: %s\n", closed.error().message.c_str());
+                      LogError(LogLevel::kWarn, "output.close_failed", closed.error());
                   }
 
-                  fprintf(stderr, "session %s RTC output: %s\n", id.c_str(),
-                          failure.message.c_str());
+                  LogError(LogLevel::kWarn, "rtc.output_failed", failure, {{"sessionId", id}});
                   return;
                 }
               }
@@ -223,22 +223,22 @@ void MediaPipeline::MediaLoop() {
                   {
                     auto closed = output.Close();
                     if (!closed)
-                      fprintf(stderr, "output close: %s\n", closed.error().message.c_str());
+                      LogError(LogLevel::kWarn, "output.close_failed", closed.error());
                   }
 
-                  fprintf(stderr, "session %s RTC output: %s\n", id.c_str(),
-                          failure.message.c_str());
+                  LogError(LogLevel::kWarn, "rtc.output_failed", failure, {{"sessionId", id}});
                   return;
                 }
               }
               std::string drain_error;
               if (!output.Slots().Close(drain_error))
-                fprintf(stderr, "disconnected render drain: %s\n", drain_error.c_str());
+                LogError(LogLevel::kWarn, "media.render_drain_failed",
+                         Error{ErrorCode::kInternal, drain_error});
             }
           }
         }
       } else if (event.type == REMOTEKIT_RTC_ERROR)
-        fprintf(stderr, "RTC %s: %s\n", id.c_str(), event.bytes.c_str());
+        LogEvent(LogLevel::kDebug, "rtc.event", {{"sessionId", id}, {"detail", event.bytes}});
     }
     if (!peer_controller.Connected() || !authorization.Current(active_authorization)) {
       std::unique_lock lock(event_mutex);
@@ -269,8 +269,7 @@ void MediaPipeline::MediaLoop() {
           auto output_close_result_3 = output.Close();
           if (!output_close_result_3) {
             const Error close_error = output_close_result_3.error();
-            fprintf(stderr, "session %s fatal output stop: %s\n", id.c_str(),
-                    close_error.message.c_str());
+            LogError(LogLevel::kWarn, "output.stop_failed", close_error, {{"sessionId", id}});
           }
         }
       }
@@ -278,7 +277,8 @@ void MediaPipeline::MediaLoop() {
       {
         registry.SetError(error);
       }
-      fprintf(stderr, "session %s media: %s\n", id.c_str(), error.c_str());
+      LogError(LogLevel::kWarn, "media.failed", Error{ErrorCode::kInternal, error},
+               {{"sessionId", id}});
       break;
     }
     if (output.Suspended()) {
@@ -394,13 +394,14 @@ void MediaPipeline::MediaLoop() {
             registry.SetError(failure);
           }
           presentation.InvalidateLayout("codec-capability-error");
-          fprintf(stderr, "session %s media: %s\n", id.c_str(), failure.c_str());
+          LogError(LogLevel::kWarn, "media.failed", Error{ErrorCode::kInternal, failure},
+                   {{"sessionId", id}});
           {
             {
               auto output_close_result_4 = output.Close();
               if (!output_close_result_4) {
                 const Error close_error = output_close_result_4.error();
-                fprintf(stderr, "codec failure output stop: %s\n", close_error.message.c_str());
+                LogError(LogLevel::kWarn, "output.stop_failed", close_error);
               }
             }
           }

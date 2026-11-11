@@ -24,7 +24,7 @@ const page = <T>(items: T[]) => ({
   accessibleTotal: items.length,
 });
 function fixture() {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   let now = Date.now();
   const accounts = new LearningAccounts(store, () => {}, undefined, undefined, Buffer.alloc(32));
   accounts.save(

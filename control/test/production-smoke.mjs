@@ -68,18 +68,29 @@ child.stderr.on('data', (data) => {
   output += data;
 });
 try {
+  child.stdout.on('data', (data) => {
+    output += data;
+  });
+  // Control announces its listener in its own log file (storage.logs defaults to
+  // `logs` next to the config file), not on stdout.
+  const logPath = resolve(scratch, 'logs/control.jsonl');
   const port = await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(`Production startup timeout: ${output}`)), 5000);
-    child.stdout.on('data', (data) => {
-      output += data;
-      const match = output.match(/RemoteKit Control http:\/\/127\.0\.0\.1:(\d+)/);
+    const timeout = setTimeout(() => {
+      clearInterval(poll);
+      reject(new Error(`Production startup timeout: ${output}`));
+    }, 5000);
+    const poll = setInterval(async () => {
+      const text = await readFile(logPath, 'utf8').catch(() => '');
+      const match = text.match(/"ev":"control\.started".*"listen":"http:\/\/127\.0\.0\.1:(\d+)"/);
       if (match && Number(match[1])) {
         clearTimeout(timeout);
+        clearInterval(poll);
         resolve(Number(match[1]));
       }
-    });
+    }, 50);
     child.once('exit', (code) => {
       clearTimeout(timeout);
+      clearInterval(poll);
       reject(new Error(`Production exited ${code}: ${output}`));
     });
   });

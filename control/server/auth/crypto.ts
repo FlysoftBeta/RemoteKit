@@ -1,4 +1,12 @@
-import { createCipheriv, createDecipheriv, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
+import { openFaceTemplate, sealFaceTemplate } from '../persistence/sealed-documents';
+import {
+  createCipheriv,
+  createDecipheriv,
+  hkdfSync,
+  randomBytes,
+  scrypt,
+  timingSafeEqual,
+} from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { RemoteKitError } from '../../shared/errors';
 import { DEFAULT_IDLE_SECONDS, type AuthSettings } from '../../shared/security';
@@ -65,15 +73,6 @@ export class AuthAttempts {
   }
 }
 
-export function validFaceTemplate(value: unknown): value is number[] {
-  return (
-    Array.isArray(value) &&
-    value.length === 128 &&
-    value.every((n) => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) <= 1) &&
-    Math.abs(value.reduce((sum, n) => sum + n * n, 0) - 1) <= 0.01
-  );
-}
-
 export class AtRestKey {
   private key?: Buffer;
   // A null path keeps an ephemeral key, for in-memory databases.
@@ -101,6 +100,9 @@ export class AtRestKey {
     }
     return this.key;
   }
+  derive(info: string): Buffer {
+    return Buffer.from(hkdfSync('sha256', this.loadKey(false), Buffer.alloc(0), info, 32));
+  }
   seal(aad: string, plaintext: Buffer): string {
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.loadKey(true), iv);
@@ -120,16 +122,9 @@ export class AtRestKey {
 export class FaceVault {
   constructor(private readonly key: AtRestKey) {}
   seal(user: string, template: number[], modelVersion: string) {
-    if (!validFaceTemplate(template))
-      throw new RemoteKitError('invalid_request', '人脸模板格式无效', { detail: 'Invalid face template' });
-    return this.key.seal(JSON.stringify([user, modelVersion]), Buffer.from(JSON.stringify(template)));
+    return sealFaceTemplate(this.key, user, template, modelVersion);
   }
   open(user: string, sealed: string, modelVersion: string): number[] {
-    const template: unknown = JSON.parse(
-      this.key.open(JSON.stringify([user, modelVersion]), sealed).toString(),
-    );
-    if (!validFaceTemplate(template))
-      throw new RemoteKitError('invalid_request', '人脸模板格式无效', { detail: 'Invalid face template' });
-    return template;
+    return openFaceTemplate(this.key, user, sealed, modelVersion);
   }
 }

@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "rtc/channel.hpp"
 #include "auth/face.hpp"
 #include "util/wire_error.hpp"
@@ -38,7 +39,7 @@ void ChannelController::HandlePeerEvent(const RtcEvent& event) {
   if (event.type == REMOTEKIT_RTC_DATA) {
     auto routed = data_router.Receive(event);
     if (!routed)
-      fprintf(stderr, "DataChannel receive: %s\n", routed.error().message.c_str());
+      LogError(LogLevel::kWarn, "dc.receive_failed", routed.error());
     return;
   }
   if (event.type == REMOTEKIT_RTC_DATA_STATE) {
@@ -52,7 +53,7 @@ void ChannelController::HandlePeerEvent(const RtcEvent& event) {
   } else if (event.type == REMOTEKIT_RTC_STATE || event.type == REMOTEKIT_RTC_REFRESH_REQUEST) {
     pipeline.Queue(event);
   } else if (event.type == REMOTEKIT_RTC_ERROR) {
-    fprintf(stderr, "RTC %s: %s\n", id.c_str(), event.bytes.c_str());
+    LogEvent(LogLevel::kDebug, "rtc.event", {{"sessionId", id}, {"detail", event.bytes}});
   }
 }
 
@@ -320,7 +321,7 @@ void ChannelController::CloseMenus() {
                                          {"session", BrowserRuntime::kSessionId},
                                          {"event", {{"type", "menus.close"}}}});
   if (!response)
-    fprintf(stderr, "menu cleanup: %s\n", response.error().message.c_str());
+    LogError(LogLevel::kWarn, "menu.cleanup_failed", response.error());
 }
 void ChannelController::Clear() {
   CloseMenus();

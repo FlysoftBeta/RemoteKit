@@ -1,3 +1,4 @@
+import { log as structuredLog } from '../log';
 import { mailError } from './mail-error';
 import { retryDelay } from '../../shared/error-policy';
 import { ImapFlow } from 'imapflow';
@@ -83,7 +84,8 @@ export class ImportMailbox {
     private readonly receive: (batch: Buffer[]) => Promise<MailDecision[]>,
     private readonly cursor: MailCursorStore,
     private readonly factory: MailClientFactory = createMailClient,
-    private readonly log: (message: string) => void = console.error,
+    private readonly log: (message: string) => void = (message) =>
+      structuredLog.warn('session_import.mailbox_failed', { message }),
     private readonly outboxStatus: () => MailboxStatus['outbox'] = () => ({
       pending: 0,
       lastErrorAt: null,

@@ -1,3 +1,4 @@
+import { log } from '../log';
 import type { ObjectIndex } from '../cluster/objects';
 import { createHash, randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
@@ -257,7 +258,7 @@ export class FileLibrary {
       );
       if (this.repository.operation(tenant, operationId, payload)) return;
       if (event.type === 'download.failed') {
-        console.warn('Page download failed', {
+        log.warn('library.download_failed', {
           tenant,
           name: event.name,
           origin: event.origin,
@@ -294,7 +295,7 @@ export class FileLibrary {
       this.repository.change(tenant, operationId, payload, (snapshot) => {
         if (sourceExcluded(snapshot, source)) return;
         if (snapshot.entries.length >= MAX_CATALOG) {
-          console.warn('Page download omitted: file catalog full', { tenant, assetId, name });
+          log.warn('library.download_omitted_catalog_full', { tenant, assetId, name });
           return;
         }
         this.objects.require(tenant, assetId);

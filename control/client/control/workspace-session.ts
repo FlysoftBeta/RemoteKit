@@ -1,4 +1,5 @@
-import type { ProductState, SocketMethods } from '../../shared/product';
+import type { ProductState } from '../../shared/product';
+import type { SocketMethods } from './socket-methods';
 import type { AuthState } from '../../shared/security';
 import type { AuthorizationScope } from '../auth/authorization-scope';
 import { formatError } from '../util/format-error';

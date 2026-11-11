@@ -1,3 +1,5 @@
+import { log } from './log';
+import { toRemoteKitError } from '../shared/errors';
 import { constants, fstatSync } from 'node:fs';
 import { Announcements } from './admin/announcements';
 import { UserAdmin } from './admin/users';
@@ -139,7 +141,7 @@ export function createApplication(
         services.pageRequests.authorizeFiles(tenant);
         void context.tenants
           .serial(tenant, () => services.reconciler.reconcileProduct(tenant))
-          .catch(() => {});
+          .catch((err) => log.warn('security.reconcile_failed', { tenant, err }));
       }
     },
     (tenant, viewer) => services.viewers.validSecurity(tenant, viewer),
@@ -155,16 +157,22 @@ export function createApplication(
           if (!viewer.locked) services.pageRequests.authorizeFiles(tenant);
           if (viewer.locked) await services.reconciler.reconcileProduct(tenant);
         })
-        .catch(() => {});
+        .catch((err) => log.warn('security.reconcile_failed', { tenant, err }));
     },
     clock,
   );
   const unsubscribeActions = endpoint.onClientAction?.((event) => {
-    void services.operations.handleEndpointAction(event).catch(() => {});
+    void services.operations
+      .handleEndpointAction(event)
+      .catch((err) => log.warn('operation.handle_failed', { tenant: event.tenantId, err }));
   });
   const unsubscribeSignals = endpoint.onSignal?.((event) => services.rtc.receiveSignal(event));
   const unsubscribeClipboard = endpoint.onClipboardChanged((event) => {
-    void services.clipboard.changed(event).catch(() => console.warn('Clipboard write failed'));
+    void services.clipboard
+      .changed(event)
+      .catch((err) =>
+        log.warn('clipboard.write_failed', { tenant: event.tenantId, code: toRemoteKitError(err).code }),
+      );
   });
   services.close = async () => {
     context.closed = true;
@@ -197,7 +205,7 @@ export function startApplication(
       () => background.delete(work),
       (error) => {
         background.delete(work);
-        console.error(error);
+        log.error('background.run_failed', { err: error });
       },
     );
   }
@@ -221,9 +229,11 @@ export function startApplication(
     control.sessionImporter.start();
     control.learning.start();
     const address = server.address();
-    console.log(
-      `RemoteKit Control ${config.tls ? 'https' : 'http'}://${config.host}:${typeof address === 'object' ? address?.port : config.port}`,
-    );
+    log.info('control.started', {
+      buildId: config.buildId,
+      pid: process.pid,
+      listen: `${config.tls ? 'https' : 'http'}://${config.host}:${typeof address === 'object' ? address?.port : config.port}`,
+    });
   });
   let closePromise: Promise<void> | undefined;
   function close(): Promise<void> {

@@ -22,6 +22,7 @@ class PeerController {
     std::function<int(uint64_t, const remotekit_rtc_frame*, int)> encode;
     std::function<void(uint64_t, uint32_t, uint32_t)> rates;
     std::function<void(uint64_t)> keyframe, destroy_encoder;
+    Json log_fields = Json::object();
   };
   PeerController(media::Sdk& sdk, const RuntimeOptions& options, Hooks hooks)
       : sdk_(sdk), options_(options), hooks_(std::move(hooks)) {}

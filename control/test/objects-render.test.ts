@@ -12,7 +12,7 @@ const HOUR = 3600_000;
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 function fixture() {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   let now = Date.now();
   let work: (node: NodeLink) => Promise<unknown> = async () => {
     throw new RemoteKitError('rejected', 'corrupt document');

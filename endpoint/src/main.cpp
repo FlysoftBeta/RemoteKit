@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "service.hpp"
 #include "media/sdk_loader.hpp"
 #include "management/cluster_link.hpp"
@@ -24,7 +25,7 @@ int main(int argc, char** argv) {
       [&] {
         auto parsed = ProcessOptions::Parse(argc, argv);
         if (!parsed) {
-          fprintf(stderr, "endpoint startup: %s\n", parsed.error().message.c_str());
+          LogError(LogLevel::kError, "endpoint.start_failed", parsed.error());
           return;
         }
         auto process = std::move(parsed).value();
@@ -40,7 +41,8 @@ int main(int argc, char** argv) {
           auto decoded = cluster::DecodeKey(encoded);
           SecureZeroMemory(encoded.data(), encoded.size());
           if (!decoded) {
-            fprintf(stderr, "endpoint startup: invalid cluster key\n");
+            LogError(LogLevel::kError, "endpoint.start_failed",
+                     Error{ErrorCode::kInvalidRequest, "invalid cluster key"});
             return;
           }
           key = decoded.value();
@@ -48,7 +50,7 @@ int main(int argc, char** argv) {
         } else {
           auto files = cluster::LoadNodeFiles(process.node_root);
           if (!files) {
-            fprintf(stderr, "endpoint startup: %s\n", files.error().message.c_str());
+            LogError(LogLevel::kError, "endpoint.start_failed", files.error());
             return;
           }
           control = files.value().control;
@@ -59,7 +61,7 @@ int main(int argc, char** argv) {
         GetModuleFileNameW(nullptr, executable, 32768);
         auto build = cluster::ReadBuildId(fs::path(executable).parent_path().parent_path());
         if (!build) {
-          fprintf(stderr, "endpoint startup: %s\n", build.error().message.c_str());
+          LogError(LogLevel::kError, "endpoint.start_failed", build.error());
           return;
         }
         std::array<uint8_t, 16> incarnation{};
@@ -77,7 +79,7 @@ int main(int argc, char** argv) {
               auto options = RuntimeOptions::FromConfig(config, process.node_root, build.value(),
                                                         process.node_id);
               if (!options) {
-                fprintf(stderr, "endpoint startup: %s\n", options.error().message.c_str());
+                LogError(LogLevel::kError, "endpoint.start_failed", options.error());
                 return options.error();
               }
               return {};
@@ -93,13 +95,13 @@ int main(int argc, char** argv) {
         const auto options = std::move(runtime).value();
         auto directory = CreateDirectories(options.data);
         if (!directory) {
-          fprintf(stderr, "endpoint startup: %s\n", directory.error().message.c_str());
+          LogError(LogLevel::kError, "endpoint.start_failed", directory.error());
           return;
         }
         media::Sdk sdk;
         auto loaded = sdk.Open(options.browser.parent_path() / "remotekit_sdk.dll");
         if (!loaded) {
-          fprintf(stderr, "endpoint startup: %s\n", loaded.error().message.c_str());
+          LogError(LogLevel::kError, "endpoint.start_failed", loaded.error());
           return;
         }
         Service service(sdk, options, link, key);

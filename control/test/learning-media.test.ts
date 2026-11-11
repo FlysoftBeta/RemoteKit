@@ -65,7 +65,7 @@ test('TeX delimiters, data-latex and MathML produce self-contained SVG with cach
 });
 
 test('HTTP media route uses Viewer cookies, tenant ownership, private caching and Range', async () => {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const user = await registerUser(store, 'media-user', 'media-password123');
   const other = await registerUser(store, 'media-other', 'media-password123');
   const app = createApplication(store, testGateway({ request: async () => ({}) }));
@@ -117,7 +117,7 @@ test('HTTP media route uses Viewer cookies, tenant ownership, private caching an
 });
 
 test('media route rejects upstream bodies larger than the cap', async () => {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const user = await registerUser(store, 'cap-user', 'media-password123');
   const app = createApplication(store, testGateway({ request: async () => ({}) }));
   const proxy = new MediaProxy(

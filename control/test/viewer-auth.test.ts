@@ -24,6 +24,32 @@ const defer = () => {
   return { promise, resolve };
 };
 
+test('detaching a Viewer retains a failed peer revocation and retries it without an active Viewer', async (t) => {
+  const f = await fixture(t);
+  await f.offer();
+  const security = f.control.tenants.get(f.tenant).viewer!.security!;
+  const request = f.endpoint.request.bind(f.endpoint);
+  let failing = true;
+  t.mock.method(
+    f.endpoint,
+    'request',
+    async (method: string, tenant: string, params: Record<string, unknown> = {}) => {
+      if (method === 'rtc.authorize' && params.unlocked === false && failing)
+        throw new Error('native revocation unavailable');
+      return request(method, tenant, params);
+    },
+  );
+  await f.control.viewers.detachViewer(f.tenant, 'lease');
+  assert.equal(f.control.tenants.get(f.tenant).viewer, undefined);
+  assert.equal(security.locked, true);
+  assert.equal(security.peer!.appliedEpoch, 0);
+  await f.control.viewers.pollFaceAuth();
+  assert.ok(security.peer);
+  failing = false;
+  await f.control.viewers.pollFaceAuth();
+  assert.equal(security.peer, undefined);
+});
+
 class AuthEndpoint implements EndpointLink {
   readonly state = { state: 'ready' as const, incarnation: 'test', connectionEpoch: 'test' };
   calls: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -86,7 +112,7 @@ class AuthEndpoint implements EndpointLink {
 
 async function fixture(t: TestContext, path = ':memory:') {
   const clock = new TestClock(),
-    store = new ControlDatabase(path, clock),
+    store = new ControlDatabase(path, { clock, buildId: 'test' }),
     endpoint = new AuthEndpoint(),
     control = createApplication(store, testGateway(endpoint), undefined, clock);
   t.after(async () => {
@@ -225,7 +251,7 @@ test('face template is encrypted and late matches or enrollment results cannot c
   const stored = f.store.security.security(f.user.id).face!;
   assert.ok(stored && !stored.sealed.includes(JSON.stringify(template)));
   assert.equal(readFileSync(path + '.key').length, 32);
-  const reopened = new ControlDatabase(path);
+  const reopened = new ControlDatabase(path, { buildId: 'test' });
   try {
     assert.deepEqual(
       reopened.security.faceVault.open(f.user.id, stored.sealed, stored.modelVersion),

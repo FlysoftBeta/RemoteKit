@@ -1,3 +1,5 @@
+import { decodeJson, encodeJson, type Codec } from './codec';
+import * as codecs from './documents';
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
@@ -5,28 +7,53 @@ import type { OperationReceipt, ProductWorkspace } from '../../shared/product';
 import { settle } from '../workspace/operations';
 import { transaction } from './database';
 import type { WorkspacesRepository } from './workspaces';
+import type { RecordedAction } from '../../shared/recorded-action';
+
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .map(([key, item]) => [key, canonical(item)]),
+    );
+  }
+  return value;
+}
+
+export function operationPayload(value: RecordedAction, where: string): string {
+  const codec: Codec<RecordedAction> = {
+    read(value, path) {
+      return canonical(codecs.action.read(value, path)) as RecordedAction;
+    },
+  };
+  return encodeJson(value, codec, where);
+}
 
 export class OperationsRepository {
   constructor(
     private readonly db: Database.Database,
     private readonly workspaces: WorkspacesRepository,
   ) {
-    // A process restart cannot prove whether an in-flight native side effect ran.
-    for (const row of this.db.prepare('SELECT tenant,id,receipt FROM operation_receipts').all() as {
+    for (const row of this.db.prepare('SELECT tenant,id FROM operation_receipts').all() as {
       tenant: string;
       id: string;
-      receipt: string;
-    }[]) {
-      const receipt = JSON.parse(row.receipt);
-      if (['accepted', 'applying'].includes(receipt.status)) {
-        settle(receipt, { status: 'unknown' });
-        receipt.error = { code: 'outcome_unknown', message: 'Control重启，执行结果待对账' };
-        this.db
-          .prepare('UPDATE operation_receipts SET receipt=? WHERE tenant=? AND id=?')
-          .run(JSON.stringify(receipt), row.tenant, row.id);
+    }[])
+      this.restarted.add(`${row.tenant}/${row.id}`);
+  }
+  private readonly restarted = new Set<string>();
+  private decodeReceipt(text: string, tenant: string, id = ''): OperationReceipt {
+    const value = decodeJson(text, codecs.receipt, `operation_receipts.receipt ${tenant}/${id}`);
+    const key = `${tenant}/${value.operationId}`;
+    if (this.restarted.has(key)) {
+      if (value.status === 'accepted' || value.status === 'applying') {
+        settle(value, { status: 'unknown' });
+        value.error = { code: 'outcome_unknown', message: 'Control重启，执行结果待对账' };
       }
     }
+    return value;
   }
+
   popupTabId(tenant: string, provisionalId: string): string | undefined {
     return (
       this.db
@@ -58,41 +85,61 @@ export class OperationsRepository {
     }
     return row.generation;
   }
-  operation(tenant: string, id: string): { payload: string; receipt: OperationReceipt } | undefined {
+  operation(
+    tenant: string,
+    id: string,
+  ):
+    | {
+        payload: string;
+        receipt: OperationReceipt;
+        action: import('../../shared/recorded-action').RecordedAction;
+      }
+    | undefined {
     const row = this.db
       .prepare('SELECT payload,receipt FROM operation_receipts WHERE tenant=? AND id=?')
       .get(tenant, id) as { payload: string; receipt: string } | undefined;
-    return row && { payload: row.payload, receipt: JSON.parse(row.receipt) };
+    return (
+      row && {
+        payload: row.payload,
+        receipt: this.decodeReceipt(row.receipt, tenant, id),
+        action: decodeJson(row.payload, codecs.action, `operation_receipts.payload ${tenant}/${id}`),
+      }
+    );
   }
   recentOperations(tenant: string): OperationReceipt[] {
     return (
       this.db
-        .prepare('SELECT receipt FROM operation_receipts WHERE tenant=? ORDER BY rowid DESC LIMIT 64')
-        .all(tenant) as { receipt: string }[]
-    ).map((row) => JSON.parse(row.receipt));
+        .prepare('SELECT id,receipt FROM operation_receipts WHERE tenant=? ORDER BY rowid DESC LIMIT 64')
+        .all(tenant) as { id: string; receipt: string }[]
+    ).map((row) => this.decodeReceipt(row.receipt, tenant, row.id));
   }
   pendingOperations(tenant: string): { action: any; receipt: OperationReceipt }[] {
     return (
-      this.db
-        .prepare(
-          "SELECT payload,receipt FROM operation_receipts WHERE tenant=? AND json_extract(receipt,'$.status') IN ('accepted','applying','unknown')",
-        )
-        .all(tenant) as { payload: string; receipt: string }[]
+      this.db.prepare('SELECT id,payload,receipt FROM operation_receipts WHERE tenant=?').all(tenant) as {
+        id: string;
+        payload: string;
+        receipt: string;
+      }[]
     )
-      .map((row) => ({ action: JSON.parse(row.payload), receipt: JSON.parse(row.receipt) }))
+      .map((row) => ({
+        action: decodeJson(row.payload, codecs.action, `operation_receipts.payload ${tenant}/${row.id}`),
+        receipt: this.decodeReceipt(row.receipt, tenant, row.id),
+      }))
       .filter((item) => ['accepted', 'applying', 'unknown'].includes(item.receipt.status));
   }
-  reserveOperation(tenant: string, payload: string, receipt: OperationReceipt): boolean {
+  reserveOperation(tenant: string, action: RecordedAction, receipt: OperationReceipt): boolean {
+    const payload = operationPayload(action, `operation_receipts.payload ${tenant}/${receipt.operationId}`);
     const count = this.db
       .prepare('SELECT COUNT(*) AS count FROM operation_receipts WHERE tenant=?')
       .get(tenant) as { count: bigint };
     if (count.count >= 4096n) {
       const unresolved = (
-        this.db.prepare('SELECT receipt FROM operation_receipts WHERE tenant=?').all(tenant) as {
+        this.db.prepare('SELECT id,receipt FROM operation_receipts WHERE tenant=?').all(tenant) as {
+          id: string;
           receipt: string;
         }[]
       ).some((row) => {
-        const receipt = JSON.parse(row.receipt);
+        const receipt = this.decodeReceipt(row.receipt, tenant, row.id);
         return (
           ['accepted', 'applying'].includes(receipt.status) ||
           (receipt.status === 'unknown' && !receipt.resolved)
@@ -120,7 +167,12 @@ export class OperationsRepository {
         .run(tenant, receipt.operationSequence);
       this.db
         .prepare('INSERT INTO operation_receipts VALUES (?,?,?,?)')
-        .run(tenant, receipt.operationId, payload, JSON.stringify(receipt));
+        .run(
+          tenant,
+          receipt.operationId,
+          payload,
+          encodeJson(receipt, codecs.receipt, `operation_receipts.receipt ${receipt.operationId}`),
+        );
     });
     return true;
   }
@@ -130,8 +182,13 @@ export class OperationsRepository {
       receipt.revision = state.revision;
       this.db
         .prepare('UPDATE operation_receipts SET receipt=? WHERE tenant=? AND id=?')
-        .run(JSON.stringify(receipt), state.tenantId, receipt.operationId);
+        .run(
+          encodeJson(receipt, codecs.receipt, `operation_receipts.receipt ${receipt.operationId}`),
+          state.tenantId,
+          receipt.operationId,
+        );
     });
+    this.restarted.delete(`${state.tenantId}/${receipt.operationId}`);
   }
   deleteTenant(tenant: string) {
     this.db.prepare('DELETE FROM operation_sequences WHERE tenant=?').run(tenant);

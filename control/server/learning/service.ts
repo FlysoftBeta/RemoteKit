@@ -1,3 +1,4 @@
+import { log } from '../log';
 import type { LearningState, LearningSocketMethods, BankQuery, MaterialType } from '../../shared/learning';
 import { RemoteKitError } from '../../shared/errors';
 import type { DomainContext, DomainServices } from '../application';
@@ -118,7 +119,9 @@ export class LearningService {
             const tab = closeSignInTab(state, id);
             if (!tab) return;
             services.operations.saveWorkspace(state);
-            await context.endpoint.closeView(tenant, { viewId: tab.webviewId, force: true }).catch(() => {});
+            await context.endpoint
+              .closeView(tenant, { viewId: tab.webviewId, force: true })
+              .catch((err) => log.warn('learning.close_view_failed', { tenant, viewId: tab.webviewId, err }));
           }),
       },
       (tenant) => this.provider(tenant),
@@ -144,7 +147,9 @@ export class LearningService {
     }
     for (const node of context.endpoint.nodes.all()) {
       const listener = (message: Record<string, any>) => {
-        void this.sessionEvents(node.nodeId, message).catch(() => {});
+        void this.sessionEvents(node.nodeId, message).catch((err) =>
+          log.warn('learning.session_events_failed', { nodeId: node.nodeId, err }),
+        );
       };
       node.on('session.events', listener);
       this.listeners.set(node, listener);

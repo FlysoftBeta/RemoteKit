@@ -92,7 +92,7 @@ class LifecycleEndpoint implements EndpointLink {
   }
 }
 async function fixture() {
-  const store = new ControlDatabase(':memory:'),
+  const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     endpoint = new LifecycleEndpoint(),
     control = createApplication(store, testGateway(endpoint));
   const { tenantId: tenant } = await registerUser(store, 'lifecycle-user', 'password123');

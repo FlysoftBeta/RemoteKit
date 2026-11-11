@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "session/navigation_recovery.hpp"
 #include "util/file_io.hpp"
 #include "diagnostics/timing.hpp"
@@ -41,14 +42,14 @@ const char* NavigationRecovery::Recovery::PhaseName() const {
 }
 
 void NavigationRecovery::FailRecovery(const std::string& view, Recovery& task, const Error& error) {
-  fprintf(stderr, "session %s view %s navigation recovery: %s\n", id.c_str(), view.c_str(),
-          error.message.c_str());
+  LogError(LogLevel::kWarn, "navigation.recovery_failed", error,
+           {{"sessionId", id}, {"viewId", view}});
   task.error = error;
   if (auto delay = RetryDelay(error, task.attempts++)) {
     task.next_poll = QpcNow() + delay->count() * QpcFrequency() / 1000;
     return;
   }
-  if (error.code == ErrorCode::kOutcomeUnknown) {
+  if (error.code == ErrorCode::kOutcomeUnknown && task.phase != Recovery::Phase::kWaiting) {
     task.reconcile = true;
     task.next_poll = QpcNow() + QpcFrequency() / 4;
     return;
@@ -100,7 +101,7 @@ bool NavigationRecovery::CancelRecovery(const std::string& view) {
                                    {"transfer", transfer}});
         if (!navigation_transfer_cancel_result) {
           const Error error = navigation_transfer_cancel_result.error();
-          fprintf(stderr, "recovery transfer cancel: %s\n", error.message.c_str());
+          LogError(LogLevel::kWarn, "navigation.cancel_failed", error);
         }
       }
     }
@@ -132,7 +133,7 @@ void NavigationRecovery::MaintainRecovery() {
         auto reconcile_output_result_2 = views.ReconcileOutput();
         if (!reconcile_output_result_2) {
           const Error error = reconcile_output_result_2.error();
-          fprintf(stderr, "session %s reconciliation: %s\n", id.c_str(), error.message.c_str());
+          LogError(LogLevel::kWarn, "session.reconcile_failed", error, {{"sessionId", id}});
           return;
         }
       }
@@ -161,7 +162,7 @@ void NavigationRecovery::MaintainRecovery() {
     CancelRecovery(view);
     return;
   }
-  {
+  try {
     if (task.reconcile) {
       const bool transfer_stage = task.phase == Recovery::Phase::kBegin ||
                                   task.phase == Recovery::Phase::kChunks ||
@@ -234,18 +235,12 @@ void NavigationRecovery::MaintainRecovery() {
       return;
     }
     if (task.phase == Recovery::Phase::kLoad) {
-      const auto path = directory / fs::path("recovery") / (view + ".json");
-      auto size_result = FileSize(path);
-      if (!size_result) {
-        FailRecovery(view, task, size_result.error());
+      auto saved = recovery_store.Load(view);
+      if (!saved) {
+        FailRecovery(view, task, saved.error());
         return;
       }
-      const auto file_bytes = size_result.value();
-      if (file_bytes > 96 * 1024 * 1024) {
-        Error error{ErrorCode::kLimitExceeded, "navigation recovery file exceeds bound"};
-        FailRecovery(view, task, error);
-        return;
-      };
+      const auto file_bytes = saved.value().dump().size();
       uint64_t buffered = 0;
       for (const auto& [key, recovery] : recoveries)
         buffered += recovery.buffer_bytes;
@@ -253,14 +248,7 @@ void NavigationRecovery::MaintainRecovery() {
         task.next_poll = now + QpcFrequency() / 20;
         return;
       }
-      task.saved = store.Load(path);
-      const auto size = std::stoull(task.saved.at("size").get<std::string>());
-      if (!size || size > 64 * 1024 * 1024 || !task.saved.at("chunks").is_array() ||
-          task.saved["chunks"].size() > 256) {
-        Error error{ErrorCode::kInternal, "invalid navigation recovery size/chunks"};
-        FailRecovery(view, task, error);
-        return;
-      };
+      task.saved = std::move(saved).value();
       task.buffer_bytes = file_bytes;
       task.phase = Recovery::Phase::kSettling;
       task.deadline = now + QpcFrequency();
@@ -424,24 +412,30 @@ void NavigationRecovery::MaintainRecovery() {
         }
       }
     }
+  } catch (const std::exception& error) {
+    FailRecovery(view, task,
+                 CorruptState(std::string("invalid navigation recovery: ") + error.what()));
   }
 }
 
-void NavigationRecovery::CaptureNavigation(const Json& browser_view) {
+Result<void> NavigationRecovery::CaptureNavigation(const Json& browser_view) try {
   const auto view = browser_view.at("view").get<std::string>();
   const auto revision = browser_view.value("navigationRevision", std::string());
   const auto saved = recovery_revisions.find(view);
   navigation_export.Observe(browser_view, browser.Incarnation(),
                             views.Contains(view) && !Recovering(view) &&
                                 (saved == recovery_revisions.end() || saved->second != revision));
+  return {};
+} catch (const std::exception& error) {
+  return CorruptState(std::string("invalid navigation snapshot: ") + error.what());
 }
 
 void NavigationRecovery::MaintainNavigationExport() {
   auto saved = ExportTick();
   if (!saved)
-    fprintf(stderr, "navigation save: %s\n", saved.error().message.c_str());
+    LogError(LogLevel::kWarn, "navigation.save_failed", saved.error());
 }
-Result<void> NavigationRecovery::ExportTick(uint32_t timeout_ms) {
+Result<void> NavigationRecovery::ExportTick(uint32_t timeout_ms) try {
   const auto start = PhaseClock::now();
   const auto selected_view = navigation_export.NextView();
   auto result = navigation_export.Tick(
@@ -463,7 +457,7 @@ Result<void> NavigationRecovery::ExportTick(uint32_t timeout_ms) {
       },
       [](const std::string& data) { return DecodedSize(data); },
       [&](const std::string& view, const Json& saved) -> Result<void> {
-        auto committed = store.Save(fs::path("recovery") / (view + ".json"), saved);
+        auto committed = recovery_store.Save(view, saved);
         if (!committed)
           return committed.error();
         recovery_revisions[view] = saved.at("navigationRevision").get<std::string>();
@@ -477,8 +471,10 @@ Result<void> NavigationRecovery::ExportTick(uint32_t timeout_ms) {
     view["requests"] = view.value("requests", 0) + 1;
   }
   return result;
+} catch (const std::exception& error) {
+  return CorruptState(std::string("invalid navigation export: ") + error.what());
 }
-Result<void> NavigationRecovery::FinalExport() {
+Result<void> NavigationRecovery::FinalExport() try {
   final_export_timing_ = {{"views", Json::object()}, {"count", 0}};
   final_exporting_ = true;
   struct Finish {
@@ -499,7 +495,7 @@ Result<void> NavigationRecovery::FinalExport() {
         return Error{ErrorCode::kUnavailable, "navigation state is unsettled at shutdown"};
       final_export_timing_["views"][name] = {{"ms", 0.0}, {"requests", 0}};
       final_export_timing_["count"] = final_export_timing_["count"].get<size_t>() + 1;
-      CaptureNavigation(view);
+      RK_RETURN_IF_ERROR(CaptureNavigation(view));
     }
   while (navigation_export.Pending()) {
     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -512,6 +508,8 @@ Result<void> NavigationRecovery::FinalExport() {
       return saved.error();
   }
   return {};
+} catch (const std::exception& error) {
+  return CorruptState(std::string("invalid final navigation export: ") + error.what());
 }
 }  // namespace remotekit
 

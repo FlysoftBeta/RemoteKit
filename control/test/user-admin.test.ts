@@ -9,7 +9,7 @@ import { importEvent, devicePublic, deviceKeyId, pairEvent } from './session-imp
 const password = 'password123';
 
 async function stack() {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const requests: { method: string; args: any }[] = [];
   const endpoint = {
     request: async (method: string, _tenant: string, args: any) => {
@@ -47,7 +47,7 @@ async function stack() {
 }
 
 test('setup creates only the first account, as administrator, and then closes', async () => {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   try {
     assert.deepEqual(accountsFor(store).setupStatus(), { setupRequired: true });
     const results = await Promise.allSettled([
@@ -111,6 +111,11 @@ test('admin methods check the server role, reject scoped params and need the cur
     const overview = await h.call('admin.overview');
     assert.deepEqual(overview.users, { total: 2, online: 2, disabled: 0 });
     assert.equal(overview.nodes.ready, 1);
+    assert.deepEqual(overview.integrity, {
+      checkedAt: h.store.integrity.checkedAt,
+      problemCount: 0,
+      problems: [],
+    });
   } finally {
     await h.close();
   }
@@ -265,10 +270,8 @@ test('deleting a user removes every row of its tenant and queues node data delet
     );
     h.store.sessionImports.saveImport(user.tenant, deviceKeyId, importEvent(), Date.now(), null);
     const placement = h.control.endpoint.placement.resolve(leaving.tenantId);
-    h.store.db
-      .prepare('INSERT INTO user_security VALUES (?,?,?,?,?,?)')
-      .run(user.id, '{}', null, null, null, null);
-    h.store.db.prepare('INSERT INTO file_library VALUES (?,?)').run(leaving.tenantId, '{"entries":[]}');
+    h.store.security.saveSecurity(user.id, h.store.security.security(user.id));
+    h.store.library.save(leaving.tenantId, h.store.library.snapshot(leaving.tenantId));
     h.store.db
       .prepare('INSERT INTO objects VALUES (?,?,?,?,?)')
       .run('a'.repeat(64), 10, 50, 'b'.repeat(64), 0);

@@ -15,11 +15,15 @@ using Buffer = std::vector<uint8_t>;
 
 Error Failure(const std::string& stage, long code) {
   return {ErrorCode::kUnavailable,
-          "cluster connect failed at " + stage + ", error 0x" + [&] {
-            char text[16];
-            snprintf(text, sizeof(text), "%lX", static_cast<unsigned long>(code));
-            return std::string(text);
-          }()};
+          "cluster connect failed at " + stage + ", error 0x" +
+              [&] {
+                char text[16];
+                snprintf(text, sizeof(text), "%lX", static_cast<unsigned long>(code));
+                return std::string(text);
+              }(),
+          {},
+          {},
+          OsError{code < 0 ? OsError::Kind::kHresult : OsError::Kind::kWin32, code}};
 }
 
 bool InitializeWinsock() {

@@ -1,3 +1,4 @@
+import { log } from '../log';
 import { RemoteKitError } from '../../shared/errors';
 import type { AdminSessionState, AdminStorage, AdminUser } from '../../shared/admin';
 import type { DomainContext, DomainServices } from '../application';
@@ -209,7 +210,9 @@ export class UserAdmin {
     });
     this.context.tenants.dispose(user.tenant);
     void this.services.sessionPurge.flush();
-    void this.services.objects.tick().catch(() => {});
+    void this.services.objects
+      .tick()
+      .catch((err) => log.warn('admin.objects_failed', { tenant: user.tenant, err }));
     return { tenant: user.tenant, users: this.list() };
   }
 }

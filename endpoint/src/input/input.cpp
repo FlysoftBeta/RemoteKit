@@ -20,6 +20,11 @@ bool IsDismissal(const Json& command) {
 }
 }  // namespace
 void InputController::ReplyInput(Json reply, const Json& request, uint64_t stamp) {
+  if (reply.contains("error")) {
+    const auto error = ParseWireError(reply["error"]);
+    reply["error"] =
+        WireError(error, "dc.request_failed", RequestLogFields(request, hooks_.log_fields));
+  }
   const bool focus = request.is_object() && request.value("type", Json()) == "focus";
   const bool layout = request.is_object() && request.value("type", Json()) == "keyboard.layout";
   if (layout && reply.value("ok", false))
@@ -281,7 +286,10 @@ void InputController::Clear() {
   input_queue.clear();
 }
 void InputController::Stop() {
-  stop_input = true;
+  {
+    std::lock_guard lock(input_mutex);
+    stop_input = true;
+  }
   input_wake.notify_all();
   if (input_thread.joinable())
     input_thread.join();

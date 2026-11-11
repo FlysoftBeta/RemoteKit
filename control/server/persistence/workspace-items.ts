@@ -1,3 +1,5 @@
+import { decodeJson, encodeJson } from './codec';
+import * as codecs from './documents';
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Favorite, InstalledApp } from '../../shared/product';
@@ -35,18 +37,20 @@ export class WorkspaceItemsRepository {
 
   apps(tenant: string): InstalledApp[] {
     return (
-      this.db.prepare('SELECT data FROM installed_apps WHERE tenant=? ORDER BY position').all(tenant) as {
+      this.db.prepare('SELECT id,data FROM installed_apps WHERE tenant=? ORDER BY position').all(tenant) as {
+        id: string;
         data: string;
       }[]
-    ).map((row) => JSON.parse(row.data));
+    ).map((row) => decodeJson(row.data, codecs.app, `installed_apps.data ${tenant}/${row.id}`));
   }
 
   favorites(tenant: string): Favorite[] {
     return (
-      this.db.prepare('SELECT data FROM favorites WHERE tenant=? ORDER BY position').all(tenant) as {
+      this.db.prepare('SELECT id,data FROM favorites WHERE tenant=? ORDER BY position').all(tenant) as {
+        id: string;
         data: string;
       }[]
-    ).map((row) => JSON.parse(row.data));
+    ).map((row) => decodeJson(row.data, codecs.favorite, `favorites.data ${tenant}/${row.id}`));
   }
 
   save(tenant: string, apps: InstalledApp[], favorites: Favorite[]) {
@@ -63,12 +67,23 @@ export class WorkspaceItemsRepository {
           `INSERT INTO installed_apps(tenant,id,position,data,icon_hash) VALUES (?,?,?,?,?)
            ON CONFLICT(tenant,id) DO UPDATE SET position=excluded.position,data=excluded.data,icon_hash=excluded.icon_hash`,
         )
-        .run(tenant, app.id, position, JSON.stringify(app), app.iconHash ?? null);
+        .run(
+          tenant,
+          app.id,
+          position,
+          encodeJson(app, codecs.app, `installed_apps.data ${tenant}/${app.id}`),
+          app.iconHash ?? null,
+        );
     this.db.prepare('DELETE FROM favorites WHERE tenant=?').run(tenant);
     for (const [position, favorite] of favorites.entries())
       this.db
         .prepare('INSERT INTO favorites(tenant,id,position,data) VALUES (?,?,?,?)')
-        .run(tenant, favorite.id, position, JSON.stringify(favorite));
+        .run(
+          tenant,
+          favorite.id,
+          position,
+          encodeJson(favorite, codecs.favorite, `favorites.data ${tenant}/${favorite.id}`),
+        );
   }
 
   appIcon(tenant: string, id: string): { png: Buffer; hash: string } | null {

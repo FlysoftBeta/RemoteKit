@@ -15,6 +15,7 @@ import { ControlDatabase } from '../server/persistence/database';
 import { FakeNode } from './fake-node';
 import { createApplication } from '../server/application';
 import { emptyWorkspace } from '../server/persistence/workspaces';
+import { log } from '../server/log';
 
 async function harness(overrides: Partial<RegistryOptions> = {}) {
   const key = randomBytes(32);
@@ -29,7 +30,7 @@ async function harness(overrides: Partial<RegistryOptions> = {}) {
     buildId: 'dev',
     ...overrides,
   });
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const placement = new Placement(store, registry);
   const gateway = new EndpointGateway(registry, placement);
   const server = createServer();
@@ -259,7 +260,7 @@ test('clipboard management events cross the encrypted link and reject stale node
     await control.tenants.drain();
     assert.deepEqual(h.store.clipboards.latest('one'), { revision: '3', text: 'last', html: '' });
     const before = alpha.requests.length;
-    const warn = test.mock.method(console, 'warn', () => {});
+    const warn = test.mock.method(log, 'warn', () => {});
     try {
       alpha.send({
         type: 'clipboard.changed',
@@ -274,7 +275,7 @@ test('clipboard management events cross the encrypted link and reject stale node
       await control.tenants.drain();
       assert.equal(h.store.clipboards.latest('one')?.revision, '3');
       assert.deepEqual(warn.mock.calls[0].arguments, [
-        'Clipboard write exceeds limits',
+        'clipboard.write_exceeds_limits',
         { textBytes: 5 * 1024 * 1024, htmlBytes: 0 },
       ]);
     } finally {

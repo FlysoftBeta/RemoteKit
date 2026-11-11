@@ -298,6 +298,9 @@ int main() {
   Check(fixture.good(), "timeout fixture available");
   Json expected;
   fixture >> expected;
+  const auto error_id = sent.back()["result"]["error"]["errorId"].get<std::string>();
+  Check(remotekit::ValidErrorId(error_id), "timeout carries Endpoint error id");
+  expected["result"]["error"]["errorId"] = error_id;
   Check(sent.back() == expected, "native timeout wire matches Client semantic fixture");
   auto late = Action(2);
   late["result"] = {{"status", "committed"}};

@@ -56,7 +56,7 @@ async function until(predicate, description, timeout = 90000) {
     await delay(100);
   }
   throw Error(
-    `${phase}: deadline waiting for ${description}\n${await text(path.join(root, 'logs/manager.log'))}\n${await text(path.join(root, 'logs/control.log'))}\n${await text(path.join(nodeRoot, 'logs/supervisor.log'))}`,
+    `${phase}: deadline waiting for ${description}\n${await text(path.join(root, 'logs/manager.log'))}\n${await text(path.join(root, 'logs/control.stdout.log'))}\n${await text(path.join(nodeRoot, 'logs/supervisor.log'))}`,
   );
 }
 async function pythonScript(script, args = []) {
@@ -287,7 +287,11 @@ async function installed(version) {
   await until(
     async () =>
       (await text(path.join(root, 'current'))).trim() === id &&
-      (await text(path.join(root, 'logs/manager.log'))).includes('started Control ' + id),
+      (await text(path.join(root, 'logs/manager.log')))
+        .split('\n')
+        .filter(Boolean)
+        .map(JSON.parse)
+        .some((record) => record.ev === 'control.started' && record.buildId === id),
     `Control v${version}`,
   );
   await until(async () => {
@@ -331,7 +335,13 @@ async function nodeInstalled(version) {
   );
   assert.deepEqual(await readdir(path.join(nodeRoot, 'runtime')), [id]);
   assert.deepEqual(await readdir(path.join(nodeRoot, 'downloads')), []);
-  assert((await text(path.join(nodeRoot, 'logs/supervisor.log'))).includes('activated runtime ' + id));
+  assert(
+    (await text(path.join(nodeRoot, 'logs/supervisor.log')))
+      .split('\n')
+      .filter(Boolean)
+      .map(JSON.parse)
+      .some((record) => record.ev === 'runtime.activated' && record.buildId === id),
+  );
   assert((await text(path.join(nodeRoot, 'logs/endpoint.log'))).includes('dummy cluster ' + id));
 }
 function assertAssets(expected) {
@@ -391,7 +401,7 @@ try {
     path.join(root, 'config/control.json'),
     JSON.stringify({
       http: { listen: controlUrl.slice(7), origins: [controlUrl] },
-      storage: { database: '../data/control.db', diagnostics: '../data/diagnostics' },
+      storage: { database: '../data/control.db', diagnostics: '../data/diagnostics', logs: '../logs' },
       cluster: { keyFile: 'cluster.key', controlUrl: controlUrl.replace('http:', 'ws:') + '/api/node' },
       nodes: { 'release-node': {} },
     }),
@@ -409,7 +419,13 @@ try {
   );
   assert.equal(fresh.filter((request) => request.status === 206).length, 1);
   assert((await text(path.join(root, 'logs/manager.log'))).includes('transfer interrupted'));
-  assert((await text(path.join(root, 'logs/control.log'))).includes('RemoteKit Control ' + controlUrl));
+  assert(
+    (await text(path.join(root, 'logs/control.jsonl')))
+      .split('\n')
+      .filter(Boolean)
+      .map(JSON.parse)
+      .some((record) => record.ev === 'control.started' && record.listen === controlUrl),
+  );
   phase = 'remote-node';
   console.log('Remote node downloads v1 from real Control');
   await mkdir(nodeRoot);
@@ -427,7 +443,13 @@ try {
   await nodeInstalled(2);
   assertAssets([[2, 'patch']]);
   assert((await text(path.join(nodeRoot, 'logs/endpoint.log'))).includes('build_mismatch'));
-  assert((await text(path.join(nodeRoot, 'logs/supervisor.log'))).includes('endpoint exit 3'));
+  assert(
+    (await text(path.join(nodeRoot, 'logs/supervisor.log')))
+      .split('\n')
+      .filter(Boolean)
+      .map(JSON.parse)
+      .some((record) => record.ev === 'endpoint.exited' && record.exitCode === 3),
+  );
   phase = 'missed-deltas';
   console.log('Missed releases chain v2 to v3 to v4');
   await stop(root);
@@ -507,7 +529,13 @@ try {
       process.ExecutablePath.toLowerCase() === path.join(root, 'remotekit_control.exe').toLowerCase(),
   );
   assert(successor && successor.ProcessId !== predecessor.child.pid, 'successor manager is running');
-  assert((await text(path.join(root, 'logs/manager.log'))).includes('installed updated supervisor'));
+  assert(
+    (await text(path.join(root, 'logs/manager.log')))
+      .split('\n')
+      .filter(Boolean)
+      .map(JSON.parse)
+      .some((record) => record.ev === 'supervisor.replaced'),
+  );
   phase = 'wrong-key';
   console.log('Wrong key rejects manifest and installs nothing');
   const wrongRoot = path.join(temporary, 'wrong-key');

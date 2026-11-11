@@ -15,6 +15,7 @@ import { endpointError } from '../server/endpoint/gateway';
 import { formatError } from '../client/util/format-error';
 import { mailError } from '../server/session-import/mail-error';
 import { HttpClient } from '../server/learning/providers/http';
+import { log } from '../server/log';
 
 test('wire errors validate every code and restrict retry hints without leaking diagnosis', () => {
   for (const code of Object.keys(httpStatus) as (keyof typeof httpStatus)[]) {
@@ -70,14 +71,14 @@ test('handling permits automatic retry only for saturation, rate windows and out
 });
 
 test('native conversion preserves handling and hints while keeping English diagnosis private', (t) => {
-  const log = t.mock.method(console, 'error', () => {});
+  const logger = t.mock.method(log, 'error', () => {});
   const error = endpointError({ code: 'busy', message: 'queue full', retryAfterMs: 25 });
   assert.equal(error.code, 'busy');
   assert.equal(error.retryAfterMs, 25);
   assert.equal(error.detail, 'queue full');
   assert.match(error.message, /[\u4e00-\u9fff]/);
   assert.equal(endpointError(error), error);
-  assert.equal(log.mock.callCount(), 1);
+  assert.equal(logger.mock.callCount(), 1);
   assert.equal(endpointError({ message: 'missing code' }).code, 'outcome_unknown');
   assert.equal(
     endpointError({ code: 'rejected', message: 'encrypted', reason: 'document_encrypted' }).message,
@@ -89,7 +90,7 @@ test('native conversion preserves handling and hints while keeping English diagn
 });
 
 test('shared native display messages recognize only the closed reason set', (t) => {
-  t.mock.method(console, 'error', () => {});
+  t.mock.method(log, 'error', () => {});
   for (const [reason, message] of [
     ['document_encrypted', '文档受密码保护，无法转换'],
     ['document_corrupt', '文档已损坏，无法转换'],

@@ -1,6 +1,6 @@
 #pragma once
 #include "objects/service.hpp"
-#include "persistence/session_store.hpp"
+#include "persistence/durable_json.hpp"
 #include "persistence/phase_timing.hpp"
 #include "persistence/checkpoint_cache.hpp"
 

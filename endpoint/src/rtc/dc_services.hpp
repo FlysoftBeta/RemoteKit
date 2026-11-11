@@ -49,6 +49,7 @@ inline bool ProductActionEnvelope(const ServiceJson& message, size_t bytes) {
 // Together requests, outstanding receipts and replies occupy at most 64 slots.
 // No operation is replayed across a management disconnect or a peer replacement.
 class DirectServices {
+  const Json log_fields_;
   struct Pending {
     ServiceJson message;
     double since;
@@ -88,11 +89,13 @@ class DirectServices {
              {{"operationId", request.at("operationId")},
               {"operationGeneration", request.at("operationGeneration")},
               {"status", unknown ? "unknown" : "failed"},
-              {"error", WireError({unknown ? ErrorCode::kOutcomeUnknown : ErrorCode::kUnavailable,
-                                   error})}}}};
+              {"error",
+               WireError({unknown ? ErrorCode::kOutcomeUnknown : ErrorCode::kUnavailable, error},
+                         "dc.request_failed", RequestLogFields(request, log_fields_))}}}};
   }
 
  public:
+  explicit DirectServices(Json log_fields = Json::object()) : log_fields_(std::move(log_fields)) {}
   void Bind(uint64_t peer, std::string connection = {}) {
     std::lock_guard lock(mutex_);
     peer_ = peer;

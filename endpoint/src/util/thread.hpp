@@ -1,4 +1,5 @@
 #pragma once
+#include "util/log.hpp"
 
 #include <cstdio>
 #include <exception>
@@ -12,20 +13,20 @@ void RunThread(std::string_view name, Function&& function, OnFailure&& on_failur
     std::forward<Function>(function)();
     return;
   } catch (const std::exception& error) {
-    std::fprintf(stderr, "thread %.*s failed: %s\n", static_cast<int>(name.size()), name.data(),
-                 error.what());
+    LogError(LogLevel::kError, "thread.failed", Error{ErrorCode::kInternal, error.what()},
+             {{"thread", std::string(name)}});
   } catch (...) {
-    std::fprintf(stderr, "thread %.*s failed: unknown exception\n", static_cast<int>(name.size()),
-                 name.data());
+    LogError(LogLevel::kError, "thread.failed", Error{ErrorCode::kInternal, "unknown exception"},
+             {{"thread", std::string(name)}});
   }
   try {
     std::forward<OnFailure>(on_failure)();
   } catch (const std::exception& error) {
-    std::fprintf(stderr, "thread %.*s failure handler: %s\n", static_cast<int>(name.size()),
-                 name.data(), error.what());
+    LogError(LogLevel::kError, "thread.handler_failed", Error{ErrorCode::kInternal, error.what()},
+             {{"thread", std::string(name)}});
   } catch (...) {
-    std::fprintf(stderr, "thread %.*s failure handler: unknown exception\n",
-                 static_cast<int>(name.size()), name.data());
+    LogError(LogLevel::kError, "thread.handler_failed",
+             Error{ErrorCode::kInternal, "unknown exception"}, {{"thread", std::string(name)}});
   }
 }
 }  // namespace remotekit

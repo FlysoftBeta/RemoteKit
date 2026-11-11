@@ -8,7 +8,7 @@ import type { EndpointLink } from '../server/endpoint/link';
 const password = 'password123';
 
 async function stack() {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const endpoint = {
     request: async (method: string) => (method === 'session.snapshot' ? { running: false, views: [] } : {}),
   } as unknown as EndpointLink;

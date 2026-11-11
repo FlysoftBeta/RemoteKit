@@ -1,4 +1,9 @@
-import { RemoteKitError, isRemoteKitError, toRemoteKitError, nativeError } from '../../shared/errors';
+import { log } from '../log';
+import {
+  RemoteKitError,
+  isRemoteKitError,
+  endpointError as convertEndpointError,
+} from '../../shared/errors';
 import type { Asset, SelectionState } from '../../shared/file-library';
 import type { MediaPolicy } from '../../shared/product';
 import type {
@@ -40,6 +45,8 @@ export class EndpointSnapshotError extends RemoteKitError {
       detail: error.detail,
       reason: error.reason,
       retryAfterMs: error.retryAfterMs,
+      errorId: error.errorId,
+      cause: error,
     });
   }
 }
@@ -174,7 +181,10 @@ export class EndpointGateway {
         const failure = endpointError(error);
         throw new RemoteKitError('unavailable', '浏览器会话尚未就绪', {
           detail: failure.detail ?? failure.message,
+          reason: failure.reason,
           retryAfterMs: failure.retryAfterMs,
+          errorId: failure.errorId,
+          cause: error,
         });
       }
       const reply = await node.request(method, tenant, {
@@ -233,7 +243,7 @@ export class EndpointGateway {
             detail: 'Placement changed during hibernation',
           });
         this.opened.delete(tenant);
-        console.warn('Hibernation lost before journal commit; retaining checkpoint', {
+        log.warn('hibernate.checkpoint_retained', {
           tenant,
           placementEpoch: placement.placementEpoch,
           checkpoint: placement.checkpoint,
@@ -244,7 +254,13 @@ export class EndpointGateway {
         this.placement.settleHibernation(placement, 'active');
         throw failure;
       }
-      throw new RemoteKitError('outcome_unknown', failure.message);
+      throw new RemoteKitError('outcome_unknown', failure.message, {
+        reason: failure.reason,
+        retryAfterMs: failure.retryAfterMs,
+        errorId: failure.errorId,
+        detail: failure.detail,
+        cause: failure,
+      });
     }
     this.opened.delete(tenant);
     if (node.state.state !== 'ready' || node.state.connectionEpoch !== state.connectionEpoch)
@@ -254,8 +270,12 @@ export class EndpointGateway {
     try {
       return this.placement.commitCheckpoint(placement, result?.manifestId, result?.objects, result?.buildId);
     } catch (error) {
+      const failure = endpointError(error);
       throw new RemoteKitError('outcome_unknown', '会话检查点提交结果待确认', {
-        detail: endpointError(error).message,
+        detail: failure.detail ?? failure.message,
+        reason: failure.reason,
+        errorId: failure.errorId,
+        cause: error,
       });
     }
   }
@@ -393,10 +413,11 @@ export class EndpointGateway {
 }
 
 export function endpointError(error: unknown): RemoteKitError {
-  if (isRemoteKitError(error)) return error;
-  if (error instanceof Error) return toRemoteKitError(error);
-  const converted = nativeError(error);
-  console.error('Endpoint error', {
+  if (isRemoteKitError(error) || error instanceof Error) return convertEndpointError(error);
+  const converted = convertEndpointError(error);
+  log.error('endpoint.failed', {
+    errorId: converted.errorId,
+    err: converted,
     code: converted.code,
     reason: converted.reason,
     detail: converted.detail,

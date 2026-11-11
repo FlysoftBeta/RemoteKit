@@ -45,21 +45,21 @@ int main() {
   } cleanup{directory};
   auto parsed = RuntimeOptions::FromConfig(TestConfig(), directory, "dev", "test");
   Check(bool(parsed), "composition options");
-  SessionStore store(directory / "data/sessions/0123456789abcdef0123456789abcdef");
-  Check(bool(store.Save("views.json", Json::array({{{"viewId", "1"}}, {{"viewId", "2"}}}))),
-        "persist desired views");
-  Check(bool(store.Save(
-            "events.json",
-            {{"next", 2},
-             {"events",
-              Json::array({{{"eventId", "1"}, {"type", "view.closed"}, {"viewId", "1"}}})}})),
-        "persist close event before desired-state reconciliation");
+  const auto session_directory = directory / "data/sessions/0123456789abcdef0123456789abcdef";
+  {
+    SessionDb store(session_directory);
+    Check(bool(store.Open()), "open session store");
+    Check(bool(store.Views().Save(Json::array({{{"viewId", "1"}}, {{"viewId", "2"}}}))),
+          "save views");
+    Check(bool(store.Views().Close("1", "requested")), "commit close");
+  }
   media::Sdk sdk;
+  media::FrameAdmission admission;
   Link link;
   objects::ObjectService objects(parsed.value().data, link, cluster::Key{}, "test", "dev");
   {
     Session session(sdk, parsed.value(), "tenant", "0123456789abcdef0123456789abcdef", 1,
-                    cluster::Key{}, link, objects);
+                    cluster::Key{}, link, objects, admission);
     Check(bool(session.Initialize()), "initialize controller composition");
     Check(!session.Views().Contains("1") && session.Views().Contains("2"),
           "replay durable close events into desired views");
@@ -90,7 +90,9 @@ int main() {
           "failed output configuration preserves desired views and schedules reconciliation");
     Check(bool(session.Stop()) && bool(session.Stop()), "shutdown is idempotent");
   }
-  const auto saved = store.Load("views.json");
+  SessionDb store(session_directory);
+  Check(bool(store.Open()), "reopen store");
+  const auto saved = store.Views().Load().value();
   Check(saved.size() == 1 && saved.at(0).at("viewId") == "2",
         "close reconciliation is durable across composition shutdown");
 }

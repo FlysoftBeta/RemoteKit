@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "persistence/checkpoint_cache.hpp"
 #include "persistence/checkpoint.hpp"
 #include "util/result_macros.hpp"
@@ -123,8 +124,13 @@ void CheckpointCache::MaybeStage(objects::ObjectService& objects, const std::str
         }
         return;
       }
+    } catch (const std::filesystem::filesystem_error& error) {
+      LogError(LogLevel::kWarn, "checkpoint.prestage_failed",
+               WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                           error.code().value()));
     } catch (const std::exception& error) {
-      fprintf(stderr, "checkpoint pre-stage: %s\n", error.what());
+      LogError(LogLevel::kWarn, "checkpoint.prestage_failed",
+               Error{ErrorCode::kUnavailable, error.what()});
     }
   });
   staging_ = task->get_future();

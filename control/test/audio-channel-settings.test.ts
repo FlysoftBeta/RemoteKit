@@ -14,7 +14,7 @@ const endpoint = {
   },
 };
 test('audio output channels default on and persist the complete shared pair atomically', async () => {
-  const store = new ControlDatabase(':memory:'),
+  const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     control = createApplication(store, testGateway(endpoint));
   try {
     const account = await registerUser(store, 'audio-settings', 'password123'),
@@ -89,7 +89,7 @@ test('audio output channels default on and persist the complete shared pair atom
   }
 });
 test('audio defaults enable both outputs and failed persistence preserves confirmed channels', async () => {
-  const store = new ControlDatabase(':memory:'),
+  const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     control = createApplication(store, testGateway(endpoint));
   try {
     const { tenantId: tenant } = await registerUser(store, 'audio-persistence', 'password123');

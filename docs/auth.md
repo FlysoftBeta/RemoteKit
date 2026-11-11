@@ -35,7 +35,7 @@
 
 ## 凭据恢复
 
-数据库损坏，或停在当前 Control 不接受的 schema 版本时，用 `recover-credentials` 重建，只保留身份与凭据，其余产品状态一概放弃。发布包里是 `recover-credentials.cmd`（固定使用包内 `config/control.json`），开发时是 `node control/dist/recover-credentials.mjs`（经 `REMOTEKIT_CONTROL_CONFIG` 或默认配置定位数据库）。实现在 `control/server/recovery/`。
+迁移失败或数据库损坏时，先用迁移前自动写出的备份（`backups/`，见[存储与迁移](control-plane.md#存储与迁移)）。备份也不可用、或库停在当前 Control 不接受的 schema 版本时，才用 `recover-credentials` 重建：只保留身份与凭据，其余产品状态一概放弃。发布包里是 `recover-credentials.cmd`（固定使用包内 `config/control.json`），开发时是 `node control/dist/recover-credentials.mjs`（经 `REMOTEKIT_CONTROL_CONFIG` 或默认配置定位数据库）。实现在 `control/server/recovery/`。
 
 ```text
 recover-credentials.cmd --dry-run      预览：读出哪些账户、放弃什么、为什么

@@ -1,3 +1,4 @@
+import { log as structuredLog } from '../log';
 import { mailError } from './mail-error';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
 import nodemailer from 'nodemailer';
@@ -83,7 +84,8 @@ export class ImportOutbox {
     private readonly config?: SessionImportConfig,
     private readonly factory: TransportFactory = createTransport,
     private readonly clock: Clock = systemClock,
-    private readonly log: (message: string) => void = console.error,
+    private readonly log: (message: string) => void = (message) =>
+      structuredLog.warn('session_import.outbox_failed', { message }),
   ) {}
   reject(publicKey: Buffer, event: Extract<ControlEvent, { type: 'pairRejected' }>) {
     this.enqueue(publicKey, 0, [event]);

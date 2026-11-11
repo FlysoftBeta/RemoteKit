@@ -1,3 +1,4 @@
+import { formatError } from '../../util/format-error';
 import { retryDelay } from '../../../shared/error-policy';
 import { ErrorOutline } from '@mui/icons-material';
 import { ButtonBase, CircularProgress, Tooltip } from '@mui/material';
@@ -125,7 +126,7 @@ export function AttachmentRow({
       if (!entry) throw new Error('文件尚未就绪');
       open(entry);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : '保存失败');
+      setError(formatError(failure));
     } finally {
       setBusy(false);
     }

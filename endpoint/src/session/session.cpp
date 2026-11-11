@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "session/session.hpp"
 #include "diagnostics/log_files.hpp"
 #include "cluster/node_files.hpp"
@@ -89,7 +90,8 @@ Session::Session(media::Sdk& api,
                   },
               .send = [this](const Json& message, uint64_t stamp) { channel.Send(message, stamp); },
               .failed = [this] { authorization.SetInput(0); },
-              .trace = [this] { return trace; }}),
+              .trace = [this] { return trace; },
+              .log_fields = {{"tenantId", config.tenant}, {"sessionId", config.id}}}),
       presentation(PresentationController::Hooks{
           .peer = [this] { return peer_controller.Handle(); },
           .scope =
@@ -140,9 +142,8 @@ Session::Session(media::Sdk& api,
               .keyframe =
                   [this](uint64_t encoder) { EncoderRegistry::Keyframe(&registry, encoder); },
               .destroy_encoder =
-                  [this](uint64_t encoder) {
-                    EncoderRegistry::DestroyEncoder(&registry, encoder);
-                  }}),
+                  [this](uint64_t encoder) { EncoderRegistry::DestroyEncoder(&registry, encoder); },
+              .log_fields = {{"tenantId", config.tenant}, {"sessionId", config.id}}}),
       output(context, peer_controller, authorization, presentation, registry, pipeline, timing),
       pipeline(context,
                peer_controller,
@@ -226,6 +227,7 @@ Result<Json> Session::WriteClipboard(const Json& request) {
   return Json{{"accepted", true}};
 }
 Result<void> Session::Initialize() {
+  RK_RETURN_IF_ERROR(store.Open());
   checkpoint_cache.Start(config.directory);
   auto loaded = views.Initialize();
   if (!loaded)
@@ -241,7 +243,7 @@ Session::~Session() {
   files.Stop();
   auto stopped = Shutdown();
   if (!stopped)
-    fprintf(stderr, "session shutdown: %s\n", stopped.error().message.c_str());
+    LogError(LogLevel::kWarn, "session.shutdown_failed", stopped.error());
   checkpoint_cache.Stop();
 }
 void Session::BindPeerResources(uint64_t handle) {
@@ -278,11 +280,11 @@ void Session::DrainPeerResources() {
   registry.Drain();
   auto closed = output.Close();
   if (!closed)
-    fprintf(stderr, "peer output close: %s\n", closed.error().message.c_str());
+    LogError(LogLevel::kWarn, "output.close_failed", closed.error());
   if (trace) {
     auto flushed = trace->Flush();
     if (!flushed)
-      fprintf(stderr, "server trace: %s\n", flushed.error().message.c_str());
+      LogError(LogLevel::kWarn, "trace.flush_failed", flushed.error());
   }
 }
 Result<void> Session::Stop() {
@@ -303,7 +305,7 @@ Result<void> Session::CloseRuntime(bool graceful) {
   if (!graceful) {
     auto clipboard_flushed = clipboard.Poll(true);
     if (!clipboard_flushed)
-      fprintf(stderr, "final clipboard synchronization unavailable\n");
+      LogEvent(LogLevel::kWarn, "clipboard.final_sync_failed");
   }
   const bool had_process = browser.Present();
   auto stopped = graceful ? browser.Shutdown([this]() -> Result<void> {
@@ -355,15 +357,15 @@ Result<Json> Session::ReadLog(const Json& request) const {
   const auto name = Required(request, "log");
   fs::path path;
   if (name == "browser")
-    path = config.directory / "browser.log";
+    path = config.options.node_root / "logs/browser" / (config.id + ".log");
   else if (name == "endpoint")
     path = config.options.node_root / "logs" / "endpoint.log";
   else if (name == "endpoint.1")
     path = config.options.node_root / "logs" / "endpoint.log.1";
   else if (name == "crashes")
-    path = config.directory / "crashes" / "events.jsonl";
+    path = config.options.node_root / "logs/crashes" / config.id / "events.jsonl";
   else if (name.starts_with("dump/")) {
-    for (const auto& dump : RecentCrashDumps(config.directory / "crashes"))
+    for (const auto& dump : RecentCrashDumps(config.options.node_root / "logs/crashes" / config.id))
       if (name == "dump/" + Utf8(dump.filename()))
         path = dump;
     if (path.empty())
@@ -380,7 +382,8 @@ Result<Json> Session::ReadLog(const Json& request) const {
                               max.get<uint64_t>());
   if (window && name == "crashes") {
     window.value()["dumps"] = Json::array();
-    for (const auto& dump : RecentCrashDumps(config.directory / "crashes")) {
+    for (const auto& dump :
+         RecentCrashDumps(config.options.node_root / "logs/crashes" / config.id)) {
       std::error_code error;
       const auto size = fs::file_size(dump, error);
       if (!error)
@@ -409,13 +412,14 @@ Result<Json> Session::Hibernate(objects::ObjectService& objects) {
         browser.ShutdownTiming().value("navigationExport", 0.0);
     timing.fields["browserShutdown"]["ms"] = PhaseMs(phase);
     files.Stop();
+    RK_RETURN_IF_ERROR(files.PrepareCheckpoint());
     // No session worker can mutate files after the shutdown boundary.
-    for (const auto* relative :
-         {"uploads", "file-library/drafts", "file-library/incoming", "file-library/staging"})
+    for (const auto* relative : {"uploads", "file-library/staging"})
       fs::remove_all(config.directory / relative);
     phase = PhaseClock::now();
     checkpoint_cache.Stop();
     AddPhase(&timing.fields, "scan", "ms", PhaseMs(phase));
+    RK_RETURN_IF_ERROR(store.Close());
     RK_ASSIGN_OR_RETURN(
         checkpoint, Checkpoints(objects, config.object_access, &timing.fields, &checkpoint_cache)
                         .Create(config.directory, config.tenant, config.options.build_id));
@@ -427,9 +431,16 @@ Result<Json> Session::Hibernate(objects::ObjectService& objects) {
   };
   try {
     auto saved = save();
-    if (!saved)
-      return Error{ErrorCode::kOutcomeUnknown, saved.error().message};
+    if (!saved) {
+      auto error = saved.error();
+      error.code = ErrorCode::kOutcomeUnknown;
+      error.retry_after_ms.reset();
+      return error;
+    }
     return saved;
+  } catch (const std::filesystem::filesystem_error& error) {
+    return WithOsError(ErrorCode::kOutcomeUnknown, error.what(), OsError::Kind::kWin32,
+                       error.code().value());
   } catch (const std::exception& error) {
     return Error{ErrorCode::kOutcomeUnknown, error.what()};
   }

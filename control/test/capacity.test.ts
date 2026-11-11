@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createApplication } from '../server/application';
+import { log } from '../server/log';
 import { diskFloor } from '../server/cluster/disk';
 import { MetricsHistory } from '../server/cluster/metrics';
 import { NodeRegistry } from '../server/cluster/node-link';
@@ -18,7 +19,7 @@ const closeTo = (actual: number | undefined, expected: number) =>
   assert.ok(actual !== undefined && Math.abs(actual - expected) < 1e-9, `${actual} != ${expected}`);
 
 function cluster(overrides: Partial<NodeConfig> = {}) {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const nodes = new NodeRegistry({
     key: Buffer.alloc(32).toString('base64'),
     buildId: 'dev',
@@ -254,7 +255,7 @@ function reliefCluster() {
 test('relief selects longest eligible absence, allows one flight per node and waits for newer metrics', async (t) => {
   const h = reliefCluster();
   const logs: unknown[][] = [];
-  t.mock.method(console, 'info', (...args: unknown[]) => logs.push(args));
+  t.mock.method(log, 'info', (...args: unknown[]) => logs.push(args));
   try {
     h.add('short', 60000);
     h.add('z-last', 60000);
@@ -291,7 +292,9 @@ test('relief selects longest eligible absence, allows one flight per node and wa
     h.nodes.get('alpha')!.metrics.record(fakeMetrics({ cpu: 0.9, sessions: 3 }), Date.now() + 1);
     await h.app.lifecycle.relieve();
     assert.deepEqual(h.hibernated, ['long', 'short']);
-    const decisions = logs.map((line) => JSON.parse(String(line[1])));
+    const decisions = logs
+      .filter((line) => line[0] === 'hibernate.auto')
+      .map((line) => line[1] as Record<string, unknown>);
     assert.equal(decisions[0].reason, 'rebalance');
     assert.equal(decisions[0].tenant, 'long');
     assert.equal(decisions[0].node, 'alpha');
@@ -334,7 +337,7 @@ test('placement requests relief without sustained pressure; a newer relieved sam
 test('sustained pressure triggers relief without a lighter node; idle hibernation keeps ten minutes', async (t) => {
   const h = reliefCluster();
   const logs: unknown[][] = [];
-  t.mock.method(console, 'info', (...args: unknown[]) => logs.push(args));
+  t.mock.method(log, 'info', (...args: unknown[]) => logs.push(args));
   try {
     h.add('idle', 120000);
     assert.equal(await h.app.lifecycle.hibernate('idle', snapshot()), false);
@@ -343,7 +346,8 @@ test('sustained pressure triggers relief without a lighter node; idle hibernatio
     h.pressure();
     await h.app.lifecycle.relieve();
     assert.deepEqual(h.hibernated, ['idle']);
-    assert.equal(JSON.parse(String(logs[0][1])).reason, 'relief');
+    assert.equal(logs[0][0], 'hibernate.auto');
+    assert.equal((logs[0][1] as { reason: string }).reason, 'relief');
   } finally {
     await h.close();
   }

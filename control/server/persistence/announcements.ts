@@ -17,15 +17,6 @@ interface AnnouncementRow {
   updated_at: bigint;
 }
 
-export function createAnnouncementTables(db: Database.Database) {
-  db.exec(`CREATE TABLE announcements (
-      id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
-      published_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-    CREATE TABLE announcement_reads (
-      announcement_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(announcement_id,user_id));
-    CREATE INDEX announcement_reads_user ON announcement_reads(user_id);`);
-}
-
 // A read covers one publication: republishing clears the reads so everyone sees it again.
 export class AnnouncementsRepository {
   constructor(private readonly db: Database.Database) {}

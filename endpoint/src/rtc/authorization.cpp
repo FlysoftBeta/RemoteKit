@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "media/gpu_device.hpp"
 #include "rtc/authorization.hpp"
 #include "media/server_trace.hpp"
@@ -104,7 +105,7 @@ void AuthorizationController::Close() {
 Result<void> AuthorizationController::ManagementLost(uint64_t generation) {
   auto transition = LockTransition();
   if (management_generation_ == generation && RevokeProduct() != 0)
-    fprintf(stderr, "RTC media authorization revoke failed\n");
+    LogEvent(LogLevel::kError, "rtc.authorization_revoke_failed");
   return {};
 }
 }  // namespace remotekit

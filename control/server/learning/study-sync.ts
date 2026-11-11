@@ -195,9 +195,7 @@ export class StudySync {
   }
   private usage(tenant: string) {
     const row = this.store.db
-      .prepare(
-        "SELECT coalesce(sum(json_extract(value,'$.size')),0) AS bytes FROM file_library,json_each(snapshot,'$.entries') WHERE tenant=?",
-      )
+      .prepare('SELECT coalesce(sum(size),0) AS bytes FROM library_entries WHERE tenant=?')
       .get(tenant) as { bytes: bigint };
     return Number(row?.bytes ?? 0);
   }

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createCipheriv, createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { log } from '../server/log';
 import { RemoteKitError, type ErrorCode } from '../shared/errors.js';
 import { HttpClient, serviceError } from '../server/learning/providers/http.js';
 import { collectMediaUrls } from '../server/learning/providers/html.js';
@@ -528,7 +529,7 @@ test('Xinjiaoyu subjects, all textbook editions and recursive scene question typ
 });
 
 test('provider rejections log service, path, code and message with request identities redacted', async (t) => {
-  const warnings = t.mock.method(console, 'warn', () => {});
+  const warnings = t.mock.method(log, 'warn', () => {});
   const client = new APIClient({
     rateLimit,
     fetch: mockFetch(() => ({
@@ -538,7 +539,7 @@ test('provider rejections log service, path, code and message with request ident
   });
   await rejectsCode(client.get(xjSession, '/api/v3/read'), 'unauthenticated');
   assert.deepEqual(warnings.mock.calls[0].arguments, [
-    'Learning provider rejected',
+    'learning.provider_rejected',
     {
       provider: 'xinjiaoyu',
       path: '/api/v3/read',
@@ -550,7 +551,7 @@ test('provider rejections log service, path, code and message with request ident
     fetch: async () => Response.json({ code: '401', message: '登录被拒绝' }),
   });
   await rejectsCode(auth.captchaPolicy(), 'unauthenticated');
-  assert.equal(warnings.mock.calls[warnings.mock.calls.length - 1].arguments[1].provider, 'changyan');
+  assert.equal(warnings.mock.calls[warnings.mock.calls.length - 1].arguments[1]?.provider, 'changyan');
   const http = new HttpClient(
     {
       maxRetries: 0,

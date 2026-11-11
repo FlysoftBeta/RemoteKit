@@ -1,7 +1,9 @@
+#include "util/log.hpp"
 #include "files/file_library.hpp"
+#include "files/library_records.hpp"
 #include "documents/object_documents.hpp"
 #include "files/dc_file_services.hpp"
-#include "persistence/session_store.hpp"
+#include "persistence/durable_json.hpp"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -34,8 +36,9 @@ namespace {
 namespace fs = std::filesystem;
 using Json = ServiceJson;
 using State = FileLibrary::Selection::State;
+using namespace library_records;
 constexpr std::uint64_t kMiB = 1024 * 1024;
-constexpr std::uint64_t kFileBytes = 256 * kMiB;
+
 constexpr std::uint64_t kStagingBytes = 512 * kMiB;
 constexpr std::uint64_t kDraftBytes = 512 * kMiB;
 constexpr std::uint64_t kJpegDerivativeBytes = 24 * kMiB;
@@ -51,11 +54,6 @@ std::int64_t Now() {
   return std::chrono::duration_cast<std::chrono::seconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
-}
-bool HexId(const std::string& id, std::size_t size) {
-  return id.size() == size && std::all_of(id.begin(), id.end(), [](char c) {
-           return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-         });
 }
 std::string Hex(std::span<const unsigned char> bytes) {
   constexpr char digits[] = "0123456789abcdef";
@@ -91,114 +89,6 @@ bool Remove(const fs::path& path) {
   fs::remove(path, error);
   return !error;
 }
-Result<void> Save(const fs::path& path, const Json& value, const FileLibrary::Check& check = {}) {
-  auto saved = WriteDurableJson(path, value, check);
-  if (!saved)
-    return saved.error();
-
-  return {};
-}
-
-template <class Visit, class Invalid>
-Result<void> Records(const fs::path& directory, std::size_t maximum, Visit visit, Invalid invalid) {
-  std::size_t count = 0;
-  RK_ASSIGN_OR_RETURN(entries, DirectoryEntries(directory));
-  for (const auto& entry : entries) {
-    if (++count > maximum * 2 + 1)
-      return Error{ErrorCode::kLimitExceeded, "file_metadata_limit"};
-    if (!Plain(entry.path())) {
-      RK_RETURN_IF_ERROR(
-          invalid(entry.path(), Error{ErrorCode::kInvalidRequest, "invalid_file_metadata"}));
-      continue;
-    }
-    if (entry.path().extension() == L".new") {
-      Remove(entry.path());
-      continue;
-    }
-    const auto size = FileSize(entry.path());
-    if (!size) {
-      RK_RETURN_IF_ERROR(invalid(entry.path(), size.error()));
-      continue;
-    }
-    if (entry.path().extension() != L".json" || size.value() > 256 * 1024) {
-      RK_RETURN_IF_ERROR(
-          invalid(entry.path(), Error{ErrorCode::kInvalidRequest, "invalid_file_metadata"}));
-      continue;
-    }
-    std::ifstream input(entry.path(), std::ios::binary);
-    const auto value = Json::parse(input, nullptr, false);
-    input.close();
-    RK_RETURN_IF_ERROR(visit(entry.path().stem().string(), value));
-  }
-
-  return {};
-}
-const char* StateName(State state) {
-  switch (state) {
-    case State::pending:
-      return "pending";
-    case State::submitted:
-      return "submitted";
-    case State::selected:
-      return "selected";
-    case State::cancelled:
-      return "cancelled";
-  }
-  throw std::logic_error("invalid selection enum");
-}
-Result<State> ParseState(const std::string& state) {
-  for (const auto value : {State::pending, State::submitted, State::selected, State::cancelled})
-    if (state == StateName(value))
-      return value;
-  return Error{ErrorCode::kInvalidRequest, "invalid_selection_state"};
-}
-Result<FileLibrary::Selection> ParseSelection(const std::string& id, const Json& value) {
-  if (!HexId(id, 32))
-    return Error{ErrorCode::kInternal, "invalid_selection_id"};
-  if (value.is_discarded())
-    return Error{ErrorCode::kInternal, "invalid_selection_json"};
-  try {
-    const auto& binding = value.at("binding");
-    RK_ASSIGN_OR_RETURN(state, ParseState(value.at("state").get<std::string>()));
-    FileLibrary::Selection selection{
-        id,
-        value.at("requestId").get<std::string>(),
-        {binding.at("browserIncarnation").get<std::string>(), binding.at("view").get<std::string>(),
-         binding.at("instance").get<std::string>(), binding.at("document").get<std::string>(),
-         binding.at("request").get<std::string>()},
-        {},
-        state};
-    selection.accept = value.at("accept").get<std::vector<std::string>>();
-    const auto& limits = value.at("limits");
-    selection.limits.file_bytes = limits.at("maxFileBytes").get<std::uint64_t>();
-    selection.limits.batch_bytes = limits.at("maxBatchBytes").get<std::uint64_t>();
-    selection.limits.files = limits.at("maxFiles").get<std::size_t>();
-    const auto& files = value.at("files");
-    if (!files.is_array() || files.empty() || files.size() > 64)
-      return Error{ErrorCode::kInternal, "invalid_selection_files"};
-    for (const auto& file : files) {
-      selection.files.push_back({file.at("assetId").get<std::string>(),
-                                 file.at("name").get<std::string>(),
-                                 file.at("type").get<std::string>()});
-    }
-    return selection;
-  } catch (const Json::exception& error) {
-    return Error{ErrorCode::kInternal,
-                 "invalid_selection_fields: json_exception_" + std::to_string(error.id)};
-  }
-}
-bool ValidSpec(const FileUploadStore::Spec& spec) {
-  if (spec.name.empty() || spec.name == "." || spec.name == ".." || spec.name.size() > 1024 ||
-      spec.type.size() > 255 || spec.size > kFileBytes)
-    return false;
-  for (const unsigned char c : spec.name)
-    if (c < 32 || c == '/' || c == '\\' || c == ':')
-      return false;
-  for (const unsigned char c : spec.type)
-    if (c < 32 || c >= 127)
-      return false;
-  return true;
-}
 }  // namespace
 
 ServiceJson FileLibrary::Asset::Json() const {
@@ -213,8 +103,10 @@ ServiceJson FileLibrary::Asset::Json() const {
 FileLibrary::FileLibrary(fs::path root,
                          objects::ObjectService& objects,
                          std::string tenant,
+                         LibraryStore store,
                          std::shared_ptr<objects::SessionObjects> access)
     : root_(std::move(root)),
+      store_(store),
       objects_(objects),
       tenant_(std::move(tenant)),
       access_(access ? std::move(access)
@@ -228,90 +120,70 @@ Result<void> FileLibrary::Initialize() {
   if (!native.starts_with(LR"(\\?\)"))
     root_ = native.starts_with(LR"(\\)") ? fs::path(LR"(\\?\UNC\)" + native.substr(2))
                                          : fs::path(LR"(\\?\)" + native);
-  for (const auto& directory : {root_, root_ / "metadata", root_ / "staging", root_ / "drafts",
-                                root_ / "incoming", root_ / "selections", root_ / "derivatives"}) {
+  for (const auto& directory : {root_, root_ / "staging", root_ / "incoming"}) {
     RK_RETURN_IF_ERROR(CreateDirectories(directory));
     if (!Plain(directory, true))
       return Error{ErrorCode::kUnavailable, "unsafe_library_root"};
   }
-  const auto fail = [](const fs::path&, const Error& error) -> Result<void> { return error; };
-  RK_RETURN_IF_ERROR(Records(
-      root_ / "metadata", kAssets,
-      [&](const auto& id, const Json& value) -> Result<void> {
-        if (value.is_discarded())
-          return Error{ErrorCode::kInternal, "invalid_asset_metadata: invalid_json"};
-        try {
-          Asset asset{id, value.at("type").get<std::string>(),
-                      value.at("size").get<std::uint64_t>(), value.value("width", 0u),
-                      value.value("height", 0u)};
-          if (!HexId(id, 64) || !ValidSpec({"asset", asset.type, asset.size}) ||
-              entries_.size() >= kAssets)
-            return Error{ErrorCode::kInternal, "invalid_asset_record"};
-          entries_.emplace(id, Entry{std::move(asset)});
-          return {};
-        } catch (const Json::exception& error) {
-          return Error{ErrorCode::kInternal,
-                       std::string("invalid_asset_metadata: ") + error.what()};
-        }
-      },
-      fail));
-  RK_RETURN_IF_ERROR(Records(
-      root_ / "drafts", kDrafts,
-      [&](const auto& id, const Json& value) -> Result<void> {
-        if (value.is_discarded())
-          return Error{ErrorCode::kInternal, "invalid_asset_draft: invalid_json"};
-        try {
-          Draft draft{id,
-                      value.at("operation").get<std::string>(),
-                      value.at("sealed").get<std::string>(),
-                      {value.at("name").get<std::string>(), value.at("type").get<std::string>(),
-                       value.at("size").get<std::uint64_t>()},
-                      value.at("expires").get<std::int64_t>()};
-          if (!HexId(id, 32) || !BoundedServiceId(draft.operation) || !ValidSpec(draft.spec) ||
-              drafts_.size() >= kDrafts)
-            return Error{ErrorCode::kInternal, "invalid_asset_draft"};
-          if (draft.sealed.empty()) {
-            const auto path = DraftData(id);
-            RK_ASSIGN_OR_RETURN(size, FileSize(path));
-            if (!Plain(path) || size > draft.spec.size ||
-                draft.spec.size > kDraftBytes - draft_bytes_)
-              return Error{ErrorCode::kInternal, "invalid_asset_draft"};
-            draft_bytes_ += draft.spec.size;
-          } else if (!HexId(draft.sealed, 64)) {
-            return Error{ErrorCode::kInternal, "invalid_asset_draft"};
-          }
-          drafts_.emplace(id, std::move(draft));
-          return {};
-        } catch (const Json::exception& error) {
-          return Error{ErrorCode::kInternal, std::string("invalid_asset_draft: ") + error.what()};
-        }
-      },
-      fail));
-  const auto discard_selection = [](const fs::path& path, const Error& error) -> Result<void> {
-    const bool removed = Remove(path);
-    std::cerr << "selection " << Json(path.stem().string()).dump() << ": " << error.message
-              << (removed ? "" : " delete_failed") << '\n';
-    return {};
-  };
-  RK_RETURN_IF_ERROR(Records(
-      root_ / "selections", kSelections,
-      [&](const auto& id, const Json& value) -> Result<void> {
-        if (selections_.size() >= kSelections)
-          return Error{ErrorCode::kInternal, "invalid_selection_record"};
-        auto selection = ParseSelection(id, value);
-        if (!selection)
-          return discard_selection(root_ / "selections" / (id + ".json"), selection.error());
-        selections_.emplace(id, std::move(selection).value());
-        return {};
-      },
-      discard_selection));
+  RK_ASSIGN_OR_RETURN(assets, store_.Load(LibraryTable::kAssets));
+  if (assets.size() > kAssets)
+    return CorruptState("library asset limit");
+  for (const auto& [id, value] : assets) {
+    const auto valid = library_records::Validate(LibraryTable::kAssets, id, value);
+    if (!valid) {
+      LogError(LogLevel::kWarn, "library.asset_discarded", valid.error(), {{"assetId", id}});
+      RK_RETURN_IF_ERROR(store_.Erase(LibraryTable::kAssets, id));
+      continue;
+    }
+    entries_.emplace(
+        id, Entry{Asset{id, value.at("type").get<std::string>(), value.at("size").get<uint64_t>(),
+                        value.value("width", 0u), value.value("height", 0u)}});
+  }
+  RK_ASSIGN_OR_RETURN(drafts, store_.Load(LibraryTable::kDrafts));
+  if (drafts.size() > kDrafts)
+    return CorruptState("library draft limit");
+  for (const auto& [id, value] : drafts) {
+    RK_RETURN_IF_ERROR(library_records::Validate(LibraryTable::kDrafts, id, value));
+    Draft draft{id,
+                value.at("operation").get<std::string>(),
+                value.at("sealed").get<std::string>(),
+                {value.at("name").get<std::string>(), value.at("type").get<std::string>(),
+                 value.at("size").get<uint64_t>()},
+                value.at("expires").get<int64_t>()};
+    if (draft.sealed.empty()) {
+      RK_ASSIGN_OR_RETURN(exists, FileExists(DraftData(id)));
+      if (!exists)
+        return CorruptState("missing asset draft payload");
+      RK_ASSIGN_OR_RETURN(size, FileSize(DraftData(id)));
+      if (!Plain(DraftData(id)) || size > draft.spec.size ||
+          draft.spec.size > kDraftBytes - draft_bytes_)
+        return CorruptState("invalid asset draft payload");
+      draft_bytes_ += draft.spec.size;
+    }
+    drafts_.emplace(id, std::move(draft));
+  }
+  RK_ASSIGN_OR_RETURN(selections, store_.Load(LibraryTable::kSelections));
+  if (selections.size() > kSelections)
+    return CorruptState("library selection limit");
+  for (const auto& [id, value] : selections) {
+    RK_RETURN_IF_ERROR(library_records::Validate(LibraryTable::kSelections, id, value));
+    RK_ASSIGN_OR_RETURN(selection, ParseSelection(id, value));
+    selections_.emplace(id, std::move(selection));
+  }
   const auto clean = [&](const fs::path& directory, std::size_t maximum,
                          auto keep) -> Result<void> {
     std::size_t count = 0;
     RK_ASSIGN_OR_RETURN(entries, DirectoryEntries(directory));
     for (const auto& entry : entries) {
-      if (++count > maximum || !Plain(entry.path()))
-        return Error{ErrorCode::kInternal, "invalid_library_payload"};
+      if (++count > maximum)
+        return CorruptState("invalid_library_payload");
+      if (!Plain(entry.path()) && directory == root_ / "staging") {
+        LogEvent(LogLevel::kWarn, "library.staging_discarded", {{"path", entry.path().string()}});
+        RK_RETURN_IF_ERROR(RemoveTree(entry.path()));
+        continue;
+      }
+      if (!Plain(entry.path()))
+        return CorruptState("invalid_library_payload");
       if (!keep(entry.path().filename().string()) && !Remove(entry.path()))
         return Error{ErrorCode::kUnavailable, "cannot_clean_library_payload"};
     }
@@ -326,12 +198,26 @@ Result<void> FileLibrary::Initialize() {
 
   return {};
 }
+Result<void> FileLibrary::PrepareCheckpoint() {
+  std::lock_guard lock(mutex_);
+  RK_RETURN_IF_ERROR(store_.ClearDrafts());
+  drafts_.clear();
+  draft_bytes_ = 0;
+  return RemoveTree(root_ / "incoming");
+}
 fs::path FileLibrary::DraftData(const std::string& id) const {
   return root_ / "incoming" / id;
 }
 Result<const FileLibrary::Entry*> FileLibrary::RequireAsset(const std::string& id) const {
   auto found = entries_.find(id);
   RK_ASSIGN_OR_RETURN(info, access_->Ensure(id));
+  if (found != entries_.end() && found->second.asset.size != info.size) {
+    LogEvent(LogLevel::kWarn, "library.asset_discarded",
+             {{"assetId", id}, {"reason", "size_mismatch"}});
+    RK_RETURN_IF_ERROR(store_.Erase(LibraryTable::kAssets, id));
+    entries_.erase(found);
+    found = entries_.end();
+  }
   if (found == entries_.end()) {
     if (info.size > kFileBytes)
       return Error{ErrorCode::kLimitExceeded, "asset_too_large", ErrorReason::kFileTooLarge};
@@ -339,8 +225,6 @@ Result<const FileLibrary::Entry*> FileLibrary::RequireAsset(const std::string& i
     RK_RETURN_IF_ERROR(SaveEntry(entry));
     found = entries_.emplace(id, std::move(entry)).first;
   }
-  if (found->second.asset.size != info.size)
-    return Error{ErrorCode::kInternal, "invalid_asset_size"};
   return &found->second;
 }
 Result<FileLibrary::Draft*> FileLibrary::RequireDraft(std::uint64_t grant, const std::string& id) {
@@ -350,44 +234,51 @@ Result<FileLibrary::Draft*> FileLibrary::RequireDraft(std::uint64_t grant, const
   return &found->second;
 }
 Result<void> FileLibrary::SaveDraft(const Draft& draft, const Check& check) const {
-  RK_RETURN_IF_ERROR(Save(root_ / "drafts" / (draft.id + ".json"),
-                          {{"operation", draft.operation},
-                           {"name", draft.spec.name},
-                           {"type", draft.spec.type},
-                           {"size", draft.spec.size},
-                           {"expires", draft.expires},
-                           {"sealed", draft.sealed}},
-                          check));
+  if (check) {
+    RK_RETURN_IF_ERROR(check());
+  }
+  RK_RETURN_IF_ERROR(store_.Save(LibraryTable::kDrafts, draft.id,
+                                 {{"operation", draft.operation},
+                                  {"name", draft.spec.name},
+                                  {"type", draft.spec.type},
+                                  {"size", draft.spec.size},
+                                  {"expires", draft.expires},
+                                  {"sealed", draft.sealed}}));
 
   return {};
 }
 Result<void> FileLibrary::SaveEntry(const Entry& entry, const Check& check) const {
+  if (check) {
+    RK_RETURN_IF_ERROR(check());
+  }
   auto value = entry.asset.Json();
-  RK_RETURN_IF_ERROR(Save(root_ / "metadata" / (entry.asset.id + ".json"), value, check));
+  RK_RETURN_IF_ERROR(store_.Save(LibraryTable::kAssets, entry.asset.id, value));
 
   return {};
 }
 Result<void> FileLibrary::SaveSelection(const Selection& selection, const Check& check) const {
+  if (check) {
+    RK_RETURN_IF_ERROR(check());
+  }
   const auto& binding = selection.binding;
   Json files = Json::array();
   for (const auto& file : selection.files)
     files.push_back({{"assetId", file.asset_id}, {"name", file.name}, {"type", file.type}});
-  RK_RETURN_IF_ERROR(Save(root_ / "selections" / (selection.id + ".json"),
-                          {{"requestId", selection.request_id},
-                           {"files", files},
-                           {"accept", selection.accept},
-                           {"limits",
-                            {{"maxFileBytes", selection.limits.file_bytes},
-                             {"maxBatchBytes", selection.limits.batch_bytes},
-                             {"maxFiles", selection.limits.files}}},
-                           {"binding",
-                            {{"browserIncarnation", binding.browser_incarnation},
-                             {"view", binding.view},
-                             {"instance", binding.instance},
-                             {"document", binding.document},
-                             {"request", binding.request}}},
-                           {"state", StateName(selection.state)}},
-                          check));
+  RK_RETURN_IF_ERROR(store_.Save(LibraryTable::kSelections, selection.id,
+                                 {{"requestId", selection.request_id},
+                                  {"files", files},
+                                  {"accept", selection.accept},
+                                  {"limits",
+                                   {{"maxFileBytes", selection.limits.file_bytes},
+                                    {"maxBatchBytes", selection.limits.batch_bytes},
+                                    {"maxFiles", selection.limits.files}}},
+                                  {"binding",
+                                   {{"browserIncarnation", binding.browser_incarnation},
+                                    {"view", binding.view},
+                                    {"instance", binding.instance},
+                                    {"document", binding.document},
+                                    {"request", binding.request}}},
+                                  {"state", StateName(selection.state)}}));
 
   return {};
 }
@@ -427,6 +318,7 @@ Result<ServiceJson> FileLibrary::Begin(std::uint64_t grant,
   if (handle == INVALID_HANDLE_VALUE)
     return Error{ErrorCode::kUnavailable, "cannot_create_asset_draft"};
   CloseHandle(handle);
+  RK_RETURN_IF_ERROR(FlushFile(path));
   auto saved = SaveDraft(draft, check);
   if (!saved) {
     Remove(path);
@@ -482,14 +374,15 @@ Result<std::uint64_t> FileLibrary::Chunk(std::uint64_t grant,
 Result<FileLibrary::Asset> FileLibrary::Publish(const fs::path& source,
                                                 Asset asset,
                                                 const Check& check,
-                                                const std::string& derived_from) {
+                                                const std::string& derived_from,
+                                                const std::string& derivative) {
   RK_RETURN_IF_ERROR(Verify(source, asset.size));
   RK_ASSIGN_OR_RETURN(info, access_->Write(source, check, derived_from));
   asset.id = info.id;
   std::lock_guard lock(mutex_);
   RK_RETURN_IF_ERROR(check());
   Entry entry{asset};
-  RK_RETURN_IF_ERROR(SaveEntry(entry, check));
+  RK_RETURN_IF_ERROR(store_.Seal(asset.id, asset.Json(), {}, Json(), derivative));
   entries_.insert_or_assign(asset.id, std::move(entry));
   return asset;
 }
@@ -507,12 +400,22 @@ Result<FileLibrary::Asset> FileLibrary::Seal(std::uint64_t grant,
       return entry->asset;
     }
   }
-  RK_ASSIGN_OR_RETURN(asset, Publish(DraftData(id), {{}, draft.spec.type, draft.spec.size}, check));
+  RK_RETURN_IF_ERROR(FlushFile(DraftData(id)));
+  RK_RETURN_IF_ERROR(Verify(DraftData(id), draft.spec.size));
+  RK_ASSIGN_OR_RETURN(info, access_->Write(DraftData(id), check));
+  Asset asset{info.id, draft.spec.type, draft.spec.size};
   std::lock_guard lock(mutex_);
   RK_RETURN_IF_ERROR(check());
   draft.sealed = asset.id;
   draft.expires = Now() + kDraftLifetime;
-  RK_RETURN_IF_ERROR(SaveDraft(draft, check));
+  RK_RETURN_IF_ERROR(store_.Seal(asset.id, asset.Json(), id,
+                                 {{"operation", draft.operation},
+                                  {"name", draft.spec.name},
+                                  {"type", draft.spec.type},
+                                  {"size", draft.spec.size},
+                                  {"expires", draft.expires},
+                                  {"sealed", draft.sealed}}));
+  entries_.insert_or_assign(asset.id, Entry{asset});
   drafts_.at(id) = std::move(draft);
   draft_bytes_ -= asset.size;
   Remove(DraftData(id));
@@ -568,7 +471,10 @@ Result<FileLibrary::Asset> FileLibrary::ImportDownload(const fs::path& profile,
       return Error{error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
                        ? ErrorCode::kNotFound
                        : ErrorCode::kUnavailable,
-                   "download_open_failed"};
+                   "download_open_failed",
+                   {},
+                   {},
+                   OsError{OsError::Kind::kWin32, error}};
     }
     handles.values.push_back(handle);
     BY_HANDLE_FILE_INFORMATION info{};
@@ -588,8 +494,10 @@ Result<FileLibrary::Asset> FileLibrary::ImportDownload(const fs::path& profile,
   return Publish(path, {{}, spec.type, size}, []() -> Result<void> { return {}; });
 }
 bool FileLibrary::EraseDraft(std::map<std::string, Draft>::iterator draft) {
-  if (!Remove(root_ / "drafts" / (draft->first + ".json")) || !Remove(DraftData(draft->first)))
+  if (!store_.Erase(LibraryTable::kDrafts, draft->first))
     return false;
+  if (!Remove(DraftData(draft->first)))
+    LogEvent(LogLevel::kWarn, "library.draft_cleanup_failed", {{"uploadId", draft->first}});
   if (draft->second.sealed.empty())
     draft_bytes_ -= draft->second.spec.size;
   drafts_.erase(draft);
@@ -684,7 +592,8 @@ Result<std::pair<FileLibrary::Asset, std::vector<std::uint8_t>>> FileLibrary::Re
 Result<FileLibrary::Asset> FileLibrary::CreateDerivative(const Render& render,
                                                          const Check& check,
                                                          DerivativeFormat format,
-                                                         const std::string& derived_from) {
+                                                         const std::string& derived_from,
+                                                         const std::string& derivative) {
   const bool jpeg = format == DerivativeFormat::jpeg;
   const auto budget = jpeg ? kJpegDerivativeBytes : kPngDerivativeBytes;
   const char* extension = jpeg ? ".jpg" : format == DerivativeFormat::png ? ".png" : ".webp";
@@ -708,8 +617,9 @@ Result<FileLibrary::Asset> FileLibrary::CreateDerivative(const Render& render,
     RK_ASSIGN_OR_RETURN(size, FileSize(path));
     if (size > budget)
       return Error{ErrorCode::kLimitExceeded, "photo_output_too_large", ErrorReason::kFileTooLarge};
-    auto result =
-        Publish(path, {{}, type, size, dimensions.width, dimensions.height}, check, derived_from);
+    RK_RETURN_IF_ERROR(FlushFile(path));
+    auto result = Publish(path, {{}, type, size, dimensions.width, dimensions.height}, check,
+                          derived_from, derivative);
     Remove(path);
     return result;
   }
@@ -721,20 +631,15 @@ Result<FileLibrary::Asset> FileLibrary::CachedDerivative(const std::string& sour
   std::lock_guard lock(derivatives_mutex_);
   RK_RETURN_IF_ERROR(check());
   RK_ASSIGN_OR_RETURN(original, Describe(source));
-  const auto path = root_ / "derivatives" /
-                    (original.id + (format == DerivativeFormat::jpeg  ? "-jpeg.json"
-                                    : format == DerivativeFormat::png ? "-png.json"
-                                                                      : "-webp.json"));
-  RK_ASSIGN_OR_RETURN(exists, FileExists(path));
-  if (exists) {
-    std::ifstream input(path, std::ios::binary);
-    const auto record = Json::parse(input, nullptr, false);
-    if (record.is_discarded() || !record.contains("assetId") || !record["assetId"].is_string())
-      return Error{ErrorCode::kInternal, "invalid_derivative_record"};
-    return Describe(record["assetId"].get<std::string>());
+  const auto key = original.id + (format == DerivativeFormat::jpeg  ? "-jpeg"
+                                  : format == DerivativeFormat::png ? "-png"
+                                                                    : "-webp");
+  RK_ASSIGN_OR_RETURN(records, store_.Load(LibraryTable::kDerivatives));
+  if (const auto found = records.find(key); found != records.end()) {
+    RK_RETURN_IF_ERROR(library_records::Validate(LibraryTable::kDerivatives, key, found->second));
+    return Describe(found->second.at("assetId").get<std::string>());
   }
-  RK_ASSIGN_OR_RETURN(asset, CreateDerivative(render, check, format, source));
-  RK_RETURN_IF_ERROR(Save(path, {{"assetId", asset.id}}, check));
+  RK_ASSIGN_OR_RETURN(asset, CreateDerivative(render, check, format, source, key));
   return asset;
 }
 Result<void> FileLibrary::Sweep() {
@@ -825,17 +730,22 @@ Result<std::optional<State>> FileLibrary::CancelPendingSelections(
     if (selection.state == State::submitted || selection.state == State::selected)
       return std::optional<State>{selection.state};
   }
-  for (auto& [id, selection] : selections_) {
+  std::map<std::string, Json> cancelled;
+  RK_ASSIGN_OR_RETURN(records, store_.Load(LibraryTable::kSelections));
+  for (const auto& [id, selection] : selections_) {
     if (selection.binding != binding)
       continue;
     if (selection.state == State::pending) {
-      auto cancelled = selection;
-      cancelled.state = State::cancelled;
-      RK_RETURN_IF_ERROR(SaveSelection(cancelled, check));
-      selection.state = State::cancelled;
-    }
-    result = selection.state;
+      auto document = records.at(id);
+      document["state"] = "cancelled";
+      cancelled.emplace(id, std::move(document));
+      result = State::cancelled;
+    } else
+      result = selection.state;
   }
+  RK_RETURN_IF_ERROR(store_.Selections(cancelled));
+  for (const auto& [id, document] : cancelled)
+    selections_.at(id).state = State::cancelled;
   return result;
 }
 Result<State> FileLibrary::Finish(const std::string& id,

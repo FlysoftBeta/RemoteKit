@@ -14,10 +14,10 @@ namespace {
 class CrashReporterClient final : public crash_reporter::CrashReporterClient {
  public:
   bool GetCrashDumpLocation(std::wstring* directory) override {
-    const auto path = base::CommandLine::ForCurrentProcess()->GetSwitchValuePath("data-path");
+    const auto path = base::CommandLine::ForCurrentProcess()->GetSwitchValuePath("crash-dir");
     if (path.empty())
       return false;
-    const auto crashes = path.AppendASCII("crashes");
+    const auto& crashes = path;
     if (!base::CreateDirectory(crashes))
       return false;
     *directory = crashes.value();
@@ -45,6 +45,8 @@ class CrashReporterClient final : public crash_reporter::CrashReporterClient {
 }  // namespace
 
 void InitializeCrashReporter() {
+  if (base::CommandLine::ForCurrentProcess()->GetSwitchValuePath("crash-dir").empty())
+    return;
   static base::NoDestructor<CrashReporterClient> client;
   crash_reporter::SetCrashReporterClient(client.get());
   const auto type = base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("type");

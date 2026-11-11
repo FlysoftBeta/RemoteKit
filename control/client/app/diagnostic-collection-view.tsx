@@ -34,7 +34,7 @@ export function DiagnosticSettings({
       </SettingRow>
       {state.phase === 'start-error' && (
         <Alert severity="error" sx={{ mt: 1 }}>
-          未能确认诊断已开始，请重试。
+          {state.error}
         </Alert>
       )}
     </SettingSection>

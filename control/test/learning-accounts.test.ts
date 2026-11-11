@@ -5,6 +5,7 @@ import { LearningAccounts } from '../server/learning/accounts';
 import { AuthClient, type AccountSession } from '../server/learning/providers/changyan/auth';
 import { ZhixueAuthClient } from '../server/learning/providers/changyan/zhixue-auth';
 import { RemoteKitError } from '../shared/errors';
+import { checkIntegrity } from '../server/persistence/integrity';
 
 const session = (): AccountSession => ({
   sso: { tgt: 'private-tgt', at: 'private-at', userId: 'id' },
@@ -16,7 +17,7 @@ const session = (): AccountSession => ({
   },
 });
 function fixture() {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const auth = new AuthClient();
   const zhixue = new ZhixueAuthClient();
   auth.ensureFresh = async (input) => input;
@@ -45,6 +46,20 @@ function fixture() {
     },
   };
 }
+
+test('learning account instances and integrity checks use the database at-rest key', () => {
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  try {
+    const accounts = new LearningAccounts(store, () => {});
+    const value = session();
+    accounts.save('tenant', 'changyan', value, 'Student', 'student');
+    const reopened = new LearningAccounts(store, () => {});
+    assert.deepEqual(reopened.session('tenant', 'changyan'), value);
+    assert.deepEqual(checkIntegrity(store.db, store.atRestKey).problems, []);
+  } finally {
+    store.db.close();
+  }
+});
 
 test('provider unauthenticated renews TGT and CAS once, then persists the rotated session', async () => {
   const f = fixture();

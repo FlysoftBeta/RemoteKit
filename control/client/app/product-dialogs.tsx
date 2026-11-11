@@ -20,11 +20,25 @@ import type {
   ProductUser,
   SetupStatus,
 } from '../../shared/product';
-import { RemoteKitError } from '../../shared/errors';
 import type { ProductActionHandler as Action } from '../control/product-operations';
 import { formatError } from '../util/format-error';
 import { request } from '../control/http-request';
 export type { ProductActionHandler as Action } from '../control/product-operations';
+
+export function ConnectionError({ error, retry }: { error: string; retry: () => void }) {
+  return (
+    <Alert
+      severity="error"
+      action={
+        <Button color="inherit" onClick={retry}>
+          重试
+        </Button>
+      }
+    >
+      无法连接服务器：{error}
+    </Alert>
+  );
+}
 
 export function AuthView({
   onLogin,
@@ -80,13 +94,7 @@ export function AuthView({
             });
             onLogin(result.user);
           } catch (e) {
-            // Account refusals carry messages written for this page, such as a disabled account.
-            setError(
-              e instanceof RemoteKitError &&
-                ['invalid_request', 'unauthenticated', 'forbidden', 'conflict'].includes(e.code)
-                ? e.message
-                : formatError(e),
-            );
+            setError(formatError(e));
             if (creating) void refreshSetup();
           } finally {
             submitting.current = false;
@@ -109,18 +117,7 @@ export function AuthView({
             : '继续你的浏览器工作空间'}
         </Typography>
         {error && <Alert severity="error">{error}</Alert>}
-        {setupError && (
-          <Alert
-            severity="error"
-            action={
-              <Button color="inherit" onClick={() => void refreshSetup()}>
-                重试
-              </Button>
-            }
-          >
-            无法连接服务器：{setupError}
-          </Alert>
-        )}
+        {setupError && <ConnectionError error={setupError} retry={() => void refreshSetup()} />}
         <TextField
           required
           inputRef={autoFocusRef}

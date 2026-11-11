@@ -353,7 +353,13 @@ try {
   await find('.viewer-lock-blank');
   await unlock();
   await registerViewer({ click, fill, username: 'diagnostic-qa', password: accountPassword });
-  await click('button', '新建窗口');
+  const startScreen = page.getByRole('dialog', { name: '开始屏幕' });
+  if (!(await startScreen.isVisible())) await page.getByRole('button', { name: '开始', exact: true }).click();
+  await startScreen
+    .locator('[data-tile-key]')
+    .filter({ has: page.getByText('浏览器', { exact: true }) })
+    .first()
+    .click({ timeout: 120000 });
 
   const media = () => read('diagnosticQA.media()');
   if (scenario) {
@@ -391,8 +397,13 @@ try {
     assert(current.videoReady && current.codecs?.includes('video/h264'));
   };
   await log('h264-ready', baseline);
-  await click('button', '更多');
-  await click('[role=menuitem]', '设置');
+  await page.getByRole('button', { name: '开始', exact: true }).click();
+  await startScreen
+    .locator('[data-tile-key]')
+    .filter({ has: page.getByText('设置', { exact: true }) })
+    .first()
+    .click({ timeout: 30000 });
+  await click('[role=button]', '诊断');
   await until(
     () =>
       read(`[...document.querySelectorAll('button')].some(button =>
@@ -471,7 +482,7 @@ try {
     'endpoint.jsonl',
     'events.jsonl',
     'logs/browser.log',
-    'logs/control.log',
+    'logs/control.jsonl',
     'logs/endpoint.log',
     'manifest.json',
   ]);
@@ -479,8 +490,8 @@ try {
   // Raw logs include history from before the collection started.
   assert.match(entries.get('logs/browser.log'), /RemoteKit startup InitLogging/);
   assert.match(entries.get('logs/browser.log'), /CONSOLE.*diagnostic-fixture-console-marker/);
-  assert.match(entries.get('logs/endpoint.log'), / browser command /);
-  assert.match(entries.get('logs/control.log'), /RemoteKit Control http:\/\//);
+  assert.match(entries.get('logs/endpoint.log'), /"ev":"browser\.launched"/);
+  assert.match(entries.get('logs/control.jsonl'), /"ev":"control\.started"/);
   assert.equal(manifest.logs.browser.exists, true);
   assert.equal(manifest.logs.endpoint.exists, true);
   assert.equal(manifest.id, complete.id);

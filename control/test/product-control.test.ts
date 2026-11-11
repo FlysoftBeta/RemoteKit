@@ -152,7 +152,7 @@ class ProductEndpoint implements EndpointLink {
 }
 async function fixture() {
   const clock = new TestClock(),
-    store = new ControlDatabase(':memory:', clock),
+    store = new ControlDatabase(':memory:', { clock, buildId: 'test' }),
     endpoint = new ProductEndpoint(),
     control = createApplication(store, testGateway(endpoint), undefined, clock);
   const user = await registerUser(store, 'testuser', 'password123');
@@ -812,7 +812,7 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
   const dir = await mkdtemp(join(tmpdir(), 'rk-site-settings-')),
     path = join(dir, 'control.db');
   const endpoint = new ProductEndpoint();
-  let store = new ControlDatabase(path),
+  let store = new ControlDatabase(path, { buildId: 'test' }),
     control = createApplication(store, testGateway(endpoint));
   try {
     const { tenantId } = await registerUser(store, 'site-settings', 'password123');
@@ -953,7 +953,7 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
     await control.viewers.detachViewer(tenantId, 'lease');
     await control.close();
     store.db.close();
-    store = new ControlDatabase(path);
+    store = new ControlDatabase(path, { buildId: 'test' });
     control = createApplication(store, testGateway(endpoint));
     await control.viewers.attachViewer(
       tenantId,
@@ -1570,7 +1570,7 @@ function connect(url: string, cookie: string, origin = 'http://product.test') {
 }
 
 test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Viewer and hide on disconnect', async () => {
-  const store = new ControlDatabase(':memory:'),
+  const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     endpoint = new ProductEndpoint(),
     control = createApplication(store, testGateway(endpoint)),
     server = createHttp(control, { origins: ['http://product.test'], clientDir: '.' });
@@ -1760,7 +1760,7 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
 });
 
 test('cookie logout/login replacement cannot revoke another token Viewer of the same user', async () => {
-  const store = new ControlDatabase(':memory:'),
+  const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     control = createApplication(store, testGateway(new ProductEndpoint()));
   const server = createHttp(control, { origins: ['http://product.test'], clientDir: '.' });
   server.listen(0, '127.0.0.1');
@@ -2178,29 +2178,48 @@ test('native file chooser anchor exposes only viewport bounds bound to the pendi
 test('viewport accepts all sixteen workspace windows and rejects a seventeenth observation', async () => {
   const { store, control, user } = await fixture();
   try {
-    await control.viewers.attachViewer(user.tenantId, 'lease', () => {},
-      { identity: 'test-account', valid: () => true }, true);
+    await control.viewers.attachViewer(
+      user.tenantId,
+      'lease',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
     let state = control.viewers.productState(user.tenantId);
     for (let i = 0; i < 16; i++) {
-      ({ state } = await control.operations.productAction(user.tenantId,
-        { type: 'window.open', appId: 'files', placement: { mode: 'space' } }, 'lease'));
+      ({ state } = await control.operations.productAction(
+        user.tenantId,
+        { type: 'window.open', appId: 'files', placement: { mode: 'space' } },
+        'lease',
+      ));
       if ([7, 8, 15].includes(i))
         await requestViewer(control, user.tenantId, 'lease', 'viewport', {
           devicePixelRatio: 1,
           windows: state.workspace.windows.map((win) => ({
-            windowId: win.id, width: 800, height: 600, visible: false,
-            occludedBottom: 0, occlusionRevision: '1',
+            windowId: win.id,
+            width: 800,
+            height: 600,
+            visible: false,
+            occludedBottom: 0,
+            occlusionRevision: '1',
           })),
         });
     }
     assert.equal(state.workspace.windows.length, 16);
-    await assert.rejects(requestViewer(control, user.tenantId, 'lease', 'viewport', {
-      devicePixelRatio: 1,
-      windows: Array.from({ length: 17 }, (_, i) => ({
-        windowId: state.workspace.windows[i % 16].id, width: 800, height: 600,
-        visible: false, occludedBottom: 0, occlusionRevision: '1',
-      })),
-    }), { code: 'invalid_request' });
+    await assert.rejects(
+      requestViewer(control, user.tenantId, 'lease', 'viewport', {
+        devicePixelRatio: 1,
+        windows: Array.from({ length: 17 }, (_, i) => ({
+          windowId: state.workspace.windows[i % 16].id,
+          width: 800,
+          height: 600,
+          visible: false,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        })),
+      }),
+      { code: 'invalid_request' },
+    );
   } finally {
     await control.viewers.detachViewer(user.tenantId, 'lease');
     await control.close();

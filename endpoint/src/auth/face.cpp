@@ -132,7 +132,8 @@ Result<Json> FaceController::FaceCommand(const std::string& method,
     else if (result->outcome == rk::auth::FaceOutcome::no_matching_face)
       reply["outcome"] = "no_matching_face";
     if (result->error)
-      reply["error"] = WireError(*result->error);
+      reply["error"] = WireError(*result->error, "dc.request_failed",
+                                 {{"method", method}, {"tenantId", tenant}, {"sessionId", id}});
     return reply;
   }
   if (method != "auth.face.begin")

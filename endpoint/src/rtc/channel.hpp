@@ -47,7 +47,8 @@ class ChannelController : private ControllerContext {
         registry(registry),
         views(views),
         timing(timing),
-        data_router(MakeRouterHooks()) {}
+        direct_services({{"tenantId", tenant}, {"sessionId", id}}),
+        data_router(MakeRouterHooks(), {{"tenantId", tenant}, {"sessionId", id}}) {}
   void QueueMessage(Json message);
   DataRouter::Hooks MakeRouterHooks();
   void Bind(uint64_t handle);

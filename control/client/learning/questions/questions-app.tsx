@@ -1,3 +1,4 @@
+import { formatError } from '../../util/format-error';
 import {
   Close,
   FilterListOutlined,
@@ -356,7 +357,7 @@ export function QuestionsApp({ state, call, windowId, tab, online }: LearningApp
           retry={() => {
             setError('');
             void call('learning.signOut', { provider: 'xinjiaoyu' }).catch((failure) =>
-              setError(failure.message),
+              setError(formatError(failure)),
             );
           }}
         />
@@ -560,7 +561,7 @@ export function QuestionsApp({ state, call, windowId, tab, online }: LearningApp
           onClick={() => {
             setMenu(undefined);
             void call('learning.signOut', { provider: 'xinjiaoyu' }).catch((failure) =>
-              setError(failure.message),
+              setError(formatError(failure)),
             );
           }}
         >
@@ -574,7 +575,7 @@ export function QuestionsApp({ state, call, windowId, tab, online }: LearningApp
           if (account.status === 'signing_in')
             void call('learning.signInCancel', { provider: 'xinjiaoyu' })
               .then(() => setLogin(false))
-              .catch((failure) => setError(failure.message));
+              .catch((failure) => setError(formatError(failure)));
           else setLogin(false);
         }}
         fullWidth

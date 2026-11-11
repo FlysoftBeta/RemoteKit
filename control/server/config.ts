@@ -49,6 +49,7 @@ export interface RuntimeConfig {
   readonly origins: readonly string[];
   readonly clientDir: string;
   readonly diagnosticDir: string;
+  readonly logDir: string;
   readonly cluster: Readonly<{ keyFile: string; key: string }>;
   readonly quotas: Readonly<{ tenantObjectBytes: number | null }>;
   readonly nodes: Readonly<Record<string, ConfiguredNode>>;
@@ -256,8 +257,8 @@ export function runtimeConfig(
           },
           storage:
             buildId === 'dev'
-              ? { database: 'control.db', diagnostics: 'diagnostics' }
-              : { database: '../data/control.db', diagnostics: '../data/diagnostics' },
+              ? { database: 'control.db', diagnostics: 'diagnostics', logs: 'logs' }
+              : { database: '../data/control.db', diagnostics: '../data/diagnostics', logs: '../logs' },
           cluster: { keyFile: 'cluster.key' },
           nodeDefaults,
           quotas: {},
@@ -339,7 +340,7 @@ export function runtimeConfig(
     const certPath = resolve(directory, string(value.cert, 'tls.cert'));
     tls = Object.freeze({ key: readFileSync(keyPath), cert: readFileSync(certPath) });
   }
-  const storage = object(fallback(source.storage, {}), ['database', 'diagnostics'], 'storage');
+  const storage = object(fallback(source.storage, {}), ['database', 'diagnostics', 'logs'], 'storage');
   const cluster = object(fallback(source.cluster, {}), ['keyFile', 'controlUrl'], 'cluster');
   const keyFile = resolve(directory, string(fallback(cluster.keyFile, 'cluster.key'), 'cluster.keyFile'));
   const defaultControlUrl =
@@ -435,6 +436,7 @@ export function runtimeConfig(
       directory,
       string(fallback(storage.diagnostics, 'diagnostics'), 'storage.diagnostics'),
     ),
+    logDir: resolve(directory, string(fallback(storage.logs, 'logs'), 'storage.logs')),
     clientDir: resolve(root, 'dist/client'),
     cluster: Object.freeze({ keyFile, key }),
     nodes: Object.freeze(nodes),

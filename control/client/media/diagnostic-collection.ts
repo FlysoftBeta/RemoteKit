@@ -1,4 +1,5 @@
 import { diagnostics } from './diagnostics';
+import { formatError } from '../util/format-error';
 import type { DiagnosticEnvironment, DiagnosticMethods, DiagnosticReply } from '../../shared/diagnostics';
 
 export function diagnosticEnvironment(): DiagnosticEnvironment {
@@ -80,7 +81,8 @@ export type DiagnosticRequest = <K extends keyof DiagnosticMethods>(
 ) => Promise<DiagnosticReply>;
 
 export type DiagnosticState =
-  | { phase: 'idle' | 'starting' | 'start-error' }
+  | { phase: 'idle' | 'starting' }
+  | { phase: 'start-error'; error: string }
   | {
       phase: 'collecting' | 'finalizing' | 'complete' | 'retry' | 'failed';
       id: string;
@@ -151,8 +153,8 @@ export class DiagnosticCollection {
       if (phase === 'collecting') this.schedule(() => this.sample());
       else if (phase === 'finalizing') void this.finish(true);
       return this.available && generation === this.generation;
-    } catch {
-      this.update({ phase: 'start-error' });
+    } catch (error) {
+      this.update({ phase: 'start-error', error: formatError(error) });
       return false;
     }
   }

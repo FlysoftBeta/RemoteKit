@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Bounded real Browser checks for recovery scheduling, dirty state and close ACK."""
+import base64
+import sqlite3
 import argparse, http.server, json, queue, subprocess, threading, time
 from cluster_bridge import endpoint_command
 from pathlib import Path
@@ -77,7 +79,7 @@ def main():
             else: body = '<title>fresh-target</title>'
             self.send_response(200); self.send_header('Content-Type','text/html'); self.end_headers()
             try: self.wfile.write(body.encode())
-            except (BrokenPipeError, ConnectionResetError): pass
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError): pass
         def do_POST(self):
             self.rfile.read(int(self.headers.get('Content-Length','0')))
             requests.append(dict(method='POST',path=self.path,at=time.time()))
@@ -89,7 +91,7 @@ def main():
     state = run/'state'; service = Service(args,run,state); evidence=[]
     try:
         initial,_ = service.call('session.ensure'); session=initial['sessionId']
-        recovery_dir=state/'sessions'/session/'recovery'
+        session_db=state/'sessions'/session/'session.db'
         for index in range(1,5):
             url=origin+('/post' if index==4 else '/state?view='+str(index))
             service.call('view.ensure',viewId=str(index),url=url,width=320,height=240,visible=True,
@@ -105,20 +107,32 @@ def main():
                     return report.get('hash')=='#three' and report.get('input')=='saved-form' and report.get('scroll')==650
             return False
         ready=service.wait(captured)
+        assert not (state/'sessions'/session/'browser.log').exists()
+        assert not (state/'sessions'/session/'crashes').exists()
+        assert (state/'logs/browser'/(session+'.log')).exists()
+        browser_log,_=service.call('session.logs.read',log='browser',maxBytes=131072)
+        assert browser_log['exists'] and base64.b64decode(browser_log['data'])
         assert ready['views'][0]['document']==document,ready
         assert len(set(revisions))>=2,revisions
-        assert all((recovery_dir/(str(index)+'.json')).exists() for index in range(1,5))
-        time.sleep(1);service.call('session.snapshot')
-        saved=(recovery_dir/'1.json').stat().st_mtime_ns
+        database=sqlite3.connect(session_db, timeout=0)
+        assert database.execute('SELECT count(*) FROM navigation_recovery').fetchone()[0]==4
+        time.sleep(1)
+        service.wait(lambda snapshot: all(database.execute('SELECT navigation_revision FROM navigation_recovery WHERE view_id=?',(view['viewId'],)).fetchone()==(int(view['navigationRevision']),) for view in snapshot['views']))
+        saved=database.execute("SELECT navigation_revision,state FROM navigation_recovery WHERE view_id='1'").fetchone()
         for _ in range(3): service.call('session.snapshot');time.sleep(.15)
-        assert (recovery_dir/'1.json').stat().st_mtime_ns==saved,'unchanged state exported again'
+        assert database.execute("SELECT navigation_revision,state FROM navigation_recovery WHERE view_id='1'").fetchone()==saved,'unchanged recovery state changed'
         pid=ready['browserPid']; subprocess.run(['taskkill','/PID',str(pid),'/F'],check=True,capture_output=True)
         time.sleep(.15)
         # Observation and stale replies must not resurrect the old process.
         dead,_=service.call('session.snapshot'); assert not dead['running']
+        crash_file=state/'logs/crashes'/session/'events.jsonl'
+        crash=json.loads(crash_file.read_text().splitlines()[-1])
+        assert crash['ev']=='browser.crashed' and crash['exitCode']!=0
+        crash_log,_=service.call('session.logs.read',log='crashes',maxBytes=131072)
+        assert crash_log['exists'] and b'browser.crashed' in base64.b64decode(crash_log['data'])
         stale,_=service.call('view.close.reply',ok=False,viewId='1',requestId='1',accept=True,
             instance='1',document='1',browserIncarnation=initial['browserIncarnation'])
-        assert 'stale_browser_incarnation' in stale['error']
+        assert 'stale_browser_incarnation' in stale['error']['message']
         restarted,elapsed=service.call('session.ensure');assert elapsed<5,elapsed
         assert restarted['recovery']['pending'] and restarted['browserIncarnation']!=initial['browserIncarnation']
         other,other_elapsed=service.call('session.ensure','unrelated');assert other_elapsed<5,other_elapsed
@@ -156,27 +170,39 @@ def main():
         service.call('view.navigate',viewId='1',url=origin+'/fresh')
         live=service.wait(lambda s:any(v['viewId']=='1' and v.get('title')=='fresh-target' and not v.get('loading') for v in s['views']))
         assert live['views'][0].get('recovery',{}).get('pending') is not True
+        database.close()
+        service.wait(lambda snapshot: all(not view.get('loading') and not view.get('pending') for view in snapshot['views']),timeout=45)
+        checkpoint,_=service.call('session.hibernate',placementEpoch=1)
         service.close(eof=True);evidence.extend(service.evidence)
-        # Durable event first / desired deletion second / Browser ACK last.
-        # Fail the second save, then restart: constructor event replay must
-        # remove the old desired view before any Browser reconstruction.
+        # A blocked write preserves the view and emits no closed event.
+        # Reconciliation commits the close before Browser acknowledgement.
         service=Service(args,run,state)
+        service.call('session.open',sessionId=session,placementEpoch=2,profileKey=base64.b64encode(bytes([7])*32).decode(),checkpoint=checkpoint['manifestId'])
         service.call('session.ensure')
+        database=sqlite3.connect(session_db,timeout=0)
         service.call('view.ensure',viewId='8',url='about:blank',width=320,height=240,visible=False,
             device=dict(mode='desktop',deviceScaleFactor=1))
-        blocked_events=state/'sessions'/session/'events.json.new';blocked_events.mkdir()
+        database.execute('BEGIN IMMEDIATE')
         service.call('view.close',viewId='8',force=True,ok=False)
-        blocked_events.rmdir()
+        database.rollback()
         replay,_=service.call('session.snapshot')
         assert any(e['viewId']=='8' for e in replay['events']),'Browser ACK preceded durable event save'
         service.call('view.ensure',viewId='9',url='about:blank',width=320,height=240,visible=False,
             device=dict(mode='desktop',deviceScaleFactor=1))
-        blocked_save=state/'sessions'/session/'views.json.new';blocked_save.mkdir()
+        database.execute('BEGIN IMMEDIATE')
         service.call('view.close',viewId='9',force=True,ok=False)
-        event_state=json.loads((state/'sessions'/session/'events.json').read_text())
-        assert any(e['viewId']=='9' for e in event_state['events'])
-        service.close();evidence.extend(service.evidence);blocked_save.rmdir()
-        service=Service(args,run,state);service.call('session.ensure')
+        assert database.execute("SELECT count(*) FROM views WHERE view_id='9'").fetchone()[0]==1
+        assert database.execute("SELECT count(*) FROM closed_events WHERE view_id='9'").fetchone()[0]==0
+        database.rollback()
+        closed,_=service.call('session.snapshot')
+        database.close()
+        service.call('session.events.ack',eventIds=[event['eventId'] for event in closed['events']])
+        service.wait(lambda snapshot: all(not view.get('loading') and not view.get('pending') for view in snapshot['views']))
+        checkpoint,_=service.call('session.hibernate',placementEpoch=2)
+        service.close();evidence.extend(service.evidence)
+        service=Service(args,run,state)
+        service.call('session.open',sessionId=session,placementEpoch=3,profileKey=base64.b64encode(bytes([7])*32).decode(),checkpoint=checkpoint['manifestId'])
+        service.call('session.ensure')
         snapshot,_=service.call('session.snapshot');assert all(v['viewId']!='9' for v in snapshot['views'])
         # Idempotent repeated close is retained inside a single Browser even
         # after its full snapshot tombstone has been acknowledged.
@@ -186,7 +212,8 @@ def main():
         service.call('view.close',viewId='10',force=True)
         refused,_=service.call('view.ensure',viewId='10',url='about:blank',width=320,height=240,visible=False,
             device=dict(mode='desktop',deviceScaleFactor=1),ok=False)
-        assert 'view_id_closed' in refused['error'],refused
+        assert 'view_id_closed' in refused['error']['message'],refused
+        service.wait(lambda snapshot: not snapshot['recovery']['pending'] and all(not view.get('loading') and not view.get('pending') for view in snapshot['views']),timeout=45)
         service.close()
         print(json.dumps(dict(passed=True,evidence=str(run),coldEnsureSeconds=elapsed,otherTenantEnsureSeconds=other_elapsed)))
     finally:

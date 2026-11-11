@@ -1,3 +1,6 @@
+import { decodeJson, encodeJson } from './codec';
+import { selection } from './documents';
+import { readLibrary, writeLibrary } from './relational-library';
 import type { FileRequest } from '../../shared/product';
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
@@ -74,10 +77,10 @@ export class LibraryRepository {
       const entryId = entry?.id ?? randomUUID();
       this.db
         .prepare(
-          `INSERT INTO library_snippets VALUES (?,?,?,?,?,?)
-        ON CONFLICT(tenant,hash) DO UPDATE SET origin=excluded.origin,copied_at=excluded.copied_at`,
+          `INSERT INTO library_snippets VALUES (?,?,?,?,?)
+        ON CONFLICT(tenant,hash) DO UPDATE SET copied_at=excluded.copied_at`,
         )
-        .run(entryId, tenant, text, hash, JSON.stringify(origin), copiedAt);
+        .run(entryId, tenant, text, hash, copiedAt);
       snapshot.entries = snapshot.entries.filter((item) => item.id !== entryId);
       const firstLine = text.split(/\r\n|\r|\n/).find((line) => line.trim()) ?? '';
       snapshot.entries.unshift({
@@ -105,19 +108,7 @@ export class LibraryRepository {
     );
   }
   snapshot(tenant: string): LibrarySnapshot {
-    const row = this.db.prepare('SELECT snapshot FROM file_library WHERE tenant=?').get(tenant) as
-      { snapshot: string } | undefined;
-    const snapshot: LibrarySnapshot = row
-      ? JSON.parse(row.snapshot)
-      : {
-          revision: 0,
-          entries: [],
-          basket: [],
-          partitions: [],
-          sources: [],
-          excludedSources: [],
-          basketPartitionId: null,
-        };
+    const snapshot = readLibrary(this.db, tenant);
     snapshot.sources = librarySources(snapshot);
     return snapshot;
   }
@@ -137,10 +128,7 @@ export class LibraryRepository {
             .run(tenant, row.entry_id);
       }
       snapshot.revision++;
-      this.db
-        .prepare('INSERT OR REPLACE INTO file_library VALUES (?,?)')
-        .run(tenant, JSON.stringify(snapshot));
-      syncObjectReferences(this.db);
+      if (writeLibrary(this.db, tenant, snapshot)) syncObjectReferences(this.db);
     });
   }
   operation(tenant: string, operationId: string, payload: string) {
@@ -168,10 +156,14 @@ export class LibraryRepository {
   pendingEntries(tenant: string) {
     const ids = new Set<string>();
     const pending = this.db
-      .prepare('SELECT manifest FROM file_library_selections WHERE tenant=? AND terminal IS NULL')
-      .all(tenant) as { manifest: string }[];
+      .prepare('SELECT id,manifest FROM file_library_selections WHERE tenant=? AND terminal IS NULL')
+      .all(tenant) as { id: string; manifest: string }[];
     for (const row of pending) {
-      const manifest: Selection = JSON.parse(row.manifest);
+      const manifest: Selection = decodeJson(
+        row.manifest,
+        selection,
+        `file_library_selections.manifest ${tenant}/${row.id}`,
+      );
       for (const entryId of manifest.entryIds) ids.add(entryId);
     }
     return ids;
@@ -191,7 +183,14 @@ export class LibraryRepository {
       .prepare('SELECT manifest,terminal FROM file_library_selections WHERE tenant=? AND id=?')
       .get(tenant, selectionId) as { manifest: string; terminal: TerminalState | null } | undefined;
     if (!row) throw new RemoteKitError('not_found', '文件选择不存在');
-    return { manifest: JSON.parse(row.manifest) as Selection, terminal: row.terminal };
+    return {
+      manifest: decodeJson(
+        row.manifest,
+        selection,
+        `file_library_selections.manifest ${tenant}/${selectionId}`,
+      ),
+      terminal: row.terminal,
+    };
   }
   settle(tenant: string, manifest: Selection, state: SelectionState) {
     transaction(this.db, () => {
@@ -228,16 +227,26 @@ export class LibraryRepository {
     return (
       this.db
         .prepare(
-          'SELECT manifest FROM file_library_selections WHERE tenant=? AND terminal IS NULL ORDER BY checked,id LIMIT ?',
+          'SELECT id,manifest FROM file_library_selections WHERE tenant=? AND terminal IS NULL ORDER BY checked,id LIMIT ?',
         )
-        .all(tenant, limit) as { manifest: string }[]
-    ).map((row) => JSON.parse(row.manifest));
+        .all(tenant, limit) as { id: string; manifest: string }[]
+    ).map((row) =>
+      decodeJson(row.manifest, selection, `file_library_selections.manifest ${tenant}/${row.id}`),
+    );
   }
   insertSelection(tenant: string, manifest: Selection, operationId: string, payload: string) {
     transaction(this.db, () => {
       this.db
         .prepare('INSERT INTO file_library_selections (tenant,id,manifest) VALUES (?,?,?)')
-        .run(tenant, manifest.selectionId, JSON.stringify(manifest));
+        .run(
+          tenant,
+          manifest.selectionId,
+          encodeJson(
+            manifest,
+            selection,
+            `file_library_selections.manifest ${tenant}/${manifest.selectionId}`,
+          ),
+        );
       this.remember(tenant, operationId, payload, manifest.selectionId);
       syncObjectReferences(this.db);
     });
@@ -245,7 +254,11 @@ export class LibraryRepository {
   saveSelection(tenant: string, manifest: Selection) {
     this.db
       .prepare('UPDATE file_library_selections SET manifest=? WHERE tenant=? AND id=?')
-      .run(JSON.stringify(manifest), tenant, manifest.selectionId);
+      .run(
+        encodeJson(manifest, selection, `file_library_selections.manifest ${tenant}/${manifest.selectionId}`),
+        tenant,
+        manifest.selectionId,
+      );
     syncObjectReferences(this.db);
   }
   recordDownloadFailure(
@@ -253,8 +266,8 @@ export class LibraryRepository {
     event: Extract<import('../endpoint/types').DownloadEvent, { type: 'download.failed' }>,
   ) {
     this.db
-      .prepare('INSERT INTO download_import_failures VALUES (?,?,?,?,?,?)')
-      .run(tenant, event.eventId, event.name, event.origin, JSON.stringify(event.error), Date.now());
+      .prepare('INSERT INTO download_import_failures VALUES (?,?,?,?,?)')
+      .run(tenant, event.eventId, event.name, event.origin, Date.now());
     this.db
       .prepare(
         'DELETE FROM download_import_failures WHERE tenant=? AND event_id NOT IN (SELECT event_id FROM download_import_failures WHERE tenant=? ORDER BY at DESC,rowid DESC LIMIT 1024)',
@@ -267,7 +280,14 @@ export class LibraryRepository {
   deleteTenant(tenant: string) {
     this.db.prepare('DELETE FROM library_snippets WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM download_import_failures WHERE tenant=?').run(tenant);
-    this.db.prepare('DELETE FROM file_library WHERE tenant=?').run(tenant);
+    for (const table of [
+      'library_state',
+      'library_entries',
+      'library_partitions',
+      'library_basket',
+      'library_excluded_sources',
+    ])
+      this.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
     this.db.prepare('DELETE FROM file_library_operations WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM file_library_selections WHERE tenant=?').run(tenant);
     syncObjectReferences(this.db);

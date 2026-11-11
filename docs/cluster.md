@@ -63,7 +63,7 @@ Control 包和节点运行时的根目录有相同的 `build.json{buildId}`。bu
 `remotekit_node.exe` 是独立的 updater 与监管者：不依赖 SDK、Chromium 或媒体代码，只链接集群通道库、内嵌的 zstd 解压与自带的 PAX tar 读取器，只使用 Windows 10（1809+）的接口。
 
 - `run --root=<dir>` 前台运行；`service-install/service-uninstall` 注册 Windows 服务 `RemoteKitNode`（自动启动，失败 5 秒后重启）。
-- 启动 `runtime/<current>/bin/endpoint_service.exe --node-root=<root>`，stdin 是管道：关闭 stdin 即请求优雅关闭（最多等 30 秒）。Endpoint 的 stdout/stderr 写入 `<root>/logs/endpoint.log`（16 MiB 轮转，保留 `.1`–`.4`），监管自身的记录在 `logs/supervisor.log`。Control 经 stdio 启动的本地 Endpoint 用同样的文件与轮转记录 stderr，两种部署下节点日志位置一致。退出码 3（需要更新）→ 更新后启动；4（配置变化）→ 立即重启；其他 → 1、2、4…30 秒退避，健康运行 60 秒后复位。
+- 启动 `runtime/<current>/bin/endpoint_service.exe --node-root=<root>`，stdin 是管道：关闭 stdin 即请求优雅关闭（最多等 30 秒）。Endpoint 的 stdout/stderr 写入 `<root>/logs/endpoint.log`（16 MiB 轮转，保留 `.1`–`.4`），监管自身的记录在 `logs/supervisor.log`；两者都是 JSON 行（格式见[诊断 · 日志](diagnostics.md#日志)），子进程原始输出按字节转写。Control 经 stdio 启动的本地 Endpoint 用同样的文件与轮转记录 stderr，两种部署下节点日志位置一致。退出码 3（需要更新）→ 更新后启动；4（配置变化）→ 立即重启；其他 → 1、2、4…30 秒退避，健康运行 60 秒后复位。
 - 更新：以 role `updater` 连接（updater 自己的 buildId 可以较旧），拿到 `node.release{buildId, sha256, size}`，用 `package.get{offset}` 断点续传下载到 `downloads/`，校验大小与 SHA-256，在进程内流式解 zstd 多帧、解 tar（只接受 `node/` 下的普通文件与目录，拒绝链接、设备名、备用数据流、绝对路径与 `..`），核对 `node/build.json`，移到 `runtime/<buildId>`，原子替换 `current`；自更新完成后删除其他运行时与 `downloads/`，监管者启动时也做同样的清理，只保留当前运行时。
 - 新运行时里的 `remotekit_node.exe` 与正在运行的不同时：把运行中的文件改名为 `.old`，复制新文件，用相同参数启动新监管者后退出；替换失败则回滚 `current`。
 
@@ -96,6 +96,26 @@ Control 版本目录中的 `release/node.tar.zst` 与 `release/node.json` 不在
 
 文件库的条目、分区、来源、篮子和选择事务仍在 Control；资产 id 就是对象 id，Endpoint 的 `Seal` 写入对象并 `object.committed` 后才算成功。草稿、选择与原生暂存仍是 Session 本地的。见[文件与相机](files-and-camera.md)。
 
+## Session 存储
+
+Endpoint 自己的 Session 状态在 Session 目录的 `session.db`（SQLite，WAL，`synchronous=FULL`，`user_version` = 1）里，随目录进 checkpoint、随 Profile 搬迁。它只保存 Control 重建不出来、而 Endpoint 执行或恢复需要的东西：
+
+| 表 | 内容 |
+|---|---|
+| `views` | Control 下发的期望 view 配置的执行副本；checkpoint 恢复后据此以恢复模式重建 view 并导入导航历史。冲突时以 Control 对账为准 |
+| `closed_events` | 页面自行关闭、等 Control 确认的事件；没有它，Control 会把已关闭的标签当成丢失而重建。未确认事件阻塞休眠 |
+| `navigation_recovery` | 每个 view 的导航历史与 PageState（Browser 导出的字节） |
+| `download_imports` | Browser 下载 → 对象 → 文件库之间的交接记录 |
+| `library_assets`、`library_derivatives` | 资产元数据与格式转换结果的缓存，可从对象重建 |
+| `library_drafts` | 上传草稿（字节在 `file-library/incoming/`，先落盘再提交行）；休眠前删除 |
+| `library_selections` | 原生文件选择回执 |
+
+站点偏好不落盘：Control 在启动 Browser 前推送，Endpoint 只放内存。每个组件只通过自己的窄接口操作自己的表。一个逻辑变更是一个事务——关闭 view（删期望配置、记关闭事件、删恢复数据）、显式导航（改 URL、删旧恢复数据）、确认事件（删事件、更新下载交接）、批量取消选择——不再有跨文件的中间状态和启动时的修复重放。SQLite 结果码映射到错误模型：`BUSY`/`LOCKED` → `busy`，IO、打不开、磁盘满、权限 → `unavailable`，`CORRUPT`/`NOTADB` 和不支持的 `user_version` → `internal` + `corrupt_state`。
+
+**旧格式导入**：checkpoint 跨构建恢复，所以打开的 Session 目录可能是旧构建写的零散 JSON（`views.json`、`events.json`、`download-imports.json`、`site-preferences.json`、`recovery/*.json`、`file-library/{metadata,drafts,selections,derivatives}/*.json`，以及目录里的 `browser.log`、`crashes/`）。打开时没有 `session.db` 而有这些文件，就按旧规则校验后在一个事务里导入新库，提交之后才删除旧文件；某个文件打不开 → `unavailable`，内容非法 → `corrupt_state`，两种情况都不导入、不删除。导入器单独在 `persistence/legacy_session_import.*`，没有其他代码读旧格式；还有旧格式 checkpoint 的 Session 唤醒过一次后它就没有用处了。
+
+**节点级文件**：`<sessionId>.hibernation.json`（休眠日志）、`.checkpoint`（标记）、`.checkpoint-index.json`（增量索引）描述的是"这个节点上的这份副本"，不随 checkpoint 搬迁，仍是单文件原子写（临时文件 + flush + 替换），写入顺序保证日志最后提交。读这些文件时"打不开"（IO 错误）与"不存在"严格区分：前者是 `unavailable`，从不当作不存在；休眠日志内容非法是 `corrupt_state`，标记与索引是缓存，内容非法时按不存在处理。冷副本清理也清除这些文件的 `.new` 残留，以及该 Session 在 `logs/browser/`、`logs/crashes/` 下的日志。
+
 ## Checkpoint 与休眠
 
 **阶段计时**：Endpoint 为每次休眠与打开写一行结构化日志（阻塞检查、导航导出、Browser 关闭与进程退出、扫描、存储、登记、日志落盘；打开时的方式、manifest、校验、定位、拉取、物化、替换、Browser 启动与就绪），诊断包随 `endpoint.log` 收集。
@@ -106,7 +126,7 @@ Control 版本目录中的 `release/node.tar.zst` 与 `release/node.json` 不在
 
 1. 有阻塞项则 `conflict`：未确认的自然关闭事件、未决原生选择、上传中、页面请求（对话框、文件选择）、下载中、RTC 连接存在、生命周期不确定。这些计数由各自的所有者组件报告在快照的 `hibernation` 字段里。
 2. 优雅关闭 Browser；不干净则 `unavailable`。
-3. 遍历 Session 目录。排除 `browser.log`、名为 `Cache`、`Code Cache`、`GPUCache`、`DawnWebGPUCache`、`DawnGraphiteCache`、`Shared Dictionary`、`VideoDecodeStats` 的目录、LevelDB 的 `LOCK`/`LOG`/`LOG.old`，以及文件库草稿与暂存（休眠时丢弃）。SQLite 的 `-journal`/`-wal` 保留：干净关闭才是一致性的前提，文件名是否存在不是。
+3. 关闭 `session.db`（之后任何写入都是缺陷），删除上传草稿与暂存，然后遍历 Session 目录。排除 名为 `Cache`、`Code Cache`、`GPUCache`、`DawnWebGPUCache`、`DawnGraphiteCache`、`Shared Dictionary`、`VideoDecodeStats` 的目录、LevelDB 的 `LOCK`/`LOG`/`LOG.old`，以及上传与文件库暂存目录。Browser 日志和崩溃转储在节点的 `logs/` 下，本来就不在 Session 目录里。SQLite 的 `-journal`/`-wal` 保留：干净关闭才是一致性的前提，文件名是否存在不是。
 4. 不超过 1MiB 的文件是一个对象，更大的按 1MiB 固定切块（SQLite 原地改页、LevelDB 只追加或整文件新建，固定切块的增量效果最好）。Session 目录之外的本地索引记录每个文件的大小、mtime、文件 ID 与块列表，未变的文件直接复用块 id，不重新读取。
    - **增量扫描**：每个运行中的 Session 在 Browser 启动前就用 `ReadDirectoryChangesW` 递归监视自己的目录，收集变化的路径；checkpoint 只 stat 这些路径（新建目录才遍历），在上次索引上增删改。监视缓冲溢出、出错、Endpoint 重启或任何不确定时退回完整遍历。开发构建用 `REMOTEKIT_CHECKPOINT_VERIFY=1` 同时做两种并要求结果一致。
    - **流水线**：读取、hash、压缩、加密在有界工作池上并行，manifest 仍按路径排序；对象登记按批发出（`object.committed.batch`，每批 ≤1024 个、一个事务），与存储重叠。Control 往返次数与文件数无关。

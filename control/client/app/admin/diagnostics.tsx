@@ -3,16 +3,20 @@ import Download from '@mui/icons-material/Download';
 import {
   Alert,
   Box,
+  Button,
+  Chip,
+  Collapse,
   IconButton,
   Table,
   TableBody,
   TableCell,
   TableHead,
   TableRow,
+  TextField,
   Tooltip,
   Typography,
 } from '@mui/material';
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import type { AdminDiagnostic } from '../../../shared/admin';
 import {
   adminError,
@@ -23,7 +27,140 @@ import {
   SectionHeader,
   useAdminResource,
   type AdminCall,
+  type ErrorSearchResult,
 } from './shared';
+
+function ErrorRecord({ source, line }: { source: string; line: string }) {
+  const [open, setOpen] = useState(false);
+  let record: { ts?: string; lvl?: string; ev?: string; err?: { message?: string; detail?: string } } = {};
+  try {
+    record = JSON.parse(line);
+  } catch {
+    // Keep incomplete records inspectable as raw text.
+  }
+  const level = record?.lvl;
+  return (
+    <Fragment>
+      <TableRow
+        hover
+        onClick={() => setOpen(!open)}
+        sx={{ cursor: 'pointer' }}
+        aria-expanded={open}
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            setOpen(!open);
+          }
+        }}
+      >
+        <TableCell>{record?.ts ?? '—'}</TableCell>
+        <TableCell>
+          <Chip
+            size="small"
+            label={level ?? '—'}
+            color={level === 'error' ? 'error' : level === 'warn' ? 'warning' : 'default'}
+          />
+        </TableCell>
+        <TableCell>{record?.ev ?? '—'}</TableCell>
+        <TableCell>{source}</TableCell>
+        <TableCell>{[record?.err?.message, record?.err?.detail].filter(Boolean).join(' · ')}</TableCell>
+      </TableRow>
+      <TableRow>
+        <TableCell colSpan={5} sx={{ p: 0, borderBottom: open ? undefined : 0 }}>
+          <Collapse in={open} unmountOnExit>
+            <Box
+              component="pre"
+              sx={{
+                m: 0,
+                p: 2,
+                fontFamily: 'monospace',
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'anywhere',
+                maxHeight: 300,
+                overflow: 'auto',
+                bgcolor: 'background.default',
+              }}
+            >
+              {line}
+            </Box>
+          </Collapse>
+        </TableCell>
+      </TableRow>
+    </Fragment>
+  );
+}
+
+function ErrorLookup({ online, call }: { online: boolean; call: AdminCall }) {
+  const [errorId, setErrorId] = useState('');
+  const [result, setResult] = useState<ErrorSearchResult | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  return (
+    <Box sx={{ mb: 3 }}>
+      <SectionHeader title="查找错误 ID" />
+      <Box
+        component="form"
+        sx={{ display: 'flex', gap: 1, mb: 2 }}
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (busy || !online) return;
+          setBusy(true);
+          setError('');
+          setResult(null);
+          try {
+            setResult(await call('admin.findError', { errorId: errorId.trim() }));
+          } catch (error) {
+            setError(adminError(error));
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <TextField
+          size="small"
+          label="错误 ID"
+          placeholder="c-… 或 e-…"
+          value={errorId}
+          onChange={(event) => setErrorId(event.target.value)}
+          slotProps={{ htmlInput: { style: { fontFamily: 'monospace' } } }}
+        />
+        <Button type="submit" variant="outlined" disabled={!online || busy || !errorId.trim()}>
+          查找
+        </Button>
+      </Box>
+      <LoadState error={error} loading={busy} />
+      {result && result.records.length === 0 && (
+        <Typography color="text.secondary">没有找到（日志可能已轮转）</Typography>
+      )}
+      {result && result.records.length > 0 && (
+        <Box className="admin-table">
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>时间</TableCell>
+                <TableCell>级别</TableCell>
+                <TableCell>事件</TableCell>
+                <TableCell>来源</TableCell>
+                <TableCell>错误</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {result.records.map((record, index) => (
+                <ErrorRecord key={`${record.source}:${index}`} {...record} />
+              ))}
+            </TableBody>
+          </Table>
+        </Box>
+      )}
+      {!!result?.unreachable.length && (
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+          未能查询：{result.unreachable.join('、')}
+        </Typography>
+      )}
+    </Box>
+  );
+}
 
 const reasons: Record<string, string> = {
   user: '用户停止',
@@ -54,6 +191,7 @@ export function AdminDiagnosticsSection({ online, call }: { online: boolean; cal
   };
   return (
     <Box className="admin-section">
+      <ErrorLookup online={online} call={call} />
       <SectionHeader title="诊断" detail="用户在设置中收集的诊断包，按诊断 ID 对应" />
       <LoadState error={error} loading={!data} />
       {downloadError && <Alert severity="error">{downloadError}</Alert>}

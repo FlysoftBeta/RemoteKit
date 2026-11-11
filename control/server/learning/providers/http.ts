@@ -1,3 +1,4 @@
+import { log } from '../../log';
 import { createHash } from 'node:crypto';
 import { retryDelay } from '../../../shared/error-policy.js';
 import { RemoteKitError } from '../../../shared/errors.js';
@@ -234,7 +235,7 @@ export class HttpClient {
     serviceMessage = serviceMessage
       .replace(/\b(?:JBY|Bearer)\s+\S+/gi, '[redacted]')
       .replace(/\beyJ[\w-]+\.[\w-]+(?:\.[\w-]+)?/g, '[redacted]');
-    console.warn('Learning provider rejected', {
+    log.warn('learning.provider_rejected', {
       provider: this.provider,
       path: address.pathname,
       code: Number.isFinite(Number(code)) ? Number(code) : code,

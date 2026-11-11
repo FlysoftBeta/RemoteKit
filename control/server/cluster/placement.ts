@@ -1,3 +1,4 @@
+import { log } from '../log';
 import { diskFloor } from './disk';
 import { randomBytes } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
@@ -108,7 +109,9 @@ export class Placement {
     return this.store.transaction(() => {
       const existing = this.peek(tenant);
       if (existing?.state === 'hibernating') {
-        void this.reconcileHibernation?.(tenant).catch(() => {});
+        void this.reconcileHibernation?.(tenant).catch((err) =>
+          log.warn('placement.hibernate_failed', { tenant, err }),
+        );
         throw new RemoteKitError('unavailable', '正在保存会话，请稍候');
       }
       if (existing?.state === 'active') {

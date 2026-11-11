@@ -37,7 +37,7 @@ class RecoveryEndpoint implements EndpointLink {
   }
 }
 async function fixture() {
-  const store = new ControlDatabase(':memory:'),
+  const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     endpoint = new RecoveryEndpoint(),
     control = createApplication(store, testGateway(endpoint));
   const { tenantId: tenant } = await registerUser(store, 'recovery-observer', 'password123');

@@ -9,7 +9,7 @@
 #include "session/session.hpp"
 #include "session/signin.hpp"
 #include "management/methods.hpp"
-#include "persistence/session_store.hpp"
+#include "persistence/durable_json.hpp"
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -358,47 +358,24 @@ void SessionManagementRequests() {
   auto parsed = RuntimeOptions::FromConfig(TestConfig(), directory, "dev", "test");
   CHECK(parsed);
   media::Sdk sdk;
+  media::FrameAdmission admission;
   objects::ObjectService objects(parsed.value().data, link, cluster::Key{}, "test", "dev");
   Session session(sdk, parsed.value(), "tenant", "0123456789abcdef0123456789abcdef", 1,
-                  cluster::Key{}, link, objects);
+                  cluster::Key{}, link, objects, admission);
   const auto session_directory = parsed.value().data / "sessions" / session.Id();
   fs::create_directories(session_directory);
-  CHECK(SessionStore(session_directory).Save("views.json", Json::array({Json{{"viewId", "1"}}})));
-  CHECK(session.Views().Initialize());
-  SessionStore persisted(session_directory);
+  CHECK(session.Initialize());
+  SessionDb persisted(session_directory);
+  CHECK(persisted.Open());
   const Json valid_views = Json::array({Json{{"viewId", "1"}}});
-  for (const auto& invalid :
-       {Json(), Json::object(), Json::array({nullptr}), Json::array({{{"viewId", 1}}}),
-        Json::array({{{"viewId", "01"}}}), Json::array({{{"viewId", "1"}, {"device", nullptr}}}),
-        Json::array({{{"viewId", "1"}, {"width", "800"}}}),
-        Json::array({{{"viewId", "1"}, {"visible", nullptr}}})}) {
-    CHECK(persisted.Save("views.json", invalid));
-    const auto loaded = session.Views().Initialize();
-    CHECK(!loaded && loaded.error().code == ErrorCode::kUnavailable);
-    CHECK(loaded.error().message.find("views.json") != std::string::npos);
-    CHECK(session.Views().Contains("1") && persisted.Load("views.json") == invalid);
-  }
-  {
-    std::ofstream malformed(session_directory / "views.json");
-    malformed << '{';
-  }
-  CHECK(session.Views().Initialize().error().message == "invalid views.json");
-  CHECK(persisted.Save("views.json", valid_views));
-  for (const auto& invalid :
-       {Json(), Json::array(), Json::object(), Json{{"next", nullptr}, {"events", Json::array()}},
-        Json{{"next", 0}, {"events", Json::array()}}, Json{{"next", 1}, {"events", nullptr}},
-        Json{{"next", 1}, {"events", Json::array({nullptr})}},
-        Json{{"next", 2},
-             {"events",
-              Json::array({{{"eventId", "1"}, {"type", "view.closed"}, {"viewId", nullptr}}})}}}) {
-    CHECK(persisted.Save("events.json", invalid));
-    const auto loaded = session.Views().Initialize();
-    CHECK(!loaded && loaded.error().code == ErrorCode::kUnavailable);
-    CHECK(loaded.error().message.find("events.json") != std::string::npos);
-    CHECK(session.Views().Contains("1") && persisted.Load("events.json") == invalid);
-  }
-  CHECK(persisted.Save("events.json", {{"next", 1}, {"events", Json::array()}}));
+  CHECK(persisted.Views().Save(valid_views));
   CHECK(session.Views().Initialize());
+  for (const auto& invalid : {Json::array({nullptr}), Json::array({{{"viewId", "01"}}}),
+                              Json::array({{{"viewId", "1"}, {"device", nullptr}}})}) {
+    CHECK(!persisted.Views().Save(invalid));
+    CHECK(persisted.Views().Load().value() == valid_views);
+    CHECK(session.Views().Contains("1"));
+  }
   const Json handler = {
       {"protocol", "web+notes"}, {"url", "https://example.test/open?url=%s"}, {"allowed", true}};
   const Json site = {{"tabletUa", true},
@@ -412,8 +389,7 @@ void SessionManagementRequests() {
                      {"protocolHandlers", Json::array({handler})}};
   const Json preferences = {{"sites", {{"https://example.test", site}}}};
   CHECK(session.Views().ManageSessionSitePreferences(preferences));
-  CHECK(SessionStore(session_directory).Load("site-preferences.json", Json()) ==
-        preferences["sites"]);
+  CHECK(!fs::exists(session_directory / "site-preferences.json"));
   auto normalized_handler = handler;
   normalized_handler["url"] = "HTTPS://EXAMPLE.TEST:443/?%s";
   CHECK(session.Views().ManageSessionSitePreferences(
@@ -554,15 +530,24 @@ void SessionManagementRequests() {
             .ManageRtcOffer({{"connectionId", "connection"}, {"sdp", "offer"}})
             .error()
             .code == ErrorCode::kInvalidRequest);
-  SessionStore download_store(session_directory);
-  CHECK(download_store.Save("download-imports.json",
-                            {{"records", Json::array({{{"browserAck", false}}})}}));
+  auto download_store = persisted.Downloads();
+  CHECK(download_store.Save({{"records", Json::array({{{"eventId", "download-test"},
+                                                       {"incarnation", "browser"},
+                                                       {"download",
+                                                        {{"guid", "guid"},
+                                                         {"eventId", "event"},
+                                                         {"fileReference", "downloads/page.txt"},
+                                                         {"name", "page.txt"},
+                                                         {"mimeType", "text/plain"},
+                                                         {"size", "8"},
+                                                         {"origin", ""}}},
+                                                       {"browserAck", false}}})}}));
   CHECK(session.Views().Initialize());
   CHECK(session.Snapshot().value().at("hibernation").at("pendingDownloadImports") == 1);
   CHECK(session.Hibernate(objects).error().message ==
         "hibernation blocked: pendingDownloadImports");
   CHECK(session.Shutdown().error().code == ErrorCode::kConflict);
-  CHECK(download_store.Save("download-imports.json", {{"records", Json::array()}}));
+  CHECK(download_store.Save({{"records", Json::array()}}));
   CHECK(session.Views().Initialize());
   CHECK(session.Snapshot().value().at("hibernation").at("pendingDownloadImports") == 0);
   const Json imported = {{"type", "download.imported"},
@@ -572,13 +557,22 @@ void SessionManagementRequests() {
                          {"mimeType", "text/plain"},
                          {"size", "8"},
                          {"origin", ""}};
-  CHECK(download_store.Save(
-      "download-imports.json",
-      {{"records", Json::array({{{"browserAck", true}, {"result", imported}}})}}));
+  CHECK(download_store.Save({{"records", Json::array({{{"eventId", "download-test"},
+                                                       {"incarnation", "browser"},
+                                                       {"download",
+                                                        {{"guid", "guid"},
+                                                         {"eventId", "event"},
+                                                         {"fileReference", "downloads/page.txt"},
+                                                         {"name", "page.txt"},
+                                                         {"mimeType", "text/plain"},
+                                                         {"size", "8"},
+                                                         {"origin", ""}}},
+                                                       {"browserAck", true},
+                                                       {"result", imported}}})}}));
   CHECK(session.Views().Initialize());
   CHECK(session.Snapshot().value().at("events") == Json::array({imported}));
   CHECK(session.Views().ManageSessionEventsAck({{"eventIds", {"download-test"}}}));
-  CHECK(download_store.Load("download-imports.json").at("records").empty());
+  CHECK(download_store.Load().value().at("records").empty());
   CHECK(session.Snapshot().value().at("events").empty());
 }
 

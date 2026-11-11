@@ -29,7 +29,7 @@ async function until(check: () => boolean) {
 }
 
 function fixture(timeout = 300_000) {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const workspace = emptyWorkspace('tenant');
   workspace.windows = [
     { id: 'study', appId: 'study', activeTabId: null, lastActiveAt: 0 },

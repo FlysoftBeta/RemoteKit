@@ -1,3 +1,4 @@
+import { log } from '../log';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { diskFloor } from './disk';
 import { createHmac, randomUUID } from 'node:crypto';
@@ -105,7 +106,9 @@ export class ObjectIndex {
   };
   private track(work: Promise<unknown>) {
     this.jobs.add(work);
-    void work.catch(() => {}).finally(() => this.jobs.delete(work));
+    void work
+      .catch((err) => log.warn('objects.background_failed', { err }))
+      .finally(() => this.jobs.delete(work));
   }
   private readonly ready = ({ nodeId }: { nodeId: string }) => {
     this.readFetches.delete(nodeId);
@@ -246,7 +249,7 @@ export class ObjectIndex {
           ? error.reason
           : null,
       );
-    console.error('object.render failed', id, error);
+    log.error('render.failed', { id, err: error });
   }
   render(id: string): void {
     if (this.closed || this.renders.has(id) || this.derived(id, 'document')) return;
@@ -255,7 +258,7 @@ export class ObjectIndex {
       this.retired.has(id) ||
       !this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(id)
     ) {
-      console.error('object.render failed', id, 'Source object is unavailable');
+      log.error('render.failed', { id, reason: 'source_unavailable' });
       return;
     }
     const failure = this.renderFailure(id);
@@ -345,7 +348,13 @@ export class ObjectIndex {
       });
     } catch (error) {
       const failure = toRemoteKitError(error);
-      throw new RemoteKitError(failure.code, failure.message);
+      throw new RemoteKitError(failure.code, failure.message, {
+        reason: failure.reason,
+        retryAfterMs: failure.retryAfterMs,
+        errorId: failure.errorId,
+        detail: failure.detail,
+        cause: failure,
+      });
     }
     for (const effect of effects) effect();
     return { ok: true };

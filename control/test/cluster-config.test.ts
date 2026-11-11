@@ -25,6 +25,7 @@ test('packaged defaults resolve deployment storage and each local node runtime',
     assert.deepEqual(config.origins, ['http://127.0.0.1:3001', 'http://localhost:3001']);
     assert.equal(config.dbPath, join(directory, 'data/control.db'));
     assert.equal(config.diagnosticDir, join(directory, 'data/diagnostics'));
+    assert.equal(config.logDir, join(directory, 'logs'));
     assert.equal(config.cluster.keyFile, join(directory, 'config/cluster.key'));
     assert.deepEqual(config.nodes.local.local, {
       root: join(directory, 'data/node'),
@@ -52,6 +53,7 @@ test('config creates defaults and key, resolves paths, hashes effective override
   const load = () => runtimeConfig({ REMOTEKIT_CONTROL_CONFIG: configPath, PORT: '1234' }, []);
   try {
     const initial = load();
+    assert.equal(initial.logDir, join(directory, 'logs'));
     assert.equal(initial.port, 3001);
     assert.equal(initial.nodes.local.config.maxSessions, null);
     assert.deepEqual(initial.nodes.local.config.peer, {
@@ -95,6 +97,7 @@ test('config creates defaults and key, resolves paths, hashes effective override
     assert.equal(config.nodes.local.local!.executable, resolve(directory, '../bin/endpoint.exe'));
     assert.equal(config.dbPath, join(directory, 'db/control.db'));
     assert.equal(config.diagnosticDir, join(directory, 'archives'));
+    assert.equal(config.logDir, join(directory, 'logs'));
     assert.equal(config.nodes.alpha.config.fps, 60);
     assert.equal(config.nodes.local.config.fps, 30);
     assert.equal(config.nodes.local.config.browser, 'browser.exe');
@@ -306,12 +309,12 @@ test('build identity and release validate descriptor, archive size and hash at s
 test('face templates, placements and profile keys survive a Control restart', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rk-placement-'));
   const path = join(directory, 'control.db');
-  let store = new ControlDatabase(path);
+  let store = new ControlDatabase(path, { buildId: 'test' });
   const template = Array(128).fill(1 / Math.sqrt(128));
   const face = store.security.faceVault.seal('user', template, 'model');
   store.db.close();
   try {
-    store = new ControlDatabase(path);
+    store = new ControlDatabase(path, { buildId: 'test' });
     assert.deepEqual(store.security.faceVault.open('user', face, 'model'), template);
     const nodes = new NodeRegistry({
       nodes: { alpha: { config: { ...nodeDefaults, nodeId: 'alpha' }, configHash: 'hash' } },
@@ -324,7 +327,7 @@ test('face templates, placements and profile keys survive a Control restart', as
     const assigned = placement.resolve('tenant');
     const profileKey = placement.keys(assigned).profileKey;
     store.db.close();
-    store = new ControlDatabase(path);
+    store = new ControlDatabase(path, { buildId: 'test' });
     placement = new Placement(store, nodes);
     assert.deepEqual(placement.resolve('tenant'), assigned);
     assert.equal(placement.keys(placement.resolve('tenant')).profileKey, profileKey);

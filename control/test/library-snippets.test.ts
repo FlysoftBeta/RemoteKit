@@ -14,8 +14,26 @@ const page: SnippetOrigin = {
   title: 'A page',
 };
 
+test('copying a snippet leaves unrelated library rows and object references untouched', () => {
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  try {
+    const snapshot = store.library.recordSnippet('tenant', 'first', page, 1)!;
+    const firstId = snapshot.entries[0].id;
+    store.db.exec(`CREATE TEMP TABLE library_writes (table_name TEXT, id TEXT);
+      CREATE TEMP TRIGGER entry_update AFTER UPDATE ON library_entries BEGIN INSERT INTO library_writes VALUES ('entry',new.id); END;
+      CREATE TEMP TRIGGER partition_update AFTER DELETE ON library_partitions BEGIN INSERT INTO library_writes VALUES ('partition',old.id); END;
+      CREATE TEMP TRIGGER basket_update AFTER DELETE ON library_basket BEGIN INSERT INTO library_writes VALUES ('basket',old.entry_id); END;
+      CREATE TEMP TRIGGER reference_update AFTER INSERT ON object_gc BEGIN INSERT INTO library_writes VALUES ('object',new.id); END;`);
+    store.library.recordSnippet('tenant', 'second', { kind: 'device' }, 2);
+    assert.deepEqual(store.db.prepare('SELECT * FROM library_writes').all(), []);
+    assert.equal(store.library.snapshot('tenant').entries[1].id, firstId);
+  } finally {
+    store.db.close();
+  }
+});
+
 test('snippets keep text in Control, deduplicate per tenant and refresh origin and copy time', () => {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   try {
     const text = '\n   hello   world \nfull text 😀';
     const first = store.library.recordSnippet('one', text, page, 10)!;
@@ -48,7 +66,7 @@ test('snippets keep text in Control, deduplicate per tenant and refresh origin a
 });
 
 test('retention keeps newest 200 unorganized snippets and all organized snippets; deletion removes text', () => {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   try {
     const first = store.library.recordSnippet('tenant', 'organized', page, 1)!.entries[0];
     store.library.change('tenant', 'move', 'move', (snapshot) => {
@@ -75,7 +93,7 @@ test('retention keeps newest 200 unorganized snippets and all organized snippets
 });
 
 test('snippet fetch, exclusion, source purge and file-selection barriers use library methods', async () => {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const library = new FileLibrary(store.library, {} as any, FILE_LIMITS, {} as any, () => null);
   const call = (method: string, params: unknown) =>
     library.request(
@@ -121,7 +139,7 @@ test('snippet fetch, exclusion, source purge and file-selection barriers use lib
 });
 
 test('empty and oversized text are omitted, previews are bounded and origins never form categories', () => {
-  const store = new ControlDatabase(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
   try {
     assert.equal(store.library.recordSnippet('tenant', '', page, 1), undefined);
     assert.equal(store.library.recordSnippet('tenant', '😀'.repeat(262145), page, 1), undefined);

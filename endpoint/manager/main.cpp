@@ -85,9 +85,9 @@ int wmain(int argc, wchar_t** argv) {
     stop_event = nullptr;
     return code;
   } catch (const Failure& failure) {
-    std::cerr << failure.what() << '\n';
+    LogError(LogLevel::kError, "manager.failed", failure.error);
   } catch (const std::exception&) {
-    std::cerr << "manager file operation failed\n";
+    LogEvent(LogLevel::kError, "manager.filesystem_failed");
   }
   return 1;
 }

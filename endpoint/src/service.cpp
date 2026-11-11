@@ -1,4 +1,6 @@
+#include "util/log.hpp"
 #include "service.hpp"
+#include "diagnostics/log_files.hpp"
 #include "util/wire_error.hpp"
 #include "management/methods.hpp"
 #include "session/session.hpp"
@@ -33,7 +35,7 @@ Service::~Service() {
   link_.OnBinary({});
   auto closed = Clear();
   if (!closed)
-    fprintf(stderr, "service shutdown: %s\n", closed.error().message.c_str());
+    LogError(LogLevel::kWarn, "service.shutdown_failed", closed.error());
 }
 Result<void> Service::Clear() {
   std::optional<Error> failure;
@@ -56,6 +58,8 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
   if (!request.is_object() || !request.contains("method") || !request["method"].is_string())
     return Error{ErrorCode::kInvalidRequest, "invalid request envelope"};
   const auto method = request["method"].get<std::string>();
+  if (method == "node.logs.search")
+    return SearchErrorLogs(options_.node_root, Required(request, "errorId"));
   if (method == "shutdown") {
     auto closed = Clear();
     if (!closed)
@@ -141,7 +145,11 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
         phases["total"] = PhaseMs(restore_start);
         phases["error"] = restored.error().message;
         phases.erase("startedQpc");
-        fprintf(stderr, "%s\n", phases.dump().c_str());
+        {
+          const auto event = phases.value("event", std::string("session.open.timing"));
+          phases.erase("event");
+          LogEvent(LogLevel::kWarn, event, phases);
+        }
         return restored.error();
       }
       auto session = std::make_unique<Session>(sdk_, options_, tenant, id,
@@ -256,9 +264,11 @@ Result<Json> Service::DeleteSession(const std::string& id) {
                                    [&](const Json& p) { return p["sessionId"] == id; }),
                     placements_.end());
   const auto root = options_.data / "sessions";
-  for (const auto* suffix : {"", ".checkpoint", ".checkpoint-index.json", ".hibernation.json",
-                             ".hibernation.json.new", ".restore", ".discard"})
+  for (const auto* suffix :
+       {"", ".checkpoint", ".checkpoint-index.json", ".hibernation.json", ".hibernation.json.new",
+        ".checkpoint.new", ".checkpoint-index.json.new", ".restore", ".discard"})
     fs::remove_all(root / (id + suffix));
+  RK_RETURN_IF_ERROR(DeleteSessionLogs(options_.node_root, id));
   return Json{{"stopped", stopped}};
 }
 Result<Json> Service::DeleteCold(bool expired_only) {
@@ -275,7 +285,8 @@ Result<Json> Service::DeleteCold(bool expired_only) {
           (name.size() == 32 || name.substr(32) == ".checkpoint" ||
            name.substr(32) == ".checkpoint-index.json" || name.substr(32) == ".restore" ||
            name.substr(32) == ".discard" || name.substr(32) == ".hibernation.json" ||
-           name.substr(32) == ".hibernation.json.new"))
+           name.substr(32) == ".hibernation.json.new" || name.substr(32) == ".checkpoint.new" ||
+           name.substr(32) == ".checkpoint-index.json.new"))
         ids.insert(id);
     }
   }
@@ -297,9 +308,11 @@ Result<Json> Service::DeleteCold(bool expired_only) {
             std::chrono::hours(24 * 7))
       continue;
     // All targets are direct children of the configured sessions root with validated IDs.
-    for (const auto* suffix : {"", ".checkpoint", ".checkpoint-index.json", ".hibernation.json",
-                               ".hibernation.json.new", ".restore", ".discard"})
+    for (const auto* suffix :
+         {"", ".checkpoint", ".checkpoint-index.json", ".hibernation.json", ".hibernation.json.new",
+          ".checkpoint.new", ".checkpoint-index.json.new", ".restore", ".discard"})
       fs::remove_all(root / (id + suffix));
+    RK_RETURN_IF_ERROR(DeleteSessionLogs(options_.node_root, id));
     ++deleted;
   }
   return Json{{"deleted", deleted}};
@@ -319,15 +332,17 @@ bool Service::HandleRequest(Json request, uint64_t generation) {
     const auto method = request.is_object() && request.value("method", Json()).is_string()
                             ? request["method"].get<std::string>()
                             : "?";
-    fprintf(stderr, "endpoint json failure: %s: %s\n", method.c_str(), error.what());
+    LogError(LogLevel::kWarn, "mgmt.invalid_json", Error{ErrorCode::kInternal, error.what()},
+             {{"method", method}});
     result = Error{ErrorCode::kInternal, "Unexpected JSON failure in " + method};
   } catch (const std::filesystem::filesystem_error& error) {
-    result = Error{ErrorCode::kUnavailable, error.what()};
+    result = WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                         error.code().value());
   } catch (const std::exception& error) {
-    fprintf(stderr, "endpoint internal: %s\n", error.what());
+    LogError(LogLevel::kWarn, "mgmt.exception", Error{ErrorCode::kInternal, error.what()});
     result = Error{ErrorCode::kInternal, "internal endpoint error"};
   } catch (...) {
-    fprintf(stderr, "endpoint internal: unknown exception\n");
+    LogError(LogLevel::kWarn, "mgmt.exception", Error{ErrorCode::kInternal, "unknown exception"});
     result = Error{ErrorCode::kInternal, "internal endpoint error"};
   }
   for (const auto* name : {"profileKey"}) {
@@ -340,15 +355,23 @@ bool Service::HandleRequest(Json request, uint64_t generation) {
   response["ok"] = bool(result);
   if (result)
     response["result"] = std::move(result).value();
-  else
-    response["error"] = WireError(result.error());
+  else {
+    auto fields = RequestLogFields(request);
+    if (fields.contains("tenantId")) {
+      std::lock_guard lock(mutex_);
+      const auto session = sessions_.find(fields["tenantId"].get<std::string>());
+      if (session != sessions_.end())
+        fields["sessionId"] = session->second->Id();
+    }
+    response["error"] = WireError(result.error(), "mgmt.request_failed", std::move(fields));
+  }
   link_.SendReply(generation, response);
   return result && request.value("method", std::string()) == "shutdown";
 }
 int Service::Run() {
   auto listening = objects_.Start(options_.peer_listen);
   if (!listening) {
-    fprintf(stderr, "peer startup: %s\n", listening.error().message.c_str());
+    LogError(LogLevel::kError, "peer.start_failed", listening.error());
     return 1;
   }
   std::string line, maintenance_cursor;
@@ -374,7 +397,7 @@ int Service::Run() {
     if (std::chrono::steady_clock::now() >= next_sweep) {
       auto swept = DeleteCold(true);
       if (!swept)
-        fprintf(stderr, "cold copy sweep: %s\n", swept.error().message.c_str());
+        LogError(LogLevel::kWarn, "session.cold_sweep_failed", swept.error());
       next_sweep = std::chrono::steady_clock::now() + std::chrono::hours(1);
     }
     if (received && link_.Current(generation)) {
@@ -413,7 +436,7 @@ int Service::Run() {
   metrics_.Stop();
   auto closed = Clear();
   if (!closed) {
-    fprintf(stderr, "service shutdown: %s\n", closed.error().message.c_str());
+    LogError(LogLevel::kWarn, "service.shutdown_failed", closed.error());
     return 1;
   }
   return failed_ ? 1 : 0;

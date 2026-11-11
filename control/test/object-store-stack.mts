@@ -27,7 +27,7 @@ const config = {
   sessionMemoryBytes: 1024 * 1024,
   peer: { listen: `127.0.0.1:${port}`, address: `127.0.0.1:${port}` },
 };
-const store = new ControlDatabase(join(run, 'control.db'));
+const store = new ControlDatabase(join(run, 'control.db'), { buildId: 'test' });
 const nodes = new NodeRegistry({
   key: randomBytes(32).toString('base64'),
   buildId: 'dev',

@@ -50,6 +50,22 @@ void Store(ObjectStore& store, const Keys& keys, const std::string& plain, Objec
   Check(Take(store.Write(keys, duplicate)).stored_sha256 == info.stored_sha256,
         "deterministic stored bytes");
   const auto path = Take(store.StoredPath(info.id));
+  const auto held = CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+  Check(held != INVALID_HANDLE_VALUE, "hold object without sharing");
+  const auto inspect = store.Inspect(info.id);
+  std::ostringstream blocked_output;
+  const auto blocked_read = store.Read(keys, info.id, blocked_output);
+  const auto blocked_range = store.ReadRange(keys, info.id, 0, 3);
+  CloseHandle(held);
+  Check(!inspect && inspect.error().code == ErrorCode::kUnavailable &&
+            inspect.error().message.find("Windows 32") != std::string::npos,
+        "object inspect sharing violation");
+  Check(!blocked_read && blocked_read.error().code == ErrorCode::kUnavailable,
+        "object read sharing violation");
+  Check(!blocked_range && blocked_range.error().code == ErrorCode::kUnavailable,
+        "object range sharing violation");
+
   std::ifstream file(path, std::ios::binary);
   file.seekg(24);
   for (uint32_t index = 0; index < 3; ++index) {

@@ -1,3 +1,5 @@
+import { log } from '../log';
+import { controlLogTail } from './control-log';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -83,7 +85,7 @@ export class DiagnosticSessions {
       control: (tenant: string) => unknown;
       endpoint: (tenant: string) => Promise<unknown>;
       endpointLog: (tenant: string, request: LogWindowRequest) => Promise<LogWindow>;
-      controlLog?: () => { data: Buffer; dropped: number };
+      logDir?: string;
     },
   ) {}
 
@@ -368,9 +370,9 @@ export class DiagnosticSessions {
   private async collectLogs(tenant: string, reason: StopReason): Promise<CollectedLogs> {
     const files = new Map<ArchiveEntry, Buffer[]>();
     const summary: Record<string, unknown> = {};
-    const control = this.sources.controlLog?.();
+    const control = this.sources.logDir ? await controlLogTail(this.sources.logDir) : undefined;
     if (control) {
-      files.set('logs/control.log', [control.data]);
+      files.set('logs/control.jsonl', [control.data]);
       summary.control = { bytes: control.data.length, droppedBefore: control.dropped };
     } else summary.control = { available: false };
     const deadline = Date.now() + (reason === 'shutdown' ? shutdownLogDeadlineMs : logDeadlineMs);
@@ -502,10 +504,18 @@ export class DiagnosticSessions {
     );
     const list: AdminDiagnostic[] = [];
     for (const archive of await this.stored()) {
-      const info = await stat(archive.path).catch(() => undefined);
+      const info = await stat(archive.path).catch((err: NodeJS.ErrnoException) => {
+        if (err.code === 'ENOENT') return undefined;
+        log.warn('diagnostics.stat_failed', { path: archive.path, err });
+        throw err;
+      });
       if (!info?.isFile()) continue;
       const reason = await readFile(archive.path.slice(0, -'.tar.zst'.length) + '.reason', 'utf8').catch(
-        () => '',
+        (err: NodeJS.ErrnoException) => {
+          if (err.code === 'ENOENT') return '';
+          log.warn('diagnostics.reason_failed', { path: archive.path, err });
+          throw err;
+        },
       );
       list.push({
         id: archive.id,

@@ -1,4 +1,5 @@
 #pragma once
+#include "util/log.hpp"
 #include "util/common.hpp"
 #include <chrono>
 #include <cstdio>
@@ -41,7 +42,11 @@ struct OperationTiming {
   PhaseClock::time_point start = PhaseClock::now();
   ~OperationTiming() {
     fields["total"] = PhaseMs(start);
-    fprintf(stderr, "%s\n", fields.dump().c_str());
+    {
+      const auto event = fields.value("event", std::string("session.hibernate.timing"));
+      fields.erase("event");
+      LogEvent(LogLevel::kInfo, event, fields);
+    }
   }
 };
 }  // namespace remotekit

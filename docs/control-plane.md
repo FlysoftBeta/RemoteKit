@@ -2,7 +2,19 @@
 
 Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、设置、站点偏好、文件目录和操作收据都只在 Control 的 SQLite 里。Endpoint 和 Browser 拥有"执行"：进程、WebContents、恢复数据、GPU 资源。Control 通过对账让执行趋向期望。Control 同时管理多个 Endpoint 节点，每个 Tenant 的请求路由到它被放置的节点（见[多节点](cluster.md)）。
 
-SQLite 带 `schema_version`（当前 16）。空库在一个事务里建表并写入版本。已有库按 `schema.ts` 的 `migrations` 逐步升级：每一步把版本 N 改写成 N+1 的格式（例如 12→13 给设置补 `autoKeyboard`、删掉站点偏好里的 `manualKeyboard`、建立转换失败表；13→14 给会话放置加 `hibernating` 状态；14→15 把操作收据改为 `failed` + 结构化错误、给后台任务记录错误码与重试时间），15→16 建立 `library_snippets`、给现有文件条目补 `kind:file`、给设置补默认开启的 `clipboardSync`。每个迁移版本只前进一次，全部在同一事务里完成再写新版本；没有升级路径的版本、或已有表却没有版本的库拒绝启动，需要保留账户时用[凭据恢复](auth.md#凭据恢复)。读取路径只认当前格式，不在运行时补默认值。
+## 存储与迁移
+
+**唯一的迁移路径**：`persistence/schema.ts` 只有一种到达当前版本（17）的方式：空库先执行冻结的 v12 基线（`baseline-v12.ts`，永不修改），再依次执行 `migrations.ts` 中的编号步骤 13…17；已有库从自己的版本继续。所有建表、改表都在基线或某个编号步骤里，正常启动不执行任何 DDL。低于 12、高于当前版本、或有表却没有 `schema_version` 的库拒绝启动（`unsupported_schema`）。
+
+**迁移前备份**：已有库需要迁移时，先 `VACUUM INTO` 到数据库所在目录的 `backups/control-v<from>-to-v<to>-<buildId>-<UTC>.db`，以只读方式打开做 `quick_check` 并核对版本，通过后才迁移；只保留最新 3 份。全部步骤与版本更新在一个事务里，任一步失败整体回滚，错误带步骤编号与原始异常。迁移后跑 `integrity_check`。备份不含 `.key`：静态密钥从不改变，恢复时把备份复制回 `control.db`（删除 `-wal`/`-shm`）即可。迁移需要静态密钥时（v17 要解开学习账户会话）密钥缺失或不符就失败并回滚，不猜。
+
+**存储的文档有类型**：SQLite 里不透明的 JSON 值（Tab、Space、窗口状态、设置、站点偏好、App、收藏、操作收据与动作、认证设置、文件库条目与分区、选择清单、会话导入各列、加密的学习会话与人脸模板等）只经 `persistence/codec.ts` 的解码器读写：键集合封闭、类型固定，解码器的推断类型必须可赋给 `shared/` 里的类型，漂移是编译错误。`persistence/` 之外不解析也不序列化存储数据。解码失败是 `internal` + `reason: corrupt_record`（`detail` 指出表、键、路径与期望），只让需要这一行的请求失败，数据原样保留——读路径从不补默认值、不删除、不改写；缺失的字段只在迁移步骤里显式回填（例如 v17 补齐认证设置、选择清单的 `limits`，把旧动作载荷改成当前形状，把缺少 `device` 的新教育会话清除并标为 `expired`）。
+
+**启动自检**：每次打开都运行 `quick_check`（失败拒绝启动）、`foreign_key_check`，并把每一行存储文档解码一遍；外键与解码问题逐条记 `store.integrity_problem`（error），保留运行，结果（最多 200 条）显示在管理 App → 概览。
+
+**迁移测试**：`control/test/fixtures/control-v12.sql`…`v16.sql` 是由各版本历史代码真实生成的库（文件头记录来源 commit），每个文档列都有当时代码写过的形状。测试把每个 fixture 迁移到当前版本：备份存在且可用、自检没有问题、规范化后的 schema 与新建库完全一致。新增迁移必须新增对应版本的 fixture。
+
+**文件库是关系表**：`library_state`（revision、篮子目标分区）、`library_entries`（每条目一行，条目文档经解码器）、`library_entry_objects`（条目引用的对象：当前/原始资产、照片候选，供 GC 与配额直接查询）、`library_partitions`、`library_basket`（有序）、`library_excluded_sources`。业务逻辑仍在 `LibrarySnapshot` 对象上修改，`save()` 只写与已读行不同的部分，一次变更一个事务。
 
 ## 数据归属
 
@@ -11,7 +23,7 @@ SQLite 带 `schema_version`（当前 16）。空库在一个事务里建表并�
 | Control 配置文件 | HTTP 监听、集群密钥文件、每个节点的配置、配额 |
 | Control SQLite | 账户（含最近登录、停用时间）、口令/PIN hash、token hash、人脸模板（加密）；workspace（Space、Window、Tab、active 关系、地址意图、恢复阶段、窗口视图状态）；已安装 App 与图标；收藏；使用记录；设置；站点偏好；操作收据；弹窗收养收据；文件目录、分组、篮子顺序、选择事务；剪贴板；会话放置与加密的 Tenant 密钥；对象索引与副本；checkpoint；被移除的节点；待各节点清理的已删除 Session |
 | Control 内存 | Viewer 租约、实际内容区尺寸、页面对话框/全屏/文件请求的临时投影、节点连接状态与指标、Memory Saver 计时 |
-| Endpoint Session | Browser 进程、期望的 view 配置（views.json）、自然关闭事件（events.json）、导航恢复文件、站点 UA 与媒体策略的运行缓存、文件草稿与暂存、媒体/输入/GPU 资源、内存中的 Profile 密钥与集群对象密钥 |
+| Endpoint Session | Browser 进程、Session 目录里的 `session.db`（期望 view 配置的执行副本、自然关闭事件、导航恢复数据、下载导入交接、文件库资产元数据/草稿/选择回执/派生映射，见[多节点 · Session 存储](cluster.md#session-存储)）、站点偏好（只在内存，由 Control 推送）与 UA、媒体策略的运行缓存、文件草稿与暂存、媒体/输入/GPU 资源、内存中的 Profile 密钥与集群对象密钥 |
 | Endpoint 节点 | 加密对象（文件库资产、缩略图、checkpoint 块）、Session 热/冷副本 |
 | Browser | Profile 存储（cookie、缓存）、WebContents、history/PageState、sessionStorage 关联、页面回调与各种代次 |
 | Client | 服务端状态副本、地址草稿、待确认操作的内存投影、媒体缓冲；持久项只有 HttpOnly token |

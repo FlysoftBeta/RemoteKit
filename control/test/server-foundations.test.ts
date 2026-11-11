@@ -155,14 +155,23 @@ test('HTTP and socket boundaries expose code and message without diagnostic deta
     ] as const) {
       const response = await fetch(base + '/api/auth/setup');
       assert.equal(response.status, status);
-      assert.deepEqual(await response.json(), { error: { code, message } });
+      const httpBody = await response.json();
+      if (code === 'internal') assert.match(httpBody.error.errorId, /^c-[0-9a-f]{10}$/);
+      const { errorId: httpErrorId, ...httpError } = httpBody.error;
+      assert.deepEqual(httpError, { code, message });
       const reply = once(socket, 'message');
       socket.send(JSON.stringify({ id: 'request', method: 'clock.ping', params: {} }));
-      assert.deepEqual(JSON.parse(String((await reply)[0])), {
-        type: 'error',
-        id: 'request',
-        error: { code, message },
-      });
+      const socketBody = JSON.parse(String((await reply)[0]));
+      if (code === 'internal') assert.match(socketBody.error.errorId, /^c-[0-9a-f]{10}$/);
+      const { errorId: socketErrorId, ...socketError } = socketBody.error;
+      assert.deepEqual(
+        { ...socketBody, error: socketError },
+        {
+          type: 'error',
+          id: 'request',
+          error: { code, message },
+        },
+      );
       failure = new Error('private local failure');
     }
     failure = new RemoteKitError('rate_limited', '请求过于频繁', { retryAfterMs: 1500 });

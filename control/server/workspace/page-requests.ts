@@ -1,3 +1,4 @@
+import { log, reportError } from '../log';
 import { createHash } from 'node:crypto';
 import { RemoteKitError, toRemoteKitError, wireError, parseWireError } from '../../shared/errors';
 import { SITE_PERMISSIONS, type FileRequest, type PageDialogReply } from '../../shared/product';
@@ -392,7 +393,9 @@ export class PageRequests {
       void this.services.learning.signIn.cancel(state.tenantId, tab.signIn);
       await this.context.endpoint
         .closeView(state.tenantId, { viewId: tab.webviewId, force: true })
-        .catch(() => {});
+        .catch((err) =>
+          log.warn('page.close_view_failed', { tenant: state.tenantId, viewId: tab.webviewId, err }),
+        );
       return;
     }
     if (state.pendingClose && state.pendingClose.id !== tab.id)
@@ -432,7 +435,15 @@ export class PageRequests {
             (action.type === 'space.close' && spaceIds.has(action.spaceId)) ||
             (action.type === 'app.uninstall' && action.appId === 'web:' + appId)
           ) {
-            settle(pending.receipt, { status: 'failed', error: wireError(failure) });
+            settle(pending.receipt, {
+              status: 'failed',
+              error: wireError(
+                reportError(failure, 'page.close_failed', {
+                  tenant: state.tenantId,
+                  operation: pending.receipt.operationId,
+                }),
+              ),
+            });
             this.context.store.operations.saveOperation(state, pending.receipt);
           }
         }
@@ -697,8 +708,16 @@ export class PageRequests {
       ...fields,
     };
     const result = await this.context.endpoint.replyPage(tenant, args).catch((error) => {
-      if (reply.kind === 'http_auth')
-        throw new RemoteKitError(toRemoteKitError(error).code, '页面登录请求未能完成');
+      if (reply.kind === 'http_auth') {
+        const failure = toRemoteKitError(error);
+        throw new RemoteKitError(failure.code, '页面登录请求未能完成', {
+          reason: failure.reason,
+          retryAfterMs: failure.retryAfterMs,
+          errorId: failure.errorId,
+          detail: failure.detail,
+          cause: error,
+        });
+      }
       throw error;
     });
     if (result?.accepted !== true || result?.browser?.ok !== true)

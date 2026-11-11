@@ -4,7 +4,7 @@ import { LibraryRepository } from '../server/persistence/library';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { createSchema } from '../server/persistence/schema';
+import { migrate } from '../server/persistence/schema';
 import { ObjectIndex } from '../server/cluster/objects';
 import type { NodeRegistry } from '../server/cluster/node-link';
 import type { ControlDatabase } from '../server/persistence/database';
@@ -41,7 +41,7 @@ const request: InternalFileRequest = {
 function fixture(assetType = 'image/jpeg') {
   const db = new Database(':memory:');
   db.defaultSafeIntegers(true);
-  createSchema(db);
+  migrate(db, { backupDirectory: '', buildId: 'test', atRestKey: new AtRestKey(null) });
   const calls: { method: string; tenant: string; args: any }[] = [];
   const states = new Map<string, SelectionState>();
   const assets = new Map([
