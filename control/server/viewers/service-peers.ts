@@ -228,9 +228,9 @@ export class ServicePeers {
 
   async tick() {
     for (const [tenant, connection] of this.connections) {
-      const placement = this.context.endpoint.placement.peek(tenant);
-      const preferred = placement?.runState === 'running' ? this.chooseNode(tenant) : undefined;
-      if (!this.current(connection) || (preferred && preferred.nodeId !== connection.node.nodeId)) {
+      // A connected service peer stays on its node (moving it would cut off transfers in flight); only
+      // losing that node moves it.
+      if (!this.current(connection)) {
         this.context.events.emit('rtc.signal', tenant, connection.lease, {
           type: 'rtc.signal',
           connectionId: connection.connectionId,

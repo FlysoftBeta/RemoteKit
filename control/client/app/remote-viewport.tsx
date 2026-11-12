@@ -148,6 +148,17 @@ export function RemoteViewport({
         }
       : null,
   );
+  // The Session cannot run (its data is on an offline node, or no node can take it): a state that
+  // resolves on its own, shown in place of the page rather than as a progress note.
+  const browser = product.state?.browser;
+  const browserUnavailable =
+    browser?.state !== 'unavailable'
+      ? null
+      : browser.reason === 'session_data_on_offline_node'
+        ? '浏览器暂不可用：数据所在节点离线，恢复后自动继续'
+        : browser.reason === 'no_eligible_node'
+          ? '浏览器暂不可用：没有可用的节点，恢复后自动继续'
+          : '浏览器暂不可用，恢复后自动继续';
   return (
     <section
       ref={viewport}
@@ -204,44 +215,38 @@ export function RemoteViewport({
           action: { label: '重新输入', run: () => editor.current?.focus() },
         }}
       />
-      <SurfaceState
-        live
-        error={
-          (product.state?.browser.state === 'unavailable'
-            ? new RemoteKitError('unavailable', '', { reason: product.state.browser.reason })
-            : undefined) ??
-          snapshot.presentationError ??
-          (viewportFailure?.code === 'limit_exceeded' ? undefined : viewportFailure) ??
-          (snapshot.rtcPhase === 'exhausted'
-            ? transport.rtc.getSnapshot().phase === 'exhausted'
-              ? (transport.rtc.getSnapshot() as { error?: RemoteKitError }).error
-              : undefined
-            : showConnectingOverlay && snapshot.rtcPhase !== 'connected'
-              ? new RemoteKitError('unavailable', '')
-              : ((product.state?.endpointErrorKind === 'output-capacity'
-                  ? undefined
-                  : product.state?.endpointError) ?? undefined))
-        }
-        context={{
-          operation: snapshot.presentationError
-            ? '显示远程视频'
-            : viewportFailure
-              ? '更新远程画面尺寸'
-              : '连接浏览器',
-          scope: 'surface',
-          connection:
-            product.state?.browser.state !== 'unavailable' && !snapshot.presentationError && !viewportFailure,
-          text:
-            product.state?.browser.state === 'unavailable'
-              ? product.state.browser.reason === 'session_data_on_offline_node'
-                ? '浏览器暂不可用：数据所在节点离线，恢复后自动继续'
-                : product.state.browser.reason === 'no_eligible_node'
-                  ? '浏览器暂不可用：没有可用的节点，恢复后自动继续'
-                  : '浏览器暂不可用，恢复后自动继续'
-              : undefined,
-          targetId: viewId,
-        }}
-      />
+      {browserUnavailable ? (
+        <div className="browser-unavailable" role="status">
+          {browserUnavailable}
+        </div>
+      ) : (
+        <SurfaceState
+          live
+          error={
+            snapshot.presentationError ??
+            (viewportFailure?.code === 'limit_exceeded' ? undefined : viewportFailure) ??
+            (snapshot.rtcPhase === 'exhausted'
+              ? transport.rtc.getSnapshot().phase === 'exhausted'
+                ? (transport.rtc.getSnapshot() as { error?: RemoteKitError }).error
+                : undefined
+              : showConnectingOverlay && snapshot.rtcPhase !== 'connected'
+                ? new RemoteKitError('unavailable', '')
+                : ((product.state?.endpointErrorKind === 'output-capacity'
+                    ? undefined
+                    : product.state?.endpointError) ?? undefined))
+          }
+          context={{
+            operation: snapshot.presentationError
+              ? '显示远程视频'
+              : viewportFailure
+                ? '更新远程画面尺寸'
+                : '连接浏览器',
+            scope: 'surface',
+            connection: !snapshot.presentationError && !viewportFailure,
+            targetId: viewId,
+          }}
+        />
+      )}
       {overlay && <ViewportStats transport={transport} surface={surface} />}
     </section>
   );
