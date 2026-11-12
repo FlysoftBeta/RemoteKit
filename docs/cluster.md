@@ -65,7 +65,10 @@ Control 与所有节点之间、节点与节点之间用同一个握手：`Noise
 - 第一条消息带发起方的静态公钥与载荷 `node.hello{role, nodeId, buildId, incarnation}`（role 为 `endpoint`、`updater` 或 `peer`）。Control 只在发起方静态公钥等于该 `nodeId` 已配置的公钥、且节点未被移除时继续；否则握手直接失败、不回复——密钥不对的一方得不到任何信息。第二条消息认证 Control 自己（`ee`、`se`），载荷是 `node.ready`（connectionEpoch、buildId、生效配置、configHash、对象密钥、该节点上的活跃会话清单、`peers`）、`node.release`（给 updater）或 `node.reject{code: build_mismatch | no_release}`。
 - **节点之间**：`node.ready` 带 `peers:[{nodeId, address, publicKey}]`（其他所有已配置、未移除的节点）；集合变化（管理员移除/重新加入）时 Control 向所有在线节点推 `node.peers`。对象传输的服务端只接受静态公钥在当前集合里的发起方，并用集合里的 ID 而不是对方自称的 ID；客户端按目标节点的公钥做 IK，连到错误的服务端会握手失败。服务期间每个请求都重新确认对方仍在集合里，所以移除节点对已建立的连接也立即生效。
 - 握手后使用 Noise Split 得到的两个方向 AES-256-GCM 状态。与 Noise 规范的唯一差异：单条传输消息上限 4MiB（规范为 65535 字节）。nonce 用尽或任一次解密失败即断开。
-- 明文首字节区分 JSON（≤1MiB 的请求/回复/事件）与 BINARY（u32 头长度 + JSON 头 + 原始字节，用于更新包和对象数据）。
+- 明文首字节区分 JSON（请求/回复/事件）与 BINARY（u32 头长度 + JSON 头 + 原始字节，用于更新包和对象数据）。
+- **大小上限是一份契约**：`protocol/limits.json` 是集群通道上所有大小与数量上限的唯一来源（传输消息、管理 JSON、`session.desired`、观察状态、事件正文与积压、剪贴板文本与 HTML、view 与站点数量等）。Endpoint 构建时由 CMake 从它生成头文件，Control 直接导入；两侧各有一个测试，在上限处接受、超过一字节拒绝。
+- **发送方先守上限**：Endpoint 不发出超限的事件或观察。剪贴板超限只带 `oversize: true` 与大小；登录结果、下载结果、页面自行关闭等事件超限则丢弃并记一个 `e-` 错误 ID（持久事件序号不受影响）；超限的观察状态丢弃，连续失败只记一次。
+- **故障只隔离一个 Session**：帧、加密、握手或消息头（无法解析出 `tenantId/sessionId/placementEpoch`）不合法时断开整个连接。属于某个当前放置的 Session 的消息（观察、事件、该 Session 请求的回复）内容不合法时，只让这个 Session 失效：记一次带 `c-` 错误 ID 的日志，不再处理它的事件与观察，期望状态改为 `run: "stopped"`、`commit: null`（副本保持 `dirty`，数据不丢），该用户的浏览器可用性为 `unavailable` 并带这个错误 ID（C 类：文字 + 错误 ID，没有重试按钮）。Viewer 再次连上时按退避（1 分钟起翻倍，最长 30 分钟；正常运行 10 分钟后复位）重新打开。同节点的其他用户不受影响。
 - 载体：远端节点用 Control HTTP(S) 监听上的 WebSocket `/api/node`，一个 Noise 消息对应一个二进制帧；通道自带认证与加密，所以普通 `ws://` 也安全，不依赖 TLS；节点自带 WebSocket 客户端（`stream_socket.cpp` 的 Schannel TLS），`wss://` 不校验服务器证书与吊销状态，也不使用系统代理——Control 的身份由 Noise 静态密钥证明。连接失败的日志带阶段与错误码（DNS、TCP、TLS 握手、HTTP 状态、Noise 握手）。本地节点用 stdio，`u32le 长度 + 消息`，与远端节点一样从节点根目录的 `node.json` 取身份——同机部署不经过网络栈，但握手与语义完全相同。节点之间用 TCP，帧格式同 stdio。
 - 双向请求：Control → Endpoint 是管理方法（20 秒超时为 `outcome_unknown`，每节点最多 256 个在途）；Endpoint → Control 只有 `object.committed`、`object.locate` 等少数请求，同样的超时语义，在独立工作线程上等待，不阻塞管理分发。
 - 节点每 15 秒 `node.ping`，任一侧 45 秒没收到任何消息即断开。同一 nodeId 的新连接替换旧连接。
@@ -116,7 +119,7 @@ Control 与 Endpoint 之间只有三种交互，没有逐方法的恢复路径�
 - **认领与引用**：`object.committed{objectId, size, storedSize, storedSha256, tenantId?, derivedFrom?, kind?, putId?}` 登记对象，带 `tenantId` 时同时写入 `object_claims(tenant, id)`——Tenant 在持久引用出现之前（上传 seal、派生物、下载导入、Control 写入）对它的读取权。持久引用按 Tenant 计算：文件库条目、未决选择、最新 4 个版本 的 `checkpoint_objects(tenant, manifest_id, id)`，以及被引用对象的派生物。没有持久引用的认领 2 小时后过期；一个对象在所有 Tenant 都不再引用或认领时记入 `object_gc`，满 2 小时从所有副本删除（时间戳持久化，Control 重启不重置宽限期）。
 - **配额**：`quotas.tenantObjectBytes` 按 Tenant 引用或认领的**不同对象**大小之和计算；共享对象对每个引用它的 Tenant 全额计费，所以去重不会让一个用户的配额依赖别人。`object.committed` 与文件库导入时检查。
 - **读取授权**：Endpoint 只能为某个 Tenant 读该 Tenant 引用或认领的对象。授权集只由三处填充：本 Session 或该 Tenant 的 service peer 自己写入的对象、Control 推送的文件库描述、对本 Tenant 成功的 `object.locate{tenantId, ids}`。Control 只在请求节点有资格代表该 Tenant 时回答：该 Tenant 的 Session 放在这个节点上，或这个节点持有该 Tenant 当前的 service peer 授权（同一 Viewer 租约、已解锁、授权代次已确认）；只为有权的 id 返回副本地址，否则 `forbidden`。节点本地恰好有某个副本不构成读取权限。Viewer 下载、Browser 暂存、缩略图与照片输入、checkpoint 恢复（含热副本）都经过这个授权集。
-- **与放置无关**：对象不属于任何 Session，也不需要转移；只要有一个就绪节点持有副本就能读，service peer 所在节点本地没有时照常从对端拉取。文件库为每个条目投影 `available`（它需要的对象都有就绪节点上的副本），在节点上线/离线、副本变化与清点对账时重算并随库快照推送；不可用的条目仍然列出，显示"暂不可用"，不能打开、选择或发送，节点回来后自动恢复。
+- **与放置无关**：对象不属于任何 Session，也不需要转移；只要有一个就绪节点持有副本就能读，service peer 所在节点本地没有时照常从对端拉取。文件库为每个条目投影 `available`（它需要的对象都有就绪节点上的副本）。对象索引只在某个对象"在就绪、未移除节点上的副本数"于 0 与非 0 之间变化时报告它的 id（副本登记与删除、节点上线/离线/移除时各用一条 SQL 算出）；文件库找出引用这些 id 的用户，只重算这些用户，每个用户 250ms 内最多一次，并随库快照推送；checkpoint 与版本的对象从不触发文件库的工作；不可用的条目仍然列出，显示"暂不可用"，不能打开、选择或发送，节点回来后自动恢复。
 - **副本**：目标为 min(2, 就绪节点数)，Control 让磁盘占用最低的节点执行 `object.fetch{ids, sources}`（每节点最多 4 个并发）。节点上线后 Control 分页读取 `object.inventory{cursor}` 对账：索引里没有、首次观察起超过 2 小时的对象删除，节点上缺失的副本从索引移除。只登记副本的提交不带 `tenantId`。
 - **节点之间**：每个节点在 `peer.listen` 上监听 TCP，握手 role `peer`，buildId 必须相同，只接受当前节点集合里的身份（见[集群通道](#集群通道)）；集合里的任何节点都可读取任何对象的存储文件（只有密文），`object.get{id, offset}` 按 1MiB 分块返回并以 `object.end{size, sha256}` 结束，可从 offset 续传；每个服务端最多 8 个并发连接。
 - **本地缺失**：Endpoint 需要对象而本地没有时，先 `object.locate` 拿到副本地址，从对端拉取并校验后写入本地存储，再 `object.committed` 登记为新副本。Browser 自己从不访问对象存储。
@@ -183,11 +186,13 @@ Session 数据以**版本**（checkpoint）保存：一个版本是一份 manife
 2. 不在变更列表里、身份（大小、last write time、文件 ID）与上一份索引一致的文件复用索引里的块；在变更列表里的文件和 `session.db`、`session.db-wal` 一律从卷影副本重新读取，不读活目录。读取、切块、加密与登记沿用提交的流水线，预存的块只在身份与卷影副本一致时复用。
 3. 写 manifest，副本记录写 `base` 与 `lastVersion{kind: running}`（`state` 保持 `dirty`），变更列表只删去早于 `takenAt − 2 秒` 的条目（快照之后的写入仍是待提交的更改），在观察状态里报告 `checkpoint{manifestId, objects, buildId, kind: running, takenAt}`。
 
-生成版本期间该 Session 的协调执行器被占用（期望状态的应用在其后排队）；一次只读这 5 分钟内变化的文件，通常不到一秒。快照进程不可用时跳过版本：日志每次连续失败只记一条 `snapshot.unavailable`，`node.metrics` 带 `snapshot: unavailable`，管理 App 的节点页显示"快照服务不可用"；Session 照常运行，停止时照常提交。开发构建可以用 `REMOTEKIT_TEST_VERSION_INTERVAL_MS`、`REMOTEKIT_TEST_VERSION_CHECK_MS` 缩短间隔，发布构建没有这两个开关。
+版本分三段，Session 的协调执行器只在首尾各占一下：A 段在执行器内记下变更列表、上一份索引与 Session 身份（进程身份、placement epoch、运行代次）；B 段在有界的 checkpoint 工作池里读卷影副本、切块、存储与登记对象、生成 manifest，不写索引、副本记录与变更日志；C 段回到执行器，若期间 Session 停止、重启或被重新放置则丢弃结果（对象照常按认领与 GC 处理），否则写索引、副本记录、裁剪变更日志并报告。B 段进行中到来的停止不等版本，直接按自己的提交进行。快照进程不可用时跳过版本：日志每次连续失败只记一条 `snapshot.unavailable`，`node.metrics` 带 `snapshot: unavailable`，管理 App 的节点页显示"快照服务不可用"；Session 照常运行，停止时照常提交。开发构建可以用 `REMOTEKIT_TEST_VERSION_INTERVAL_MS`、`REMOTEKIT_TEST_VERSION_CHECK_MS` 缩短间隔，发布构建没有这两个开关。
 
 ### Control 侧
 
 放置是 `run_state × data_state`。停止并提交时先在事务里写 `pending_commit`（epoch 不变），然后发布带这个 requestId 的期望状态；不需要单独的请求、超时或补发——观察状态报告 `committed.requestId` 等于它时，校验对象、登记版本，改为 `stopped/clean`，下一份期望文档清除 `commit`。重连只是重发期望状态。未决提交期间认领受保护，不会被 GC。
+
+**期望状态的发布**：`EndpointGateway` 唯一负责发布。改变期望状态的代码只调用 `invalidate(tenant)`；网关合并同一时刻的多次标记，在该用户所在节点就绪时编译并发送最新一份，节点每次就绪时重发它上面的全部放置。节点离线不是调用方要处理的错误：锁定、解锁等状态写在期望文档里，节点回来时生效。需要效果已经发生的调用方显式等待——`published(tenant)`（当前修订已送达）或按条件等待观察状态，二者都有期限；需要 Browser 的操作先检查浏览器可用性，不可用时以带原因的 `unavailable` 失败。发布失败与恢复只在状态切换时各记一条 warn。
 
 运行中的版本：观察状态里 `checkpoint.kind` 为 `running`、副本 `dirty`、Browser 运行中、且 `lastVersion` 与 checkpoint 一致时，同样校验对象并登记，只推进 `checkpoint_id`，`data_state` 保持 `dirty`。同一 manifest 与 `takenAt` 重复报告是幂等的。每个 Tenant 保留最新 **4** 个版本（两种来源一起计），它们的对象保持引用，更早的按 GC 规则回收。复制（目标 min(2, 就绪节点数) 个副本）优先处理每个 Tenant 最新版本的对象。
 

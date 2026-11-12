@@ -227,3 +227,34 @@ Endpoint 的 `clipboard.changed` 管理事件保留 Tenant/Session/browserSequen
 Endpoint 把 DC `editing.dismiss` 转为 Browser `input` 请求的 `event:{type:editing.dismiss,target,revision}`，保留完整身份并分配 browser sequence。Session 收尾使用 `input {session,event:{type:menus.close}}`，不携带 view 或 output_generation。
 
 Browser 原地 `view.configure` 使用 `occludedBottom / occlusionRevision / outputGeneration`，稳定尺寸变化走完整 `output.configure.viewConfigs` 并携带相同遮挡字段；过期代次/revision 返回 ignored。共享映射 ABI 为 v8：focus 来源和观测、水滴几何、page_height_dip 与 occlusion_revision 与帧快照一起发布。Viz 配置 `target_size` 是稳定纹理尺寸，Begin token 的 `page_height_pixels` 是当前页面范围，二者不能互换。
+
+## 身份、代次与序号
+
+协议里的计数器各有唯一所有者和明确的作用范围。"相等"类只比较是否相同；"单调"类只在所列范围内比较大小，越过范围必须换一个上层身份（例如 Endpoint 换了进程，`seq` 才可以重新开始）。每个"单调跨某个生命周期事件"的假设都有一个跨越该事件的测试（执行器重建、管理重连、Endpoint 进程替换、Browser 重启、Viewer 重连、RTC peer 替换、Control 重启）。
+
+| 名称 | 所有者 | 范围与递增 | 使用方的假设 | 持久化 |
+|---|---|---|---|---|
+| `endpointIncarnation` | Endpoint 进程 | 每次启动随机 | 相等；它变了，`seq` 才可以重新开始 | 否 |
+| `connectionEpoch` | Control（`node-link.ts`） | 每次管理连接握手新生成 | 相等；旧连接的回复、观察与授权全部作废 | 否 |
+| `node.desired.revision` | Control | 管理连接内，fencing 清单变化时加一 | 同一连接内单调 | 否 |
+| `placementEpoch` | Control（`placement.ts`） | 每次重新放置或转移加一；同节点继续 dirty 副本时不变 | 跨 Control 重启单调；Endpoint 用它隔离旧副本与旧执行器 | 是 |
+| `session.desired.revision` | Control | 期望文档内容或放置变化时加一 | 跨 Control 重启单调 | 是 |
+| `session.observed.seq` | Endpoint（`Service`） | 整个 Endpoint 进程共享，每次发送观察加一 | 同一进程内跨执行器重建单调 | 否 |
+| 事件 `seq` / `upTo` / `streamId` / `eventId` | Endpoint `session.db` | 流内连续递增；恢复或新放置时换流并重新编号，`eventId` 不变 | 流内连续；`eventId` 跨流去重 | 是 |
+| `browserIncarnation` | Endpoint（`browser.cpp`） | 每个 Browser 进程随机 | 相等；Browser 内部的各种代次只在同一 incarnation 内比较 | 否 |
+| 运行代次（版本） | `SessionExecution` | 运行时创建、启动、成功停止、退役时加一 | 版本的 C 段要求与 A 段一致 | 否 |
+| peer 授权代次 `authEpoch` | Control（每条 peer） | 授权变化时加一；新 peer 从零开始 | 同一 `connectionId` 内单调 | 否 |
+| 锁定代次 `AuthState.epoch` | Control（Viewer 租约） | 锁定或解锁时加一；新租约从一开始 | 同一租约内单调 | 否 |
+| `outputGeneration` | Endpoint 渲染输出 | 重新打开输出时换新 | 相等；Browser 重启后可以更小 | 否 |
+| `layoutEpoch` | Endpoint 呈现控制 | 几何真正变化或显式作废时加一；相同布局不变，跨 peer 重绑保持 | 输入、帧、选择与反馈要求当前值 | 否 |
+| 呈现屏障 `barrierId` | Endpoint | 输出、布局或视频重启时新建 | Viewer 必须原样回传 | 否 |
+| `occlusionRevision` | Viewer 视口请求 | 每窗口几何或遮挡变化时加一，以时间为种子 | 同一租约内单调 | 否 |
+| `workspace.revision` | Control | 产品状态有实际变化时加一 | 跨 Control 重启单调；Viewer 据此撤掉乐观投影 | 是 |
+| `operationGeneration` / `operationSequence` | Control | 收据账本轮换时换代；每次受理操作序号加一 | 代相等；序号跨重启单调 | 是 |
+| `snapshotSequence` / `serverIncarnation` | Control | 快照内容变化时加一；每次启动换 incarnation | 同一 Control 进程内单调 | 否 |
+| `library.revision` | Control | 目录、文件篮或可用性变化时加一 | 跨 Control 重启单调 | 是 |
+| 剪贴板 `revision` / `baseRevision` | Control | 每次接受写入加一；清除时重置 | 同一账户内单调 | 是 |
+| 客户端输入 `sequence` | Viewer 输入管线 | 每次提交加一；Endpoint 在 peer 替换时重置高水位 | 同一 peer 内单调 | 否 |
+| Noise 发送与接收 nonce | 集群通道两端 | 每条传输消息加一；用尽即断开 | 同一密钥内单调；重连先协商新密钥 | 否 |
+
+完整清单（含媒体、诊断、会话导入与时钟相关的计数器）在代码旁的注释与对应测试里；新增计数器时在此表登记所有者、范围与假设，并补跨生命周期的测试。

@@ -165,7 +165,7 @@ Control 保存每用户一份最新剪贴板，Browser 是本地粘贴缓存；�
 - 片段只记录非空纯文本，按用户+SHA-256 去重，重复复制更新时间和来源。`library_snippets(entry_id,tenant,text,hash,origin,copied_at)` 保存正文；目录带 `kind:snippet`、字节大小和首个非空行的 ≤200 字符预览。未整理保留最新 200 条，移入分区的保留；排除 `clipboard/''` 来源停止收集，清除来源删除未整理片段，已整理的保留。
 - “与本机剪贴板同步”（`clipboardSync`）默认开启。远端新值写设备剪贴板，未聚焦时只保留最新待写值；设备粘贴事件先同步再投远端。回到前台仅在 clipboard-read 已 granted 时读取，不自动请求权限；显式远端粘贴可发起读取。本地选择粘贴只在已授权时刷新设备，其余用应用缓存。scope/revision/文本 hash 防止跨账号和回声。
 - “重置浏览器数据”要求 Session 已停止，清除最新剪贴板；历史片段仍由文件库管理。删除用户同时删除最新值与片段。
-- 集群帧按类型限制：`clipboard.changed` 事件 4 MiB；`session.desired` 整份文档 < 4 MiB（剪贴板正文计入）；其他 1 MiB。Viewer WS 普通请求仍为 1 MiB，`clipboard.set` 可容纳 1 MiB 纯文本。
+- 集群通道上的上限都来自 `protocol/limits.json`（见[多节点 · 集群通道](cluster.md#集群通道)）；Viewer WS 普通请求仍为 1 MiB，`clipboard.set` 可容纳 1 MiB 纯文本。
 
 
 ## 设置
