@@ -345,10 +345,14 @@ void EventTransactions(const fs::path& path) {
             std::stoull(retained.at(0).at("seq").get<std::string>()),
         "durable stream sequence advances across Endpoint and Browser restart");
   const auto before_drop = Take(reopened.Events().State());
-  const auto dropped = Take(reopened.Events().Append(
-      "clipboard.changed",
-      {{"text", std::string(1024 * 1024 + 1, 'x')}, {"html", ""}, {"excludeFromHistory", false}},
-      "oversize", "new-browser"));
+  // Escaping exceeds the serialized event bound while keeping clipboard fields valid.
+  const auto dropped = Take(reopened.Events().Append("clipboard.changed",
+                                                     {{"baseRevision", "9"},
+                                                      {"browserSequence", "1"},
+                                                      {"text", std::string(1024 * 1024, '\x01')},
+                                                      {"html", ""},
+                                                      {"excludeFromHistory", false}},
+                                                     "oversize", "new-browser"));
   Check(dropped.value("dropped", false) && Take(reopened.Events().State()) == before_drop,
         "oversize event is dropped without consuming a durable sequence");
   Check(Take(reopened.Events().State()).at("streamId") == rotated.at("streamId"),
