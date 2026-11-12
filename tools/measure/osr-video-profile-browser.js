@@ -32,7 +32,6 @@ async (host) => {
     const { launchTestBrowser } = await import(pathToFileURL(join(root, 'tests/e2e/kit/browser.mjs')).href);
     const context = await launchTestBrowser({
       profile: evidence + '/viewer',
-      browserType: host.context().browser().browserType(),
       executablePath,
       headless,
       viewport: { width: 1920, height: 1080 },
