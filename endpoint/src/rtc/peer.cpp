@@ -23,6 +23,7 @@ Result<Json> PeerController::Offer(const Json& request,
     std::lock_guard lock(mutex_);
     connection_ = connection;
     signals_.clear();
+    retained_signals_.clear();
     signal_overflow_ = false;
   }
   state_ = State::kNegotiating;
@@ -169,6 +170,7 @@ void PeerController::Close() {
     connection_.clear();
     advertised_ip_.clear();
     signals_.clear();
+    retained_signals_.clear();
     signal_overflow_ = false;
   }
   state_ = State::kNone;
@@ -215,9 +217,11 @@ void PeerController::OnEvent(uint64_t peer,
       type == REMOTEKIT_RTC_ICE_COMPLETE || type == REMOTEKIT_RTC_ERROR) {
     std::lock_guard lock(self.mutex_);
     if (!self.signal_overflow_) {
-      if (self.signals_.size() < 256)
+      if (self.signals_.size() < 256) {
         self.signals_.push_back(event);
-      else {
+        if (self.retained_signals_.size() < 256)
+          self.retained_signals_.push_back(event);
+      } else {
         self.signals_.clear();
         self.signal_overflow_ = true;
         RtcEvent failure{REMOTEKIT_RTC_ERROR, "RTC signaling queue exceeded bound",
@@ -228,6 +232,19 @@ void PeerController::OnEvent(uint64_t peer,
     }
   }
   self.hooks_.event(event);
+}
+Result<void> PeerController::ReplaySignals(const std::string& connection, uint64_t generation) {
+  std::lock_guard lock(mutex_);
+  if (!Handle() || connection_ != connection)
+    return Error{ErrorCode::kConflict, "RPC peer is retired"};
+  if (signals_.empty()) {
+    for (auto event : retained_signals_) {
+      event.management_generation = generation;
+      signals_.push_back(std::move(event));
+    }
+  }
+  management_generation_ = generation;
+  return {};
 }
 void PeerController::FlushSignals() {
   std::deque<RtcEvent> pending;

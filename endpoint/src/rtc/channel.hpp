@@ -68,6 +68,7 @@ class ChannelController : private ControllerContext {
   void FlushServices();
   bool ServiceMessage(const RtcEvent& event);
   Result<Json> Offer(const Json& request, uint64_t generation);
+  Result<void> ReplayOffer(const Json& request, uint64_t generation);
   Result<Json> ManageRtcActionResult(const Json& request);
   Result<Json> ManageRtcOffer(const Json& request);
   Result<Json> ManageRtcClose(const Json& request);

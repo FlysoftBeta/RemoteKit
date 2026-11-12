@@ -86,9 +86,13 @@ INSERT INTO event_state VALUES(1,lower(hex(randomblob(4)))||'-'||lower(hex(rando
 CREATE TABLE retired_views(view_id TEXT PRIMARY KEY,event_id TEXT NOT NULL);
 )sql"));
       }
+      {
+        RK_ASSIGN_OR_RETURN(retired, db_.Prepare("INSERT INTO retired_views(view_id,event_id) "
+                                                 "SELECT view_id,?||view_id FROM closed_events"));
+        RK_RETURN_IF_ERROR(retired.Bind(1, "closed-" + directory_.filename().string() + "-"));
+        RK_RETURN_IF_ERROR(Done(retired));
+      }
       RK_RETURN_IF_ERROR(db_.Execute(R"sql(
-INSERT INTO retired_views(view_id,event_id)
- SELECT view_id,'closed-'||(SELECT stream_id FROM event_state)||'-'||event_id FROM closed_events;
 INSERT INTO events(event_id,type,body)
  SELECT r.event_id,'view.closed',json_object('browserIncarnation',NULL,'body',json_object('viewId',c.view_id,'reason',c.reason))
  FROM closed_events c JOIN retired_views r ON r.view_id=c.view_id ORDER BY c.event_id;

@@ -51,7 +51,7 @@ class MediaPipeline : private ControllerContext {
   void SetSampling(MediaSampling value);
   void MediaLoop();
   uint32_t SamplingFps() const;
-  Result<Json> ManageSessionMediaPolicy(const Json& request);
+  Result<Json> ApplyMediaPolicy(const Json& request);
 
  private:
   PeerController& peer_controller;

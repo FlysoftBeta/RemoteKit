@@ -176,6 +176,35 @@ void Reads(const fs::path& path) {
             result.error().message == "unsupported session store version",
         "unsupported schema classification");
 }
+void StableMigration(const fs::path& root) {
+  const auto first = root / "one" / std::string(32, 'a');
+  const auto second = root / "two" / std::string(32, 'a');
+  fs::create_directories(first);
+  fs::create_directories(second);
+  sqlite::Database seed;
+  Take(seed.Open(first / "session.db"));
+  Take(seed.Execute(R"sql(
+CREATE TABLE views(view_id TEXT PRIMARY KEY,config TEXT NOT NULL);
+CREATE TABLE closed_events(event_id INTEGER PRIMARY KEY,view_id TEXT NOT NULL,reason TEXT NOT NULL);
+INSERT INTO closed_events VALUES(1,'9','script');
+CREATE TABLE download_imports(event_id TEXT PRIMARY KEY,incarnation TEXT NOT NULL,download TEXT NOT NULL,result TEXT,browser_ack INTEGER NOT NULL,attempt INTEGER,error TEXT,retry_at INTEGER);
+PRAGMA user_version=1;
+)sql"));
+  Take(seed.Close());
+  fs::copy_file(first / "session.db", second / "session.db");
+  SessionDb migrated(first), restored(second);
+  Take(migrated.Open());
+  Take(restored.Open());
+  const auto original = Take(migrated.Events().Load()).at(0);
+  const auto replayed = Take(restored.Events().Load()).at(0);
+  Check(original.at("eventId") == replayed.at("eventId"),
+        "checkpoint migration preserves source event identity");
+  Check(Take(migrated.Events().State()).at("streamId") !=
+            Take(restored.Events().State()).at("streamId"),
+        "restored migrations get separate streams");
+  Check(Take(restored.Views().Retired()) == Json::array({"9"}),
+        "migration retains close retirement");
+}
 void EventTransactions(const fs::path& path) {
   SessionDb store(path);
   Take(store.Open());
@@ -234,6 +263,7 @@ int wmain(int argc, wchar_t** argv) {
     fs::remove_all(root);
     Transactions(root / "transactions");
     EventTransactions(root / "events");
+    StableMigration(root / "migration");
     Reads(root / "reads");
     fs::remove_all(root);
     return 0;

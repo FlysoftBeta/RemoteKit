@@ -3,7 +3,6 @@ import type {
   AppliedMediaPolicy,
   OperationReceipt,
   PageDialogReply,
-  ProductOperation,
   SitePreferences,
 } from '../../shared/product';
 import type { ErrorCode, NativeErrorReason, WireError } from '../../shared/errors';
@@ -28,12 +27,6 @@ export interface RtcSignal {
     | { type: 'complete' }
     | { type: 'error'; error: NativeError };
 }
-export type ClientActionEvent = ProductOperation & {
-  tenantId: string;
-  connectionId: string;
-  authEpoch?: number;
-};
-
 export interface Accepted {
   accepted: boolean;
   browser?: { ok?: boolean };
@@ -95,16 +88,6 @@ export type DownloadEvent = {
   | { type: 'download.imported'; assetId: string; mimeType: string; size: string }
   | { type: 'download.failed'; error: NativeError }
 );
-export interface ViewConfiguration {
-  occludedBottom?: number;
-  occlusionRevision?: string;
-  viewId: string;
-  width?: number;
-  height?: number;
-  device?: { mode: string; deviceScaleFactor: number };
-  visible: boolean;
-  requireRunning?: boolean;
-}
 export interface OperationIdentity {
   operationId?: string;
   operationGeneration?: string;
@@ -157,12 +140,6 @@ export interface ActionResult {
   operationId: string;
   operationGeneration: string;
   result: OperationReceipt;
-}
-export interface FileAuthorization {
-  connectionId: string;
-  requests: { id: string; binding: FileBinding }[];
-  library: boolean;
-  authEpoch: number;
 }
 export interface PrepareSelection {
   selectionId: string;

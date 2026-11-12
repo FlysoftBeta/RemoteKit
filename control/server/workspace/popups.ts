@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
-import type { ViewConfiguration } from '../endpoint/types';
+import { RemoteKitError, wireError } from '../../shared/errors';
 
 import type { ProductTab, ProductWorkspace } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';

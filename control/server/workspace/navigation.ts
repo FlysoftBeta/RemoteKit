@@ -51,6 +51,8 @@ export class Navigation {
     await this.context.endpoint.command(state.tenantId, {
       viewId: t.webviewId,
       command: effect.command,
+      browserIncarnation:
+        t.navigation?.browserIncarnation ?? this.context.tenants.get(state.tenantId).browserIncarnation,
       ...(effect.ctx
         ? {
             operationId: effect.ctx.operationId,

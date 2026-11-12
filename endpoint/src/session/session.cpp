@@ -217,12 +217,10 @@ Result<void> Session::StageDesired(const Json& document) {
   SecureZeroMemory(key.value().data(), key.value().size());
   if (!identical)
     return Error{ErrorCode::kConflict, "Session identity conflicts"};
-  auto preferences =
-      views.ManageSessionSitePreferences({{"method", "session.sitePreferences"},
-                                          {"sites", document.at("sitePreferences").at("sites")}});
+  auto preferences = views.ApplySitePreferences(document.at("sitePreferences"));
   if (!preferences)
     return preferences.error();
-  auto policy = pipeline.ManageSessionMediaPolicy(document.at("mediaPolicy"));
+  auto policy = pipeline.ApplyMediaPolicy(document.at("mediaPolicy"));
   if (!policy)
     return policy.error();
   Json value = document.at("clipboard").at("value");

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "session/view_configuration.hpp"
+#include "session/site_preferences.hpp"
 #include "util/result_macros.hpp"
 #include <set>
 
@@ -151,6 +152,24 @@ inline Result<void> ValidateDesired(const Json& value) {
       value["sitePreferences"]["sites"].size() > 4096 || !Keys(value["library"], {"describe"}) ||
       !value["library"]["describe"].is_array() || value["library"]["describe"].size() > 256)
     return Error{ErrorCode::kInvalidRequest, "invalid desired policy"};
+  RK_RETURN_IF_ERROR(ValidateSitePreferences(value["sitePreferences"]));
+  std::set<std::string> requests;
+  for (const auto& item : auth["files"]["requests"]) {
+    if (!Keys(item, {"id", "binding"}) || !item["id"].is_string() ||
+        item["id"].get_ref<const std::string&>().empty() ||
+        item["id"].get_ref<const std::string&>().size() > 128 ||
+        !requests.insert(item["id"].get<std::string>()).second || item["id"] == "library" ||
+        !Keys(item["binding"], {"browserIncarnation", "view", "instance", "document", "request"}))
+      return Error{ErrorCode::kInvalidRequest, "invalid desired file grant"};
+    const auto& binding = item["binding"];
+    if (!binding["browserIncarnation"].is_string() ||
+        binding["browserIncarnation"].get_ref<const std::string&>().empty() ||
+        binding["browserIncarnation"].get_ref<const std::string&>().size() > 128)
+      return Error{ErrorCode::kInvalidRequest, "invalid desired file Browser"};
+    for (const auto* field : {"view", "instance", "document", "request"})
+      if (!Counter(binding[field], true))
+        return Error{ErrorCode::kInvalidRequest, "invalid desired file binding"};
+  }
   for (const auto& asset : value["library"]["describe"])
     if (!Hex(asset, 64))
       return Error{ErrorCode::kInvalidRequest, "invalid described asset"};

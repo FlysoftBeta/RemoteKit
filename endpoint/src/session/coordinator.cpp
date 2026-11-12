@@ -88,6 +88,12 @@ Result<Json> SessionCoordinator::Execute(const std::function<Result<Json>()>& ac
   return future.get();
 }
 Result<Json> SessionCoordinator::Request(const Json& request, uint64_t generation) {
+  if (!coordination::Keys(request,
+                          {"method", "tenantId", "sessionId", "placementEpoch",
+                           "endpointIncarnation", "opId", "replay", "params"},
+                          {"id"}) ||
+      !request["params"].is_object())
+    return Error{ErrorCode::kInvalidRequest, "invalid Session RPC envelope"};
   if (!Current(generation) || request.value("endpointIncarnation", Json()) != incarnation_)
     return Error{ErrorCode::kConflict, "RPC target is retired"};
   for (const auto* name : {"tenantId", "sessionId", "placementEpoch"})
@@ -97,10 +103,23 @@ Result<Json> SessionCoordinator::Request(const Json& request, uint64_t generatio
     if (!Current(generation))
       return Error{ErrorCode::kUnavailable, "management disconnected before RPC admission"};
     RK_RETURN_IF_ERROR(hooks_.admit(request, generation));
-    return results_.Execute(request, [&] { return hooks_.request(request, generation); });
+    auto result = results_.Execute(request, [&] { return hooks_.request(request, generation); });
+    if (result && hooks_.replay)
+      RK_RETURN_IF_ERROR(hooks_.replay(request, generation));
+    return result;
   });
 }
 Result<Json> SessionCoordinator::Acknowledge(const Json& request, uint64_t generation) {
+  if (!coordination::Keys(request,
+                          {"method", "tenantId", "sessionId", "placementEpoch", "connectionEpoch",
+                           "streamId", "upTo"},
+                          {"id"}))
+    return Error{ErrorCode::kInvalidRequest, "invalid event acknowledgment"};
+  {
+    std::lock_guard lock(mutex_);
+    if (request["connectionEpoch"] != scope_.connection)
+      return Error{ErrorCode::kConflict, "event acknowledgment connection is stale"};
+  }
   if (!Current(generation) || !request.contains("streamId") || !request["streamId"].is_string() ||
       !coordination::Counter(request.value("upTo", Json())))
     return Error{ErrorCode::kInvalidRequest, "invalid event acknowledgment"};
@@ -174,6 +193,7 @@ Result<void> SessionCoordinator::Converge(const Json& desired, const Scope& scop
     Observe(scope, true);
     RK_RETURN_IF_ERROR(hooks_.start());
     started_revision_ = revision;
+    applied_clipboard_revision_ = desired["clipboard"]["revision"].get<std::string>();
   }
   if (!Current(scope.generation) || !LatestRevision(desired))
     return {};
@@ -212,6 +232,13 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
     std::lock_guard lock(mutex_);
     desired = desired_;
   }
+  if (desired.is_object() && desired["run"] == "running" &&
+      observation.value("browser", Json()) != "running" && !started_revision_.empty()) {
+    prepared_revision_.clear();
+    started_revision_.clear();
+    views_revision_.clear();
+    converged_ = false;
+  }
   observation["observedRevision"] = desired.is_object() ? desired["revision"] : Json("0");
   const auto revision =
       desired.is_object() ? desired["revision"].get<std::string>() : std::string();
@@ -224,9 +251,7 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
       {"sitePreferencesRevision", started_revision_.empty() ? "0" : started_revision_},
       {"mediaPolicyRevision", prepared_revision_.empty() ? "0" : prepared_revision_},
       {"viewsRevision", views_revision_.empty() ? "0" : views_revision_},
-      {"clipboardRevision", desired.is_object() && !started_revision_.empty()
-                                ? desired["clipboard"]["revision"]
-                                : Json("0")}};
+      {"clipboardRevision", started_revision_.empty() ? "0" : applied_clipboard_revision_}};
   const auto encoded = observation.dump();
   const auto now = std::chrono::steady_clock::now();
   const bool changed = encoded != last_encoded_;

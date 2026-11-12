@@ -11,7 +11,6 @@ import { rpcId } from './rpc-results';
 import { log } from '../log';
 import { RemoteKitError, isRemoteKitError, endpointError as convertEndpointError } from '../../shared/errors';
 import type { Asset, SelectionState } from '../../shared/file-library';
-import type { MediaPolicy } from '../../shared/product';
 import type {
   BrowserIdentity,
   ImportChunk,
@@ -19,17 +18,13 @@ import type {
   StorageImportStatus,
 } from '../../shared/session-import';
 import type { NodeRegistry } from '../cluster/node-link';
-import type { Placement, SessionPlacement } from '../cluster/placement';
-import type { ClipboardValue } from '../persistence/clipboards';
+import type { Placement } from '../cluster/placement';
 import type {
   Accepted,
   ActionResult,
-  ClientActionEvent,
-  ClipboardChangedEvent,
   EndpointSnapshot,
   FaceBinding,
   FaceStatusReply,
-  FileAuthorization,
   LifecycleRequest,
   LogWindow,
   LogWindowRequest,
@@ -38,8 +33,6 @@ import type {
   PageReplyRequest,
   PrepareSelection,
   RtcSignal,
-  SessionSitePreferencesRequest,
-  ViewConfiguration,
   ViewAppInfo,
 } from './types';
 export class EndpointSnapshotError extends RemoteKitError {
@@ -190,6 +183,7 @@ export class EndpointGateway {
   }
   forget(tenant: string) {
     this.sent.delete(tenant);
+    this.descriptions.delete(tenant);
   }
   isPlacedOn(tenant: string, nodeId: string) {
     return this.placement.peek(tenant)?.nodeId === nodeId;
@@ -279,7 +273,9 @@ export class EndpointGateway {
     const placed = this.placement.peek(event.tenantId);
     if (!placed || placed.sessionId !== event.sessionId || placed.placementEpoch !== event.placementEpoch)
       return;
-    await this.nodes.get(placed.nodeId)!.publish(event);
+    const node = this.nodes.get(placed.nodeId);
+    if (node?.state.state !== 'ready' || node.state.connectionEpoch !== event.connectionEpoch) return;
+    await node.publish(event);
   }
   async describeAsset(tenant: string, args: { assetId: string }): Promise<Asset> {
     let requested = this.descriptions.get(tenant);
@@ -287,13 +283,18 @@ export class EndpointGateway {
     if (requested.size >= 256 && !requested.has(args.assetId))
       throw new RemoteKitError('busy', 'Too many asset descriptions');
     requested.add(args.assetId);
-    await this.synchronize(tenant);
-    const value = await this.waitObserved(tenant, (observation) =>
-      observation.library.descriptions.some((entry) => entry.assetId === args.assetId),
-    );
-    const description = value.library.descriptions.find((entry) => entry.assetId === args.assetId)!;
-    if (description.error) throw endpointError(description.error);
-    return description.asset;
+    try {
+      await this.synchronize(tenant);
+      const value = await this.waitObserved(tenant, (observation) =>
+        observation.library.descriptions.some((entry) => entry.assetId === args.assetId),
+      );
+      const description = value.library.descriptions.find((entry) => entry.assetId === args.assetId)!;
+      if (description.error) throw endpointError(description.error);
+      return description.asset;
+    } finally {
+      requested.delete(args.assetId);
+      if (!requested.size) this.descriptions.delete(tenant);
+    }
   }
   readLog(tenant: string, request: LogWindowRequest): Promise<LogWindow> {
     return this.invoke<LogWindow>('session.logs.read', tenant, request);

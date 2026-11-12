@@ -491,6 +491,8 @@ Result<Json> ClusterLink::RequestUntil(const std::string& name,
         dispatched ? "Control request outcome unknown" : "Control request was not dispatched"};
   if (!reply->is_object() || !reply->contains("ok") || !(*reply)["ok"].is_boolean())
     return Error{ErrorCode::kOutcomeUnknown, "Invalid Control reply envelope"};
+  if (reply->value("opId", Json()) != id)
+    return Error{ErrorCode::kOutcomeUnknown, "Control RPC reply identity differs"};
   if ((*reply)["ok"] == true && reply->contains("result"))
     return (*reply)["result"];
   return ParseWireError(reply->value("error", Json()));

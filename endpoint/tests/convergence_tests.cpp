@@ -116,6 +116,11 @@ int main(int argc, char** argv) {
     Check(!coordinator.Request(request, 1) && requests == 1,
           "cached reply revalidates authorization");
     authorized = true;
+    running = false;
+    Await([&] {
+      return starts == 2 && configured == 2 && coordinator.Latest().value("converged", false);
+    });
+    Check(prepares == 2, "Browser retirement re-converges from retained desired state");
     desired["revision"] = "2";
     desired["run"] = "stopped";
     desired["commit"] = "commit";

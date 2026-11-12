@@ -6,7 +6,7 @@ import { sitePayload } from './site-policy';
 
 export function compileDesired(
   context: DomainContext,
-  services: Pick<DomainServices, 'policy' | 'lifecycle' | 'viewers'>,
+  services: Pick<DomainServices, 'policy' | 'lifecycle' | 'viewers' | 'security'>,
   tenant: string,
 ): SessionDesired {
   const runtime = context.tenants.get(tenant);
@@ -16,8 +16,9 @@ export function compileDesired(
   const state = context.store.workspaces.workspace(tenant);
   const actual = context.endpoint.observation(tenant);
   const viewer = runtime.viewer;
-  const peer = viewer?.security.peer;
   const connectionId = runtime.connectionId ?? runtime.rtc.disconnectedPeer?.connectionId ?? null;
+  const security = viewer?.security ?? services.security.retiring(tenant, connectionId);
+  const peer = security?.peer;
   const unlocked =
     !!viewer && viewer.security.lock.state !== 'locked' && !!peer && peer.connectionId === connectionId;
   const quality = services.policy.qualityFor(tenant, state);
@@ -85,14 +86,14 @@ export function compileDesired(
     },
     views,
     authorization: {
-      connectionId,
+      connectionId: peer?.connectionId ?? null,
       epoch: peer?.epoch ?? 0,
       unlocked,
       files: { library: unlocked, requests: files },
     },
     lock: {
       leaseId: viewer?.id ?? null,
-      epoch: viewer?.security.epoch ?? 0,
+      epoch: security?.epoch ?? 0,
       state: unlocked ? 'unlocked' : 'locked',
     },
     library: { describe: context.endpoint.descriptionRequests(tenant) },

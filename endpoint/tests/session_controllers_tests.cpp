@@ -387,24 +387,22 @@ void SessionManagementRequests() {
                        {"idle_detection", "block"}}},
                      {"protocolHandlers", Json::array({handler})}};
   const Json preferences = {{"sites", {{"https://example.test", site}}}};
-  CHECK(session.Views().ManageSessionSitePreferences(preferences));
+  CHECK(session.Views().ApplySitePreferences(preferences));
   CHECK(!fs::exists(session_directory / "site-preferences.json"));
   auto normalized_handler = handler;
   normalized_handler["url"] = "HTTPS://EXAMPLE.TEST:443/?%s";
-  CHECK(session.Views().ManageSessionSitePreferences(
+  CHECK(session.Views().ApplySitePreferences(
       {{"sites",
         {{"https://example.test", {{"protocolHandlers", Json::array({normalized_handler})}}}}}}));
   const Json local_handler = {
       {"protocol", "mailto"}, {"url", "http://localhost:8080/?%s"}, {"allowed", false}};
   const Json local_site = {{"protocolHandlers", Json::array({local_handler})}};
-  CHECK(session.Views().ManageSessionSitePreferences(
-      {{"sites", {{"http://localhost:8080", local_site}}}}));
-  CHECK(session.Views().ManageSessionSitePreferences(
-      {{"sites",
-        {{"http://127.0.0.1", {{"tabletUa", true}}},
-         {"https://[::1]:8443", {{"tabletUa", true}}}}}}));
+  CHECK(session.Views().ApplySitePreferences({{"sites", {{"http://localhost:8080", local_site}}}}));
+  CHECK(session.Views().ApplySitePreferences({{"sites",
+                                               {{"http://127.0.0.1", {{"tabletUa", true}}},
+                                                {"https://[::1]:8443", {{"tabletUa", true}}}}}}));
   const auto invalid_preferences = [&](const Json& request) {
-    const auto result = session.Views().ManageSessionSitePreferences(request);
+    const auto result = session.Views().ApplySitePreferences(request);
     CHECK(!result && result.error().code == ErrorCode::kInvalidRequest);
   };
   invalid_preferences(Json::object());
@@ -466,7 +464,7 @@ void SessionManagementRequests() {
   for (int i = 0; i < 4097; ++i)
     many_sites["https://site" + std::to_string(i) + ".test"] = {{"tabletUa", true}};
   invalid_preferences({{"sites", many_sites}});
-  CHECK(session.Views().ManageSessionSitePreferences({{"sites", Json::object()}}));
+  CHECK(session.Views().ApplySitePreferences({{"sites", Json::object()}}));
   auto app_info = ManagementMethods::Find("view.appInfo");
   CHECK(app_info);
   const auto unknown_view = app_info(session, {{"viewId", "2"}});
@@ -497,28 +495,28 @@ void SessionManagementRequests() {
   CHECK(session.Views().ManageSessionStorageImportStatus({{"importId", "record:0"}}).error().code ==
         ErrorCode::kNotFound);
   const Json request = {{"maxFps", 30}, {"degradationPreference", "balanced"}, {"audio", false}};
-  CHECK(session.Media().ManageSessionMediaPolicy(request));
+  CHECK(session.Media().ApplyMediaPolicy(request));
   CHECK(!session.Media().Audio());
   CHECK(session.Media().Snapshot().at("mediaPolicy").at("requested") == request);
   for (const auto& invalid : {Json(), Json(0), Json("false"), Json::object()}) {
     auto bad = request;
     bad["audio"] = invalid;
-    auto result = session.Media().ManageSessionMediaPolicy(bad);
+    auto result = session.Media().ApplyMediaPolicy(bad);
     CHECK(!result && result.error().code == ErrorCode::kInvalidRequest);
     CHECK(!session.Media().Audio());
   }
   auto missing = request;
   missing.erase("audio");
-  auto result = session.Media().ManageSessionMediaPolicy(missing);
+  auto result = session.Media().ApplyMediaPolicy(missing);
   CHECK(!result && result.error().code == ErrorCode::kInvalidRequest);
   missing = request;
   missing.erase("maxFps");
-  result = session.Media().ManageSessionMediaPolicy(missing);
+  result = session.Media().ApplyMediaPolicy(missing);
   CHECK(!result && result.error().code == ErrorCode::kInvalidRequest);
   CHECK(result.error().message == "invalid media policy maxFps");
   auto enabled = request;
   enabled["audio"] = true;
-  CHECK(session.Media().ManageSessionMediaPolicy(enabled));
+  CHECK(session.Media().ApplyMediaPolicy(enabled));
   CHECK(session.Media().Audio());
   for (const auto& invalid : {Json(), Json(0), Json("false")}) {
     auto bad = Json{{"connectionId", "connection"}, {"sdp", "offer"}, {"avSync", invalid}};
@@ -677,7 +675,14 @@ void PeerFailureCleanup() {
   CHECK(signals.empty());
   controller.FlushSignals();
   CHECK(signals.size() == 1 && signals[0].first == 3 && signals[0].second["type"] == "complete");
+  CHECK(controller.ReplaySignals("connection", 4));
+  controller.FlushSignals();
+  CHECK(signals.size() == 2 && signals.back().first == 4 &&
+        signals.back().second["type"] == "complete");
+  CHECK(!controller.ReplaySignals("replaced", 4));
+  CHECK(fixture.closes == 9);
   controller.Close();
+  CHECK(!controller.ReplaySignals("connection", 4));
   CHECK(fixture.closes == 10 && fixture.stops_with_handle == 10);
   accepted = controller.Offer(offer, 3, 60, 0, true, false);
   CHECK(accepted && accepted.value().at("avSync") == false);

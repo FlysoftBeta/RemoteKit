@@ -30,23 +30,13 @@ export class Reconciler {
       | 'learning'
     >,
   ) {}
-  private reconcileStop(tenant: string) {
-    return this.context.endpoint.stop(tenant).then(() => {
-      if (this.context.endpoint.placement.peek(tenant)?.runState === 'stopped')
-        this.services.lifecycle.finishStop(tenant);
-    });
-  }
   async tick() {
     this.context.store.reclaim.tick();
-    const stopping = this.context.store.db
-      .prepare('SELECT tenant FROM session_placements WHERE pending_commit IS NOT NULL')
-      .all() as { tenant: string }[];
-    const saving = stopping.map(({ tenant }) =>
-      this.reconcileStop(tenant).catch((err) => log.warn('reconciler.stop_failed', { tenant, err })),
-    );
     const relief = this.services.lifecycle.relieve();
     const active = this.context.store.db
-      .prepare("SELECT tenant FROM session_placements WHERE run_state='running'")
+      .prepare(
+        "SELECT tenant FROM session_placements WHERE run_state='running' OR pending_commit IS NOT NULL",
+      )
       .all() as { tenant: string }[];
     for (const { tenant } of active) this.context.tenants.get(tenant).started = true;
     const work = this.context.tenants.activeTenants().map((tenant) => {
@@ -64,7 +54,7 @@ export class Reconciler {
       tracking.inflight = task;
       return task;
     });
-    await Promise.all([...work, relief, ...saving]);
+    await Promise.all([...work, relief]);
   }
   private runtimesForNode(nodeId?: string) {
     return this.context.tenants.values().filter((runtime) => {
@@ -125,12 +115,18 @@ export class Reconciler {
     const runtime = this.context.tenants.get(tenant);
     this.services.lifecycle.observeWanted(this.context.store.workspaces.workspace(tenant), false);
     if (this.context.endpoint.placement.peek(tenant)?.pendingCommit) {
-      void this.reconcileStop(tenant).catch((err) => log.warn('reconciler.stop_failed', { tenant, err }));
+      await this.context.endpoint.synchronize(tenant);
+      if (this.context.endpoint.placement.peek(tenant)?.dataState === 'clean') {
+        this.services.lifecycle.finishStop(tenant);
+        return;
+      }
       runtime.lastErrorKey = 'stopping';
       runtime.lastError = undefined;
       this.services.viewers.push(tenant);
       return;
     }
+    if (runtime.viewer && this.context.endpoint.placement.peek(tenant)?.runState !== 'running')
+      this.context.endpoint.placement.resolve(tenant);
     if (!(runtime.viewer !== undefined) && !runtime.started) return;
     const tracking = runtime.reconciliation;
     const desiredKey = JSON.stringify([
@@ -416,7 +412,7 @@ export class Reconciler {
     const runtime = this.context.tenants.get(tenant);
     this.services.lifecycle.observeWanted(this.context.store.workspaces.workspace(tenant), false);
     if (this.context.endpoint.placement.peek(tenant)?.pendingCommit) {
-      void this.reconcileStop(tenant).catch((err) => log.warn('reconciler.stop_failed', { tenant, err }));
+      await this.context.endpoint.synchronize(tenant);
       return;
     }
     if (this.context.endpoint.placement.peek(tenant)?.runState === 'stopped') {

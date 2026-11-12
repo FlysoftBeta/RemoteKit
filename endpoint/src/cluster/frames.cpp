@@ -10,13 +10,6 @@ size_t JsonLimit(const Json& message) {
       message.value("event", Json()) == "session.observed" ||
       message.value("event", Json()) == "session.event")
     return kMaxPlaintext - 1;
-  if (message.value("type", Json()) == "clipboard.changed")
-    return 4 * 1024 * 1024 - 1;
-  const auto method = message.value("method", Json());
-  if (method == "clipboard.write")
-    return kMaxPlaintext - 1;
-  if ((method == "session.open" || method == "session.ensure") && message.contains("clipboard"))
-    return kMaxPlaintext - 1;
   return kMaxJson;
 }
 std::array<uint8_t, 4> EncodeLength(uint32_t n) {

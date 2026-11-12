@@ -37,6 +37,7 @@ class PeerController {
   Result<void> Policy(uint32_t fps, uint32_t degradation, bool audio);
   void Close();
   void FlushSignals();
+  Result<void> ReplaySignals(const std::string& connection, uint64_t generation);
   uint64_t Handle() const { return peer_.load(); }
   uint64_t ManagementGeneration() const { return management_generation_.load(); }
   std::string Connection() const {
@@ -66,7 +67,7 @@ class PeerController {
   mutable std::mutex mutex_;
   std::string connection_;
   std::string advertised_ip_;
-  std::deque<RtcEvent> signals_;
+  std::deque<RtcEvent> signals_, retained_signals_;
   bool signal_overflow_ = false;
 };
 }  // namespace remotekit

@@ -34,6 +34,14 @@ SessionCoordinator::Hooks SessionExecution::Hooks() {
                       uint64_t generation) { return self->Admit(value, generation); },
       .request = [self](const Json& value,
                         uint64_t generation) { return self->Request(value, generation); },
+      .replay = [self](const Json& request, uint64_t generation) -> Result<void> {
+        if (request.at("method") != "rtc.offer")
+          return {};
+        const auto session = self->runtime_.load();
+        if (!session)
+          return Error{ErrorCode::kConflict, "RPC peer is retired"};
+        return session->Channel().ReplayOffer(request.at("params"), generation);
+      },
       .acknowledge = [self](const std::string& stream,
                             uint64_t up_to) { return self->Acknowledge(stream, up_to); },
       .management_lost =
@@ -54,8 +62,11 @@ void SessionExecution::Activate(std::string connection, uint64_t generation) {
   generation_ = generation;
 }
 Result<void> SessionExecution::Authorize(const Json& document, uint64_t generation) {
+  std::lock_guard lock(authorization_mutex_);
   auto previous = desired_.load();
   const auto revision = std::stoull(document.at("revision").get<std::string>());
+  if (previous && std::stoull(previous->at("revision").get<std::string>()) > revision)
+    return {};
   while (!previous || std::stoull(previous->at("revision").get<std::string>()) <= revision) {
     if (previous && *previous == document)
       break;
@@ -116,7 +127,9 @@ Result<void> SessionExecution::Prepare(const Json& document) {
       RK_RETURN_IF_ERROR(session->AcknowledgeEvents(stream, known->second));
   }
   starting_ = !session->Running();
-  return session->StageDesired(document);
+  RK_RETURN_IF_ERROR(session->StageDesired(document));
+  staged_revision_ = document.at("revision").get<std::string>();
+  return {};
 }
 Result<void> SessionExecution::Start() {
   const auto session = runtime_.load();
@@ -139,6 +152,11 @@ Result<Json> SessionExecution::Stop(const Json& commit,
                                     PhaseClock::time_point deadline,
                                     bool deferred) {
   if (auto session = runtime_.load()) {
+    if (const auto document = desired_.load();
+        document && document->at("revision").get<std::string>() != staged_revision_) {
+      RK_RETURN_IF_ERROR(session->StageDesired(*document));
+      staged_revision_ = document->at("revision").get<std::string>();
+    }
     auto stopped = session->StopAndCommit(commit, check_blockers, deadline, deferred);
     if (stopped || stopped.error().code == ErrorCode::kOutcomeUnknown) {
       runtime_.store({});
@@ -147,8 +165,15 @@ Result<Json> SessionExecution::Stop(const Json& commit,
     return stopped;
   }
   RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory_));
-  if (copy.is_null())
-    return Error{ErrorCode::kNotFound, "Session copy is missing"};
+  if (copy.is_null()) {
+    if (commit.is_null())
+      return Json{{"state", "clean"}, {"base", nullptr}, {"committed", nullptr}};
+    const auto desired = desired_.load();
+    if (!desired)
+      return Error{ErrorCode::kUnavailable, "Session desired state is missing"};
+    RK_RETURN_IF_ERROR(Prepare(*desired));
+    return Stop(commit, check_blockers, deadline, deferred);
+  }
   if (copy.at("placementEpoch") != epoch_)
     return Error{ErrorCode::kConflict, "Session stop placement is fenced"};
   if (!commit.is_null() && !copy.at("lastCommit").is_null() &&

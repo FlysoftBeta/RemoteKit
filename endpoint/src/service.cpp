@@ -2,6 +2,7 @@
 #include "cluster/node_files.hpp"
 #include "diagnostics/log_files.hpp"
 #include "management/coordination.hpp"
+#include "management/methods.hpp"
 #include "persistence/checkpoint.hpp"
 #include "util/log.hpp"
 #include "util/result_macros.hpp"
@@ -82,6 +83,12 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
                         method.starts_with("object.") || method == "session.cold.delete" ||
                         method == "session.delete";
   if (node_rpc) {
+    if (!coordination::Keys(request,
+                            {"method", "tenantId", "sessionId", "placementEpoch",
+                             "endpointIncarnation", "opId", "replay", "params"},
+                            {"id"}) ||
+        !request["sessionId"].is_null() || !request["placementEpoch"].is_null())
+      return Error{ErrorCode::kInvalidRequest, "invalid node RPC envelope"};
     if (request.value("endpointIncarnation", Json()) != incarnation_ ||
         !request.value("params", Json()).is_object())
       return Error{ErrorCode::kConflict, "RPC Endpoint target is retired"};
@@ -124,6 +131,8 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
     return coordinator->Publish(request, generation);
   if (method == "session.events.ack")
     return coordinator->Acknowledge(request, generation);
+  if (method != "session.logs.read" && !ManagementMethods::Find(method))
+    return Error{ErrorCode::kInvalidRequest, "unknown Session RPC: " + method};
   return coordinator->Request(request, generation);
 }
 Result<void> Service::Fence(const Json& desired, uint64_t generation) {

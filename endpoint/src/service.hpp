@@ -39,7 +39,7 @@ class Service {
   NodeMetrics metrics_;
   std::atomic<size_t> session_count_{0};
   std::atomic<uint64_t> metrics_generation_{0};
-  uint64_t fenced_generation_ = 0;
+  std::atomic<uint64_t> fenced_generation_{0};
   std::string connection_epoch_;
   Json node_desired_;
   Json placements_ = Json::array();

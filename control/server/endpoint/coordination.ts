@@ -99,7 +99,16 @@ export interface PendingPopup {
   status: string;
 }
 export interface PageRequest {
-  kind: string;
+  kind:
+    | 'alert'
+    | 'confirm'
+    | 'prompt'
+    | 'beforeunload'
+    | 'permission'
+    | 'http_auth'
+    | 'repost'
+    | 'protocol_handler'
+    | 'file_chooser';
   request: string;
   state: string;
   origin?: string;
@@ -113,7 +122,8 @@ export interface PageRequest {
   url?: string;
   realm?: string;
   scheme?: string;
-  is_proxy?: boolean;
+  proxy?: boolean;
+  selection_id?: string;
   mode?: 'open' | 'open_multiple';
   multiple?: boolean;
   need_local_path?: boolean;
@@ -133,7 +143,17 @@ export interface PageRequest {
   };
 }
 export interface PageEvent {
-  kind: string;
+  kind:
+    | 'request_rejected'
+    | 'request_cancelled'
+    | 'find_cancelled'
+    | 'file_chooser_unsupported'
+    | 'fullscreen'
+    | 'pointer_lock_denied'
+    | 'keyboard_lock_denied'
+    | 'blocked_popup'
+    | 'request_replied'
+    | 'find_result';
   request?: string;
   reason?: string;
   state?: string;
@@ -422,4 +442,154 @@ export function validateDesired(value: SessionDesired): void {
       Buffer.byteLength(JSON.stringify(value)) > coordinationLimits.documentBytes,
     'size',
   );
+}
+
+function record(value: unknown): value is Record<string, any> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+function boundedString(value: unknown, max: number, nonempty = true): value is string {
+  return typeof value === 'string' && (!nonempty || value.length > 0) && Buffer.byteLength(value) <= max;
+}
+function coordinationTarget(value: Record<string, any>) {
+  return (
+    boundedString(value.tenantId, 128) &&
+    /^[0-9a-f]{32}$/.test(value.sessionId) &&
+    Number.isSafeInteger(value.placementEpoch) &&
+    value.placementEpoch > 0 &&
+    boundedString(value.connectionEpoch, 128) &&
+    counter(value.seq, true)
+  );
+}
+export function validateSessionEvent(value: unknown): asserts value is SessionEvent {
+  const invalid = () => {
+    throw new RemoteKitError('invalid_request', 'Invalid Session event');
+  };
+  if (
+    !record(value) ||
+    !coordinationTarget(value) ||
+    value.event !== 'session.event' ||
+    !boundedString(value.streamId, 128) ||
+    !boundedString(value.eventId, 128) ||
+    !(value.browserIncarnation === null || boundedString(value.browserIncarnation, 128)) ||
+    !record(value.body)
+  )
+    return invalid();
+  const body = value.body;
+  switch (value.type) {
+    case 'view.closed':
+      if (!counter(body.viewId, true) || !boundedString(body.reason, 128)) return invalid();
+      break;
+    case 'download.imported':
+    case 'download.failed':
+      if (!boundedString(body.name, 4096, false) || !boundedString(body.origin, 2048, false))
+        return invalid();
+      if (
+        value.type === 'download.imported'
+          ? !/^[0-9a-f]{64}$/.test(body.assetId) ||
+            !boundedString(body.mimeType, 255, false) ||
+            !counter(body.size)
+          : !record(body.error) ||
+            !boundedString(body.error.code, 64) ||
+            typeof body.error.message !== 'string'
+      )
+        return invalid();
+      break;
+    case 'clipboard.changed':
+      if (
+        !counter(body.baseRevision) ||
+        !counter(body.browserSequence) ||
+        typeof body.excludeFromHistory !== 'boolean' ||
+        (body.viewId !== undefined && !counter(body.viewId, true))
+      )
+        return invalid();
+      if (
+        body.oversize === true
+          ? ![body.textBytes, body.htmlBytes].every((value) => Number.isSafeInteger(value) && value >= 0)
+          : !boundedString(body.text, coordinationLimits.textBytes, false) ||
+            !boundedString(body.html, coordinationLimits.htmlBytes, false)
+      )
+        return invalid();
+      break;
+    case 'view.signIn':
+      if (
+        body.version !== 1 ||
+        !counter(body.webviewId, true) ||
+        !['changyan', 'xinjiaoyu'].includes(body.provider) ||
+        !record(body.result) ||
+        Buffer.byteLength(JSON.stringify(body.result)) > 8192 ||
+        Object.values(body.result).some((value) => typeof value !== 'string')
+      )
+        return invalid();
+      break;
+    case 'client.action':
+      if (
+        !boundedString(body.connectionId, 128) ||
+        !boundedString(body.leaseId, 128) ||
+        !Number.isSafeInteger(body.authEpoch) ||
+        body.authEpoch < 1 ||
+        !boundedString(body.operationId, 64) ||
+        !boundedString(body.operationGeneration, 64) ||
+        !record(body.action) ||
+        Buffer.byteLength(JSON.stringify(body.action)) > 32768
+      )
+        return invalid();
+      break;
+    default:
+      return invalid();
+  }
+}
+export function validateSessionObserved(value: unknown): asserts value is SessionObserved {
+  const invalid = () => {
+    throw new RemoteKitError('invalid_request', 'Invalid Session observation');
+  };
+  if (
+    !record(value) ||
+    !coordinationTarget(value) ||
+    value.event !== 'session.observed' ||
+    !counter(value.nodeRevision, true) ||
+    !counter(value.observedRevision) ||
+    !boundedString(value.endpointIncarnation, 128) ||
+    typeof value.converged !== 'boolean' ||
+    !['starting', 'running', 'stopping', 'stopped', 'failed'].includes(value.browser) ||
+    !(value.browserIncarnation === null || boundedString(value.browserIncarnation, 128)) ||
+    !Array.isArray(value.views) ||
+    value.views.length > coordinationLimits.views ||
+    !Array.isArray(value.pendingPopups) ||
+    !record(value.events) ||
+    !(value.events.streamId === null || boundedString(value.events.streamId, 128)) ||
+    !counter(value.events.ackedThrough) ||
+    !counter(value.events.lastSeq) ||
+    BigInt(value.events.ackedThrough) > BigInt(value.events.lastSeq) ||
+    !record(value.applied) ||
+    !Object.values(value.applied).every((revision) => counter(revision)) ||
+    !record(value.authorization) ||
+    !record(value.lock) ||
+    !record(value.rtc) ||
+    !record(value.blockers) ||
+    !record(value.library) ||
+    !Array.isArray(value.library.descriptions) ||
+    value.library.descriptions.length > coordinationLimits.descriptions ||
+    !record(value.stats)
+  )
+    return invalid();
+  if (
+    value.checkpoint !== null &&
+    (!record(value.checkpoint) ||
+      !/^[0-9a-f]{64}$/.test(value.checkpoint.manifestId) ||
+      !Array.isArray(value.checkpoint.objects) ||
+      value.checkpoint.objects.length > 32768 ||
+      value.checkpoint.objects.some((id: unknown) => typeof id !== 'string' || !/^[0-9a-f]{64}$/.test(id)) ||
+      !boundedString(value.checkpoint.buildId, 128))
+  )
+    return invalid();
+  for (const view of value.views) {
+    if (!record(view) || !counter(view.viewId, true)) return invalid();
+    if (
+      view.pageRequests !== undefined &&
+      (!record(view.pageRequests) ||
+        !Array.isArray(view.pageRequests.pending) ||
+        !Array.isArray(view.pageRequests.events))
+    )
+      return invalid();
+  }
 }

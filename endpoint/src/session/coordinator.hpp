@@ -20,6 +20,7 @@ class SessionCoordinator {
     std::function<void()> maintain;
     std::function<Result<void>(const Json&, uint64_t)> admit;
     std::function<Result<Json>(const Json&, uint64_t)> request;
+    std::function<Result<void>(const Json&, uint64_t)> replay;
     std::function<Result<void>(const std::string&, uint64_t)> acknowledge;
     std::function<void(uint64_t)> management_lost;
     std::function<bool(const Json&, uint64_t)> send;
@@ -61,7 +62,7 @@ class SessionCoordinator {
   std::thread worker_;
   bool stopping_ = false, force_observation_ = true;
   std::string prepared_revision_, started_revision_, views_revision_, stopped_revision_;
-  std::string browser_incarnation_;
+  std::string browser_incarnation_, applied_clipboard_revision_ = "0";
   uint64_t sequence_ = 0;
   bool converged_ = false;
   std::optional<Error> error_;

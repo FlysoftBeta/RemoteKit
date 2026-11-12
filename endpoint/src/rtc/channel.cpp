@@ -227,6 +227,11 @@ Result<Json> ChannelController::Offer(const Json& request, uint64_t generation) 
   return result;
 }
 
+Result<void> ChannelController::ReplayOffer(const Json& request, uint64_t generation) {
+  if (request.value("leaseId", Json()) != peer_lease_)
+    return Error{ErrorCode::kConflict, "RPC Viewer lease is retired"};
+  return peer_controller.ReplaySignals(Required(request, "connectionId"), generation);
+}
 Result<Json> ChannelController::ManageRtcActionResult(const Json& request) {
   if (Required(request, "connectionId") != peer_controller.Connection() ||
       !peer_controller.Handle() || !authorization.Stamp())

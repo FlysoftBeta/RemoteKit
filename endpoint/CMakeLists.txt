@@ -345,6 +345,7 @@ if(WIN32)
     src/session/coordinator.cpp
     src/session/execution.cpp
     src/session/views.cpp
+    src/session/site_preferences.cpp
     src/media/output.cpp
     src/media/pipeline.cpp
     src/media/encoders.cpp
@@ -365,6 +366,9 @@ if(WIN32)
     src/input/input.cpp)
 
   target_link_libraries(remotekit_runtime PUBLIC remotekit_cluster remotekit_media remotekit_endpoint remotekit_face remotekit_file_library winmm crypt32 ole32 winhttp pdh)
+  if(BUILD_TESTING)
+    target_link_libraries(endpoint_coordination_tests PRIVATE remotekit_runtime)
+  endif()
   if(TARGET remotekit_photo)
     target_compile_definitions(remotekit_runtime PUBLIC RK_FILE_PHOTO)
     target_link_libraries(remotekit_runtime PUBLIC remotekit_photo)

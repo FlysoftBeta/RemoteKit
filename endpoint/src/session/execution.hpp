@@ -46,13 +46,13 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   std::atomic<std::shared_ptr<const Json>> desired_;
   std::atomic<uint64_t> generation_{0};
   std::atomic<bool> running_{false};
-  std::mutex scope_mutex_;
+  std::mutex scope_mutex_, authorization_mutex_;
   std::string connection_;
   std::unique_ptr<SessionDb> reader_;
   std::map<std::string, uint64_t> acknowledged_;
   std::chrono::steady_clock::time_point last_events_sent_{};
   uint64_t sent_through_ = 0;
-  std::string sent_stream_;
+  std::string sent_stream_, staged_revision_;
   bool starting_ = false;
 };
 }  // namespace remotekit

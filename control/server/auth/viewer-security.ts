@@ -140,6 +140,11 @@ export class ViewerSecurity {
     }
   }
 
+  retiring(tenant: string, connectionId: string | null) {
+    return [...this.revocations].find(
+      ([viewer, owner]) => owner === tenant && viewer.peer?.connectionId === connectionId,
+    )?.[0];
+  }
   async retryRevocations() {
     await Promise.all(
       [...this.revocations].map(async ([viewer, tenant]) => {

@@ -31,6 +31,13 @@ int main(int argc, char** argv) {
     invalid = desired;
     invalid["unrecognized"] = true;
     Check(!coordination::ValidateDesired(invalid), "unknown fields rejected");
+    invalid = desired;
+    invalid["sitePreferences"]["sites"]["https://EXAMPLE.test"] = {{"tabletUa", true}};
+    Check(!coordination::ValidateDesired(invalid), "site entries are validated before publication");
+    invalid = desired;
+    invalid["authorization"]["files"]["requests"] =
+        Json::array({{{"id", "token"}, {"binding", {{"view", "1"}}}}});
+    Check(!coordination::ValidateDesired(invalid), "file grants are validated before publication");
     for (const auto* value : {"0", "1", "18446744073709551615"})
       Check(coordination::Counter(value), "valid counter");
     for (const auto* value : {"01", "-1", "18446744073709551616", "1.0"})

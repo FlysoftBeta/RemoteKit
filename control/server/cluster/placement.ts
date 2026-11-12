@@ -20,7 +20,6 @@ export interface SessionPlacement {
   checkpoint: string | null;
 }
 export class Placement {
-  reconcileStop?: (tenant: string) => Promise<number>;
   constructor(
     private readonly store: ControlDatabase,
     private readonly nodes: NodeRegistry,
@@ -115,7 +114,6 @@ export class Placement {
     return this.store.transaction(() => {
       const existing = this.peek(tenant);
       if (existing?.pendingCommit) {
-        void this.reconcileStop?.(tenant).catch(() => {});
         throw new RemoteKitError('unavailable', '正在提交会话，请稍候');
       }
       if (existing?.dataState === 'dirty') {

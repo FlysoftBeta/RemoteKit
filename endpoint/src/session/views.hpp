@@ -72,7 +72,7 @@ class ViewController : private ControllerContext {
   Result<Json> ManageSessionStorageImport(const Json& request);
   Result<Json> ManageSessionStorageImportStatus(const Json& request);
   Result<Json> ManageSessionIdentity(const Json& request);
-  Result<Json> ManageSessionSitePreferences(const Json& request);
+  Result<Json> ApplySitePreferences(const Json& request);
   Result<Json> ManageViewNavigationAck(const Json& request);
   Result<Json> ManageViewAppInfo(const Json& request);
   Result<Json> ManageViewClose(const Json& request);

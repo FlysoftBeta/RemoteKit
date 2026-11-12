@@ -1,5 +1,7 @@
 import {
   canonical,
+  validateSessionEvent,
+  validateSessionObserved,
   counter,
   type OneShotRequest,
   type SessionObserved,
@@ -27,7 +29,7 @@ import {
 import { log } from '../log';
 import type { ConfiguredNode, NodeConfig, NodeLimits } from '../config';
 import { readyTransition, type EndpointLink, type EndpointLinkState } from '../endpoint/link';
-import type { ClipboardChangedEvent, ClientActionEvent, RtcSignal } from '../endpoint/types';
+import type { RtcSignal } from '../endpoint/types';
 import {
   decodeFrame,
   encodeBinary,
@@ -113,6 +115,7 @@ interface Connection {
   epoch: string;
 }
 interface Pending {
+  opId?: string;
   delivered: boolean;
   epoch: string;
   resolve(value: unknown): void;
@@ -328,7 +331,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         if (this.current !== connection) return;
         let bytes: Buffer;
         try {
-          bytes = encodeJson({ id: message.id, ...reply });
+          bytes = encodeJson({ id: message.id, opId: message.opId, ...reply });
         } catch {
           bytes = encodeJson({
             id: message.id,
@@ -402,6 +405,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       )
         return;
       if (message.event === 'session.observed') {
+        validateSessionObserved(message);
         if (
           message.endpointIncarnation !== this.incarnation ||
           !counter(message.nodeRevision, true) ||
@@ -420,6 +424,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         typeof message.body !== 'object'
       )
         throw new Error('Invalid Session event');
+      if (message.event === 'session.event') validateSessionEvent(message);
       this.registry.emit(message.event, { nodeId: this.nodeId, message });
       this.emit(message.event, message);
       return;
@@ -440,6 +445,10 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     if (!pending || pending.epoch !== connection.epoch) return;
     clearTimeout(pending.timer);
     this.pending.delete(message.id);
+    if (pending.opId && message.opId !== pending.opId) {
+      pending.reject(new RemoteKitError('outcome_unknown', 'RPC reply identity differs'));
+      return;
+    }
     if (message.ok) pending.resolve(message.result);
     else
       pending.reject(
@@ -531,6 +540,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     return new Promise((resolve, reject) => {
       const pending: Pending = {
         epoch: connection.epoch,
+        opId: (envelope as { opId?: string }).opId,
         delivered: false,
         resolve,
         reject,

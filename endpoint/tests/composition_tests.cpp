@@ -64,11 +64,11 @@ int main() {
           "replay durable close events into desired views");
     session.BeginManagementRequest(7);
     Check(session.ManagementCurrent(), "management generation wiring");
-    auto policy = session.Media().ManageSessionMediaPolicy(
+    auto policy = session.Media().ApplyMediaPolicy(
         {{"audio", true}, {"maxFps", 30}, {"degradationPreference", "balanced"}});
     Check(bool(policy) && session.Media().MaxFps() == 30,
           "media policy belongs to pipeline before peer creation");
-    auto invalid = session.Media().ManageSessionMediaPolicy(
+    auto invalid = session.Media().ApplyMediaPolicy(
         {{"audio", true}, {"maxFps", 0}, {"degradationPreference", "balanced"}});
     Check(!invalid && invalid.error().code == ErrorCode::kInvalidRequest,
           "invalid policy preserves typed error");
