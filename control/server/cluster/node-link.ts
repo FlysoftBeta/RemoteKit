@@ -310,6 +310,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     this.healthySince = Date.now();
     this.buildId = this.registry.options.buildId;
     this.state = transition.state;
+    log.warn('node.online', { nodeId: this.nodeId });
     this.events = { connectedAt: Date.now() };
     void this.coordinate().then(
       () => {
@@ -609,6 +610,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   disconnect(connection: Connection) {
     if (this.current !== connection) return;
     this.current = undefined;
+    log.warn('node.offline', { nodeId: this.nodeId });
     this.state = { state: 'offline' };
     if (this.healthySince !== undefined && Date.now() - this.healthySince >= 60_000) this.launchFailures = 0;
     this.healthySince = undefined;

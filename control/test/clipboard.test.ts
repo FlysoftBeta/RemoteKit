@@ -105,18 +105,18 @@ test('desired documents seed and update the current clipboard', async () => {
   const control = createApplication(store, gateway);
   try {
     store.clipboards.record('one', { text: 'copy', html: '<p>copy</p>' });
-    await gateway.synchronize('one');
+    await gateway.published('one');
     assert.deepEqual(requests[requests.length - 1]?.args.clipboard, {
       revision: '1',
       value: { text: 'copy', html: '<p>copy</p>' },
     });
-    await gateway.synchronize('empty');
+    await gateway.published('empty');
     assert.deepEqual(requests[requests.length - 1]?.args.clipboard, {
       revision: '0',
       value: { text: '', html: '' },
     });
     store.clipboards.record('one', { text: 'new', html: '' });
-    await gateway.synchronize('one');
+    await gateway.published('one');
     assert.deepEqual(requests[requests.length - 1]?.args.clipboard, {
       revision: '2',
       value: { text: 'new', html: '' },

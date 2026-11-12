@@ -566,9 +566,7 @@ export class PageRequests {
       JSON.stringify(files) !== JSON.stringify(runtime.pageRequests.files ?? []);
     runtime.pageRequests.dialogs = found;
     runtime.pageRequests.files = files;
-    void this.context.endpoint
-      .synchronize(tenant)
-      .catch((err) => log.warn('session.desired_failed', { tenant, err }));
+    this.context.endpoint.invalidate(tenant);
     if (changed) this.services.viewers.push(tenant);
   }
   async replyDialog(state: ProductWorkspace, action: { dialogId: string; reply: PageDialogReply }) {
@@ -622,7 +620,7 @@ export class PageRequests {
     }
     if (changed) {
       this.services.operations.saveWorkspace(state);
-      const desired = await this.context.endpoint.synchronize(tenant);
+      const desired = await this.context.endpoint.published(tenant);
       const applied = await this.context.endpoint.waitObserved(
         tenant,
         (value) =>

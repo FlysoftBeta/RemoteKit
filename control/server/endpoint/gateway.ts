@@ -49,6 +49,11 @@ export class EndpointSnapshotError extends RemoteKitError {
 export class EndpointGateway {
   private desiredSource?: (tenant: string) => SessionDesired;
   private readonly sent = new Map<string, string>();
+  private readonly stale = new Set<string>();
+  private readonly publishing = new Map<string, Promise<SessionDesired | undefined>>();
+  private readonly publicationFailures = new Set<string>();
+  private scheduled = false;
+  private retry?: NodeJS.Timeout;
   constructor(
     readonly nodes: NodeRegistry,
     readonly placement: Pick<
@@ -70,6 +75,9 @@ export class EndpointGateway {
       | 'newestComplete'
     >,
   ) {
+    nodes.on('ready', ({ nodeId }: { nodeId: string }) => {
+      for (const target of nodes.fencing(nodeId)) this.invalidate(target.tenantId);
+    });
     nodes.on('session.observed', ({ nodeId, message }: { nodeId: string; message: SessionObserved }) => {
       const placed = placement.peek(message.tenantId);
       if (
@@ -126,6 +134,10 @@ export class EndpointGateway {
   }
   setDesiredSource(source?: (tenant: string) => SessionDesired) {
     this.desiredSource = source;
+    if (!source) {
+      clearTimeout(this.retry);
+      this.stale.clear();
+    }
   }
   observation(tenant: string): SessionObserved | undefined {
     const placed = this.placement.peek(tenant);
@@ -139,28 +151,97 @@ export class EndpointGateway {
       ? value
       : undefined;
   }
-  async synchronize(tenant: string): Promise<SessionDesired> {
-    if (!this.desiredSource) throw new RemoteKitError('unavailable', 'Desired state source is not installed');
-    let desired = this.desiredSource(tenant);
-    const placed = this.placement.peek(tenant)!;
-    const node = this.nodes.get(placed.nodeId);
-    if (!node || node.state.state !== 'ready')
-      throw new RemoteKitError('unavailable', 'Session node is offline');
-    await node.coordinate();
-    desired = this.desiredSource(tenant);
-    validateDesired(desired);
-    const key = canonical([
-      node.nodeId,
-      desired.connectionEpoch,
-      desired.sessionId,
-      desired.placementEpoch,
-      desired.revision,
-    ]);
-    if (this.sent.get(tenant) !== key) {
-      await node.publish(desired);
-      this.sent.set(tenant, key);
+  invalidate(tenant: string): void {
+    if (!this.desiredSource) return;
+    this.stale.add(tenant);
+    if (this.scheduled) return;
+    this.scheduled = true;
+    queueMicrotask(() => {
+      this.scheduled = false;
+      for (const tenant of this.stale) void this.publishTenant(tenant);
+    });
+  }
+  private unavailable(tenant: string) {
+    const fault = this.sessionFault(tenant);
+    if (fault) return fault;
+    const placed = this.placement.peek(tenant);
+    return new RemoteKitError('unavailable', 'Session node is offline', {
+      reason: placed?.dataState === 'dirty' ? 'session_data_on_offline_node' : 'no_eligible_node',
+    });
+  }
+  private publishTenant(tenant: string): Promise<SessionDesired | undefined> {
+    const running = this.publishing.get(tenant);
+    if (running) return running;
+    const work = Promise.resolve()
+      .then(async () => {
+        let latest: SessionDesired | undefined;
+        while (this.stale.has(tenant) && this.desiredSource) {
+          if (!this.isReady(tenant)) return;
+          this.stale.delete(tenant);
+          let desired = this.desiredSource(tenant);
+          const placed = this.placement.peek(tenant)!;
+          const node = this.nodes.get(placed.nodeId);
+          if (node?.state.state !== 'ready') {
+            this.stale.add(tenant);
+            return;
+          }
+          await node.coordinate();
+          if (!this.desiredSource) return;
+          desired = this.desiredSource(tenant);
+          validateDesired(desired);
+          const key = canonical([
+            node.nodeId,
+            desired.connectionEpoch,
+            desired.sessionId,
+            desired.placementEpoch,
+            desired.revision,
+          ]);
+          if (this.sent.get(tenant) !== key) {
+            await node.publish(desired);
+            this.sent.set(tenant, key);
+          }
+          if (this.publicationFailures.delete(tenant)) log.warn('session.publication_recovered', { tenant });
+          latest = desired;
+        }
+        return latest;
+      })
+      .catch((err) => {
+        this.stale.add(tenant);
+        if (this.isReady(tenant) && !this.publicationFailures.has(tenant)) {
+          this.publicationFailures.add(tenant);
+          log.warn('session.publication_failed', { tenant, err });
+        }
+        if (this.desiredSource && !this.retry) {
+          this.retry = setTimeout(() => {
+            this.retry = undefined;
+            for (const tenant of this.stale) void this.publishTenant(tenant);
+          }, 1000);
+          this.retry.unref();
+        }
+        return undefined;
+      })
+      .finally(() => this.publishing.delete(tenant));
+    this.publishing.set(tenant, work);
+    return work;
+  }
+  async published(tenant: string, timeoutMs = 20000): Promise<SessionDesired> {
+    this.invalidate(tenant);
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const desired = await Promise.race([
+        this.publishTenant(tenant),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new RemoteKitError('unavailable', 'Desired publication timed out')),
+            timeoutMs,
+          );
+        }),
+      ]);
+      if (!desired) throw this.unavailable(tenant);
+      return desired;
+    } finally {
+      clearTimeout(timer);
     }
-    return desired;
   }
   async waitObserved(
     tenant: string,
@@ -169,8 +250,7 @@ export class EndpointGateway {
   ): Promise<SessionObserved> {
     const placed = this.placement.peek(tenant);
     const node = placed && this.nodes.get(placed.nodeId);
-    if (!node || node.state.state !== 'ready')
-      throw new RemoteKitError('unavailable', 'Session node is offline');
+    if (!node || node.state.state !== 'ready') throw this.unavailable(tenant);
     const epoch = node.state.connectionEpoch;
     return new Promise((resolve, reject) => {
       const finish = (error?: unknown, value?: SessionObserved) => {
@@ -288,7 +368,7 @@ export class EndpointGateway {
     const current = this.placement.peek(tenant);
     if (current?.runState === 'stopped' && current.dataState === 'clean') return current.checkpointId ?? 0;
     const placed = this.placement.beginStop(tenant);
-    await this.synchronize(tenant);
+    this.invalidate(tenant);
     const observed = await this.waitObserved(
       tenant,
       (value) =>

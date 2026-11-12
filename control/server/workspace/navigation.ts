@@ -1,3 +1,4 @@
+import { requireBrowser } from './browser-availability';
 import { RemoteKitError } from '../../shared/errors';
 import { endpointError } from '../endpoint/gateway';
 import { reportError } from '../log';
@@ -13,6 +14,7 @@ export class Navigation {
     private readonly services: Pick<DomainServices, 'policy' | 'workspace'>,
   ) {}
   async navigate(state: ProductWorkspace, effect: Extract<CommandEffect, { kind: 'navigate' }>) {
+    requireBrowser(this.context, state.tenantId, true);
     const tenant = state.tenantId,
       runtime = this.context.tenants.get(tenant),
       t = state.tabs.find((t) => t.id === effect.tabId)!,
@@ -29,7 +31,7 @@ export class Navigation {
     const browser = t.navigation?.browserIncarnation ?? runtime.browserIncarnation;
     t.kind = 'remote';
     this.context.store.workspaces.saveWorkspace(state);
-    await this.context.endpoint.synchronize(tenant);
+    this.context.endpoint.invalidate(tenant);
     const observed = await this.context.endpoint.waitObserved(
       tenant,
       (value) => value.browser === 'running' && value.views.some((view) => view.viewId === t.webviewId),

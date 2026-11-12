@@ -114,9 +114,14 @@ export class Reconciler {
   }
   async reconcileProduct(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
+    this.context.endpoint.invalidate(tenant);
+    if (!this.context.endpoint.isReady(tenant) || this.context.endpoint.sessionFault(tenant)) {
+      this.services.viewers.push(tenant);
+      return;
+    }
     this.services.lifecycle.observeWanted(this.context.store.workspaces.workspace(tenant), false);
     if (this.context.endpoint.placement.peek(tenant)?.pendingCommit) {
-      await this.context.endpoint.synchronize(tenant);
+      this.context.endpoint.invalidate(tenant);
       if (this.context.endpoint.placement.peek(tenant)?.dataState === 'clean') {
         this.services.lifecycle.finishStop(tenant);
         return;
@@ -163,7 +168,7 @@ export class Reconciler {
       const observed = this.context.endpoint.observation(tenant);
       if (observed) await this.services.popups.observePopups(desired, observed);
       let resourceLimitation = this.services.policy.qualityFor(tenant, desired).resourceLimitation;
-      const sent = await this.context.endpoint.synchronize(tenant);
+      const sent = await this.context.endpoint.published(tenant);
       const latest = this.context.endpoint.observation(tenant);
       if (
         sent.run === 'running' &&
@@ -389,7 +394,7 @@ export class Reconciler {
           snapshot.browserIncarnation,
         );
       }
-      await this.context.endpoint.synchronize(tenant);
+      this.context.endpoint.invalidate(tenant);
       if (resourceLimitation) {
         const changed = runtime.lastErrorKey !== 'resource_limit';
         runtime.lastErrorKey = 'resource_limit';
@@ -423,16 +428,21 @@ export class Reconciler {
   }
   async observeOffline(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
+    this.context.endpoint.invalidate(tenant);
+    if (!this.context.endpoint.isReady(tenant) || this.context.endpoint.sessionFault(tenant)) {
+      this.services.viewers.push(tenant);
+      return;
+    }
     this.services.lifecycle.observeWanted(this.context.store.workspaces.workspace(tenant), false);
     if (this.context.endpoint.placement.peek(tenant)?.pendingCommit) {
-      await this.context.endpoint.synchronize(tenant);
+      this.context.endpoint.invalidate(tenant);
       return;
     }
     if (this.context.endpoint.placement.peek(tenant)?.runState === 'stopped') {
       runtime.started = false;
       return;
     }
-    await this.context.endpoint.synchronize(tenant);
+    this.context.endpoint.invalidate(tenant);
     const snapshot = this.context.endpoint.current(tenant),
       state = this.context.store.workspaces.workspace(tenant);
     this.services.learning.signIn.reconcile(state, snapshot.browserIncarnation, snapshot.running !== false);

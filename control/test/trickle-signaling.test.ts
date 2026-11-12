@@ -133,15 +133,15 @@ test('Viewer detach while desired state is publishing cancels the offer before n
       { identity: 'account', valid: () => true },
       true,
     );
-    const synchronize = control.endpoint.synchronize.bind(control.endpoint);
+    const published = control.endpoint.published.bind(control.endpoint);
     let block = true;
-    control.endpoint.synchronize = async (tenant) => {
+    control.endpoint.published = async (tenant) => {
       if (block) {
         block = false;
         entered();
         await gate;
       }
-      return synchronize(tenant);
+      return published(tenant);
     };
     const offer = control.rtc.offer(
       account.tenantId,

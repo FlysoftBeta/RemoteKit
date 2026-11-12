@@ -5,6 +5,7 @@ import { endpointError } from '../endpoint/gateway';
 import { randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type { AuthSettings, AuthState, FacePurpose, FaceStatus } from '../../shared/security';
+import type { SessionObserved } from '../endpoint/coordination';
 import type { EndpointGateway } from '../endpoint/gateway';
 import type { ControlDatabase } from '../persistence/database';
 import { systemClock, type Clock } from '../util/clock';
@@ -187,20 +188,38 @@ export class ViewerSecurity {
     void this.capabilities(tenant, viewer);
   }
 
+  observe(tenant: string, viewer: ViewerSecurityState, observed: SessionObserved) {
+    const peer = viewer.peer;
+    if (
+      !peer ||
+      observed.authorization.connectionId !== peer.connectionId ||
+      observed.authorization.epoch !== peer.epoch ||
+      observed.authorization.unlocked !== !viewer.locked ||
+      peer.appliedEpoch === peer.epoch
+    )
+      return;
+    peer.appliedEpoch = peer.epoch;
+    this.changed(tenant, viewer, false);
+  }
   async restore(tenant: string, viewer: ViewerSecurityState) {
     if (viewer.peer) await this.apply(tenant, viewer, !viewer.locked);
     void this.capabilities(tenant, viewer);
   }
 
   private async apply(tenant: string, viewer: ViewerSecurityState, unlocked: boolean) {
+    this.endpoint.invalidate(tenant);
     const peer = viewer.peer;
     if (!peer) return;
     const { connectionId } = peer;
     const epoch = ++peer.epoch;
     peer.requests++;
     peer.appliedEpoch = 0;
+    if (!this.endpoint.isReady(tenant) || this.endpoint.sessionFault(tenant)) {
+      peer.requests--;
+      return;
+    }
     try {
-      const desired = await this.endpoint.synchronize(tenant);
+      const desired = await this.endpoint.published(tenant);
       const observed = await this.endpoint.waitObserved(
         tenant,
         (value) =>
@@ -222,7 +241,8 @@ export class ViewerSecurity {
       peer.appliedEpoch = epoch;
       this.changed(tenant, viewer, false);
     } catch (err) {
-      if (!unlocked) log.error('security.lock_failed', { tenant, connectionId, epoch, err });
+      if (!this.endpoint.isReady(tenant)) return;
+      if (!unlocked) log.warn('security.lock_failed', { tenant, connectionId, epoch, err });
       throw err;
     } finally {
       peer.requests--;
@@ -334,11 +354,6 @@ export class ViewerSecurity {
   }
 
   async poll(tenant: string, viewer: ViewerSecurityState) {
-    const peer = viewer.peer;
-    if (peer && peer.appliedEpoch !== peer.epoch && peer.requests === 0 && this.valid(tenant, viewer))
-      await this.apply(tenant, viewer, !viewer.locked).catch((err) =>
-        log.error('security.reapply_failed', { tenant, err }),
-      );
     const challenge = viewer.challenge;
     if (!challenge?.started || viewer.polling || !this.valid(tenant, viewer)) return;
     viewer.polling = true;

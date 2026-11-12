@@ -287,7 +287,7 @@ export class OperationPipeline {
     if (receipt && !['tab.navigate', 'tab.command'].includes(action.type) && !closePending)
       settle(receipt, { status: 'committed', application });
     this.saveWorkspace(state, receipt);
-    await this.context.endpoint.synchronize(tenant).catch(() => {});
+    this.context.endpoint.invalidate(tenant);
     if (plan.siteUaChanged) {
       const latest = this.context.store.workspaces.workspace(tenant);
       if (

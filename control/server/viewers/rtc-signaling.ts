@@ -1,3 +1,4 @@
+import { requireBrowser } from '../workspace/browser-availability';
 import { KeyedSerialQueue } from '../util/serial-queue';
 import { log, reportError } from '../log';
 import { endpointError } from '../endpoint/gateway';
@@ -106,7 +107,8 @@ export class RtcSignaling {
       const timings: Record<string, number> = { queueMs: this.context.clock.monotonicMs() - receivedAt };
       this.services.viewers.assertViewer(tenant, lease);
       this.services.policy.qualityState(tenant).resetFeedback();
-      await this.context.endpoint.synchronize(tenant);
+      requireBrowser(this.context, tenant, true);
+      await this.context.endpoint.published(tenant);
       timings.reconcileEndMs = this.context.clock.monotonicMs() - receivedAt;
       this.services.viewers.assertViewer(tenant, lease);
       const security = runtime.viewer!.security;
@@ -170,7 +172,7 @@ export class RtcSignaling {
         await this.services.security.bind(tenant, security, connectionId);
         this.services.viewers.assertViewer(tenant, lease);
         runtime.activateRtc(connectionId, lease);
-        await this.context.endpoint.synchronize(tenant);
+        this.context.endpoint.invalidate(tenant);
         return {
           type: 'answer',
           avSync: accepted.avSync,

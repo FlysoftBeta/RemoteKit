@@ -138,10 +138,16 @@ export function createApplication(
   services.learning = new LearningService(context, services);
   services.clipboard = new ClipboardService(context, services);
   endpoint.setDesiredSource((tenant) => compileDesired(context, services, tenant));
-  endpoint.nodes.on('session.fault', ({ target }) => {
-    void endpoint.synchronize(target.tenantId).catch(() => {});
+  const sessionFault = ({ target }: { target: { tenantId: string } }) => {
+    endpoint.invalidate(target.tenantId);
     services.viewers.push(target.tenantId);
-  });
+  };
+  const sessionObserved = ({ message }: { message: import('./endpoint/coordination').SessionObserved }) => {
+    const viewer = context.tenants.get(message.tenantId).viewer;
+    if (viewer) services.security.observe(message.tenantId, viewer.security, message);
+  };
+  endpoint.nodes.on('session.fault', sessionFault);
+  endpoint.nodes.on('session.observed', sessionObserved);
   services.security = new ViewerSecurity(
     store,
     endpoint,
@@ -156,7 +162,7 @@ export function createApplication(
       context.events.emit('auth', tenant, lease, services.viewers.authState(tenant, viewer));
       if (workspace) {
         services.viewers.push(tenant);
-        void endpoint.synchronize(tenant).catch((err) => log.warn('session.desired_failed', { tenant, err }));
+        endpoint.invalidate(tenant);
         void context.tenants
           .serial(tenant, () => services.reconciler.reconcileProduct(tenant))
           .catch((err) => log.warn('security.reconcile_failed', { tenant, err }));
@@ -171,10 +177,7 @@ export function createApplication(
       void context.tenants
         .serial(tenant, async () => {
           if (!services.viewers.validSecurity(tenant, viewer)) return;
-          if (!viewer.locked)
-            void endpoint
-              .synchronize(tenant)
-              .catch((err) => log.warn('session.desired_failed', { tenant, err }));
+          if (!viewer.locked) endpoint.invalidate(tenant);
           if (viewer.locked) await services.reconciler.reconcileProduct(tenant);
         })
         .catch((err) => log.warn('security.reconcile_failed', { tenant, err }));
@@ -185,6 +188,8 @@ export function createApplication(
   const unsubscribeSignals = endpoint.onSignal((event) => services.rtc.receiveSignal(event));
   services.close = async () => {
     context.closed = true;
+    endpoint.nodes.off('session.fault', sessionFault);
+    endpoint.nodes.off('session.observed', sessionObserved);
     unsubscribeSignals?.();
     await services.servicePeers.dispose();
     await sessionEvents.close();

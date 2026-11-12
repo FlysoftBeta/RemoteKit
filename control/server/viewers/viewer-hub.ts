@@ -106,6 +106,7 @@ export class ViewerHub {
     await Promise.all(
       this.context.tenants
         .withViewers()
+        .filter(([, viewer]) => !!viewer.security?.challenge)
         .map(([tenant, viewer]) => viewer.security && this.services.security.poll(tenant, viewer.security)),
     );
   }

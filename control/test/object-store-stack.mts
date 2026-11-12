@@ -121,7 +121,7 @@ try {
   await control.objects.gc(now + 2 * 60 * 60 * 1000 + 1);
   assert.equal(control.objects.usage().objects, 0);
 
-  await endpoint.synchronize('first');
+  await endpoint.published('first');
   await endpoint.stop('first');
   const firstPlacement = endpoint.placement.peek('first')!;
   const secondPlacement = endpoint.placement.peek('second')!;
@@ -147,7 +147,7 @@ try {
   assert.ok(
     located.some((request) => request.tenantId === 'first' && request.ids.includes(restored.checkpoint!)),
   );
-  await endpoint.synchronize('first');
+  await endpoint.published('first');
   await endpoint.stop('first');
   await writeFile(
     join(run, 'result.json'),

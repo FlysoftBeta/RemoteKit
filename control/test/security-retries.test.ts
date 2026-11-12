@@ -18,7 +18,10 @@ function securityFixture() {
   let calls = 0;
   let viewer: ReturnType<ViewerSecurity['create']>;
   const endpoint = {
-    synchronize: async () => {
+    invalidate() {},
+    isReady: () => true,
+    sessionFault: () => undefined,
+    published: async () => {
       calls++;
       if (failLock && viewer.locked) throw new Error('native lock failed');
       return { revision: '1' };
@@ -58,7 +61,7 @@ function securityFixture() {
   };
 }
 
-test('failed native lock is marked not applied and the existing poll retries it', async () => {
+test('failed native lock is marked not applied and explicit restoration waits for observation', async () => {
   const f = securityFixture();
   await f.security.bind('tenant', f.viewer, 'connection');
   assert.equal(f.viewer.peer!.appliedEpoch, 1);
@@ -67,9 +70,9 @@ test('failed native lock is marked not applied and the existing poll retries it'
   assert.equal(f.viewer.locked, true);
   assert.equal(f.viewer.peer!.appliedEpoch, 0);
   assert.notEqual(f.viewer.peer!.appliedEpoch, f.viewer.peer!.epoch);
-  assert.ok(f.records.some((record) => record.ev === 'security.lock_failed' && record.lvl === 'error'));
+  assert.ok(f.records.some((record) => record.ev === 'security.lock_failed' && record.lvl === 'warn'));
   f.fail(false);
-  await f.security.poll('tenant', f.viewer);
+  await f.security.restore('tenant', f.viewer);
   assert.equal(f.viewer.peer!.appliedEpoch, f.viewer.peer!.epoch);
   assert.equal(f.calls(), 3);
 });
@@ -110,7 +113,7 @@ test('presence polling failure locks product state and a failed native lock stay
   assert.equal(f.viewer.peer!.appliedEpoch, 0);
   assert.ok(f.records.some((record) => record.ev === 'security.face_status_failed'));
   f.fail(false);
-  await f.security.poll('tenant', f.viewer);
+  await f.security.restore('tenant', f.viewer);
   assert.equal(f.viewer.peer!.appliedEpoch, f.viewer.peer!.epoch);
 });
 

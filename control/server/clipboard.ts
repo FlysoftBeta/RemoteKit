@@ -81,7 +81,7 @@ export class ClipboardService {
         throw new RemoteKitError('limit_exceeded', '剪贴板文本超过大小限制', { capacity: 'field' });
       const value = await this.accept(authority.tenantId, params.text, '', { kind: 'device' }, false);
       if (!value) throw new RemoteKitError('not_found', '账号不存在');
-      await this.context.endpoint.synchronize(authority.tenantId);
+      this.context.endpoint.invalidate(authority.tenantId);
       return { revision: value.revision };
     });
   }
@@ -104,7 +104,7 @@ export class ClipboardService {
       const { text, html } = this.context.store.library.snippet(authority.tenantId, entry.id);
       const value = await this.accept(authority.tenantId, text, html, entry.origin);
       if (!value) throw new RemoteKitError('not_found', '账号不存在');
-      await this.context.endpoint.synchronize(authority.tenantId);
+      this.context.endpoint.invalidate(authority.tenantId);
       return { revision: value.revision, text };
     });
   }
