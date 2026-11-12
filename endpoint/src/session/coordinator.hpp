@@ -66,7 +66,7 @@ class SessionCoordinator {
   std::string prepared_revision_, started_revision_, views_revision_, stopped_revision_;
   std::string browser_incarnation_, applied_clipboard_revision_ = "0";
   std::atomic<uint64_t>& observation_sequence_;
-  bool converged_ = false;
+  bool converged_ = false, observation_oversize_ = false;
   std::optional<Error> error_;
   std::chrono::steady_clock::time_point last_sent_{};
   std::string last_encoded_;

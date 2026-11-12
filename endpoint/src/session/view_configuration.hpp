@@ -1,4 +1,5 @@
 #pragma once
+#include "protocol/limits.hpp"
 #include "session/signin.hpp"
 #include <charconv>
 #include <cmath>
@@ -16,7 +17,7 @@ inline Result<void> ValidateViewConfiguration(const Json& config) {
     if (config.contains(name) &&
         (!config[name].is_number_integer() ||
          config[name] < (std::string_view(name) == "occludedBottom" ? 0 : 1) ||
-         config[name] > 8192))
+         config[name] > limits::viewDimension))
       return Error{ErrorCode::kInvalidRequest, std::string("invalid viewport ") + name};
   if (config.contains("occlusionRevision")) {
     if (!config["occlusionRevision"].is_string())
@@ -32,8 +33,8 @@ inline Result<void> ValidateViewConfiguration(const Json& config) {
     if (!device.is_object())
       return Error{ErrorCode::kInvalidRequest, "device must be an object"};
     for (const auto* name : {"width", "height"})
-      if (device.contains(name) &&
-          (!device[name].is_number_integer() || device[name] < 1 || device[name] > 8192))
+      if (device.contains(name) && (!device[name].is_number_integer() || device[name] < 1 ||
+                                    device[name] > limits::viewDimension))
         return Error{ErrorCode::kInvalidRequest, std::string("invalid device ") + name};
     if (device.contains("mode") && !device["mode"].is_string())
       return Error{ErrorCode::kInvalidRequest, "required string: device.mode"};

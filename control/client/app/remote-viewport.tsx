@@ -218,6 +218,7 @@ export function RemoteViewport({
       {browserUnavailable ? (
         <div className="browser-unavailable" role="status">
           {browserUnavailable}
+          {browser?.errorId ? ` (${browser.errorId})` : ''}
         </div>
       ) : (
         <SurfaceState

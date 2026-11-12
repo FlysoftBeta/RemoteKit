@@ -1,4 +1,5 @@
 #pragma once
+#include "protocol/limits.hpp"
 
 #include "util/common.hpp"
 #include "util/error.hpp"
@@ -135,8 +136,8 @@ class ClipboardController {
       if (value.contains("viewId") && value["viewId"].is_string() && value["viewId"] != "")
         event["viewId"] = value["viewId"];
       event["excludeFromHistory"] = value.value("excludeFromHistory", false);
-      if (text.size() > 1024 * 1024 || html.size() > 2 * 1024 * 1024 ||
-          event.dump().size() >= kMaxEventBytes) {
+      if (text.size() > limits::textBytes || html.size() > limits::htmlBytes ||
+          event.dump().size() > limits::eventBytes) {
         event.erase("text");
         event.erase("html");
         event["oversize"] = true;
@@ -149,7 +150,6 @@ class ClipboardController {
       return {};
     }
   }
-  static constexpr size_t kMaxEventBytes = 4 * 1024 * 1024;
   const std::string tenant_, session_;
   Hooks hooks_;
   std::mutex mutex_;

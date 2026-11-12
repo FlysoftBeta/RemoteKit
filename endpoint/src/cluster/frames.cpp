@@ -9,7 +9,7 @@ size_t JsonLimit(const Json& message) {
   if (message.value("method", Json()) == "session.desired" ||
       message.value("event", Json()) == "session.observed" ||
       message.value("event", Json()) == "session.event")
-    return kMaxPlaintext - 1;
+    return limits::documentBytes;
   return kMaxJson;
 }
 std::array<uint8_t, 4> EncodeLength(uint32_t n) {

@@ -3,6 +3,8 @@ import { RemoteKitError, nativeReasonMessage, type NativeErrorReason } from '../
 import type { DomainContext } from '../application';
 
 export function browserAvailability(context: DomainContext, tenant: string): BrowserAvailability {
+  const fault = context.endpoint.sessionFault(tenant);
+  if (fault) return { state: 'unavailable', reason: 'browser_unavailable', errorId: fault.errorId };
   const placement = context.endpoint.placement.peek(tenant);
   const nodes = context.endpoint.nodes;
   if (placement?.dataState === 'dirty' && nodes.get(placement.nodeId)?.state.state !== 'ready')

@@ -1,4 +1,6 @@
 #include "session/coordinator.hpp"
+#include "management/payload_limits.hpp"
+#include "util/log.hpp"
 #include "util/wire_error.hpp"
 
 namespace remotekit {
@@ -295,6 +297,14 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
     return;
   observation["seq"] =
       std::to_string(observation_sequence_.fetch_add(1, std::memory_order_relaxed) + 1);
+  if (!coordination::ObservationFits(observation)) {
+    if (!observation_oversize_)
+      LogError(LogLevel::kError, "session.observation_dropped",
+               Error{ErrorCode::kLimitExceeded, "Session observation exceeds bound"}, target_);
+    observation_oversize_ = true;
+    return;
+  }
+  observation_oversize_ = false;
   if (hooks_.send(observation, scope.generation)) {
     last_encoded_ = encoded;
     last_sent_ = now;

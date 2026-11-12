@@ -138,6 +138,10 @@ export function createApplication(
   services.learning = new LearningService(context, services);
   services.clipboard = new ClipboardService(context, services);
   endpoint.setDesiredSource((tenant) => compileDesired(context, services, tenant));
+  endpoint.nodes.on('session.fault', ({ target }) => {
+    void endpoint.synchronize(target.tenantId).catch(() => {});
+    services.viewers.push(target.tenantId);
+  });
   services.security = new ViewerSecurity(
     store,
     endpoint,

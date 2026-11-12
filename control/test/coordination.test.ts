@@ -92,3 +92,107 @@ test('inbox preserves source identity across restored streams and commits cursor
     store.db.close();
   }
 });
+
+import { coordinationLimits, validateSessionEvent } from '../server/endpoint/coordination';
+import { SessionFaults } from '../server/endpoint/session-faults';
+
+test('clipboard UTF-8 fields accept the contract boundary and reject one byte past', () => {
+  for (const [field, bound] of [
+    ['text', coordinationLimits.textBytes],
+    ['html', coordinationLimits.htmlBytes],
+  ] as const) {
+    const value = desired();
+    value.clipboard.value[field] = 'x'.repeat(bound);
+    validateDesired(value);
+    value.clipboard.value[field] += 'x';
+    assert.throws(() => validateDesired(value));
+    const event = {
+      event: 'session.event',
+      tenantId: 'tenant',
+      sessionId: 'a'.repeat(32),
+      placementEpoch: 1,
+      connectionEpoch: 'connection',
+      seq: '1',
+      streamId: 'stream',
+      eventId: 'event',
+      browserIncarnation: null,
+      type: 'clipboard.changed',
+      body: {
+        baseRevision: '0',
+        browserSequence: '1',
+        excludeFromHistory: false,
+        text: '',
+        html: '',
+        [field]: 'x'.repeat(bound),
+      },
+    };
+    validateSessionEvent(event);
+    event.body[field] += 'x';
+    assert.throws(() => validateSessionEvent(event));
+  }
+});
+
+test('Session faults back off on attaches and reset after healthy running', () => {
+  let now = 0;
+  const faults = new SessionFaults(() => now);
+  const target = { tenantId: 'tenant', sessionId: 'a'.repeat(32), placementEpoch: 1 };
+  const first = faults.fault(target, 'bad');
+  assert.match(first.errorId!, /^c-/);
+  assert.equal(faults.fault(target, 'again'), first);
+  assert.equal(faults.attach(target), false);
+  now = 60_000;
+  assert.equal(faults.attach(target), true);
+  faults.fault(target, 'again');
+  now += 60_000;
+  assert.equal(faults.attach(target), false);
+  now += 60_000;
+  assert.equal(faults.attach(target), true);
+  faults.observe(target, true);
+  now += 600_000;
+  faults.fault(target, 'again');
+  now += 60_000;
+  assert.equal(faults.attach(target), true);
+  assert.equal(faults.get({ ...target, placementEpoch: 2 }), undefined);
+});
+
+import { encodeJson } from '../server/cluster/frames';
+import { observedSession } from './coordination-fixture';
+import { validateSessionObserved } from '../server/endpoint/coordination';
+
+test('encoded management, event and observation bounds are inclusive', () => {
+  const management = { padding: '' };
+  management.padding = 'x'.repeat(
+    coordinationLimits.managementBytes - Buffer.byteLength(JSON.stringify(management)),
+  );
+  encodeJson(management);
+  management.padding += 'x';
+  assert.throws(() => encodeJson(management));
+  const body = { viewId: '1', reason: 'script', padding: '' };
+  body.padding = 'x'.repeat(coordinationLimits.eventBytes - Buffer.byteLength(JSON.stringify(body)));
+  const event = {
+    event: 'session.event',
+    tenantId: 'tenant',
+    sessionId: 'a'.repeat(32),
+    placementEpoch: 1,
+    connectionEpoch: 'connection',
+    seq: '1',
+    streamId: 'stream',
+    eventId: 'event',
+    browserIncarnation: null,
+    type: 'view.closed',
+    body,
+  };
+  encodeJson(event);
+  validateSessionEvent(event);
+  body.padding += 'x';
+  assert.throws(() => validateSessionEvent(event));
+  const observation = observedSession(desired(), 'connection', 'endpoint');
+  observation.stats.padding = '';
+  observation.stats.padding = 'x'.repeat(
+    coordinationLimits.observationBytes - Buffer.byteLength(JSON.stringify(observation)),
+  );
+  encodeJson(observation);
+  validateSessionObserved(observation);
+  observation.stats.padding += 'x';
+  assert.throws(() => validateSessionObserved(observation));
+});

@@ -27,6 +27,8 @@ import {
   parseWireError,
 } from '../../shared/errors';
 import { log } from '../log';
+import { SessionFaults } from '../endpoint/session-faults';
+import type { SessionTarget } from '../endpoint/coordination';
 import type { ConfiguredNode, NodeConfig, NodeLimits } from '../config';
 import { readyTransition, type EndpointLink, type EndpointLinkState } from '../endpoint/link';
 import type { RtcSignal } from '../endpoint/types';
@@ -115,6 +117,8 @@ interface Connection {
   epoch: string;
 }
 interface Pending {
+  target?: SessionTarget;
+  method?: string;
   opId?: string;
   delivered: boolean;
   epoch: string;
@@ -152,6 +156,13 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   private fenceKey = '';
   private fenceRevision = 0n;
   readonly observations = new Map<string, SessionObserved>();
+  readonly faults = new SessionFaults();
+  private faultSession(target: SessionTarget, cause: unknown) {
+    if (this.faults.get(target)) return;
+    const error = this.faults.fault(target, cause);
+    this.observations.delete(target.tenantId);
+    this.registry.emit('session.fault', { nodeId: this.nodeId, target, error });
+  }
   private incoming = 0;
   private current?: Connection;
   private incarnation?: string;
@@ -390,13 +401,14 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     }
     if (message.event === 'session.observed' || message.event === 'session.event') {
       if (
-        message.connectionEpoch !== connection.epoch ||
         typeof message.tenantId !== 'string' ||
+        !message.tenantId ||
         typeof message.sessionId !== 'string' ||
+        !/^[0-9a-f]{32}$/.test(message.sessionId) ||
         !Number.isSafeInteger(message.placementEpoch) ||
-        !counter(message.seq, true)
+        message.placementEpoch < 1
       )
-        throw new Error('Invalid Session coordination message');
+        throw new Error('Invalid Session coordination envelope');
       const placed = this.registry.fencing(this.nodeId).find((value) => value.tenantId === message.tenantId);
       if (
         !placed ||
@@ -404,28 +416,23 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         placed.placementEpoch !== message.placementEpoch
       )
         return;
-      if (message.event === 'session.observed') {
-        validateSessionObserved(message);
-        if (
-          message.endpointIncarnation !== this.incarnation ||
-          !counter(message.nodeRevision, true) ||
-          !counter(message.observedRevision) ||
-          typeof message.converged !== 'boolean' ||
-          !Array.isArray(message.views)
-        )
-          throw new Error('Invalid Session observation');
-        const previous = this.observations.get(message.tenantId);
-        if (previous && BigInt(previous.seq) >= BigInt(message.seq)) return;
-        if (message.lastError?.code === 'unauthenticated') message.lastError.code = 'forbidden';
-        this.observations.set(message.tenantId, message as SessionObserved);
-      } else if (
-        typeof message.streamId !== 'string' ||
-        typeof message.eventId !== 'string' ||
-        !message.body ||
-        typeof message.body !== 'object'
-      )
-        throw new Error('Invalid Session event');
-      if (message.event === 'session.event') validateSessionEvent(message);
+      if (this.faults.get(placed)) return;
+      try {
+        if (message.connectionEpoch !== connection.epoch) throw new Error('Invalid Session connection');
+        if (message.event === 'session.observed') {
+          validateSessionObserved(message);
+          if (message.endpointIncarnation !== this.incarnation)
+            throw new Error('Invalid Endpoint incarnation');
+          const previous = this.observations.get(message.tenantId);
+          if (previous && BigInt(previous.seq) >= BigInt(message.seq)) return;
+          if (message.lastError?.code === 'unauthenticated') message.lastError.code = 'forbidden';
+          this.faults.observe(placed, message.browser === 'running' && message.lastError === null);
+          this.observations.set(message.tenantId, message);
+        } else validateSessionEvent(message);
+      } catch (error) {
+        this.faultSession(placed, error);
+        return;
+      }
       this.registry.emit(message.event, { nodeId: this.nodeId, message });
       this.emit(message.event, message);
       return;
@@ -440,14 +447,33 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       this.emit(message.event, message);
       return;
     }
-    if (typeof message.id !== 'string' || typeof message.ok !== 'boolean')
-      throw new Error('Invalid node reply');
+    if (typeof message.id !== 'string') throw new Error('Invalid node reply');
     const pending = this.pending.get(message.id);
     if (!pending || pending.epoch !== connection.epoch) return;
     clearTimeout(pending.timer);
     this.pending.delete(message.id);
-    if (pending.opId && message.opId !== pending.opId) {
-      pending.reject(new RemoteKitError('outcome_unknown', 'RPC reply identity differs'));
+    const invalidReply =
+      typeof message.ok !== 'boolean' ||
+      (pending.opId && message.opId !== pending.opId) ||
+      (message.ok === true
+        ? !Object.prototype.hasOwnProperty.call(message, 'result')
+        : !parseWireError(message.error));
+    if (invalidReply) {
+      if (!pending.target) throw new Error('Invalid node reply');
+      const placed = this.registry
+        .fencing(this.nodeId)
+        .find((value) => value.tenantId === pending.target!.tenantId);
+      if (
+        placed &&
+        placed.sessionId === pending.target.sessionId &&
+        placed.placementEpoch === pending.target.placementEpoch
+      )
+        this.faultSession(placed, new Error('Invalid Session RPC reply'));
+      pending.reject(new RemoteKitError('unavailable', 'Invalid Session RPC reply'));
+      return;
+    }
+    if (pending.target && pending.method !== 'session.desired' && this.faults.get(pending.target)) {
+      pending.reject(this.faults.get(pending.target));
       return;
     }
     if (message.ok) pending.resolve(message.result);
@@ -542,6 +568,8 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     return new Promise((resolve, reject) => {
       const pending: Pending = {
         epoch: connection.epoch,
+        method: (envelope as any).method,
+        target: typeof (envelope as any).sessionId === 'string' ? (envelope as SessionTarget) : undefined,
         opId: (envelope as { opId?: string }).opId,
         delivered: false,
         resolve,

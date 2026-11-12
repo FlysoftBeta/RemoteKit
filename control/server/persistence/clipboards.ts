@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import limits from '../../../protocol/limits.json';
 import { log } from '../log';
 import { systemClock, type Clock } from '../util/clock';
 
@@ -8,7 +9,7 @@ export interface ClipboardValue {
   html: string;
 }
 
-export const clipboardLimits = { text: 1024 * 1024, html: 2 * 1024 * 1024 } as const;
+export const clipboardLimits = { text: limits.textBytes, html: limits.htmlBytes } as const;
 
 export function warnClipboardOversize(textBytes: number, htmlBytes: number) {
   log.warn('clipboard.write_exceeds_limits', { textBytes, htmlBytes });

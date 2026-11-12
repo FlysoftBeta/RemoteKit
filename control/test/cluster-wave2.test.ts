@@ -1779,3 +1779,36 @@ test('durable reference removal starts its own grace even without a GC tick whil
     await h.close();
   }
 });
+
+test('a malformed Session event stops only its current placement and retains its dirty copy', async () => {
+  const h = await harness();
+  try {
+    const client = await h.connect('alpha');
+    await h.gateway.synchronize('first');
+    await h.gateway.synchronize('second');
+    const node = h.nodes.get('alpha')!;
+    const faulted = once(h.nodes, 'session.fault');
+    client.event('first', '1', 'clipboard.changed', {
+      text: 'x'.repeat(1024 * 1024 + 1),
+      html: '',
+      baseRevision: '0',
+      browserSequence: '1',
+      excludeFromHistory: false,
+    });
+    await faulted;
+    await h.gateway.synchronize('first');
+    assert.equal(node.state.state, 'ready');
+    assert.equal(client.sessions.get('first')!.run, 'stopped');
+    assert.equal(client.sessions.get('first')!.commit, null);
+    assert.equal(h.placement.peek('first')!.dataState, 'dirty');
+    assert.equal(h.control.viewers.productState('first').browser.state, 'unavailable');
+    assert.match(h.control.viewers.productState('first').browser.errorId!, /^c-/);
+    const received = once(node, 'session.event');
+    client.event('second', '1', 'view.closed', { viewId: '1', reason: 'script' });
+    assert.equal((await received)[0].tenantId, 'second');
+    assert.equal(h.gateway.sessionFault('second'), undefined);
+    assert.equal(client.sessions.get('second')!.run, 'running');
+  } finally {
+    await h.close();
+  }
+});

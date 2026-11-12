@@ -4,14 +4,15 @@
 #include "session/site_preferences.hpp"
 #include "util/result_macros.hpp"
 #include <set>
+#include "protocol/limits.hpp"
 
 namespace remotekit::coordination {
-inline constexpr size_t kMaxSessions = 64;
-inline constexpr size_t kMaxViews = 256;
-inline constexpr size_t kMaxResults = 1024;
-inline constexpr size_t kMaxEvents = 4096;
-inline constexpr size_t kMaxEventBytes = 32 * 1024 * 1024;
-inline constexpr size_t kMaxDocumentBytes = 4 * 1024 * 1024 - 1;
+inline constexpr size_t kMaxSessions = limits::sessions;
+inline constexpr size_t kMaxViews = limits::views;
+inline constexpr size_t kMaxResults = limits::results;
+inline constexpr size_t kMaxEvents = limits::events;
+inline constexpr size_t kMaxEventBytes = limits::eventBacklogBytes;
+inline constexpr size_t kMaxDocumentBytes = limits::documentBytes;
 
 inline bool Counter(const Json& value, bool positive = false) {
   if (!value.is_string())
@@ -87,9 +88,9 @@ inline Result<void> ValidateDesired(const Json& value) {
   RK_RETURN_IF_ERROR(ValidateTarget(value));
   const auto& commit = value["commit"];
   if ((value["run"] != "running" && value["run"] != "stopped") ||
-      (!commit.is_null() &&
-       (!commit.is_string() || commit.get_ref<const std::string&>().empty() ||
-        commit.get_ref<const std::string&>().size() > 128 || value["run"] == "running")) ||
+      (!commit.is_null() && (!commit.is_string() || commit.get_ref<const std::string&>().empty() ||
+                             commit.get_ref<const std::string&>().size() > limits::identityBytes ||
+                             value["run"] == "running")) ||
       !value["profileKey"].is_string() ||
       (!value["checkpoint"].is_null() && !Hex(value["checkpoint"], 64)))
     return Error{ErrorCode::kInvalidRequest, "invalid desired run or checkpoint"};
@@ -97,8 +98,8 @@ inline Result<void> ValidateDesired(const Json& value) {
   if (!Keys(clipboard, {"revision", "value"}) || !Counter(clipboard["revision"]) ||
       !Keys(clipboard["value"], {"text", "html"}) || !clipboard["value"]["text"].is_string() ||
       !clipboard["value"]["html"].is_string() ||
-      clipboard["value"]["text"].get_ref<const std::string&>().size() > 1024 * 1024 ||
-      clipboard["value"]["html"].get_ref<const std::string&>().size() > 2 * 1024 * 1024)
+      clipboard["value"]["text"].get_ref<const std::string&>().size() > limits::textBytes ||
+      clipboard["value"]["html"].get_ref<const std::string&>().size() > limits::htmlBytes)
     return Error{ErrorCode::kInvalidRequest, "invalid desired clipboard"};
   if (!Keys(value["quality"], {"effectiveDpr"}) || !value["quality"]["effectiveDpr"].is_number() ||
       !std::isfinite(value["quality"]["effectiveDpr"].get<double>()) ||
@@ -130,7 +131,8 @@ inline Result<void> ValidateDesired(const Json& value) {
   }
   const auto& media = value["mediaPolicy"];
   if (!Keys(media, {"audio", "maxFps", "degradationPreference"}) || !media["audio"].is_boolean() ||
-      !media["maxFps"].is_number_integer() || media["maxFps"] < 1 || media["maxFps"] > 240 ||
+      !media["maxFps"].is_number_integer() || media["maxFps"] < 1 ||
+      media["maxFps"] > limits::maxFps ||
       (media["degradationPreference"] != "maintain-resolution" &&
        media["degradationPreference"] != "balanced" &&
        media["degradationPreference"] != "maintain-framerate"))
@@ -142,27 +144,28 @@ inline Result<void> ValidateDesired(const Json& value) {
       !Epoch(auth["epoch"], auth["connectionId"].is_null()) || !auth["unlocked"].is_boolean() ||
       (auth["connectionId"].is_null() && (auth["epoch"] != 0 || auth["unlocked"] != false)) ||
       !Keys(auth["files"], {"requests"}) || !auth["files"]["requests"].is_array() ||
-      auth["files"]["requests"].size() > 64 || !Keys(lock, {"leaseId", "epoch", "state"}) ||
-      !Epoch(lock["epoch"], true) || (!lock["leaseId"].is_null() && !lock["leaseId"].is_string()) ||
+      auth["files"]["requests"].size() > limits::fileRequests ||
+      !Keys(lock, {"leaseId", "epoch", "state"}) || !Epoch(lock["epoch"], true) ||
+      (!lock["leaseId"].is_null() && !lock["leaseId"].is_string()) ||
       (lock["state"] != "locked" && lock["state"] != "unlocking" && lock["state"] != "unlocked"))
     return Error{ErrorCode::kInvalidRequest, "invalid desired authorization"};
   if (!Keys(value["sitePreferences"], {"sites"}) ||
       !value["sitePreferences"]["sites"].is_object() ||
-      value["sitePreferences"]["sites"].size() > 4096)
+      value["sitePreferences"]["sites"].size() > limits::sites)
     return Error{ErrorCode::kInvalidRequest, "invalid desired policy"};
   RK_RETURN_IF_ERROR(ValidateSitePreferences(value["sitePreferences"]));
   std::set<std::string> requests;
   for (const auto& item : auth["files"]["requests"]) {
     if (!Keys(item, {"id", "binding"}) || !item["id"].is_string() ||
         item["id"].get_ref<const std::string&>().empty() ||
-        item["id"].get_ref<const std::string&>().size() > 128 ||
+        item["id"].get_ref<const std::string&>().size() > limits::identityBytes ||
         !requests.insert(item["id"].get<std::string>()).second || item["id"] == "library" ||
         !Keys(item["binding"], {"browserIncarnation", "view", "instance", "document", "request"}))
       return Error{ErrorCode::kInvalidRequest, "invalid desired file grant"};
     const auto& binding = item["binding"];
     if (!binding["browserIncarnation"].is_string() ||
         binding["browserIncarnation"].get_ref<const std::string&>().empty() ||
-        binding["browserIncarnation"].get_ref<const std::string&>().size() > 128)
+        binding["browserIncarnation"].get_ref<const std::string&>().size() > limits::identityBytes)
       return Error{ErrorCode::kInvalidRequest, "invalid desired file Browser"};
     for (const auto* field : {"view", "instance", "document", "request"})
       if (!Counter(binding[field], true))
@@ -170,7 +173,8 @@ inline Result<void> ValidateDesired(const Json& value) {
   }
   auto configuration = value;
   configuration.erase("clipboard");
-  if (configuration.dump().size() > 1024 * 1024 || value.dump().size() > kMaxDocumentBytes)
+  if (configuration.dump().size() > limits::configurationBytes ||
+      value.dump().size() > kMaxDocumentBytes)
     return Error{ErrorCode::kLimitExceeded, "desired document exceeds bound"};
   return {};
 }

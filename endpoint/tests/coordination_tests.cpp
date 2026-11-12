@@ -1,4 +1,5 @@
 #include "management/coordination.hpp"
+#include "management/payload_limits.hpp"
 #include "management/rpc_results.hpp"
 #include <atomic>
 #include <fstream>
@@ -19,6 +20,28 @@ int main(int argc, char** argv) {
     Json desired;
     input >> desired;
     Check(bool(coordination::ValidateDesired(desired)), "valid desired fixture");
+    for (const auto& [field, bound] : std::vector<std::pair<std::string, size_t>>{
+             {"text", limits::textBytes}, {"html", limits::htmlBytes}}) {
+      auto boundary = desired;
+      boundary["clipboard"]["value"][field] = std::string(bound, 'x');
+      Check(bool(coordination::ValidateDesired(boundary)), "clipboard bound accepted");
+      auto body = boundary["clipboard"]["value"];
+      Check(coordination::EventBodyFits("clipboard.changed", body), "event bound accepted");
+      boundary["clipboard"]["value"][field] = std::string(bound + 1, 'x');
+      Check(!coordination::ValidateDesired(boundary), "clipboard overflow rejected");
+      body[field] = std::string(bound + 1, 'x');
+      Check(!coordination::EventBodyFits("clipboard.changed", body), "event overflow rejected");
+    }
+    Json body{{"viewId", "1"}, {"reason", "script"}, {"padding", ""}};
+    body["padding"] = std::string(limits::eventBytes - body.dump().size(), 'x');
+    Check(coordination::EventBodyFits("view.closed", body), "encoded event bound accepted");
+    body["padding"] = body["padding"].get<std::string>() + "x";
+    Check(!coordination::EventBodyFits("view.closed", body), "encoded event overflow rejected");
+    Json observation{{"padding", ""}};
+    observation["padding"] = std::string(limits::observationBytes - observation.dump().size(), 'x');
+    Check(coordination::ObservationFits(observation), "observation bound accepted");
+    observation["padding"] = observation["padding"].get<std::string>() + "x";
+    Check(!coordination::ObservationFits(observation), "observation overflow rejected");
     auto invalid = desired;
     invalid["commit"] = "commit";
     Check(!coordination::ValidateDesired(invalid), "running commit rejected");

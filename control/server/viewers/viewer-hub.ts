@@ -116,6 +116,7 @@ export class ViewerHub {
     authentication: { identity: string; valid: () => boolean },
     initialUnlocked = false,
   ) {
+    this.context.endpoint.attachViewer(tenant);
     const runtime = this.context.tenants.get(tenant);
     this.services.policy.qualityState(tenant).resetFeedback();
     const old = runtime.viewer;

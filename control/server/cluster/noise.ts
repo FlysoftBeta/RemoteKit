@@ -10,7 +10,8 @@ import {
   type KeyObject,
 } from 'node:crypto';
 
-export const MAX_TRANSPORT = 4 * 1024 * 1024;
+import limits from '../../../protocol/limits.json';
+export const MAX_TRANSPORT = limits.transportBytes;
 export const MAX_CIPHERTEXT = MAX_TRANSPORT + 16;
 const EMPTY = Buffer.alloc(0);
 const PROTOCOL = 'Noise_IK_25519_AESGCM_SHA256';

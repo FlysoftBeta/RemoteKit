@@ -2,19 +2,8 @@ import { RemoteKitError } from '../../shared/errors';
 import type { MediaPolicy } from '../../shared/product';
 import type { FileBinding, NativeError, SessionSitePreferencesRequest } from './types';
 
-export const coordinationLimits = {
-  sessions: 64,
-  views: 256,
-  sites: 4096,
-  fileRequests: 64,
-  documentBytes: 4 * 1024 * 1024 - 1,
-  configurationBytes: 1024 * 1024,
-  textBytes: 1024 * 1024,
-  htmlBytes: 2 * 1024 * 1024,
-  results: 1024,
-  events: 4096,
-  eventBytes: 32 * 1024 * 1024,
-} as const;
+import limits from '../../../protocol/limits.json';
+export const coordinationLimits = limits;
 
 export interface SessionTarget {
   tenantId: string;
@@ -387,7 +376,9 @@ export function validateDesired(value: SessionDesired): void {
     invalid(!counter(view.viewId, true), 'viewId');
     invalid(!['ensure', 'ifPresent'].includes(view.presence), 'presence');
     invalid(
-      ![view.width, view.height].every((size) => Number.isInteger(size) && size >= 1 && size <= 8192),
+      ![view.width, view.height].every(
+        (size) => Number.isInteger(size) && size >= 1 && size <= coordinationLimits.viewDimension,
+      ),
       'dimensions',
     );
     invalid(
@@ -409,7 +400,7 @@ export function validateDesired(value: SessionDesired): void {
   invalid(
     !Number.isInteger(value.mediaPolicy.maxFps) ||
       value.mediaPolicy.maxFps < 1 ||
-      value.mediaPolicy.maxFps > 240 ||
+      value.mediaPolicy.maxFps > coordinationLimits.maxFps ||
       !['maintain-resolution', 'balanced', 'maintain-framerate'].includes(
         value.mediaPolicy.degradationPreference,
       ),
@@ -444,11 +435,11 @@ function boundedString(value: unknown, max: number, nonempty = true): value is s
 }
 function coordinationTarget(value: Record<string, any>) {
   return (
-    boundedString(value.tenantId, 128) &&
+    boundedString(value.tenantId, coordinationLimits.identityBytes) &&
     /^[0-9a-f]{32}$/.test(value.sessionId) &&
     Number.isSafeInteger(value.placementEpoch) &&
     value.placementEpoch > 0 &&
-    boundedString(value.connectionEpoch, 128) &&
+    boundedString(value.connectionEpoch, coordinationLimits.identityBytes) &&
     counter(value.seq, true)
   );
 }
@@ -460,25 +451,33 @@ export function validateSessionEvent(value: unknown): asserts value is SessionEv
     !record(value) ||
     !coordinationTarget(value) ||
     value.event !== 'session.event' ||
-    !boundedString(value.streamId, 128) ||
-    !boundedString(value.eventId, 128) ||
-    !(value.browserIncarnation === null || boundedString(value.browserIncarnation, 128)) ||
-    !record(value.body)
+    !boundedString(value.streamId, coordinationLimits.identityBytes) ||
+    !boundedString(value.eventId, coordinationLimits.identityBytes) ||
+    !(
+      value.browserIncarnation === null ||
+      boundedString(value.browserIncarnation, coordinationLimits.identityBytes)
+    ) ||
+    !record(value.body) ||
+    Buffer.byteLength(JSON.stringify(value.body)) > coordinationLimits.eventBytes
   )
     return invalid();
   const body = value.body;
   switch (value.type) {
     case 'view.closed':
-      if (!counter(body.viewId, true) || !boundedString(body.reason, 128)) return invalid();
+      if (!counter(body.viewId, true) || !boundedString(body.reason, coordinationLimits.identityBytes))
+        return invalid();
       break;
     case 'download.imported':
     case 'download.failed':
-      if (!boundedString(body.name, 4096, false) || !boundedString(body.origin, 2048, false))
+      if (
+        !boundedString(body.name, coordinationLimits.downloadNameBytes, false) ||
+        !boundedString(body.origin, coordinationLimits.originBytes, false)
+      )
         return invalid();
       if (
         value.type === 'download.imported'
           ? !/^[0-9a-f]{64}$/.test(body.assetId) ||
-            !boundedString(body.mimeType, 255, false) ||
+            !boundedString(body.mimeType, coordinationLimits.mimeTypeBytes, false) ||
             !counter(body.size)
           : !record(body.error) ||
             !boundedString(body.error.code, 64) ||
@@ -508,7 +507,7 @@ export function validateSessionEvent(value: unknown): asserts value is SessionEv
         !counter(body.webviewId, true) ||
         !['changyan', 'xinjiaoyu'].includes(body.provider) ||
         !record(body.result) ||
-        Buffer.byteLength(JSON.stringify(body.result)) > 8192 ||
+        Buffer.byteLength(JSON.stringify(body.result)) > coordinationLimits.signInBytes ||
         Object.values(body.result).some((value) => typeof value !== 'string')
       )
         return invalid();
@@ -525,17 +524,23 @@ export function validateSessionObserved(value: unknown): asserts value is Sessio
     !record(value) ||
     !coordinationTarget(value) ||
     value.event !== 'session.observed' ||
+    Buffer.byteLength(JSON.stringify(value)) > coordinationLimits.observationBytes ||
     !counter(value.nodeRevision, true) ||
     !counter(value.observedRevision) ||
-    !boundedString(value.endpointIncarnation, 128) ||
+    !boundedString(value.endpointIncarnation, coordinationLimits.identityBytes) ||
     typeof value.converged !== 'boolean' ||
     !['starting', 'running', 'stopping', 'stopped', 'failed'].includes(value.browser) ||
-    !(value.browserIncarnation === null || boundedString(value.browserIncarnation, 128)) ||
+    !(
+      value.browserIncarnation === null ||
+      boundedString(value.browserIncarnation, coordinationLimits.identityBytes)
+    ) ||
     !Array.isArray(value.views) ||
     value.views.length > coordinationLimits.views ||
     !Array.isArray(value.pendingPopups) ||
     !record(value.events) ||
-    !(value.events.streamId === null || boundedString(value.events.streamId, 128)) ||
+    !(
+      value.events.streamId === null || boundedString(value.events.streamId, coordinationLimits.identityBytes)
+    ) ||
     !counter(value.events.ackedThrough) ||
     !counter(value.events.lastSeq) ||
     BigInt(value.events.ackedThrough) > BigInt(value.events.lastSeq) ||
@@ -553,9 +558,9 @@ export function validateSessionObserved(value: unknown): asserts value is Sessio
     (!record(value.checkpoint) ||
       !/^[0-9a-f]{64}$/.test(value.checkpoint.manifestId) ||
       !Array.isArray(value.checkpoint.objects) ||
-      value.checkpoint.objects.length > 32768 ||
+      value.checkpoint.objects.length > coordinationLimits.checkpointObjects ||
       value.checkpoint.objects.some((id: unknown) => typeof id !== 'string' || !/^[0-9a-f]{64}$/.test(id)) ||
-      !boundedString(value.checkpoint.buildId, 128) ||
+      !boundedString(value.checkpoint.buildId, coordinationLimits.identityBytes) ||
       !['running', 'stopped'].includes(value.checkpoint.kind) ||
       !Number.isSafeInteger(value.checkpoint.takenAt) ||
       value.checkpoint.takenAt < 0)

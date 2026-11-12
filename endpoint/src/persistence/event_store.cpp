@@ -1,5 +1,7 @@
 #include "persistence/session_db.hpp"
 #include "management/coordination.hpp"
+#include "management/payload_limits.hpp"
+#include "util/log.hpp"
 #include "util/result_macros.hpp"
 #include <limits>
 
@@ -81,9 +83,11 @@ Result<Json> EventStore::Append(const std::string& type,
     return Error{ErrorCode::kInvalidRequest, "invalid Session event"};
   Json document{{"body", body}, {"browserIncarnation", incarnation}};
   const auto encoded = document.dump();
-  const size_t bound = type == "clipboard.changed" ? coordination::kMaxDocumentBytes : 256 * 1024;
-  if (encoded.size() > bound)
-    return Error{ErrorCode::kLimitExceeded, "Session event exceeds bound"};
+  if (!coordination::EventBodyFits(type, body)) {
+    Error error{ErrorCode::kLimitExceeded, "Session event exceeds bound"};
+    LogError(LogLevel::kError, "session.event_dropped", error, {{"type", type}});
+    return error;
+  }
   Json event;
   auto written = db_.Write([&]() -> Result<void> {
     {

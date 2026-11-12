@@ -1,14 +1,15 @@
 import { RemoteKitError } from '../../shared/errors';
 import { MAX_CIPHERTEXT, MAX_TRANSPORT } from './noise';
 
-export const MAX_JSON = 1024 * 1024;
+import limits from '../../../protocol/limits.json';
+export const MAX_JSON = limits.managementBytes;
 function jsonLimit(value: Record<string, unknown>) {
   if (
     value.method === 'session.desired' ||
     value.event === 'session.observed' ||
     value.event === 'session.event'
   )
-    return MAX_TRANSPORT - 1;
+    return limits.documentBytes;
   return MAX_JSON;
 }
 const decoder = new TextDecoder('utf-8', { fatal: true });

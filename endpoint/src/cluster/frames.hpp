@@ -8,7 +8,7 @@ struct Message {
   Json json;
   Bytes bytes;
 };
-inline constexpr size_t kMaxJson = 1024 * 1024;
+inline constexpr size_t kMaxJson = limits::managementBytes;
 size_t JsonLimit(const Json& message);
 Result<Bytes> EncodeJson(const Json& message);
 Result<Bytes> EncodeBinary(const Json& header, std::span<const uint8_t> bytes);

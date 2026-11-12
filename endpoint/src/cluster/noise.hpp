@@ -1,5 +1,6 @@
 #pragma once
 #include "util/error.hpp"
+#include "protocol/limits.hpp"
 #include <array>
 #include <filesystem>
 #include <memory>
@@ -11,7 +12,7 @@
 namespace remotekit::cluster {
 using Key = std::array<uint8_t, 32>;
 using Bytes = std::vector<uint8_t>;
-inline constexpr size_t kMaxPlaintext = 4 * 1024 * 1024;
+inline constexpr size_t kMaxPlaintext = limits::transportBytes;
 inline constexpr size_t kMaxCiphertext = kMaxPlaintext + 16;
 Key PublicKey(const Key& private_key);
 Key Sha256(std::span<const uint8_t> bytes);

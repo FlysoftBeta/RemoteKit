@@ -115,6 +115,15 @@ export class EndpointGateway {
       }
     });
   }
+  sessionFault(tenant: string) {
+    const placed = this.placement.peek(tenant);
+    return placed && this.nodes.get(placed.nodeId)?.faults.get({ ...placed, tenantId: tenant });
+  }
+  attachViewer(tenant: string) {
+    const placed = this.placement.peek(tenant);
+    if (placed && this.nodes.get(placed.nodeId)?.faults.attach({ ...placed, tenantId: tenant }))
+      this.forget(tenant);
+  }
   setDesiredSource(source?: (tenant: string) => SessionDesired) {
     this.desiredSource = source;
   }
