@@ -21,6 +21,7 @@ for (const [name, options] of [
   const result = { browser: name, before, samples: [], profile };
   results.push(result);
   let context;
+  let previousCount = before;
   try {
     context = await launchTestBrowser({ profile, ...options });
     result.version = context.browser().version();
@@ -36,7 +37,8 @@ for (const [name, options] of [
       result.samples.push({ elapsedMs, count });
       console.log(`${name}: ${elapsedMs} ms, failed logons ${before} -> ${count}`);
       assert(count < 6, 'Counter reached six; stop browser launches until zero');
-      assert(count <= before, 'Seeded profile increased the failed-logon counter');
+      assert(count <= previousCount, 'Seeded profile increased the failed-logon counter');
+      previousCount = count;
     }
     result.passed = true;
   } catch (error) {
@@ -45,12 +47,12 @@ for (const [name, options] of [
   } finally {
     await context?.close();
     result.after = failedLogonCount();
-    if (result.after > before) result.passed = false;
+    if (result.after > previousCount) result.passed = false;
     result.preferences = JSON.parse(readFileSync(join(profile, 'Local State'), 'utf8')).password_manager;
     writeFileSync(join(out, 'verification.json'), JSON.stringify(results, null, 2));
   }
   assert(
-    result.after < 6 && result.after <= before,
+    result.after < 6 && result.after <= previousCount,
     'Failed-logon counter increased during browser shutdown',
   );
 }
