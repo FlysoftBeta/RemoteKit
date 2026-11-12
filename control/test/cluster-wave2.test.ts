@@ -1088,7 +1088,7 @@ test('GC follows library and selection references, derivatives and only the newe
   }
 });
 
-test('stop policy respects Memory Saver, ten-minute viewer absence, every blocker and receipts', async () => {
+test('stop policy respects ten-minute viewer absence, every blocker and receipts', async () => {
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
@@ -1104,12 +1104,6 @@ test('stop policy respects Memory Saver, ten-minute viewer absence, every blocke
     h.nodes.get('alpha')!.metrics.clear();
     for (let offset = 30000; offset >= 0; offset -= 5000)
       h.nodes.get('alpha')!.metrics.record(fakeMetrics({ cpu: 0.95 }), now - offset);
-    const workspace = h.store.workspaces.workspace('tenant');
-    workspace.settings.browser.memorySaverEnabled = false;
-    h.store.workspaces.writeWorkspace(workspace);
-    assert.equal(await h.control.lifecycle.stop('tenant', snapshot), false);
-    workspace.settings.browser.memorySaverEnabled = true;
-    h.store.workspaces.writeWorkspace(workspace);
     for (const field of Object.keys(snapshot.stopBlockers!)) {
       const blocked = structuredClone(snapshot);
       (blocked.stopBlockers as any)[field] =

@@ -28,7 +28,7 @@ function empty(): ProductWorkspace {
         avSync: false,
         audioChannels: { left: true, right: true },
       },
-      browser: { searchEngine: 'google', memorySaverEnabled: true },
+      browser: { searchEngine: 'google' },
     },
   };
 }
@@ -220,7 +220,6 @@ test('settings updates merge each section and reject fields in the wrong section
   assert.equal(workspace.settings.workspace.uiScale, 1.5);
   assert.equal(workspace.settings.workspace.avSync, false);
   assert.equal(workspace.settings.browser.searchEngine, 'bing');
-  assert.equal(workspace.settings.browser.memorySaverEnabled, true);
   assert.equal(workspace.settings.workspace.clipboardSync, true);
   const unsynced = command(workspace, {
     type: 'settings.update',

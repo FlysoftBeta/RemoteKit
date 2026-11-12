@@ -1,4 +1,5 @@
 import Sqlite from 'better-sqlite3';
+import { ReclaimStatistics } from './reclaim-statistics';
 import { AtRestKey } from '../auth/crypto';
 import { systemClock, type Clock } from '../util/clock';
 import { AccountsRepository } from './accounts';
@@ -17,6 +18,7 @@ export interface DatabaseOptions {
   buildId: string;
 }
 export class ControlDatabase {
+  readonly reclaim: ReclaimStatistics;
   readonly integrity: IntegrityResult;
   readonly db: Sqlite.Database;
   readonly atRestKey: AtRestKey;
@@ -44,6 +46,7 @@ export class ControlDatabase {
       this.db.close();
       throw error;
     }
+    this.reclaim = new ReclaimStatistics(this.db, clock);
     this.workspaces = new WorkspacesRepository(this.db);
     this.security = new SecurityRepository(this.db, this.atRestKey, clock);
     this.accounts = new AccountsRepository(this.db);

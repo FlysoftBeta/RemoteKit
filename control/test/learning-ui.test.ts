@@ -87,6 +87,7 @@ test('embedded sign-in menus retain editing commands and expose no navigation ac
   const tab = {
     id: 'sign-in',
     windowId: 'study',
+    idleKeepAlive: false,
     webviewId: 'view',
     title: '登录',
     url: 'https://example.invalid',

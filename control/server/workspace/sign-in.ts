@@ -22,6 +22,7 @@ export function openSignInTab(
   const tab = {
     id: randomUUID(),
     windowId,
+    idleKeepAlive: false,
     webviewId: viewId,
     kind: 'remote' as const,
     title: provider === 'changyan' ? '畅言验证' : '新教育登录',

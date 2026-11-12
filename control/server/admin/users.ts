@@ -210,6 +210,7 @@ export class UserAdmin {
         store.library.deleteTenant(user.tenant);
         store.operations.deleteTenant(user.tenant);
         store.workspaces.deleteTenant(user.tenant);
+        store.reclaim.deleteTenant(user.tenant);
         store.security.deleteUser(user.id);
         store.announcements.deleteUser(user.id);
         store.clipboards.clear(user.id);

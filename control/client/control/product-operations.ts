@@ -70,6 +70,7 @@ export function projectOperations(
           w.tabs.push({
             id: id + '-tab',
             windowId: id,
+            idleKeepAlive: false,
             webviewId: '',
             kind: 'start',
             title: '正在打开…',
@@ -149,6 +150,7 @@ export function projectOperations(
           w.tabs.push({
             id,
             windowId: win.id,
+            idleKeepAlive: false,
             webviewId: '',
             kind: 'start',
             title: '正在打开…',

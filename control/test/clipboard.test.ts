@@ -255,6 +255,7 @@ test('page origins, concealed copies and device writes share recording without d
     workspace.tabs.push({
       id: 'tab',
       windowId: 'window',
+      idleKeepAlive: false,
       webviewId: '42',
       title: 'Fixture',
       url: 'https://example.test/path',

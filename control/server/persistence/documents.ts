@@ -91,8 +91,20 @@ export const wireError = object(
 export const windowState = record(jsonValue);
 const tabKind = literal('start', 'remote');
 export const tab = object(
-  { id: s(), windowId: s(), webviewId: s(), title: s(), url: s() },
+  { id: s(), windowId: s(), webviewId: s(), title: s(), url: s(), idleKeepAlive: b() },
   {
+    idleKeepAliveState: object({ enabledAt: n() }, { eligibleSince: n(), leftAt: n() }),
+    idleKeepAliveOutcome: object(
+      {
+        enabledAt: n(),
+        eligibleSince: n(),
+        leftAt: n(),
+        outcome: literal('survived', 'frozen', 'discarded', 'stopped'),
+        at: n(),
+        reason: literal('statistics', 'pressure', 'exhaustion'),
+      },
+      { returnedAt: n() },
+    ),
     signIn: literal('changyan', 'xinjiaoyu'),
     usageDocument: s(),
     usageSource: literal('launcher'),
@@ -147,7 +159,6 @@ const workspaceFields = {
 };
 const browserFields = {
   searchEngine: literal('google', 'bing', 'duckduckgo', 'baidu'),
-  memorySaverEnabled: b(),
 };
 export const settings = object({
   workspace: object(workspaceFields),
@@ -270,6 +281,8 @@ export const action = union(
     { type: literal('tab.activate', 'tab.close'), tabId: s() },
     { requestId: s(), confirm: b(), cancel: b(), ...source },
   ),
+  object({ type: literal('tab.setIdleKeepAlive'), tabId: s(), enabled: b() }),
+  object({ type: literal('tab.ackIdleKeepAliveOutcome'), tabId: s(), at: n(), returnedAt: n() }),
   object({ type: literal('tab.move'), tabId: s(), windowId: s() }, { index: i() }),
   object({ type: literal('tab.navigate'), tabId: s(), url: s() }, source),
   object({ type: literal('tab.command'), tabId: s(), command: literal('back', 'forward', 'reload', 'stop') }),

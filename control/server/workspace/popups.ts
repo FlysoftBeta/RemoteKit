@@ -101,6 +101,7 @@ export class Popups {
       const tab: ProductTab = {
         id: randomUUID(),
         windowId: target.id,
+        idleKeepAlive: false,
         webviewId: this.context.store.workspaces.viewId(),
         kind: 'remote',
         title: '新页面',

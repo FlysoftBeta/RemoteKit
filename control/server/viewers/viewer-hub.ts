@@ -125,6 +125,7 @@ export class ViewerHub {
       throw new RemoteKitError('unauthenticated', '账号不存在', { detail: 'Account does not exist' });
     const security = this.services.security.create(user, initialUnlocked);
     this.services.pageRequests.clearFullscreen(tenant);
+    this.context.store.reclaim.attach(tenant);
     runtime.viewer = { id, revoke, authentication, security };
     old?.revoke('another-viewer');
     this.context.events.emit('auth', tenant, id, this.authState(tenant, security));
@@ -147,6 +148,7 @@ export class ViewerHub {
     const runtime = this.context.tenants.get(tenant);
     const viewer = runtime.viewer;
     if (viewer?.id !== id) return;
+    this.context.store.reclaim.detach(tenant);
     delete runtime.viewer;
     runtime.viewerAbsentSince = this.context.clock.monotonicMs();
     delete runtime.pageRequests.fullscreen;

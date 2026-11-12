@@ -453,7 +453,7 @@ test('remote page fullscreen follows the live document, with a document-bound ex
   }
 });
 
-test('memory saver uses hidden age and canDiscard; activating a discarded page waits for actual live completion', async () => {
+test('automatic reclaim uses eligible background time and canDiscard; activating a discarded page waits for actual live completion', async () => {
   const { store, endpoint, control, user, clock } = await fixture();
   try {
     await control.viewers.attachViewer(

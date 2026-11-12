@@ -62,7 +62,6 @@ export interface WorkspaceSettings {
 }
 export interface BrowserSettings {
   searchEngine: SearchEngine;
-  memorySaverEnabled: boolean;
 }
 export interface ProductSettings {
   workspace: WorkspaceSettings;
@@ -103,7 +102,19 @@ export function placeTab<T extends { id: string; windowId: string }>(
         : tabs.length;
   tabs.splice(at, 0, moved);
 }
+export interface IdleKeepAliveOutcome {
+  enabledAt: number;
+  eligibleSince: number;
+  leftAt: number;
+  outcome: 'survived' | 'frozen' | 'discarded' | 'stopped';
+  at: number;
+  reason: 'statistics' | 'pressure' | 'exhaustion';
+  returnedAt?: number;
+}
 export interface ProductTab {
+  idleKeepAlive: boolean;
+  idleKeepAliveState?: { enabledAt: number; eligibleSince?: number; leftAt?: number };
+  idleKeepAliveOutcome?: IdleKeepAliveOutcome;
   signIn?: LearningProvider;
   usageDocument?: string;
   usageSource?: 'launcher';
@@ -400,6 +411,8 @@ export type ProductAction =
       cancel?: boolean;
       source?: 'launcher';
     }
+  | { type: 'tab.setIdleKeepAlive'; tabId: string; enabled: boolean }
+  | { type: 'tab.ackIdleKeepAliveOutcome'; tabId: string; at: number; returnedAt: number }
   | { type: 'tab.move'; tabId: string; windowId: string; index?: number }
   | { type: 'tab.navigate'; tabId: string; url: string; source?: 'launcher' }
   | { type: 'tab.command'; tabId: string; command: 'back' | 'forward' | 'reload' | 'stop' }

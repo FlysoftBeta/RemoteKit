@@ -89,6 +89,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
     const kind = address === undefined ? 'start' : 'remote';
     const next: ProductTab = {
       id: nextId(),
+      idleKeepAlive: false,
       windowId,
       webviewId: ctx.viewId,
       kind,
@@ -407,6 +408,27 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       effects.push({ kind: 'exitFullscreen', target: action.target });
       break;
     }
+    case 'tab.setIdleKeepAlive': {
+      if (typeof action.enabled !== 'boolean')
+        throw new RemoteKitError('invalid_request', '挂机模式设置无效');
+      const target = tab();
+      if (isLocalTab(target)) throw new RemoteKitError('conflict', '请先打开网页');
+      if (target.idleKeepAlive === action.enabled) break;
+      target.idleKeepAlive = action.enabled;
+      delete target.idleKeepAliveOutcome;
+      if (action.enabled) target.idleKeepAliveState = { enabledAt: now };
+      else delete target.idleKeepAliveState;
+      break;
+    }
+    case 'tab.ackIdleKeepAliveOutcome': {
+      const target = tab();
+      if (
+        target.idleKeepAliveOutcome?.at === action.at &&
+        target.idleKeepAliveOutcome?.returnedAt === action.returnedAt
+      )
+        delete target.idleKeepAliveOutcome;
+      break;
+    }
     case 'settings.update': {
       const value = action.settings;
       if (
@@ -422,15 +444,13 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
           !browser ||
           typeof browser !== 'object' ||
           Array.isArray(browser) ||
-          Object.keys(browser).some((key) => !['searchEngine', 'memorySaverEnabled'].includes(key))
+          Object.keys(browser).some((key) => !['searchEngine'].includes(key))
         )
           throw new RemoteKitError('invalid_request', '设置格式无效', { detail: 'Invalid settings' });
         if (
           'searchEngine' in browser &&
           !SEARCH_ENGINES.some((engine) => engine.value === browser.searchEngine)
         )
-          throw new RemoteKitError('invalid_request', '参数值无效', { detail: 'Invalid value' });
-        if ('memorySaverEnabled' in browser && typeof browser.memorySaverEnabled !== 'boolean')
           throw new RemoteKitError('invalid_request', '参数值无效', { detail: 'Invalid value' });
         Object.assign(state.settings.browser, browser);
       }

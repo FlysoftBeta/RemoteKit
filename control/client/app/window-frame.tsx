@@ -13,6 +13,7 @@ import { RemoteKitError } from '../../shared/errors';
 import type { ProductState, ProductWindow } from '../../shared/product';
 import { BUILTIN_APP_TITLES, SEARCH_ENGINES, isBuiltinApp, isLocalApp } from '../../shared/product';
 import { SurfaceState, failureError } from '../failures';
+import { IdleKeepAliveNotice } from '../failures/idle-keep-alive';
 import { failureContext, ownOperation } from '../failures/operations';
 import { FilesWindow } from '../files/files-window';
 import { SignInHost } from '../learning/sign-in-host';
@@ -89,6 +90,7 @@ export function WindowFrame({
   const failure = windowFailure ?? receiptFailure ?? surfaceFailure?.error;
   const failureOperation =
     windowFailure || receiptFailure ? '完成页面操作' : (surfaceFailure?.operation ?? '完成页面操作');
+  const productLocked = useViewerSessionSelector(transport, (snapshot) => snapshot.authorization.locked);
   const presentationError = useViewerSessionSelector(transport, (snapshot) => snapshot.presentation.error);
   const drop = useDropTarget('window', win.id);
   const dragging = useWindowDragging();
@@ -303,6 +305,14 @@ export function WindowFrame({
                 )}
               </>
             )}
+            <IdleKeepAliveNotice
+              tenant={state.workspace.tenantId}
+              tab={active}
+              visible={visible && online && !productLocked}
+              acknowledge={(command) => {
+                void action(command).catch(report);
+              }}
+            />
           </div>
           <WindowMenus
             win={win}

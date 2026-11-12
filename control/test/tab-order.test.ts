@@ -9,6 +9,7 @@ function workspace(): ProductWorkspace {
   const tab = (id: string, windowId: string): ProductTab => ({
     id,
     windowId,
+    idleKeepAlive: false,
     webviewId: id,
     kind: 'start',
     title: id,

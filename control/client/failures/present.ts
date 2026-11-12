@@ -29,7 +29,7 @@ export interface FailureContext {
   action?: FailureAction;
 }
 export interface Presentation {
-  class: 'A' | 'B' | 'C' | 'silent';
+  class: 'A' | 'B' | 'C' | 'info' | 'silent';
   text: string;
   longText?: string;
   action?: FailureAction;

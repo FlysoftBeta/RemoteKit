@@ -21,6 +21,7 @@ const windowWithTab: ProductWindow = {
 const startTab: ProductTab = {
   id: 'tab-id',
   windowId: windowWithTab.id,
+  idleKeepAlive: false,
   webviewId: '1',
   kind: 'start',
   title: '新标签页',
@@ -69,6 +70,7 @@ function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
 function Frame({ state, online }: { state: ProductState; online: boolean }) {
   const unexpected = (): never => assert.fail('Rendering must not dispatch any operation');
   const transport = {
+    authorization: { getSnapshot: () => ({ locked: false }) },
     operations: { subscribe: () => () => {}, getSnapshot: () => ({ error: undefined }) },
     presentation: { getSnapshot: () => ({ error: undefined }) },
     observations: { audio: new ViewerAudioOutput(unexpected) },

@@ -4,7 +4,7 @@ import type { LibrarySnapshot } from '../../shared/file-library';
 import { defaultAuthSettings, type AtRestKey } from '../auth/crypto';
 import { isDocument } from '../learning/document-type';
 import { decodeJson, encodeJson, jsonValue, object, string } from './codec';
-import { action, authSettings, librarySnapshot, selection } from './documents';
+import { authSettings, librarySnapshot, selection } from './documents';
 import { writeLibrary } from './relational-library';
 import { learningKeyInfo, openLearningDocument } from './sealed-documents';
 
@@ -261,33 +261,6 @@ export const migrations: {
           );
         }
       }
-      for (const row of db.prepare('SELECT tenant,id,payload FROM operation_receipts').all() as {
-        tenant: string;
-        id: string;
-        payload: string;
-      }[]) {
-        const payload = decodeJson(
-          row.payload,
-          jsonValue,
-          `operation_receipts.payload ${row.tenant}/${row.id}`,
-        ) as Record<string, any>;
-        if (payload.type === 'settings.update' && payload.settings?.memorySaverEnabled !== undefined) {
-          payload.settings.browser = {
-            ...payload.settings.browser,
-            memorySaverEnabled: payload.settings.memorySaverEnabled,
-          };
-          delete payload.settings.memorySaverEnabled;
-          db.prepare('UPDATE operation_receipts SET payload=? WHERE tenant=? AND id=?').run(
-            encodeJson(
-              payload,
-              action as import('./codec').Codec<unknown>,
-              `operation_receipts.payload ${row.tenant}/${row.id}`,
-            ),
-            row.tenant,
-            row.id,
-          );
-        }
-      }
       const renderColumns = db.pragma('table_info(object_render_failures)') as { name: string }[];
       const buildId = renderColumns.some((column) => column.name === 'build_id') ? 'build_id' : "'unknown'";
       db.exec(`ALTER TABLE object_render_failures RENAME TO object_render_failures_old;
@@ -416,6 +389,19 @@ export const migrations: {
         .all() as { tenant: string }[])
         pending.run(randomUUID(), row.tenant);
       db.exec('DROP TABLE session_placements_old');
+    },
+  },
+  {
+    version: 20,
+    name: 'automatic-reclaim-and-idle-keep-alive',
+    up(db) {
+      db.exec(`CREATE TABLE viewer_presence (tenant TEXT NOT NULL, connected_at INTEGER NOT NULL, disconnected_at INTEGER);
+        CREATE INDEX viewer_presence_tenant ON viewer_presence(tenant,connected_at);
+        CREATE TABLE page_dwell (tenant TEXT NOT NULL, page_key TEXT NOT NULL, visible_ms INTEGER NOT NULL, visits INTEGER NOT NULL, last_visible_at INTEGER NOT NULL, PRIMARY KEY(tenant,page_key));
+        CREATE TABLE control_heartbeat (id INTEGER PRIMARY KEY CHECK(id=1), last_ran_at INTEGER NOT NULL);
+        UPDATE user_settings SET data=json_remove(data,'$.browser.memorySaverEnabled','$.memorySaverEnabled');
+        UPDATE operation_receipts SET payload=json_remove(payload,'$.settings.browser.memorySaverEnabled','$.settings.memorySaverEnabled') WHERE json_extract(payload,'$.type')='settings.update';
+        UPDATE workspace_tabs SET data=json_set(data,'$.idleKeepAlive',json('false'));`);
     },
   },
 ];

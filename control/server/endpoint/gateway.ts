@@ -226,8 +226,26 @@ export class EndpointGateway {
         throw new RemoteKitError('outcome_unknown', '节点未返回有效确认');
       return reply as T;
     } catch (error) {
-      throw endpointError(error);
+      const failure = endpointError(error);
+      this.recordAllocationFailure(tenant, failure);
+      throw failure;
     }
+  }
+  private recordAllocationFailure(tenant: string, error: RemoteKitError) {
+    const allocationFailures = [
+      'OSR plane resources allocation failed',
+      'OSR slot resources allocation failed',
+      'render mapping allocation failed',
+      'render message pipe allocation failed',
+    ];
+    if (
+      error.reason !== 'output_failed' ||
+      !allocationFailures.some((message) => error.message === message || error.detail === message)
+    )
+      return;
+    const placement = this.placement.peek(tenant);
+    const node = placement && this.nodes.get(placement.nodeId);
+    if (node) node.allocationFailedAt = Date.now();
   }
   writeClipboard(tenant: string, clipboard: ClipboardValue): Promise<Accepted> {
     return this.invoke('clipboard.write', tenant, clipboard);
@@ -312,6 +330,7 @@ export class EndpointGateway {
     const snapshot = await this.invoke<EndpointSnapshot>('session.snapshot', tenant, args);
     if (snapshot.status) {
       const error = endpointError(snapshot.status);
+      this.recordAllocationFailure(tenant, error);
       throw new EndpointSnapshotError(error, snapshot.browserRestart);
     }
     return {

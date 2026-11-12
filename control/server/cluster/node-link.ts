@@ -136,6 +136,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   buildId?: string;
   diskDraining = false;
   reliefRequestedAt?: number;
+  allocationFailedAt?: number;
   readyCopies: Promise<void> = Promise.resolve();
   private copyGate?: { resolve: () => void; reject: (error: unknown) => void };
   private incoming = 0;

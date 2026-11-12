@@ -2,6 +2,7 @@ import './browser-chrome.css';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   BedtimeOutlined,
+  TimelapseOutlined,
   ArrowBack,
   ArrowForward,
   Language,
@@ -303,6 +304,8 @@ export function BrowserChrome({
 }
 
 function BrowserTabIcon({ tab }: { tab: ProductTab }) {
+  if (tab.idleKeepAlive)
+    return <TimelapseOutlined className="tab-icon" sx={{ color: 'primary.main' }} titleAccess="挂机模式" />;
   if (tab.loading) return <CircularProgress className="tab-icon" size={13} />;
   if (tab.residency && tab.residency !== 'live') return <BedtimeOutlined className="tab-icon" />;
   return <Language className="tab-icon" />;

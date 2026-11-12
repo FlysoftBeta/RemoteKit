@@ -12,6 +12,7 @@ const menu: ContextMenu = { id: '1', x: 12, y: 40, source: 'mouse' };
 const tab: ProductTab = {
   id: 'tab',
   windowId: 'window',
+  idleKeepAlive: false,
   webviewId: 'v',
   title: 'Page',
   url: 'https://example.com/',

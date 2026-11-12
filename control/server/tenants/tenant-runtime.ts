@@ -4,7 +4,7 @@ import type { ViewerSecurityState } from '../auth/viewer-security';
 import type { PageIdentity } from '../endpoint/types';
 import { QualityState } from '../quality';
 import type { Clock } from '../util/clock';
-import { MemorySaverViews } from '../workspace/lifecycle';
+import { BackgroundReclaimViews } from '../workspace/lifecycle';
 import type { InternalFileRequest } from '../workspace/page-requests';
 export interface ViewerLease {
   id: string;
@@ -66,13 +66,13 @@ export class TenantRuntime {
     authorization?: string;
     files?: InternalFileRequest[];
   } = {};
-  lifecycle: { transitions: Map<string, { action: string; at: number }>; background: MemorySaverViews };
+  lifecycle: { transitions: Map<string, { action: string; at: number }>; background: BackgroundReclaimViews };
   constructor(
     readonly tenantId: string,
     clock: Clock,
   ) {
     this.viewerAbsentSince = clock.monotonicMs();
-    this.lifecycle = { transitions: new Map(), background: new MemorySaverViews(clock) };
+    this.lifecycle = { transitions: new Map(), background: new BackgroundReclaimViews(clock) };
   }
   get connectionId() {
     return this.rtc.connection.phase === 'idle' ? undefined : this.rtc.connection.connectionId;

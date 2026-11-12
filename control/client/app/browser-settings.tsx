@@ -19,7 +19,7 @@ import { OverflowText } from './overflow-text';
 import { siteHost } from './permission-prompt';
 import type { Action } from './product-dialogs';
 import { ScaledSelect } from './scaled-select';
-import { SettingNote, SettingRow, SettingSection, SettingSwitch } from './setting-layout';
+import { SettingNote, SettingRow, SettingSection } from './setting-layout';
 import { SiteSettings } from './site-settings';
 import type { WorkspaceCall } from './window-state';
 
@@ -77,17 +77,6 @@ export function BrowserSettingsSheet({
                 type: 'settings.update',
                 settings: { browser: { searchEngine: searchEngine as SearchEngine } },
               })
-            }
-          />
-        </SettingSection>
-        <SettingSection title="性能">
-          <SettingSwitch
-            title="Memory Saver"
-            description="不在屏幕上的网页一段时间后释放内存，回来时自动恢复"
-            checked={browser.memorySaverEnabled}
-            disabled={!online}
-            onChange={(memorySaverEnabled) =>
-              run({ type: 'settings.update', settings: { browser: { memorySaverEnabled } } })
             }
           />
         </SettingSection>

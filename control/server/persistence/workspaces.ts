@@ -18,7 +18,7 @@ export const defaultSettings = () => ({
     avSync: false,
     audioChannels: { left: true, right: true },
   },
-  browser: { searchEngine: 'google' as const, memorySaverEnabled: true },
+  browser: { searchEngine: 'google' as const },
 });
 export function emptyWorkspace(tenantId: string): ProductWorkspace {
   return {

@@ -19,6 +19,7 @@ function workspace() {
   state.workspace.tabs = ['a', 'c'].map((id) => ({
     id,
     windowId: id,
+    idleKeepAlive: false,
     webviewId: id,
     kind: 'remote',
     title: id,

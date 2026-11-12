@@ -7,11 +7,17 @@ export class TenantRegistry {
   }
   private readonly runtimes = new Map<string, TenantRuntime>();
   private readonly queue = new KeyedSerialQueue();
-  constructor(private readonly clock: Clock = systemClock) {}
+  constructor(
+    private readonly clock: Clock = systemClock,
+    private readonly absentSince: (tenant: string) => number | undefined = () => undefined,
+  ) {}
   get(tenantId: string): TenantRuntime {
     let runtime = this.runtimes.get(tenantId);
     if (!runtime) {
       runtime = new TenantRuntime(tenantId, this.clock);
+      const absentSince = this.absentSince(tenantId);
+      if (absentSince !== undefined)
+        runtime.viewerAbsentSince -= Math.max(0, this.clock.wallMs() - absentSince);
       this.runtimes.set(tenantId, runtime);
     }
     return runtime;

@@ -6,7 +6,7 @@ import { registerUser, requestViewer, TestClock, testGateway } from './server-fi
 import { openSignInTab } from '../server/workspace/sign-in';
 import { applyCommand } from '../server/workspace/commands';
 
-test('sign-in tabs pass purpose to Endpoint, skip usage, previews, popups and Memory Saver and close with the window', async () => {
+test('sign-in tabs pass purpose to Endpoint, skip usage, previews, popups and automatic reclaim and close with the window', async () => {
   const clock = new TestClock();
   const store = new ControlDatabase(':memory:', { clock, buildId: 'test' });
   const calls: { method: string; args: any }[] = [];

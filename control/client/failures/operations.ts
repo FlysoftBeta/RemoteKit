@@ -2,6 +2,8 @@ import { toRemoteKitError, type RemoteKitError } from '../../shared/errors';
 import type { FailureContext } from './present';
 
 const operations: Record<string, string> = {
+  'tab.setIdleKeepAlive': '设置挂机模式',
+  'tab.ackIdleKeepAliveOutcome': '确认挂机通知',
   'tab.navigate': '打开网页',
   'tab.create': '创建标签页',
   'tab.command': '完成页面操作',

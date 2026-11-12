@@ -47,7 +47,6 @@ export function createHttp(
               autoFullscreen: settings.workspace.autoFullscreen,
               avSync: settings.workspace.avSync,
               audioChannels: settings.workspace.audioChannels,
-              memorySaverEnabled: settings.browser.memorySaverEnabled,
             },
             learning: control.learning?.sync.diagnostics(tenant),
           };

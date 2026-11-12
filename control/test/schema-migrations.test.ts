@@ -27,6 +27,30 @@ import { learningKey } from '../server/persistence/sealed-documents';
 const fixture = (version: number) =>
   readFileSync(new URL(`./fixtures/control-v${version}.sql`, import.meta.url), 'utf8');
 
+test('v19 migrates automatic reclaim settings, receipt payloads, tab defaults and statistics tables', () => {
+  const db = new Sqlite(':memory:');
+  const store = new ControlDatabase(':memory:', { buildId: 'fixture' });
+  try {
+    db.exec(fixture(19));
+    migrate(db, { backupDirectory: '', buildId: 'fixture', atRestKey: store.atRestKey });
+    const settings = JSON.parse(
+      (db.prepare("SELECT data FROM user_settings WHERE tenant='tenant'").get() as any).data,
+    );
+    assert.deepEqual(settings.browser, { searchEngine: 'google' });
+    const payload = JSON.parse(
+      (db.prepare("SELECT payload FROM operation_receipts WHERE id='settings'").get() as any).payload,
+    );
+    assert.deepEqual(payload, { type: 'settings.update', settings: { browser: {} } });
+    const tab = JSON.parse((db.prepare("SELECT data FROM workspace_tabs WHERE id='tab'").get() as any).data);
+    assert.equal(tab.idleKeepAlive, false);
+    assert.equal(db.prepare('SELECT * FROM viewer_presence').all().length, 0);
+    assert.equal(db.prepare('SELECT * FROM page_dwell').all().length, 0);
+  } finally {
+    store.db.close();
+    db.close();
+  }
+});
+
 test('v18 placements migrate run/data states and persist a fresh commit identity', () => {
   const db = new Sqlite(':memory:');
   try {
@@ -80,7 +104,7 @@ function schema(db: Sqlite.Database) {
     }[]
   ).map((row) => ({ name: row.name, sql: row.sql.replace(/\s+/g, ' ').trim() }));
 }
-for (const version of [12, 13, 14, 15, 16, 18]) {
+for (const version of [12, 13, 14, 15, 16, 18, 19]) {
   test(`historical v${version} migrates with a verified backup and the fresh schema`, () => {
     const directory = mkdtempSync(join(tmpdir(), 'rk-migration-'));
     const path = join(directory, 'control.db');
@@ -96,12 +120,12 @@ for (const version of [12, 13, 14, 15, 16, 18]) {
     const store = new ControlDatabase(path, { buildId: 'fixture' });
     const fresh = new ControlDatabase(':memory:', { buildId: 'fixture' });
     try {
-      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 19n }]);
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 20n }]);
       assert.deepEqual(store.integrity.problems, []);
       assert.deepEqual(schema(store.db), schema(fresh.db));
       const backups = readdirSync(join(directory, 'backups'));
       assert.equal(backups.length, 1);
-      assert.match(backups[0], new RegExp(`^control-v${version}-to-v19-fixture-\\d{8}T\\d{6}Z\\.db$`));
+      assert.match(backups[0], new RegExp(`^control-v${version}-to-v20-fixture-\\d{8}T\\d{6}Z\\.db$`));
       const backup = new Sqlite(join(directory, 'backups', backups[0]), { readonly: true });
       try {
         assert.equal(backup.pragma('quick_check', { simple: true }), 'ok');
@@ -326,7 +350,7 @@ test('unsupported versions and nonempty unversioned databases are refused', () =
   try {
     for (const [index, ddl] of [
       'CREATE TABLE anything (id TEXT)',
-      ...[11, 20].map(
+      ...[11, 21].map(
         (version) =>
           `CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES (${version})`,
       ),

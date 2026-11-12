@@ -80,7 +80,7 @@ export function createApplication(
     endpoint,
     fileLimits,
     clock,
-    tenants: new TenantRegistry(clock),
+    tenants: new TenantRegistry(clock, (tenant) => store.reclaim.absentSince(tenant)),
     events: new EventEmitter(),
     serverIncarnation: randomUUID(),
     closed: false,
@@ -185,6 +185,7 @@ export function createApplication(
     await context.tenants.close();
     await services.objects.close();
     await services.sessionPurge.close();
+    store.reclaim.close();
     context.events.removeAllListeners();
   };
   return services;

@@ -117,7 +117,6 @@ test('workspace WS routes preserve bounded local state and split settings while 
     const settings = f.store.workspaces.workspace(f.user.tenantId).settings;
     assert.equal(settings.workspace.showStats, true);
     assert.equal(settings.browser.searchEngine, 'bing');
-    assert.equal(settings.browser.memorySaverEnabled, true);
     await assert.rejects(
       f.request('action', { type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
       { code: 'invalid_request' },

@@ -19,6 +19,17 @@
 .failure-A {
   color: var(--text-secondary);
 }
+.failure-info {
+  color: var(--text-primary);
+  background: var(--primary-tab-drop);
+}
+.failure-dismiss {
+  color: var(--text-secondary);
+  background: transparent;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
 .failure-B {
   color: var(--text-primary);
   background: var(--primary-tab-drop);
@@ -80,7 +91,8 @@
   pointer-events: auto;
   background: var(--surface);
 }
-.failure-surface-live .failure-B {
+.failure-surface-live .failure-B,
+.failure-surface-live .failure-info {
   background: linear-gradient(var(--primary-tab-drop), var(--primary-tab-drop)), var(--surface);
 }
 .failure-surface-live .failure-C {

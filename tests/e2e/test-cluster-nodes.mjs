@@ -90,7 +90,6 @@ async function connect(name, context) {
     currentPassword: password,
     settings: { lockOnHidden: false, lockOnIdle: false },
   });
-  await viewer.action({ type: 'settings.update', settings: { browser: { memorySaverEnabled: true } } });
   return viewer;
 }
 async function workspace(viewer, path) {

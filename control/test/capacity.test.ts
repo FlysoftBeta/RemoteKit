@@ -12,7 +12,7 @@ import { EndpointGateway } from '../server/endpoint/gateway';
 import type { EndpointSnapshot } from '../server/endpoint/types';
 import { ControlDatabase } from '../server/persistence/database';
 import { emptyWorkspace } from '../server/persistence/workspaces';
-import { MemorySaver, type MemoryObservation } from '../server/workspace/lifecycle';
+import { BackgroundReclaim, type ReclaimObservation } from '../server/workspace/lifecycle';
 import { fakeMetrics } from './fake-node';
 import { TestClock } from './server-fixture';
 
@@ -265,16 +265,12 @@ test('relief selects longest eligible absence, allows one flight per node and wa
   const logs: unknown[][] = [];
   t.mock.method(log, 'info', (...args: unknown[]) => logs.push(args));
   try {
-    h.add('short', 60000);
-    h.add('z-last', 60000);
-    h.add('long', 120000);
-    h.add('blocked', 240000);
+    h.add('short', 600000);
+    h.add('z-last', 600000);
+    h.add('long', 720000);
+    h.add('blocked', 840000);
     h.add('online', 300000).viewer = {} as any;
     h.add('recent', 59999);
-    h.add('disabled', 400000);
-    const workspace = h.store.workspaces.workspace('disabled');
-    workspace.settings.browser.memorySaverEnabled = false;
-    h.store.workspaces.writeWorkspace(workspace);
     h.gateway.snapshot = async (tenant) => {
       const value = snapshot();
       if (tenant === 'blocked') value.stopBlockers!.inFlightUploads = 1;
@@ -323,7 +319,7 @@ test('relief selects longest eligible absence, allows one flight per node and wa
 test('placement requests relief without sustained pressure; a newer relieved sample clears the request', async () => {
   const h = reliefCluster();
   try {
-    h.add('idle', 60000);
+    h.add('idle', 600000);
     h.nodes.get('beta')!.state = { state: 'offline' };
     const alpha = h.nodes.get('alpha')!;
     alpha.metrics.record(fakeMetrics({ cpu: 0.8, sessions: 1 }));
@@ -347,9 +343,8 @@ test('sustained pressure triggers relief without a lighter node; idle stop keeps
   const logs: unknown[][] = [];
   t.mock.method(log, 'info', (...args: unknown[]) => logs.push(args));
   try {
-    h.add('idle', 120000);
-    assert.equal(await h.app.lifecycle.stop('idle', snapshot()), false);
-    assert.equal(h.app.lifecycle.stopBlocker('idle', snapshot(), false, true), undefined);
+    h.add('idle', 600000);
+    assert.equal(h.app.lifecycle.stopBlocker('idle', snapshot(), false), undefined);
     h.nodes.get('beta')!.metrics.record(fakeMetrics({ cpu: 0.7 }));
     h.pressure();
     await h.app.lifecycle.relieve();
@@ -364,7 +359,7 @@ test('sustained pressure triggers relief without a lighter node; idle stop keeps
 test('relief rechecks pressure and Viewer presence after awaiting the snapshot', async () => {
   const h = reliefCluster();
   try {
-    const runtime = h.add('idle', 120000);
+    const runtime = h.add('idle', 600000);
     h.pressure();
     h.gateway.snapshot = async () => {
       h.nodes.get('alpha')!.metrics.record(fakeMetrics(), Date.now() + 1);
@@ -384,12 +379,11 @@ test('relief rechecks pressure and Viewer presence after awaiting the snapshot',
   }
 });
 
-test('tab Memory Saver uses ten-second freeze and thirty-second discard under pressure', () => {
+test('tab reclaim uses ten-second freeze and thirty-second discard under pressure', () => {
   for (const underPressure of [true, false]) {
     const clock = new TestClock();
-    const saver = new MemorySaver(clock);
-    const observation: MemoryObservation = {
-      enabled: true,
+    const saver = new BackgroundReclaim(clock);
+    const observation: ReclaimObservation = {
       visible: false,
       protectedByProduct: false,
       underPressure,

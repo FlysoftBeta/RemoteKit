@@ -143,7 +143,7 @@ export function learningProductFixture(appId = 'study', signed = true): ProductS
           avSync: false,
           audioChannels: { left: true, right: true },
         },
-        browser: { searchEngine: 'bing', memorySaverEnabled: true },
+        browser: { searchEngine: 'bing' },
       },
     },
     quality: {

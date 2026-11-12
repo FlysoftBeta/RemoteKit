@@ -64,7 +64,7 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
           windows: [],
           settings: {
             workspace: { qualityPreference: 'auto', unrelatedSetting: 'sensitive-setting' },
-            browser: { searchEngine: 'google', memorySaverEnabled: true },
+            browser: { searchEngine: 'google' },
           },
         }),
       },

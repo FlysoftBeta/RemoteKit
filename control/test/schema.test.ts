@@ -9,7 +9,7 @@ import { ControlDatabase } from '../server/persistence/database';
 test('fresh schema includes workspace spaces, installed apps, favorites and usage', () => {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 19n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 20n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
@@ -76,6 +76,7 @@ test('reopening keeps accounts, workspace and the view allocator', async () => {
     workspace.tabs.push({
       id: 'tab',
       windowId: 'window',
+      idleKeepAlive: false,
       webviewId: firstView,
       kind: 'remote',
       title: 'Page',

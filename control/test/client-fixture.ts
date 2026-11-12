@@ -83,7 +83,7 @@ export function productSnapshot(): import('../shared/product').ProductState {
           avSync: false,
           audioChannels: { left: true, right: true },
         },
-        browser: { searchEngine: 'google', memorySaverEnabled: true },
+        browser: { searchEngine: 'google' },
       },
       sites: {},
       windows: [],

@@ -2,6 +2,8 @@ import './window-menus.css';
 import React, { useEffect, useState } from 'react';
 import {
   Add,
+  Check,
+  TimelapseOutlined,
   ArrowForward,
   Close,
   DriveFileMoveOutlined,
@@ -14,7 +16,7 @@ import {
   SettingsOutlined,
   TuneOutlined,
 } from '@mui/icons-material';
-import { Divider, ListItemIcon, Menu, MenuItem, MenuList, Popover } from '@mui/material';
+import { Divider, ListItemIcon, ListItemText, Menu, MenuItem, MenuList, Popover } from '@mui/material';
 import type { ProductState, ProductTab, ProductWindow } from '../../shared/product';
 import { isLocalTab } from '../../shared/product';
 import type { ViewerSession } from '../viewer-session';
@@ -178,6 +180,21 @@ export function WindowMenus({
         }}
       >
         <MenuList autoFocusItem={!!menu} dense>
+          {browser && (
+            <MenuItem
+              role="menuitemcheckbox"
+              aria-checked={!!active?.idleKeepAlive}
+              disabled={!online || !active || isLocalTab(active) || !!active.signIn}
+              onClick={() => {
+                closeMore();
+                if (active)
+                  run({ type: 'tab.setIdleKeepAlive', tabId: active.id, enabled: !active.idleKeepAlive });
+              }}
+            >
+              <ListItemIcon>{active?.idleKeepAlive ? <Check /> : <TimelapseOutlined />}</ListItemIcon>
+              <ListItemText primary="挂机模式" secondary="离开后保持此页面运行至少 30 分钟" />
+            </MenuItem>
+          )}
           {moreItems.map((item) => (
             <MenuItem
               key={item.label}

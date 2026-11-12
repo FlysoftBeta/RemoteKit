@@ -10,6 +10,14 @@ import { isLocalTab } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 import type { NodeLink } from '../cluster/node-link';
 import { systemClock, type Clock } from '../util/clock';
+import { normalizedUsagePage } from '../navigation-url';
+import {
+  dwellFactor,
+  hardExhaustion,
+  keepAliveBlocksStop,
+  shouldStopSession,
+  tabReclaimDelays,
+} from './reclaim-policy';
 
 type StopReason = 'idle' | 'relief' | 'rebalance';
 type ReliefState = { waitingAfter?: number; inflight?: Promise<void> };
@@ -21,6 +29,112 @@ export class UncertainRecovery {
   >();
   private readonly relief = new Map<string, ReliefState>();
   private readonly stoppingNodes = new Set<string>();
+  private readonly sessionEligibility = new Map<
+    string,
+    { since: number; observedAt: number; absence: number }
+  >();
+
+  private nodeFor(tenant: string) {
+    const placement = this.context.endpoint.placement.peek(tenant);
+    return placement && this.context.endpoint.nodes.get(placement.nodeId);
+  }
+  private exhausted(node: NodeLink | undefined) {
+    return hardExhaustion(node?.metrics.latest()?.value.memory, node?.allocationFailedAt !== undefined);
+  }
+  wantedVisible(state: ProductWorkspace, tab: ProductTab) {
+    const viewer = this.context.tenants.get(state.tenantId).viewer;
+    return (
+      !isLocalTab(tab) &&
+      !!viewer &&
+      !viewer.security?.locked &&
+      !!viewer.viewport?.windows.some((window) => window.windowId === tab.windowId && window.visible) &&
+      state.windows.some((window) => window.id === tab.windowId && window.activeTabId === tab.id) &&
+      state.spaces.some((space) => space.id === state.activeSpaceId && space.windowIds.includes(tab.windowId))
+    );
+  }
+  observeWanted(state: ProductWorkspace, presentationReady = true) {
+    const visible = new Map<string, string>();
+    let changed = false;
+    for (const tab of state.tabs) {
+      const keepAlive = tab.idleKeepAliveState;
+      if (!this.wantedVisible(state, tab)) {
+        if (keepAlive && keepAlive.leftAt === undefined) {
+          keepAlive.leftAt = this.context.clock.wallMs();
+          changed = true;
+        }
+        continue;
+      }
+      const pageKey = normalizedUsagePage(tab.url);
+      if (pageKey) visible.set(tab.id, pageKey);
+      if (!presentationReady) continue;
+      if (keepAlive?.leftAt !== undefined && !tab.idleKeepAliveOutcome) {
+        tab.idleKeepAliveOutcome = {
+          enabledAt: keepAlive.enabledAt,
+          eligibleSince: keepAlive.eligibleSince ?? keepAlive.leftAt,
+          leftAt: keepAlive.leftAt,
+          outcome: 'survived',
+          at: this.context.clock.wallMs(),
+          reason: 'statistics',
+        };
+        changed = true;
+      }
+      if (tab.idleKeepAliveOutcome && tab.idleKeepAliveOutcome.returnedAt === undefined) {
+        tab.idleKeepAliveOutcome.returnedAt = this.context.clock.wallMs();
+        changed = true;
+      }
+      if (tab.idleKeepAliveState?.eligibleSince !== undefined) {
+        delete tab.idleKeepAliveState.eligibleSince;
+        changed = true;
+      }
+      if (keepAlive?.leftAt !== undefined) {
+        delete keepAlive.leftAt;
+        changed = true;
+      }
+    }
+    this.context.store.reclaim.observeWanted(state.tenantId, visible);
+    if (changed) this.services.operations.saveWorkspace(state);
+  }
+
+  observeReclaimed(tab: ProductTab, current: BackgroundView | undefined) {
+    const record = tab.idleKeepAliveOutcome;
+    if (
+      !record ||
+      record.outcome === 'stopped' ||
+      record.returnedAt !== undefined ||
+      (current?.actual !== 1 && current?.actual !== 2)
+    )
+      return false;
+    const outcome = current.actual === 1 ? 'frozen' : 'discarded';
+    if (record.outcome === outcome) return false;
+    record.outcome = outcome;
+    record.at = this.context.clock.wallMs();
+    return true;
+  }
+
+  private automaticStopEligible(tenant: string, state: ProductWorkspace, immediate: boolean) {
+    const runtime = this.context.tenants.get(tenant);
+    const node = this.nodeFor(tenant);
+    const now = this.context.clock.wallMs();
+    const eligible = state.tabs
+      .filter((tab) => tab.idleKeepAlive)
+      .map((tab) =>
+        tab.idleKeepAliveState?.eligibleSince === undefined
+          ? undefined
+          : Math.min(
+              Math.max(0, now - tab.idleKeepAliveState.eligibleSince),
+              this.context.clock.monotonicMs() -
+                (this.sessionEligibility.get(tenant)?.since ?? this.context.clock.monotonicMs()),
+            ),
+      );
+    if (immediate) return !eligible.some((duration) => keepAliveBlocksStop(duration, this.exhausted(node)));
+    return shouldStopSession(
+      this.context.store.reclaim.absences(tenant),
+      this.context.clock.monotonicMs() - runtime.viewerAbsentSince,
+      node?.metrics.underPressure() ?? false,
+      eligible,
+      this.exhausted(node),
+    );
+  }
 
   private needsRelief(node: NodeLink) {
     const sample = node.metrics.latest();
@@ -28,7 +142,7 @@ export class UncertainRecovery {
       return false;
     if (node.reliefRequestedAt !== undefined && sample.at > node.reliefRequestedAt)
       node.reliefRequestedAt = undefined;
-    return !node.metrics.relieved() || node.reliefRequestedAt !== undefined;
+    return !node.metrics.relieved() || node.reliefRequestedAt !== undefined || this.exhausted(node);
   }
   relieve(): Promise<void> {
     const jobs: Promise<void>[] = [];
@@ -51,7 +165,13 @@ export class UncertainRecovery {
         this.relief.delete(node.nodeId);
         continue;
       }
-      if (!state && !node.metrics.underPressure() && node.reliefRequestedAt === undefined) continue;
+      if (
+        !state &&
+        !node.metrics.underPressure() &&
+        node.reliefRequestedAt === undefined &&
+        !this.exhausted(node)
+      )
+        continue;
       if (!state) {
         state = {};
         this.relief.set(node.nodeId, state);
@@ -84,46 +204,36 @@ export class UncertainRecovery {
       .activeTenants(node.nodeId)
       .map((tenant) => this.context.tenants.get(tenant))
       .filter(
-        (runtime) =>
-          !runtime.viewer &&
-          this.context.clock.monotonicMs() - runtime.viewerAbsentSince >= 60000 &&
-          this.context.store.workspaces.workspace(runtime.tenantId).settings.browser.memorySaverEnabled,
+        (runtime) => !runtime.viewer && this.context.clock.monotonicMs() - runtime.viewerAbsentSince >= 60000,
       )
       .sort((a, b) => a.viewerAbsentSince - b.viewerAbsentSince || a.tenantId.localeCompare(b.tenantId));
     for (const runtime of candidates) {
       if (!this.needsRelief(node)) return;
-      const stopped = await this.context.tenants.serial(runtime.tenantId, async () => {
-        if (!this.context.endpoint.isPlacedOn(runtime.tenantId, node.nodeId)) return false;
-        const snapshot = await this.context.endpoint.snapshot(runtime.tenantId);
-        if (!this.needsRelief(node)) return false;
-        return this.stop(runtime.tenantId, snapshot, false, reason);
-      });
+      const stopped = await this.context.tenants
+        .serial(runtime.tenantId, async () => {
+          if (!this.context.endpoint.isPlacedOn(runtime.tenantId, node.nodeId)) return false;
+          const snapshot = await this.context.endpoint.snapshot(runtime.tenantId);
+          if (!this.needsRelief(node)) return false;
+          return this.stop(runtime.tenantId, snapshot, false, reason);
+        })
+        .catch((err) => {
+          log.warn('stop.candidate_failed', { tenant: runtime.tenantId, nodeId: node.nodeId, err });
+          return false;
+        });
       if (stopped) {
         state.waitingAfter = Date.now();
         return;
       }
     }
   }
-  // An administrator may stop at once; automatic stops also need Memory Saver and idle time.
-  stopBlocker(
-    tenant: string,
-    snapshot: EndpointSnapshot,
-    immediate: boolean,
-    relief = false,
-  ): string | undefined {
+  private nativeStopBlocker(tenant: string, snapshot: EndpointSnapshot): string | undefined {
     const runtime = this.context.tenants.get(tenant);
     const blockers = snapshot.stopBlockers;
+    const state = this.context.store.workspaces.workspace(tenant);
     if (this.context.endpoint.placement.peek(tenant)?.runState !== 'running') return '会话未运行';
     if (runtime.viewer) return '用户在线';
-    if (this.context.store.workspaces.workspace(tenant).tabs.some((tab) => tab.signIn))
-      return '正在登录学习账号';
+    if (state.tabs.some((tab) => tab.signIn)) return '正在登录学习账号';
     if (!blockers) return '节点未报告停止条件';
-    if (
-      !immediate &&
-      (!this.context.store.workspaces.workspace(tenant).settings.browser.memorySaverEnabled ||
-        this.context.clock.monotonicMs() - runtime.viewerAbsentSince < (relief ? 60000 : 600000))
-    )
-      return '未到停止时间';
     if (
       this.context.store.operations
         .pendingOperations(tenant)
@@ -142,6 +252,23 @@ export class UncertainRecovery {
     )
       return '会话状态尚未稳定';
   }
+  stopBlocker(tenant: string, snapshot: EndpointSnapshot, immediate: boolean): string | undefined {
+    const blocker = this.nativeStopBlocker(tenant, snapshot);
+    if (blocker) {
+      this.sessionEligibility.delete(tenant);
+      return blocker;
+    }
+    const runtime = this.context.tenants.get(tenant);
+    const now = this.context.clock.monotonicMs();
+    const previous = this.sessionEligibility.get(tenant);
+    const since =
+      previous && previous.absence === runtime.viewerAbsentSince && now - previous.observedAt <= 15000
+        ? previous.since
+        : now;
+    this.sessionEligibility.set(tenant, { since, observedAt: now, absence: runtime.viewerAbsentSince });
+    if (!this.automaticStopEligible(tenant, this.context.store.workspaces.workspace(tenant), immediate))
+      return '未到停止时间';
+  }
   async stop(
     tenant: string,
     snapshot: EndpointSnapshot,
@@ -151,10 +278,16 @@ export class UncertainRecovery {
     const relief = reason !== 'idle';
     const placement = this.context.endpoint.placement.peek(tenant);
     const node = placement && this.context.endpoint.nodes.get(placement.nodeId);
+    const blocker = this.stopBlocker(tenant, snapshot, immediate);
+    if (blocker) {
+      if (immediate) throw new RemoteKitError('conflict', blocker);
+      return false;
+    }
     if (
       node &&
       !immediate &&
       !relief &&
+      !this.exhausted(node) &&
       (this.relief.has(node.nodeId) || node.reliefRequestedAt !== undefined || node.metrics.underPressure())
     )
       return false;
@@ -162,11 +295,7 @@ export class UncertainRecovery {
       if (immediate) throw new RemoteKitError('conflict', '节点正在停止其他会话');
       return false;
     }
-    const blocker = this.stopBlocker(tenant, snapshot, immediate, relief);
-    if (blocker) {
-      if (immediate) throw new RemoteKitError('conflict', blocker);
-      return false;
-    }
+    const exhaustion = this.exhausted(node);
     const sample = node?.metrics.latest();
     const predicted = node?.metrics.predicted();
     this.stoppingNodes.add(placement!.nodeId);
@@ -175,6 +304,27 @@ export class UncertainRecovery {
     } finally {
       this.stoppingNodes.delete(placement!.nodeId);
     }
+    if (node) delete node.allocationFailedAt;
+    const state = this.context.store.workspaces.workspace(tenant);
+    for (const tab of state.tabs) {
+      if (!tab.idleKeepAlive || !tab.idleKeepAliveState) continue;
+      tab.idleKeepAliveOutcome = {
+        enabledAt: tab.idleKeepAliveState.enabledAt,
+        eligibleSince: tab.idleKeepAliveState.eligibleSince ?? this.context.clock.wallMs(),
+        leftAt:
+          tab.idleKeepAliveState.leftAt ??
+          tab.idleKeepAliveState.eligibleSince ??
+          this.context.clock.wallMs(),
+        outcome: 'stopped',
+        at: this.context.clock.wallMs(),
+        reason: exhaustion
+          ? 'exhaustion'
+          : relief || node?.metrics.underPressure()
+            ? 'pressure'
+            : 'statistics',
+      };
+    }
+    this.services.operations.saveWorkspace(state);
     log.info('stop.auto', {
       tenant,
       node: placement!.nodeId,
@@ -191,6 +341,23 @@ export class UncertainRecovery {
     runtime.resetEndpoint();
     for (const tab of state.tabs)
       if (!isLocalTab(tab)) {
+        if (tab.idleKeepAliveState && tab.idleKeepAliveOutcome?.outcome !== 'stopped') {
+          tab.idleKeepAliveOutcome = {
+            enabledAt: tab.idleKeepAliveState.enabledAt,
+            eligibleSince: tab.idleKeepAliveState.eligibleSince ?? this.context.clock.wallMs(),
+            leftAt:
+              tab.idleKeepAliveState.leftAt ??
+              tab.idleKeepAliveState.eligibleSince ??
+              this.context.clock.wallMs(),
+            outcome: 'stopped',
+            at: this.context.clock.wallMs(),
+            reason: this.exhausted(this.nodeFor(tenant))
+              ? 'exhaustion'
+              : this.nodeFor(tenant)?.metrics.underPressure()
+                ? 'pressure'
+                : 'statistics',
+          };
+        }
         tab.residency = 'discarded';
         tab.restoring = false;
       }
@@ -451,21 +618,53 @@ export class UncertainRecovery {
   ) {
     const tenant = state.tenantId,
       key = tenant + '/' + tab.webviewId;
-    const action = this.context.tenants
-      .get(tenant)
-      .lifecycle.background.action(
-        key,
-        state.settings.browser.memorySaverEnabled,
-        visible,
-        isLocalTab(tab) ||
-          !!tab.signIn ||
-          (!!tab.popup && tab.popup.status !== 'adopted') ||
-          state.pendingClose?.id === tab.id ||
-          state.pendingWindowCloseId === tab.windowId,
-        current,
-        browserIncarnation,
-        this.context.endpoint.placement.underPressure(tenant),
-      );
+    const node = this.nodeFor(tenant);
+    const exhaustion = this.exhausted(node);
+    const protectedByProduct =
+      isLocalTab(tab) ||
+      !!tab.signIn ||
+      (!!tab.popup && tab.popup.status !== 'adopted') ||
+      state.pendingClose?.id === tab.id ||
+      state.pendingWindowCloseId === tab.windowId;
+    const observation: ReclaimObservation = {
+      visible,
+      protectedByProduct,
+      current,
+      browserIncarnation,
+      underPressure: node?.metrics.underPressure(),
+      dwellFactor: dwellFactor(normalizedUsagePage(tab.url), this.context.store.reclaim.dwell(tenant)),
+      idleKeepAlive: tab.idleKeepAlive,
+      exhaustion,
+    };
+    if (tab.idleKeepAliveState) {
+      const record = tab.idleKeepAliveState;
+      const eligible = backgroundEligible(observation);
+      let changed = false;
+      if (eligible && record.eligibleSince === undefined) {
+        record.eligibleSince = this.context.clock.wallMs();
+        tab.idleKeepAliveOutcome = {
+          enabledAt: record.enabledAt,
+          eligibleSince: record.eligibleSince,
+          leftAt: record.leftAt ?? record.eligibleSince,
+          outcome: 'survived',
+          at: record.eligibleSince,
+          reason: 'statistics',
+        };
+        changed = true;
+      } else if (
+        !eligible &&
+        !visible &&
+        record.eligibleSince !== undefined &&
+        current?.actual !== 1 &&
+        current?.actual !== 2
+      ) {
+        delete record.eligibleSince;
+        changed = true;
+      }
+      if (!visible && this.observeReclaimed(tab, current)) changed = true;
+      if (changed) this.services.operations.saveWorkspace(state);
+    }
+    const action = this.context.tenants.get(tenant).lifecycle.background.action(key, observation);
     if (!action) return;
     const attempt = this.context.tenants.get(tenant).lifecycle.transitions.get(key);
     if (attempt?.action === action && this.context.clock.monotonicMs() - attempt.at <= 12000) return;
@@ -474,6 +673,10 @@ export class UncertainRecovery {
       action,
       requireRunning: true,
     });
+    if (tab.idleKeepAliveOutcome && exhaustion) {
+      tab.idleKeepAliveOutcome.reason = 'exhaustion';
+      this.services.operations.saveWorkspace(state);
+    }
     this.context.tenants
       .get(tenant)
       .lifecycle.transitions.set(key, { action, at: this.context.clock.monotonicMs() });
@@ -496,36 +699,48 @@ type BackgroundView = {
   pageRequests?: { pending?: unknown[] };
 };
 
-export interface MemoryObservation {
+export interface ReclaimObservation {
   underPressure?: boolean;
-  enabled: boolean;
+  dwellFactor?: number;
+  idleKeepAlive?: boolean;
+  exhaustion?: boolean;
   visible: boolean;
   protectedByProduct: boolean;
   current?: BackgroundView;
   browserIncarnation: unknown;
 }
+function backgroundCandidate(observation: ReclaimObservation) {
+  const { visible, protectedByProduct, current } = observation;
+  return (
+    !visible &&
+    !protectedByProduct &&
+    !!current &&
+    current.visible === false &&
+    !current.audible &&
+    !current.captured &&
+    !current.pending_close &&
+    !current.recovery?.pending &&
+    !current.pageRequests?.pending?.length &&
+    current.close_state !== 'closing' &&
+    (current.actual === 0 || current.actual === 1)
+  );
+}
+export function backgroundEligible(observation: ReclaimObservation) {
+  return (
+    backgroundCandidate(observation) &&
+    observation.current?.pending !== true &&
+    observation.current?.canDiscard === true
+  );
+}
 type Accounting = { eligibleMs: number; observedAt: number; freezeRequested: boolean; identity: string };
-type MemoryAction = 'freeze' | 'discard';
-function advanceMemory(
+type ReclaimAction = 'freeze' | 'discard';
+function advanceReclaim(
   entry: Accounting | undefined,
-  observation: MemoryObservation,
+  observation: ReclaimObservation,
   now: number,
-): { entry?: Accounting; action: MemoryAction | null } {
-  const { enabled, visible, protectedByProduct, current, browserIncarnation } = observation;
-  if (
-    !enabled ||
-    visible ||
-    protectedByProduct ||
-    !current ||
-    current.visible !== false ||
-    current.audible ||
-    current.captured ||
-    current.pending_close ||
-    current.recovery?.pending ||
-    current.pageRequests?.pending?.length ||
-    current.close_state === 'closing' ||
-    (current.actual !== 0 && current.actual !== 1)
-  )
+): { entry?: Accounting; action: ReclaimAction | null } {
+  const { current, browserIncarnation } = observation;
+  if (!backgroundCandidate(observation) || !current || (observation.idleKeepAlive && !observation.exhaustion))
     return { action: null };
   const identity = JSON.stringify([browserIncarnation, current.instance]);
   if (entry && (entry.identity !== identity || now - entry.observedAt > 15000)) entry = undefined;
@@ -542,22 +757,26 @@ function advanceMemory(
     : { eligibleMs: 0, observedAt: now, freezeRequested: false, identity };
   return {
     entry: next,
-    action:
-      next.eligibleMs >= (observation.underPressure ? 30000 : 120000)
+    action: observation.exhaustion
+      ? 'discard'
+      : next.eligibleMs >=
+          tabReclaimDelays(observation.dwellFactor ?? 1, !!observation.underPressure).discardMs
         ? 'discard'
-        : current.actual === 0 && next.eligibleMs >= (observation.underPressure ? 10000 : 30000)
+        : current.actual === 0 &&
+            next.eligibleMs >=
+              tabReclaimDelays(observation.dwellFactor ?? 1, !!observation.underPressure).freezeMs
           ? 'freeze'
           : null,
   };
 }
-export class MemorySaver {
+export class BackgroundReclaim {
   private accounting?: Accounting;
   constructor(private readonly clock: Clock = systemClock) {}
-  next(observation: MemoryObservation, now: number): MemoryAction | null {
-    return advanceMemory(this.accounting, observation, now).action;
+  next(observation: ReclaimObservation, now: number): ReclaimAction | null {
+    return advanceReclaim(this.accounting, observation, now).action;
   }
-  observe(observation: MemoryObservation): MemoryAction | null {
-    const next = advanceMemory(this.accounting, observation, this.clock.monotonicMs());
+  observe(observation: ReclaimObservation): ReclaimAction | null {
+    const next = advanceReclaim(this.accounting, observation, this.clock.monotonicMs());
     this.accounting = next.entry;
     return next.action;
   }
@@ -565,8 +784,8 @@ export class MemorySaver {
     if (this.accounting) this.accounting = { ...this.accounting, freezeRequested: true };
   }
 }
-export class MemorySaverViews {
-  private readonly views = new Map<string, MemorySaver>();
+export class BackgroundReclaimViews {
+  private readonly views = new Map<string, BackgroundReclaim>();
   constructor(private readonly clock: Clock = systemClock) {}
   clear() {
     this.views.clear();
@@ -582,21 +801,13 @@ export class MemorySaverViews {
   freezeRequested(key: string) {
     this.views.get(key)?.freezeRequested();
   }
-  action(
-    key: string,
-    enabled: boolean,
-    visible: boolean,
-    protectedByProduct: boolean,
-    current: BackgroundView | undefined,
-    browserIncarnation: unknown,
-    underPressure = false,
-  ) {
+  action(key: string, observation: ReclaimObservation) {
     let view = this.views.get(key);
     if (!view) {
-      view = new MemorySaver(this.clock);
+      view = new BackgroundReclaim(this.clock);
       this.views.set(key, view);
     }
-    return view.observe({ enabled, visible, protectedByProduct, current, browserIncarnation, underPressure });
+    return view.observe(observation);
   }
 }
 

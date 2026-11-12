@@ -37,6 +37,7 @@ export class Reconciler {
     });
   }
   async tick() {
+    this.context.store.reclaim.tick();
     const stopping = this.context.store.db
       .prepare('SELECT tenant FROM session_placements WHERE pending_commit IS NOT NULL')
       .all() as { tenant: string }[];
@@ -123,6 +124,7 @@ export class Reconciler {
   }
   async reconcileProduct(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
+    this.services.lifecycle.observeWanted(this.context.store.workspaces.workspace(tenant), false);
     if (this.context.endpoint.placement.peek(tenant)?.pendingCommit) {
       void this.reconcileStop(tenant).catch((err) => log.warn('reconciler.stop_failed', { tenant, err }));
       runtime.lastErrorKey = 'stopping';
@@ -294,6 +296,7 @@ export class Reconciler {
         }
         if (Number.isInteger(current.actual) && current.actual >= 0 && current.actual <= 3)
           t.residency = (['live', 'frozen', 'discarded', 'unloaded'] as const)[current.actual];
+        this.services.lifecycle.observeReclaimed(t, current);
         t.restoring =
           !t.lifecycleRecoveryError && (recovering || (!!current.pending && current.desired === 0));
       }
@@ -346,14 +349,8 @@ export class Reconciler {
         throw new RemoteKitError('unavailable', 'Browser已离线，页面保留并等待恢复');
       const viewer = runtime.viewer,
         viewport = viewer?.viewport ?? runtime.lastViewport;
-      const wanted = (t: ProductTab) =>
-        !isLocalTab(t) &&
-        !viewer?.security?.locked &&
-        !!viewer?.viewport?.windows.some((w) => w.windowId === t.windowId && w.visible) &&
-        state.windows.some((w) => w.id === t.windowId && w.activeTabId === t.id) &&
-        state.spaces.some(
-          (space) => space.id === state.activeSpaceId && space.windowIds.includes(t.windowId),
-        );
+      this.services.lifecycle.observeWanted(state);
+      const wanted = (tab: ProductTab) => this.services.lifecycle.wantedVisible(state, tab);
       const ordered = [...state.tabs]
         .filter((t) => !isLocalTab(t))
         .sort((a, b) => Number(wanted(a)) - Number(wanted(b)));
@@ -506,6 +503,7 @@ export class Reconciler {
   }
   async observeOffline(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
+    this.services.lifecycle.observeWanted(this.context.store.workspaces.workspace(tenant), false);
     if (this.context.endpoint.placement.peek(tenant)?.pendingCommit) {
       void this.reconcileStop(tenant).catch((err) => log.warn('reconciler.stop_failed', { tenant, err }));
       return;

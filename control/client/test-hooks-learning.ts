@@ -178,6 +178,7 @@ export function installLearningMock() {
           {
             id: 'mock-sign-in',
             windowId: fake.state.workspace.windows[0].id,
+            idleKeepAlive: false,
             webviewId: 'signin-view',
             signIn: provider,
             kind: 'remote',

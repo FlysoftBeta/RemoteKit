@@ -5,7 +5,7 @@ import { createApplication } from '../server/application';
 import { ControlDatabase } from '../server/persistence/database';
 import { emptyWorkspace } from '../server/persistence/workspaces';
 import { applyCommand } from '../server/workspace/commands';
-import { MemorySaver, type MemoryObservation } from '../server/workspace/lifecycle';
+import { BackgroundReclaim, type ReclaimObservation } from '../server/workspace/lifecycle';
 import { TestClock, accountsFor, testGateway } from './server-fixture';
 
 test('workspace planning is deterministic and leaves its input unchanged', () => {
@@ -43,11 +43,10 @@ test('workspace planning is deterministic and leaves its input unchanged', () =>
   ]);
 });
 
-test('memory saver advances through public observations and pure next decisions with an injected clock', () => {
+test('background reclaim advances through public observations and pure next decisions with an injected clock', () => {
   const clock = new TestClock();
-  const saver = new MemorySaver(clock);
-  const observation: MemoryObservation = {
-    enabled: true,
+  const saver = new BackgroundReclaim(clock);
+  const observation: ReclaimObservation = {
     visible: false,
     protectedByProduct: false,
     browserIncarnation: 'browser',

@@ -36,8 +36,9 @@ type Props = {
   context?: FailureContext;
   presentation?: Presentation;
   since?: number;
+  onDismiss?: () => void;
 };
-export function FailureNote({ error, context, presentation, since }: Props) {
+export function FailureNote({ error, context, presentation, since, onDismiss }: Props) {
   const failure = useMemo(
     () =>
       presentation ??
@@ -85,6 +86,11 @@ export function FailureNote({ error, context, presentation, since }: Props) {
       role={failure.class === 'C' ? 'alert' : 'status'}
     >
       {recovering && !timing.calm && <span className="failure-spinner" aria-hidden />}
+      {onDismiss && (
+        <button type="button" className="failure-dismiss" aria-label="关闭通知" onClick={onDismiss}>
+          ×
+        </button>
+      )}
       <div className="failure-content">
         <span>{recovering && timing.long ? (failure.longText ?? failure.text) : failure.text}</span>
         {failure.class === 'C' && failure.errorId && <ErrorId id={failure.errorId} />}
@@ -105,10 +111,10 @@ export function FailureNote({ error, context, presentation, since }: Props) {
   );
 }
 
-export function SurfaceState({ live = false, ...props }: Props & { live?: boolean }) {
+export function SurfaceState({ live = false, onDismiss, ...props }: Props & { live?: boolean }) {
   return (
     <div className={`failure-surface${live ? ' failure-surface-live' : ''}`}>
-      <FailureNote {...props} />
+      <FailureNote {...props} onDismiss={onDismiss} />
     </div>
   );
 }
