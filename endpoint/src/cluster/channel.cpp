@@ -49,7 +49,8 @@ class BufferedCarrier : public Carrier {
         if (!message)
           break;
         std::lock_guard lock(mutex_);
-        if (queue_.size() >= 256 || queued_ + message.value().size() > 16 * kMaxCiphertext)
+        if (queue_.size() >= limits::queuedMessages ||
+            queued_ + message.value().size() > 16 * kMaxCiphertext)
           break;
         queued_ += message.value().size();
         queue_.push_back(std::move(message).value());
@@ -401,7 +402,7 @@ class EncryptedChannel final : public Channel {
       }
       std::lock_guard lock(mutex_);
       size_t size = message.bytes.size() + message.json.dump().size();
-      if (queue_.size() >= 256 || queued_ + size > 16 * kMaxPlaintext)
+      if (queue_.size() >= limits::queuedMessages || queued_ + size > 16 * kMaxPlaintext)
         break;
       queued_ += size;
       queue_.push_back(std::move(message));

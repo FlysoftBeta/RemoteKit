@@ -155,6 +155,25 @@ test('Session faults back off on attaches and reset after healthy running', () =
   assert.equal(faults.get({ ...target, placementEpoch: 2 }), undefined);
 });
 
+test('management disconnect interrupts the Session fault healthy-running reset window', () => {
+  let now = 0;
+  const faults = new SessionFaults(() => now);
+  const target = { tenantId: 'tenant', sessionId: 'a'.repeat(32), placementEpoch: 1 };
+  faults.fault(target, 'first');
+  now = 60_000;
+  assert.equal(faults.attach(target), true);
+  faults.observe(target, true);
+  now += 500_000;
+  faults.disconnected();
+  now += 100_000;
+  faults.observe(target, true);
+  faults.fault(target, 'second');
+  now += 60_000;
+  assert.equal(faults.attach(target), false);
+  now += 60_000;
+  assert.equal(faults.attach(target), true);
+});
+
 import { encodeJson } from '../server/cluster/frames';
 import { observedSession } from './coordination-fixture';
 import { validateSessionObserved } from '../server/endpoint/coordination';
@@ -270,4 +289,68 @@ test('persisted coordination, operation, workspace, library and clipboard counte
     store.reclaim.close();
     store.db.close();
   }
+});
+
+import { validateNodeDesired } from '../server/endpoint/coordination';
+
+test('desired collection counts accept each contract boundary and reject one more', () => {
+  for (const field of ['views', 'sites', 'fileRequests'] as const) {
+    const value = desired();
+    const count = coordinationLimits[field];
+    const set = (size: number) => {
+      if (field === 'views')
+        value.views = Array.from({ length: size }, (_, index) => ({
+          ...desired().views[0],
+          viewId: String(index + 1),
+        }));
+      if (field === 'sites')
+        value.sitePreferences.sites = Object.fromEntries(
+          Array.from({ length: size }, (_, index) => [`https://site${index}.test`, { tabletUa: true }]),
+        );
+      if (field === 'fileRequests')
+        value.authorization.files.requests = Array.from({ length: size }, (_, index) => ({
+          id: `request${index}`,
+          binding: { browserIncarnation: 'browser', view: '1', instance: '1', document: '1', request: '1' },
+        }));
+    };
+    set(count);
+    validateDesired(value);
+    set(count + 1);
+    assert.throws(() => validateDesired(value));
+  }
+  const node = {
+    method: 'node.desired' as const,
+    connectionEpoch: 'connection',
+    revision: '1',
+    sessions: Array.from({ length: coordinationLimits.sessions }, (_, index) => ({
+      tenantId: `tenant${index}`,
+      sessionId: index.toString(16).padStart(32, '0'),
+      placementEpoch: 1,
+      dataState: 'dirty' as const,
+    })),
+  };
+  validateNodeDesired(node);
+  node.sessions.push({ tenantId: 'extra', sessionId: 'f'.repeat(32), placementEpoch: 1, dataState: 'dirty' });
+  assert.throws(() => validateNodeDesired(node));
+});
+
+test('configuration and whole desired JSON bounds include the exact encoded boundary', () => {
+  const value = desired();
+  value.views[0].url = '';
+  const { clipboard, ...configuration } = value;
+  value.views[0].url = 'x'.repeat(
+    coordinationLimits.configurationBytes - Buffer.byteLength(JSON.stringify(configuration)),
+  );
+  validateDesired(value);
+  value.views[0].url += 'x';
+  assert.throws(() => validateDesired(value));
+  value.views[0].url = value.views[0].url.slice(1);
+  value.clipboard.value.text = 'x'.repeat(coordinationLimits.textBytes);
+  value.clipboard.value.html = 'x'.repeat(coordinationLimits.htmlBytes);
+  const excess = Buffer.byteLength(JSON.stringify(value)) - coordinationLimits.documentBytes;
+  value.clipboard.value.html = value.clipboard.value.html.slice(excess);
+  assert.equal(Buffer.byteLength(JSON.stringify(value)), coordinationLimits.documentBytes);
+  validateDesired(value);
+  value.clipboard.value.html += 'x';
+  assert.throws(() => validateDesired(value));
 });

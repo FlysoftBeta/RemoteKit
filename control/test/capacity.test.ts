@@ -9,6 +9,7 @@ import { Placement } from '../server/cluster/placement';
 import type { NodeLimits } from '../server/config';
 import { endpointDefaults, testNode } from './node-fixture';
 import { EndpointGateway } from '../server/endpoint/gateway';
+import { coordinationLimits } from '../server/endpoint/coordination';
 import type { EndpointSnapshot } from '../server/endpoint/types';
 import { ControlDatabase } from '../server/persistence/database';
 import { emptyWorkspace } from '../server/persistence/workspaces';
@@ -161,6 +162,25 @@ test('configured caps remain hard, including placements newer than the metrics',
       h.nodes.get('alpha')!.metrics.record(fakeMetrics(overrides));
       assert.throws(() => h.placement.resolve('second'), { code: 'unavailable' });
     }
+  } finally {
+    h.close();
+  }
+});
+
+test('fencing document capacity includes stopped placements and permits reopening an existing placement', () => {
+  const h = cluster({ maxSessions: null });
+  try {
+    h.nodes.get('beta')!.diskDraining = true;
+    for (let index = 0; index < coordinationLimits.sessions; index++) {
+      const tenant = `tenant-${index}`;
+      assert.equal(h.placement.resolve(tenant).nodeId, 'alpha');
+      h.store.db
+        .prepare("UPDATE session_placements SET run_state='stopped',data_state='clean' WHERE tenant=?")
+        .run(tenant);
+    }
+    assert.equal(h.nodes.fencing('alpha').length, coordinationLimits.sessions);
+    assert.throws(() => h.placement.resolve('one-more'), { code: 'unavailable', reason: 'no_eligible_node' });
+    assert.equal(h.placement.resolve('tenant-0').nodeId, 'alpha');
   } finally {
     h.close();
   }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "protocol/control.h"
+#include "protocol/limits.hpp"
 #include "util/common.hpp"
 #include "util/error.hpp"
 
@@ -23,7 +24,7 @@ inline bool ValidSignInEvent(const Json& event) {
       !event.value("webviewId", Json()).is_string() || !event.value("result", Json()).is_object())
     return false;
   const auto& result = event.at("result");
-  if (result.dump().size() > protocol::kMaxSignInResultBytes)
+  if (result.dump().size() > limits::signInBytes)
     return false;
   const bool changyan = event.value("provider", Json()) == "changyan";
   const bool xinjiaoyu = event.value("provider", Json()) == "xinjiaoyu";

@@ -1,8 +1,9 @@
 import {
   canonical,
   validateSessionEvent,
+  validateNodeDesired,
   validateSessionObserved,
-  counter,
+  coordinationLimits,
   type OneShotRequest,
   type SessionObserved,
   type SessionEvent,
@@ -157,7 +158,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   private fenceRevision = 0n;
   readonly observations = new Map<string, SessionObserved>();
   readonly faults = new SessionFaults();
-  private faultSession(target: SessionTarget, cause: unknown) {
+  faultSession(target: SessionTarget, cause: unknown) {
     if (this.faults.get(target)) return;
     const error = this.faults.fault(target, cause);
     this.observations.delete(target.tenantId);
@@ -206,12 +207,14 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       .catch(() => {})
       .then(async () => {
         if (this.current !== connection) throw new RemoteKitError('unavailable', 'Node connection changed');
-        await this.exchange({
-          method: 'node.desired',
+        const document = {
+          method: 'node.desired' as const,
           connectionEpoch: connection.epoch,
           revision,
           sessions,
-        });
+        };
+        validateNodeDesired(document);
+        await this.exchange(document);
       });
     this.coordination = pending;
     void pending.catch(() => {
@@ -220,7 +223,15 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     return pending;
   }
   publish(message: object): Promise<any> {
-    return this.coordinate().then(() => this.exchange(message));
+    return this.coordinate().then(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          void this.exchange(message, undefined, resolve).catch((error) => {
+            reject(error);
+            this.registry.emit('publication.failed', { nodeId: this.nodeId, message, error });
+          });
+        }),
+    );
   }
   async invoke(message: OneShotRequest, timeoutMs?: number): Promise<any> {
     await this.coordinate();
@@ -359,7 +370,10 @@ export class NodeLink extends EventEmitter implements EndpointLink {
           connection.carrier.close();
         }
       };
-      if (this.incoming >= 256 || connection.carrier.bufferedAmount > 2 * MAX_JSON) {
+      if (
+        this.incoming >= coordinationLimits.pendingRequests ||
+        connection.carrier.bufferedAmount > 2 * MAX_JSON
+      ) {
         respond({ ok: false, error: { code: 'busy', message: 'Too many node requests' } });
         return;
       }
@@ -457,10 +471,15 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       typeof message.ok !== 'boolean' ||
       (pending.opId && message.opId !== pending.opId) ||
       (message.ok === true
-        ? !Object.prototype.hasOwnProperty.call(message, 'result')
+        ? !Object.prototype.hasOwnProperty.call(message, 'result') ||
+          (!!pending.target &&
+            (!message.result || typeof message.result !== 'object' || Array.isArray(message.result)))
         : !parseWireError(message.error));
     if (invalidReply) {
-      if (!pending.target) throw new Error('Invalid node reply');
+      if (!pending.target) {
+        pending.reject(new RemoteKitError('outcome_unknown', 'Invalid node reply'));
+        throw new Error('Invalid node reply');
+      }
       const placed = this.registry
         .fencing(this.nodeId)
         .find((value) => value.tenantId === pending.target!.tenantId);
@@ -470,7 +489,9 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         placed.placementEpoch === pending.target.placementEpoch
       )
         this.faultSession(placed, new Error('Invalid Session RPC reply'));
-      pending.reject(new RemoteKitError('unavailable', 'Invalid Session RPC reply'));
+      pending.reject(
+        this.faults.get(pending.target) ?? new RemoteKitError('unavailable', 'Invalid Session RPC reply'),
+      );
       return;
     }
     if (pending.target && pending.method !== 'session.desired' && this.faults.get(pending.target)) {
@@ -541,11 +562,14 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       timeoutMs,
     );
   }
-  private exchange(envelope: object, timeoutMs?: number): Promise<any> {
+  private exchange(envelope: object, timeoutMs?: number, delivered?: () => void): Promise<any> {
     const connection = this.current;
     if (this.stopped || !connection)
       return Promise.reject(new RemoteKitError('unavailable', '节点离线', { detail: 'Node is offline' }));
-    if (this.pending.size >= 256 || connection.carrier.bufferedAmount > 2 * MAX_JSON)
+    if (
+      this.pending.size >= coordinationLimits.pendingRequests ||
+      connection.carrier.bufferedAmount > 2 * MAX_JSON
+    )
       return Promise.reject(new RemoteKitError('busy', '节点请求繁忙'));
     const id = randomUUID();
     let message: Buffer;
@@ -601,6 +625,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       try {
         void connection.carrier.send(encrypted).then(() => {
           pending.delivered = true;
+          delivered?.();
         }, failed);
       } catch {
         failed();
@@ -610,6 +635,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   disconnect(connection: Connection) {
     if (this.current !== connection) return;
     this.current = undefined;
+    this.faults.disconnected();
     log.warn('node.offline', { nodeId: this.nodeId });
     this.state = { state: 'offline' };
     if (this.healthySince !== undefined && Date.now() - this.healthySince >= 60_000) this.launchFailures = 0;
@@ -914,6 +940,7 @@ export class NodeRegistry extends EventEmitter {
   stop() {
     if (this.stopped) return;
     this.stopped = true;
+    this.emit('stopped');
     for (const link of this.links.values()) link.stop();
     for (const carrier of this.carriers) carrier.close();
     this.sockets.close();

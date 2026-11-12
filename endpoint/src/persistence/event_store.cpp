@@ -85,8 +85,9 @@ Result<Json> EventStore::Append(const std::string& type,
   const auto encoded = document.dump();
   if (!coordination::EventBodyFits(type, body)) {
     Error error{ErrorCode::kLimitExceeded, "Session event exceeds bound"};
+    error.error_id = NewErrorId();
     LogError(LogLevel::kError, "session.event_dropped", error, {{"type", type}});
-    return error;
+    return Json{{"dropped", true}};
   }
   Json event;
   auto written = db_.Write([&]() -> Result<void> {

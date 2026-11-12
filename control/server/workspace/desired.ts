@@ -1,7 +1,7 @@
 import { isLocalTab } from '../../shared/product';
 import { RemoteKitError } from '../../shared/errors';
 import type { DomainContext, DomainServices } from '../application';
-import type { DesiredView, SessionDesired } from '../endpoint/coordination';
+import { coordinationLimits, type DesiredView, type SessionDesired } from '../endpoint/coordination';
 import { sitePayload } from './site-policy';
 
 export function compileDesired(
@@ -77,7 +77,7 @@ export function compileDesired(
   const clipboard = user && context.store.clipboards.latest(user.id);
   const files = unlocked
     ? (runtime.pageRequests.files ?? [])
-        .slice(0, 64)
+        .slice(0, coordinationLimits.fileRequests)
         .map((request) => ({ id: request.id, binding: request.binding }))
     : [];
   const desired: Omit<SessionDesired, 'revision'> = {

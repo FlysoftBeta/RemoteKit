@@ -312,9 +312,11 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
   observation["seq"] =
       std::to_string(observation_sequence_.fetch_add(1, std::memory_order_relaxed) + 1);
   if (!coordination::ObservationFits(observation)) {
-    if (!observation_oversize_)
-      LogError(LogLevel::kError, "session.observation_dropped",
-               Error{ErrorCode::kLimitExceeded, "Session observation exceeds bound"}, target_);
+    if (!observation_oversize_) {
+      Error error{ErrorCode::kLimitExceeded, "Session observation exceeds bound"};
+      error.error_id = NewErrorId();
+      LogError(LogLevel::kError, "session.observation_dropped", error, target_);
+    }
     observation_oversize_ = true;
     return;
   }

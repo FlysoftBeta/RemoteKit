@@ -52,6 +52,18 @@ int main(int argc, char** argv) {
       Require(Hex(wire) == v["messages"][i]["ciphertext"].get<std::string>());
       Require(Take((i % 2 == 0 ? rr : ir).Decrypt(wire)) == payload);
     }
+    Noise bound_init(Role::kInitiator, init_key, KeyHex(v["init_remote_static"])),
+        bound_resp(Role::kResponder, resp_key);
+    Bytes boundary(remotekit::limits::handshakeBytes - 96, 42);
+    const auto bound_wire = Take(bound_init.Write(boundary));
+    Require(bound_wire.size() == remotekit::limits::handshakeBytes);
+    Require(Take(bound_resp.Read(bound_wire)) == boundary);
+    Bytes reply_boundary(remotekit::limits::handshakeBytes - 48, 7);
+    Require(Take(bound_init.Read(Take(bound_resp.Write(reply_boundary)))) == reply_boundary);
+    Noise over_init(Role::kInitiator, init_key, KeyHex(v["init_remote_static"])),
+        over_resp(Role::kResponder, resp_key);
+    Require(!over_init.Write(Bytes(boundary.size() + 1)));
+    Require(!over_resp.Read(Bytes(remotekit::limits::handshakeBytes + 1)));
     return 0;
   } catch (const std::exception& e) {
     std::cerr << e.what() << '\n';

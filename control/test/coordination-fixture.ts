@@ -177,3 +177,9 @@ export function installDesiredSource(gateway: EndpointGateway) {
     return document;
   });
 }
+
+export async function publishAndObserve(gateway: EndpointGateway, tenant: string) {
+  const desired = await gateway.published(tenant);
+  await gateway.waitObserved(tenant, (value) => BigInt(value.observedRevision) >= BigInt(desired.revision));
+  return desired;
+}

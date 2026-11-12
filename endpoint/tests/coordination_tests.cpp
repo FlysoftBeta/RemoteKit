@@ -42,6 +42,43 @@ int main(int argc, char** argv) {
     Check(coordination::ObservationFits(observation), "observation bound accepted");
     observation["padding"] = observation["padding"].get<std::string>() + "x";
     Check(!coordination::ObservationFits(observation), "observation overflow rejected");
+    for (const auto* kind : {"views", "sites", "files"}) {
+      auto boundary = desired;
+      const size_t bound = std::string_view(kind) == "views"   ? limits::views
+                           : std::string_view(kind) == "sites" ? limits::sites
+                                                               : limits::fileRequests;
+      auto set = [&](size_t count) {
+        boundary["views"] = desired["views"];
+        boundary["sitePreferences"]["sites"] = Json::object();
+        boundary["authorization"]["files"]["requests"] = Json::array();
+        if (std::string_view(kind) == "views") {
+          boundary["views"] = Json::array();
+          for (size_t index = 0; index < count; ++index) {
+            auto view = desired["views"][0];
+            view["viewId"] = std::to_string(index + 1);
+            boundary["views"].push_back(view);
+          }
+        } else if (std::string_view(kind) == "sites") {
+          for (size_t index = 0; index < count; ++index)
+            boundary["sitePreferences"]["sites"]["https://site" + std::to_string(index) + ".test"] =
+                {{"tabletUa", true}};
+        } else {
+          for (size_t index = 0; index < count; ++index)
+            boundary["authorization"]["files"]["requests"].push_back(
+                {{"id", "request" + std::to_string(index)},
+                 {"binding",
+                  {{"browserIncarnation", "browser"},
+                   {"view", "1"},
+                   {"instance", "1"},
+                   {"document", "1"},
+                   {"request", "1"}}}});
+        }
+      };
+      set(bound);
+      Check(bool(coordination::ValidateDesired(boundary)), "collection bound accepted");
+      set(bound + 1);
+      Check(!coordination::ValidateDesired(boundary), "collection overflow rejected");
+    }
     auto invalid = desired;
     invalid["commit"] = "commit";
     Check(!coordination::ValidateDesired(invalid), "running commit rejected");
@@ -78,6 +115,20 @@ int main(int argc, char** argv) {
     Check(bool(coordination::ValidateNodeDesired(node)), "fencing list");
     node["sessions"].push_back(node["sessions"][0]);
     Check(!coordination::ValidateNodeDesired(node), "duplicate fence rejected");
+    node["sessions"] = Json::array();
+    for (size_t index = 0; index < limits::sessions; ++index) {
+      const auto suffix = std::to_string(index);
+      node["sessions"].push_back({{"tenantId", "tenant" + suffix},
+                                  {"sessionId", std::string(32 - suffix.size(), '0') + suffix},
+                                  {"placementEpoch", 1},
+                                  {"dataState", "dirty"}});
+    }
+    Check(bool(coordination::ValidateNodeDesired(node)), "session count bound accepted");
+    node["sessions"].push_back({{"tenantId", "extra"},
+                                {"sessionId", std::string(32, 'f')},
+                                {"placementEpoch", 1},
+                                {"dataState", "dirty"}});
+    Check(!coordination::ValidateNodeDesired(node), "session count overflow rejected");
     RpcResults results;
     Json request{{"method", "view.navigate"},
                  {"opId", "operation"},

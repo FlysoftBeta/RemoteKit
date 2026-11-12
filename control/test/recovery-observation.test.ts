@@ -5,6 +5,7 @@ import { accountsFor } from './server-fixture';
 import { requestViewer } from './server-fixture';
 import { testGateway } from './server-fixture';
 import test from 'node:test';
+import { publishAndObserve } from './coordination-fixture';
 import assert from 'node:assert/strict';
 import { ControlDatabase } from '../server/persistence/database';
 import { createApplication, type DomainServices } from '../server/application';
@@ -81,7 +82,7 @@ async function fixture() {
   return { store, endpoint, control, tenant, tab };
 }
 
-test('pending recovery preserves product URL/title/history and desired visibility until complete', async () => {
+test('pending recovery preserves product URL/title/history while withholding native visibility until complete', async () => {
   const { store, endpoint, control, tenant, tab } = await fixture();
   try {
     await requestViewer(control, tenant, 'lease', 'viewport', {
@@ -97,13 +98,15 @@ test('pending recovery preserves product URL/title/history and desired visibilit
         },
       ],
     });
+    await publishAndObserve(control.endpoint, tenant);
+    await control.reconciler.reconcileProduct(tenant);
     let current = store.workspaces.workspace(tenant).tabs[0];
     assert.equal(current.url, 'https://saved.test/history');
     assert.equal(current.title, 'Saved title');
     assert.equal(current.canGoBack, true);
     assert.equal(current.canGoForward, true);
     assert.equal(current.restoring, true);
-    assert.equal(endpoint.desiredVisible, true);
+    assert.equal(endpoint.desiredVisible, false);
     assert.equal(endpoint.view.visible, false);
     assert.equal(endpoint.view.recovery.pending, true);
     const count = endpoint.configured.length;

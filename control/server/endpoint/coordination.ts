@@ -323,6 +323,16 @@ export function canonical(value: unknown): string {
   };
   return JSON.stringify(ordered(value));
 }
+export function validateNodeDesired(value: NodeDesired): void {
+  const targets = value.sessions;
+  if (
+    !Array.isArray(targets) ||
+    targets.length > coordinationLimits.sessions ||
+    new Set(targets.map((target) => target.tenantId)).size !== targets.length ||
+    new Set(targets.map((target) => target.sessionId)).size !== targets.length
+  )
+    throw new RemoteKitError('limit_exceeded', 'Invalid node fencing list');
+}
 export function validateDesired(value: SessionDesired): void {
   const invalid = (condition: boolean, field: string) => {
     if (condition) throw new RemoteKitError('invalid_request', `Invalid desired ${field}`);
@@ -356,7 +366,9 @@ export function validateDesired(value: SessionDesired): void {
   invalid(!['running', 'stopped'].includes(value.run), 'run');
   invalid(
     value.commit !== null &&
-      (value.run === 'running' || !value.commit || Buffer.byteLength(value.commit) > 128),
+      (value.run === 'running' ||
+        !value.commit ||
+        Buffer.byteLength(value.commit) > coordinationLimits.identityBytes),
     'commit',
   );
   invalid(!/^[A-Za-z0-9+/]{43}=$/.test(value.profileKey), 'profileKey');

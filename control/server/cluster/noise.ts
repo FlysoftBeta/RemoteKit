@@ -154,7 +154,7 @@ export class NoiseHandshake {
     this.check(true);
     try {
       const overhead = this.step === 0 ? 96 : 48;
-      if (payload.length + overhead > 65535) throw new Error('Noise handshake too large');
+      if (payload.length + overhead > limits.handshakeBytes) throw new Error('Noise handshake too large');
       this.mixHash(this.ephemeralPublic);
       const parts = [this.ephemeralPublic];
       if (this.step === 0) {
@@ -179,7 +179,7 @@ export class NoiseHandshake {
   readMessage(message: Buffer): Buffer {
     this.check(false);
     try {
-      if (message.length < (this.step === 0 ? 96 : 48) || message.length > 65535)
+      if (message.length < (this.step === 0 ? 96 : 48) || message.length > limits.handshakeBytes)
         throw new Error('Invalid Noise handshake size');
       this.remoteEphemeral = Buffer.from(message.subarray(0, 32));
       this.mixHash(this.remoteEphemeral);

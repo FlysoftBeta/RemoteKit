@@ -2,7 +2,7 @@ import type { DomainContext, DomainServices } from '../application';
 import type { SessionEvent } from '../endpoint/coordination';
 import type { DownloadEvent } from '../endpoint/types';
 import { log } from '../log';
-import { toRemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 
 export class SessionEvents {
   private readonly queues = new Map<string, Promise<void>>();
@@ -44,13 +44,26 @@ export class SessionEvents {
       placed.sessionId !== event.sessionId ||
       placed.placementEpoch !== event.placementEpoch ||
       node?.state.state !== 'ready' ||
-      node.state.connectionEpoch !== event.connectionEpoch
+      node.state.connectionEpoch !== event.connectionEpoch ||
+      endpoint.sessionFault(event.tenantId)
     )
       return;
     const cursor = BigInt(store.coordination.cursor(event));
-    if (BigInt(event.seq) > cursor + 1n) return;
+    if (BigInt(event.seq) > cursor + 1n) {
+      endpoint.faultSession(
+        event.tenantId,
+        new RemoteKitError('invalid_request', 'Session event sequence has a gap'),
+      );
+      return;
+    }
     if (BigInt(event.seq) > cursor) {
-      const disposition = store.coordination.receive(event);
+      let disposition: string | null;
+      try {
+        disposition = store.coordination.receive(event);
+      } catch (error) {
+        endpoint.faultSession(event.tenantId, error);
+        return;
+      }
       const settle = (value: string) => store.coordination.settle(event, value);
       if (disposition === null) {
         switch (event.type) {

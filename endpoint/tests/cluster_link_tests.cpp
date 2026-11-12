@@ -278,17 +278,27 @@ void LimitsAndRetry() {
     Take(link.WaitReady());
     auto server = responder.At(0);
     std::atomic<bool> lost{false};
+    std::atomic<bool> received_boundary{false};
     link.OnDisconnect([&](uint64_t) { lost = true; });
-    for (int i = 0; i < 300 && !lost; ++i) {
-      if (!server->Send({{"id", i}}))
-        break;
+    link.OnPeers([&](const Json&) -> Result<void> {
+      received_boundary = true;
+      return {};
+    });
+    received_boundary = false;
+    for (size_t i = 0; i < limits::queuedMessages; ++i) {
+      Take(server->Send({{"id", i}}));
       // Fill the management queue without overflowing the carrier's own queue.
       std::this_thread::sleep_for(1ms);
     }
+    Take(server->Send({{"type", "node.peers"}, {"peers", Json::array()}}));
+    Await([&] { return received_boundary.load(); });
+    Check(!lost, "incoming queue accepts its exact bound");
+    Take(server->Send({{"id", limits::queuedMessages}}));
     Await([&] { return lost.load(); });
     Await([&] { return link.ExitCode() == 1; });
     Check(link.ExitCode() == 1, "bounded incoming queue fails local carrier");
     link.OnDisconnect({});
+    link.OnPeers({});
   }
 }
 void SupervisorEof() {
@@ -395,6 +405,35 @@ void RequestTimeout() {
             std::chrono::steady_clock::now() - started >= 20s,
         "20 second request timeout");
 }
+void PendingRequestLimit() {
+  Responder responder({Ready()});
+  ClusterLink link([&] { return responder.Connect(); }, true, "dev", std::string(32, 'a'),
+                   Validate);
+  Take(link.WaitReady());
+  auto server = responder.At(0);
+  std::vector<std::future<Result<Json>>> pending;
+  std::vector<std::jthread> workers;
+  std::vector<Json> sent;
+  for (size_t i = 0; i < limits::pendingRequests; ++i) {
+    std::promise<Result<Json>> reply;
+    pending.push_back(reply.get_future());
+    workers.emplace_back([&link, reply = std::move(reply)]() mutable {
+      reply.set_value(link.Request("test", Json::object()));
+    });
+  }
+  for (size_t i = 0; i < limits::pendingRequests; ++i)
+    sent.push_back(Take(server->Receive(5s)).json);
+  const auto excess = link.Request("test", Json::object());
+  Check(!excess && excess.error().code == ErrorCode::kBusy,
+        "request past the exact pending bound is rejected");
+  for (const auto& request : sent)
+    Take(server->Send({{"id", request["id"]},
+                       {"opId", request["opId"]},
+                       {"ok", true},
+                       {"result", Json::object()}}));
+  for (auto& request : pending)
+    Take(request.get());
+}
 }  // namespace
 int main() {
   try {
@@ -406,6 +445,7 @@ int main() {
     LimitsAndRetry();
     SupervisorEof();
     OutboundRequests();
+    PendingRequestLimit();
     RequestTimeout();
     return 0;
   } catch (const std::exception& error) {

@@ -12,7 +12,10 @@ interface FaultState {
 
 export class SessionFaults {
   private readonly states = new Map<string, FaultState>();
-  constructor(private readonly now = Date.now) {}
+  constructor(private readonly now = () => performance.now()) {}
+  disconnected() {
+    for (const state of this.states.values()) state.healthySince = undefined;
+  }
   private state(target: SessionTarget) {
     const state = this.states.get(target.tenantId);
     return state?.target === `${target.sessionId}:${target.placementEpoch}` ? state : undefined;

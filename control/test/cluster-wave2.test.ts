@@ -1,3 +1,4 @@
+import { publishAndObserve } from './coordination-fixture';
 import { installDesiredSource } from './coordination-fixture';
 import type { LibrarySnapshot } from '../shared/file-library';
 import { registerUser } from './server-fixture';
@@ -31,7 +32,7 @@ test('offline dirty copies wait until transfer restores a complete version and f
     const alpha = await h.connect('alpha');
     await h.connect('beta', 0.8);
     const user = await registerUser(h.store, 'dirty-owner', 'dirty-owner-password');
-    await h.gateway.published(user.tenantId);
+    await publishAndObserve(h.gateway, user.tenantId);
     const first = h.placement.peek(user.tenantId)!;
     await h.commit(alpha, user.tenantId, id(1));
     h.placement.commitCheckpoint(first, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 1234 });
@@ -61,7 +62,7 @@ test('running versions retain four checkpoints and restore the newest complete v
   try {
     const alpha = await h.connect('alpha');
     await h.connect('beta', 0.6);
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     const placed = h.placement.peek('tenant')!;
     for (let n = 1; n <= 6; n++) {
       await h.commit(alpha, 'tenant', id(n));
@@ -90,7 +91,7 @@ test('equal manifests at different snapshot times are distinct versions and repe
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(1));
     const placed = h.placement.peek('tenant')!;
     h.placement.commitCheckpoint(placed, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 1000 });
@@ -107,7 +108,7 @@ test('a version with a missing data chunk falls back even when its manifest is a
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     const placed = h.placement.peek('tenant')!;
     for (const n of [1, 2, 3]) await h.commit(alpha, 'tenant', id(n));
     h.placement.commitCheckpoint(placed, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 1000 });
@@ -128,7 +129,7 @@ test('online transfer stops and saves before changing placement and fencing the 
   try {
     const alpha = await h.connect('alpha');
     const beta = await h.connect('beta', 0.6);
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(1));
     const first = h.placement.peek('tenant')!;
     const moved = await h.gateway.transfer('tenant', 'beta');
@@ -160,7 +161,7 @@ test('observed running versions commit through the assigned actor and retain dir
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(1));
     alpha.observe('tenant', {
       browser: 'running',
@@ -188,8 +189,8 @@ test('offline transfer without a complete version starts from blank browser data
   try {
     const alpha = await h.connect('alpha');
     await h.connect('beta', 0.6);
-    await h.gateway.published('tenant');
-    await h.gateway.published('first');
+    await publishAndObserve(h.gateway, 'tenant');
+    await publishAndObserve(h.gateway, 'first');
     h.store.db.prepare("UPDATE session_placements SET node_id='alpha'").run();
     const before = h.placement.peek('tenant')!;
     const offline = once(h.nodes.get('alpha')!, 'offline');
@@ -219,7 +220,7 @@ test('claim refresh renews existing tenant claims without granting other IDs', a
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(1));
     h.store.db.prepare('UPDATE object_claims SET claimed_at=0').run();
     await alpha.request('object.claims.refresh', 'tenant', { ids: [id(1), id(2)] });
@@ -243,7 +244,7 @@ test('GC preserves claims for a durable pending commit without an in-flight stop
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(1));
     h.store.db.exec(
       'UPDATE objects SET created_at=0; UPDATE object_claims SET claimed_at=0; DELETE FROM object_gc',
@@ -270,7 +271,7 @@ test('node removal transfers every placement from the newest complete version', 
     const alpha = await h.connect('alpha');
     await h.connect('beta', 0.8);
     const user = await registerUser(h.store, 'node-dirty-user', 'node-dirty-password');
-    await h.gateway.published(user.tenantId);
+    await publishAndObserve(h.gateway, user.tenantId);
     const first = h.placement.peek(user.tenantId)!;
     await h.commit(alpha, user.tenantId, id(1));
     h.placement.commitCheckpoint(first, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 1234 });
@@ -300,7 +301,7 @@ test('observed shutdown commits once and stale placement evidence is ignored', a
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(1));
     const proof = {
       browser: 'stopped' as const,
@@ -341,7 +342,7 @@ test('desired publication waits for the initial observed fencing barrier', async
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     const offline = once(h.nodes.get('alpha')!, 'offline');
     alpha.close();
     await offline;
@@ -367,7 +368,7 @@ test('object commit batches are atomic, idempotent, bounded and repair replica r
   try {
     const alpha = await h.connect('alpha');
     const beta = await h.connect('beta', 0.9);
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     const objects = Array.from({ length: 1024 }, (_, i) => ({
       objectId: id(i + 1),
       size: 1,
@@ -424,7 +425,7 @@ test('a commit batch rolls back metadata and claims on conflict or quota failure
   const h = await harness(20);
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(1));
     const item = (n: number, size = 10) => ({
       objectId: id(n),
@@ -456,7 +457,7 @@ test('stopping placement authorizes checkpoint objects only on its assigned node
   try {
     const alpha = await h.connect('alpha');
     const beta = await h.connect('beta', 0.9);
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     const placement = h.placement.beginStop('tenant');
     assert.equal(h.gateway.isPlacedOn('tenant', 'alpha'), true);
     assert.equal(h.gateway.isPlacedOn('tenant', 'beta'), false);
@@ -474,7 +475,7 @@ test('pending commit survives disconnect and resumes from observed proof', async
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(1));
     const pending = h.placement.beginStop('tenant');
     const offline = once(h.nodes.get('alpha')!, 'offline');
@@ -502,7 +503,7 @@ test('pending commit survives disconnect and resumes from observed proof', async
         });
     };
     await h.connect('alpha', 0.1, alpha);
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await alpha.barrier();
     assert.equal(h.placement.peek('tenant')!.pendingCommit, null);
     assert.equal(h.placement.peek('tenant')!.checkpoint, id(1));
@@ -637,7 +638,7 @@ test('session events reach learning and acknowledge without interrupting the nod
       };
       client.on('request', listener);
     });
-    await h.gateway.published(account.tenantId);
+    await publishAndObserve(h.gateway, account.tenantId);
     client.event(account.tenantId, '1', 'view.signIn', {
       version: 1,
       webviewId: '1',
@@ -747,7 +748,7 @@ test('two nodes place by pressure, checkpoint, wake at epoch+1, fence reconnects
   try {
     const alpha = await h.connect('alpha', 0.2),
       beta = await h.connect('beta', 0.6);
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     const first = h.placement.peek('tenant')!;
     assert.equal(first.nodeId, 'alpha');
     const opening = alpha.requests.find((request) => request.method === 'session.desired')!;
@@ -796,7 +797,7 @@ test('two nodes place by pressure, checkpoint, wake at epoch+1, fence reconnects
     beta.publishMetrics();
     await Promise.all([alpha.barrier(), beta.barrier()]);
     h.placement.resolve('tenant');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     const awakened = h.placement.peek('tenant')!;
     assert.equal(awakened.nodeId, 'beta');
     assert.equal(awakened.placementEpoch, first.placementEpoch + 1);
@@ -872,7 +873,7 @@ test('object requests enforce ownership, idempotence, conflicts, quotas and the 
   try {
     const alpha = await h.connect('alpha'),
       beta = await h.connect('beta', 0.6);
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     const object = await h.commit(alpha, 'tenant', id(1), 20);
     const { id: objectId, tenantId, ...metadata } = object;
     await alpha.request('object.committed', tenantId, { objectId, ...metadata });
@@ -907,7 +908,7 @@ test('document derivations authorize the source and are shared across tenant cla
   try {
     const alpha = await h.connect('alpha');
     const beta = await h.connect('beta', 0.6);
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(801));
     const params = { id: id(801), kind: 'document' };
     assert.equal(await alpha.request('object.derivation', 'tenant', { params }), null);
@@ -933,7 +934,7 @@ test('document derivations authorize the source and are shared across tenant cla
       kind: 'document',
     });
     assert.deepEqual(await alpha.request('object.derivation', 'tenant', { params }), { id: id(802) });
-    await h.gateway.published('second');
+    await publishAndObserve(h.gateway, 'second');
     const second = h.client(h.placement.peek('second')!.nodeId)!;
     await h.commit(second, 'second', id(801));
     assert.deepEqual(await second.request('object.derivation', 'second', { params }), { id: id(802) });
@@ -956,7 +957,7 @@ test('pre-render chooses a source replica, authorizes only its operation and cre
   try {
     const alpha = await h.connect('alpha', 0.6);
     const beta = await h.connect('beta', 0.1);
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     const owner = h.client(h.placement.peek('tenant')!.nodeId)!;
     await h.commit(owner, 'tenant', id(811));
     h.store.db.prepare('DELETE FROM object_replicas WHERE id=?').run(id(811));
@@ -1014,7 +1015,7 @@ test('pre-render without a replica uses the least loaded ready node and logs fai
   try {
     const alpha = await h.connect('alpha', 0.6);
     const beta = await h.connect('beta', 0.1);
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(h.client(h.placement.peek('tenant')!.nodeId)!, 'tenant', id(821));
     h.store.db.prepare('DELETE FROM object_replicas WHERE id=?').run(id(821));
     beta.handler = (message) => {
@@ -1039,7 +1040,7 @@ test('inventory pages restore matching replicas, drop missing or corrupt copies 
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     const first = await h.commit(alpha, 'tenant', id(1)),
       missing = await h.commit(alpha, 'tenant', id(2));
     const corrupt = await h.commit(alpha, 'tenant', id(3));
@@ -1075,7 +1076,7 @@ test('GC follows library and selection references, derivatives and the latest fo
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     for (let n = 1; n <= 7; n++) await h.commit(alpha, 'tenant', id(n), 1, n === 2 ? id(1) : undefined);
     h.store.library.save('tenant', {
       revision: 0,
@@ -1153,7 +1154,7 @@ test('stop policy respects ten-minute viewer absence, every blocker and receipts
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     h.store.workspaces.writeWorkspace(emptyWorkspace('tenant'));
     const runtime = h.control.tenants.get('tenant');
     runtime.started = true;
@@ -1199,7 +1200,7 @@ test('disk pressure deletes cold copies, relocates replicas before deletion and 
   try {
     const alpha = await h.connect('alpha'),
       beta = await h.connect('beta', 0.6);
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(1), 200);
     alpha.metrics.disk.free = 50;
     alpha.publishMetrics();
@@ -1208,7 +1209,7 @@ test('disk pressure deletes cold copies, relocates replicas before deletion and 
     assert.ok(alpha.requests.some((request) => request.method === 'session.cold.delete'));
     assert.ok(beta.objects.has(id(1)));
     assert.equal(alpha.objects.has(id(1)), false);
-    await h.gateway.published('new-tenant');
+    await publishAndObserve(h.gateway, 'new-tenant');
     assert.equal(h.placement.peek('new-tenant')!.nodeId, 'beta');
     assert.equal(h.placement.peek('tenant')!.nodeId, 'alpha');
   } finally {
@@ -1230,7 +1231,7 @@ test('null limits reach nodes and automatic disk floors drain cold copies and re
     }
     await Promise.all([alpha.barrier(), beta.barrier()]);
     await h.control.objects.tick();
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(1), 200);
     alpha.metrics.disk.free = 4 * 1024 ** 3;
     alpha.publishMetrics();
@@ -1261,7 +1262,7 @@ test('replication limits each destination to four simultaneous fetches', async (
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     for (let n = 1; n <= 9; n++) await h.commit(alpha, 'tenant', id(n));
     const beta = new FakeNode();
     let active = 0,
@@ -1290,7 +1291,7 @@ test('checkpoint commit fences stale epochs and rejects incomplete object sets',
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     const placement = h.placement.peek('tenant')!;
     await h.commit(alpha, 'tenant', id(1));
     assert.throws(() => h.placement.commitCheckpoint(placement, id(2), [id(2)], 'dev'), { code: 'conflict' });
@@ -1451,7 +1452,7 @@ test('normal stop waits ten minutes and fails without committing a checkpoint af
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     h.store.workspaces.writeWorkspace(emptyWorkspace('tenant'));
     h.control.tenants.get('tenant').started = true;
     h.clock.advance(599999);
@@ -1478,7 +1479,7 @@ test('library imports require indexed object ids and deduplicated derivatives st
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     for (const n of [1, 2]) await h.commit(alpha, 'tenant', id(n));
     const thumb = await h.commit(alpha, 'tenant', id(3), 10, id(1));
     await alpha.request('object.committed', 'tenant', {
@@ -1532,7 +1533,7 @@ test('GC rechecks references after asynchronous deletes and checkpoints cannot a
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(1));
     await h.commit(alpha, 'tenant', id(2));
     h.store.db.exec(
@@ -1607,7 +1608,7 @@ test('cluster object keys persist and match every node while session opens carry
         alpha.helloReply[key],
         Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(0), domain, 32)).toString('base64'),
       );
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     const opened = alpha.requests.find((r) => r.method === 'session.desired')!;
     assert.ok(opened.profileKey);
     assert.equal(opened.objectKey, undefined);
@@ -1659,7 +1660,7 @@ test('streamed Control puts deduplicate across tenants, authorize references, ch
           origin: { kind: 'files', channel: 'upload', partitionId: null },
         }),
       );
-    await h.gateway.published('stranger');
+    await publishAndObserve(h.gateway, 'stranger');
     await assert.rejects(alpha.request('object.locate', 'stranger', { ids: [first.id] }), {
       code: 'forbidden',
     });
@@ -1740,7 +1741,7 @@ test('durable reference removal starts its own grace even without a GC tick whil
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     await h.commit(alpha, 'tenant', id(1));
     h.store.db.exec(
       'UPDATE objects SET created_at=0; UPDATE object_claims SET claimed_at=0; DELETE FROM object_gc',
@@ -1784,8 +1785,8 @@ test('a malformed Session event stops only its current placement and retains its
   const h = await harness();
   try {
     const client = await h.connect('alpha');
-    await h.gateway.published('first');
-    await h.gateway.published('second');
+    await publishAndObserve(h.gateway, 'first');
+    await publishAndObserve(h.gateway, 'second');
     const node = h.nodes.get('alpha')!;
     const faulted = once(h.nodes, 'session.fault');
     client.event('first', '1', 'clipboard.changed', {
@@ -1797,6 +1798,7 @@ test('a malformed Session event stops only its current placement and retains its
     });
     await faulted;
     await h.gateway.published('first');
+    await node.request('fixture.barrier', '');
     assert.equal(node.state.state, 'ready');
     assert.equal(client.sessions.get('first')!.run, 'stopped');
     assert.equal(client.sessions.get('first')!.commit, null);
@@ -1825,7 +1827,7 @@ test('offline lock and unlock queue desired state and navigation reports the ava
       { identity: 'test', valid: () => true },
       true,
     );
-    await h.gateway.published(user.tenantId);
+    await publishAndObserve(h.gateway, user.tenantId);
     const runtime = h.control.tenants.get(user.tenantId);
     const viewer = runtime.viewer!.security;
     runtime.activateRtc('peer', 'viewer');
@@ -1862,7 +1864,7 @@ test('chunk commits do no library recomputes and last replica loss refreshes onl
   const h = await harness(null);
   try {
     const alpha = await h.connect('alpha');
-    await h.gateway.published('tenant');
+    await publishAndObserve(h.gateway, 'tenant');
     for (let index = 0; index < 50; ++index) {
       const tenant = `online-${index}`;
       h.store.workspaces.writeWorkspace(emptyWorkspace(tenant));
@@ -1923,6 +1925,28 @@ test('chunk commits do no library recomputes and last replica loss refreshes onl
     await new Promise((resolve) => setTimeout(resolve, 275));
     assert.deepEqual(recomputed.sort(), ['online-19', 'online-2']);
     assert.equal(h.control.objects.available(id(1)), false);
+  } finally {
+    await h.close();
+  }
+});
+
+test('a malformed Session RPC reply faults its placement while the other tenant keeps running', async () => {
+  const h = await harness();
+  try {
+    const client = await h.connect('alpha');
+    await publishAndObserve(h.gateway, 'first');
+    await publishAndObserve(h.gateway, 'second');
+    client.handler = (message) =>
+      message.method === 'session.identity' ? 'bad result' : client.handle(message);
+    const faulted = once(h.nodes, 'session.fault');
+    await assert.rejects(h.gateway.identity('first'), { code: 'unavailable' });
+    await faulted;
+    await h.gateway.published('first');
+    await h.nodes.get('alpha')!.request('fixture.barrier', '');
+    assert.equal(client.sessions.get('first')!.run, 'stopped');
+    assert.equal(h.gateway.sessionFault('second'), undefined);
+    assert.equal(client.sessions.get('second')!.run, 'running');
+    assert.equal(h.nodes.get('alpha')!.state.state, 'ready');
   } finally {
     await h.close();
   }

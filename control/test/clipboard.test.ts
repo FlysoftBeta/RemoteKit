@@ -1,3 +1,4 @@
+import { publishAndObserve } from './coordination-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createApplication } from '../server/application';
@@ -105,18 +106,18 @@ test('desired documents seed and update the current clipboard', async () => {
   const control = createApplication(store, gateway);
   try {
     store.clipboards.record('one', { text: 'copy', html: '<p>copy</p>' });
-    await gateway.published('one');
+    await publishAndObserve(gateway, 'one');
     assert.deepEqual(requests[requests.length - 1]?.args.clipboard, {
       revision: '1',
       value: { text: 'copy', html: '<p>copy</p>' },
     });
-    await gateway.published('empty');
+    await publishAndObserve(gateway, 'empty');
     assert.deepEqual(requests[requests.length - 1]?.args.clipboard, {
       revision: '0',
       value: { text: '', html: '' },
     });
     store.clipboards.record('one', { text: 'new', html: '' });
-    await gateway.published('one');
+    await publishAndObserve(gateway, 'one');
     assert.deepEqual(requests[requests.length - 1]?.args.clipboard, {
       revision: '2',
       value: { text: 'new', html: '' },

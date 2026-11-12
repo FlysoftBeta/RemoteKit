@@ -27,19 +27,24 @@ Json Recovery() {
           {"chunks", Json::array({{{"data", "YWJj"}, {"bytes", 3}}})}};
 }
 Json Download() {
-  return {{"records",
-           Json::array(
-               {{{"incarnation", "browser"},
-                 {"eventId", "download-event"},
-                 {"download",
-                  {{"guid", "guid"},
-                   {"eventId", "browser-event"},
-                   {"fileReference", "downloads/a"},
-                   {"name", "a"},
-                   {"mimeType", "text/plain"},
-                   {"size", "3"},
-                   {"origin", ""}}},
-                 {"result", {{"type", "download.imported"}, {"eventId", "download-event"}}}}})}};
+  return {{"records", Json::array({{{"incarnation", "browser"},
+                                    {"eventId", "download-event"},
+                                    {"download",
+                                     {{"guid", "guid"},
+                                      {"eventId", "browser-event"},
+                                      {"fileReference", "downloads/a"},
+                                      {"name", "a"},
+                                      {"mimeType", "text/plain"},
+                                      {"size", "3"},
+                                      {"origin", ""}}},
+                                    {"result",
+                                     {{"type", "download.imported"},
+                                      {"eventId", "download-event"},
+                                      {"name", "a"},
+                                      {"origin", ""},
+                                      {"mimeType", "text/plain"},
+                                      {"assetId", std::string(64, 'a')},
+                                      {"size", "3"}}}}})}};
 }
 Json Selection(const std::string& state = "pending") {
   return {
@@ -218,7 +223,7 @@ void EventTransactions(const fs::path& path) {
   Check(Take(events.Append("view.closed", {{"viewId", "1"}, {"reason", "script"}}, "first",
                            "browser")) == first,
         "event insertion deduplicates source identity");
-  Check(!events.Append("view.closed", {{"viewId", "2"}}, "first", "browser"),
+  Check(!events.Append("view.closed", {{"viewId", "2"}, {"reason", "script"}}, "first", "browser"),
         "event identity conflict");
   Take(events.Append(
       "clipboard.changed",
@@ -258,6 +263,12 @@ void EventTransactions(const fs::path& path) {
   Check(std::stoull(next.at("seq").get<std::string>()) >
             std::stoull(retained.at(0).at("seq").get<std::string>()),
         "durable stream sequence advances across Endpoint and Browser restart");
+  const auto before_drop = Take(reopened.Events().State());
+  const auto dropped = Take(reopened.Events().Append(
+      "clipboard.changed", {{"text", std::string(1024 * 1024 + 1, 'x')}, {"html", ""}}, "oversize",
+      "new-browser"));
+  Check(dropped.value("dropped", false) && Take(reopened.Events().State()) == before_drop,
+        "oversize event is dropped without consuming a durable sequence");
   Check(Take(reopened.Events().State()).at("streamId") == rotated.at("streamId"),
         "process restart retains the durable event stream");
 }

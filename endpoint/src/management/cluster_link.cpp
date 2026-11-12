@@ -253,7 +253,8 @@ struct ClusterLink::Impl {
             }
             auto bytes = json.dump();
             std::lock_guard lock(mutex);
-            if (incoming.size() >= 256 || incoming_bytes + bytes.size() > kMaxQueuedBytes) {
+            if (incoming.size() >= limits::queuedMessages ||
+                incoming_bytes + bytes.size() > kMaxQueuedBytes) {
               protocol_error = true;
               break;
             }
@@ -389,7 +390,8 @@ bool ClusterLink::Queue(const Json& message, uint64_t generation, DeliveryFlag d
   std::lock_guard lock(impl_->mutex);
   if (!generation || generation != impl_->active || impl_->stopping || impl_->overload)
     return false;
-  if (bytes.size() > cluster::JsonLimit(message) || impl_->outgoing.size() >= 256 ||
+  if (bytes.size() > cluster::JsonLimit(message) ||
+      impl_->outgoing.size() >= limits::queuedMessages ||
       impl_->outgoing_bytes + bytes.size() > kMaxQueuedBytes) {
     impl_->overload = true;
     return false;
@@ -454,7 +456,7 @@ Result<Json> ClusterLink::RequestUntil(const std::string& name,
     std::lock_guard lock(impl_->mutex);
     if (!impl_->active || impl_->stopping || impl_->overload)
       return Error{ErrorCode::kUnavailable, "Control disconnected"};
-    if (impl_->pending.size() >= 256)
+    if (impl_->pending.size() >= limits::pendingRequests)
       return Error{ErrorCode::kBusy, "too many in-flight requests"};
     generation = impl_->active;
     impl_->pending.emplace(id, Impl::Pending{generation, {}});

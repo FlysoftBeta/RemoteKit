@@ -1,3 +1,4 @@
+import { publishAndObserve } from './coordination-fixture';
 import { installDesiredSource } from './coordination-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,6 +18,7 @@ import { FakeNode } from './fake-node';
 import { createApplication } from '../server/application';
 import { emptyWorkspace } from '../server/persistence/workspaces';
 import { log } from '../server/log';
+import { coordinationLimits } from '../server/endpoint/coordination';
 
 async function harness(overrides: Partial<RegistryOptions> = {}) {
   const key = randomBytes(32);
@@ -200,7 +202,7 @@ test('node request cap, timeout, offline certainty and ping/pong', async () => {
     node.send({ type: 'node.ping' });
     assert.equal((await pong)[0].message.type, 'node.pong');
     node.handler = () => undefined;
-    const requests = Array.from({ length: 256 }, () =>
+    const requests = Array.from({ length: coordinationLimits.pendingRequests }, () =>
       assert.rejects(link.request('test', 'one'), { code: 'outcome_unknown' }),
     );
     await assert.rejects(link.request('excess', 'one'), { code: 'busy' });
@@ -218,8 +220,8 @@ test('balanced placement publishes desired once per revision and fences reconnec
   try {
     const alpha = await h.connect(),
       beta = await h.connect({ nodeId: 'beta' });
-    await h.gateway.published('one');
-    await h.gateway.published('one');
+    await publishAndObserve(h.gateway, 'one');
+    await publishAndObserve(h.gateway, 'one');
     const documents = alpha.requests.filter((request) => request.method === 'session.desired');
     assert.equal(documents.length, 1);
     const first = h.placement.peek('one')!,
@@ -227,7 +229,7 @@ test('balanced placement publishes desired once per revision and fences reconnec
     assert.equal(Buffer.from(key, 'base64').length, 32);
     assert.equal(first.keyCiphertext.includes(key), false);
     assert.throws(() => h.store.atRestKey.open('other', first.keyCiphertext));
-    for (const tenant of ['two', 'three', 'four']) await h.gateway.published(tenant);
+    for (const tenant of ['two', 'three', 'four']) await publishAndObserve(h.gateway, tenant);
     assert.deepEqual(
       ['one', 'two', 'three', 'four'].map((tenant) => h.placement.peek(tenant)!.nodeId),
       ['alpha', 'beta', 'alpha', 'beta'],
@@ -240,7 +242,7 @@ test('balanced placement publishes desired once per revision and fences reconnec
     assert.equal(h.gateway.isReady('two'), true);
     const next = await h.connect({ incarnation: alpha.incarnation });
     await h.registry.get('alpha')!.request('fixture.barrier', '');
-    await h.gateway.published('one');
+    await publishAndObserve(h.gateway, 'one');
     const published = next.requests.find((request) => request.method === 'session.desired')!;
     assert.equal(published.sessionId, first.sessionId);
     assert.equal(published.profileKey, key);
@@ -275,7 +277,7 @@ test('Endpoint peer authentication failures cannot invalidate the Viewer Control
       observation.converged = false;
       observation.lastError = { code: 'unauthenticated', message: 'Peer identity not admitted' };
     };
-    await h.gateway.published('one');
+    await publishAndObserve(h.gateway, 'one');
     const observation = await h.gateway.waitObserved('one', (value) => !!value.lastError);
     assert.equal(observation.lastError?.code, 'forbidden');
     assert.equal(observation.lastError?.message, 'Peer identity not admitted');
@@ -288,7 +290,7 @@ test('stop and reopen on the same node and epoch accepts the new coordinator obs
   const h = await harness();
   try {
     const endpoint = await h.connect();
-    let desired = await h.gateway.published('returning');
+    let desired = await publishAndObserve(h.gateway, 'returning');
     h.gateway.setDesiredSource(() => desired);
     endpoint.desiredHandler = (_document, observation) => {
       observation.checkpoint = null;
@@ -296,7 +298,7 @@ test('stop and reopen on the same node and epoch accepts the new coordinator obs
     };
     const running = await h.gateway.waitObserved('returning', (value) => value.converged);
     desired = { ...desired, revision: '2', run: 'stopped', commit: 'stop-returning' };
-    await h.gateway.published('returning');
+    await publishAndObserve(h.gateway, 'returning');
     const stopped = await h.gateway.waitObserved(
       'returning',
       (value) => value.converged && value.observedRevision === '2' && value.browser === 'stopped',
@@ -304,7 +306,7 @@ test('stop and reopen on the same node and epoch accepts the new coordinator obs
     endpoint.sessions.delete('returning');
     endpoint.observations.delete('returning');
     desired = { ...desired, revision: '3', run: 'running', commit: null };
-    await h.gateway.published('returning');
+    await publishAndObserve(h.gateway, 'returning');
     const reopened = await h.gateway.waitObserved(
       'returning',
       (value) => value.converged && value.observedRevision === '3' && value.browser === 'running',
@@ -339,7 +341,7 @@ test('clipboard management events cross the encrypted link and reject stale node
     const alpha = await h.connect();
     const beta = await h.connect({ nodeId: 'beta' });
     h.store.clipboards.record('one', { text: 'seed', html: '' });
-    await h.gateway.published('one');
+    await publishAndObserve(h.gateway, 'one');
     assert.deepEqual(alpha.requests.find((request) => request.method === 'session.desired')?.clipboard, {
       revision: '1',
       value: { text: 'seed', html: '' },
@@ -446,7 +448,7 @@ test('node offline and process changes affect only placed tenants while a same-p
     await h.connect({ nodeId: 'beta' });
     for (const tenant of ['one', 'two']) {
       h.store.workspaces.writeWorkspace(emptyWorkspace(tenant));
-      await h.gateway.published(tenant);
+      await publishAndObserve(h.gateway, tenant);
     }
     const one = control.tenants.get('one');
     const two = control.tenants.get('two');
@@ -501,7 +503,7 @@ test('browser status reasons map once at the Endpoint boundary and keep uncertai
       ['browser_restarting', '浏览器正在恢复，请稍候…'],
       ['output_failed', '浏览器画面输出失败，请稍后重试'],
     ] as const) {
-      await h.gateway.published('one');
+      await publishAndObserve(h.gateway, 'one');
       node.observe('one', { lastError: { code: 'unavailable', reason, message: detail } });
       await node.barrier();
       await assert.rejects(h.gateway.snapshot('one'), { code: 'unavailable', message, detail });
@@ -532,7 +534,7 @@ test('fresh lifecycle decisions get new opIds while generation-bound retries ret
   const h = await harness();
   try {
     const node = await h.connect();
-    await h.gateway.published('one');
+    await publishAndObserve(h.gateway, 'one');
     for (let index = 0; index < 2; index++)
       await h.gateway.lifecycle('one', { viewId: '1', action: 'freeze' });
     const fresh = node.requests.filter((request) => request.method === 'view.lifecycle');
@@ -556,7 +558,7 @@ test('one publisher coalesces a burst and republishes placements on reconnect', 
   try {
     const alpha = await h.connect();
     for (let i = 0; i < 100; ++i) h.gateway.invalidate('one');
-    await h.gateway.published('one');
+    await publishAndObserve(h.gateway, 'one');
     assert.equal(alpha.requests.filter((request) => request.method === 'session.desired').length, 1);
     const offline = once(h.registry.get('alpha')!, 'offline');
     alpha.close();
@@ -574,7 +576,7 @@ test('Endpoint incarnation replacement accepts a fresh observation sequence and 
   const h = await harness();
   try {
     const first = await h.connect();
-    await h.gateway.published('one');
+    await publishAndObserve(h.gateway, 'one');
     const old = await h.gateway.waitObserved('one', (value) => value.browser === 'running');
     const replacement = await h.connect();
     const fresh = await h.gateway.waitObserved(

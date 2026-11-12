@@ -75,6 +75,16 @@ export class EndpointGateway {
       | 'newestComplete'
     >,
   ) {
+    nodes.on('stopped', () => this.setDesiredSource());
+    nodes.on(
+      'publication.failed',
+      ({ message, error }: { message: Partial<SessionDesired>; error: unknown }) => {
+        if (this.desiredSource && message.method === 'session.desired' && message.tenantId) {
+          this.sent.delete(message.tenantId);
+          this.publicationFailed(message.tenantId, error);
+        }
+      },
+    );
     nodes.on('ready', ({ nodeId }: { nodeId: string }) => {
       for (const target of nodes.fencing(nodeId)) this.invalidate(target.tenantId);
     });
@@ -123,14 +133,20 @@ export class EndpointGateway {
       }
     });
   }
+  faultSession(tenant: string, cause: unknown) {
+    const placed = this.placement.peek(tenant);
+    if (placed) this.nodes.get(placed.nodeId)?.faultSession({ ...placed, tenantId: tenant }, cause);
+  }
   sessionFault(tenant: string) {
     const placed = this.placement.peek(tenant);
     return placed && this.nodes.get(placed.nodeId)?.faults.get({ ...placed, tenantId: tenant });
   }
   attachViewer(tenant: string) {
     const placed = this.placement.peek(tenant);
-    if (placed && this.nodes.get(placed.nodeId)?.faults.attach({ ...placed, tenantId: tenant }))
+    if (placed && this.nodes.get(placed.nodeId)?.faults.attach({ ...placed, tenantId: tenant })) {
       this.forget(tenant);
+      this.invalidate(tenant);
+    }
   }
   setDesiredSource(source?: (tenant: string) => SessionDesired) {
     this.desiredSource = source;
@@ -206,23 +222,30 @@ export class EndpointGateway {
         return latest;
       })
       .catch((err) => {
-        this.stale.add(tenant);
-        if (this.isReady(tenant) && !this.publicationFailures.has(tenant)) {
-          this.publicationFailures.add(tenant);
-          log.warn('session.publication_failed', { tenant, err });
-        }
-        if (this.desiredSource && !this.retry) {
-          this.retry = setTimeout(() => {
-            this.retry = undefined;
-            for (const tenant of this.stale) void this.publishTenant(tenant);
-          }, 1000);
-          this.retry.unref();
-        }
+        if (this.desiredSource) this.publicationFailed(tenant, err);
         return undefined;
       })
-      .finally(() => this.publishing.delete(tenant));
+      .finally(() => {
+        this.publishing.delete(tenant);
+        if (this.desiredSource && !this.retry && this.stale.has(tenant) && this.isReady(tenant))
+          this.invalidate(tenant);
+      });
     this.publishing.set(tenant, work);
     return work;
+  }
+  private publicationFailed(tenant: string, err: unknown) {
+    this.stale.add(tenant);
+    if (this.isReady(tenant) && !this.publicationFailures.has(tenant)) {
+      this.publicationFailures.add(tenant);
+      log.warn('session.publication_failed', { tenant, err });
+    }
+    if (!this.retry) {
+      this.retry = setTimeout(() => {
+        this.retry = undefined;
+        for (const tenant of this.stale) void this.publishTenant(tenant);
+      }, 1000);
+      this.retry.unref();
+    }
   }
   async published(tenant: string, timeoutMs = 20000): Promise<SessionDesired> {
     this.invalidate(tenant);
@@ -250,17 +273,21 @@ export class EndpointGateway {
   ): Promise<SessionObserved> {
     const placed = this.placement.peek(tenant);
     const node = placed && this.nodes.get(placed.nodeId);
-    if (!node || node.state.state !== 'ready') throw this.unavailable(tenant);
+    if (!node || node.state.state !== 'ready' || this.sessionFault(tenant)) throw this.unavailable(tenant);
     const epoch = node.state.connectionEpoch;
     return new Promise((resolve, reject) => {
       const finish = (error?: unknown, value?: SessionObserved) => {
         clearTimeout(timer);
         node.off('session.observed', check);
         node.off('offline', offline);
+        this.nodes.off('session.fault', faulted);
         if (error) reject(error);
         else resolve(value!);
       };
-      const offline = () => finish(new RemoteKitError('unavailable', 'Session node disconnected'));
+      const offline = () => finish(this.unavailable(tenant));
+      const faulted = ({ target }: { target: { tenantId: string } }) => {
+        if (target.tenantId === tenant) finish(this.unavailable(tenant));
+      };
       const check = () => {
         const value = this.observation(tenant);
         if (value?.connectionEpoch === epoch && predicate(value)) finish(undefined, value);
@@ -271,6 +298,7 @@ export class EndpointGateway {
       );
       node.on('session.observed', check);
       node.on('offline', offline);
+      this.nodes.on('session.fault', faulted);
       check();
     });
   }
@@ -367,6 +395,8 @@ export class EndpointGateway {
   async stop(tenant: string): Promise<number> {
     const current = this.placement.peek(tenant);
     if (current?.runState === 'stopped' && current.dataState === 'clean') return current.checkpointId ?? 0;
+    const fault = this.sessionFault(tenant);
+    if (fault) throw fault;
     const placed = this.placement.beginStop(tenant);
     this.invalidate(tenant);
     const observed = await this.waitObserved(
@@ -418,7 +448,12 @@ export class EndpointGateway {
     if (!placed || placed.sessionId !== event.sessionId || placed.placementEpoch !== event.placementEpoch)
       return;
     const node = this.nodes.get(placed.nodeId);
-    if (node?.state.state !== 'ready' || node.state.connectionEpoch !== event.connectionEpoch) return;
+    if (
+      node?.state.state !== 'ready' ||
+      node.state.connectionEpoch !== event.connectionEpoch ||
+      this.sessionFault(event.tenantId)
+    )
+      return;
     await node.publish(event);
   }
   readLog(tenant: string, request: LogWindowRequest): Promise<LogWindow> {

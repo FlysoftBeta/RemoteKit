@@ -327,7 +327,7 @@ Key Noise::remote_public_key() const {
 Result<Bytes> Noise::Write(std::span<const uint8_t> payload) {
   auto& s = *impl_;
   if (s.failed || s.step != (s.role == Role::kInitiator ? 0 : 1) ||
-      payload.size() > 65535 - (s.step == 0 ? 96 : 48))
+      payload.size() > limits::handshakeBytes - (s.step == 0 ? 96 : 48))
     return Error{ErrorCode::kInvalidRequest, "invalid Noise handshake write"};
   try {
     s.MixHash(s.public_key);
@@ -353,7 +353,7 @@ Result<Bytes> Noise::Write(std::span<const uint8_t> payload) {
 Result<Bytes> Noise::Read(std::span<const uint8_t> message) {
   auto& s = *impl_;
   if (s.failed || s.step != (s.role == Role::kInitiator ? 1 : 0) ||
-      message.size() < (s.step == 0 ? 96 : 48) || message.size() > 65535) {
+      message.size() < (s.step == 0 ? 96 : 48) || message.size() > limits::handshakeBytes) {
     s.failed = true;
     return CryptoError();
   }

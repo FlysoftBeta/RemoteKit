@@ -1,5 +1,8 @@
 {
   "transportBytes": 4194304,
+  "handshakeBytes": 65535,
+  "pendingRequests": 256,
+  "queuedMessages": 256,
   "managementBytes": 1048576,
   "documentBytes": 4194303,
   "observationBytes": 4194303,

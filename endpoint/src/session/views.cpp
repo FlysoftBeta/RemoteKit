@@ -903,6 +903,15 @@ void ViewController::PollSignIn() {
     return;
   sign_in_acknowledged = Json::array();
   for (const auto& event : reply.value().value("events", Json::array())) {
+    if (event.is_object() && event.value("result", Json()).is_object() &&
+        event["result"].dump().size() > limits::signInBytes) {
+      Error error{ErrorCode::kLimitExceeded, "Sign-in result exceeds event bound"};
+      error.error_id = NewErrorId();
+      LogError(LogLevel::kError, "session.event_dropped", error, {{"type", "view.signIn"}});
+      if (event.value("eventId", Json()).is_string())
+        sign_in_acknowledged.push_back(event.at("eventId"));
+      continue;
+    }
     if (!ValidSignInEvent(event))
       continue;
     const auto view = event.at("webviewId").get<std::string>();

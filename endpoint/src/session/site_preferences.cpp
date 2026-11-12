@@ -5,6 +5,7 @@
 #include <set>
 #include <charconv>
 #include "session/site_preferences.hpp"
+#include "protocol/limits.hpp"
 namespace remotekit {
 namespace {
 bool SiteOrigin(const std::string& origin) {
@@ -125,7 +126,7 @@ bool SiteEntry(const std::string& origin, const Json& value) {
 }  // namespace
 Result<void> ValidateSitePreferences(const Json& value) {
   if (!value.is_object() || value.size() != 1 || !value.contains("sites") ||
-      !value["sites"].is_object() || value["sites"].size() > 4096)
+      !value["sites"].is_object() || value["sites"].size() > limits::sites)
     return Error{ErrorCode::kInvalidRequest, "invalid site preferences"};
   for (const auto& [origin, site] : value["sites"].items())
     if (!SiteEntry(origin, site))

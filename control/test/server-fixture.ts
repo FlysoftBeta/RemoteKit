@@ -155,22 +155,24 @@ export function testGateway(
     if (message.method === 'session.events.ack')
       return link.request(message.method, message.tenantId, message);
     documents.set(message.tenantId, message);
-    try {
-      await link.request('session.desired', message.tenantId, message);
-      if (BigInt(applied.get(message.tenantId)?.revision ?? '0') <= BigInt(message.revision)) {
-        failures.delete(message.tenantId);
-        applied.set(message.tenantId, message);
+    void (async () => {
+      try {
+        await link.request('session.desired', message.tenantId, message);
+        if (BigInt(applied.get(message.tenantId)?.revision ?? '0') <= BigInt(message.revision)) {
+          failures.delete(message.tenantId);
+          applied.set(message.tenantId, message);
+        }
+      } catch (error: any) {
+        if (documents.get(message.tenantId) === message)
+          failures.set(message.tenantId, {
+            code: error.code ?? 'internal',
+            message: error.message ?? String(error),
+          });
       }
-    } catch (error: any) {
-      if (documents.get(message.tenantId) === message)
-        failures.set(message.tenantId, {
-          code: error.code ?? 'internal',
-          message: error.message ?? String(error),
-        });
-    }
-    const observation = refresh(message.tenantId)!;
-    nodes.emit('session.observed', { nodeId: 'fixture', message: observation });
-    node.emit('session.observed', observation);
+      const observation = refresh(message.tenantId)!;
+      nodes.emit('session.observed', { nodeId: 'fixture', message: observation });
+      node.emit('session.observed', observation);
+    })();
     return { accepted: true, revision: message.revision };
   };
   node.invoke = async (request) => link.request(request.method, request.tenantId, request.params);

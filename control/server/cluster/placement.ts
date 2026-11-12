@@ -1,3 +1,4 @@
+import { coordinationLimits } from '../endpoint/coordination';
 import { diskFloor } from './disk';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
@@ -200,8 +201,10 @@ export class Placement {
           !node.diskDraining &&
           !this.nodes.isRemoved(node.nodeId) &&
           sample &&
-          (node.limits.maxSessions === null ||
-            Math.max(this.activeSessions(node.nodeId), sample.value.sessions) < node.limits.maxSessions) &&
+          this.nodes.fencing(node.nodeId).filter((target) => target.tenantId !== tenant).length <
+            coordinationLimits.sessions &&
+          Math.max(this.activeSessions(node.nodeId), sample.value.sessions) <
+            Math.min(node.limits.maxSessions ?? coordinationLimits.sessions, coordinationLimits.sessions) &&
           sample.value.disk.free >= diskFloor(node, sample) &&
           (node.limits.sessionMemoryBytes === null ||
             sample.value.memory.available >= node.limits.sessionMemoryBytes);

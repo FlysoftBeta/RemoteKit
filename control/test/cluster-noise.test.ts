@@ -3,6 +3,25 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { CipherState, MAX_TRANSPORT, NoiseHandshake, publicKey } from '../server/cluster/noise';
 import { decodeFrame, encodeBinary, encodeJson, encodeStdio, StdioDecoder } from '../server/cluster/frames';
+import limits from '../../protocol/limits.json';
+
+test('Noise handshake accepts its encoded boundary and rejects one byte past', () => {
+  const key = Buffer.alloc(32, 1);
+  const initiator = new NoiseHandshake('initiator', key, publicKey(key));
+  const responder = new NoiseHandshake('responder', key);
+  const payload = Buffer.alloc(limits.handshakeBytes - 96, 42);
+  const wire = initiator.writeMessage(payload);
+  assert.equal(wire.length, limits.handshakeBytes);
+  assert.deepEqual(responder.readMessage(wire), payload);
+  const reply = Buffer.alloc(limits.handshakeBytes - 48, 7);
+  assert.deepEqual(initiator.readMessage(responder.writeMessage(reply)), reply);
+  assert.throws(() =>
+    new NoiseHandshake('initiator', key, publicKey(key)).writeMessage(Buffer.alloc(payload.length + 1)),
+  );
+  assert.throws(() =>
+    new NoiseHandshake('responder', key).readMessage(Buffer.alloc(limits.handshakeBytes + 1)),
+  );
+});
 
 test('Noise matches cacophony handshake hash and every handshake/transport ciphertext', () => {
   const vector = JSON.parse(

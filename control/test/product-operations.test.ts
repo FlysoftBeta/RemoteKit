@@ -1,3 +1,4 @@
+import { publishAndObserve } from './coordination-fixture';
 import { observedProductAction, observedOperation } from './server-fixture';
 import { applyDesiredViews } from './coordination-fixture';
 import { registerUser } from './server-fixture';
@@ -229,6 +230,7 @@ for (const initial of ['start', 'remote'] as const) {
             (call) => call.method === 'view.navigation.ack' && call.args.operationId === op.operationId,
           ),
         );
+      await publishAndObserve(f.control.endpoint, f.tenant);
       assert.equal(view.visible, initial === 'remote');
       if (initial === 'start')
         assert.ok(
