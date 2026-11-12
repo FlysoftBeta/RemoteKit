@@ -19,3 +19,16 @@ inline remotekit::Json TestConfig() {
           {"peer", {{"listen", "127.0.0.1:0"}, {"address", "127.0.0.1:3101"}}},
           {"rtc", {{"ports", nullptr}, {"address", nullptr}}}};
 }
+
+inline remotekit::Json TestView(const std::string& id = "1",
+                                const std::string& url = "about:blank") {
+  return {{"viewId", id},
+          {"presence", "ensure"},
+          {"url", url},
+          {"width", 1440},
+          {"height", 900},
+          {"visible", false},
+          {"device", {{"mode", "desktop"}, {"deviceScaleFactor", 1}}},
+          {"occludedBottom", 0},
+          {"occlusionRevision", "0"}};
+}

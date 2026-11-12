@@ -1,4 +1,5 @@
 #include "objects/store.hpp"
+#include "persistence/strict_json.hpp"
 #include "objects/digest.hpp"
 #include "util/result_macros.hpp"
 #include <windows.h>
@@ -18,7 +19,7 @@ namespace {
 namespace fs = std::filesystem;
 using cluster::Bytes;
 Error Corrupt() {
-  return {ErrorCode::kInternal, "Corrupt local object"};
+  return CorruptRecord("Corrupt local object");
 }
 Error Io(DWORD code = GetLastError()) {
   return WithOsError(ErrorCode::kUnavailable, "object I/O failed", OsError::Kind::kWin32, code);
@@ -43,6 +44,19 @@ void Append(Bytes& bytes, std::string_view text) {
 void Append32(Bytes& bytes, uint32_t value) {
   const auto encoded = cluster::EncodeLength(value);
   bytes.insert(bytes.end(), encoded.begin(), encoded.end());
+}
+Bytes EncodeHeader(uint64_t size) {
+  const uint64_t count = size / kSegmentSize + (size % kSegmentSize != 0);
+  if (count > UINT32_MAX)
+    throw std::length_error("object too large");
+  Bytes header;
+  Append(header, "RKO2");
+  Append32(header, 2);
+  for (int i = 0; i < 8; ++i)
+    header.push_back(static_cast<uint8_t>(size >> (8 * i)));
+  Append32(header, kSegmentSize);
+  Append32(header, static_cast<uint32_t>(count));
+  return header;
 }
 struct Header {
   uint64_t size;
@@ -119,6 +133,25 @@ Result<Bytes> Crypt(bool encrypt,
   if (status < 0 || written != length)
     return Corrupt();
   return output;
+}
+Result<Bytes> EncodeSegment(const Keys& keys,
+                            const std::string& id,
+                            uint32_t index,
+                            uint32_t count,
+                            std::span<const uint8_t> bytes,
+                            Bytes& compressed) {
+  const auto stored =
+      ZSTD_compress(compressed.data(), compressed.size(), bytes.data(), bytes.size(), 3);
+  if (ZSTD_isError(stored))
+    return Error{ErrorCode::kInternal, "object compression failed"};
+  const bool compress = stored < bytes.size();
+  RK_ASSIGN_OR_RETURN(
+      ciphertext, Crypt(true, keys.object, id, index, count,
+                        compress ? std::span<const uint8_t>(compressed.data(), stored) : bytes));
+  Bytes encoded{static_cast<uint8_t>(compress)};
+  Append32(encoded, static_cast<uint32_t>(ciphertext.size()));
+  encoded.insert(encoded.end(), ciphertext.begin(), ciphertext.end());
+  return encoded;
 }
 Result<Bytes> Segment(std::istream& stream,
                       const Header& header,
@@ -241,26 +274,11 @@ Result<ObjectInfo> ObjectStore::WriteChunk(const Keys& keys,
   if (local.error().code != ErrorCode::kNotFound)
     return local.error();
   const auto start = std::chrono::steady_clock::now();
-  Bytes encoded;
-  Append(encoded, "RKO2");
-  Append32(encoded, 2);
-  for (int i = 0; i < 8; ++i)
-    encoded.push_back(static_cast<uint8_t>(uint64_t(bytes.size()) >> (i * 8)));
-  Append32(encoded, kSegmentSize);
-  Append32(encoded, bytes.empty() ? 0 : 1);
+  Bytes encoded = EncodeHeader(bytes.size());
   if (!bytes.empty()) {
     Bytes compressed(ZSTD_compressBound(bytes.size()));
-    const auto size =
-        ZSTD_compress(compressed.data(), compressed.size(), bytes.data(), bytes.size(), 3);
-    if (ZSTD_isError(size))
-      return Error{ErrorCode::kInternal, "object compression failed"};
-    const bool compress = size < bytes.size();
-    RK_ASSIGN_OR_RETURN(
-        ciphertext, Crypt(true, keys.object, id, 0, 1,
-                          compress ? std::span<const uint8_t>(compressed.data(), size) : bytes));
-    encoded.push_back(static_cast<uint8_t>(compress));
-    Append32(encoded, static_cast<uint32_t>(ciphertext.size()));
-    encoded.insert(encoded.end(), ciphertext.begin(), ciphertext.end());
+    RK_ASSIGN_OR_RETURN(segment, EncodeSegment(keys, id, 0, 1, bytes, compressed));
+    encoded.insert(encoded.end(), segment.begin(), segment.end());
   }
   const auto cpu_ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -333,13 +351,7 @@ Result<ObjectInfo> ObjectStore::Write(const Keys& keys, std::istream& input, con
   if (count64 > UINT32_MAX)
     return Error{ErrorCode::kLimitExceeded, "object too large"};
   const auto count = static_cast<uint32_t>(count64);
-  Bytes header;
-  Append(header, "RKO2");
-  Append32(header, 2);
-  for (int i = 0; i < 8; ++i)
-    header.push_back(static_cast<uint8_t>(size >> (8 * i)));
-  Append32(header, kSegmentSize);
-  Append32(header, count);
+  const auto header = EncodeHeader(size);
   output.write(reinterpret_cast<const char*>(header.data()), header.size());
   Bytes compressed(ZSTD_compressBound(kSegmentSize));
   for (uint32_t index = 0; index < count; ++index) {
@@ -351,19 +363,10 @@ Result<ObjectInfo> ObjectStore::Write(const Keys& keys, std::istream& input, con
     if (!ReadFile(copy.value, buffer.data(), static_cast<DWORD>(length), &read, nullptr) ||
         read != length)
       return Io();
-    const auto stored =
-        ZSTD_compress(compressed.data(), compressed.size(), buffer.data(), length, 3);
-    if (ZSTD_isError(stored))
-      return Error{ErrorCode::kInternal, "object compression failed"};
-    const bool use_compressed = stored < length;
-    RK_ASSIGN_OR_RETURN(ciphertext,
-                        Crypt(true, keys.object, id, index, count,
-                              use_compressed ? std::span<const uint8_t>(compressed.data(), stored)
-                                             : std::span<const uint8_t>(buffer.data(), length)));
-    Bytes prefix{static_cast<uint8_t>(use_compressed)};
-    Append32(prefix, static_cast<uint32_t>(ciphertext.size()));
-    output.write(reinterpret_cast<const char*>(prefix.data()), prefix.size());
-    output.write(reinterpret_cast<const char*>(ciphertext.data()), ciphertext.size());
+    RK_ASSIGN_OR_RETURN(segment,
+                        EncodeSegment(keys, id, index, count,
+                                      std::span<const uint8_t>(buffer.data(), length), compressed));
+    output.write(reinterpret_cast<const char*>(segment.data()), segment.size());
     if (!output)
       return Io();
   }

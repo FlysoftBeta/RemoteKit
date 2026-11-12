@@ -1,4 +1,5 @@
 #include "persistence/snapshot_protocol.hpp"
+#include "persistence/config_formats.hpp"
 #include "persistence/snapshot_leases.hpp"
 #include <vss.h>
 #include <vswriter.h>
@@ -81,14 +82,7 @@ class Service {
                                                               : HRESULT_FROM_WIN32(GetLastError()));
     volume_ = volume;
     journal_ = root_ / L"snapshot-owner.json";
-    try {
-      Cleanup();
-    } catch (const Failure& error) {
-      std::cout << Json{{"event", "snapshot.cleanup_failed"},
-                        {"os", {{"kind", "hresult"}, {"value", int64_t(error.hr)}}}}
-                       .dump()
-                << std::endl;
-    }
+    Cleanup();
   }
   void Disconnect(uint64_t owner) {
     std::lock_guard lock(mutex_);
@@ -267,9 +261,14 @@ class Service {
     std::ifstream input(journal_);
     if (!input)
       return;
-    Json record = Json::parse(input, nullptr, false);
+    const std::string bytes((std::istreambuf_iterator<char>(input)), {});
     input.close();
-    Require(record.is_object() && record.contains("snapshotId"));
+    auto decoded = config_formats::Decode(bytes, config_formats::Owner, persisted::Store::kOwner);
+    if (!decoded) {
+      ReportError(decoded.error(), "snapshot.owner_corrupt");
+      throw Failure{E_FAIL};
+    }
+    const auto record = std::move(decoded).value();
     GUID id{};
     Check(CLSIDFromString(Path(record.at("snapshotId").get<std::string>()).c_str(), &id));
     IVssBackupComponents* backup = nullptr;
@@ -288,7 +287,13 @@ class Service {
     fs::remove(journal_);
   }
   void SaveOwner(GUID id) {
-    const auto bytes = Json{{"snapshotId", Id(id)}}.dump();
+    auto encoded =
+        config_formats::Encode({{"version", 1}, {"snapshotId", Id(id)}}, config_formats::Owner);
+    if (!encoded) {
+      ReportError(encoded.error(), "snapshot.owner_corrupt");
+      throw Failure{E_FAIL};
+    }
+    const auto bytes = std::move(encoded).value();
     HANDLE file = CreateFileW(journal_.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
     Check(file == INVALID_HANDLE_VALUE ? HRESULT_FROM_WIN32(GetLastError()) : S_OK);

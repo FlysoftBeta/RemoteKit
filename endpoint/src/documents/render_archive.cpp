@@ -1,4 +1,5 @@
 #include "documents/render_archive.hpp"
+#include "persistence/strict_json.hpp"
 
 #include <json.hpp>
 #include <zstd.h>
@@ -23,7 +24,7 @@ struct ArchiveFailure {
 
 void Require(bool condition, const char* reason) {
   if (!condition)
-    throw ArchiveFailure{{ErrorCode::kInternal, reason}};
+    throw ArchiveFailure{CorruptRecord(reason)};
 }
 
 void Bound(bool condition, const char* message) {
@@ -266,11 +267,13 @@ struct RenderArchive::Impl {
     Bound(manifest->second.size <= kManifestLimit, "missing or oversized manifest");
     auto bytes = Read(manifest->second.offset, manifest->second.size);
     Json json = Json::parse(bytes);
+    persisted::Keys(json, {"format", "version", "dictionary", "resources", "files", "document"});
     Require(json.at("format") == "classapp-render-archive" && Unsigned(json.at("version")) == 2,
             "unsupported document archive format");
     bool has_dictionary = !json.at("dictionary").is_null();
     if (has_dictionary) {
       const auto& metadata = json.at("dictionary");
+      persisted::Keys(metadata, {"contentId", "path", "size", "storedOffset"});
       uint64_t length = Unsigned(metadata.at("size"));
       Bound(length <= kDictionaryLimit, "Document dictionary exceeds bounds");
       Require(metadata.at("path") == "dictionary.zdict" && length > 0,
@@ -287,6 +290,8 @@ struct RenderArchive::Impl {
     const auto& resources = json.at("resources");
     Require(resources.is_array(), "invalid manifest resources");
     for (const auto& metadata : resources) {
+      persisted::Keys(metadata, {"contentId", "mime", "encoding", "rawSize", "storedSize",
+                                 "storedOffset", "path"});
       auto id = metadata.at("contentId").get<std::string>();
       auto encoding = metadata.at("encoding").get<std::string>();
       uint64_t raw = Unsigned(metadata.at("rawSize"));
@@ -323,6 +328,14 @@ struct RenderArchive::Impl {
       return ids;
     };
     const auto& document = json.at("document");
+    persisted::Keys(document, {"layout", "sourceMime", "sourcePages", "firstPage", "lastPage",
+                               "resolution", "webpQuality", "shared", "items"});
+    persisted::Enum(document.at("layout"), {"fixed"});
+    const auto pages = persisted::Unsigned(document.at("sourcePages"), 1, 20000);
+    const auto first = persisted::Unsigned(document.at("firstPage"), 1, pages);
+    persisted::Unsigned(document.at("lastPage"), first, pages);
+    persisted::Number(document.at("resolution"), 1, 1200);
+    persisted::Number(document.at("webpQuality"), 0, 100);
     Require(document.at("sourceMime") == "application/pdf", "invalid document source MIME");
     info.shared = references(document.at("shared"));
     const auto& items = document.at("items");
@@ -330,6 +343,7 @@ struct RenderArchive::Impl {
     Bound(items.size() <= 20000, "Too many document pages");
     std::set<std::string> ids;
     for (const auto& page : items) {
+      persisted::Keys(page, {"id", "ordinal", "width", "height", "document", "dependencies"});
       auto id = page.at("id").get<std::string>();
       uint64_t ordinal = Unsigned(page.at("ordinal"));
       double width = page.at("width").get<double>(), height = page.at("height").get<double>();
@@ -345,6 +359,7 @@ struct RenderArchive::Impl {
     Require(files.is_array(), "invalid document files");
     std::set<std::string> paths;
     for (const auto& file : files) {
+      persisted::Keys(file, {"path", "contentId"});
       auto name = file.at("path").get<std::string>();
       Require(SafeName(name) && paths.insert(name).second &&
                   objects.contains(file.at("contentId").get<std::string>()),
@@ -365,7 +380,7 @@ Result<RenderArchive> RenderArchive::Open(ArchiveRead read, uint64_t size) {
   } catch (const ArchiveFailure& failure) {
     return failure.error;
   } catch (const std::exception&) {
-    return Error{ErrorCode::kInternal, "invalid document archive"};
+    return CorruptRecord("invalid document archive");
   }
 }
 

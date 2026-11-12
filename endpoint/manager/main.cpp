@@ -1,4 +1,5 @@
 #include "supervisor.hpp"
+#include "persistence/config_formats.hpp"
 #include "release/options.hpp"
 #include "release/payload.hpp"
 #include "release/http.hpp"
@@ -47,7 +48,10 @@ int wmain(int argc, wchar_t** argv) {
       Require(ValidUrl(manifest), "invalid manager manifest URL");
       auto key = LoadKey(options.Path(L"key-file"));
       fs::create_directories(root / L"config");
-      AtomicText(root / L"config/manager.json", Json{{"manifest", manifest}}.dump());
+      AtomicText(root / L"config/manager.json",
+                 Take(config_formats::Encode(
+                     {{"version", 1}, {"manifest", manifest}, {"checkIntervalMinutes", 60}},
+                     config_formats::Manager)));
       AtomicText(root / L"config/release.key", EncodeKey(key));
       SecureZeroMemory(key.data(), key.size());
       auto target = root / L"remotekit_control.exe";

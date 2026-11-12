@@ -49,8 +49,7 @@ int main() {
   {
     SessionDb store(session_directory);
     Check(bool(store.Open()), "open session store");
-    Check(bool(store.Views().Save(Json::array({{{"viewId", "1"}}, {{"viewId", "2"}}}))),
-          "save views");
+    Check(bool(store.Views().Save(Json::array({TestView("1"), TestView("2")}))), "save views");
     Check(bool(store.Views().Close("1", "requested")), "commit close");
   }
   media::Sdk sdk;

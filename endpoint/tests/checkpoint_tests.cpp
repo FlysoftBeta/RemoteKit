@@ -5,6 +5,7 @@
 #include "runtime_config_fixture.hpp"
 #include "diagnostics/node_metrics.hpp"
 #include "persistence/checkpoint.hpp"
+#include "persistence/checkpoint_formats.hpp"
 #include "persistence/versions.hpp"
 #include "session/session.hpp"
 #include "service.hpp"
@@ -278,7 +279,7 @@ void RoundTrip(const fs::path& root) {
   fs::remove(remote_directory / "small");
   Write(remote_directory / "profile/Cookies-wal", "leave this changed file");
   const auto local_index =
-      Json::parse(Read(remote_directory.wstring() + L".checkpoint-index.json"));
+      checkpoint_formats::DecodeIndex(Read(remote_directory.wstring() + L".checkpoint-index.json"));
   const auto missing_id = local_index["small"]["chunks"][0].get<std::string>();
   target_link.sources[missing_id] = Json::array();
   Take(target.Store().Delete(missing_id));
@@ -433,7 +434,8 @@ void BatchesAndPipeline(const fs::path& root) {
     changed.put('q');
   }
   cache.Stop();
-  const auto previous = Json::parse(Read(directory.wstring() + L".checkpoint-index.json"));
+  const auto previous =
+      checkpoint_formats::DecodeIndex(Read(directory.wstring() + L".checkpoint-index.json"));
   const auto chunk = previous["large"]["chunks"][1].get<std::string>();
   const auto object_path = Take(source.Store().StoredPath(chunk));
   HANDLE held = CreateFileW(object_path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
@@ -643,7 +645,8 @@ void GracefulCommit(const fs::path& root) {
     Take(database.Open());
     Take(database.Close());
   }
-  Take(Checkpoints::WriteCopy(seed, {{"sessionId", link.session},
+  Take(Checkpoints::WriteCopy(seed, {{"version", 1},
+                                     {"sessionId", link.session},
                                      {"placementEpoch", 1},
                                      {"base", nullptr},
                                      {"state", "dirty"},
@@ -711,8 +714,10 @@ void CopyRecovery(const fs::path& root) {
   Write(directory / "gap", "old");
   Write(directory / "removed", "old");
   auto previous = Take(Checkpoints::Scan(directory, Json(), {}));
-  Take(WriteDurableJson(directory.wstring() + L".checkpoint-index.json", previous));
-  Json copy{{"sessionId", directory.filename().string()},
+  Take(WriteDurableJson(directory.wstring() + L".checkpoint-index.json",
+                        Take(checkpoint_formats::EncodeIndex(previous))));
+  Json copy{{"version", 1},
+            {"sessionId", directory.filename().string()},
             {"placementEpoch", uint64_t(3)},
             {"base", std::string(64, 'a')},
             {"state", "dirty"},

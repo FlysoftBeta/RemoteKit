@@ -272,7 +272,9 @@ void ArchiveTests(const fs::path& fixtures) {
   Reject(bundle.Build([](Json& m) { m["resources"][0]["storedSize"] = 1; }));
   Reject(bundle.Build([](Json& m) { m["resources"][0]["rawSize"] = 67108865; }),
          ErrorCode::kRejected);
-  Reject(bundle.Build([](Json& m) { m["version"] = 1; }));
+  Reject(bundle.Build([](Json& m) { m.erase("format"); }));
+  Reject(bundle.Build([](Json& m) { m["unknown"] = true; }));
+  Reject(bundle.Build([](Json& m) { m["format"] = 7; }));
   Reject(bundle.Build([](Json& m) { m["format"] = "other"; }));
   Reject(bundle.Build(
       [](Json& m) { m["document"]["items"][0]["dependencies"] = Json::array({"missing"}); }));

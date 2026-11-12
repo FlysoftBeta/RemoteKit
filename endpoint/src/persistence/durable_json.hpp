@@ -12,6 +12,9 @@ inline fs::path LongPath(const fs::path& path) {
   return L"\\\\?\\" + absolute;
 }
 Result<void> FlushFile(const fs::path& path);
+Result<void> WriteDurableText(const fs::path& path,
+                              std::string_view bytes,
+                              const std::function<Result<void>()>& before_commit = {});
 Result<void> WriteDurableJson(const fs::path& path,
                               const Json& value,
                               const std::function<Result<void>()>& before_commit = {});

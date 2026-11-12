@@ -1,4 +1,5 @@
 #include "supervisor.hpp"
+#include "persistence/config_formats.hpp"
 #include "release/executor.hpp"
 #include "release/payload.hpp"
 #include "updater/archive.hpp"
@@ -14,24 +15,19 @@ using namespace release;
 namespace {
 struct Config {
   std::string manifest, proxy;
-  DWORD interval = 60 * 60000;
+  DWORD interval;
 };
 Config LoadConfig(const fs::path& root) {
   auto bytes = Read(root / L"config/manager.json", 1024 * 1024);
-  auto json = ParseJson({reinterpret_cast<const char*>(bytes.data()), bytes.size()});
-  Keys(json, {"manifest"}, {"checkIntervalMinutes", "proxy"});
-  Require(json["manifest"].is_string(), "invalid manager manifest URL");
+  auto decoded = config_formats::Decode({reinterpret_cast<const char*>(bytes.data()), bytes.size()},
+                                        config_formats::Manager, persisted::Store::kManager);
+  auto json = Take(std::move(decoded));
   Config config;
-  config.manifest = json["manifest"].get<std::string>();
+  config.manifest = json.at("manifest").get<std::string>();
   Require(ValidUrl(config.manifest), "invalid manager manifest URL");
-  if (json.contains("checkIntervalMinutes")) {
-    auto minutes = Unsigned(json["checkIntervalMinutes"]);
-    Require(minutes >= 5 && minutes <= 1440, "checkIntervalMinutes must be 5..1440");
-    config.interval = static_cast<DWORD>(minutes * 60000);
-  }
+  config.interval = static_cast<DWORD>(json.at("checkIntervalMinutes").get<uint64_t>() * 60000);
   if (json.contains("proxy")) {
-    Require(json["proxy"].is_string(), "invalid manager proxy");
-    config.proxy = json["proxy"].get<std::string>();
+    config.proxy = json.at("proxy").get<std::string>();
     Require(ValidUrl(config.proxy), "invalid manager proxy");
   }
   return config;
@@ -196,7 +192,9 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
         try {
           snapshots.clear();
           auto bytes = Read(root / L"config/control.json", 1024 * 1024);
-          auto control = ParseJson({reinterpret_cast<const char*>(bytes.data()), bytes.size()});
+          auto control = Take(
+              config_formats::Decode({reinterpret_cast<const char*>(bytes.data()), bytes.size()},
+                                     config_formats::Control, persisted::Store::kControl));
           for (const auto& [node_id, node] : control.at("nodes").items()) {
             if (!node.contains("local"))
               continue;

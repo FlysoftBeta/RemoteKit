@@ -1,4 +1,5 @@
 #include "persistence/session_db.hpp"
+#include "persistence/session_documents.hpp"
 #include "management/coordination.hpp"
 #include "util/result_macros.hpp"
 #include <limits>
@@ -39,13 +40,6 @@ Result<Json> EventStore::State() {
               {"lastSeq", std::to_string(statement.Int64(2))},
               {"pending", statement.Int64(3)}};
 }
-Result<bool> EventStore::Present() {
-  std::lock_guard lock(db_.mutex_);
-  RK_ASSIGN_OR_RETURN(
-      statement,
-      db_.db_.Prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_state'"));
-  return statement.Step();
-}
 Result<Json> EventStore::Load(uint64_t after, size_t limit) {
   if (after > std::numeric_limits<int64_t>::max() || limit > coordination::kMaxEvents)
     return Error{ErrorCode::kInvalidRequest, "invalid event read bound"};
@@ -61,9 +55,11 @@ Result<Json> EventStore::Load(uint64_t after, size_t limit) {
     if (!row)
       return result;
     auto document = Json::parse(statement.Text(3), nullptr, false);
-    if (!document.is_object() || !document.contains("body") ||
-        !document.contains("browserIncarnation"))
-      return CorruptState("invalid event body");
+    try {
+      session_documents::Event(statement.Text(2), document);
+    } catch (const std::exception& error) {
+      return CorruptRecord(std::string("events.body: ") + error.what());
+    }
     document["seq"] = std::to_string(statement.Int64(0));
     document["eventId"] = statement.Text(1);
     document["type"] = statement.Text(2);
@@ -74,12 +70,13 @@ Result<Json> EventStore::Append(const std::string& type,
                                 const Json& body,
                                 const std::string& event_id,
                                 const Json& incarnation) {
-  static const std::set<std::string> types = {"view.closed", "download.imported", "download.failed",
-                                              "clipboard.changed", "view.signIn"};
-  if (!types.contains(type) || !body.is_object() || event_id.empty() || event_id.size() > 128 ||
-      (!incarnation.is_null() && !incarnation.is_string()))
-    return Error{ErrorCode::kInvalidRequest, "invalid Session event"};
   Json document{{"body", body}, {"browserIncarnation", incarnation}};
+  try {
+    persisted::Text(Json(event_id), 1, 128);
+    session_documents::Event(type, document);
+  } catch (const std::exception& error) {
+    return CorruptRecord(std::string("events.body: ") + error.what());
+  }
   const auto encoded = document.dump();
   const size_t bound = type == "clipboard.changed" ? coordination::kMaxDocumentBytes : 256 * 1024;
   if (encoded.size() > bound)

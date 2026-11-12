@@ -1,4 +1,7 @@
 #include "persistence/session_db.hpp"
+#include "persistence/session_migrations.hpp"
+#include "persistence/session_documents.hpp"
+#include "files/library_records.hpp"
 #include "session/view_configuration.hpp"
 #include "files/dc_file_services.hpp"
 #include "util/file_io.hpp"
@@ -24,18 +27,12 @@ Result<void> Done(sqlite::Statement& statement) {
   return {};
 }
 Result<void> View(const Json& view) {
-  RK_RETURN_IF_ERROR(ValidateViewConfiguration(view));
-  if (!view.contains("viewId"))
-    return CorruptState("missing viewId");
-  if (!view.at("viewId").is_string())
-    return CorruptState("invalid viewId");
-  const auto& text = view.at("viewId").get_ref<const std::string&>();
-  uint64_t id = 0;
-  const auto parsed = std::from_chars(text.data(), text.data() + text.size(), id);
-  if (text.empty() || text.front() == '0' || !id || parsed.ec != std::errc{} ||
-      parsed.ptr != text.data() + text.size())
-    return CorruptState("invalid viewId");
-  return {};
+  try {
+    session_documents::View(view);
+    return {};
+  } catch (const std::exception& error) {
+    return CorruptRecord(std::string("views.config: ") + error.what());
+  }
 }
 const char* TableName(LibraryTable table) {
   switch (table) {
@@ -62,84 +59,13 @@ Result<void> SessionDb::OpenReadOnly(bool immutable) {
   std::lock_guard lock(mutex_);
   RK_RETURN_IF_ERROR(db_.OpenReadOnly(directory_ / "session.db", immutable));
   closed_ = true;
-  return {};
+  return CheckSessionDb(db_);
 }
 Result<void> SessionDb::OpenFile(const fs::path& path) {
   RK_RETURN_IF_ERROR(db_.Open(path));
-  int64_t version = 0;
-  {
-    RK_ASSIGN_OR_RETURN(statement, db_.Prepare("PRAGMA user_version"));
-    RK_ASSIGN_OR_RETURN(row, statement.Step());
-    if (!row)
-      return CorruptState("missing session store version");
-    version = statement.Int64(0);
-  }
-  if (version == 3)
-    return {};
-  if (version == 1 || version == 2)
-    return Write([&]() -> Result<void> {
-      if (version == 1) {
-        RK_RETURN_IF_ERROR(db_.Execute(R"sql(
-CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,type TEXT NOT NULL,body TEXT NOT NULL);
-CREATE TABLE event_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),stream_id TEXT NOT NULL,acked_through INTEGER NOT NULL);
-INSERT INTO event_state VALUES(1,lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-4'||substr(lower(hex(randomblob(2))),2)||'-8'||substr(lower(hex(randomblob(2))),2)||'-'||lower(hex(randomblob(6))),0);
-CREATE TABLE retired_views(view_id TEXT PRIMARY KEY,event_id TEXT NOT NULL);
-)sql"));
-      }
-      {
-        RK_ASSIGN_OR_RETURN(retired, db_.Prepare("INSERT INTO retired_views(view_id,event_id) "
-                                                 "SELECT view_id,?||view_id FROM closed_events"));
-        RK_RETURN_IF_ERROR(retired.Bind(1, "closed-" + directory_.filename().string() + "-"));
-        RK_RETURN_IF_ERROR(Done(retired));
-      }
-      RK_RETURN_IF_ERROR(db_.Execute(R"sql(
-INSERT INTO events(event_id,type,body)
- SELECT r.event_id,'view.closed',json_object('browserIncarnation',NULL,'body',json_object('viewId',c.view_id,'reason',c.reason))
- FROM closed_events c JOIN retired_views r ON r.view_id=c.view_id ORDER BY c.event_id;
-DROP TABLE closed_events;
-INSERT INTO events(event_id,type,body)
- SELECT event_id,json_extract(result,'$.type'),json_object('browserIncarnation',incarnation,'body',json(json_remove(result,'$.type','$.eventId')))
- FROM download_imports WHERE browser_ack=1;
-DELETE FROM download_imports WHERE browser_ack=1;
-ALTER TABLE download_imports DROP COLUMN browser_ack;
-ALTER TABLE views ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
-CREATE TABLE coordination_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),placement_epoch INTEGER NOT NULL,desired_revision TEXT NOT NULL);
-INSERT INTO coordination_state VALUES(1,0,'0');
-CREATE TABLE view_runtime(view_id TEXT PRIMARY KEY,resume_url TEXT,original_browser TEXT);
-PRAGMA user_version=3;
-)sql"));
-      return {};
-    });
-  if (version != 0)
-    return CorruptState("unsupported session store version");
-  {
-    RK_ASSIGN_OR_RETURN(statement, db_.Prepare("SELECT count(*) FROM sqlite_master"));
-    RK_ASSIGN_OR_RETURN(row, statement.Step());
-    if (!row || statement.Int64(0))
-      return CorruptState("unsupported session store version");
-  }
-  return Write([&]() -> Result<void> {
-    return db_.Execute(R"sql(
-CREATE TABLE views(view_id TEXT PRIMARY KEY, config TEXT NOT NULL,position INTEGER NOT NULL);
-CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,type TEXT NOT NULL,body TEXT NOT NULL);
-CREATE TABLE event_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),stream_id TEXT NOT NULL,acked_through INTEGER NOT NULL);
-INSERT INTO event_state VALUES(1,lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-4'||substr(lower(hex(randomblob(2))),2)||'-8'||substr(lower(hex(randomblob(2))),2)||'-'||lower(hex(randomblob(6))),0);
-CREATE TABLE retired_views(view_id TEXT PRIMARY KEY,event_id TEXT NOT NULL);
-CREATE TABLE download_imports(event_id TEXT PRIMARY KEY, incarnation TEXT NOT NULL, download TEXT NOT NULL,
- result TEXT, attempt INTEGER, error TEXT, retry_at INTEGER);
-CREATE TABLE coordination_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),placement_epoch INTEGER NOT NULL,desired_revision TEXT NOT NULL);
-INSERT INTO coordination_state VALUES(1,0,'0');
-CREATE TABLE view_runtime(view_id TEXT PRIMARY KEY,resume_url TEXT,original_browser TEXT);
-CREATE TABLE navigation_recovery(view_id TEXT PRIMARY KEY, navigation_revision INTEGER NOT NULL, state BLOB NOT NULL);
-CREATE TABLE library_assets(asset_id TEXT PRIMARY KEY, size INTEGER NOT NULL, type TEXT NOT NULL, width INTEGER, height INTEGER);
-CREATE TABLE library_drafts(upload_id TEXT PRIMARY KEY, operation TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
- size INTEGER NOT NULL, expires INTEGER NOT NULL, sealed TEXT NOT NULL);
-CREATE TABLE library_selections(selection_id TEXT PRIMARY KEY, state TEXT NOT NULL, document TEXT NOT NULL);
-CREATE TABLE library_derivatives(asset_id TEXT NOT NULL, format TEXT NOT NULL, derived_id TEXT NOT NULL, PRIMARY KEY(asset_id, format));
-PRAGMA user_version=3;
-)sql");
-  });
+  return MigrateSessionDb(db_, directory_, build_);
 }
+
 Result<void> SessionDb::Close() {
   std::lock_guard lock(mutex_);
   RK_RETURN_IF_ERROR(db_.Close());
@@ -178,12 +104,10 @@ Result<Json> ViewStore::Load() {
       break;
     auto config = Json::parse(statement.Text(0), nullptr, false);
     if (config.is_discarded())
-      return CorruptState("invalid views.config");
-    auto valid = View(config);
-    if (!valid)
-      return CorruptState("invalid views.config: " + valid.error().message);
+      return CorruptRecord("invalid views.config");
+    RK_RETURN_IF_ERROR(View(config));
     if (config.at("viewId") != statement.Text(1))
-      return CorruptState("mismatched views.view_id");
+      return CorruptRecord("mismatched views.view_id");
     views.push_back(std::move(config));
   }
   return views;
@@ -195,9 +119,7 @@ Result<void> ViewStore::Save(const Json& views) {
     RK_RETURN_IF_ERROR(db_.db_.Execute("DELETE FROM views"));
     int64_t position = 0;
     for (const auto& view : views) {
-      auto valid = View(view);
-      if (!valid)
-        return CorruptState("invalid views.config: " + valid.error().message);
+      RK_RETURN_IF_ERROR(View(view));
       RK_ASSIGN_OR_RETURN(statement, db_.db_.Prepare("INSERT INTO views VALUES(?,?,?)"));
       RK_RETURN_IF_ERROR(statement.Bind(1, view.at("viewId").get<std::string>()));
       RK_RETURN_IF_ERROR(statement.Bind(2, view.dump()));
@@ -372,33 +294,10 @@ Result<void> RecoveryStore::Erase(const std::string& view) {
 }
 Result<void> ValidateDownloadState(const Json& state) {
   try {
-    if (!state.at("records").is_array())
-      return CorruptState("invalid download imports");
-    std::set<std::string> ids;
-    for (const auto& row : state.at("records")) {
-      if (row.at("incarnation").get<std::string>().empty() || !row.at("download").is_object() ||
-          !ids.insert(row.at("eventId").get<std::string>()).second)
-        return CorruptState("invalid download import row");
-      const auto& download = row.at("download");
-      for (const auto* key :
-           {"guid", "eventId", "fileReference", "name", "mimeType", "size", "origin"})
-        download.at(key).get<std::string>();
-      if (row.contains("result")) {
-        const auto& result = row.at("result");
-        if (!result.is_object() || result.at("eventId") != row.at("eventId"))
-          return CorruptState("invalid download result");
-        result.at("type").get<std::string>();
-      }
-      if (row.contains("attempt"))
-        row.at("attempt").get<unsigned>();
-      if (row.contains("retryAt"))
-        row.at("retryAt").get<int64_t>();
-      if (row.contains("error") && !row.at("error").is_object())
-        return CorruptState("invalid download error");
-    }
+    session_documents::Downloads(state);
     return {};
   } catch (const std::exception& error) {
-    return CorruptState(std::string("invalid download imports: ") + error.what());
+    return CorruptRecord(std::string("download_imports: ") + error.what());
   }
 }
 Result<Json> DownloadStore::Load() {
@@ -414,14 +313,14 @@ Result<Json> DownloadStore::Load() {
       break;
     auto download = Json::parse(statement.Text(2), nullptr, false);
     if (download.is_discarded())
-      return CorruptState("invalid download_imports.download");
+      return CorruptRecord("invalid download_imports.download");
     Json value = {
         {"eventId", statement.Text(0)}, {"incarnation", statement.Text(1)}, {"download", download}};
     for (const auto [column, name] : {std::pair{3, "result"}, {5, "error"}}) {
       if (!statement.IsNull(column)) {
         auto document = Json::parse(statement.Text(column), nullptr, false);
         if (document.is_discarded())
-          return CorruptState("invalid download import document");
+          return CorruptRecord("invalid download import document");
         value[name] = std::move(document);
       }
     }
@@ -479,8 +378,11 @@ Result<void> DownloadStore::Complete(const std::string& event_id) {
       result = Json::parse(statement.Text(0), nullptr, false);
       incarnation = statement.Text(1);
     }
-    if (!result.is_object() || !result.contains("type"))
-      return CorruptState("invalid download handoff");
+    try {
+      session_documents::DownloadResult(result, event_id);
+    } catch (const std::exception& error) {
+      return CorruptRecord(std::string("download_imports.result: ") + error.what());
+    }
     const auto type = result["type"].get<std::string>();
     result.erase("type");
     result.erase("eventId");
@@ -523,11 +425,13 @@ Result<std::map<std::string, Json>> LibraryStore::Load(LibraryTable table) {
         value = {{"assetId", statement.Text(2)}};
         break;
     }
+    RK_RETURN_IF_ERROR(library_records::Validate(table, id, value));
     result.emplace(std::move(id), std::move(value));
   }
   return result;
 }
 Result<void> SessionDb::PutLibrary(LibraryTable table, const std::string& id, const Json& value) {
+  RK_RETURN_IF_ERROR(library_records::Validate(table, id, value));
   const char* query = table == LibraryTable::kAssets
                           ? "INSERT OR REPLACE INTO library_assets VALUES(?,?,?,?,?)"
                       : table == LibraryTable::kDrafts

@@ -401,7 +401,7 @@ void SessionManagementRequests() {
   CHECK(session.Initialize());
   SessionDb persisted(session_directory);
   CHECK(persisted.Open());
-  const Json valid_views = Json::array({Json{{"viewId", "1"}}});
+  const Json valid_views = Json::array({TestView()});
   CHECK(persisted.Views().Save(valid_views));
   CHECK(session.Views().Initialize());
   for (const auto& invalid : {Json::array({nullptr}), Json::array({{{"viewId", "01"}}}),
