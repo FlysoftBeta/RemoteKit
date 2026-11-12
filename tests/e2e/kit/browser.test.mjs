@@ -35,6 +35,14 @@ test('persistent and raw launches receive the seeded Local State before starting
     },
   };
   assert.equal(await launchTestBrowser({ profile, browserType }), context);
+  for (const options of [
+    { ignoreDefaultArgs: true },
+    { ignoreDefaultArgs: ['--enable-automation'] },
+    { ignoreAllDefaultArgs: true },
+  ]) {
+    await assert.rejects(launchTestBrowser({ profile, browserType, ...options }), /retain the seeded/);
+  }
+
   const child = {};
   t.mock.method(childProcess, 'spawn', (executable, args, options) => {
     checkSeed(profile);

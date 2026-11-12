@@ -39,7 +39,16 @@ export async function waitForLogonBudget() {
   return count;
 }
 
-export async function launchTestBrowser({ profile, browserType, spawnOptions, ...options } = {}) {
+export async function launchTestBrowser({
+  profile,
+  browserType,
+  spawnOptions,
+  ignoreDefaultArgs,
+  ignoreAllDefaultArgs,
+  ...options
+} = {}) {
+  if (ignoreDefaultArgs || ignoreAllDefaultArgs)
+    throw Error('Browser launches must retain the seeded user-data-dir argument');
   await waitForLogonBudget();
   profile = resolve(
     profile ??
