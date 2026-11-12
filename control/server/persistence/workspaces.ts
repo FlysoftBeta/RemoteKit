@@ -1,4 +1,6 @@
-import { decodeJson, encodeJson } from './codec';
+import { defaultAuthSettings } from '../auth/crypto';
+import { createLearningSettings } from './learning-settings';
+import { corruptRecord, decodeJson, encodeJson } from './codec';
 import * as codecs from './documents';
 import type Database from 'better-sqlite3';
 import { isDeepStrictEqual } from 'node:util';
@@ -54,6 +56,7 @@ export class WorkspacesRepository {
     const settings = this.db.prepare('SELECT data FROM user_settings WHERE tenant=?').get(tenant) as {
       data: string;
     };
+    if (!settings) throw corruptRecord(`user_settings ${tenant}`, new Error('missing required record'));
     const productSettings = decodeJson(settings.data, codecs.settings, `user_settings.data ${tenant}`);
     return {
       tenantId: tenant,
@@ -162,6 +165,19 @@ export class WorkspacesRepository {
     return true;
   }
   writeWorkspace(state: ProductWorkspace) {
+    if (!this.db.prepare('SELECT 1 FROM workspaces WHERE tenant=?').get(state.tenantId)) {
+      this.db.prepare('INSERT INTO library_state VALUES (?,0,NULL)').run(state.tenantId);
+      createLearningSettings(this.db, state.tenantId);
+      const user = this.db.prepare('SELECT id FROM users WHERE tenant=?').get(state.tenantId) as
+        { id: string } | undefined;
+      if (user)
+        this.db
+          .prepare('INSERT INTO user_security(user_id,settings) VALUES (?,?)')
+          .run(
+            user.id,
+            encodeJson(defaultAuthSettings(), codecs.authSettings, `user_security.settings ${user.id}`),
+          );
+    }
     this.db.prepare('INSERT OR REPLACE INTO workspaces VALUES (?,?,?,?)').run(
       state.tenantId,
       state.revision,

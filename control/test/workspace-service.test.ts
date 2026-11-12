@@ -1,3 +1,4 @@
+import { defaultFilesWindowState, updateFilesLibraryTab } from '../client/files/files-app-state';
 import { applyDesiredViews } from './coordination-fixture';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -106,20 +107,33 @@ test('workspace WS operation envelopes preserve bounded local state and split se
     await f.request('operation.submit', {
       type: 'window.state',
       windowId,
-      state: { view: 'recent', search: 'photo' },
+      state: updateFilesLibraryTab(defaultFilesWindowState('aaaaaaaa'), 'aaaaaaaa', {
+        view: 'recent',
+        query: 'photo',
+      }) as unknown as Record<string, unknown>,
     });
     assert.deepEqual(f.store.workspaces.workspace(f.user.tenantId).windows[0].state, {
-      view: 'recent',
-      search: 'photo',
+      ...updateFilesLibraryTab(defaultFilesWindowState('aaaaaaaa'), 'aaaaaaaa', {
+        view: 'recent',
+        query: 'photo',
+      }),
     });
-    await f.request('operation.submit', { type: 'window.state', windowId, state: { partitionId: 'photos' } });
+    await f.request('operation.submit', {
+      type: 'window.state',
+      windowId,
+      state: updateFilesLibraryTab(defaultFilesWindowState('aaaaaaaa'), 'aaaaaaaa', {
+        view: { partition: 'photos' },
+      }) as unknown as Record<string, unknown>,
+    });
     assert.deepEqual(f.store.workspaces.workspace(f.user.tenantId).windows[0].state, {
-      partitionId: 'photos',
+      ...updateFilesLibraryTab(defaultFilesWindowState('aaaaaaaa'), 'aaaaaaaa', {
+        view: { partition: 'photos' },
+      }),
     });
     await assert.rejects(
       f.request('operation.submit', { type: 'window.state', windowId, state: { text: '界'.repeat(2800) } }),
       {
-        code: 'limit_exceeded',
+        code: 'invalid_request',
       },
     );
     for (const state of [[], null])

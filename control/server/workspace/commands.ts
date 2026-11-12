@@ -1,3 +1,4 @@
+import { readWindowState } from '../../shared/persisted-window-state';
 import { RemoteKitError } from '../../shared/errors';
 import {
   DEAD_ZONE_MAX,
@@ -212,7 +213,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         });
       if (Buffer.byteLength(JSON.stringify(value), 'utf8') > 8192)
         throw new RemoteKitError('limit_exceeded', '窗口状态超过 8 KiB', { capacity: 'field' });
-      window().state = structuredClone(value);
+      window().state = readWindowState(value);
       break;
     }
     case 'space.activate': {

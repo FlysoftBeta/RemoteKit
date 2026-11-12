@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { parseWireError, wireError, type WireError } from '../../shared/errors';
+import { type WireError } from '../../shared/errors';
 import type {
   ControlEvent,
   DeviceEvent,
@@ -55,14 +55,17 @@ function record(row: any): StoredImport {
     cookies: Number(row.cookies),
     origins: Number(row.origins),
     rejectedItems: Number(row.rejected_items),
-    error: row.error ? wireError(parseWireError(JSON.parse(row.error))!) : null,
-    storageJob: row.storage_job
-      ? decodeJson(row.storage_job, codecs.storageJob, `session_imports.storage_job ${row.id}`)
-      : undefined,
+    error:
+      row.error === null ? null : decodeJson(row.error, codecs.wireError, `session_imports.error ${row.id}`),
+    storageJob:
+      row.storage_job !== null
+        ? decodeJson(row.storage_job, codecs.storageJob, `session_imports.storage_job ${row.id}`)
+        : undefined,
     chunkIndex: Number(row.chunk_index),
-    applyCounts: row.apply_counts
-      ? decodeJson(row.apply_counts, codecs.applyCounts, `session_imports.apply_counts ${row.id}`)
-      : undefined,
+    applyCounts:
+      row.apply_counts !== null
+        ? decodeJson(row.apply_counts, codecs.applyCounts, `session_imports.apply_counts ${row.id}`)
+        : undefined,
     retryAt: row.retry_at === null ? undefined : Number(row.retry_at),
     receivedAt: Number(row.received_at),
     finishedAt: row.finished_at === null ? null : Number(row.finished_at),
@@ -382,7 +385,7 @@ export class SessionImportsRepository {
         Array.isArray(event.cookies) ? event.cookies.length : 0,
         Array.isArray(event.localStorage) ? event.localStorage.length : 0,
         0,
-        error ? JSON.stringify(error) : null,
+        error === null ? null : encodeJson(error, codecs.wireError, `session_imports.error ${id}`),
         now,
         error ? now : null,
       );
@@ -429,7 +432,14 @@ export class SessionImportsRepository {
       .prepare(
         "UPDATE session_imports SET state=?,payload=NULL,rejected_items=?,error=?,finished_at=? WHERE tenant=? AND id=? AND state='pending'",
       )
-      .run(state, rejectedItems, error ? JSON.stringify(error) : null, now, tenant, id);
+      .run(
+        state,
+        rejectedItems,
+        error === null ? null : encodeJson(error, codecs.wireError, `session_imports.error ${id}`),
+        now,
+        tenant,
+        id,
+      );
   }
   devices(tenant: string) {
     return (

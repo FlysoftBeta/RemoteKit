@@ -1,3 +1,5 @@
+import { decodeJson, encodeJson } from '../persistence/codec';
+import { archiveMetadata, diagnosticManifest, type stopReason } from './formats';
 import { mkdir, open, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -50,8 +52,15 @@ export async function writeDiagnosticArchive(
   id: string,
   entries: ReadonlyMap<ArchiveEntry, readonly Buffer[]>,
   endedAt: number,
-  reason: string,
+  reason: import('../persistence/codec').Decoded<typeof stopReason>,
 ) {
+  const manifest = entries.get('manifest.json');
+  decodeJson(
+    Buffer.concat(manifest ? [...manifest] : []).toString(),
+    diagnosticManifest,
+    `diagnostics.manifest ${id}`,
+  );
+  const metadataBytes = encodeJson({ version: 1, reason }, archiveMetadata, `diagnostics.metadata ${id}`);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const final = join(directory, `${id}.tar.zst`);
   const partial = join(directory, `${id}.partial`);
@@ -64,7 +73,7 @@ export async function writeDiagnosticArchive(
     const reasonFile = await open(metadata, 'wx', 0o600);
     ownsMetadata = true;
     try {
-      await reasonFile.writeFile(reason);
+      await reasonFile.writeFile(metadataBytes);
     } finally {
       await reasonFile.close();
     }

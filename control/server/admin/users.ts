@@ -1,4 +1,5 @@
 import { log } from '../log';
+import { createLearningSettings } from '../persistence/learning-settings';
 import { RemoteKitError } from '../../shared/errors';
 import type { AdminSessionState, AdminStorage, AdminUser } from '../../shared/admin';
 import type { DomainContext, DomainServices } from '../application';
@@ -176,6 +177,7 @@ export class UserAdmin {
       const placement = this.context.endpoint.placement.peek(user.tenant);
       if (placement && placement.runState !== 'stopped') throw new RemoteKitError('conflict', '需先停止');
       this.context.store.transaction(() => {
+        createLearningSettings(this.context.store.db, user.tenant);
         this.context.store.clipboards.clear(user.id);
         this.context.store.coordination.deleteTenant(user.tenant);
         const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);
@@ -213,7 +215,6 @@ export class UserAdmin {
         store.operations.deleteTenant(user.tenant);
         store.workspaces.deleteTenant(user.tenant);
         store.reclaim.deleteTenant(user.tenant);
-        store.security.deleteUser(user.id);
         store.announcements.deleteUser(user.id);
         store.clipboards.clear(user.id);
         const importMail = this.services.sessionImporter.deleteUser(user.tenant);

@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { LibraryEntry, LibrarySnapshot, StoredLibraryEntry } from '../../shared/file-library';
-import { decodeJson, encodeJson } from './codec';
+import { corruptRecord, decodeJson, encodeJson } from './codec';
 import { libraryEntry, librarySource, partition } from './documents';
 
 export function entryObjects(entry: StoredLibraryEntry): { id: string; role: string }[] {
@@ -16,6 +16,7 @@ export function readLibrary(db: Database.Database, tenant: string): LibrarySnaps
   const state = db
     .prepare('SELECT revision,basket_partition_id FROM library_state WHERE tenant=?')
     .get(tenant) as { revision: bigint; basket_partition_id: string | null } | undefined;
+  if (!state) throw corruptRecord(`library_state ${tenant}`, new Error('missing required record'));
   const documents = <T>(table: string, codec: import('./codec').Codec<T>, order: string) =>
     (
       db.prepare(`SELECT id,data FROM ${table} WHERE tenant=? ORDER BY ${order}`).all(tenant) as {
@@ -24,8 +25,8 @@ export function readLibrary(db: Database.Database, tenant: string): LibrarySnaps
       }[]
     ).map((row) => decodeJson(row.data, codec, `${table}.data ${tenant}/${row.id}`));
   return {
-    revision: state ? Number(state.revision) : 0,
-    basketPartitionId: state?.basket_partition_id ?? null,
+    revision: Number(state.revision),
+    basketPartitionId: state.basket_partition_id,
     entries: documents('library_entries', libraryEntry, 'created_at DESC,position').map((entry) => ({
       ...entry,
       available: true,

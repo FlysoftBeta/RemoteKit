@@ -49,10 +49,12 @@ test('files window accepts only the strict current state shape', () => {
     { ...base, launch: { requestId: 'request' } },
     { ...base, launch: { requestId: 'request', entryId: 'entry', extra: true } },
   ])
-    expectDefault(value);
+    assert.throws(() => readFilesWindowState(value), { reason: 'corrupt_record' });
   const circular: Record<string, unknown> = {};
   circular.self = circular;
-  expectDefault(circular);
+  assert.throws(() => readFilesWindowState(circular), { reason: 'corrupt_record' });
+  expectDefault(undefined);
+  expectDefault({});
   assert.deepEqual(readFilesWindowState(base), base);
   assert.notEqual(readFilesWindowState(base).tabs, base.tabs);
   assert.match(filesTabId(), /^[a-z0-9]{8}$/);
@@ -154,7 +156,10 @@ test('sixteen tabs disable creation; launches replace the active tab', () => {
   assert.equal(launched.activeTabId, 'zzzzzzzz');
   assert.equal(launched.tabs[15].kind, 'document');
   assert.deepEqual(launched.tabs[15], { id: 'zzzzzzzz', kind: 'document', entryId: 'entry', from: 'all' });
-  expectDefault({ ...state, tabs: [...state.tabs, { ...state.tabs[0], id: 'zzzzzzzz' }] });
+  assert.throws(
+    () => readFilesWindowState({ ...state, tabs: [...state.tabs, { ...state.tabs[0], id: 'zzzzzzzz' }] }),
+    { reason: 'corrupt_record' },
+  );
 });
 
 test('UTF-8 budget clears inactive drafts first, then the active draft', () => {
@@ -169,7 +174,7 @@ test('UTF-8 budget clears inactive drafts first, then the active draft', () => {
   assert.equal(trimmed.tabs[0].kind === 'library' && trimmed.tabs[0].query.length, 256);
   assert.ok(trimmed.tabs.slice(1).every((tab) => tab.kind === 'library' && !tab.query));
   assert.ok(Buffer.byteLength(JSON.stringify(trimmed)) <= 8192);
-  expectDefault(next);
+  assert.throws(() => readFilesWindowState(next), { reason: 'corrupt_record' });
   const heavy: FilesWindowState = {
     ...next,
     tabs: tabs.map((tab) => ({

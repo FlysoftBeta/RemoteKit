@@ -1,3 +1,4 @@
+import { strictSqlite } from './sqlite';
 import { CoordinationRepository } from './coordination';
 import Sqlite from 'better-sqlite3';
 import { ReclaimStatistics } from './reclaim-statistics';
@@ -8,7 +9,7 @@ import { AnnouncementsRepository } from './announcements';
 import { ClipboardsRepository } from './clipboards';
 import { LibraryRepository } from './library';
 import { OperationsRepository } from './operations';
-import { migrate } from './schema';
+import { migrate } from './migrations';
 import { dirname, join } from 'node:path';
 import { checkIntegrity, type IntegrityResult } from './integrity';
 import { SecurityRepository } from './security';
@@ -36,6 +37,7 @@ export class ControlDatabase {
     const clock = options.clock ?? systemClock;
     this.db = new Sqlite(path);
     this.db.defaultSafeIntegers(true);
+    strictSqlite(this.db);
     this.db.pragma('journal_mode = WAL');
     this.atRestKey = new AtRestKey(path && path !== ':memory:' ? path + '.key' : null);
     try {

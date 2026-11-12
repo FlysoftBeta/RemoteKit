@@ -1,3 +1,4 @@
+import { emptyWorkspace } from '../server/persistence/workspaces';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ControlDatabase } from '../server/persistence/database';
@@ -16,6 +17,9 @@ const page: SnippetOrigin = {
 
 test('copying a snippet leaves unrelated library rows and object references untouched', () => {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  store.workspaces.writeWorkspace(emptyWorkspace('tenant'));
+  store.workspaces.writeWorkspace(emptyWorkspace('one'));
+  store.workspaces.writeWorkspace(emptyWorkspace('two'));
   try {
     const snapshot = store.library.recordSnippet('tenant', 'first', page, 1)!;
     const firstId = snapshot.entries[0].id;
@@ -34,6 +38,9 @@ test('copying a snippet leaves unrelated library rows and object references unto
 
 test('snippets keep text in Control, deduplicate per tenant and refresh origin and copy time', () => {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  store.workspaces.writeWorkspace(emptyWorkspace('tenant'));
+  store.workspaces.writeWorkspace(emptyWorkspace('one'));
+  store.workspaces.writeWorkspace(emptyWorkspace('two'));
   try {
     const text = '\n   hello   world \nfull text 😀';
     const first = store.library.recordSnippet('one', text, page, 10)!;
@@ -67,6 +74,9 @@ test('snippets keep text in Control, deduplicate per tenant and refresh origin a
 
 test('retention keeps newest 200 unorganized snippets and all organized snippets; deletion removes text', () => {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  store.workspaces.writeWorkspace(emptyWorkspace('tenant'));
+  store.workspaces.writeWorkspace(emptyWorkspace('one'));
+  store.workspaces.writeWorkspace(emptyWorkspace('two'));
   try {
     const first = store.library.recordSnippet('tenant', 'organized', page, 1)!.entries[0];
     store.library.change('tenant', 'move', 'move', (snapshot) => {
@@ -94,6 +104,9 @@ test('retention keeps newest 200 unorganized snippets and all organized snippets
 
 test('snippet fetch, exclusion, source purge and file-selection barriers use library methods', async () => {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  store.workspaces.writeWorkspace(emptyWorkspace('tenant'));
+  store.workspaces.writeWorkspace(emptyWorkspace('one'));
+  store.workspaces.writeWorkspace(emptyWorkspace('two'));
   const library = new FileLibrary(store.library, {} as any, FILE_LIMITS, {} as any, () => null);
   const call = (method: string, params: unknown) =>
     library.request(
@@ -140,6 +153,9 @@ test('snippet fetch, exclusion, source purge and file-selection barriers use lib
 
 test('empty and oversized text are omitted, previews are bounded and origins never form categories', () => {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  store.workspaces.writeWorkspace(emptyWorkspace('tenant'));
+  store.workspaces.writeWorkspace(emptyWorkspace('one'));
+  store.workspaces.writeWorkspace(emptyWorkspace('two'));
   try {
     assert.equal(store.library.recordSnippet('tenant', '', page, 1), undefined);
     assert.equal(store.library.recordSnippet('tenant', '😀'.repeat(262145), page, 1), undefined);

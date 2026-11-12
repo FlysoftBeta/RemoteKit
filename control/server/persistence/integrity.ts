@@ -34,6 +34,8 @@ const documents: [string, string, Codec<unknown>][] = [
   ['library_partitions', 'data', codecs.partition],
   ['library_excluded_sources', 'source', codecs.librarySource],
   ['file_library_selections', 'manifest', codecs.selection],
+  ['learning_downloads', 'failure', codecs.wireError],
+  ['session_imports', 'error', codecs.wireError],
   ['session_imports', 'sites', codecs.sites],
   ['session_imports', 'storage_job', codecs.storageJob],
   ['session_imports', 'apply_counts', codecs.applyCounts],

@@ -1,3 +1,4 @@
+import { emptyWorkspace } from '../server/persistence/workspaces';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
@@ -25,6 +26,8 @@ const page = <T>(items: T[]) => ({
 });
 function fixture() {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  store.workspaces.writeWorkspace(emptyWorkspace('tenant'));
+  store.workspaces.writeWorkspace(emptyWorkspace('second'));
   let now = Date.now();
   const accounts = new LearningAccounts(store, () => {}, undefined, undefined, Buffer.alloc(32));
   accounts.save(
@@ -477,6 +480,7 @@ test('the sync scheduler admits four tenants at once', async () => {
   try {
     const session = f.accounts.session('tenant', 'changyan');
     for (let index = 0; index < 6; index++) {
+      f.store.workspaces.writeWorkspace(emptyWorkspace('tenant-' + index));
       f.accounts.save('tenant-' + index, 'changyan', session, '学生');
       f.sync.sync('tenant-' + index);
     }
