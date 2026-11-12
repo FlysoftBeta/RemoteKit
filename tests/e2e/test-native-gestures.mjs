@@ -12,6 +12,7 @@ const { values } = parseArgs({
     out: { type: 'string' },
     port: { type: 'string', default: '34180' },
     'peer-port': { type: 'string', default: '34189' },
+    only: { type: 'string', multiple: true },
   },
 });
 if (!values.out || !['edge', 'chrome89'].includes(values.browser))
@@ -109,7 +110,11 @@ try {
     ...['invalidationCases', 'lifecycleCases'].map((name) => [name, () => qa[name]()]),
     ...Object.entries(host._retirementQA),
   ];
+  for (const name of values.only ?? []) {
+    if (!journeys.some(([journey]) => journey === name)) throw Error('Unknown journey: ' + name);
+  }
   for (const [name, journey] of journeys) {
+    if (values.only && !values.only.includes(name)) continue;
     try {
       results.push({ name, result: await journey() });
       console.log('Verified', name);

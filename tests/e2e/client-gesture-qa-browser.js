@@ -415,7 +415,8 @@ async (host) => {
         e.summary.rejections.every(
           (r) =>
             config.allowMomentumDenied &&
-            r.message.error?.code === 'conflict' &&
+            r.message.error?.code === 'outcome_unknown' &&
+            r.message.inputAdmitted === true &&
             r.message.error?.message === 'Momentum was not allowed' &&
             e.data.sent.some(
               (s) =>
@@ -426,7 +427,7 @@ async (host) => {
         ),
         `${name}: unexpected rejected input`,
       );
-      check(e);
+      await check(e);
       output.push({ name, summary: e.summary });
     };
     const root = (e) => e.common.fixture.telemetry[e.case + ':root'];
@@ -440,12 +441,19 @@ async (host) => {
       'root-scroll',
       {},
       () => qa.swipe(),
-      (e) => {
-        assert(root(e).positions.rootY > 220, 'Root scroll must include Client momentum');
+      async (e) => {
         const end = e.summary.momentum.filter((m) => m.action === 'momentumEnd').slice(-1)[0];
         assert(end, 'No Client momentumEnd');
+        const expected = -e.summary.deltaY - end.y;
+        for (let attempt = 0; attempt < 50; ++attempt) {
+          if (Math.abs(root(e).positions.rootY - expected) <= 3) break;
+          await base.page.waitForTimeout(100);
+          e.common.fixture = await base.inspect();
+        }
+        const settled = await qa.sample(e.name + '-settled');
+        assert(root(settled).positions.rootY > 220, 'Root scroll must include Client momentum');
         assert(
-          Math.abs(root(e).positions.rootY + e.summary.deltaY + end.y) <= 3,
+          Math.abs(root(settled).positions.rootY - expected) <= 3,
           'DOM distance differs from Client integral (possible native fling double execution)',
         );
       },

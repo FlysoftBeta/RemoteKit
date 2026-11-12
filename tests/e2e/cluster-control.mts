@@ -35,6 +35,7 @@ export async function createClusterControl(options: {
               peer: { listen: `127.0.0.1:${peerPort}`, address: `127.0.0.1:${peerPort}` },
             }
           : {
+              limits: { diskReserveBytes: 2 * 1024 ** 3 },
               local: {
                 executable: stageRuntime(executable, browser, join(run, 'node-runtime/bin')),
                 root: join(run, 'node'),
