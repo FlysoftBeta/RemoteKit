@@ -108,6 +108,7 @@ function summary() {
 }
 async function run(item, slot) {
   await waitForLogonBudget();
+  if (interrupted) return;
   const { scenario, browser, pointer, viewport } = item;
   const port = basePort + slot * 20;
   if (port + 19 > 65535) throw Error('Port allocation exceeds 65535');
