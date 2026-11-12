@@ -40,10 +40,17 @@ export function observedSession(
           stoppedCleanly: !running,
           changesAt: 0,
           committed,
+          lastVersion: null,
         }
       : null,
     checkpoint: committed
-      ? { manifestId: committed.manifestId, objects: [committed.manifestId], buildId: 'test' }
+      ? {
+          manifestId: committed.manifestId,
+          objects: [committed.manifestId],
+          buildId: 'test',
+          kind: 'stopped',
+          takenAt: Date.now(),
+        }
       : null,
     applied: {
       sitePreferencesRevision: desired?.revision ?? '0',

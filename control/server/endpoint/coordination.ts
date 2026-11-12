@@ -74,6 +74,7 @@ export interface CopyObservation {
   stoppedCleanly: boolean;
   changesAt: number;
   committed: { requestId: string; manifestId: string } | null;
+  lastVersion: { manifestId: string; takenAt: number; kind: 'running' | 'stopped' } | null;
 }
 export interface StopBlockers {
   unacknowledgedEvents: number;
@@ -236,7 +237,13 @@ export interface SessionObserved extends SessionTarget {
   browserPid: number;
   browserRestart: 'ready' | 'waiting' | 'exhausted';
   data: CopyObservation | null;
-  checkpoint: { manifestId: string; objects: string[]; buildId: string } | null;
+  checkpoint: {
+    manifestId: string;
+    objects: string[];
+    buildId: string;
+    kind: 'running' | 'stopped';
+    takenAt: number;
+  } | null;
   applied: {
     sitePreferencesRevision: string;
     mediaPolicyRevision: string;
@@ -579,7 +586,10 @@ export function validateSessionObserved(value: unknown): asserts value is Sessio
       !Array.isArray(value.checkpoint.objects) ||
       value.checkpoint.objects.length > 32768 ||
       value.checkpoint.objects.some((id: unknown) => typeof id !== 'string' || !/^[0-9a-f]{64}$/.test(id)) ||
-      !boundedString(value.checkpoint.buildId, 128))
+      !boundedString(value.checkpoint.buildId, 128) ||
+      !['running', 'stopped'].includes(value.checkpoint.kind) ||
+      !Number.isSafeInteger(value.checkpoint.takenAt) ||
+      value.checkpoint.takenAt < 0)
   )
     return invalid();
   for (const view of value.views) {

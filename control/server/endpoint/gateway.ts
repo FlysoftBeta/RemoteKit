@@ -73,7 +73,8 @@ export class EndpointGateway {
       | 'checkpoints'
       | 'beginStop'
       | 'cancelStop'
-      | 'discard'
+      | 'transfer'
+      | 'newestComplete'
     >,
   ) {
     nodes.on('session.observed', ({ nodeId, message }: { nodeId: string; message: SessionObserved }) => {
@@ -87,7 +88,22 @@ export class EndpointGateway {
         return;
       const copy = message.data;
       if (
-        message.checkpoint &&
+        message.checkpoint?.kind === 'running' &&
+        copy?.state === 'dirty' &&
+        message.browser === 'running' &&
+        copy.lastVersion?.manifestId === message.checkpoint.manifestId &&
+        copy.lastVersion.takenAt === message.checkpoint.takenAt
+      ) {
+        placement.commitCheckpoint(
+          placed,
+          message.checkpoint.manifestId,
+          message.checkpoint.objects,
+          message.checkpoint.buildId,
+          message.checkpoint,
+        );
+      }
+      if (
+        message.checkpoint?.kind === 'stopped' &&
         placed.dataState === 'dirty' &&
         copy?.state === 'clean' &&
         copy.committed &&
@@ -101,6 +117,7 @@ export class EndpointGateway {
           copy.base,
           message.checkpoint!.objects,
           message.checkpoint!.buildId,
+          message.checkpoint!,
         );
       }
     });
@@ -240,6 +257,20 @@ export class EndpointGateway {
   }
   identity(tenant: string): Promise<BrowserIdentity> {
     return this.invoke('session.identity', tenant);
+  }
+  async transfer(tenant: string, nodeId?: string) {
+    const source = this.placement.peek(tenant);
+    if (!source) throw new RemoteKitError('not_found', '用户没有 Session');
+    if (this.nodes.get(source.nodeId)?.state.state === 'ready') await this.stop(tenant);
+    const placed = this.placement.transfer(tenant, nodeId);
+    this.forget(tenant);
+    await Promise.all(
+      this.nodes
+        .all()
+        .filter((node) => node.state.state === 'ready')
+        .map((node) => node.coordinate()),
+    );
+    return placed;
   }
   async stop(tenant: string): Promise<number> {
     const current = this.placement.peek(tenant);

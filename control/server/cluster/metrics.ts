@@ -1,6 +1,7 @@
 import { RemoteKitError } from '../../shared/errors';
 
 export interface NodeMetrics {
+  snapshot: 'available' | 'unavailable';
   cpu: number;
   memory: { total: number; available: number };
   gpus: {
@@ -43,6 +44,7 @@ export class MetricsHistory {
     if (
       !value ||
       !unit(value.cpu) ||
+      !['available', 'unavailable'].includes(value.snapshot) ||
       !value.memory ||
       !value.disk ||
       !nonnegative(value.memory.total) ||

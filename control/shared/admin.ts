@@ -29,7 +29,8 @@ export interface AdminNode {
   sessions: number;
   maxSessions: number | null;
   users: string[];
-  dirtyUsers: string[];
+  affectedUsers: { username: string; checkpointAt: number | null }[];
+  snapshot: 'available' | 'unavailable';
   replicaBytes: number;
   metrics: AdminNodeMetrics | null;
   connectedAt: number | null;
@@ -130,12 +131,12 @@ export interface AdminSocketMethods {
   'admin.setDisabled': { params: User & { disabled: boolean }; result: AdminUser[] };
   'admin.transferAdmin': { params: User; result: AdminUser[] };
   'admin.stop': { params: User; result: AdminUser[] };
-  'admin.discardChanges': { params: User & { confirmed: boolean }; result: AdminUser[] };
+  'admin.transfer': { params: User & { nodeId?: string }; result: AdminUser[] };
   'admin.resetSession': { params: User; result: AdminUser[] };
   'admin.deleteUser': { params: User; result: AdminUser[] };
   'admin.storage': { params: Record<string, never>; result: AdminStorage };
   'admin.nodes': { params: Record<string, never>; result: AdminNode[] };
-  'admin.removeNode': { params: { nodeId: string; discardDirty?: boolean }; result: AdminNode[] };
+  'admin.removeNode': { params: { nodeId: string }; result: AdminNode[] };
   'admin.readdNode': { params: { nodeId: string }; result: AdminNode[] };
   'admin.diagnostics': { params: Record<string, never>; result: AdminDiagnostic[] };
   'admin.deleteDiagnostic': { params: { id: string }; result: AdminDiagnostic[] };

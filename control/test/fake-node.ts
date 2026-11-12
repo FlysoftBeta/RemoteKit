@@ -135,13 +135,20 @@ export class FakeNode extends EventEmitter {
           .map((object) => object.id);
         if (ids.length)
           Object.assign(value, {
-            checkpoint: { manifestId: ids[ids.length - 1], objects: ids, buildId: 'dev' },
+            checkpoint: {
+              manifestId: ids[ids.length - 1],
+              objects: ids,
+              buildId: 'dev',
+              kind: 'stopped',
+              takenAt: Date.now(),
+            },
             data: {
               state: 'clean',
               base: ids[ids.length - 1],
               stoppedCleanly: true,
               changesAt: 0,
               committed: { requestId: message.commit, manifestId: ids[ids.length - 1] },
+              lastVersion: null,
             },
           });
       }
@@ -340,6 +347,7 @@ export class FakeNode extends EventEmitter {
 
 export function fakeMetrics(overrides: Partial<NodeMetrics> = {}): NodeMetrics {
   return {
+    snapshot: 'available',
     cpu: 0.1,
     memory: { total: 32 * 1024 ** 3, available: 30 * 1024 ** 3 },
     gpus: [],

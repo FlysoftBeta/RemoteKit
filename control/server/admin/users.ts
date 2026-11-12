@@ -42,7 +42,7 @@ export class UserAdmin {
       nodeId: placement.nodeId,
       dataState: placement.dataState,
       nodeOffline: this.context.endpoint.nodes.get(placement.nodeId)?.state.state !== 'ready',
-      checkpointAt: this.context.endpoint.placement.checkpoints(tenant).latestAt,
+      checkpointAt: this.context.endpoint.placement.newestComplete(tenant)?.takenAt ?? null,
     };
   }
   list(): AdminUser[] {
@@ -155,12 +155,13 @@ export class UserAdmin {
     });
     return this.list();
   }
-  async discardChanges(username: unknown, confirmed: unknown) {
-    if (confirmed !== true) throw new RemoteKitError('conflict', '需要确认放弃未提交的更改');
+  async transfer(username: unknown, nodeId: unknown) {
+    if (nodeId !== undefined && (typeof nodeId !== 'string' || !nodeId))
+      throw new RemoteKitError('invalid_request', '目标节点无效');
     const user = this.find(username);
+    await this.disconnect(user.tenant);
     await this.context.tenants.serial(user.tenant, async () => {
-      this.context.store.transaction(() => this.context.endpoint.placement.discard(user.tenant));
-      this.context.endpoint.forget(user.tenant);
+      await this.context.endpoint.transfer(user.tenant, nodeId as string | undefined);
       this.services.lifecycle.finishStop(user.tenant);
     });
     return this.list();

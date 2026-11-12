@@ -829,7 +829,12 @@ export class ObjectIndex {
     const target = Math.min(2, ready.length);
     const jobs: Promise<unknown>[] = [];
     for (const object of this.store.db
-      .prepare('SELECT * FROM objects ORDER BY created_at,id')
+      .prepare(
+        `SELECT o.* FROM objects o ORDER BY EXISTS (
+        SELECT 1 FROM checkpoint_objects co JOIN checkpoints c ON c.tenant=co.tenant AND c.manifest_id=co.manifest_id
+        WHERE co.id=o.id AND c.id=(SELECT max(newest.id) FROM checkpoints newest WHERE newest.tenant=c.tenant)
+      ) DESC,o.created_at DESC,o.id`,
+      )
       .all() as IndexedObject[]) {
       const sources = this.sources(object.id);
       if (!sources.length) continue;

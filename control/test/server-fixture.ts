@@ -68,13 +68,14 @@ export function testGateway(
       current.pendingCommit = null;
       return true;
     },
-    discard: (tenant) => {
+    newestComplete: () => null,
+    transfer: (tenant) => {
       const current = placements.get(tenant)!;
       current.runState = 'stopped';
       current.dataState = 'clean';
       current.pendingCommit = null;
       current.placementEpoch++;
-      return current;
+      return { ...current, runState: 'stopped' as const, dataState: 'clean' as const };
     },
     commitCheckpoint: (placement, manifestId) => {
       Object.assign(placements.get(placement.tenant)!, {

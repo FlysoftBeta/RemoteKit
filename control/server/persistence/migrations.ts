@@ -420,4 +420,13 @@ export const migrations: {
       db.exec("ALTER TABLE library_snippets ADD COLUMN html TEXT NOT NULL DEFAULT ''");
     },
   },
+  {
+    version: 23,
+    name: 'session-transfer-assignment',
+    up(db) {
+      db.exec(
+        'ALTER TABLE session_placements ADD COLUMN transfer_pending INTEGER NOT NULL DEFAULT 0 CHECK(transfer_pending IN (0,1))',
+      );
+    },
+  },
 ];

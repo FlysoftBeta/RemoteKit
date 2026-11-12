@@ -52,6 +52,8 @@ function problems(node: AdminNode) {
           : `（代码 ${node.exited.code}${exits[node.exited.code] ? `，${exits[node.exited.code]}` : ''}）`
       }`,
     });
+  if (node.snapshot === 'unavailable' && node.state === 'ready')
+    list.push({ severity: 'warning', text: 'snapshot: unavailable · 运行版本暂不可用' });
   if (node.underPressure) list.push({ severity: 'warning', text: '持续高负载，新会话会优先放到其他节点。' });
   if (node.diskDraining)
     list.push({ severity: 'warning', text: '磁盘空间低于保留值，正在清理冷副本并停止接收新数据。' });
@@ -202,7 +204,6 @@ export function AdminNodesSection({ online, call }: { online: boolean; call: Adm
           setData(
             await call(node.state === 'removed' ? 'admin.readdNode' : 'admin.removeNode', {
               nodeId: node.nodeId,
-              discardDirty: true,
             }),
           );
         }}
@@ -210,13 +211,14 @@ export function AdminNodesSection({ online, call }: { online: boolean; call: Adm
         <Typography>
           {selected?.state === 'removed'
             ? `允许节点 ${selected.nodeId} 重新连接。`
-            : `移除节点 ${selected?.nodeId}？其上的会话将从最新检查点在其他节点恢复，没有检查点的会话从空白浏览器数据开始；该节点上的副本不再计入。`}
+            : `移除节点 ${selected?.nodeId}，并将以下用户的 Session 转移到其他节点，恢复其最新完整版本。此后的更改将丢失。`}
         </Typography>
-        {selected?.state !== 'removed' && !!selected?.dirtyUsers.length && (
-          <Typography color="error">
-            以下用户的未提交更改将永久丢失：{selected.dirtyUsers.join('、')}
-          </Typography>
-        )}
+        {selected?.state !== 'removed' &&
+          selected?.affectedUsers.map((user) => (
+            <Typography key={user.username}>
+              {user.username} · 最新完整版本：{formatTime(user.checkpointAt)}
+            </Typography>
+          ))}
       </ConfirmDialog>
     </Box>
   );

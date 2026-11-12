@@ -24,18 +24,18 @@ import { log } from '../server/log';
 
 const id = (n: number) => n.toString(16).padStart(64, '0');
 
-test('dirty copies stay on their owner, offline owners block placement, and confirmed discard fences them', async () => {
+test('offline dirty copies wait until transfer restores a complete version and fences the source', async () => {
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
     await h.connect('beta', 0.8);
     const user = await registerUser(h.store, 'dirty-owner', 'dirty-owner-password');
-    const first = h.placement.resolve(user.tenantId);
-    assert.equal(first.nodeId, 'alpha');
-    alpha.metrics.cpu = 0.95;
-    alpha.publishMetrics();
-    await alpha.barrier();
-    assert.equal(h.placement.resolve(user.tenantId).nodeId, first.nodeId);
+    await h.gateway.synchronize(user.tenantId);
+    const first = h.placement.peek(user.tenantId)!;
+    await h.commit(alpha, user.tenantId, id(1));
+    h.placement.commitCheckpoint(first, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 1234 });
+    await h.control.objects.replicate();
+    assert.equal(h.placement.peek(user.tenantId)!.dataState, 'dirty');
     const offline = once(h.nodes.get('alpha')!, 'offline');
     alpha.close();
     await offline;
@@ -43,15 +43,142 @@ test('dirty copies stay on their owner, offline owners block placement, and conf
       code: 'unavailable',
       reason: 'session_data_on_offline_node',
     });
-    const listed = h.control.userAdmin.list().find((user) => user.username === 'dirty-owner')!;
-    assert.equal(listed.session.state === 'none' ? false : listed.session.nodeOffline, true);
-    await assert.rejects(h.control.userAdmin.discardChanges('dirty-owner', false), { code: 'conflict' });
-    await h.control.userAdmin.discardChanges('dirty-owner', true);
-    const discarded = h.placement.peek(user.tenantId)!;
-    assert.equal(discarded.dataState, 'clean');
-    assert.equal(discarded.runState, 'stopped');
-    assert.equal(discarded.placementEpoch, first.placementEpoch + 1);
-    assert.equal(h.placement.resolve(user.tenantId).nodeId, 'beta');
+    await h.control.userAdmin.transfer('dirty-owner', 'beta');
+    const moved = h.placement.peek(user.tenantId)!;
+    assert.equal(moved.nodeId, 'beta');
+    assert.equal(moved.checkpoint, id(1));
+    assert.equal(moved.dataState, 'clean');
+    assert.equal(moved.runState, 'stopped');
+    assert.equal(moved.placementEpoch, first.placementEpoch + 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test('running versions retain four checkpoints and restore the newest complete version', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.6);
+    await h.gateway.synchronize('tenant');
+    const placed = h.placement.peek('tenant')!;
+    for (let n = 1; n <= 6; n++) {
+      await h.commit(alpha, 'tenant', id(n));
+      h.placement.commitCheckpoint(placed, id(n), [id(n)], 'dev', { kind: 'running', takenAt: n * 1000 });
+    }
+    assert.equal(h.placement.checkpoints('tenant').count, 4);
+    assert.equal(h.placement.peek('tenant')!.dataState, 'dirty');
+    assert.equal(h.placement.peek('tenant')!.runState, 'running');
+    assert.equal(h.placement.newestComplete('tenant')!.manifestId, id(6));
+    h.store.db.prepare('DELETE FROM object_replicas WHERE id=?').run(id(6));
+    assert.equal(h.placement.newestComplete('tenant')!.manifestId, id(5));
+    h.placement.commitCheckpoint(placed, id(6), [id(6)], 'dev');
+    assert.equal(h.placement.resolve('tenant').checkpoint, id(5));
+    h.store.db.exec('DELETE FROM object_replicas');
+    assert.equal(h.placement.newestComplete('tenant'), null);
+    h.store.db
+      .prepare("UPDATE session_placements SET data_state='clean',run_state='stopped' WHERE tenant=?")
+      .run('tenant');
+    assert.throws(() => h.placement.resolve('tenant'), { code: 'unavailable' });
+  } finally {
+    await h.close();
+  }
+});
+
+test('a version with a missing data chunk falls back even when its manifest is available', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.gateway.synchronize('tenant');
+    const placed = h.placement.peek('tenant')!;
+    for (const n of [1, 2, 3]) await h.commit(alpha, 'tenant', id(n));
+    h.placement.commitCheckpoint(placed, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 1000 });
+    h.placement.commitCheckpoint(placed, id(3), [id(2), id(3)], 'dev', { kind: 'running', takenAt: 2000 });
+    h.store.db.prepare('DELETE FROM object_replicas WHERE id=?').run(id(2));
+    assert.equal(h.placement.newestComplete('tenant')!.manifestId, id(1));
+    const offline = once(h.nodes.get('alpha')!, 'offline');
+    alpha.close();
+    await offline;
+    assert.equal(h.placement.newestComplete('tenant'), null);
+  } finally {
+    await h.close();
+  }
+});
+
+test('online transfer stops and saves before changing placement and fencing the old actor', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    const beta = await h.connect('beta', 0.6);
+    await h.gateway.synchronize('tenant');
+    await h.commit(alpha, 'tenant', id(1));
+    const first = h.placement.peek('tenant')!;
+    const moved = await h.gateway.transfer('tenant', 'beta');
+    assert.ok(
+      alpha.requests.some(
+        (request) => request.method === 'session.desired' && request.run === 'stopped' && request.commit,
+      ),
+    );
+    assert.equal(moved.nodeId, 'beta');
+    assert.equal(moved.dataState, 'clean');
+    assert.equal(moved.runState, 'stopped');
+    assert.equal(moved.placementEpoch, first.placementEpoch + 1);
+    assert.equal(moved.checkpoint, id(1));
+    assert.equal(
+      alpha.requests.filter((request) => request.method === 'node.desired').slice(-1)[0].sessions.length,
+      0,
+    );
+    assert.equal(
+      beta.requests.filter((request) => request.method === 'node.desired').slice(-1)[0].sessions[0]
+        .placementEpoch,
+      moved.placementEpoch,
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test('observed running versions commit through the assigned actor and retain dirty ownership', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.gateway.synchronize('tenant');
+    await h.commit(alpha, 'tenant', id(1));
+    alpha.observe('tenant', {
+      browser: 'running',
+      data: {
+        state: 'dirty',
+        base: id(1),
+        stoppedCleanly: false,
+        changesAt: 1000,
+        committed: null,
+        lastVersion: { manifestId: id(1), takenAt: 1000, kind: 'running' },
+      },
+      checkpoint: { manifestId: id(1), takenAt: 1000, kind: 'running', objects: [id(1)], buildId: 'dev' },
+    });
+    await alpha.barrier();
+    assert.equal(h.placement.peek('tenant')!.checkpoint, id(1));
+    assert.equal(h.placement.peek('tenant')!.dataState, 'dirty');
+    assert.equal(h.placement.checkpoints('tenant').latestAt, 1000);
+  } finally {
+    await h.close();
+  }
+});
+
+test('offline transfer and removal fail atomically when no complete version exists', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.6);
+    await h.gateway.synchronize('tenant');
+    const before = h.placement.peek('tenant')!;
+    const offline = once(h.nodes.get('alpha')!, 'offline');
+    alpha.close();
+    await offline;
+    await assert.rejects(h.gateway.transfer('tenant', 'beta'), { code: 'unavailable' });
+    assert.throws(() => h.control.nodeAdmin.remove('alpha'), { code: 'unavailable' });
+    assert.deepEqual(h.placement.peek('tenant'), before);
+    assert.equal(h.nodes.isRemoved('alpha'), false);
   } finally {
     await h.close();
   }
@@ -106,24 +233,28 @@ test('GC preserves claims for a durable pending commit without an in-flight stop
   }
 });
 
-test('node removal lists dirty users and requires explicit loss confirmation', async () => {
+test('node removal transfers every placement from the newest complete version', async () => {
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.8);
     const user = await registerUser(h.store, 'node-dirty-user', 'node-dirty-password');
-    const placement = h.placement.resolve(user.tenantId);
+    await h.gateway.synchronize(user.tenantId);
+    const first = h.placement.peek(user.tenantId)!;
+    await h.commit(alpha, user.tenantId, id(1));
+    h.placement.commitCheckpoint(first, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 1234 });
+    await h.control.objects.replicate();
     const offline = once(h.nodes.get('alpha')!, 'offline');
     alpha.close();
     await offline;
-    assert.deepEqual(h.control.nodeAdmin.list().find((node) => node.nodeId === 'alpha')!.dirtyUsers, [
-      'node-dirty-user',
+    assert.deepEqual(h.control.nodeAdmin.list().find((node) => node.nodeId === 'alpha')!.affectedUsers, [
+      { username: 'node-dirty-user', checkpointAt: 1234 },
     ]);
-    assert.throws(() => h.control.nodeAdmin.remove('alpha'), { code: 'conflict' });
-    h.control.nodeAdmin.remove('alpha', true);
-    const discarded = h.placement.peek(user.tenantId)!;
-    assert.equal(discarded.dataState, 'clean');
-    assert.equal(discarded.runState, 'stopped');
-    assert.equal(discarded.placementEpoch, placement.placementEpoch + 1);
+    h.control.nodeAdmin.remove('alpha');
+    const moved = h.placement.peek(user.tenantId)!;
+    assert.equal(moved.nodeId, 'beta');
+    assert.equal(moved.dataState, 'clean');
+    assert.equal(moved.placementEpoch, first.placementEpoch + 1);
   } finally {
     await h.close();
   }
@@ -143,9 +274,16 @@ test('observed shutdown commits once and stale placement evidence is ignored', a
         base: id(1),
         stoppedCleanly: true,
         changesAt: 0,
+        lastVersion: null,
         committed: { requestId: 'node-shutdown', manifestId: id(1) },
       },
-      checkpoint: { manifestId: id(1), objects: [id(1)], buildId: 'dev' },
+      checkpoint: {
+        manifestId: id(1),
+        objects: [id(1)],
+        buildId: 'dev',
+        kind: 'stopped' as const,
+        takenAt: Date.now(),
+      },
     };
     alpha.observe('tenant', proof);
     await alpha.barrier();
@@ -310,12 +448,19 @@ test('pending commit survives disconnect and resumes from observed proof', async
     alpha.desiredHandler = (document, value) => {
       if (document.commit)
         Object.assign(value, {
-          checkpoint: { manifestId: id(1), objects: [id(1)], buildId: 'dev' },
+          checkpoint: {
+            manifestId: id(1),
+            objects: [id(1)],
+            buildId: 'dev',
+            kind: 'stopped' as const,
+            takenAt: Date.now(),
+          },
           data: {
             state: 'clean',
             base: id(1),
             stoppedCleanly: true,
             changesAt: 0,
+            lastVersion: null,
             committed: { requestId: document.commit, manifestId: id(1) },
           },
         });
@@ -589,12 +734,19 @@ test('two nodes place by pressure, checkpoint, wake at epoch+1, fence reconnects
     alpha.desiredHandler = (document, value) => {
       if (document.commit)
         Object.assign(value, {
-          checkpoint: { manifestId: id(2), objects: [id(1), id(2)], buildId: 'dev' },
+          checkpoint: {
+            manifestId: id(2),
+            objects: [id(1), id(2)],
+            buildId: 'dev',
+            kind: 'stopped' as const,
+            takenAt: Date.now(),
+          },
           data: {
             state: 'clean',
             base: id(2),
             stoppedCleanly: true,
             changesAt: 0,
+            lastVersion: null,
             committed: { requestId: document.commit, manifestId: id(2) },
           },
         });
@@ -647,7 +799,7 @@ test('two nodes place by pressure, checkpoint, wake at epoch+1, fence reconnects
     const gone = once(h.nodes.get('beta')!, 'offline');
     beta.close();
     await gone;
-    h.control.nodeAdmin.remove('beta', true);
+    h.control.nodeAdmin.remove('beta');
     assert.equal(h.placement.peek('tenant')!.runState, 'stopped');
     assert.equal(h.placement.peek('tenant')!.placementEpoch, 3);
     assert.equal(h.placement.peek('tenant')!.checkpoint, id(2));
@@ -883,7 +1035,7 @@ test('inventory pages restore matching replicas, drop missing or corrupt copies 
   }
 });
 
-test('GC follows library and selection references, derivatives and only the newest two checkpoints', async () => {
+test('GC follows library and selection references, derivatives and the latest four checkpoints', async () => {
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
@@ -940,8 +1092,8 @@ test('GC follows library and selection references, derivatives and only the newe
       'UPDATE objects SET created_at=0; UPDATE object_claims SET claimed_at=0; DELETE FROM object_gc',
     );
     await h.control.objects.gc();
-    for (const n of [1, 2, 3, 5, 6]) assert.ok(alpha.objects.has(id(n)));
-    for (const n of [4, 7]) assert.equal(alpha.objects.has(id(n)), false);
+    for (const n of [1, 2, 3, 4, 5, 6]) assert.ok(alpha.objects.has(id(n)));
+    for (const n of [7]) assert.equal(alpha.objects.has(id(n)), false);
     h.store.library.save('tenant', {
       revision: 1,
       entries: [],
@@ -1241,6 +1393,8 @@ test('placement excludes missing metrics, exhausted capacity, disk and memory; p
     h.store.db
       .prepare('INSERT INTO checkpoints VALUES (?,?,?,?,?,?)')
       .run('warm', 1, sleeping.placementEpoch, id(1), 'dev', 0);
+    h.store.db.prepare('INSERT INTO checkpoint_objects VALUES (?,?,?)').run('warm', id(1), id(1));
+    h.store.db.prepare('INSERT INTO object_replicas VALUES (?,?)').run(id(1), 'alpha');
     h.store.db
       .prepare(
         "UPDATE session_placements SET run_state='stopped',data_state='clean',checkpoint_id=1 WHERE tenant='warm'",

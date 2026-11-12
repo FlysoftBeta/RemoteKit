@@ -11,7 +11,10 @@ export class NodeAdmin {
   constructor(
     private readonly store: ControlDatabase,
     private readonly nodes: NodeRegistry,
-    private readonly placement: Pick<Placement, 'evacuate' | 'activeSessions' | 'activeTenants'>,
+    private readonly placement: Pick<
+      Placement,
+      'evacuate' | 'activeSessions' | 'activeTenants' | 'newestComplete'
+    >,
     private readonly objects: Pick<ObjectIndex, 'forgetNode' | 'tick' | 'replicaBytes'>,
   ) {
     nodes.isRemoved = (nodeId) =>
@@ -41,11 +44,15 @@ export class NodeAdmin {
         users: this.placement
           .activeTenants(node.nodeId)
           .flatMap((tenant) => this.store.accounts.userForTenant(tenant)?.username ?? []),
-        dirtyUsers: (
-          this.store.db
-            .prepare("SELECT tenant FROM session_placements WHERE node_id=? AND data_state='dirty'")
-            .all(node.nodeId) as { tenant: string }[]
-        ).map((row) => this.store.accounts.userForTenant(row.tenant)?.username ?? row.tenant),
+        snapshot: sample?.value.snapshot ?? 'unavailable',
+        affectedUsers: (
+          this.store.db.prepare('SELECT tenant FROM session_placements WHERE node_id=?').all(node.nodeId) as {
+            tenant: string;
+          }[]
+        ).map((row) => ({
+          username: this.store.accounts.userForTenant(row.tenant)?.username ?? row.tenant,
+          checkpointAt: this.placement.newestComplete(row.tenant)?.takenAt ?? null,
+        })),
         replicaBytes: this.objects.replicaBytes(node.nodeId),
         metrics: sample
           ? {
@@ -64,14 +71,10 @@ export class NodeAdmin {
       };
     });
   }
-  remove(nodeId: string, discardDirty = false) {
+  remove(nodeId: string) {
     const node = this.nodes.get(nodeId);
     if (!node) throw new RemoteKitError('not_found', '节点未配置');
     if (node.state.state === 'ready') throw new RemoteKitError('conflict', '在线节点不能移除');
-    const dirty = this.store.db
-      .prepare("SELECT tenant FROM session_placements WHERE node_id=? AND data_state='dirty'")
-      .all(nodeId);
-    if (dirty.length && !discardDirty) throw new RemoteKitError('conflict', '需要确认放弃节点上未提交的更改');
     this.store.transaction(() => {
       if (this.nodes.isRemoved(nodeId)) return;
       this.store.db.prepare('INSERT INTO removed_nodes VALUES (?,?)').run(nodeId, Date.now());

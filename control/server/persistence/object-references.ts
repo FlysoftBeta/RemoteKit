@@ -30,7 +30,7 @@ export function tenantObjects(db: Database.Database, claims = true, now = Date.n
   for (const row of db
     .prepare(
       `SELECT o.tenant,o.id FROM checkpoint_objects o WHERE o.manifest_id IN
-    (SELECT c.manifest_id FROM checkpoints c WHERE c.tenant=o.tenant ORDER BY c.id DESC LIMIT 2)`,
+    (SELECT c.manifest_id FROM checkpoints c WHERE c.tenant=o.tenant ORDER BY c.id DESC LIMIT 4)`,
     )
     .all() as { tenant: string; id: string }[])
     add(row.tenant, row.id);

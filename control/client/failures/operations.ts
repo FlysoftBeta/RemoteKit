@@ -77,7 +77,7 @@ const operations: Record<string, string> = {
   'admin.clearSecondFactors': '清除用户验证方式',
   'admin.signOut': '使用户退出',
   'admin.stop': '停止用户会话',
-  'admin.discardChanges': '放弃未提交的更改',
+  'admin.transfer': '转移 Session',
   'admin.resetSession': '重置浏览器数据',
   'admin.setDisabled': '更新账户状态',
   'admin.transferAdmin': '转让管理员权限',

@@ -25,7 +25,7 @@ import {
   Typography,
 } from '@mui/material';
 import { useState } from 'react';
-import type { AdminSocketMethods, AdminUser } from '../../../shared/admin';
+import type { AdminSocketMethods, AdminUser, AdminNode } from '../../../shared/admin';
 import { RemoteKitError } from '../../../shared/errors';
 import { useAutoFocus } from '../../editing/local-autofocus';
 import { failureError, FailureNote } from '../../failures';
@@ -48,7 +48,7 @@ type Action =
   | 'password'
   | 'factors'
   | 'signOut'
-  | 'discardChanges'
+  | 'move'
   | 'stop'
   | 'resetSession'
   | 'disable'
@@ -57,10 +57,8 @@ type Action =
   | 'delete';
 
 function sessionText(user: AdminUser) {
-  if (user.session.state === 'running') return `运行中 · ${user.session.nodeId}`;
-  if (user.session.state === 'stopped')
-    return user.session.checkpointAt ? `已停止 · ${formatTime(user.session.checkpointAt)}` : '已停止';
-  return '未启动';
+  if (user.session.state === 'none') return '未启动';
+  return `${user.session.nodeId} · ${user.session.state === 'running' ? '运行中' : '已停止'} · ${user.session.dataState === 'dirty' ? '有新更改' : '已保存'} · 完整版本 ${formatTime(user.session.checkpointAt)}`;
 }
 
 function PasswordField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
@@ -158,22 +156,26 @@ function ActionDialog({
   action,
   user,
   self,
+  nodes,
   run,
   onClose,
 }: {
   action: Action | null;
   user: AdminUser | null;
   self: string;
+  nodes: AdminNode[];
   run: (method: UserMethod, params: Record<string, unknown>) => Promise<void>;
   onClose: () => void;
 }) {
   const [password, setPassword] = useState(''),
-    [typed, setTyped] = useState('');
+    [typed, setTyped] = useState(''),
+    [nodeId, setNodeId] = useState('');
   if (!user || !action) return null;
   const username = user.username;
   const close = () => {
     setPassword('');
     setTyped('');
+    setNodeId('');
     onClose();
   };
   const common = { open: true, onClose: close };
@@ -217,23 +219,42 @@ function ActionDialog({
           </Typography>
         </ConfirmDialog>
       );
-    case 'discardChanges':
+    case 'move':
       return (
         <ConfirmDialog
-          open
-          danger
-          title="放弃未提交的更改"
-          confirmLabel="放弃更改"
-          onClose={close}
-          onConfirm={() => run('admin.discardChanges', { username, confirmed: true })}
+          {...common}
+          title={`转移 ${username} 的 Session`}
+          confirmLabel="转移"
+          disabled={
+            user.session.state === 'none' || (user.session.nodeOffline && user.session.checkpointAt === null)
+          }
+          onConfirm={() => run('admin.transfer', { username, ...(nodeId ? { nodeId } : {}) })}
         >
           <Typography>
-            上次提交：
-            {user.session.state === 'none' || user.session.checkpointAt === null
-              ? '从未提交'
-              : formatTime(user.session.checkpointAt)}
-            。未提交的更改将永久丢失。
+            {user.session.state !== 'none' && user.session.nodeOffline
+              ? `源节点离线。将恢复最新完整版本（${formatTime(user.session.checkpointAt)}），此后的更改将丢失。`
+              : '将先停止并保存源节点上的 Session，再转移到目标节点。'}
           </Typography>
+          <TextField
+            select
+            label="目标节点"
+            value={nodeId}
+            onChange={(event) => setNodeId(event.target.value)}
+          >
+            <MenuItem value="">自动选择</MenuItem>
+            {nodes
+              .filter(
+                (node) =>
+                  node.state === 'ready' &&
+                  user.session.state !== 'none' &&
+                  node.nodeId !== user.session.nodeId,
+              )
+              .map((node) => (
+                <MenuItem key={node.nodeId} value={node.nodeId}>
+                  {node.nodeId}
+                </MenuItem>
+              ))}
+          </TextField>
         </ConfirmDialog>
       );
     case 'stop':
@@ -335,6 +356,7 @@ export function AdminUsersSection({
   self: string;
 }) {
   const { data, setData, error } = useAdminResource(online, () => call('admin.users', {}));
+  const { data: nodes } = useAdminResource(online, () => call('admin.nodes', {}));
   const [creating, setCreating] = useState(false),
     [menu, setMenu] = useState<{ anchor: HTMLElement; user: AdminUser } | null>(null),
     [action, setAction] = useState<{ action: Action; user: AdminUser } | null>(null);
@@ -470,16 +492,8 @@ export function AdminUsersSection({
         >
           <ListItemText primary="立即停止" secondary={target?.online ? '用户在线时不可用' : undefined} />
         </MenuItem>
-        <MenuItem
-          disabled={
-            target?.session.state === 'none' ||
-            !target ||
-            target.session.dataState !== 'dirty' ||
-            !target.session.nodeOffline
-          }
-          onClick={() => open('discardChanges')}
-        >
-          <ListItemText primary="放弃未提交的更改" />
+        <MenuItem disabled={!target || target.session.state === 'none'} onClick={() => open('move')}>
+          转移
         </MenuItem>
         <MenuItem disabled={target?.session.state !== 'stopped'} onClick={() => open('resetSession')}>
           <ListItemText
@@ -515,6 +529,7 @@ export function AdminUsersSection({
         action={action?.action ?? null}
         user={action?.user ?? null}
         self={self}
+        nodes={nodes ?? []}
         run={run}
         onClose={() => setAction(null)}
       />

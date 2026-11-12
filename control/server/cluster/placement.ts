@@ -72,15 +72,68 @@ export class Placement {
       .get(nodeId) as { count: bigint };
     return Number(row.count);
   }
-  // A removed node's sessions resume elsewhere from their latest checkpoint.
   evacuate(nodeId: string) {
-    this.store.db
-      .prepare(
-        `UPDATE session_placements SET run_state='stopped',data_state='clean',pending_commit=NULL,placement_epoch=placement_epoch+1,
-      checkpoint_id=(SELECT max(id) FROM checkpoints WHERE tenant=session_placements.tenant) WHERE node_id=?`,
-      )
-      .run(nodeId);
+    const tenants = this.store.db
+      .prepare('SELECT tenant FROM session_placements WHERE node_id=?')
+      .all(nodeId) as { tenant: string }[];
+    for (const { tenant } of tenants) this.transfer(tenant);
     this.store.db.prepare('DELETE FROM warm_session_copies WHERE node_id=?').run(nodeId);
+  }
+  newestComplete(tenant: string) {
+    const ready = new Set(
+      this.nodes
+        .all()
+        .filter((node) => node.state.state === 'ready' && !this.nodes.isRemoved(node.nodeId))
+        .map((node) => node.nodeId),
+    );
+    const versions = this.store.db
+      .prepare(
+        'SELECT id,manifest_id AS manifestId,created_at AS takenAt FROM checkpoints WHERE tenant=? ORDER BY id DESC',
+      )
+      .all(tenant) as { id: bigint; manifestId: string; takenAt: bigint }[];
+    for (const version of versions) {
+      const objects = this.store.db
+        .prepare('SELECT id FROM checkpoint_objects WHERE tenant=? AND manifest_id=?')
+        .all(tenant, version.manifestId) as { id: string }[];
+      if (!objects.some((object) => object.id === version.manifestId)) continue;
+      if (
+        objects.every((object) =>
+          (
+            this.store.db
+              .prepare('SELECT node_id AS nodeId FROM object_replicas WHERE id=?')
+              .all(object.id) as { nodeId: string }[]
+          ).some((replica) => ready.has(replica.nodeId)),
+        )
+      )
+        return { id: Number(version.id), manifestId: version.manifestId, takenAt: Number(version.takenAt) };
+    }
+    return null;
+  }
+  transfer(tenant: string, nodeId?: string) {
+    return this.store.transaction(() => {
+      const current = this.peek(tenant);
+      if (!current) throw new RemoteKitError('not_found', '用户没有 Session');
+      if (nodeId === current.nodeId) throw new RemoteKitError('conflict', '目标节点必须与源节点不同');
+      if (this.nodes.get(current.nodeId)?.state.state === 'ready' && current.dataState !== 'clean')
+        throw new RemoteKitError('conflict', '转移前需要停止并保存 Session');
+      const version = this.newestComplete(tenant);
+      if (!version) throw new RemoteKitError('unavailable', '没有完整且可用的 Session 版本');
+      this.store.db
+        .prepare(
+          "UPDATE session_placements SET run_state='stopped',data_state='clean',pending_commit=NULL,checkpoint_id=? WHERE tenant=?",
+        )
+        .run(version.id, tenant);
+      const placed = this.resolve(tenant, nodeId, current.nodeId);
+      this.store.db
+        .prepare(
+          "UPDATE session_placements SET run_state='stopped',data_state='clean',transfer_pending=1 WHERE tenant=?",
+        )
+        .run(tenant);
+      this.store.db
+        .prepare('DELETE FROM warm_session_copies WHERE tenant=? AND node_id=?')
+        .run(tenant, current.nodeId);
+      return { ...placed, runState: 'stopped' as const, dataState: 'clean' as const };
+    });
   }
   // Removes the placement and every checkpoint; returns the session whose node data must be purged.
   forgetTenant(tenant: string) {
@@ -110,9 +163,9 @@ export class Placement {
     const placement = this.peek(tenant);
     return !!placement && !!this.nodes.get(placement.nodeId)?.metrics.underPressure();
   }
-  resolve(tenant: string): SessionPlacement {
+  resolve(tenant: string, targetNodeId?: string, excludedNodeId?: string): SessionPlacement {
     return this.store.transaction(() => {
-      const existing = this.peek(tenant);
+      let existing = this.peek(tenant);
       if (existing?.pendingCommit) {
         throw new RemoteKitError('unavailable', '正在提交会话，请稍候');
       }
@@ -129,11 +182,18 @@ export class Placement {
         }
         return existing;
       }
+      if (existing?.checkpointId !== null && existing?.checkpointId !== undefined) {
+        const version = this.newestComplete(tenant);
+        if (!version) throw new RemoteKitError('unavailable', '没有完整且可用的 Session 版本');
+        existing = { ...existing, checkpointId: version.id, checkpoint: version.manifestId };
+      }
       const now = Date.now();
       const candidates = this.nodes.all().flatMap((node) => {
         const sample = node.metrics.latest(now);
         const eligible =
           node.state.state === 'ready' &&
+          node.nodeId !== excludedNodeId &&
+          (!targetNodeId || node.nodeId === targetNodeId) &&
           !node.diskDraining &&
           !this.nodes.isRemoved(node.nodeId) &&
           sample &&
@@ -154,9 +214,16 @@ export class Placement {
             .get(tenant, node.nodeId, existing.checkpoint, now - 7 * 86400000);
         return [{ node, predicted, score: predicted - (warm ? 0.15 : 0) }];
       });
-      const winner = candidates.sort(
+      const assigned =
+        existing &&
+        !!this.store.db
+          .prepare('SELECT 1 FROM session_placements WHERE tenant=? AND transfer_pending=1')
+          .get(tenant);
+      const ranked = candidates.sort(
         (a, b) => a.score - b.score || a.node.nodeId.localeCompare(b.node.nodeId),
-      )[0];
+      );
+      const winner =
+        (assigned && ranked.find((candidate) => candidate.node.nodeId === existing!.nodeId)) || ranked[0];
       if (!winner) throw new RemoteKitError('unavailable', '没有可用的节点');
       const { node, predicted } = winner;
       if (predicted >= 0.85) node.reliefRequestedAt = now;
@@ -167,7 +234,7 @@ export class Placement {
             runState: 'running',
             dataState: 'dirty',
             pendingCommit: null,
-            placementEpoch: existing.placementEpoch + 1,
+            placementEpoch: existing.placementEpoch + (assigned && node.nodeId === existing.nodeId ? 0 : 1),
           }
         : {
             tenant,
@@ -232,27 +299,13 @@ export class Placement {
       0
     );
   }
-  discard(tenant: string) {
-    const placement = this.peek(tenant);
-    if (
-      !placement ||
-      placement.dataState !== 'dirty' ||
-      this.nodes.get(placement.nodeId)?.state.state === 'ready'
-    )
-      throw new RemoteKitError('conflict', '只能放弃离线节点上的未提交更改');
-    this.store.db
-      .prepare(
-        `UPDATE session_placements SET run_state='stopped',data_state='clean',pending_commit=NULL,
-      placement_epoch=placement_epoch+1,
-      checkpoint_id=(SELECT max(id) FROM checkpoints WHERE tenant=session_placements.tenant) WHERE tenant=?`,
-      )
-      .run(tenant);
-    this.store.db
-      .prepare('DELETE FROM warm_session_copies WHERE tenant=? AND node_id=?')
-      .run(tenant, placement.nodeId);
-    return this.peek(tenant)!;
-  }
-  commitCheckpoint(placement: SessionPlacement, manifestId: string, objects: string[], buildId: string) {
+  commitCheckpoint(
+    placement: SessionPlacement,
+    manifestId: string,
+    objects: string[],
+    buildId: string,
+    version = { kind: 'stopped' as 'running' | 'stopped', takenAt: Date.now() },
+  ) {
     return this.store.transaction(() => {
       const current = this.peek(placement.tenant);
       if (
@@ -282,14 +335,15 @@ export class Placement {
             detail: 'Checkpoint object is not committed',
           });
       }
-      if (current.checkpoint === manifestId && current.dataState === 'clean') return current.checkpointId!;
+      if (current.checkpoint === manifestId && (version.kind === 'running' || current.dataState === 'clean'))
+        return current.checkpointId!;
       const row = this.store.db
         .prepare('SELECT coalesce(max(id),0)+1 AS id FROM checkpoints WHERE tenant=?')
         .get(placement.tenant) as { id: bigint };
       const id = Number(row.id);
       this.store.db
         .prepare('INSERT INTO checkpoints VALUES (?,?,?,?,?,?)')
-        .run(placement.tenant, id, placement.placementEpoch, manifestId, buildId, Date.now());
+        .run(placement.tenant, id, placement.placementEpoch, manifestId, buildId, version.takenAt);
       for (const objectId of new Set(objects))
         this.store.db
           .prepare('INSERT OR IGNORE INTO checkpoint_objects VALUES (?,?,?)')
@@ -297,21 +351,27 @@ export class Placement {
       this.store.db
         .prepare(
           `DELETE FROM checkpoint_objects WHERE tenant=? AND manifest_id NOT IN
-        (SELECT manifest_id FROM checkpoints WHERE tenant=? ORDER BY id DESC LIMIT 2)`,
+        (SELECT manifest_id FROM checkpoints WHERE tenant=? ORDER BY id DESC LIMIT 4)`,
         )
         .run(placement.tenant, placement.tenant);
       this.store.db
         .prepare(
           `DELETE FROM checkpoints WHERE tenant=? AND id NOT IN
-        (SELECT id FROM checkpoints WHERE tenant=? ORDER BY id DESC LIMIT 2)`,
+        (SELECT id FROM checkpoints WHERE tenant=? ORDER BY id DESC LIMIT 4)`,
         )
         .run(placement.tenant, placement.tenant);
-      this.store.db
-        .prepare(
-          "UPDATE session_placements SET run_state='stopped',data_state='clean',pending_commit=NULL,checkpoint_id=? WHERE tenant=?",
-        )
-        .run(id, placement.tenant);
-      this.markWarm({ ...placement, checkpoint: manifestId });
+      if (version.kind === 'running') {
+        this.store.db
+          .prepare('UPDATE session_placements SET checkpoint_id=? WHERE tenant=?')
+          .run(id, placement.tenant);
+      } else {
+        this.store.db
+          .prepare(
+            "UPDATE session_placements SET run_state='stopped',data_state='clean',pending_commit=NULL,checkpoint_id=? WHERE tenant=?",
+          )
+          .run(id, placement.tenant);
+        this.markWarm({ ...placement, checkpoint: manifestId });
+      }
       syncObjectReferences(this.store.db);
       return id;
     });

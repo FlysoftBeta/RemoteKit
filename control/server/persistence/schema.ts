@@ -6,7 +6,7 @@ import { RemoteKitError } from '../../shared/errors';
 import { baselineV12 } from './baseline-v12';
 import { migrations, type MigrationContext } from './migrations';
 
-export const currentVersion = 22;
+export const currentVersion = 23;
 export interface MigrationOptions extends MigrationContext {
   backupDirectory: string;
   buildId: string;

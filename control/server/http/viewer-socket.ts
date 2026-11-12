@@ -196,8 +196,8 @@ Object.assign(handlers, {
   'admin.transferAdmin': admin(({ services, authority }, params) =>
     services.userAdmin.transferAdmin(authority.tenantId, params.username),
   ),
-  'admin.discardChanges': admin(({ services }, params) =>
-    services.userAdmin.discardChanges(params.username, params.confirmed),
+  'admin.transfer': admin(({ services }, params) =>
+    services.userAdmin.transfer(params.username, params.nodeId),
   ),
   'admin.stop': admin(({ services }, params) => services.userAdmin.stop(params.username)),
   'admin.resetSession': admin(({ services }, params) => services.userAdmin.resetSession(params.username)),
@@ -208,9 +208,7 @@ Object.assign(handlers, {
   }),
   'admin.storage': admin(({ services }) => services.userAdmin.storage()),
   'admin.nodes': admin(({ services }) => services.nodeAdmin.list()),
-  'admin.removeNode': admin(({ services }, params) =>
-    services.nodeAdmin.remove(nodeId(params), params.discardDirty === true),
-  ),
+  'admin.removeNode': admin(({ services }, params) => services.nodeAdmin.remove(nodeId(params))),
   'admin.readdNode': admin(({ services }, params) => services.nodeAdmin.readd(nodeId(params))),
   'admin.findError': admin((ctx, params) =>
     findError(params.errorId, ctx.logs?.directory, ctx.logs?.nodes ?? { all: () => [] }),
