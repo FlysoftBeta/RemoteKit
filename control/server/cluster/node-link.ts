@@ -1,3 +1,11 @@
+import {
+  canonical,
+  counter,
+  type OneShotRequest,
+  type SessionObserved,
+  type SessionEvent,
+} from '../endpoint/coordination';
+import { RpcResults, rpcId } from '../endpoint/rpc-results';
 import { diskFloor } from './disk';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -137,8 +145,10 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   diskDraining = false;
   reliefRequestedAt?: number;
   allocationFailedAt?: number;
-  readyCopies: Promise<void> = Promise.resolve();
-  private copyGate?: { resolve: () => void; reject: (error: unknown) => void };
+  coordination: Promise<void> = Promise.resolve();
+  private fenceKey = '';
+  private fenceRevision = 0n;
+  readonly observations = new Map<string, SessionObserved>();
   private incoming = 0;
   private current?: Connection;
   private incarnation?: string;
@@ -163,23 +173,46 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         .map((node) => node.metrics),
     );
   }
-  onClientAction(listener: (event: ClientActionEvent) => void) {
-    this.on('client.action', listener);
-    return () => {
-      this.off('client.action', listener);
-    };
-  }
   onSignal(listener: (event: RtcSignal) => void) {
     this.on('rtc.signal', listener);
     return () => {
       this.off('rtc.signal', listener);
     };
   }
-  onClipboardChanged(listener: (event: ClipboardChangedEvent) => void) {
-    this.on('clipboard.changed', listener);
-    return () => {
-      this.off('clipboard.changed', listener);
-    };
+  coordinate(): Promise<void> {
+    const connection = this.current;
+    if (!connection) return Promise.reject(new RemoteKitError('unavailable', 'Node is offline'));
+    const sessions = this.registry.fencing(this.nodeId);
+    const key = canonical(sessions);
+    if (key === this.fenceKey) return this.coordination;
+    this.fenceKey = key;
+    const revision = String(++this.fenceRevision);
+    const previous = this.coordination;
+    const pending = previous
+      .catch(() => {})
+      .then(async () => {
+        if (this.current !== connection) throw new RemoteKitError('unavailable', 'Node connection changed');
+        await this.exchange({
+          method: 'node.desired',
+          connectionEpoch: connection.epoch,
+          revision,
+          sessions,
+        });
+      });
+    this.coordination = pending;
+    void pending.catch(() => {
+      if (this.coordination === pending) this.fenceKey = '';
+    });
+    return pending;
+  }
+  publish(message: object): Promise<any> {
+    return this.coordinate().then(() => this.exchange(message));
+  }
+  async invoke(message: OneShotRequest, timeoutMs?: number): Promise<any> {
+    await this.coordinate();
+    if (this.state.state !== 'ready' || this.state.incarnation !== message.endpointIncarnation)
+      throw new RemoteKitError('conflict', 'RPC Endpoint target is retired');
+    return this.exchange(message, timeoutMs);
   }
   start() {
     const launch = this.configured.local;
@@ -254,17 +287,26 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     }
     const transition = readyTransition(this.incarnation, incarnation, connection.epoch);
     this.current = connection;
-    this.readyCopies = new Promise<void>((resolve, reject) => {
-      this.copyGate = { resolve, reject };
-    });
-    void this.readyCopies.catch(() => {});
+    this.coordination = Promise.resolve();
+    this.fenceKey = '';
+    this.fenceRevision = 0n;
+    this.observations.clear();
     this.incarnation = incarnation;
     this.metrics.clear();
     this.healthySince = Date.now();
     this.buildId = this.registry.options.buildId;
     this.state = transition.state;
     this.events = { connectedAt: Date.now() };
-    this.emit('ready', { incarnation, processChanged: transition.processChanged });
+    void this.coordinate().then(
+      () => {
+        if (this.current === connection)
+          this.emit('ready', { incarnation, processChanged: transition.processChanged });
+      },
+      (error) => {
+        log.warn('node.fencing_failed', { nodeId: this.nodeId, err: error });
+        if (this.current === connection) connection.carrier.close();
+      },
+    );
   }
   receive(connection: Connection, message: Record<string, any>) {
     if (this.current !== connection) return;
@@ -343,49 +385,46 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         });
       return;
     }
-    if (message.event === 'node.ready') {
+    if (message.event === 'session.observed' || message.event === 'session.event') {
       if (
-        !Array.isArray(message.sessions) ||
-        message.sessions.length > 64 ||
-        typeof message.complete !== 'boolean'
-      )
-        throw new Error('Invalid node copy list');
-      this.registry.emit('copies', { nodeId: this.nodeId, sessions: message.sessions });
-      if (message.complete) {
-        this.copyGate?.resolve();
-        this.copyGate = undefined;
-      }
-      return;
-    }
-    if (message.type === 'clipboard.changed') {
-      if (
+        message.connectionEpoch !== connection.epoch ||
         typeof message.tenantId !== 'string' ||
         typeof message.sessionId !== 'string' ||
-        typeof message.browserSequence !== 'string' ||
-        !/^\d{1,20}$/.test(message.browserSequence) ||
-        (message.viewId !== undefined &&
-          (typeof message.viewId !== 'string' || !/^[1-9]\d*$/.test(message.viewId))) ||
-        (message.excludeFromHistory !== undefined && typeof message.excludeFromHistory !== 'boolean') ||
-        (message.oversize === true
-          ? ![message.textBytes, message.htmlBytes].every((size) => Number.isSafeInteger(size) && size >= 0)
-          : typeof message.text !== 'string' || typeof message.html !== 'string')
+        !Number.isSafeInteger(message.placementEpoch) ||
+        !counter(message.seq, true)
       )
-        throw new Error('Invalid clipboard event');
-      this.emit('clipboard.changed', message);
-      return;
-    }
-    if (message.event === 'session.events') {
+        throw new Error('Invalid Session coordination message');
+      const placed = this.registry.fencing(this.nodeId).find((value) => value.tenantId === message.tenantId);
       if (
-        typeof message.tenantId !== 'string' ||
-        typeof message.sessionId !== 'string' ||
-        typeof message.browserIncarnation !== 'string' ||
-        !Array.isArray(message.events)
+        !placed ||
+        placed.sessionId !== message.sessionId ||
+        placed.placementEpoch !== message.placementEpoch
       )
-        throw new Error('Invalid session events');
-      this.emit('session.events', message);
+        return;
+      if (message.event === 'session.observed') {
+        if (
+          message.endpointIncarnation !== this.incarnation ||
+          !counter(message.nodeRevision, true) ||
+          !counter(message.observedRevision) ||
+          typeof message.converged !== 'boolean' ||
+          !Array.isArray(message.views)
+        )
+          throw new Error('Invalid Session observation');
+        const previous = this.observations.get(message.tenantId);
+        if (previous && BigInt(previous.seq) >= BigInt(message.seq)) return;
+        this.observations.set(message.tenantId, message as SessionObserved);
+      } else if (
+        typeof message.streamId !== 'string' ||
+        typeof message.eventId !== 'string' ||
+        !message.body ||
+        typeof message.body !== 'object'
+      )
+        throw new Error('Invalid Session event');
+      this.registry.emit(message.event, { nodeId: this.nodeId, message });
+      this.emit(message.event, message);
       return;
     }
-    if (message.event === 'client.action' || message.event === 'rtc.signal') {
+    if (message.event === 'rtc.signal') {
       if (
         typeof message.tenantId !== 'string' ||
         typeof message.connectionId !== 'string' ||
@@ -447,6 +486,24 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     args: Record<string, unknown> = {},
     timeoutMs?: number,
   ): Promise<any> {
+    if (this.state.state !== 'ready')
+      return Promise.reject(new RemoteKitError('unavailable', 'Node is offline'));
+    const identity = typeof args.putId === 'string' ? rpcId(method, args.putId) : randomUUID();
+    return this.invoke(
+      {
+        method,
+        tenantId,
+        sessionId: null,
+        placementEpoch: null,
+        endpointIncarnation: this.state.incarnation,
+        opId: identity,
+        replay: false,
+        params: args,
+      },
+      timeoutMs,
+    );
+  }
+  private exchange(envelope: object, timeoutMs?: number): Promise<any> {
     const connection = this.current;
     if (this.stopped || !connection)
       return Promise.reject(new RemoteKitError('unavailable', '节点离线', { detail: 'Node is offline' }));
@@ -455,7 +512,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     const id = randomUUID();
     let message: Buffer;
     try {
-      message = encodeJson({ ...args, id, method, tenantId });
+      message = encodeJson({ ...envelope, id });
     } catch (error) {
       return Promise.reject(
         error instanceof RemoteKitError
@@ -488,7 +545,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
           }
           reject(
             new RemoteKitError(pending.delivered ? 'outcome_unknown' : 'unavailable', '节点请求未获确认', {
-              detail: method,
+              detail: String((envelope as { method?: string }).method ?? ''),
             }),
           );
         },
@@ -512,8 +569,6 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   disconnect(connection: Connection) {
     if (this.current !== connection) return;
     this.current = undefined;
-    this.copyGate?.reject(new RemoteKitError('unavailable', '节点副本报告未完成'));
-    this.copyGate = undefined;
     this.state = { state: 'offline' };
     if (this.healthySince !== undefined && Date.now() - this.healthySince >= 60_000) this.launchFailures = 0;
     this.healthySince = undefined;
@@ -567,9 +622,23 @@ export class NodeRegistry extends EventEmitter {
     const handler = this.handlers.get(message.request);
     if (!handler)
       throw new RemoteKitError('invalid_request', '不支持的节点请求', { detail: 'Unknown node request' });
-    return handler(node, message);
+    if (
+      typeof message.opId !== 'string' ||
+      typeof message.replay !== 'boolean' ||
+      !message.params ||
+      typeof message.params !== 'object' ||
+      message.endpointIncarnation !== (node.state.state === 'ready' ? node.state.incarnation : undefined)
+    )
+      throw new RemoteKitError('invalid_request', 'Invalid node RPC envelope');
+    const key = canonical([node.nodeId, message.endpointIncarnation, message.tenantId]);
+    let results = this.results.get(key);
+    if (!results) this.results.set(key, (results = new RpcResults()));
+    return results.execute(message, () =>
+      handler(node, { ...message.params, request: message.request, tenantId: message.tenantId }),
+    );
   }
   private readonly links = new Map<string, NodeLink>();
+  private readonly results = new Map<string, RpcResults>();
   private readonly carriers = new Set<Carrier>();
   private stopped = false;
   private readonly sockets = new WebSocketServer({
@@ -670,7 +739,6 @@ export class NodeRegistry extends EventEmitter {
                   type: 'node.ready',
                   peers: this.peers(hello.nodeId),
                   ...this.objectKeys,
-                  sessions: this.fencing(hello.nodeId),
                   connectionEpoch: epoch,
                   buildId: this.options.buildId,
                   config: link!.config,

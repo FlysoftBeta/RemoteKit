@@ -189,7 +189,15 @@ export class ViewerSecurity {
     peer.requests++;
     peer.appliedEpoch = 0;
     try {
-      const result = await this.endpoint.authorizeRtc(tenant, { connectionId, epoch, unlocked });
+      await this.endpoint.synchronize(tenant);
+      const observed = await this.endpoint.waitObserved(
+        tenant,
+        (value) =>
+          value.authorization.connectionId === connectionId &&
+          value.authorization.epoch === epoch &&
+          value.authorization.unlocked === unlocked,
+      );
+      const result = { applied: true, epoch: observed.authorization.epoch };
       if (result?.applied !== true || result.epoch !== epoch || viewer.peer !== peer || peer.epoch !== epoch)
         throw new RemoteKitError('outcome_unknown', 'Endpoint 授权结果未知');
       peer.appliedEpoch = epoch;

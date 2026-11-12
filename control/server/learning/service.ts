@@ -65,7 +65,6 @@ export class LearningService {
   private readonly studies = new Map<string, StudyService>();
   private readonly banks = new Map<string, BankService>();
   private readonly providers = new Map<string, XinjiaoyuProvider>();
-  private readonly listeners = new Map<object, (message: Record<string, any>) => void>();
   constructor(
     private readonly context: DomainContext,
     private readonly services: Pick<DomainServices, 'viewers' | 'library' | 'objects' | 'operations'>,
@@ -151,15 +150,6 @@ export class LearningService {
         }
       context.store.workspaces.saveWorkspace(state);
     }
-    for (const node of context.endpoint.nodes.all()) {
-      const listener = (message: Record<string, any>) => {
-        void this.sessionEvents(node.nodeId, message).catch((err) =>
-          log.warn('learning.session_events_failed', { nodeId: node.nodeId, err }),
-        );
-      };
-      node.on('session.events', listener);
-      this.listeners.set(node, listener);
-    }
   }
   state(tenant: string): LearningState {
     return {
@@ -193,19 +183,6 @@ export class LearningService {
       this.banks.set(tenant, bank);
     }
     return bank;
-  }
-  async sessionEvents(nodeId: string, message: Record<string, any>) {
-    const { tenantId: tenant, sessionId, browserIncarnation: browser, events } = message;
-    if (typeof tenant !== 'string' || typeof browser !== 'string' || !Array.isArray(events))
-      throw new RemoteKitError('invalid_request', '无效会话事件');
-    const placement = this.context.endpoint.placement.peek(tenant);
-    if (placement?.nodeId !== nodeId || placement.sessionId !== sessionId)
-      throw new RemoteKitError('forbidden', '会话事件不属于当前节点');
-    const current = this.context.tenants.get(tenant).browserIncarnation;
-    if (current && current !== browser) return;
-    const eventIds: string[] = [];
-    for (const event of events) if (this.signIn.consume(tenant, browser, event)) eventIds.push(event.eventId);
-    if (eventIds.length) await this.context.endpoint.ackEvents(tenant, { eventIds });
   }
   async request(tenant: string, method: string, params: Record<string, any>) {
     switch (method) {
@@ -351,10 +328,6 @@ export class LearningService {
     this.sync.start();
   }
   async stop() {
-    for (const node of this.context.endpoint.nodes.all()) {
-      const listener = this.listeners.get(node);
-      if (listener) node.off('session.events', listener);
-    }
     await Promise.all([this.signIn.stop(), this.sync.stop()]);
   }
 }

@@ -1,3 +1,4 @@
+import { CoordinationRepository } from './coordination';
 import Sqlite from 'better-sqlite3';
 import { ReclaimStatistics } from './reclaim-statistics';
 import { AtRestKey } from '../auth/crypto';
@@ -18,6 +19,7 @@ export interface DatabaseOptions {
   buildId: string;
 }
 export class ControlDatabase {
+  readonly coordination: CoordinationRepository;
   readonly reclaim: ReclaimStatistics;
   readonly integrity: IntegrityResult;
   readonly db: Sqlite.Database;
@@ -46,6 +48,7 @@ export class ControlDatabase {
       this.db.close();
       throw error;
     }
+    this.coordination = new CoordinationRepository(this.db, this.atRestKey);
     this.reclaim = new ReclaimStatistics(this.db, clock);
     this.workspaces = new WorkspacesRepository(this.db);
     this.security = new SecurityRepository(this.db, this.atRestKey, clock);

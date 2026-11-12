@@ -246,7 +246,7 @@ export class UncertainRecovery {
       return '有正在进行的下载';
     if (blockers.pendingPageRequests !== 0) return '页面有等待处理的请求';
     if (
-      blockers.unacknowledgedClosedEvents !== 0 ||
+      blockers.unacknowledgedEvents !== 0 ||
       blockers.rtcConnected !== false ||
       blockers.lifecycleUncertain !== false
     )

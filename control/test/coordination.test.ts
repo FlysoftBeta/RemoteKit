@@ -28,3 +28,67 @@ test('desired rejects conflicting run and commit, duplicate views and invalid oc
   occluded.views[0].occludedBottom = 901;
   assert.throws(() => validateDesired(occluded), { code: 'invalid_request' });
 });
+
+import { ControlDatabase } from '../server/persistence/database';
+import type { SessionEvent } from '../server/endpoint/coordination';
+
+test('desired revisions survive reconnects and only advance for changed content', () => {
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  try {
+    const { revision, ...document } = desired();
+    assert.equal(store.coordination.revision(document), '1');
+    assert.equal(store.coordination.revision({ ...document, connectionEpoch: 'reconnected' }), '1');
+    assert.equal(store.coordination.revision({ ...document, quality: { effectiveDpr: 2 } }), '2');
+    assert.equal(
+      store.coordination.revision({ ...document, placementEpoch: document.placementEpoch + 1 }),
+      '3',
+    );
+  } finally {
+    store.db.close();
+  }
+});
+test('inbox preserves source identity across restored streams and commits cursors with effects', () => {
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  try {
+    const event: SessionEvent = {
+      event: 'session.event',
+      tenantId: 'tenant',
+      sessionId: 'a'.repeat(32),
+      placementEpoch: 1,
+      connectionEpoch: 'connection',
+      streamId: 'source-stream',
+      seq: '1',
+      eventId: 'closed-source',
+      browserIncarnation: 'browser',
+      type: 'view.closed',
+      body: { viewId: '1', reason: 'script' },
+    };
+    assert.equal(store.coordination.receive(event), null);
+    assert.throws(() =>
+      store.transaction(() => {
+        store.coordination.settle(event, 'removed');
+        store.coordination.advance(event);
+        throw new Error('disk failure');
+      }),
+    );
+    assert.equal(store.coordination.cursor(event), '0');
+    assert.equal(store.coordination.receive(event), null);
+    store.transaction(() => {
+      store.coordination.settle(event, 'removed');
+      store.coordination.advance(event);
+    });
+    const restored = { ...event, streamId: 'restored-stream' };
+    assert.equal(store.coordination.receive(restored), 'removed');
+    store.transaction(() => store.coordination.advance(restored));
+    assert.equal(store.coordination.cursor(restored), '1');
+    assert.throws(
+      () => store.coordination.receive({ ...restored, body: { viewId: '2', reason: 'script' } }),
+      { code: 'conflict' },
+    );
+    assert.throws(() => store.coordination.advance({ ...restored, seq: '3' }), { code: 'conflict' });
+    const row = store.db.prepare('SELECT payload FROM session_event_inbox').get() as { payload: string };
+    assert.doesNotMatch(row.payload, /viewId|reason|script/);
+  } finally {
+    store.db.close();
+  }
+});

@@ -145,6 +145,7 @@ export class RtcSignaling {
         };
         const accepted = await this.context.endpoint.offer(tenant, {
           connectionId,
+          leaseId: lease,
           sdp: body.sdp,
           avSync: this.context.store.workspaces.workspace(tenant).settings.workspace.avSync,
         });
@@ -165,8 +166,7 @@ export class RtcSignaling {
         await this.services.security.bind(tenant, security, connectionId);
         this.services.viewers.assertViewer(tenant, lease);
         runtime.activateRtc(connectionId, lease);
-        this.services.pageRequests.clearAuthorization(tenant);
-        this.services.pageRequests.authorizeFiles(tenant);
+        await this.context.endpoint.synchronize(tenant);
         return {
           type: 'answer',
           avSync: accepted.avSync,

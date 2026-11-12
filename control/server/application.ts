@@ -1,3 +1,5 @@
+import { SessionEvents } from './workspace/session-events';
+import { compileDesired } from './workspace/desired';
 import { log } from './log';
 import { toRemoteKitError } from '../shared/errors';
 import { constants, fstatSync } from 'node:fs';
@@ -86,10 +88,6 @@ export function createApplication(
     closed: false,
   };
   const services = context as DomainServices;
-  endpoint.setClipboardSource((tenant) => {
-    const user = store.accounts.userForTenant(tenant);
-    return user && store.clipboards.latest(user.id);
-  });
   services.sessionImporter = new SessionImporter(
     store,
     endpoint,
@@ -129,6 +127,7 @@ export function createApplication(
   );
   services.learning = new LearningService(context, services);
   services.clipboard = new ClipboardService(context, services);
+  endpoint.setDesiredSource((tenant) => compileDesired(context, services, tenant));
   services.security = new ViewerSecurity(
     store,
     endpoint,
@@ -138,7 +137,7 @@ export function createApplication(
       context.events.emit('auth', tenant, lease, services.viewers.authState(tenant, viewer));
       if (workspace) {
         services.viewers.push(tenant);
-        services.pageRequests.authorizeFiles(tenant);
+        void endpoint.synchronize(tenant).catch((err) => log.warn('session.desired_failed', { tenant, err }));
         void context.tenants
           .serial(tenant, () => services.reconciler.reconcileProduct(tenant))
           .catch((err) => log.warn('security.reconcile_failed', { tenant, err }));
@@ -148,38 +147,28 @@ export function createApplication(
     (tenant, viewer) => {
       const runtime = context.tenants.get(tenant);
       if (!runtime.viewer || !services.viewers.validSecurity(tenant, viewer)) return;
-      services.pageRequests.clearAuthorization(tenant);
       if (viewer.locked) services.pageRequests.clearFullscreen(tenant);
       runtime.quality.resetFeedback();
       void context.tenants
         .serial(tenant, async () => {
           if (!services.viewers.validSecurity(tenant, viewer)) return;
-          if (!viewer.locked) services.pageRequests.authorizeFiles(tenant);
+          if (!viewer.locked)
+            void endpoint
+              .synchronize(tenant)
+              .catch((err) => log.warn('session.desired_failed', { tenant, err }));
           if (viewer.locked) await services.reconciler.reconcileProduct(tenant);
         })
         .catch((err) => log.warn('security.reconcile_failed', { tenant, err }));
     },
     clock,
   );
-  const unsubscribeActions = endpoint.onClientAction?.((event) => {
-    void services.operations
-      .handleEndpointAction(event)
-      .catch((err) => log.warn('operation.handle_failed', { tenant: event.tenantId, err }));
-  });
-  const unsubscribeSignals = endpoint.onSignal?.((event) => services.rtc.receiveSignal(event));
-  const unsubscribeClipboard = endpoint.onClipboardChanged((event) => {
-    void services.clipboard
-      .changed(event)
-      .catch((err) =>
-        log.warn('clipboard.write_failed', { tenant: event.tenantId, code: toRemoteKitError(err).code }),
-      );
-  });
+  const sessionEvents = new SessionEvents(context, services);
+  const unsubscribeSignals = endpoint.onSignal((event) => services.rtc.receiveSignal(event));
   services.close = async () => {
     context.closed = true;
-    unsubscribeActions?.();
     unsubscribeSignals?.();
-    unsubscribeClipboard();
-    endpoint.setClipboardSource(() => undefined);
+    await sessionEvents.close();
+    endpoint.setDesiredSource();
     await services.learning.stop();
     await services.sessionImporter.stop();
     await context.tenants.close();

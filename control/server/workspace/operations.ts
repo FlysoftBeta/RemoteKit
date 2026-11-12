@@ -291,7 +291,7 @@ export class OperationPipeline {
     });
     this.services.viewers.push(tenant);
     if (['site.permission', 'site.protocolHandler.remove', 'site.permissions.reset'].includes(body.type))
-      await this.services.policy.applySites(tenant, state);
+      await this.context.endpoint.synchronize(tenant);
     for (const effect of plan.effects) {
       switch (effect.kind) {
         case 'navigate':
@@ -344,7 +344,8 @@ export class OperationPipeline {
     if (plan.siteUaChanged) {
       const latest = this.context.store.workspaces.workspace(tenant);
       if (
-        runtime.policy.site?.applied &&
+        this.context.endpoint.observation(tenant)?.applied.sitePreferencesRevision ===
+          this.context.endpoint.observation(tenant)?.observedRevision &&
         (!action.tabId || !latest.tabs.find((t) => t.id === action.tabId)?.pendingUaReloadOrigin)
       )
         application = undefined;

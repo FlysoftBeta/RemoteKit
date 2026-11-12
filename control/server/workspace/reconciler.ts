@@ -76,7 +76,6 @@ export class Reconciler {
     if (identity?.processChanged !== false) return this.reconcileAll(identity?.nodeId);
     const runtimes = this.runtimesForNode(identity.nodeId);
     for (const runtime of runtimes) {
-      this.services.pageRequests.clearAuthorization(runtime.tenantId);
       this.services.policy.reset(runtime.tenantId);
       runtime.reconciliation.error = undefined;
       if (runtime.connectionId || runtime.rtc.disconnectedPeer) runtime.pendingRtcCheck = true;
@@ -158,34 +157,15 @@ export class Reconciler {
       }
       const desired = this.context.store.workspaces.workspace(tenant);
       let resourceLimitation = this.services.policy.qualityFor(tenant, desired).resourceLimitation;
-      if (!resourceLimitation) {
-        // This operation caches preferences without starting an offline Browser.
-        await this.services.policy.applySites(tenant, desired);
-        await this.services.policy.applyMedia(tenant);
-        if (!(runtime.viewer !== undefined)) {
-          if (runtime.started) await this.observeOffline(tenant);
-          return;
-        }
-        const ensured = await this.context.endpoint.ensureSession(tenant);
-        runtime.started = true;
-        if (!(runtime.viewer !== undefined)) {
-          await this.observeOffline(tenant);
-          return;
-        }
-        const applied = runtime.policy.site!;
-        if (
-          !applied.applied ||
-          (ensured.browserPid !== undefined && applied.browserPid !== ensured.browserPid)
-        )
-          await this.services.policy.applySites(tenant, desired, true, ensured.browserPid);
-        if (!runtime.policy.site?.applied)
-          throw new RemoteKitError('unavailable', '站点身份尚未应用，等待Endpoint恢复');
-        const media = runtime.policy.media!;
-        if (!media.applied || (ensured.browserPid !== undefined && media.browserPid !== ensured.browserPid))
-          await this.services.policy.applyMedia(tenant, true, ensured.browserPid);
-      }
-      // Native source/encoder application may finish after views or RTC exist.
-      // Accepted policy is cached before their creation; stats retain unknown actuals.
+      const sent = await this.context.endpoint.synchronize(tenant);
+      if (sent.run === 'running')
+        await this.context.endpoint.waitObserved(
+          tenant,
+          (value) =>
+            BigInt(value.observedRevision) >= BigInt(sent.revision) &&
+            (value.browser === 'running' || value.lastError !== null),
+        );
+      runtime.started = true;
       const snapshot = await this.context.endpoint.snapshot(tenant),
         state = this.context.store.workspaces.workspace(tenant),
         actual: any[] = Array.isArray(snapshot?.views) ? snapshot.views : [];
@@ -203,7 +183,6 @@ export class Reconciler {
         runtime.browserIncarnation = snapshot.browserIncarnation;
       this.services.navigation.observeRetired(state, snapshot);
       this.services.policy.observeMedia(tenant, snapshot.stats?.mediaPolicy?.applied);
-      const closedViews = await this.services.pageRequests.consumeClosedEvents(state, snapshot);
       if (!(runtime.viewer !== undefined)) {
         await this.observeOffline(tenant);
         return;
@@ -354,30 +333,6 @@ export class Reconciler {
       const ordered = [...state.tabs]
         .filter((t) => !isLocalTab(t))
         .sort((a, b) => Number(wanted(a)) - Number(wanted(b)));
-      // A first navigation can have created/shown a Native view before a
-      // provisional failure restores a local product tab. Explicitly remove
-      // that existing view from the atlas, including under resource limitation.
-      for (const t of state.tabs.filter((tab) => isLocalTab(tab))) {
-        const current = actual.find((v) => v.viewId === t.webviewId),
-          key = tenant + '/' + t.webviewId;
-        if (!current) {
-          this.services.policy.invalidateConfiguration(tenant, key);
-          continue;
-        }
-        this.services.lifecycle.forget(tenant, key);
-        const config = { viewId: t.webviewId, visible: false, requireRunning: true },
-          encoded = JSON.stringify(config);
-        if (
-          current.visible === true ||
-          (current.visible !== false && this.services.policy.configuration(tenant, key) !== encoded)
-        ) {
-          this.services.policy.invalidateConfiguration(tenant, key);
-          await this.context.endpoint.configureView(tenant, config);
-        }
-        // This hide-only cache deliberately differs from the complete remote
-        // config, so the next navigation reapplies bounds/device/visibility.
-        this.services.policy.appliedConfiguration(tenant, key, encoded);
-      }
       for (const t of resourceLimitation ? [] : ordered) {
         if (!(runtime.viewer !== undefined)) {
           await this.observeOffline(tenant);
@@ -400,46 +355,6 @@ export class Reconciler {
           current,
           lifecycleBlocked,
         );
-        // Endpoint hides the recovering WebContents while retaining this desired
-        // visibility for its final recovery step. Do not persist a temporary hide.
-        const config = {
-          viewId: t.webviewId,
-          width: region?.width ?? 1440,
-          height: region?.height ?? 900,
-          occludedBottom:
-            visible && state.windows.some((w) => w.id === t.windowId && w.activeTabId === t.id)
-              ? (region?.occludedBottom ?? 0)
-              : 0,
-          occlusionRevision: region?.occlusionRevision ?? '1',
-          device: { mode: 'desktop', deviceScaleFactor: dpr },
-          visible: !lifecycleBlocked && visible && (recovering || readyToShow),
-        };
-        const encoded = JSON.stringify(config);
-        if (!current && t.popup?.status === 'pending') {
-          if (await this.services.popups.adopt(state, t, config))
-            this.services.policy.appliedConfiguration(tenant, key, encoded);
-          continue;
-        }
-        if (
-          !current &&
-          (lifecycleBlocked ||
-            (t.navigation && !t.navigation.resolved && ['applying', 'unknown'].includes(t.navigation.status)))
-        )
-          continue;
-        if (!current) {
-          const ensure = { ...config, url: t.pendingUrl ?? t.url, ...(t.signIn ? { signIn: t.signIn } : {}) };
-          await this.context.endpoint.ensureView(tenant, ensure);
-          this.services.policy.appliedConfiguration(tenant, key, encoded);
-        } else if (
-          this.services.policy.configuration(tenant, key) !== encoded ||
-          (!recovering && current.visible !== undefined && current.visible !== config.visible)
-        ) {
-          await this.context.endpoint.configureView(
-            tenant,
-            lifecycleBlocked ? { ...config, requireRunning: true } : config,
-          );
-          this.services.policy.appliedConfiguration(tenant, key, encoded);
-        }
         if (lifecycleBlocked) {
           await this.services.lifecycle.advanceLifecycleRecovery(
             state,
@@ -465,11 +380,7 @@ export class Reconciler {
           snapshot.browserIncarnation,
         );
       }
-      for (const v of actual) {
-        const viewId = v.viewId;
-        if (!state.tabs.some((t) => t.webviewId === viewId) && !v.provisional && !closedViews.has(viewId))
-          await this.context.endpoint.closeView(tenant, { viewId, force: true, orphan: true });
-      }
+      await this.context.endpoint.synchronize(tenant);
       if (resourceLimitation) {
         const changed = runtime.lastErrorKey !== 'resource_limit';
         runtime.lastErrorKey = 'resource_limit';
@@ -512,7 +423,7 @@ export class Reconciler {
       runtime.started = false;
       return;
     }
-    // Snapshot is read-only. Maintenance must never revive a missing Browser/view.
+    await this.context.endpoint.synchronize(tenant);
     const snapshot = await this.context.endpoint.snapshot(tenant),
       state = this.context.store.workspaces.workspace(tenant);
     this.services.learning.signIn.reconcile(state, snapshot.browserIncarnation, snapshot.running !== false);
@@ -527,7 +438,6 @@ export class Reconciler {
               .map((v: any) => v.viewId),
       ),
     );
-    await this.services.pageRequests.consumeClosedEvents(state, snapshot);
     this.services.pageRequests.clearTransient(tenant);
     if (state.pendingClose) {
       const tab = state.tabs.find((t) => t.id === state.pendingClose?.id);
@@ -556,14 +466,6 @@ export class Reconciler {
       );
       if (!current) continue;
       const key = tenant + '/' + tab.webviewId;
-      if (current.visible !== false) {
-        await this.context.endpoint.configureView(tenant, {
-          viewId: tab.webviewId,
-          visible: false,
-          requireRunning: true,
-        });
-        this.services.policy.invalidateConfiguration(tenant, key);
-      }
       if (lifecycleBlocked)
         await this.services.lifecycle.advanceLifecycleRecovery(
           state,

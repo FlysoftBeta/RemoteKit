@@ -120,29 +120,4 @@ export class Popups {
       this.services.viewers.push(state.tenantId);
     }
   }
-
-  async adopt(state: ProductWorkspace, tab: ProductTab, config: ViewConfiguration): Promise<boolean> {
-    const popup = tab.popup!;
-    try {
-      const adopted = await this.context.endpoint.adoptView(state.tenantId, {
-        ...config,
-        url: tab.url,
-        provisionalId: popup.provisionalId,
-      });
-      if (adopted?.accepted !== true || adopted.completed !== true)
-        throw new RemoteKitError('outcome_unknown', 'Endpoint尚未完成新页面收养');
-      tab.popup = { provisionalId: popup.provisionalId, status: 'adopted' };
-      this.services.operations.saveWorkspace(state);
-      return true;
-    } catch (error) {
-      if (!['not_found', 'rejected'].includes(toRemoteKitError(error).code)) throw error;
-      tab.popup = {
-        provisionalId: popup.provisionalId,
-        status: 'failed',
-        error: wireError(toRemoteKitError(error)),
-      };
-      this.services.operations.saveWorkspace(state);
-      return false;
-    }
-  }
 }

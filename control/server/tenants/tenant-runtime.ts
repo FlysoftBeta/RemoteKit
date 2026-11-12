@@ -27,7 +27,6 @@ export type RtcConnection =
   | { phase: 'idle' }
   | { phase: 'negotiating'; connectionId: string; attemptId: string; leaseId: string }
   | { phase: 'active'; connectionId: string; leaseId: string };
-export type PolicyApplication = { encoded: string; applied: boolean; browserPid?: number };
 export class TenantRuntime {
   reconciliation: {
     inflight?: Promise<void>;
@@ -53,17 +52,11 @@ export class TenantRuntime {
     signal?: SignalBinding;
     disconnectedPeer?: { connectionId: string; leaseId: string };
   } = { connection: { phase: 'idle' } };
-  policy: {
-    configurations: Map<string, string>;
-    site?: PolicyApplication;
-    media?: PolicyApplication;
-    actualMedia?: AppliedMediaPolicy;
-  } = { configurations: new Map() };
+  policy: { actualMedia?: AppliedMediaPolicy } = {};
   quality = new QualityState();
   pageRequests: {
     dialogs?: (PageDialog & PageIdentity & { requestId: string })[];
     fullscreen?: FullscreenBinding;
-    authorization?: string;
     files?: InternalFileRequest[];
   } = {};
   lifecycle: { transitions: Map<string, { action: string; at: number }>; background: BackgroundReclaimViews };
@@ -119,7 +112,7 @@ export class TenantRuntime {
     this.mediaGeneration = undefined;
     this.pendingRtcCheck = false;
     this.started = false;
-    this.policy = { configurations: new Map() };
+    this.policy = {};
     this.lifecycle.transitions.clear();
     this.lifecycle.background.clear();
     this.pageRequests = {};

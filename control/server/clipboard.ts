@@ -28,24 +28,50 @@ export class ClipboardService {
     return value;
   }
 
-  changed(event: ClipboardChangedEvent) {
+  changed(event: ClipboardChangedEvent, commit: (disposition: string) => void) {
     return this.context.tenants.serial(event.tenantId, async () => {
-      if (this.context.endpoint.placement.peek(event.tenantId)?.sessionId !== event.sessionId) return;
-      if (event.oversize === true) {
-        warnClipboardOversize(event.textBytes, event.htmlBytes);
-        return;
-      }
-      const workspace = this.context.store.workspaces.workspace(event.tenantId);
-      const tab = event.viewId && workspace.tabs.find((tab) => tab.webviewId === event.viewId);
-      const app = tab && workspace.windows.find((window) => window.id === tab.windowId)?.appId;
-      const origin: SnippetOrigin =
-        tab && app
-          ? { kind: 'page', app, url: tab.url, ...(tab.title ? { title: tab.title } : {}) }
-          : { kind: 'app', app: 'browser' };
-      await this.accept(event.tenantId, event.text, event.html, origin, event.excludeFromHistory);
+      let clipboard: ReturnType<DomainContext['store']['clipboards']['latest']>;
+      let library: ReturnType<DomainContext['store']['library']['snapshot']> | undefined;
+      this.context.store.transaction(() => {
+        const user = this.context.store.accounts.userForTenant(event.tenantId);
+        if (!user) {
+          commit('account-removed');
+          return;
+        }
+        if (event.oversize === true) {
+          warnClipboardOversize(event.textBytes, event.htmlBytes);
+          commit('oversize');
+          return;
+        }
+        const workspace = this.context.store.workspaces.workspace(event.tenantId);
+        const tab = event.viewId && workspace.tabs.find((tab) => tab.webviewId === event.viewId);
+        const app = tab && workspace.windows.find((window) => window.id === tab.windowId)?.appId;
+        const origin: SnippetOrigin =
+          tab && app
+            ? { kind: 'page', app, url: tab.url, ...(tab.title ? { title: tab.title } : {}) }
+            : { kind: 'app', app: 'browser' };
+        const current = this.context.store.clipboards.latest(user.id)?.revision ?? '0';
+        const concurrent = current !== event.baseRevision;
+        if (!concurrent)
+          clipboard = this.context.store.clipboards.record(user.id, { text: event.text, html: event.html });
+        if (concurrent || !event.excludeFromHistory)
+          library = this.context.store.library.recordSnippet(
+            event.tenantId,
+            event.text,
+            origin,
+            this.context.clock.wallMs(),
+          );
+        commit(concurrent ? 'concurrent-snippet' : 'applied');
+      });
+      if (clipboard)
+        this.context.events.emit('clipboard', event.tenantId, {
+          type: 'clipboard',
+          revision: clipboard.revision,
+          text: clipboard.text,
+        });
+      if (library) this.context.events.emit('library', event.tenantId, library);
     });
   }
-
   set(authority: ViewerAuthority, params: { text: string }) {
     return this.context.tenants.serial(authority.tenantId, async () => {
       this.services.viewers.assertProductViewer(authority.tenantId, authority.leaseId, authority.epoch);
@@ -54,7 +80,7 @@ export class ClipboardService {
         throw new RemoteKitError('limit_exceeded', '剪贴板文本超过大小限制', { capacity: 'field' });
       const value = await this.accept(authority.tenantId, params.text, '', { kind: 'device' }, false);
       if (!value) throw new RemoteKitError('not_found', '账号不存在');
-      await this.context.endpoint.writeClipboard(authority.tenantId, value);
+      await this.context.endpoint.synchronize(authority.tenantId);
       return { revision: value.revision };
     });
   }
@@ -77,7 +103,7 @@ export class ClipboardService {
       const { text } = this.context.store.library.snippet(authority.tenantId, entry.id);
       const value = await this.accept(authority.tenantId, text, '', entry.origin);
       if (!value) throw new RemoteKitError('not_found', '账号不存在');
-      await this.context.endpoint.writeClipboard(authority.tenantId, value);
+      await this.context.endpoint.synchronize(authority.tenantId);
       return { revision: value.revision, text };
     });
   }

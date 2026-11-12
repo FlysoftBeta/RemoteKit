@@ -13,6 +13,7 @@ export type ClipboardChangedEvent = {
   tenantId: string;
   sessionId: string;
   browserSequence: string;
+  baseRevision: string;
   viewId?: string;
   excludeFromHistory?: boolean;
 } & (
@@ -47,31 +48,7 @@ export interface Accepted {
   requestId?: string;
   [key: string]: unknown;
 }
-export interface ViewSnapshot {
-  viewId: string;
-  instance?: string;
-  document?: string;
-  url?: string;
-  title?: string;
-  actual?: number;
-  desired?: number;
-  pending?: boolean;
-  visible?: boolean;
-  canDiscard?: boolean;
-  audible?: boolean;
-  captured?: boolean;
-  pending_close?: boolean;
-  close_state?: string;
-  lifecycle_uncertain?: boolean;
-  lifecycle_generation?: string;
-  last_lifecycle?: { generation: string; action: number; succeeded: boolean; error?: NativeError };
-  touch_error?: NativeError;
-  recovery?: { pending?: boolean; phase?: string; error?: NativeError };
-  pageRequests?: { pending?: Record<string, unknown>[]; fullscreen?: Record<string, unknown> };
-  navigationOperations?: Record<string, unknown>[];
-  provisional?: boolean;
-  [key: string]: unknown;
-}
+export type ViewSnapshot = import('./coordination').ObservedView;
 // Raw log names an Endpoint serves for diagnostics: this Session's Browser log
 // and the node's Endpoint log with its first rotation.
 export type EndpointLogName = 'browser' | 'endpoint' | 'endpoint.1' | 'crashes' | `dump/${string}`;
@@ -92,7 +69,7 @@ export interface EndpointSnapshot {
   status?: NativeError | null;
   browserRestart?: 'ready' | 'waiting' | 'exhausted';
   stopBlockers?: {
-    unacknowledgedClosedEvents: number;
+    unacknowledgedEvents: number;
     pendingNativeSelections: number;
     inFlightUploads: number;
     pendingPageRequests: number;
@@ -107,8 +84,7 @@ export interface EndpointSnapshot {
   views: ViewSnapshot[];
   rtc?: { active: boolean; connectionId?: string; avSync?: boolean | null };
   stats?: { mediaPolicy?: { applied?: AppliedMediaPolicy | null }; [key: string]: unknown };
-  events?: Record<string, unknown>[];
-  pendingPopups?: Record<string, unknown>[];
+  pendingPopups?: import('./coordination').PendingPopup[];
   [key: string]: unknown;
 }
 export type DownloadEvent = {

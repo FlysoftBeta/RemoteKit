@@ -1,3 +1,13 @@
+import { randomUUID } from 'node:crypto';
+import {
+  canonical,
+  validateDesired,
+  type SessionDesired,
+  type SessionObserved,
+  type EventsAck,
+  type OneShotRequest,
+} from './coordination';
+import { rpcId } from './rpc-results';
 import { log } from '../log';
 import { RemoteKitError, isRemoteKitError, endpointError as convertEndpointError } from '../../shared/errors';
 import type { Asset, SelectionState } from '../../shared/file-library';
@@ -47,40 +57,12 @@ export class EndpointSnapshotError extends RemoteKitError {
   }
 }
 export class EndpointGateway {
-  private clipboardSource: (tenant: string) => ClipboardValue | undefined = () => undefined;
-  setClipboardSource(source: (tenant: string) => ClipboardValue | undefined) {
-    this.clipboardSource = source;
+  private readonly descriptions = new Map<string, Set<string>>();
+  descriptionRequests(tenant: string) {
+    return [...(this.descriptions.get(tenant) ?? [])];
   }
-  private clipboardParams(tenant: string) {
-    const clipboard = this.clipboardSource(tenant);
-    return clipboard ? { clipboard } : {};
-  }
-  onClipboardChanged(listener: (event: ClipboardChangedEvent) => void) {
-    const unsubscribe = this.nodes.all().map((node) =>
-      node.onClipboardChanged((event) => {
-        if (
-          this.isPlacedOn(event.tenantId, node.nodeId) &&
-          this.placement.peek(event.tenantId)?.sessionId === event.sessionId
-        )
-          listener(event);
-      }),
-    );
-    return () => unsubscribe.forEach((fn) => fn());
-  }
-  storageImport(tenant: string, args: ImportChunk & StorageImportJob): Promise<StorageImportStatus> {
-    return this.invoke('session.storage.import', tenant, args);
-  }
-  storageImportStatus(tenant: string, args: StorageImportJob): Promise<StorageImportStatus> {
-    return this.invoke('session.storage.importStatus', tenant, args);
-  }
-  identity(tenant: string): Promise<BrowserIdentity> {
-    return this.invoke('session.identity', tenant);
-  }
-  readonly stopping = new Map<string, Promise<number>>();
-  private readonly opened = new Map<
-    string,
-    { epoch: string; placementEpoch: number; promise: Promise<void> }
-  >();
+  private desiredSource?: (tenant: string) => SessionDesired;
+  private readonly sent = new Map<string, string>();
   constructor(
     readonly nodes: NodeRegistry,
     readonly placement: Pick<
@@ -99,38 +81,105 @@ export class EndpointGateway {
       | 'beginStop'
       | 'cancelStop'
       | 'discard'
-      | 'reconcileStop'
     >,
   ) {
-    placement.reconcileStop = (tenant) => this.stop(tenant);
-    nodes.on('copies', ({ nodeId, sessions }: { nodeId: string; sessions: any[] }) => {
-      for (const reported of sessions) {
-        const current = placement.peek(reported.tenantId);
-        if (
-          !current ||
-          current.nodeId !== nodeId ||
-          current.sessionId !== reported.sessionId ||
-          current.placementEpoch !== reported.placementEpoch ||
-          reported.copy?.state !== 'clean' ||
-          !reported.copy.lastCommit ||
-          typeof reported.copy.lastCommit.requestId !== 'string' ||
-          !reported.copy.lastCommit.requestId ||
-          reported.copy.lastCommit.manifestId !== reported.copy.base
-        )
-          continue;
-        try {
-          placement.commitCheckpoint(
-            { ...current, pendingCommit: null },
-            reported.copy.base,
-            reported.checkpoint?.objects,
-            reported.checkpoint?.buildId,
-          );
-          this.opened.delete(current.tenant);
-        } catch (err) {
-          log.warn('session.shutdown_commit_failed', { tenant: current.tenant, err });
-          throw err;
-        }
+    nodes.on('session.observed', ({ nodeId, message }: { nodeId: string; message: SessionObserved }) => {
+      const placed = placement.peek(message.tenantId);
+      if (
+        !placed ||
+        placed.nodeId !== nodeId ||
+        placed.sessionId !== message.sessionId ||
+        placed.placementEpoch !== message.placementEpoch
+      )
+        return;
+      const copy = message.data;
+      if (
+        message.checkpoint &&
+        placed.dataState === 'dirty' &&
+        copy?.state === 'clean' &&
+        copy.committed &&
+        copy.base === copy.committed.manifestId &&
+        (!placed.pendingCommit ||
+          placed.pendingCommit === copy.committed.requestId ||
+          copy.committed.requestId.startsWith('node-'))
+      ) {
+        placement.commitCheckpoint(
+          placed,
+          copy.base,
+          message.checkpoint!.objects,
+          message.checkpoint!.buildId,
+        );
       }
+    });
+  }
+  setDesiredSource(source?: (tenant: string) => SessionDesired) {
+    this.desiredSource = source;
+  }
+  observation(tenant: string): SessionObserved | undefined {
+    const placed = this.placement.peek(tenant);
+    const node = placed && this.nodes.get(placed.nodeId);
+    const value = node?.observations.get(tenant);
+    return value &&
+      node?.state.state === 'ready' &&
+      value.sessionId === placed?.sessionId &&
+      value?.placementEpoch === placed?.placementEpoch &&
+      value.connectionEpoch === node.state.connectionEpoch
+      ? value
+      : undefined;
+  }
+  async synchronize(tenant: string): Promise<SessionDesired> {
+    if (!this.desiredSource) throw new RemoteKitError('unavailable', 'Desired state source is not installed');
+    let desired = this.desiredSource(tenant);
+    const placed = this.placement.peek(tenant)!;
+    const node = this.nodes.get(placed.nodeId);
+    if (!node || node.state.state !== 'ready')
+      throw new RemoteKitError('unavailable', 'Session node is offline');
+    await node.coordinate();
+    desired = this.desiredSource(tenant);
+    validateDesired(desired);
+    const key = canonical([
+      node.nodeId,
+      desired.connectionEpoch,
+      desired.sessionId,
+      desired.placementEpoch,
+      desired.revision,
+    ]);
+    if (this.sent.get(tenant) !== key) {
+      await node.publish(desired);
+      this.sent.set(tenant, key);
+    }
+    return desired;
+  }
+  async waitObserved(
+    tenant: string,
+    predicate: (value: SessionObserved) => boolean,
+    timeoutMs = 20000,
+  ): Promise<SessionObserved> {
+    const placed = this.placement.peek(tenant);
+    const node = placed && this.nodes.get(placed.nodeId);
+    if (!node || node.state.state !== 'ready')
+      throw new RemoteKitError('unavailable', 'Session node is offline');
+    const epoch = node.state.connectionEpoch;
+    return new Promise((resolve, reject) => {
+      const finish = (error?: unknown, value?: SessionObserved) => {
+        clearTimeout(timer);
+        node.off('session.observed', check);
+        node.off('offline', offline);
+        if (error) reject(error);
+        else resolve(value!);
+      };
+      const offline = () => finish(new RemoteKitError('unavailable', 'Session node disconnected'));
+      const check = () => {
+        const value = this.observation(tenant);
+        if (value?.connectionEpoch === epoch && predicate(value)) finish(undefined, value);
+      };
+      const timer = setTimeout(
+        () => finish(new RemoteKitError('outcome_unknown', 'Session convergence has not been observed')),
+        timeoutMs,
+      );
+      node.on('session.observed', check);
+      node.on('offline', offline);
+      check();
     });
   }
   isReady(tenant: string) {
@@ -140,216 +189,118 @@ export class EndpointGateway {
       : this.nodes.all().some((node) => node.state.state === 'ready');
   }
   forget(tenant: string) {
-    this.opened.delete(tenant);
+    this.sent.delete(tenant);
   }
   isPlacedOn(tenant: string, nodeId: string) {
-    const placement = this.placement.peek(tenant);
-    return placement !== undefined && placement.dataState === 'dirty' && placement.nodeId === nodeId;
+    return this.placement.peek(tenant)?.nodeId === nodeId;
   }
   onSignal(listener: (event: RtcSignal) => void) {
-    const unsubscribe = this.nodes.all().map((node) =>
-      node.onSignal?.((event) => {
+    const subscriptions = this.nodes.all().map((node) =>
+      node.onSignal((event) => {
         if (this.isPlacedOn(event.tenantId, node.nodeId)) listener(event);
       }),
     );
-    return () => unsubscribe.forEach((fn) => fn?.());
+    return () => subscriptions.forEach((unsubscribe) => unsubscribe());
   }
-  onClientAction(listener: (event: ClientActionEvent) => void) {
-    const unsubscribe = this.nodes.all().map((node) =>
-      node.onClientAction?.((event) => {
-        if (this.isPlacedOn(event.tenantId, node.nodeId)) listener(event);
-      }),
-    );
-    return () => unsubscribe.forEach((fn) => fn?.());
-  }
-  private async openSession(placement: SessionPlacement) {
-    const node = this.nodes.get(placement.nodeId)!;
-    const state = node.state;
-    if (state.state !== 'ready')
-      throw new RemoteKitError('unavailable', '会话节点离线', { detail: 'Placed node is offline' });
-    const previous = this.opened.get(placement.tenant);
-    if (previous?.epoch === state.connectionEpoch && previous.placementEpoch === placement.placementEpoch)
-      return previous.promise;
-    const entry = {
-      epoch: state.connectionEpoch,
-      placementEpoch: placement.placementEpoch,
-      promise: Promise.resolve(),
-    };
-    entry.promise = node
-      .request('session.open', placement.tenant, {
-        sessionId: placement.sessionId,
-        placementEpoch: placement.placementEpoch,
-        ...this.placement.keys(placement),
-        checkpoint: placement.checkpoint,
-        ...this.clipboardParams(placement.tenant),
-      })
-      .then(() => {
-        if (node.state.state !== 'ready' || node.state.connectionEpoch !== entry.epoch)
-          throw new RemoteKitError('outcome_unknown', '会话启动结果待确认', {
-            detail: 'Node changed during session.open',
-          });
-        this.placement.markWarm(placement);
-      })
-      .catch((error) => {
-        if (this.opened.get(placement.tenant) === entry) this.opened.delete(placement.tenant);
-        throw error;
-      });
-    this.opened.set(placement.tenant, entry);
-    return entry.promise;
-  }
-  private async invoke<T>(method: string, tenant: string, args?: object): Promise<T> {
+  private async invoke<T>(method: string, tenant: string, args: object = {}): Promise<T> {
     try {
-      const prior = this.placement.peek(tenant);
-      if (prior?.dataState === 'dirty') {
-        const owner = this.nodes.get(prior.nodeId);
-        if (owner?.state.state === 'ready') await owner.readyCopies;
+      const placed = this.placement.peek(tenant) ?? this.placement.resolve(tenant);
+      const node = this.nodes.get(placed.nodeId);
+      if (!node || node.state.state !== 'ready')
+        throw new RemoteKitError('unavailable', 'Session node is offline');
+      const target = {
+        sessionId: placed.sessionId,
+        placementEpoch: placed.placementEpoch,
+        endpointIncarnation: node.state.incarnation,
+      };
+      const params = { ...args } as Record<string, unknown>;
+      if (
+        method.startsWith('view.') ||
+        method.startsWith('session.storage.') ||
+        method === 'session.identity'
+      ) {
+        if (!params.browserIncarnation)
+          params.browserIncarnation = this.observation(tenant)?.browserIncarnation;
+        if (!params.browserIncarnation)
+          throw new RemoteKitError('unavailable', 'Session Browser has not been observed');
       }
-      const placement = this.placement.resolve(tenant);
-      const node = this.nodes.get(placement.nodeId)!;
-      try {
-        await this.openSession(placement);
-      } catch (error) {
-        const failure = endpointError(error);
-        throw new RemoteKitError('unavailable', '浏览器会话尚未就绪', {
-          detail: failure.detail ?? failure.message,
-          reason: failure.reason,
-          retryAfterMs: failure.retryAfterMs,
-          errorId: failure.errorId,
-          cause: error,
-        });
-      }
-      const reply = await node.request(method, tenant, {
-        ...args,
-        ...(method === 'session.ensure' ? this.clipboardParams(tenant) : {}),
-      });
-      if (reply && typeof reply === 'object' && 'accepted' in reply && reply.accepted === false)
-        throw new RemoteKitError('outcome_unknown', '节点未返回有效确认');
-      return reply as T;
+      const identity = params.operationId ?? params.selectionId ?? params.importId ?? params.generation;
+      const opId = identity ? rpcId(method, target, params) : randomUUID();
+      const request: OneShotRequest = { method, tenantId: tenant, ...target, opId, replay: false, params };
+      return (await node.invoke(request)) as T;
     } catch (error) {
-      const failure = endpointError(error);
-      this.recordAllocationFailure(tenant, failure);
-      throw failure;
+      throw endpointError(error);
     }
   }
-  private recordAllocationFailure(tenant: string, error: RemoteKitError) {
-    const allocationFailures = [
-      'OSR plane resources allocation failed',
-      'OSR slot resources allocation failed',
-      'render mapping allocation failed',
-      'render message pipe allocation failed',
-    ];
-    if (
-      error.reason !== 'output_failed' ||
-      !allocationFailures.some((message) => error.message === message || error.detail === message)
-    )
-      return;
-    const placement = this.placement.peek(tenant);
-    const node = placement && this.nodes.get(placement.nodeId);
-    if (node) node.allocationFailedAt = Date.now();
+  storageImport(tenant: string, args: ImportChunk & StorageImportJob): Promise<StorageImportStatus> {
+    return this.invoke('session.storage.import', tenant, args);
   }
-  writeClipboard(tenant: string, clipboard: ClipboardValue): Promise<Accepted> {
-    return this.invoke('clipboard.write', tenant, clipboard);
+  storageImportStatus(tenant: string, args: StorageImportJob): Promise<StorageImportStatus> {
+    return this.invoke('session.storage.importStatus', tenant, args);
   }
-  stop(tenant: string): Promise<number> {
-    const previous = this.stopping.get(tenant);
-    if (previous) return previous;
-    const pending = this.stopSession(tenant)
-      .catch((error) => {
-        throw endpointError(error);
-      })
-      .finally(() => {
-        this.stopping.delete(tenant);
-      });
-    this.stopping.set(tenant, pending);
-    return pending;
+  identity(tenant: string): Promise<BrowserIdentity> {
+    return this.invoke('session.identity', tenant);
   }
-  private async stopSession(tenant: string) {
-    const previous = this.placement.peek(tenant);
-    const owner = previous && this.nodes.get(previous.nodeId);
-    if (owner?.state.state === 'ready') await owner.readyCopies;
+  async stop(tenant: string): Promise<number> {
     const current = this.placement.peek(tenant);
     if (current?.runState === 'stopped' && current.dataState === 'clean') return current.checkpointId ?? 0;
-    const reconciling = !!current?.pendingCommit;
-    const placement = this.placement.beginStop(tenant);
-    try {
-      await this.opened.get(tenant)?.promise;
-    } catch (error) {
-      if (!reconciling) this.placement.cancelStop(placement);
-      throw error;
-    }
-    const node = this.nodes.get(placement.nodeId);
-    if (node?.state.state !== 'ready') {
-      if (!reconciling) this.placement.cancelStop(placement);
-      throw new RemoteKitError('unavailable', '会话节点离线');
-    }
-    const state = node.state;
-    let result;
-    try {
-      result = await node.request(
-        'session.stop',
-        tenant,
-        {
-          placementEpoch: placement.placementEpoch,
-          commit: placement.pendingCommit,
-        },
-        180000,
-      );
-    } catch (error) {
-      const failure = endpointError(error);
-      if (failure.code === 'conflict' || (!reconciling && ['unavailable', 'busy'].includes(failure.code))) {
-        this.placement.cancelStop(placement);
-        throw failure;
-      }
-      throw new RemoteKitError('outcome_unknown', failure.message, {
-        reason: failure.reason,
-        cause: failure,
-      });
-    }
-    this.opened.delete(tenant);
-    if (node.state.state !== 'ready' || node.state.connectionEpoch !== state.connectionEpoch)
-      throw new RemoteKitError('outcome_unknown', '会话提交结果待确认');
-    try {
-      if (
-        result?.state !== 'clean' ||
-        typeof result.base !== 'string' ||
-        (result.committed !== null &&
-          (result.committed?.requestId !== placement.pendingCommit ||
-            result.committed?.manifestId !== result.base))
-      )
-        throw new RemoteKitError('outcome_unknown', '节点未确认提交');
-      return this.placement.commitCheckpoint(placement, result.base, result.objects, result.buildId);
-    } catch (error) {
-      const failure = endpointError(error);
-      throw new RemoteKitError('outcome_unknown', '会话检查点提交结果待确认', {
-        detail: failure.detail ?? failure.message,
-        cause: error,
-      });
-    }
+    const placed = this.placement.beginStop(tenant);
+    await this.synchronize(tenant);
+    await this.waitObserved(
+      tenant,
+      (value) =>
+        value.browser === 'stopped' &&
+        value.data?.state === 'clean' &&
+        value.data.base !== null &&
+        (value.data.committed === null || value.data.committed.requestId === placed.pendingCommit),
+      180000,
+    );
+    return this.placement.peek(tenant)?.checkpointId ?? 0;
   }
   async snapshot(tenant: string, args: { outputDiagnostics?: boolean } = {}): Promise<EndpointSnapshot> {
-    const snapshot = await this.invoke<EndpointSnapshot>('session.snapshot', tenant, args);
-    if (snapshot.status) {
-      const error = endpointError(snapshot.status);
-      this.recordAllocationFailure(tenant, error);
-      throw new EndpointSnapshotError(error, snapshot.browserRestart);
-    }
+    if (args.outputDiagnostics) return this.invoke('session.snapshot', tenant, args);
+    const value = this.observation(tenant);
+    if (!value) throw new RemoteKitError('unavailable', 'Session has not been observed');
     return {
-      ...snapshot,
-      views: (snapshot.views ?? []).map((view) => {
-        const { viewId, view: nativeView, id, ...fields } = view;
-        return { ...fields, viewId: String(viewId ?? nativeView ?? id) };
-      }),
+      running: value.browser === 'running',
+      browserIncarnation: value.browserIncarnation ?? undefined,
+      browserPid: value.browserPid,
+      browserRestart: value.browserRestart,
+      views: value.views,
+      pendingPopups: value.pendingPopups,
+      recovery: value.recovery,
+      rtc: { ...value.rtc, connectionId: value.rtc.connectionId ?? undefined },
+      stats: value.stats,
+      stopBlockers: value.blockers,
+      status: value.lastError,
     };
+  }
+  async acknowledge(event: EventsAck): Promise<void> {
+    const placed = this.placement.peek(event.tenantId);
+    if (!placed || placed.sessionId !== event.sessionId || placed.placementEpoch !== event.placementEpoch)
+      return;
+    await this.nodes.get(placed.nodeId)!.publish(event);
+  }
+  async describeAsset(tenant: string, args: { assetId: string }): Promise<Asset> {
+    let requested = this.descriptions.get(tenant);
+    if (!requested) this.descriptions.set(tenant, (requested = new Set()));
+    if (requested.size >= 256 && !requested.has(args.assetId))
+      throw new RemoteKitError('busy', 'Too many asset descriptions');
+    requested.add(args.assetId);
+    await this.synchronize(tenant);
+    const value = await this.waitObserved(tenant, (observation) =>
+      observation.library.descriptions.some((entry) => entry.assetId === args.assetId),
+    );
+    const description = value.library.descriptions.find((entry) => entry.assetId === args.assetId)!;
+    if (description.error) throw endpointError(description.error);
+    return description.asset;
   }
   readLog(tenant: string, request: LogWindowRequest): Promise<LogWindow> {
     return this.invoke<LogWindow>('session.logs.read', tenant, request);
   }
-  async ensureSession(tenant: string): Promise<{ browserPid?: number; [key: string]: unknown }> {
-    return this.invoke<{ browserPid?: number; [key: string]: unknown }>('session.ensure', tenant);
-  }
   async offer(
     tenant: string,
-    args: { connectionId: string; sdp: string; avSync: boolean },
+    args: { connectionId: string; leaseId: string; sdp: string; avSync: boolean },
   ): Promise<Accepted & { avSync: boolean }> {
     return this.invoke<Accepted & { avSync: boolean }>('rtc.offer', tenant, { ...args, trickle: true });
   }
@@ -359,12 +310,6 @@ export class EndpointGateway {
   async closeRtc(tenant: string, args: { connectionId: string }): Promise<Accepted> {
     return this.invoke<Accepted>('rtc.close', tenant, args);
   }
-  async authorizeRtc(
-    tenant: string,
-    args: { connectionId: string; epoch: number; unlocked: boolean },
-  ): Promise<Accepted> {
-    return this.invoke<Accepted>('rtc.authorize', tenant, args);
-  }
   async actionResult(tenant: string, args: ActionResult): Promise<Accepted> {
     return this.invoke<Accepted>('rtc.actionResult', tenant, args);
   }
@@ -373,15 +318,6 @@ export class EndpointGateway {
     args: OperationIdentity & { viewId: string; url: string },
   ): Promise<Accepted> {
     return this.invoke<Accepted>('view.navigate', tenant, args);
-  }
-  async ensureView(
-    tenant: string,
-    args: Partial<ViewConfiguration> & OperationIdentity & { viewId: string; url: string },
-  ): Promise<Accepted> {
-    return this.invoke<Accepted>('view.ensure', tenant, args);
-  }
-  async configureView(tenant: string, args: ViewConfiguration): Promise<Accepted> {
-    return this.invoke<Accepted>('view.configure', tenant, args);
   }
   appInfo(tenant: string, args: { viewId: string }): Promise<ViewAppInfo> {
     return this.invoke<ViewAppInfo>('view.appInfo', tenant, args);
@@ -416,24 +352,6 @@ export class EndpointGateway {
   async lifecycle(tenant: string, args: LifecycleRequest): Promise<Accepted> {
     return this.invoke<Accepted>('view.lifecycle', tenant, args);
   }
-  async adoptView(
-    tenant: string,
-    args: ViewConfiguration & { url: string; provisionalId: string },
-  ): Promise<Accepted> {
-    return this.invoke<Accepted>('view.adopt', tenant, args);
-  }
-  async mediaPolicy(tenant: string, args: MediaPolicy): Promise<Accepted> {
-    return this.invoke<Accepted>('session.mediaPolicy', tenant, args);
-  }
-  async sitePreferences(tenant: string, args: SessionSitePreferencesRequest): Promise<Accepted> {
-    return this.invoke<Accepted>('session.sitePreferences', tenant, args);
-  }
-  async authorizeFiles(tenant: string, args: FileAuthorization): Promise<Accepted> {
-    return this.invoke<Accepted>('session.files.authorize', tenant, args);
-  }
-  async ackEvents(tenant: string, args: { eventIds: string[] }): Promise<Accepted> {
-    return this.invoke<Accepted>('session.events.ack', tenant, args);
-  }
   async faceCapabilities(tenant: string): Promise<{ available: boolean; modelVersion?: string }> {
     return this.invoke<{ available: boolean; modelVersion?: string }>('auth.face.capabilities', tenant);
   }
@@ -448,9 +366,6 @@ export class EndpointGateway {
   }
   async faceStatus(tenant: string, args: FaceBinding): Promise<FaceStatusReply> {
     return this.invoke<FaceStatusReply>('auth.face.status', tenant, args);
-  }
-  async describeAsset(tenant: string, args: { assetId: string }): Promise<Asset> {
-    return this.invoke<Asset>('session.library.describe', tenant, args);
   }
   async prepareSelection(tenant: string, args: PrepareSelection): Promise<Accepted> {
     return this.invoke<Accepted>('session.library.prepare', tenant, args);

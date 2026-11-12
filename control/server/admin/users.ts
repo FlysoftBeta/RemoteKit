@@ -201,7 +201,6 @@ export class UserAdmin {
     await this.disconnect(user.tenant);
     await this.services.learning.forgetTenant(user.tenant);
     await this.context.tenants.serial(user.tenant, async () => {
-      await this.context.endpoint.stopping.get(user.tenant)?.catch(() => {});
       const store = this.context.store;
       const importMail = store.transaction(() => {
         const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);

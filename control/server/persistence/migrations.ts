@@ -404,4 +404,13 @@ export const migrations: {
         UPDATE workspace_tabs SET data=json_set(data,'$.idleKeepAlive',json('false'));`);
     },
   },
+  {
+    version: 21,
+    name: 'session-coordination',
+    up(db) {
+      db.exec(`CREATE TABLE session_desired (tenant TEXT PRIMARY KEY, session_id TEXT NOT NULL, placement_epoch INTEGER NOT NULL, revision TEXT NOT NULL, fingerprint TEXT NOT NULL);
+        CREATE TABLE session_event_cursors (tenant TEXT NOT NULL, session_id TEXT NOT NULL, stream_id TEXT NOT NULL, up_to TEXT NOT NULL, PRIMARY KEY(tenant,session_id,stream_id));
+        CREATE TABLE session_event_inbox (tenant TEXT NOT NULL, session_id TEXT NOT NULL, event_id TEXT NOT NULL, type TEXT NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL, disposition TEXT, PRIMARY KEY(tenant,session_id,event_id));`);
+    },
+  },
 ];

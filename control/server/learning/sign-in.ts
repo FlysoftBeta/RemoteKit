@@ -171,7 +171,12 @@ export class SignIn {
     await this.finish(flow);
     this.signedIn(flow.tenant, flow.provider);
   }
-  consume(tenant: string, browser: string, event: unknown): boolean {
+  consume(
+    tenant: string,
+    browser: string,
+    event: unknown,
+    completed?: (outcome: 'complete' | 'canceled') => void,
+  ): boolean {
     if (!event || typeof event !== 'object') return false;
     const value = event as Record<string, unknown>;
     if (value.type !== 'view.signIn' || value.version !== 1 || typeof value.eventId !== 'string')
@@ -184,11 +189,19 @@ export class SignIn {
       flow.finishing ||
       flow.viewId !== value.webviewId ||
       (flow.browser && flow.browser !== browser)
-    )
+    ) {
+      completed?.('canceled');
       return true;
+    }
     const result = value.result;
-    if (!result || typeof result !== 'object' || Array.isArray(result)) return true;
-    if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 8192) return true;
+    if (!result || typeof result !== 'object' || Array.isArray(result)) {
+      completed?.('canceled');
+      return true;
+    }
+    if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 8192) {
+      completed?.('canceled');
+      return true;
+    }
     flow.finishing = true;
     this.run(
       (async () => {
@@ -234,7 +247,9 @@ export class SignIn {
           await this.finish(flow);
           this.signedIn(tenant, provider);
         }
-      })().catch((error) => this.finish(flow, error)),
+      })()
+        .catch((error) => this.finish(flow, error))
+        .finally(() => completed?.('complete')),
     );
     return true;
   }
@@ -285,7 +300,7 @@ export class SignIn {
           this.finish(
             flow,
             !running || (flow.browser && browser && flow.browser !== browser)
-              ? new RemoteKitError('rejected', '登录页面已随浏览器重启而结束')
+              ? new RemoteKitError('canceled', '登录页面已随浏览器重启而结束')
               : undefined,
             'browser-replaced',
           ),

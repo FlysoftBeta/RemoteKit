@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../../shared/errors';
 import { endpointError } from '../endpoint/gateway';
 import { reportError } from '../log';
 import { wireError } from '../../shared/errors';
@@ -25,35 +26,22 @@ export class Navigation {
           operationSequence: operation.operationSequence,
         }
       : {};
-    if (isLocalTab({ kind: previousKind })) {
-      const snapshot = await this.context.endpoint.snapshot(tenant),
-        exists = (snapshot.views ?? []).some((view: any) => view.viewId === t.webviewId);
-      const region = runtime.viewer?.viewport?.windows.find((w) => w.windowId === t.windowId);
-      if (exists)
-        await this.context.endpoint.navigate(tenant, {
-          viewId: t.webviewId,
-          url: address,
-          ...metadata,
-        });
-      else
-        await this.context.endpoint.ensureView(tenant, {
-          viewId: t.webviewId,
-          url: address,
-          width: region?.width ?? 1440,
-          height: region?.height ?? 900,
-          device: {
-            mode: 'desktop',
-            deviceScaleFactor: this.services.policy.qualityFor(tenant, state).effectiveDpr,
-          },
-          visible: false,
-          ...metadata,
-        });
-    } else
-      await this.context.endpoint.navigate(tenant, {
-        viewId: t.webviewId,
-        url: address,
-        ...metadata,
-      });
+    const browser = t.navigation?.browserIncarnation ?? runtime.browserIncarnation;
+    t.kind = 'remote';
+    this.context.store.workspaces.saveWorkspace(state);
+    await this.context.endpoint.synchronize(tenant);
+    const observed = await this.context.endpoint.waitObserved(
+      tenant,
+      (value) => value.browser === 'running' && value.views.some((view) => view.viewId === t.webviewId),
+    );
+    if (browser && observed.browserIncarnation !== browser)
+      throw new RemoteKitError('outcome_unknown', 'Original navigation Browser was retired');
+    await this.context.endpoint.navigate(tenant, {
+      viewId: t.webviewId,
+      url: address,
+      browserIncarnation: browser ?? observed.browserIncarnation ?? undefined,
+      ...metadata,
+    });
     t.kind = 'remote';
     if (!operation) t.url = address;
     t.pendingUrl = address;

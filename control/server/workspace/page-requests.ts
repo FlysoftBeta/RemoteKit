@@ -187,9 +187,6 @@ function fileRequestAnchor(value: any, instance: string, document: string): File
 }
 
 export class PageRequests {
-  clearAuthorization(tenant: string) {
-    delete this.context.tenants.get(tenant).pageRequests.authorization;
-  }
   clearFullscreen(tenant: string) {
     delete this.context.tenants.get(tenant).pageRequests.fullscreen;
   }
@@ -470,27 +467,6 @@ export class PageRequests {
       delete state.pendingAppUninstallId;
     }
   }
-  authorizeFiles(tenant: string) {
-    const runtime = this.context.tenants.get(tenant);
-    const connectionId = runtime.connectionId,
-      viewer = runtime.viewer;
-    if (!connectionId || !viewer || !this.services.viewers.productAllowed(tenant, viewer.id)) return;
-    const authEpoch = viewer.security.peer?.appliedEpoch;
-    if (!authEpoch || viewer.security.peer?.connectionId !== connectionId) return;
-    const requests = (runtime.pageRequests.files ?? [])
-      .slice(0, 64)
-      .map((request) => ({ id: request.id, binding: request.binding }));
-    const params = { connectionId, requests, library: true, authEpoch };
-    const encoded = JSON.stringify(params);
-    if (runtime.pageRequests.authorization === encoded) return;
-    runtime.pageRequests.authorization = encoded;
-    const retry = () => {
-      if (runtime.pageRequests.authorization === encoded) delete runtime.pageRequests.authorization;
-    };
-    void this.context.endpoint.authorizeFiles(tenant, params).then((result) => {
-      if (result?.accepted !== true) retry();
-    }, retry);
-  }
   collectDialogs(tenant: string, state: ProductWorkspace, snapshot: any) {
     const runtime = this.context.tenants.get(tenant);
     const found: (PageDialog & PageIdentity & { requestId: string })[] = [];
@@ -583,82 +559,11 @@ export class PageRequests {
       JSON.stringify(files) !== JSON.stringify(runtime.pageRequests.files ?? []);
     runtime.pageRequests.dialogs = found;
     runtime.pageRequests.files = files;
-    this.authorizeFiles(tenant);
+    void this.context.endpoint
+      .synchronize(tenant)
+      .catch((err) => log.warn('session.desired_failed', { tenant, err }));
     if (changed) this.services.viewers.push(tenant);
   }
-  async consumeClosedEvents(state: ProductWorkspace, snapshot: any): Promise<Set<string>> {
-    const closed = new Set<string>(),
-      eventIds: string[] = [];
-    for (const event of Array.isArray(snapshot.events) ? snapshot.events : []) {
-      if (
-        event?.type === 'view.signIn' &&
-        this.services.learning.signIn.consume(state.tenantId, snapshot.browserIncarnation, event)
-      ) {
-        eventIds.push(event.eventId);
-        continue;
-      }
-      if (event?.type === 'download.imported' || event?.type === 'download.failed') {
-        if (
-          typeof event.eventId !== 'string' ||
-          typeof event.name !== 'string' ||
-          typeof event.origin !== 'string' ||
-          (event.type === 'download.failed' && !parseWireError(event.error))
-        )
-          throw new RemoteKitError('internal', '节点下载事件格式错误', {
-            detail: 'Invalid Endpoint download event',
-          });
-        const runtime = this.context.tenants.get(state.tenantId);
-        try {
-          await this.services.library.consumeDownload(state.tenantId, event as DownloadEvent);
-          runtime.backgroundTasks.set(event.eventId, {
-            id: event.eventId,
-            kind: 'download',
-            name: event.name,
-            state: event.type === 'download.failed' ? 'failed' : 'complete',
-            error: event.type === 'download.failed' ? event.error : undefined,
-          });
-        } catch (error) {
-          runtime.backgroundTasks.set(event.eventId, {
-            id: event.eventId,
-            kind: 'download',
-            name: event.name,
-            state: 'failed',
-            error: wireError(
-              reportError(toRemoteKitError(error), 'download.import_failed', {
-                tenant: state.tenantId,
-                downloadId: event.eventId,
-              }),
-            ),
-          });
-          this.services.viewers.push(state.tenantId);
-          throw error;
-        }
-        while (runtime.backgroundTasks.size > 50)
-          runtime.backgroundTasks.delete(runtime.backgroundTasks.keys().next().value!);
-        this.services.viewers.push(state.tenantId);
-        eventIds.push(event.eventId);
-        continue;
-      }
-      if (
-        event?.type !== 'view.closed' ||
-        typeof event.eventId !== 'string' ||
-        typeof event.viewId !== 'string'
-      )
-        continue;
-      closed.add(event.viewId);
-      eventIds.push(event.eventId);
-      const tab = state.tabs.find((t) => t.webviewId === event.viewId);
-      if (tab) this.removeProductTab(state, tab);
-    }
-    if (eventIds.length) {
-      // Commit product deletion before acknowledging durable Endpoint events.
-      this.services.operations.saveWorkspace(state);
-      const result = await this.context.endpoint.ackEvents(state.tenantId, { eventIds });
-      if (result?.accepted !== true) throw new RemoteKitError('outcome_unknown', 'Endpoint关闭事件尚未确认');
-    }
-    return closed;
-  }
-
   async replyDialog(state: ProductWorkspace, action: { dialogId: string; reply: PageDialogReply }) {
     validatePageReply(action.reply);
     const tenant = state.tenantId,
@@ -710,7 +615,7 @@ export class PageRequests {
     }
     if (changed) {
       this.services.operations.saveWorkspace(state);
-      await this.services.policy.applySites(tenant, state);
+      await this.context.endpoint.synchronize(tenant);
     }
     let fields: PageReplyFields;
     switch (reply.kind) {
