@@ -52,7 +52,7 @@ const nodes = Object.fromEntries(
     id,
     {
       peer: { listen: `127.0.0.1:${port + 2 + index}`, address: `127.0.0.1:${port + 2 + index}` },
-      limits: { maxSessions: 1 },
+      limits: { maxSessions: 1, diskReserveBytes: 256 * 1024 * 1024 },
       local: {
         executable: stageRuntime(endpoint, browser, join(run, 'node-runtime/bin')),
         root: join(run, id, 'root'),
@@ -84,6 +84,34 @@ async function connect(name, context) {
     data: { username: name, password },
   });
   assert.equal(response.status(), 200, await response.text());
+  await context.addInitScript(() => {
+    window.clusterInput = [];
+    const create = RTCPeerConnection.prototype.createDataChannel;
+    RTCPeerConnection.prototype.createDataChannel = function (...args) {
+      const channel = create.apply(this, args);
+      channel.addEventListener('message', ({ data }) => {
+        if (typeof data !== 'string') return;
+        const message = JSON.parse(data);
+        if (message.type === 'frame') window.clusterFrame = message;
+        if (message.type === 'input.result' || message.type === 'focus') {
+          window.clusterInput.push({ direction: 'in', message });
+          if (window.clusterInput.length > 100) window.clusterInput.shift();
+        }
+      });
+      const send = channel.send.bind(channel);
+      channel.send = (data) => {
+        if (typeof data === 'string') {
+          const message = JSON.parse(data);
+          if (message.type === 'input' || message.type === 'focus') {
+            window.clusterInput.push({ direction: 'out', message });
+            if (window.clusterInput.length > 100) window.clusterInput.shift();
+          }
+        }
+        return send(data);
+      };
+      return channel;
+    };
+  });
   const viewer = await shellViewer(context, run, name);
   await viewer.page.goto(origin);
   await viewer.ready();
@@ -109,6 +137,9 @@ async function tap(viewer, path, id) {
     const workspace = shellQA.state?.workspace;
     const active = workspace?.tabs.find((tab) => tab.id === workspace.windows[0]?.activeTabId);
     return (
+      shellQA.auth?.peerEpoch > 0 &&
+      window.clusterFrame?.authEpoch === shellQA.auth.peerEpoch &&
+      window.clusterFrame?.layoutEpoch === shellQA.layout?.epoch &&
       shellQA.layout?.views.some((view) => view.id === active?.webviewId && !view.stale) &&
       viewport?.querySelector('video')?.videoWidth > 0 &&
       !viewport.classList.contains('resize-waiting') &&
@@ -313,6 +344,20 @@ try {
     error: error.stack,
     snapshot: await control.call('inspect').catch(String),
     events,
+    input: await Promise.all(
+      contexts
+        .flatMap((context) => context.pages())
+        .map((page) =>
+          page
+            .evaluate(() => ({
+              state: shellQA.state,
+              layout: shellQA.layout,
+              frame: window.clusterFrame,
+              wire: window.clusterInput,
+            }))
+            .catch(String),
+        ),
+    ),
   });
 } finally {
   await viewers?.close();

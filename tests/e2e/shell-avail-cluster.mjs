@@ -42,6 +42,7 @@ const nodes = Object.fromEntries(
     id,
     {
       peer: { listen: `127.0.0.1:${port + 2 + i}`, address: `127.0.0.1:${port + 2 + i}` },
+      limits: { diskReserveBytes: 256 * 1024 * 1024 },
       local: { executable, root: join(run, id) },
     },
   ]),

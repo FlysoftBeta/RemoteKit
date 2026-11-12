@@ -78,6 +78,7 @@ await writeFile(
     storage: { database: join(run, 'control.db'), logs: join(run, 'logs') },
     nodes: {
       alpha: {
+        limits: { diskReserveBytes: 256 * 1024 * 1024 },
         remote: { control: 'ws://127.0.0.1:' + (port + 2) + '/api/node' },
         peer: { listen: '127.0.0.1:' + (port + 3), address: '127.0.0.1:' + (port + 3) },
       },
