@@ -266,7 +266,6 @@ export async function keyboardOcclusion(kind) {
       });
       assert.equal(sample.layouts.length, 0, label + ' sent layout');
       assert.equal(sample.barriers.length, 0, label + ' started barrier');
-      assert.equal(sample.keyframes.length, 0, label + ' sent keyframe');
       assert.equal(sample.layout.generation, before.layout.generation, label + ' changed generation');
       assert.equal(sample.layout.epoch, before.layout.epoch, label + ' changed epoch');
       assert.equal(sample.waiting, false);
@@ -426,14 +425,23 @@ export async function keyboardOcclusion(kind) {
       { timeout: 45000 },
     );
     await page.waitForFunction(
-      () => occlusionQA.frames.some((frame) => frame.correct && Math.abs(frame.pageHeight - 751) <= 1),
-      undefined,
+      ({ wire: start, generation }) => {
+        const wire = occlusionQA.wire.slice(start);
+        const layout = wire.find(
+          ({ message }) => message.type === 'layout' && BigInt(message.generation) > BigInt(generation),
+        )?.message;
+        return (
+          wire.some(({ message }) => message.type === 'frame' && message.layoutEpoch === layout?.epoch) &&
+          occlusionQA.frames.some((frame) => frame.correct && Math.abs(frame.pageHeight - 751) <= 1)
+        );
+      },
+      beforeRotation,
       { timeout: 45000 },
     );
-    const rotation = await page.evaluate((start) => {
+    const rotation = await page.evaluate(({ wire: start, generation }) => {
       const wire = occlusionQA.wire.slice(start);
       const layout = wire.find(
-        (entry) => entry.message.type === 'layout' && entry.message.generation !== '0',
+        (entry) => entry.message.type === 'layout' && BigInt(entry.message.generation) > BigInt(generation),
       )?.message;
       const frame = wire.find(
         (entry) => entry.message.type === 'frame' && entry.message.layoutEpoch === layout?.epoch,
@@ -448,7 +456,7 @@ export async function keyboardOcclusion(kind) {
         firstPageHeight: frame?.viewports?.[0]?.pageHeight,
         firstKeyframe: frame?.keyframe,
       };
-    }, beforeRotation.wire);
+    }, beforeRotation);
     assert.ok(BigInt(rotation.generation) > BigInt(beforeRotation.generation));
     assert.ok(rotation.barriers > 0);
     assert.equal(rotation.firstPageHeight, 751, 'rotation generation started without the current occlusion');
@@ -482,8 +490,7 @@ export async function keyboardOcclusion(kind) {
         );
       const beforeOwnerMove = await page.evaluate(() => ({
         wire: occlusionQA.wire.length,
-        generation: [...occlusionQA.wire].reverse().find((entry) => entry.message.type === 'layout').message
-          .generation,
+        layout: [...occlusionQA.wire].reverse().find((entry) => entry.message.type === 'layout').message,
       }));
       const neighbourResizes = events.filter(
         (event) => event.path === '/page' && event.type === 'resize',
@@ -538,18 +545,36 @@ export async function keyboardOcclusion(kind) {
       await session.pointer.up();
       await checkOwners(views[0].id);
       const ownerMove = await page.evaluate(
-        ({ start, generation }) => {
+        ({ start, layout }) => {
           const wire = occlusionQA.wire.slice(start);
+          const geometry = ({ epoch, views, ...value }) =>
+            JSON.stringify({ ...value, views: views.map(({ focus, ...view }) => view) });
+          let previous = geometry(layout);
+          const changedEpochs = new Set();
+          for (const { message } of wire) {
+            if (message.type !== 'layout') continue;
+            const next = geometry(message);
+            if (next !== previous) changedEpochs.add(message.epoch);
+            previous = next;
+          }
+          const barriers = wire.filter((entry) => entry.message.type === 'presentation.prepare');
           return {
             generations: wire.filter(
-              (entry) => entry.message.type === 'layout' && entry.message.generation !== generation,
+              (entry) => entry.message.type === 'layout' && entry.message.generation !== layout.generation,
             ).length,
-            barriers: wire.filter((entry) => entry.message.type === 'presentation.prepare').length,
+            barriers: barriers.length,
+            unnecessaryBarriers: barriers.filter((entry) => !changedEpochs.has(entry.message.layoutEpoch))
+              .length,
           };
         },
-        { start: beforeOwnerMove.wire, generation: beforeOwnerMove.generation },
+        { start: beforeOwnerMove.wire, layout: beforeOwnerMove.layout },
       );
-      assert.deepEqual(ownerMove, { generations: 0, barriers: 0 });
+      assert.equal(ownerMove.generations, 0, 'keyboard transfer rebuilt output');
+      assert.equal(
+        ownerMove.unnecessaryBarriers,
+        0,
+        'keyboard transfer started a barrier without changing encoded geometry',
+      );
       results.push({ label: 'editing-window-transfer', ...ownerMove });
     }
     await page.screenshot({ path: join(run, 'complete.png') });

@@ -348,6 +348,7 @@ export function startProductStack({
       media,
       nodes: {
         local: {
+          limits: { diskReserveBytes: 2 * 1024 ** 3 },
           local: {
             executable: stageProductRuntime(endpoint, browser, join(run, 'runtime/bin')),
             root: join(run, 'node'),

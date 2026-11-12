@@ -230,11 +230,26 @@ export async function launch({
       if (!response.ok()) throw Error('Login failed: ' + (await response.text()));
       await page.goto(stack.origin);
       await page.waitForFunction(() => !!window.__remotekitTest);
-      await waitUnlocked();
+      await unlock();
       await wait(() => state, 'product state');
     }
   } catch (error) {
     await shot('fail-launch').catch(() => {});
+    writeFileSync(
+      join(out, 'fail-launch.json'),
+      JSON.stringify(
+        {
+          errors,
+          page: await page.evaluate(() => ({
+            text: document.body.innerText,
+            html: document.querySelector('#root')?.innerHTML,
+            state: window.__remotekitTest?.state(),
+          })),
+        },
+        null,
+        2,
+      ),
+    );
     writeFileSync(join(out, 'fail-launch.txt'), String(error.stack ?? error));
     await browser.close();
     throw error;

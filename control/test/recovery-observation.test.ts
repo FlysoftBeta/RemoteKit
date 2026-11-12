@@ -81,7 +81,7 @@ async function fixture() {
   return { store, endpoint, control, tenant, tab };
 }
 
-test('pending recovery preserves product URL/title/history and desired visibility until complete', async () => {
+test('pending recovery preserves product URL/title/history and keeps the view hidden until complete', async () => {
   const { store, endpoint, control, tenant, tab } = await fixture();
   try {
     await requestViewer(control, tenant, 'lease', 'viewport', {
@@ -103,7 +103,7 @@ test('pending recovery preserves product URL/title/history and desired visibilit
     assert.equal(current.canGoBack, true);
     assert.equal(current.canGoForward, true);
     assert.equal(current.restoring, true);
-    assert.equal(endpoint.desiredVisible, true);
+    assert.equal(endpoint.desiredVisible, false);
     assert.equal(endpoint.view.visible, false);
     assert.equal(endpoint.view.recovery.pending, true);
     const count = endpoint.configured.length;

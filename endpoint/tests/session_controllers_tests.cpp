@@ -10,6 +10,7 @@
 #include "session/signin.hpp"
 #include "management/methods.hpp"
 #include "persistence/durable_json.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -204,6 +205,7 @@ void PresentationOwnership() {
     return 0;
   };
   outbox.Bind(scope);
+  MediaSampling sampling{1280, 720, 1};
   PresentationController presentation({.peer = [&] { return scope.peer; },
                                        .scope = [&] { return scope; },
                                        .admitted = [](const auto&) { return true; },
@@ -212,7 +214,7 @@ void PresentationOwnership() {
                                        .flush = [&] { outbox.Flush(scope, send); },
                                        .refresh_editable = [] {},
                                        .outbox = [&]() -> ControlOutbox& { return outbox; },
-                                       .sampling = [] { return MediaSampling{1280, 720, 1}; }});
+                                       .sampling = [&] { return sampling; }});
   presentation.Bind(scope.peer);
   RtcEvent message{};
   message.peer = scope.peer;
@@ -223,14 +225,18 @@ void PresentationOwnership() {
   frame->generation = 3;
   frame->width_pixels = 1280;
   frame->height_pixels = 720;
-  frame->view_count = 1;
+  frame->view_count = 2;
   auto& view = frame->views[0];
   view.webview_id = 1;
   view.session_id = 2;
-  view.width_pixels = 1280;
+  view.width_pixels = 640;
   view.height_pixels = 720;
   view.page_device_scale_factor = 1;
   view.atlas_pixels_per_dip = 1;
+  auto& neighbour = frame->views[1];
+  neighbour = view;
+  neighbour.webview_id = 2;
+  neighbour.x_pixels = 640;
   const auto epoch = presentation.ObserveLayout(*frame);
   auto layout = presentation.Layout(*frame);
   layout["epoch"] = std::to_string(epoch);
@@ -267,6 +273,37 @@ void PresentationOwnership() {
     return true;
   }));
   CHECK(published && sent.size() == messages && presentation.Allows("1", epoch));
+  for (bool first_owns_keyboard : {false, true}) {
+    view.page_height_dip = first_owns_keyboard ? 360 : 720;
+    neighbour.page_height_dip = first_owns_keyboard ? 720 : 360;
+    ++view.occlusion_revision;
+    ++neighbour.occlusion_revision;
+    ++view.focus_generation;
+    ++neighbour.focus_generation;
+    CHECK(presentation.ObserveLayout(*frame) == epoch);
+    auto transferred = presentation.Layout(*frame);
+    transferred["epoch"] = std::to_string(epoch);
+    const auto start = sent.size();
+    presentation.PublishLayout(std::move(transferred), epoch);
+    CHECK(std::none_of(sent.begin() + start, sent.end(),
+                       [](const auto& value) { return value["type"] == "presentation.prepare"; }));
+    CHECK(presentation.Send(scope.peer, epoch, false, [] { return true; }));
+    CHECK(presentation.Allows("1", epoch) && presentation.Allows("2", epoch));
+  }
+  sampling = {640, 360, .5};
+  const auto resized_epoch = presentation.ObserveLayout(*frame);
+  CHECK(resized_epoch > epoch);
+  auto resized = presentation.Layout(*frame);
+  resized["epoch"] = std::to_string(resized_epoch);
+  presentation.PublishLayout(std::move(resized), resized_epoch);
+  CHECK(sent.back()["type"] == "presentation.prepare");
+  CHECK(sent.back()["outputGeneration"] == "3");
+  CHECK(!presentation.Send(scope.peer, resized_epoch, false, [] { return true; }));
+  message.message = sent.back();
+  message.message["type"] = "presentation.ready";
+  message.bytes = message.message.dump();
+  CHECK(presentation.PresentationMessage(message));
+  CHECK(presentation.Send(scope.peer, resized_epoch, true, [] { return true; }));
   ++scope.authorization;
   outbox.Bind(scope);
   presentation.QueueLayout();
