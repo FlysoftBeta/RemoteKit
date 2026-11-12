@@ -10,6 +10,14 @@ struct SnapshotSource {
   Json entries;
   std::function<Result<std::string>(const std::string&, uint64_t, uint32_t)> read;
 };
+struct CheckpointPlan {
+  Json previous;
+  DirectoryChanges changes;
+};
+struct BuiltCheckpoint {
+  Json checkpoint;
+  Json index;
+};
 class Checkpoints {
  public:
   explicit Checkpoints(objects::ObjectService& objects,
@@ -23,6 +31,15 @@ class Checkpoints {
                       PhaseClock::time_point deadline = PhaseClock::time_point::max(),
                       bool defer_commits = false,
                       const SnapshotSource* source = nullptr);
+  static Result<CheckpointPlan> Capture(const fs::path& directory, DirectoryChanges changes);
+  Result<BuiltCheckpoint> Build(const fs::path& directory,
+                                const std::string& tenant,
+                                const std::string& build,
+                                const CheckpointPlan& plan,
+                                PhaseClock::time_point deadline = PhaseClock::time_point::max(),
+                                bool defer_commits = false,
+                                const SnapshotSource* source = nullptr);
+  static Result<void> InstallIndex(const fs::path& directory, const BuiltCheckpoint& built);
   Result<void> Restore(const fs::path& directory,
                        const std::string& tenant,
                        const Json& checkpoint);

@@ -470,20 +470,43 @@ Result<Json> Checkpoints::Create(const fs::path& raw_directory,
                                  PhaseClock::time_point deadline,
                                  bool defer_commits,
                                  const SnapshotSource* source) {
-  const auto directory = LongPath(raw_directory);
-  const fs::path index_path = directory.wstring() + L".checkpoint-index.json";
-  RK_ASSIGN_OR_RETURN(previous, Load(index_path));
-  if (!ValidIndex(previous))
-    previous = Json();
-  fs::create_directories(directory);
-  auto changes = cache_ ? cache_->Changes() : DirectoryChanges{};
-  if (!source && cache_ && !changes.continuous && ValidIndex(previous)) {
-    RK_ASSIGN_OR_RETURN(copy, Copy(directory));
+  fs::create_directories(LongPath(raw_directory));
+  RK_ASSIGN_OR_RETURN(plan,
+                      Capture(raw_directory, cache_ ? cache_->Changes() : DirectoryChanges{}));
+  if (!source && cache_ && !plan.changes.continuous && ValidIndex(plan.previous)) {
+    RK_ASSIGN_OR_RETURN(copy, Copy(raw_directory));
     RK_ASSIGN_OR_RETURN(
         recovered,
-        RecoverChanges(directory, copy.is_null() ? 0 : copy["changesAt"].get<int64_t>()));
-    changes = std::move(recovered);
+        RecoverChanges(raw_directory, copy.is_null() ? 0 : copy["changesAt"].get<int64_t>()));
+    plan.changes = std::move(recovered);
   }
+  RK_ASSIGN_OR_RETURN(built,
+                      Build(raw_directory, tenant, build, plan, deadline, defer_commits, source));
+  const auto journal_start = PhaseClock::now();
+  RK_RETURN_IF_ERROR(InstallIndex(raw_directory, built));
+  if (phases_)
+    (*phases_)["journal"] = phases_->value("journal", 0.0) + PhaseMs(journal_start);
+  return std::move(built.checkpoint);
+}
+Result<CheckpointPlan> Checkpoints::Capture(const fs::path& directory, DirectoryChanges changes) {
+  RK_ASSIGN_OR_RETURN(previous, Load(LongPath(directory).wstring() + L".checkpoint-index.json"));
+  if (!ValidIndex(previous))
+    previous = Json();
+  return CheckpointPlan{std::move(previous), std::move(changes)};
+}
+Result<void> Checkpoints::InstallIndex(const fs::path& directory, const BuiltCheckpoint& built) {
+  return WriteDurableJson(LongPath(directory).wstring() + L".checkpoint-index.json", built.index);
+}
+Result<BuiltCheckpoint> Checkpoints::Build(const fs::path& raw_directory,
+                                           const std::string& tenant,
+                                           const std::string& build,
+                                           const CheckpointPlan& plan,
+                                           PhaseClock::time_point deadline,
+                                           bool defer_commits,
+                                           const SnapshotSource* source) {
+  const auto directory = LongPath(raw_directory);
+  const auto& previous = plan.previous;
+  const auto& changes = plan.changes;
   RK_ASSIGN_OR_RETURN(snapshot, source ? Result<Json>(source->entries)
                                        : Scan(directory, previous, changes, phases_));
   Json index = snapshot;
@@ -628,11 +651,7 @@ Result<Json> Checkpoints::Create(const fs::path& raw_directory,
   if (access_)
     for (const auto& id : ids)
       access_->Grant(id);
-  const auto journal_start = PhaseClock::now();
-  RK_RETURN_IF_ERROR(WriteDurableJson(index_path, index));
-  if (phases_)
-    (*phases_)["journal"] = phases_->value("journal", 0.0) + PhaseMs(journal_start);
-  return Json{{"manifestId", info.id}, {"objects", ids}};
+  return BuiltCheckpoint{Json{{"manifestId", info.id}, {"objects", ids}}, std::move(index)};
 }
 Result<void> Checkpoints::Restore(const fs::path& raw_directory,
                                   const std::string& tenant,

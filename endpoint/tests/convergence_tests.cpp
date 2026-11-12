@@ -1,4 +1,5 @@
 #include "session/coordinator.hpp"
+#include "session/version_identity.hpp"
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -145,11 +146,73 @@ int main(int argc, char** argv) {
     Check(bool(coordinator.Publish(desired, 2)), "reconnect accepts same desired revision");
     Await([&] { return coordinator.Latest().value("connectionEpoch", Json()) == "reconnected"; });
     Check(stopped == 1, "reconnect does not repeat completed commit");
+    VersionIdentity identity{"endpoint", "browser", 1, 1};
+    unsigned installed = 0;
+    for (const auto* action : {"desired", "stop", "restart"}) {
+      desired["revision"] = std::to_string(std::stoull(desired["revision"].get<std::string>()) + 1);
+      desired["run"] = "running";
+      desired["commit"] = nullptr;
+      Check(bool(coordinator.Publish(desired, 2)), "start for version");
+      Await([&] { return running && coordinator.Latest().value("converged", false); });
+      VersionIdentity captured;
+      std::promise<void> entered, release;
+      auto gate = release.get_future();
+      auto version = std::async(std::launch::async, [&] {
+        return coordinator.Version(
+            [&]() -> Result<void> {
+              captured = identity;
+              return {};
+            },
+            [&]() -> Result<void> {
+              entered.set_value();
+              if (gate.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+                return Error{ErrorCode::kUnavailable, "version test release timed out"};
+              return {};
+            },
+            [&]() -> Result<Json> {
+              if (!captured.Current(identity, running))
+                return Json{{"discarded", true}};
+              ++installed;
+              return Json{{"installed", true}};
+            });
+      });
+      entered.get_future().wait();
+      desired["revision"] = std::to_string(std::stoull(desired["revision"].get<std::string>()) + 1);
+      if (std::string_view(action) != "desired") {
+        desired["run"] = "stopped";
+        desired["commit"] = "stop-during-version";
+      }
+      Check(bool(coordinator.Publish(desired, 2)), "desired admitted during slow version build");
+      Await([&] {
+        return coordinator.Latest().value("observedRevision", Json()) == desired["revision"] &&
+               coordinator.Latest().value("converged", false);
+      });
+      if (std::string_view(action) == "restart") {
+        Check(bool(coordinator.Execute([&]() -> Result<Json> {
+                ++identity.runtime_generation;
+                identity.browser_incarnation = "restarted";
+                return Json::object();
+              })),
+              "runtime generation advances in actor");
+        desired["revision"] =
+            std::to_string(std::stoull(desired["revision"].get<std::string>()) + 1);
+        desired["run"] = "running";
+        desired["commit"] = nullptr;
+        Check(bool(coordinator.Publish(desired, 2)), "restart during version");
+        Await([&] { return running && coordinator.Latest().value("converged", false); });
+      }
+      release.set_value();
+      auto result = version.get();
+      Check(bool(result), "version completes");
+      Check(result.value().value("discarded", false) == (std::string_view(action) != "desired"),
+            "stop and restart supersede running version");
+    }
+    Check(installed == 1, "only healthy current version installed");
     coordinator.ManagementLost(2);
     const auto previous_sequence = std::stoull(coordinator.Latest().at("seq").get<std::string>());
     SessionCoordinator reopened(target, "endpoint", observation_sequence, hooks);
     reopened.Activate("reconnected", "2", 2);
-    desired["revision"] = "3";
+    desired["revision"] = std::to_string(std::stoull(desired["revision"].get<std::string>()) + 1);
     desired["run"] = "running";
     desired["commit"] = nullptr;
     Check(bool(reopened.Publish(desired, 2)), "reopened coordinator accepts desired state");

@@ -150,6 +150,20 @@ void SessionCoordinator::ManagementLost(uint64_t generation) {
   }
   hooks_.management_lost(generation);
 }
+Result<Json> SessionCoordinator::Version(const std::function<Result<void>()>& capture,
+                                         const std::function<Result<void>()>& build,
+                                         const std::function<Result<Json>()>& commit) {
+  RK_ASSIGN_OR_RETURN(captured, Execute([&]() -> Result<Json> {
+                        RK_RETURN_IF_ERROR(capture());
+                        return Json::object();
+                      }));
+  try {
+    RK_RETURN_IF_ERROR(build());
+  } catch (const std::exception& error) {
+    return Error{ErrorCode::kUnavailable, error.what()};
+  }
+  return Execute(commit);
+}
 Json SessionCoordinator::Latest() const {
   std::lock_guard lock(mutex_);
   return latest_;

@@ -37,6 +37,9 @@ class SessionCoordinator {
   Result<Json> Acknowledge(const Json& request, uint64_t generation);
   void ManagementLost(uint64_t generation);
   Result<Json> Execute(const std::function<Result<Json>()>& action);
+  Result<Json> Version(const std::function<Result<void>()>& capture,
+                       const std::function<Result<void>()>& build,
+                       const std::function<Result<Json>()>& commit);
   Json Latest() const;
   Result<Json> Report();
   const Json& Target() const { return target_; }

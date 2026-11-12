@@ -12,6 +12,7 @@
 #include "session/views.hpp"
 #include "session/clipboard.hpp"
 #include "persistence/checkpoint_cache.hpp"
+#include "persistence/checkpoint.hpp"
 #include "persistence/snapshot_client.hpp"
 namespace remotekit {
 class Session {
@@ -48,7 +49,11 @@ class Session {
                              bool defer_commits = false);
   Result<void> MarkStopped();
   bool VersionDue(int64_t now, int64_t interval) const;
-  Result<Json> SaveVersion(SnapshotClient& client, const Json& snapshot);
+  Result<CheckpointPlan> CaptureVersion() const;
+  Result<BuiltCheckpoint> BuildVersion(SnapshotClient& client,
+                                       const Json& snapshot,
+                                       const CheckpointPlan& plan);
+  Result<Json> CommitVersion(const Json& snapshot, const BuiltCheckpoint& built);
   uint64_t PlacementEpoch() const { return config.placement_epoch; }
   const std::string& Id() const { return config.id; }
   void BeginManagementRequest(uint64_t generation) {

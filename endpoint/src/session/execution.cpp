@@ -10,13 +10,15 @@ SessionExecution::SessionExecution(media::Sdk& sdk,
                                    const RuntimeOptions& options,
                                    ManagementLink& management,
                                    objects::ObjectService& objects,
-                                   Json target)
+                                   Json target,
+                                   std::string incarnation)
     : sdk_(sdk),
       options_(options),
       management_(management),
       objects_(objects),
       tenant_(target.at("tenantId")),
       id_(target.at("sessionId")),
+      incarnation_(std::move(incarnation)),
       epoch_(target.at("placementEpoch")),
       directory_(options.data / "sessions" / id_) {}
 SessionCoordinator::Hooks SessionExecution::Hooks() {
@@ -121,6 +123,7 @@ Result<void> SessionExecution::Prepare(const Json& document) {
     phases["restoreTotal"] = PhaseMs(start);
     session->SetOpenTiming(std::move(phases));
     runtime_.store(session);
+    ++runtime_generation_;
     RK_ASSIGN_OR_RETURN(events, session->EventState());
     const auto stream = events.at("streamId").get<std::string>();
     if (const auto known = acknowledged_.find(stream); known != acknowledged_.end())
@@ -136,6 +139,8 @@ Result<void> SessionExecution::Start() {
   if (!session)
     return Error{ErrorCode::kUnavailable, "Session execution is not prepared"};
   starting_ = true;
+  if (!session->Running())
+    ++runtime_generation_;
   auto result = session->Views().Start();
   starting_ = false;
   running_ = session->Running();
@@ -159,6 +164,7 @@ Result<Json> SessionExecution::Stop(const Json& commit,
     }
     auto stopped = session->StopAndCommit(commit, check_blockers, deadline, deferred);
     if (stopped || stopped.error().code == ErrorCode::kOutcomeUnknown) {
+      ++runtime_generation_;
       runtime_.store({});
       running_ = false;
     }
@@ -228,6 +234,7 @@ Result<Json> SessionExecution::Stop(const Json& commit,
 }
 Result<void> SessionExecution::Fence() {
   retired_ = true;
+  ++runtime_generation_;
   const auto session = runtime_.exchange({});
   running_ = false;
   reader_.reset();
@@ -290,11 +297,25 @@ bool SessionExecution::VersionDue(int64_t now, int64_t interval) const {
   auto session = runtime_.load();
   return session && session->VersionDue(now, interval);
 }
-Result<Json> SessionExecution::SaveVersion(SnapshotClient& client, const Json& snapshot) {
+Result<SessionExecution::Version> SessionExecution::CaptureVersion() {
   auto session = runtime_.load();
-  if (!session)
+  if (!session || retired_)
     return Error{ErrorCode::kConflict, "Session is not running"};
-  return session->SaveVersion(client, snapshot);
+  RK_ASSIGN_OR_RETURN(plan, session->CaptureVersion());
+  return Version{session,
+                 std::move(plan),
+                 {incarnation_, session->BrowserIncarnation(), epoch_, runtime_generation_}};
+}
+Result<Json> SessionExecution::CommitVersion(const Version& version,
+                                             const Json& snapshot,
+                                             const BuiltCheckpoint& built) {
+  const auto session = runtime_.load();
+  if (retired_ || !session || session != version.session ||
+      !version.identity.Current(
+          {incarnation_, session->BrowserIncarnation(), epoch_, runtime_generation_},
+          session->Running()))
+    return Json{{"discarded", true}};
+  return session->CommitVersion(snapshot, built);
 }
 Result<Json> SessionExecution::Observe() {
   if (retired_)

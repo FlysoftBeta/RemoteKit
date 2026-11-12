@@ -173,6 +173,14 @@ void SnapshotVersions(const fs::path& root) {
   Check(reads == 1, "staged and previous identity mismatch reads snapshot");
   Check(first["manifestId"] == second["manifestId"],
         "manifest describes snapshot bytes, not live file");
+  const auto index_before = Read(directory.wstring() + L".checkpoint-index.json");
+  const auto plan = Take(Checkpoints::Capture(directory, changes));
+  const auto built = Take(Checkpoints(objects).Build(
+      directory, "tenant", "dev", plan, PhaseClock::time_point::max(), false, &snapshot));
+  Check(built.checkpoint == second, "split running version equals ordinary checkpoint");
+  Check(Read(directory.wstring() + L".checkpoint-index.json") == index_before,
+        "build phase leaves checkpoint index untouched");
+  Take(Checkpoints::InstallIndex(directory, built));
   snapshot.entries = Json::object();
   const auto removed = Take(Checkpoints(objects).Create(
       directory, "tenant", "dev", PhaseClock::time_point::max(), false, &snapshot));

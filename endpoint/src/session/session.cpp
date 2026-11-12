@@ -406,19 +406,27 @@ bool Session::VersionDue(int64_t now, int64_t interval) const {
   const auto changes = checkpoint_cache.Changes();
   return remotekit::VersionDue(Running(), changes, now, version_at_, interval);
 }
-Result<Json> Session::SaveVersion(SnapshotClient& client, const Json& snapshot) {
+Result<CheckpointPlan> Session::CaptureVersion() const {
   if (!Running())
-    return Error{ErrorCode::kConflict, "Session stopped before version creation"};
+    return Error{ErrorCode::kConflict, "Session stopped before version capture"};
+  return Checkpoints::Capture(config.directory, checkpoint_cache.Changes());
+}
+Result<BuiltCheckpoint> Session::BuildVersion(SnapshotClient& client,
+                                              const Json& snapshot,
+                                              const CheckpointPlan& plan) {
   const auto prefix = "sessions/" + config.id;
   RK_ASSIGN_OR_RETURN(entries, SnapshotEntries(snapshot.at("files"), prefix));
   const auto id = snapshot.at("snapshotId").get<std::string>();
   SnapshotSource source{entries, [&](const std::string& name, uint64_t offset, uint32_t length) {
                           return client.Read(id, prefix + "/" + name, offset, length);
                         }};
-  RK_ASSIGN_OR_RETURN(checkpoint,
-                      Checkpoints(context.objects, config.object_access, nullptr, &checkpoint_cache)
-                          .Create(config.directory, config.tenant, config.options.build_id,
-                                  PhaseClock::time_point::max(), false, &source));
+  return Checkpoints(context.objects, config.object_access)
+      .Build(config.directory, config.tenant, config.options.build_id, plan,
+             PhaseClock::time_point::max(), false, &source);
+}
+Result<Json> Session::CommitVersion(const Json& snapshot, const BuiltCheckpoint& built) {
+  RK_RETURN_IF_ERROR(Checkpoints::InstallIndex(config.directory, built));
+  const auto& checkpoint = built.checkpoint;
   Json version{{"manifestId", checkpoint.at("manifestId")},
                {"takenAt", snapshot.at("takenAt")},
                {"kind", "running"}};

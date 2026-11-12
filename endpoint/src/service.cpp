@@ -253,8 +253,8 @@ Result<void> Service::Fence(const Json& desired, uint64_t generation) {
       if (!entry.coordinator) {
         auto target = placement;
         target.erase("dataState");
-        entry.execution =
-            std::make_shared<SessionExecution>(sdk_, options_, link_, objects_, target);
+        entry.execution = std::make_shared<SessionExecution>(sdk_, options_, link_, objects_,
+                                                             target, incarnation_);
         entry.coordinator = std::make_shared<SessionCoordinator>(
             target, incarnation_, observation_sequence_, entry.execution->Hooks());
       }
@@ -410,8 +410,21 @@ void Service::Versions() {
   snapshot_available_ = true;
   snapshot_unavailable_streak_ = false;
   for (const auto& managed : due) {
-    auto saved = managed.coordinator->Execute(
-        [&] { return managed.execution->SaveVersion(client, taken.value()); });
+    std::optional<SessionExecution::Version> version;
+    std::optional<BuiltCheckpoint> built;
+    auto saved = managed.coordinator->Version(
+        [&]() -> Result<void> {
+          RK_ASSIGN_OR_RETURN(work, managed.execution->CaptureVersion());
+          version = std::move(work);
+          return {};
+        },
+        [&]() -> Result<void> {
+          RK_ASSIGN_OR_RETURN(result,
+                              version->session->BuildVersion(client, taken.value(), version->plan));
+          built = std::move(result);
+          return {};
+        },
+        [&] { return managed.execution->CommitVersion(*version, taken.value(), *built); });
     if (!saved) {
       if (!client.Available())
         unavailable(saved.error());

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "session/coordinator.hpp"
+#include "session/version_identity.hpp"
 #include "session/session.hpp"
 
 namespace remotekit {
@@ -10,7 +11,8 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
                    const RuntimeOptions&,
                    ManagementLink&,
                    objects::ObjectService&,
-                   Json target);
+                   Json target,
+                   std::string incarnation);
   SessionCoordinator::Hooks Hooks();
   void Activate(std::string connection, uint64_t generation);
   Result<Json> Stop(const Json& commit,
@@ -19,7 +21,15 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
                     bool deferred = false);
   Result<void> Fence();
   bool VersionDue(int64_t now, int64_t interval) const;
-  Result<Json> SaveVersion(SnapshotClient& client, const Json& snapshot);
+  struct Version {
+    std::shared_ptr<Session> session;
+    CheckpointPlan plan;
+    VersionIdentity identity;
+  };
+  Result<Version> CaptureVersion();
+  Result<Json> CommitVersion(const Version& version,
+                             const Json& snapshot,
+                             const BuiltCheckpoint& built);
   bool Running() const { return running_.load(); }
   const std::string& Id() const { return id_; }
   uint64_t PlacementEpoch() const { return epoch_; }
@@ -40,7 +50,7 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   const RuntimeOptions& options_;
   ManagementLink& management_;
   objects::ObjectService& objects_;
-  const std::string tenant_, id_;
+  const std::string tenant_, id_, incarnation_;
   const uint64_t epoch_;
   const fs::path directory_;
   std::atomic<std::shared_ptr<Session>> runtime_;
@@ -55,5 +65,6 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   uint64_t sent_through_ = 0;
   std::string sent_stream_, staged_revision_;
   bool starting_ = false, retired_ = false;
+  uint64_t runtime_generation_ = 0;
 };
 }  // namespace remotekit
