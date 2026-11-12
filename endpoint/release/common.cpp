@@ -74,9 +74,17 @@ std::string HashFile(const fs::path& path) {
 void AtomicText(const fs::path& path, const std::string& text) {
   auto temporary = fs::path(path.wstring() + L".tmp");
   WriteText(temporary, text);
-  Io(MoveFileExW(temporary.c_str(), path.c_str(),
-                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH),
-     "cannot activate release file");
+  // Scanners and indexers briefly open fresh files without FILE_SHARE_DELETE.
+  for (int attempt = 1;; ++attempt) {
+    if (MoveFileExW(temporary.c_str(), path.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+      return;
+    const DWORD error = GetLastError();
+    if ((error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION) || attempt == 50)
+      Fail(ErrorCode::kUnavailable,
+           "cannot activate release file (Windows error " + std::to_string(error) + ")");
+    Sleep(20);
+  }
 }
 Mapping::Mapping(const fs::path& path, std::optional<uint64_t> output_size) {
   file_.value = CreateFileW(path.c_str(), output_size ? GENERIC_READ | GENERIC_WRITE : GENERIC_READ,
