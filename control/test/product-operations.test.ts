@@ -108,6 +108,59 @@ test('WS navigation submitted while Browser starts prepares its view before nati
   }
 });
 
+test('a returning Viewer restores a frozen view before publishing it visible', async () => {
+  const f = await fixture();
+  try {
+    await observedProductAction(
+      f.control,
+      f.tenant,
+      {
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'https://frozen.test/',
+      },
+      'lease',
+    );
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0];
+    const view = f.endpoint.views[0];
+    view.actual = 1;
+    view.desired = 1;
+    view.visible = false;
+    const request = f.endpoint.request.bind(f.endpoint);
+    let restored = false;
+    f.endpoint.request = async (method, tenant, args) => {
+      if (method === 'session.desired' && args.views.some((item: any) => item.visible) && !restored)
+        throw new RemoteKitError('conflict', 'Restore must complete before showing the WebView');
+      if (method === 'view.lifecycle' && args.action === 'restore') {
+        restored = true;
+        view.actual = 0;
+        view.desired = 0;
+      }
+      return request(method, tenant, args);
+    };
+    await requestViewer(f.control, f.tenant, 'lease', 'viewport', {
+      devicePixelRatio: 1,
+      windows: [
+        {
+          windowId: tab.windowId,
+          width: 900,
+          height: 600,
+          visible: true,
+          occludedBottom: 0,
+          occlusionRevision: '1',
+        },
+      ],
+    });
+    await f.control.reconciler.reconcileProduct(f.tenant);
+    assert(restored);
+    assert.equal(view.visible, true);
+  } finally {
+    await f.control.close();
+    f.store.db.close();
+  }
+});
+
 for (const initial of ['start', 'remote'] as const) {
   test(`stop retains the ${initial} pending navigation owner and settles both receipts without committing a document`, async () => {
     const f = await fixture();

@@ -189,7 +189,8 @@ export class ViewerSession {
     authorization.resets.subscribe(editing.reset.bind(editing));
     authorization.resets.subscribe(observations.resetMediaDiagnostics.bind(observations));
     authorization.transitions.subscribe(({ locked }) => {
-      if (locked) operations.reset();
+      const { status, auth } = workspace.getSnapshot();
+      if (locked && status === 'online' && auth?.locked === false) operations.reset();
     });
     authorization.resets.subscribe(pageFiles.disconnect.bind(pageFiles));
     authorization.transitions.subscribe(({ locked }) => {

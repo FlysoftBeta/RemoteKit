@@ -42,6 +42,8 @@ export function compileDesired(
       !quality.resourceLimitation &&
       !isLocalTab(tab) &&
       !lifecycleBlocked &&
+      (current?.actual === undefined || current.actual === 0) &&
+      !current?.pending &&
       services.lifecycle.wantedVisible(state, tab);
     const region = viewport?.windows.find((window) => window.windowId === tab.windowId);
     const originalBrowser = navigating ? tab.navigation?.browserIncarnation : undefined;
