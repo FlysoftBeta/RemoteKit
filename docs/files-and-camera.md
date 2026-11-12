@@ -20,10 +20,10 @@
 
 1. Browser 的 `PageRequests` 保留原生 listener。Control 的 `fileRequests` 投影暴露不透明请求 ID、所属 Tab/Window、来源 origin、multiple/accept 提示、状态和限制。内部绑定包含 Tenant、Browser incarnation、view/instance/document/原生请求号。
 2. accept 只是选择器提示，不是 MIME 安全门：最多 64 个提示、每个 256 UTF-8 字节、序列化后 16KiB；超出时标记 `acceptTypesOmitted`，Viewer 去掉本地 accept 限制。不支持目录上传。
-3. 用户在篮子里确定选择后：`library.prepare`（Control 校验原生请求、multiple、数量、大小，写入不可变的选择清单）→ DC `selection.commit`（Endpoint 再校验当前 peer、授权和真实的待处理原生请求，把资产暂存为 Browser 可读的文件，回调 listener）→ `library.finish`。暂存前，WebP 资产在页面 accept 非空且不含 `image/webp`、`image/*`、`.webp` 时转码：接受 JPEG（`image/jpeg`、`.jpg` 等）就交 JPEG（质量 0.92，扩展名 `.jpg`），否则接受 PNG 就交 PNG，都不接受时原样交付（accept 只是提示）。accept 由 Endpoint 在 `session.library.prepare` 时从自己的选择器请求快照里取，转码结果作为源资产的缓存衍生，页面的大小限制按转码后的字节检查。
+3. 用户在篮子里确定选择后：`library.prepare`（Control 校验原生请求、multiple、数量、大小，写入不可变的选择清单）→ DC `selection.commit`（Endpoint 再校验当前 peer、授权和真实的待处理原生请求，把资产暂存为 Browser 可读的文件，回调 listener）→ `library.finish`。暂存前，选择清单里类型为 WebP 的资产在页面 accept 非空且不含 `image/webp`、`image/*`、`.webp` 时转码：接受 JPEG（`image/jpeg`、`.jpg` 等）就交 JPEG（质量 0.92，扩展名 `.jpg`），否则接受 PNG 就交 PNG，都不接受时原样交付（accept 只是提示）。accept 由 Endpoint 在 `session.library.prepare` 时从自己的选择器请求快照里取，转码结果作为源资产的缓存衍生，页面的大小限制按转码后的字节检查。
 4. 暂存：随机磁盘文件名，`NativeFileInfo.display_name` 带用户文件名，回复和错误从不泄露本地路径；Windows 私有绝对路径用扩展路径形式（含 UNC），随机 ID 用 32 位十六进制，避免叠加的 MAX_PATH 失败。能硬链接时复用物理内容，否则复制。
 5. 回调之前先持久化"已提交"：之后传输丢失时结果是未知，而不是"可以安全重发"。已提交但没有匹配 Browser 回执的选择保持 unknown，不重放已认领的原生回调。只有原子上仍处于 pending 时，才能在选择器退役时取消。
-   Endpoint 把选择回执持久化在 Session 的 `session.db`（`library_selections`）里。回执是绑定 Browser incarnation 的瞬时握手状态：加载时读不出或校验不通过的回执被删除并记一行日志（只含回执 ID 与原因），不阻止 Session 打开；之后查询该选择得到 unknown，按上一条不消费文件篮。资产元数据只是缓存：缺失时从对象惰性重建。上传草稿只在一个 Session 运行期内有效，提交前连同 `file-library/incoming` 的字节一起删除，不进 checkpoint。
+   Endpoint 把选择回执持久化在 Session 的 `session.db`（`library_selections`）里。回执是绑定 Browser incarnation 的瞬时握手状态：加载时读不出或校验不通过的回执被删除并记一行日志（只含回执 ID 与原因），不阻止 Session 打开；之后查询该选择得到 unknown，按上一条不消费文件篮。资产的名称与媒体类型属于 Control 的文件库条目：选择清单与 `document.open` 都带上它们，Endpoint 不保存、也不猜测类型。Endpoint 的资产记录只缓存大小与尺寸，缺失时从对象惰性重建；在本节点上传的资产记录上传时声明的类型，但任何判断都不读它。上传草稿只在一个 Session 运行期内有效，提交前连同 `file-library/incoming` 的字节一起删除，不进 checkpoint。
 6. selected 回执只证明文件交给了 `FileSelectListener`，不证明网站自己的上传完成。Browser 的异步文件校验检查原始 `WeakDocumentPtr`；取消会移除 pending 所有权，迟到的校验完成不能把文件选进另一个文档。
 
 **选择器锚点**：可见的主 frame 文件输入框有可靠位置时，文件篮锚定在它旁边（按输入框实际 bounds 与文档/布局身份，不按最后一次点击位置，见 patch 0016）；隐藏、移动、无效时撤销锚点；子 frame 中的输入框没有锚点，文件篮停在底部居中。浮层不会让远端页面 resize。
@@ -73,12 +73,12 @@
 - 结果是一个以源对象为 `derivedFrom`、`kind: 'document'` 的派生对象，随源对象一起被引用和回收；因为对象存储跨 Tenant 去重，同一份课件全集群只转换一次。`rejected` 的转换结果按源对象缓存 10 分钟，其余失败不缓存；加密、损坏、不支持、过于复杂由 `reason` 区分。
 - 学习 App 下载附件后由 Control 请求预渲染（`object.render{id}`，交给持有副本的节点），用户打开时通常已经就绪。Control 是学习附件转换的唯一发起者：同一源对象在全集群同时只有一个转换；结果记在 `object_render_failures`——记录保存错误码、诊断与构建 ID。`rejected` 与 `internal` 在同一构建内不再自动重试，任何 Tenant 的同步都不会再次转换它；节点与 Control 版本锁定，换了构建（可能修好了转换器）后按没有失败处理。`busy`、`rate_limited` 从 1 分钟起翻倍、最长 1 小时后重试；`unavailable` 按 1、2、4、8、16 小时退避、最长 24 小时，节点重新就绪时提前重试；结果未知时只在原节点重新提交（转换按源对象幂等，队列按源对象合并，提交即查询）。源对象删除或派生完成时清掉记录。
 - Viewer 打开这类源对象时，Endpoint 向 Control 查询派生对象；Control 的转换仍在进行时回复 `busy`，Endpoint 把它作为 `{state:'converting'}` 交给 Viewer 继续轮询，而不是在本节点再转换一次；本节点渲染队列已满（`busy`）同样报告为 converting。
-- 类型判断先看内容：PDF/RTF 魔数、OLE 与 ZIP 包结构（OOXML 的部件、OpenDocument 的 mimetype）。内容能识别为已知格式时以内容为准（扩展名或类型写错的有效 DOCX 照常转换）。内容识别不出时，看文件声明的格式：Viewer 上传时由 `File.type` 记下、Endpoint 随资产保存的媒体类型，学习附件则用 Control 传入的文件名；声明的是支持的文档格式就判为损坏（`rejected` + `document_corrupt`，例如被截断的 DOCX），只有既识别不出、也没有声明支持格式的才是不支持。媒体类型与扩展名共用一张格式表。文件名属于 Control 的产品状态，Endpoint 不保存。
+- 类型判断先看内容：PDF/RTF 魔数、OLE 与 ZIP 包结构（OOXML 的部件、OpenDocument 的 mimetype）。内容能识别为已知格式时以内容为准（扩展名或类型写错的有效 DOCX 照常转换）。内容识别不出时，看文件声明的格式：Control 文件库条目的媒体类型（上传时由 `File.type` 记下，Viewer 打开预览时随 `document.open` 传入），学习附件则用 Control 传入的文件名；声明的是支持的文档格式就判为损坏（`rejected` + `document_corrupt`，例如被截断的 DOCX），只有既识别不出、也没有声明支持格式的才是不支持。媒体类型与扩展名共用一张格式表。文件名属于 Control 的产品状态，Endpoint 不保存。
 - 转换失败的 Endpoint 日志写明工具（soffice / pdfrender）、退出码与 stderr 最后几行（去掉路径与文件名），不写文件内容。
 
 **读取**：归档的 ZIP、zstd 与 hash 校验都在 Endpoint 完成，Viewer 只拿解码后的资源。DataChannel 文件服务（与 `asset.read` 同样的库授权）提供：
 
-- `document.open{assetId}` → `{state:'ready', documentId, pages:[{id, ordinal, width, height, document, dependencies}], shared}`、`{state:'converting'}`（Viewer 每 1.5 秒再问，最多 5 分钟）或错误：`rejected` 表示这个文件在当前构建上无法转换，`reason` 区分不支持的格式、加密、损坏与过于复杂（转换超时或超出内存预算），各自显示不同的说明；`unavailable` 表示转换器或数据暂时不可用，阅读器提供重试。轮询 5 分钟仍在转换时，阅读器停止轮询并显示"仍在转换"，不当作失败。
+- `document.open{requestId:'library', assetId, type}`（`type` 是文件库条目的媒体类型）→ `{state:'ready', documentId, pages:[{id, ordinal, width, height, document, dependencies}], shared}`、`{state:'converting'}`（Viewer 每 1.5 秒再问，最多 5 分钟）或错误：`rejected` 表示这个文件在当前构建上无法转换，`reason` 区分不支持的格式、加密、损坏与过于复杂（转换超时或超出内存预算），各自显示不同的说明；`unavailable` 表示转换器或数据暂时不可用，阅读器提供重试。轮询 5 分钟仍在转换时，阅读器停止轮询并显示"仍在转换"，不当作失败。
 - `document.resource{documentId, contentId, offset}` → 与 `asset.read` 相同的分块回复并带 `mime`；Endpoint 每节点保持 8 个打开的归档。
 
 **阅读器**（`control/client/documents/`，取自 talos-ng 的阅读器与虚拟滚动）：页面虚拟化，只挂载视口附近的页并按需取资源，资源 Blob URL 有界 LRU（64 项、32MiB）；每页挂在自己的 shadow root 里，内联样式表，`data-bundle-ref` 解析为 Blob URL，其他 URL 一律去掉，页面内容不会发出网络请求；按 pdfrender 约定给多字符单词设置 `--fit-x` 对齐原始字宽。默认适应宽度，可缩放（按钮、双指、Ctrl+滚轮）。页面控制是浮在页面上方、底边居中的胶囊：页码（点开直接跳页）、缩小、缩放比例（点按回到适合宽度）、放大；内容底部留出空间让最后一页能滚出胶囊；精确指针设备上 2.5 秒无操作淡到 35%，指针移动或滚动时恢复，触屏设备上保持不透明。打开中显示文件类型图标、名称与进度条；Endpoint 报告转换中时改为"正在转换文档"，20 秒后加一行"仍在转换…"；转换失败保留阅读器的“无法转换此文档”与错误说明，仅可恢复错误提供重试；永久拒绝不替换成通用文件预览卡。阅读位置（页号与页内偏移）存在 Control（见[学习与题库 · 文档阅读进度](learning.md#文档阅读进度)）。

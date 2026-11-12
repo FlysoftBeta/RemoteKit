@@ -145,7 +145,7 @@ Endpoint 自己的 Session 状态在 Session 目录的 `session.db`（SQLite，W
 | `closed_events` | 页面自行关闭、等 Control 确认的事件；没有它，Control 会把已关闭的标签当成丢失而重建。未确认事件阻止停止 |
 | `navigation_recovery` | 每个 view 的导航历史与 PageState（Browser 导出的字节） |
 | `download_imports` | Browser 下载 → 对象 → 文件库之间的交接记录 |
-| `library_assets`、`library_derivatives` | 资产元数据与格式转换结果的缓存，可从对象重建 |
+| `library_assets`、`library_derivatives` | 资产大小、尺寸与格式转换结果的缓存，可从对象重建；媒体类型以 Control 文件库为准 |
 | `library_drafts` | 上传草稿（字节在 `file-library/incoming/`，先落盘再提交行）；提交前删除，从不进 checkpoint |
 | `library_selections` | 原生文件选择回执 |
 

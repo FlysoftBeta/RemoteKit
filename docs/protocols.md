@@ -96,7 +96,7 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 | `input` | 完整身份、outputGeneration、layoutEpoch、sequence、event |
 | `editing.dismiss` | 完整 InputTarget、outputGeneration/layoutEpoch、sequence、target、revision；与 input 共享顺序，用户收起时 blur 远端元素 |
 | `keyboard.layout` | Session 级 `entries: [[code,key], ...]`，最多 256 项，由当前已授权连接提供 |
-| `files.request` | `{version:1, requestId, method, params}`。service peer：asset.begin/chunk/seal/cancel/describe/read、document.open{assetId}/document.resource{documentId, contentId, offset}（见[文件与相机 · 文档预览](files-and-camera.md#文档预览)）、photo.burst.begin/sample/end/cancel、photo.thumbnail/process。Session peer：只有 selection.commit/cancel（把文件交给页面） |
+| `files.request` | `{version:1, requestId, method, params}`。service peer：asset.begin/chunk/seal/cancel/describe/read、document.open{requestId, assetId, type}/document.resource{documentId, contentId, offset}（见[文件与相机 · 文档预览](files-and-camera.md#文档预览)）、photo.burst.begin/sample/end/cancel、photo.thumbnail/process。Session peer：只有 selection.commit/cancel（把文件交给页面） |
 | `clock.ping` | requestId |
 
 **input.event**
