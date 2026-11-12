@@ -70,8 +70,18 @@ Result<void> SessionDb::OpenFile(const fs::path& path) {
       return CorruptState("missing session store version");
     version = statement.Int64(0);
   }
-  if (version == 1)
+  if (version == 2)
     return {};
+  if (version == 1)
+    return Write([&]() -> Result<void> {
+      return db_.Execute(R"sql(
+CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,type TEXT NOT NULL,body TEXT NOT NULL);
+CREATE TABLE event_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),stream_id TEXT NOT NULL,acked_through INTEGER NOT NULL);
+INSERT INTO event_state VALUES(1,lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-4'||substr(lower(hex(randomblob(2))),2)||'-8'||substr(lower(hex(randomblob(2))),2)||'-'||lower(hex(randomblob(6))),0);
+CREATE TABLE retired_views(view_id TEXT PRIMARY KEY,event_id TEXT NOT NULL);
+PRAGMA user_version=2;
+)sql");
+    });
   if (version != 0)
     return CorruptState("unsupported session store version");
   {
@@ -83,6 +93,10 @@ Result<void> SessionDb::OpenFile(const fs::path& path) {
   return Write([&]() -> Result<void> {
     return db_.Execute(R"sql(
 CREATE TABLE views(view_id TEXT PRIMARY KEY, config TEXT NOT NULL);
+CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,type TEXT NOT NULL,body TEXT NOT NULL);
+CREATE TABLE event_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),stream_id TEXT NOT NULL,acked_through INTEGER NOT NULL);
+INSERT INTO event_state VALUES(1,lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-4'||substr(lower(hex(randomblob(2))),2)||'-8'||substr(lower(hex(randomblob(2))),2)||'-'||lower(hex(randomblob(6))),0);
+CREATE TABLE retired_views(view_id TEXT PRIMARY KEY,event_id TEXT NOT NULL);
 CREATE TABLE closed_events(event_id INTEGER PRIMARY KEY AUTOINCREMENT, view_id TEXT NOT NULL, reason TEXT NOT NULL);
 CREATE TABLE download_imports(event_id TEXT PRIMARY KEY, incarnation TEXT NOT NULL, download TEXT NOT NULL,
  browser_ack INTEGER NOT NULL, result TEXT, attempt INTEGER, error TEXT, retry_at INTEGER);
@@ -92,7 +106,7 @@ CREATE TABLE library_drafts(upload_id TEXT PRIMARY KEY, operation TEXT NOT NULL,
  size INTEGER NOT NULL, expires INTEGER NOT NULL, sealed TEXT NOT NULL);
 CREATE TABLE library_selections(selection_id TEXT PRIMARY KEY, state TEXT NOT NULL, document TEXT NOT NULL);
 CREATE TABLE library_derivatives(asset_id TEXT NOT NULL, format TEXT NOT NULL, derived_id TEXT NOT NULL, PRIMARY KEY(asset_id, format));
-PRAGMA user_version=1;
+PRAGMA user_version=2;
 )sql");
   });
 }

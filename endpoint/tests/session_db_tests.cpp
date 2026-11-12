@@ -247,7 +247,7 @@ void Reads(const fs::path& path) {
   Check(!unavailable && unavailable.error().code == ErrorCode::kUnavailable, "copy I/O error");
   sqlite::Database db;
   Take(db.Open(path / "unsupported.db"));
-  Take(db.Execute("PRAGMA user_version=2"));
+  Take(db.Execute("PRAGMA user_version=3"));
   Take(db.Close());
   fs::create_directory(path / "unsupported");
   fs::rename(path / "unsupported.db", path / "unsupported/session.db");
@@ -257,6 +257,55 @@ void Reads(const fs::path& path) {
             result.error().message == "unsupported session store version",
         "unsupported schema classification");
 }
+void EventTransactions(const fs::path& path) {
+  SessionDb store(path);
+  Take(store.Open());
+  auto events = store.Events();
+  const auto initial = Take(events.State());
+  const auto stream = initial.at("streamId").get<std::string>();
+  Check(stream.size() == 36, "event stream identity");
+  const auto first = Take(
+      events.Append("view.closed", {{"viewId", "1"}, {"reason", "script"}}, "first", "browser"));
+  Check(first.at("seq") == "1", "first sequence");
+  Check(Take(events.Append("view.closed", {{"viewId", "1"}, {"reason", "script"}}, "first",
+                           "browser")) == first,
+        "event insertion deduplicates source identity");
+  Check(!events.Append("view.closed", {{"viewId", "2"}}, "first", "browser"),
+        "event identity conflict");
+  Take(events.Append(
+      "clipboard.changed",
+      {{"baseRevision", "9"}, {"browserSequence", "3"}, {"text", "native"}, {"html", ""}}, "second",
+      "browser"));
+  sqlite::Database inject;
+  Take(inject.Open(path / "session.db"));
+  Take(
+      inject.Execute("CREATE TRIGGER fail_event_ack BEFORE UPDATE ON event_state BEGIN SELECT "
+                     "RAISE(ABORT,'injected'); END"));
+  Check(!events.Acknowledge(stream, 1), "ack fault");
+  Check(Take(events.Load()).size() == 2 && Take(events.State()).at("ackedThrough") == "0",
+        "ack deletion and cursor roll back together");
+  Take(inject.Execute("DROP TRIGGER fail_event_ack"));
+  Take(events.Acknowledge(stream, 1));
+  Take(events.Acknowledge(stream, 0));
+  Check(Take(events.Load()).size() == 1 && Take(events.State()).at("ackedThrough") == "1",
+        "cumulative ack never moves backward");
+  Check(!events.Acknowledge(stream, 3), "future ack rejected");
+  Take(events.Rotate());
+  const auto rotated = Take(events.State());
+  Check(rotated.at("streamId") != stream && rotated.at("ackedThrough") == "0",
+        "new stream after restore");
+  const auto retained = Take(events.Load());
+  Check(retained.size() == 1 && retained.at(0).at("eventId") == "second" &&
+            retained.at(0).at("seq") == "1",
+        "rotation preserves source identity and resequences retained events");
+  Check(!events.Acknowledge(stream, 1), "retired stream ack rejected");
+  Take(inject.Close());
+  Take(store.Close());
+  Check(!events.Acknowledge(rotated.at("streamId"), 1), "ack cannot reopen checkpoint database");
+  SessionDb reopened(path);
+  Take(reopened.Open());
+  Check(Take(reopened.Events().Load()) == retained, "outbox survives reopen");
+}
 }  // namespace
 int wmain(int argc, wchar_t** argv) {
   if (argc != 2)
@@ -265,6 +314,7 @@ int wmain(int argc, wchar_t** argv) {
   try {
     fs::remove_all(root);
     Transactions(root / "transactions");
+    EventTransactions(root / "events");
     Legacy(root / "legacy");
     Reads(root / "reads");
     fs::remove_all(root);

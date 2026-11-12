@@ -11,6 +11,21 @@ inline Error CorruptState(std::string message) {
   return {ErrorCode::kInternal, std::move(message), ErrorReason::kCorruptState};
 }
 class SessionDb;
+class EventStore {
+ public:
+  explicit EventStore(SessionDb& db) : db_(db) {}
+  Result<Json> State();
+  Result<Json> Load(uint64_t after = 0, size_t limit = 256);
+  Result<Json> Append(const std::string& type,
+                      const Json& body,
+                      const std::string& event_id,
+                      const Json& incarnation = nullptr);
+  Result<void> Acknowledge(const std::string& stream, uint64_t up_to);
+  Result<void> Rotate();
+
+ private:
+  SessionDb& db_;
+};
 class ViewStore {
  public:
   explicit ViewStore(SessionDb& db) : db_(db) {}
@@ -68,12 +83,14 @@ class SessionDb {
   Result<void> Open();
   Result<void> Close();
   ViewStore Views() { return ViewStore(*this); }
+  EventStore Events() { return EventStore(*this); }
   RecoveryStore Recovery() { return RecoveryStore(*this); }
   DownloadStore Downloads() { return DownloadStore(*this); }
   LibraryStore Library() { return LibraryStore(*this); }
 
  private:
   friend class ViewStore;
+  friend class EventStore;
   friend class RecoveryStore;
   friend class DownloadStore;
   friend class LibraryStore;
