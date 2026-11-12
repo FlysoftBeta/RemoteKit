@@ -342,6 +342,11 @@ try {
   result('3 context and quick menu copy', { linkRevision, quickRevision: revision() });
 
   const retained = row();
+  await until(async () => {
+    const snapshot = await stack.call('inspect');
+    const tenant = snapshot.users.find((entry) => entry.username === 'clipboard-user').tenant;
+    return snapshot.observations[tenant]?.applied.clipboardRevision === String(retained.revision);
+  }, 'quick copy applied before testing the local-only oversized clipboard');
   const nodesBeforeOversize = await admin.call('admin.nodes');
   await writeFile(join(run, 'nodes-before-oversize.json'), JSON.stringify(nodesBeforeOversize, null, 2));
   await click('large');
