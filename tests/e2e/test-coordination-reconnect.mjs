@@ -229,9 +229,10 @@ try {
     (await viewer.state()).workspace.windows.find((win) => win.appId === 'admin'),
   );
   const admin = viewer.page.locator(`[data-window-id="${adminWindow.id}"]`);
-  const nodeTab = admin.getByRole('tab', { name: '节点', exact: true });
-  if (await nodeTab.count()) await nodeTab.click();
-  else await admin.getByRole('button', { name: '节点', exact: true }).click();
+  await admin
+    .locator('.admin-nav .MuiListItemButton-root, .admin-tabs [role="tab"]')
+    .filter({ hasText: /^节点$/ })
+    .click();
   await admin.getByText('公钥指纹', { exact: true }).waitFor();
   await admin.getByText(/node\.json/).waitFor();
   assert.match(await admin.innerText(), /nodes[\\/]alpha[\\/]node\.json/);
@@ -274,6 +275,53 @@ try {
   await writeFile(
     join(run, 'absence-return.json'),
     JSON.stringify({ beforeAbsence, absent, afterAbsence, returnedMedia }, null, 2),
+  );
+  await returning.page.close();
+  await until(
+    'viewer detached before stop',
+    async () =>
+      !(await control.call('inspect')).runtimes.find((runtime) => runtime.tenant === placement.tenant)
+        ?.viewer,
+  );
+  await until(
+    'stopped Session',
+    async () => {
+      try {
+        const users = await control.call('stop', { username: 'coordination' });
+        return users.find((user) => user.username === 'coordination').session.state === 'stopped';
+      } catch (error) {
+        if (/会话状态尚未稳定/.test(error.message)) return false;
+        throw error;
+      }
+    },
+    120000,
+  );
+  const stoppedState = await control.call('inspect');
+  const stoppedReturn = await instrumentViewer(context, run, 'stopped-return');
+  await stoppedReturn.page.goto(origin, { timeout: 120000 });
+  await stoppedReturn.page.locator('.viewer-lock-blank').waitFor();
+  await pause(500);
+  for (const direction of ['Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right'])
+    await stoppedReturn.page.keyboard.press('Arrow' + direction);
+  await stoppedReturn.page.locator('input[autocomplete="current-password"]').fill(password);
+  await stoppedReturn.page.getByRole('button', { name: '解锁', exact: true }).click();
+  await stoppedReturn.ready(120000);
+  const stoppedReturnMedia = await stoppedReturn.media();
+  const afterStoppedReturn = await stoppedReturn.state();
+  for (const tab of afterAbsence.workspace.tabs)
+    assert(afterStoppedReturn.workspace.tabs.some((next) => next.id === tab.id && next.url === tab.url));
+  await stoppedReturn.page.screenshot({ path: join(run, 'stopped-return.png') });
+  await writeFile(
+    join(run, 'stopped-return.json'),
+    JSON.stringify(
+      {
+        stoppedState,
+        afterStoppedReturn,
+        stoppedReturnMedia,
+      },
+      null,
+      2,
+    ),
   );
   await writeFile(join(run, 'result.json'), JSON.stringify({ before, after, child, childLoads }, null, 2));
   console.log('Disconnected self-close persisted, removed the tab, and did not recreate its page: ' + run);

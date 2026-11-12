@@ -2,19 +2,71 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import { connect, createServer } from 'node:net';
 import { startStack, until } from './kit/stack.mjs';
 import { launch } from './kit/viewer.mjs';
 const root = resolve(process.argv[2] ?? 'develop/tmp/e2e-shell/transport-journeys');
+const port = Number(process.env.REMOTEKIT_E2E_PORT ?? 34080);
 mkdirSync(root, { recursive: true });
-const stack = await startStack({ scenario: 'shell-transport', port: 34080, run: join(root, 'stack') });
 const results = [];
-let v;
+let v, stack, network;
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
+async function viewerNetwork() {
+  let online = true;
+  const sockets = new Map();
+  const proxy = createServer((socket) => {
+    socket.once('data', (bytes) => {
+      const hotReload = /^GET \/\?token=/.test(bytes.toString('utf8'));
+      if (!online && !hotReload) return socket.destroy();
+      const upstream = connect(port + 1, '127.0.0.1');
+      for (const peer of [socket, upstream]) {
+        sockets.set(peer, hotReload);
+        peer.on('error', () => {});
+        peer.on('close', () => {
+          sockets.delete(peer);
+          socket.destroy();
+          upstream.destroy();
+        });
+      }
+      upstream.write(bytes);
+      socket.pipe(upstream);
+      upstream.pipe(socket);
+    });
+  });
+  await new Promise((done, reject) => {
+    proxy.once('error', reject);
+    proxy.listen(port + 5, '127.0.0.1', done);
+  });
+  const disconnect = () => {
+    online = false;
+    // Keep Vite's development socket alive so its reconnect does not reload the Viewer.
+    for (const [socket, hotReload] of sockets) if (!hotReload) socket.destroy();
+  };
+  return {
+    origin: `http://127.0.0.1:${port + 5}`,
+    disconnect,
+    reconnect: () => {
+      online = true;
+    },
+    close: async () => {
+      disconnect();
+      for (const socket of sockets.keys()) socket.destroy();
+      await new Promise((done) => proxy.close(done));
+    },
+  };
+}
 try {
   for (const browser of process.env.QA_BROWSER ? [process.env.QA_BROWSER] : ['edge', 'chrome89'])
     for (const phone of process.env.QA_PHONE !== undefined ? [process.env.QA_PHONE === '1'] : [false, true]) {
       const label = browser + (phone ? '-phone' : '-desktop'),
         out = join(root, label);
+      network = await viewerNetwork();
+      stack = await startStack({
+        scenario: 'shell-transport',
+        port,
+        viewerOrigin: network.origin,
+        run: join(out, 'stack'),
+      });
       v = await launch({ browser, pointer: phone ? 'touch' : 'mouse', stack, out });
       const { page, context } = v;
       if (phone) await page.setViewportSize({ width: 390, height: 844 });
@@ -59,13 +111,21 @@ try {
             super(...args);
             netQA.sockets.push(this);
           }
+          send(raw) {
+            try {
+              const message = JSON.parse(raw);
+              if (message.method === 'operation.submit')
+                netQA.wire.push({ direction: 'out', at: performance.now(), message });
+            } catch {}
+            return super.send(raw);
+          }
         };
         const send = RTCDataChannel.prototype.send;
         RTCDataChannel.prototype.send = function (raw) {
           if (this.label === 'remotekit' && typeof raw === 'string') {
             try {
               const m = JSON.parse(raw);
-              if (['product.action', 'input', 'focus'].includes(m.type))
+              if (['input', 'focus'].includes(m.type))
                 netQA.wire.push({ direction: 'out', at: performance.now(), message: m });
             } catch {}
           }
@@ -86,6 +146,8 @@ try {
               sockets: netQA.sockets.map((s) => ({ url: s.url, state: s.readyState })),
               wire: netQA.wire,
               dom: netQA.dom,
+              navigationResult: netQA.navigationResult,
+              navigationError: netQA.navigationError,
             })),
             null,
             2,
@@ -110,6 +172,7 @@ try {
         await pause(400);
       };
       const offline = async () => {
+        network.disconnect();
         await cdp.send('Network.emulateNetworkConditions', {
           offline: true,
           latency: 0,
@@ -124,6 +187,7 @@ try {
         assert.equal(await page.getByRole('button', { name: '重试', exact: true }).count(), 0);
       };
       const online = async () => {
+        network.reconnect();
         await cdp.send('Network.emulateNetworkConditions', {
           offline: false,
           latency: 0,
@@ -138,19 +202,34 @@ try {
           'WS restored',
           90000,
         );
-        await page.waitForTimeout(500);
         const password = page.locator('input[autocomplete="current-password"]');
+        const start = page.getByRole('button', { name: '开始', exact: true });
+        const blank = page.locator('.viewer-lock-blank');
+        await until(
+          async () => (await start.isVisible()) || (await password.isVisible()) || (await blank.isVisible()),
+          'authentication controls restored',
+          90000,
+        );
         if (await password.isVisible()) {
           await password.fill(stack.password);
           await click(page.getByRole('button', { name: '解锁', exact: true }));
-          await page.getByRole('button', { name: '开始', exact: true }).waitFor({ timeout: 90000 });
-        } else await v.unlock();
+        } else if (await blank.isVisible()) await v.unlock();
+        await start.waitFor({ timeout: 90000 });
+        console.log(label + ': Control restored');
         await until(
-          () => page.evaluate(() => netQA.peers.some((p) => p.connectionState === 'connected')),
+          () =>
+            page.evaluate(() =>
+              netQA.peers.some(
+                (p) =>
+                  p.connectionState === 'connected' &&
+                  p.getTransceivers().some((t) => t.receiver.track.kind === 'video'),
+              ),
+            ),
           'RTC restored',
           90000,
         );
         await page.locator('canvas[data-video-input]:not(.no-frame)').first().waitFor({ timeout: 90000 });
+        console.log(label + ': browser restored');
         await pause(1800);
       };
       const revealConnection = async () => {
@@ -218,24 +297,45 @@ try {
         const url = stack.fixture + '/flow/' + label;
         const address = page.getByRole('textbox', { name: '搜索或输入网址', exact: true }).first();
         await address.fill(url);
-        await address.press('Enter');
-        await until(
-          () =>
-            page.evaluate(
-              (url) => netQA.wire.some((e) => e.direction === 'out' && e.message?.action?.url === url),
-              url,
-            ),
-          'navigation submitted over RTC',
-          10000,
-        );
+        const tabId = v.state.workspace.tabs.find((tab) => tab.url.endsWith('/notes/recovered-' + label)).id;
+        await page.evaluate(() => {
+          for (const element of document.querySelectorAll('*')) {
+            const key = Object.keys(element).find((name) => name.startsWith('__reactFiber$'));
+            for (let fiber = key && element[key]; fiber; fiber = fiber.return)
+              for (let hook = fiber.memoizedState; hook; hook = hook.next) {
+                const current = hook.memoizedState;
+                if (current?.operations && current?.rtc && current?.endpoint) {
+                  netQA.operations = current.operations;
+                  return;
+                }
+              }
+          }
+          throw Error('Operations store not mounted');
+        });
         await offline();
+        // The lock screen replaces the address form during a complete outage.
+        await page.evaluate(
+          ({ tabId, url }) => {
+            void netQA.operations.action({ type: 'tab.navigate', tabId, url }).then(
+              (receipt) => {
+                netQA.navigationResult = receipt;
+              },
+              (error) => {
+                netQA.navigationError = { code: error.code, message: error.message, stack: error.stack };
+              },
+            );
+          },
+          { tabId, url },
+        );
         await shot('offline-mid-navigation');
         await revealConnection();
         await online();
         try {
           await v.until(
-            () => v.state.workspace.tabs.some((t) => t.url === url && !t.loading),
-            'navigation converges',
+            async () =>
+              v.state.workspace.tabs.some((t) => t.url === url && !t.loading) ||
+              (await page.getByRole('button', { name: /操作结果未知/ }).count()) > 0,
+            'navigation commits or reports unknown result',
             90000,
           );
         } catch (error) {
@@ -272,10 +372,14 @@ try {
       console.log(JSON.stringify(results.at(-1)));
       await v.close();
       v = undefined;
-      await pause(15000);
+      await stack.stop();
+      stack = undefined;
+      await network.close();
+      network = undefined;
     }
 } finally {
   await v?.close();
-  await stack.stop();
+  await stack?.stop();
+  await network?.close();
 }
 if (results.some((x) => x.status === 'fail')) process.exitCode = 1;

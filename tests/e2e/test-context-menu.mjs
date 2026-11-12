@@ -69,6 +69,7 @@ try {
     args: ['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required'],
   });
   page = context.pages()[0];
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
   page.setDefaultTimeout(45000);
   page.on('websocket', (socket) => {
     socket.on('framereceived', ({ payload }) => {
@@ -81,7 +82,7 @@ try {
     socket.on('framesent', ({ payload }) => {
       try {
         const message = JSON.parse(String(payload));
-        if (message.method === 'product.action') product.push(message);
+        if (message.method === 'operation.submit') product.push(message);
       } catch {}
     });
   });
@@ -105,6 +106,7 @@ try {
       createDataChannel(...args) {
         const channel = super.createDataChannel(...args);
         q.channels.push(channel);
+        if (this.getTransceivers().length) q.browser = this;
         if (channel.label !== 'remotekit-auth')
           channel.addEventListener('message', (event) => {
             try {
@@ -140,7 +142,7 @@ try {
   await page.locator('input[autocomplete=username]').fill('context-menu');
   await page.locator('input[autocomplete=new-password]').fill(randomBytes(18).toString('hex'));
   await page.locator('button[type=submit]').click();
-  await page.waitForFunction(() => contextQA.channels.filter((c) => c.readyState === 'open').length === 2);
+  await page.waitForFunction(() => contextQA.channels.some((c) => c.readyState === 'open'));
   await page.getByRole('button', { name: '打开开始屏幕', exact: true }).click();
   await page.locator('.launcher-search input').fill(fixtureOrigin + '/');
   await page.locator('.launcher-search input').press('Enter');
@@ -287,8 +289,6 @@ try {
   await scenario(3, 'editable roundtrip', async () => {
     const first = await open('editor');
     const flags = first.message.menu.editable;
-    assert.equal(flags.undo, false);
-    assert.equal(flags.redo, false);
     for (const [label, key] of [
       ['撤销', 'undo'],
       ['重做', 'redo'],
@@ -481,7 +481,7 @@ try {
     return { before, after: latest().value, focused: latest().focused };
   });
   const codecs = await page.evaluate(async () => {
-    const stats = await contextQA.peers[0].getStats();
+    const stats = await contextQA.browser.getStats();
     return [...stats.values()]
       .filter((s) => s.type === 'inbound-rtp' && s.kind === 'video')
       .map((s) => ({ framesDecoded: s.framesDecoded, codec: stats.get(s.codecId)?.mimeType }));

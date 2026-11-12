@@ -94,8 +94,8 @@ class SessionDriver:
                 run="stopped", commit=None, profileKey="BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=", checkpoint=None,
                 sitePreferences=dict(sites={}), mediaPolicy=dict(maxFps=60,degradationPreference="balanced",audio=False),
                 quality=dict(effectiveDpr=1), clipboard=dict(revision="0",value=dict(text="",html="")), views=[],
-                authorization=dict(connectionId=None,epoch=0,unlocked=False,files=dict(library=False,requests=[])),
-                lock=dict(leaseId="probe",epoch=1,state="unlocked"), library=dict(describe=[]))
+                authorization=dict(connectionId=None,epoch=0,unlocked=False,files=dict(requests=[])),
+                lock=dict(leaseId="probe",epoch=1,state="unlocked"))
         return copy.deepcopy(self.desired[tenant])
 
     def publish(self, tenant=None, **fields):

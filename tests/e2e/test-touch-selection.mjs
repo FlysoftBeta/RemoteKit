@@ -89,7 +89,7 @@ try {
           q.pending.delete(id);
           message.error ? reject(Error(JSON.stringify(message.error))) : resolve(message.result);
         });
-        (rtc ? q.channels.find((c) => c.label === 'remotekit') : q.socket).send(
+        (rtc ? q[method.startsWith('selection.') ? 'browser' : 'service'].channel : q.socket).send(
           JSON.stringify(
             rtc
               ? {
@@ -98,7 +98,7 @@ try {
                   requestId: id,
                   method,
                   params,
-                  authEpoch: q.auth.peerEpoch,
+                  authEpoch: method.startsWith('selection.') ? q.auth.peerEpoch : q.auth.serviceEpoch,
                 }
               : { id, method, params },
           ),
@@ -127,6 +127,10 @@ try {
       createDataChannel(...args) {
         const channel = super.createDataChannel(...args);
         q.channels.push(channel);
+        if (channel.label === 'remotekit') {
+          const role = this.getTransceivers().length ? 'browser' : 'service';
+          q[role] = { peer: this, channel };
+        }
         if (channel.label !== 'remotekit-auth')
           channel.addEventListener('message', (event) => {
             try {
@@ -163,21 +167,20 @@ try {
   await page.locator('input[autocomplete=username]').fill('touch-selection');
   await page.locator('input[autocomplete=new-password]').fill(password);
   await page.locator('button[type=submit]').click();
-  await page.waitForFunction(() => selectionQA.channels.filter((c) => c.readyState === 'open').length === 2);
-  await page.evaluate((operationId) => {
+  await page.waitForFunction(() => selectionQA.channels.some((c) => c.readyState === 'open'));
+  await page.evaluate(async (operationId) => {
     const q = selectionQA;
-    q.channels
-      .find((c) => c.label === 'remotekit')
-      .send(
-        JSON.stringify({
-          type: 'product.action',
-          version: 1,
-          operationId,
-          operationGeneration: q.state.operationGeneration,
-          action: { type: 'settings.update', settings: { workspace: { clipboardSync: false } } },
-          authEpoch: q.auth.peerEpoch,
-        }),
-      );
+    const receipt = await q.call(
+      'operation.submit',
+      {
+        operationId,
+        operationGeneration: q.state.operationGeneration,
+        action: { type: 'settings.update', settings: { workspace: { clipboardSync: false } } },
+      },
+      false,
+      operationId,
+    );
+    if (receipt.status === 'failed') throw Error(JSON.stringify(receipt));
   }, randomUUID());
   await page.waitForFunction(() => selectionQA.state.workspace.settings.workspace.clipboardSync === false);
   await page.getByRole('button', { name: '打开开始屏幕', exact: true }).click();
@@ -205,18 +208,16 @@ try {
   const action = (value) =>
     page.evaluate(
       ({ value, id }) =>
-        selectionQA.channels
-          .find((c) => c.label === 'remotekit')
-          .send(
-            JSON.stringify({
-              type: 'product.action',
-              version: 1,
-              operationId: id,
-              operationGeneration: selectionQA.state.operationGeneration,
-              action: value,
-              authEpoch: selectionQA.auth.peerEpoch,
-            }),
-          ),
+        selectionQA.call(
+          'operation.submit',
+          {
+            operationId: id,
+            operationGeneration: selectionQA.state.operationGeneration,
+            action: value,
+          },
+          false,
+          id,
+        ),
       { value, id: randomUUID() },
     );
   const project = async (rect) => {
@@ -705,7 +706,7 @@ try {
   await page.screenshot({ path: join(run, 'document-selection.png') });
   result('document shadow-root selection and snippet', clipboard.text);
   const codecs = await page.evaluate(async () => {
-    const stats = await selectionQA.peers[0].getStats();
+    const stats = await selectionQA.browser.peer.getStats();
     return [...stats.values()]
       .filter((s) => s.type === 'inbound-rtp' && s.kind === 'video')
       .map((s) => ({ framesDecoded: s.framesDecoded, codec: stats.get(s.codecId)?.mimeType }));

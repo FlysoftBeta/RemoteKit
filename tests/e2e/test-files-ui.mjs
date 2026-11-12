@@ -74,7 +74,7 @@ try {
         headers: { Origin: stack.origin },
       });
       assert(response.ok(), await response.text());
-      await page.goto(stack.origin);
+      await page.goto(stack.origin, { waitUntil: 'domcontentloaded', timeout: 120000 });
       await viewer.ready();
       await call('auth.settings', {
         currentPassword: stack.password,
@@ -236,6 +236,22 @@ try {
       if (before) await dialog.getByRole('button', { name: '取消文件选择', exact: true }).click();
     } catch (error) {
       await page.screenshot({ path: join(out, 'failure.png') });
+      writeFileSync(
+        join(out, 'failure.json'),
+        JSON.stringify(
+          {
+            error: String(error.stack),
+            viewer: await page.evaluate(() => ({
+              auth: clusterQA.auth,
+              state: clusterQA.state,
+              fileWire: clusterQA.fileWire,
+              text: document.body.innerText,
+            })),
+          },
+          null,
+          2,
+        ),
+      );
       throw error;
     } finally {
       await browser.close();

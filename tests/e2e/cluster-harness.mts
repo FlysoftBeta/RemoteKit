@@ -51,6 +51,7 @@ process.on('message', (message: any) => {
       await control.reconciler.tick();
       return { elapsed };
     }
+    if (message.method === 'stop') return control.userAdmin.stop(message.username);
     if (message.method === 'inspect') {
       return {
         nodes: control.nodeAdmin.list().map((node) => ({

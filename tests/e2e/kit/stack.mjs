@@ -17,7 +17,8 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 export const defaultBrowser = 'C:/src/chromium/src/out/rel/remotekit_browser.exe';
-export const defaultEndpoint = join(root, 'build/endpoint/endpoint/endpoint_service.exe');
+export const defaultEndpoint =
+  process.env.REMOTEKIT_ENDPOINT ?? join(root, 'build/endpoint/endpoint/endpoint_service.exe');
 
 export async function until(check, label, timeout = 30000) {
   const end = Date.now() + timeout;
@@ -84,6 +85,7 @@ export async function startStack({
   dev = true,
   media = {},
   port: basePort,
+  viewerOrigin,
   seed = true,
   run = join(root, 'develop/tmp/e2e-shell', `${scenario}-${Date.now()}`),
 } = {}) {
@@ -105,7 +107,7 @@ export async function startStack({
   const ports = Number.isInteger(base)
     ? { control: base, viewer: base + 1, fixture: base + 2, peer: base + 3 }
     : { control: await port(), viewer: await port(), fixture: await port(), peer: await port() };
-  const origin = `http://127.0.0.1:${dev ? ports.viewer : ports.control}`;
+  const origin = viewerOrigin ?? `http://127.0.0.1:${dev ? ports.viewer : ports.control}`;
   const logs = {
     control: join(run, 'control.log'),
     vite: join(run, 'vite.log'),

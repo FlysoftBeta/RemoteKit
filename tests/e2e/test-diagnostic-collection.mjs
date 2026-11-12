@@ -175,7 +175,7 @@ try {
         }
         createDataChannel(...args) {
           const channel = super.createDataChannel(...args);
-          probe.channels.push(channel);
+          if (this.getTransceivers().length) probe.channels.push(channel);
           return channel;
         }
         addTransceiver(trackOrKind, init) {
@@ -233,7 +233,7 @@ try {
         attributeFilter: ['value'],
       });
       probe.media = async () => {
-        const peer = probe.peers[0];
+        const peer = probe.peers.find((candidate) => candidate.getTransceivers().length > 0);
         const stats = peer && (await peer.getStats());
         const codecs =
           stats &&
@@ -247,7 +247,7 @@ try {
             .map((stat) => stats.get(stat.codecId)?.mimeType?.toLowerCase());
         return {
           peer: id(peer),
-          count: probe.peers.length,
+          count: probe.peers.filter((candidate) => candidate.getTransceivers().length > 0).length,
           connected: peer?.connectionState,
           tracks: peer?.getReceivers().map((receiver) => id(receiver.track)),
           transceivers: peer?.getTransceivers().map((transceiver) => ({
@@ -370,7 +370,7 @@ try {
       const state = await media();
       return (
         state.connected === 'connected' &&
-        state.channels.filter((channel) => channel[2] === 'open').length === 2
+        state.channels.filter((channel) => channel[2] === 'open').length === 1
       );
     }, 'Scenario could not open its RTC channels');
   }
@@ -381,7 +381,7 @@ try {
     const state = await media();
     return (
       state.connected === 'connected' &&
-      state.channels.filter((channel) => channel[2] === 'open').length === 2 &&
+      state.channels.filter((channel) => channel[2] === 'open').length === 1 &&
       fixtureVisits > 0 &&
       state.videoReady &&
       state.codecs?.includes('video/h264') &&
@@ -583,7 +583,7 @@ try {
         read(`Boolean(document.querySelector('.viewer-shell') ||
           (document.querySelector('.viewer-lock-blank') &&
             diagnosticQA.controlSocket?.readyState === WebSocket.OPEN &&
-            diagnosticQA.channels.filter(channel => channel.readyState === 'open').length === 2))`),
+            diagnosticQA.channels.filter(channel => channel.readyState === 'open').length === 1))`),
       'Viewer did not reattach',
     );
     if (await read('Boolean(document.querySelector(".viewer-lock-blank"))')) {

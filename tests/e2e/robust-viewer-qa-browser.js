@@ -168,7 +168,6 @@ async (host) => {
         channels: [],
         snapshots: [],
         state: null,
-        dropProductReplies: 0,
         holdSnapshots: false,
         heldSnapshots: [],
         holdAck: false,
@@ -259,17 +258,7 @@ async (host) => {
             } catch {
               return;
             }
-            if (message.type === 'product.result' && q.dropProductReplies) {
-              q.dropProductReplies--;
-              event.stopImmediatePropagation();
-              record('product.reply.dropped', { operationId: message.operationId });
-              return;
-            }
-            if (
-              ['product.result', 'input.result', 'layout', 'presentation.prepare', 'clock.pong'].includes(
-                message.type,
-              )
-            )
+            if (['input.result', 'layout', 'presentation.prepare', 'clock.pong'].includes(message.type))
               record('dc.receive', { message });
           });
           return channel;
@@ -501,15 +490,6 @@ async (host) => {
     const point = await qa.point(viewId, x, y);
     await qa.page.mouse.click(point.x, point.y);
     return point;
-  };
-  qa.assertNoWsActions = async () => {
-    const actions = await qa.page.evaluate(() =>
-      robustQA.wsSent.filter(
-        (message) => message.method === 'action' || String(message.method).startsWith('files.'),
-      ),
-    );
-    if (actions.length) throw Error('Unexpected WS browser/file action: ' + JSON.stringify(actions));
-    return true;
   };
   qa.releaseAcks = async () =>
     qa.page.evaluate(() => {

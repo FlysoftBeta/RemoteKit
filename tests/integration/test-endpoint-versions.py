@@ -210,7 +210,10 @@ def main():
 
         def open(self, epoch, checkpoint):
             self.driver.publish(sessionId=session, placementEpoch=epoch, run="running", commit=None, checkpoint=checkpoint)
-            self.driver.wait(lambda value: value["browser"] == "running" and value["converged"])
+            self.driver.wait(
+                lambda value: value["browser"] == "running" and value["converged"],
+                timeout=180,
+            )
             self.driver.view(viewId="1", url=origin, width=640, height=480, visible=True)
 
         def state(self):

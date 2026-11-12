@@ -69,7 +69,7 @@ export function startControl(server, configPath, evidence) {
 }
 export async function instrumentViewer(context, evidence, name) {
   await context.addInitScript(() => {
-    const qa = (window.clusterQA = { peers: [], pending: new Map(), channels: [] });
+    const qa = (window.clusterQA = { peers: [], pending: new Map(), channels: [], fileWire: [] });
     const receive = ({ data }) => {
       if (typeof data !== 'string') return;
       let message;
@@ -81,6 +81,15 @@ export async function instrumentViewer(context, evidence, name) {
       if (message.type === 'state') qa.state = message.state;
       if (message.type === 'layout') qa.layout = message;
       if (message.type === 'auth') qa.auth = message.auth;
+      if (message.type === 'files.result') {
+        const { data, ...result } = message.result ?? {};
+        qa.fileWire.push({
+          at: performance.now(),
+          direction: 'in',
+          ...message,
+          result: { ...result, ...(data ? { dataBytes: data.length } : {}) },
+        });
+      }
       qa.pending.get(message.id ?? message.requestId)?.(message);
     };
     window.WebSocket = class extends WebSocket {
@@ -97,8 +106,28 @@ export async function instrumentViewer(context, evidence, name) {
       }
       createDataChannel(...args) {
         const channel = super.createDataChannel(...args);
+        const send = channel.send.bind(channel);
+        channel.send = (raw) => {
+          if (typeof raw === 'string') {
+            const message = JSON.parse(raw);
+            if (message.type === 'files.request') {
+              const { data, ...params } = message.params;
+              qa.fileWire.push({
+                at: performance.now(),
+                direction: 'out',
+                ...message,
+                params: { ...params, ...(data ? { dataBytes: data.length } : {}) },
+              });
+            }
+          }
+          return send(raw);
+        };
         qa.channels.push(channel);
-        if (channel.label === 'remotekit') qa.channel = channel;
+        if (channel.label === 'remotekit') {
+          const role = this.getTransceivers().length ? 'browser' : 'service';
+          qa[role] = { peer: this, channel };
+          if (role === 'browser') qa.channel = channel;
+        }
         channel.addEventListener('message', receive);
         return channel;
       }
@@ -115,9 +144,18 @@ export async function instrumentViewer(context, evidence, name) {
           done(message);
         });
         const message = rtc
-          ? { type: 'files.request', version: 1, requestId: id, method, params, authEpoch: qa.auth.peerEpoch }
+          ? {
+              type: 'files.request',
+              version: 1,
+              requestId: id,
+              method,
+              params,
+              authEpoch: method.startsWith('selection.') ? qa.auth.peerEpoch : qa.auth.serviceEpoch,
+            }
           : { id, method, params };
-        (rtc ? qa.channel : qa.socket).send(JSON.stringify(message));
+        (rtc ? qa[method.startsWith('selection.') ? 'browser' : 'service'].channel : qa.socket).send(
+          JSON.stringify(message),
+        );
       });
   });
   const page = await context.newPage();
@@ -135,6 +173,12 @@ export async function instrumentViewer(context, evidence, name) {
       void appendFile(join(evidence, name + '-console.jsonl'), JSON.stringify({ error: error.stack }) + '\n'),
   );
   const call = async (method, params = {}, rtc = false) => {
+    if (rtc)
+      await page.waitForFunction((selection) => {
+        const role = selection ? 'browser' : 'service';
+        const epoch = selection ? clusterQA.auth?.peerEpoch : clusterQA.auth?.serviceEpoch;
+        return clusterQA[role]?.channel.readyState === 'open' && epoch > 0;
+      }, method.startsWith('selection.'));
     const reply = await page.evaluate(
       ({ method, params, rtc, id }) => clusterQA.call(method, params, rtc, id),
       { method, params, rtc, id: randomUUID() },
@@ -153,20 +197,9 @@ export async function instrumentViewer(context, evidence, name) {
     async action(action) {
       const operationId = randomUUID();
       const { operationGeneration } = await this.state();
-      await page.evaluate(
-        ({ operationId, operationGeneration, action }) =>
-          clusterQA.channel.send(
-            JSON.stringify({
-              type: 'product.action',
-              version: 1,
-              operationId,
-              operationGeneration,
-              action,
-              authEpoch: clusterQA.auth.peerEpoch,
-            }),
-          ),
-        { operationId, operationGeneration, action },
-      );
+      const receipt = await call('operation.submit', { operationId, operationGeneration, action });
+      assert(receipt.status !== 'failed', JSON.stringify(receipt));
+      if (receipt.status === 'committed') return;
       await until('action ' + action.type, async () => {
         const receipt = await call('operation.status', { operationId, operationGeneration });
         assert(receipt.status !== 'failed', JSON.stringify(receipt));
@@ -176,7 +209,9 @@ export async function instrumentViewer(context, evidence, name) {
     async ready(timeout = 45000) {
       await page.waitForFunction(
         () =>
-          clusterQA.channel?.readyState === 'open' && clusterQA.auth?.peerEpoch > 0 && !clusterQA.auth.locked,
+          clusterQA.socket?.readyState === WebSocket.OPEN &&
+          clusterQA.state &&
+          clusterQA.auth?.locked === false,
         undefined,
         { timeout },
       );
@@ -184,7 +219,7 @@ export async function instrumentViewer(context, evidence, name) {
     async media() {
       return until('H264 decoded', () =>
         page.evaluate(async () => {
-          const peer = clusterQA.peers[clusterQA.peers.length - 1];
+          const peer = clusterQA.browser?.peer;
           if (peer?.connectionState !== 'connected') return false;
           const stats = await peer.getStats();
           const video = [...stats.values()].find(

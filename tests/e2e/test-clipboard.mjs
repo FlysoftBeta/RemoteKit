@@ -33,7 +33,7 @@ const remote = [];
 const results = [];
 let user, admin, chrome, db;
 const result = (scenario, detail) => {
-  results.push({ scenario, status: 'verified', detail });
+  results.push({ scenario, status: 'verified', at: new Date().toISOString(), detail });
   console.log(scenario, JSON.stringify(detail));
 };
 const fixture = createServer(async (request, response) => {
@@ -354,6 +354,8 @@ try {
   result('3 context and quick menu copy', { linkRevision, quickRevision: revision() });
 
   const retained = row();
+  const nodesBeforeOversize = await admin.call('admin.nodes');
+  await writeFile(join(run, 'nodes-before-oversize.json'), JSON.stringify(nodesBeforeOversize, null, 2));
   await click('large');
   await until(
     async () =>
@@ -370,6 +372,14 @@ try {
   const large = await paste();
   assert.equal(Buffer.byteLength(large), 3 * 1024 * 1024);
   assert(large.startsWith(oversizeMarker));
+  const nodesAfterOversize = await admin.call('admin.nodes');
+  await writeFile(join(run, 'nodes-after-oversize.json'), JSON.stringify(nodesAfterOversize, null, 2));
+  for (const before of nodesBeforeOversize) {
+    const after = nodesAfterOversize.find((node) => node.nodeId === before.nodeId);
+    assert.equal(after.state, 'ready');
+    assert.deepEqual(after.exited, before.exited);
+    assert.equal(after.connectedAt, before.connectedAt);
+  }
   result('4 oversize remains local', { bytes: Buffer.byteLength(large), revision: revision() });
   await assert.rejects(admin.call('admin.resetSession', { username: 'clipboard-user' }), /需先停止/);
   assert.deepEqual(row(), retained);

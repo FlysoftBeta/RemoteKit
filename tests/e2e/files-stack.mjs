@@ -73,7 +73,10 @@ export async function startStack({
     run,
     port,
     browser,
-    endpoint: resolve('build/endpoint/endpoint/endpoint_service.exe'),
+    endpoint:
+      options.endpoint ??
+      process.env.REMOTEKIT_ENDPOINT ??
+      resolve('build/endpoint/endpoint/endpoint_service.exe'),
   });
   for (const stream of ['stdout', 'stderr'])
     child[stream].on('data', (b) => appendFileSync(join(run, 'control.log'), b));

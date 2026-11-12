@@ -27,12 +27,24 @@ const fixture = createServer(async (req, res) => {
     events.push(JSON.parse(body));
     return res.end();
   }
+  if (req.url === '/self-close') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(`<!doctype html>
+      <button id="closeSelf" style="position:fixed;inset:0" onclick="window.close()">Close page</button>
+      <script>
+        const report = () => fetch('/event', {method:'POST',body:JSON.stringify({
+          type:'geometry',width:innerWidth,height:innerHeight,
+          boxes:{closeSelf:document.getElementById('closeSelf').getBoundingClientRect().toJSON()}
+        })});
+        report();addEventListener('resize',report);
+      </script>`);
+    return;
+  }
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(`<!doctype html>
     <meta name="viewport" content="width=device-width,initial-scale=1"><title>File library regression</title>
     <style>body{font:18px system-ui;margin:24px;background:#eaf2fc}input,button{display:block;margin:24px 0;height:44px;width:320px}canvas{position:fixed;right:0;bottom:0}</style>
     <h1>Native file selection</h1><input id="single" type="file" accept=".txt"><input id="multiple" type="file" multiple>
     <button id="download">Download a file</button>
-    <button id="closePage" onclick="window.close()">Close page</button><canvas width="16" height="16"></canvas>
+    <button id="closePage" onclick="window.open('/self-close')">Open self-closing page</button><canvas width="16" height="16"></canvas>
     <script>
       const report = (type, extra = {}) => fetch('/event', {
         method: 'POST', body: JSON.stringify({ type, ...extra }),
@@ -241,8 +253,17 @@ try {
       'download imported',
     );
     await tap('closePage');
+    const child = await until(
+      async () =>
+        (await viewer.state()).workspace.tabs.find(
+          (tab) => tab.url === fixtureOrigin + '/self-close' && tab.popup?.status === 'adopted',
+        ),
+      'script-opened child',
+    );
+    await until(() => events.some((event) => event.boxes?.closeSelf), 'child geometry');
+    await tap('closeSelf');
     await until(
-      async () => !(await viewer.state()).workspace.tabs.some((tab) => tab.id === win.activeTabId),
+      async () => !(await viewer.state()).workspace.tabs.some((tab) => tab.id === child.id),
       'natural close acknowledged',
     );
     await page.screenshot({ path: join(run, 'natural-close.png') });
