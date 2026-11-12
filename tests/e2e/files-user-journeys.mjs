@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { startJourney } from './kit/viewer.mjs';
+import { remoteInputReady, startJourney } from './kit/viewer.mjs';
 
 const results = [];
 function pdf() {
@@ -344,6 +344,7 @@ try {
       () => j.provider.events.findLast((e) => e.type === 'geometry' && Math.abs(e.width - box.width) < 3),
       'bank geometry',
     );
+    await page.waitForFunction(remoteInputReady);
     await j.tapAt(
       box.x + geo.username.x + geo.username.width / 2,
       box.y + geo.username.y + geo.username.height / 2,
@@ -356,6 +357,7 @@ try {
       () => j.provider.events.some((event) => event.type === 'input' && event.value === 'fixture-student'),
       'bank username received',
     );
+    await page.waitForFunction(remoteInputReady);
     await j.tapAt(box.x + geo.login.x + geo.login.width / 2, box.y + geo.login.y + geo.login.height / 2);
     await j.until(
       async () => (await j.viewer.state()).learning.accounts.xinjiaoyu.status === 'signed_in',
