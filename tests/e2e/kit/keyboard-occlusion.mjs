@@ -408,6 +408,20 @@ export async function keyboardOcclusion(kind) {
       undefined,
       { timeout: 15000 },
     );
+    await page.waitForFunction(
+      (start) => {
+        const wire = occlusionQA.wire.slice(start);
+        const layout = wire.find(
+          (entry) => entry.message.type === 'layout' && entry.message.generation !== '0',
+        )?.message;
+        return (
+          layout &&
+          wire.some((entry) => entry.message.type === 'frame' && entry.message.layoutEpoch === layout.epoch)
+        );
+      },
+      beforeRotation.wire,
+      { timeout: 15000 },
+    );
     const rotation = await page.evaluate((start) => {
       const wire = occlusionQA.wire.slice(start);
       const layout = wire.find(
