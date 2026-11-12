@@ -231,7 +231,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       if (this.healthySince !== undefined && Date.now() - this.healthySince >= 60_000)
         this.launchFailures = 0;
       this.healthySince = undefined;
-      if (!this.stopped && code !== 1 && code !== 3) {
+      if (!this.stopped && code !== 3) {
         const delay = code === 4 ? 0 : Math.min(60_000, 1500 * 2 ** Math.min(this.launchFailures++, 6));
         this.retry = setTimeout(() => this.start(), delay);
       }

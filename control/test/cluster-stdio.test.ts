@@ -16,6 +16,64 @@ import { decodeFrame, encodeJson, encodeStdio, StdioDecoder, jsonObject } from '
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 
+for (const code of [1, 0, null, 99, 3, 4]) {
+  test(`local Endpoint exit ${code} follows the restart policy`, (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const children: EventEmitter[] = [];
+    t.mock.method(childProcess, 'spawn', () => {
+      const child = Object.assign(new EventEmitter(), {
+        stdin: new PassThrough(),
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        kill() {
+          child.emit('exit', 0);
+        },
+      });
+      children.push(child);
+      return child;
+    });
+    syncBuiltinESMExports();
+    const registry = new NodeRegistry({
+      privateKey: Buffer.alloc(32).toString('base64'),
+      buildId: 'dev',
+      nodes: {
+        local: {
+          ...testNode('local'),
+          local: { root: tmpdir(), executable: 'endpoint_service.exe' },
+        },
+      },
+    });
+    t.after(() => {
+      registry.stop();
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    });
+    registry.start();
+    children[0].emit('exit', code);
+    if (code === 3) {
+      t.mock.timers.tick(60_000);
+      assert.equal(children.length, 1);
+      return;
+    }
+    if (code !== 4) {
+      t.mock.timers.tick(1499);
+      assert.equal(children.length, 1);
+    }
+    t.mock.timers.tick(code === 4 ? 0 : 1);
+    assert.equal(children.length, 2);
+    children[1].emit('exit', code);
+    t.mock.timers.tick(code === 4 ? 0 : 2999);
+    assert.equal(children.length, code === 4 ? 3 : 2);
+    if (code !== 4) {
+      t.mock.timers.tick(1);
+      assert.equal(children.length, 3);
+    }
+    registry.stop();
+    t.mock.timers.tick(60_000);
+    assert.equal(children.length, 3);
+  });
+}
+
 for (const outcome of ['success', 'failure', 'stopped', 'dev'] as const) {
   test(`local runtime installation: ${outcome}`, async (t) => {
     const directory = await mkdtemp(join(tmpdir(), 'rk-local-install-'));
