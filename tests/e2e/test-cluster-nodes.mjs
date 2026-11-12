@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { startFixture } from './kit/fixtures.mjs';
 import { createViewerContext, instrumentViewer, launchBrowser, remoteInputReady } from './kit/viewer.mjs';
 
 import { join, resolve } from 'node:path';
@@ -23,7 +22,6 @@ const evidence = async (name, value) => {
   await writeFile(join(run, name + '.json'), JSON.stringify(value, null, 2));
 };
 const events = [];
-const fixture = await startFixture('test-cluster-nodes', port + 1, { events });
 
 const stack = await startStack({
   scenario: 'cluster-nodes',
@@ -32,7 +30,7 @@ const stack = await startStack({
   endpoint,
   browser,
   seed: false,
-  fixtures: false,
+  fixtures: { kind: 'test-cluster-nodes', context: { events } },
   dev: false,
   nodes: ['alpha', 'beta'],
   nodeLimits: { maxSessions: 1 },
@@ -294,6 +292,4 @@ try {
 } finally {
   await viewers?.close();
   await stack.stop();
-  fixture.closeAllConnections();
-  await new Promise((done) => fixture.close(done));
 }

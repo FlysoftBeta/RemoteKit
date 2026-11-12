@@ -1,6 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { startFixture } from './kit/fixtures.mjs';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { startStack, until } from './kit/stack.mjs';
@@ -8,17 +7,14 @@ import { createViewerContext, instrumentViewer, launchBrowser } from './kit/view
 
 import assert from 'node:assert/strict';
 
+const port = Number(process.env.E2E_PORT ?? 34200);
 const output = resolve(process.env.E2E_RUN ?? `develop/tmp/e2e/files-ui-${Date.now()}`);
 const require = createRequire(import.meta.url);
 
 mkdirSync(output, { recursive: true });
 let stack;
 const events = [];
-const fixture = await startFixture('test-files-ui', Number(process.env.E2E_PORT ?? 34200) + 1, {
-  events,
-  output,
-});
-const fixtureOrigin = `http://127.0.0.1:${fixture.address().port}`;
+
 const results = [];
 try {
   const device = process.env.E2E_BROWSER ?? 'edge';
@@ -28,14 +24,15 @@ try {
   stack = await startStack({
     scenario: `files-ui-${device}`,
     run: join(out, 'stack'),
-    fixtures: false,
+    fixtures: { kind: 'test-files-ui', context: { events, output } },
     ports: {
-      control: Number(process.env.E2E_PORT) + 3,
-      viewer: Number(process.env.E2E_PORT),
-      fixture: Number(process.env.E2E_PORT) + 1,
-      peer: Number(process.env.E2E_PORT) + 2,
+      control: port + 3,
+      viewer: port,
+      fixture: port + 1,
+      peer: port + 2,
     },
   });
+  const fixtureOrigin = stack.fixture;
   const tablet = process.env.E2E_POINTER ? process.env.E2E_POINTER === 'touch' : device === 'chrome89';
   const browser = await launchBrowser(
     device === 'chrome89'
@@ -241,7 +238,5 @@ try {
     stack = undefined;
   }
 } finally {
-  fixture.closeAllConnections();
-  await new Promise((done) => fixture.close(done));
   await stack?.stop();
 }

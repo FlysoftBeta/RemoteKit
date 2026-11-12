@@ -1,4 +1,3 @@
-import { startFixture } from './kit/fixtures.mjs';
 import { createViewerContext, instrumentViewer, launchBrowser, remoteInputReady } from './kit/viewer.mjs';
 
 import { randomUUID } from 'node:crypto';
@@ -34,11 +33,10 @@ const result = (scenario, detail) => {
   results.push({ scenario, status: 'verified', at: new Date().toISOString(), detail });
   console.log(scenario, JSON.stringify(detail));
 };
-const fixture = await startFixture('test-clipboard', port + 1, { remote, marker, oversizeMarker });
 
 const stack = await startStack({
   seed: false,
-  fixtures: false,
+  fixtures: { kind: 'test-clipboard', context: { remote, marker, oversizeMarker } },
   ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
   run,
   port,
@@ -430,7 +428,6 @@ try {
   );
   await chrome?.close();
   await stack.stop();
-  fixture.closeAllConnections();
-  fixture.close();
+
   console.log('Evidence:', run);
 }

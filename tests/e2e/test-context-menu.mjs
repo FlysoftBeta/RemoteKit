@@ -1,4 +1,3 @@
-import { startFixture } from './kit/fixtures.mjs';
 import { launchPersistentViewer } from './kit/viewer.mjs';
 
 import { randomBytes } from 'node:crypto';
@@ -29,7 +28,6 @@ const results = [];
 const product = [];
 let state;
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
-const fixture = await startFixture('test-context-menu', port + 4, { remote });
 
 const stack = await startStack({
   scenario: 'context-menu',
@@ -38,7 +36,7 @@ const stack = await startStack({
   endpoint,
   browser,
   seed: false,
-  fixtures: false,
+  fixtures: { kind: 'test-context-menu', context: { remote } },
   ports: { control: port, viewer: port + 1, fixture: port + 4, peer: port + 3 },
 });
 let context, page;
@@ -492,7 +490,6 @@ try {
   await writeFile(join(run, 'trace.json'), JSON.stringify({ results, remote, wire, product }, null, 2));
   await context?.close();
   await stack.stop();
-  fixture.closeAllConnections();
-  fixture.close();
+
   console.log('Evidence:', run);
 }

@@ -1,4 +1,3 @@
-import { startFixture } from './kit/fixtures.mjs';
 import { launchPersistentViewer } from './kit/viewer.mjs';
 
 import assert from 'node:assert/strict';
@@ -28,11 +27,10 @@ const remote = [];
 const results = [];
 const password = randomBytes(18).toString('hex');
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
-const fixture = await startFixture('test-touch-selection', port + 1, { remote });
 
 const stack = await startStack({
   seed: false,
-  fixtures: false,
+  fixtures: { kind: 'test-touch-selection', context: { remote } },
   ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
   run,
   port,
@@ -719,7 +717,6 @@ try {
   await writeFile(join(run, 'trace.json'), JSON.stringify({ results, remote, wire }, null, 2));
   await context?.close();
   await stack.stop();
-  fixture.closeAllConnections();
-  fixture.close();
+
   console.log('Evidence:', run);
 }

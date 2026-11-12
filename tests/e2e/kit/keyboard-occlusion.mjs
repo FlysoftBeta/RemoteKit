@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { startStack } from './stack.mjs';
 import { launch } from './viewer.mjs';
@@ -13,29 +12,6 @@ export async function keyboardOcclusion(kind) {
   const run = resolve(output ?? `develop/tmp/e2e/occlusion/${kind}-${browserName}-${Date.now()}`);
   await mkdir(run, { recursive: true });
   const events = [];
-  const fixture = createServer(async (request, response) => {
-    if (request.method === 'POST') {
-      let bytes = '';
-      for await (const part of request) bytes += part;
-      events.push(JSON.parse(bytes));
-      return response.end();
-    }
-    response.setHeader('Content-Type', 'text/html; charset=utf-8');
-    response.end(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
-      <title>Occlusion</title><style>html,body{margin:0;width:100%;height:100%;background:rgb(40,90,160);overflow:hidden}
-      input{position:absolute;left:24px;top:24px;width:260px;height:48px;font-size:20px}
-      #footer{position:fixed;bottom:0;height:12px;left:0;right:0;background:rgb(220,20,180)}
-      #motion{position:absolute;top:210px;width:8px;height:8px;background:#0f0}</style>
-      <input id="text"><div id="footer"></div><div id="motion"></div><script>
-      const report=type=>fetch('/event',{method:'POST',body:JSON.stringify({type,path:location.pathname,height:innerHeight,visualHeight:visualViewport.height,width:innerWidth,value:text.value,focused:document.activeElement===text,at:performance.now()})});
-      for(const type of ['focus','blur','input','compositionstart','compositionend'])text.addEventListener(type,()=>report(type));
-      document.addEventListener('pointerdown',e=>fetch('/event',{method:'POST',body:JSON.stringify({type:'pointer',x:e.clientX,y:e.clientY,path:location.pathname})}));
-      window.addEventListener('resize',()=>report('resize'));report('ready');
-      function animate(t){motion.style.left=(t/10%120)+'px';requestAnimationFrame(animate)}requestAnimationFrame(animate);
-      </script>`);
-  });
-  await new Promise((done) => fixture.listen(0, '127.0.0.1', done));
-  const url = `http://127.0.0.1:${fixture.address().port}/page`;
   let stack, session;
   const results = [];
   const normalChanges = [];
@@ -46,7 +22,9 @@ export async function keyboardOcclusion(kind) {
       browser,
       endpoint,
       media: { gop: 65535 },
+      fixtures: { kind: 'keyboard-occlusion', context: { events } },
     });
+    const url = stack.fixture + '/page';
     session = await launch({
       browser: browserName,
       dpr: 2,
@@ -602,7 +580,5 @@ export async function keyboardOcclusion(kind) {
       );
     await session?.close();
     await stack?.stop();
-    fixture.closeAllConnections();
-    await new Promise((done) => fixture.close(done));
   }
 }

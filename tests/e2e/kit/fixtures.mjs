@@ -1,7 +1,7 @@
 import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
-export async function startGestureFixture({ port: fixturePort, run, call }) {
+async function startGestureFixture({ port: fixturePort, run, call }) {
   const latest = new Map(),
     commands = new Map(),
     fixtureHtml = await readFile(new URL('../fixtures/native-gestures.html', import.meta.url));
@@ -81,6 +81,7 @@ export async function startGestureFixture({ port: fixturePort, run, call }) {
 }
 
 export async function startFixture(kind, port, context = {}) {
+  if (kind === 'gestures') return startGestureFixture({ ...context, port });
   const server = createServer(await fixtureHandlers[kind](context));
   await new Promise((done, reject) => {
     server.once('error', reject);
@@ -89,6 +90,138 @@ export async function startFixture(kind, port, context = {}) {
   return server;
 }
 const fixtureHandlers = {
+  'keyboard-occlusion':
+    ({ events }) =>
+    async (request, response) => {
+      if (request.method === 'POST') {
+        let bytes = '';
+        for await (const part of request) bytes += part;
+        events.push(JSON.parse(bytes));
+        return response.end();
+      }
+      response.setHeader('Content-Type', 'text/html; charset=utf-8');
+      response.end(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+      <title>Occlusion</title><style>html,body{margin:0;width:100%;height:100%;background:rgb(40,90,160);overflow:hidden}
+      input{position:absolute;left:24px;top:24px;width:260px;height:48px;font-size:20px}
+      #footer{position:fixed;bottom:0;height:12px;left:0;right:0;background:rgb(220,20,180)}
+      #motion{position:absolute;top:210px;width:8px;height:8px;background:#0f0}</style>
+      <input id="text"><div id="footer"></div><div id="motion"></div><script>
+      const report=type=>fetch('/event',{method:'POST',body:JSON.stringify({type,path:location.pathname,height:innerHeight,visualHeight:visualViewport.height,width:innerWidth,value:text.value,focused:document.activeElement===text,at:performance.now()})});
+      for(const type of ['focus','blur','input','compositionstart','compositionend'])text.addEventListener(type,()=>report(type));
+      document.addEventListener('pointerdown',e=>fetch('/event',{method:'POST',body:JSON.stringify({type:'pointer',x:e.clientX,y:e.clientY,path:location.pathname})}));
+      window.addEventListener('resize',()=>report('resize'));report('ready');
+      function animate(t){motion.style.left=(t/10%120)+'px';requestAnimationFrame(animate)}requestAnimationFrame(animate);
+      </script>`);
+    },
+  workspace: async ({ run }) => {
+    const icon = await readFile(new URL('./fixture-icon.png', import.meta.url));
+    const events = [];
+    return async (req, res) => {
+      const path = new URL(req.url, 'http://fixture').pathname;
+      if (path === '/icon.png') return res.writeHead(200, { 'Content-Type': 'image/png' }).end(icon);
+      if (path === '/manifest.json')
+        return res.writeHead(200, { 'Content-Type': 'application/manifest+json' }).end(
+          JSON.stringify({
+            name: 'Workspace Notes',
+            short_name: 'Notes',
+            start_url: '/notes/',
+            scope: '/notes/',
+            display: 'standalone',
+            theme_color: '#2660b5',
+            icons: [{ src: '/icon.png', sizes: '192x192', type: 'image/png' }],
+          }),
+        );
+      if (path === '/events')
+        return res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(events));
+      if (path === '/event') {
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        const event = JSON.parse(body);
+        events.push(event);
+        await appendFile(join(run, 'fixture-events.jsonl'), JSON.stringify(event) + '\n');
+        return res.end('ok');
+      }
+      const label =
+        path === '/fs/'
+          ? 'File System regression'
+          : path.startsWith('/flow/')
+            ? path.split('/').pop()
+            : 'Workspace Notes';
+      const filesystem =
+        path === '/fs/'
+          ? `<script>
+      const report = (api, status, error) => fetch('/event', {method:'POST',body:JSON.stringify({api,status,error})});
+      (async () => {
+        try {
+          const directory = await navigator.storage.getDirectory();
+          const handle = await directory.getFileHandle('regression.txt', {create:true});
+          const writer = await handle.createWritable();
+          await writer.write('RemoteKit File System regression');
+          await writer.close();
+          await report('getDirectory', 'ok');
+        } catch (error) { await report('getDirectory', 'error', String(error)); }
+      })();
+      if (window.webkitRequestFileSystem) window.webkitRequestFileSystem(TEMPORARY, 1024 * 1024, fs => {
+        fs.root.getFile('legacy.txt', {create:true}, entry => entry.createWriter(writer => {
+          writer.onwriteend = () => report('webkitRequestFileSystem','ok');
+          writer.onerror = error => report('webkitRequestFileSystem','error',String(error));
+          writer.write(new Blob(['RemoteKit legacy File System regression']));
+        }), error => report('webkitRequestFileSystem','error',String(error)));
+      }, error => report('webkitRequestFileSystem','error',String(error)));
+      else report('webkitRequestFileSystem','unavailable');
+    </script>`
+          : '';
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(
+        `<!doctype html>
+        <html lang="en">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>${label}</title>
+          <link rel="manifest" href="/manifest.json">
+          <link rel="icon" href="/icon.png">
+          <style>
+            body { margin: 0; padding: 32px; font: 18px system-ui; background: #edf3fb; color: #234567; }
+            h1 { font-size: 32px; }
+            a, button, input { display: block; margin: 18px 0; }
+            button { padding: 10px 18px; }
+            textarea { width: 90%; height: 96px; font: 18px system-ui; }
+          </style>
+          <h1>${label}</h1>
+          <p>A real remote page inside RemoteKit.</p>
+          <textarea placeholder="Write a note"></textarea>
+          <a href="/outside">Outside scope</a>
+          <button onclick="window.open('/notes/popup','notes-popup','width=500,height=500')">Open popup</button>
+          <a target="_blank" href="/notes/new-tab">Open browser tab</a>
+          <input id="upload" type="file" multiple>
+          <nav>
+            <a href="/flow/A">A</a>
+            <a href="/flow/B">B</a>
+            <a href="/flow/C">C</a>
+            <a href="/flow/D">D</a>
+          </nav>
+          <script>
+            const note = document.querySelector('textarea');
+            note.addEventListener('input', () => fetch('/event', {
+              method: 'POST',
+              body: JSON.stringify({ path: location.pathname, type: 'note', value: note.value }),
+            }));
+            document.querySelector('#upload').onchange = async event => fetch('/event', {
+              method: 'POST',
+              body: JSON.stringify({ files: await Promise.all([...event.target.files].map(async file => ({
+                name: file.name,
+                text: await file.text(),
+              }))) }),
+            });
+            const geometry = () => fetch('/event', {
+              method: 'POST',
+              body: JSON.stringify({ path: location.pathname, width: innerWidth, height: innerHeight, geometry: Object.fromEntries([...document.querySelectorAll('textarea,button,a,input')].map((el,i) => [el.tagName.toLowerCase()+'-'+i, el.getBoundingClientRect().toJSON()])) }),
+            });
+            geometry(); addEventListener('resize', geometry);
+          </script>
+          ${filesystem}
+        </html>`,
+      );
+    };
+  },
   'test-files-ui':
     ({ events, output }) =>
     async (request, response) => {

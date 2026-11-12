@@ -1,6 +1,5 @@
 import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir } from 'node:fs/promises';
-import { startFixture } from './kit/fixtures.mjs';
 import { startStack } from './kit/stack.mjs';
 import { launchPersistentViewer, registerViewer } from './kit/viewer.mjs';
 
@@ -29,7 +28,6 @@ const log = async (stage, value) => {
 };
 
 const fixtureEvents = [];
-const fixture = await startFixture('test-fullscreen', port + 4, { fixtureEvents, run });
 
 const stack = await startStack({
   scenario: 'fullscreen',
@@ -38,7 +36,7 @@ const stack = await startStack({
   endpoint,
   browser,
   seed: false,
-  fixtures: false,
+  fixtures: { kind: 'test-fullscreen', context: { fixtureEvents } },
   ports: { control: port, viewer: port + 1, fixture: port + 4, peer: port + 3 },
 });
 
@@ -611,7 +609,5 @@ try {
     await context?.close();
   } finally {
     await stack.stop();
-    fixture.closeAllConnections();
-    await new Promise((accept) => fixture.close(accept));
   }
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { cameraFixtures, startFixture } from './kit/fixtures.mjs';
+import { cameraFixtures } from './kit/fixtures.mjs';
 import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
 
 import { join, resolve } from 'node:path';
@@ -21,11 +21,10 @@ const cameras = await cameraFixtures(run);
 const events = [];
 const results = [];
 const rpcEvidence = [];
-const fixture = await startFixture('test-camera-scan', port + 1, { events });
 
 const stack = await startStack({
   seed: false,
-  fixtures: false,
+  fixtures: { kind: 'test-camera-scan', context: { events } },
   ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
   run,
   port,
@@ -405,7 +404,4 @@ try {
   await writeFile(join(run, 'fixture-events.json'), JSON.stringify(events, null, 2));
   await chrome?.close();
   await stack.stop();
-
-  fixture.closeAllConnections();
-  await new Promise((done) => fixture.close(done));
 }

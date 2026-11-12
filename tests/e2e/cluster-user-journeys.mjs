@@ -1,6 +1,5 @@
 import { execFileSync } from 'node:child_process';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { startFixture } from './kit/fixtures.mjs';
 import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
 
 import { join, resolve } from 'node:path';
@@ -23,7 +22,6 @@ const report = async (stage, value) => {
     JSON.stringify({ at: new Date().toISOString(), stage, value }) + '\n',
   );
 };
-const fixture = await startFixture('cluster-user-journeys', port + 2, { events, run });
 
 const endpoint = resolve(process.env.REMOTEKIT_ENDPOINT ?? 'build/endpoint/endpoint/endpoint_service.exe'),
   remote = process.env.REMOTEKIT_BROWSER ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe';
@@ -34,7 +32,7 @@ const stack = await startStack({
   endpoint,
   browser: remote,
   seed: false,
-  fixtures: false,
+  fixtures: { kind: 'cluster-user-journeys', context: { events } },
   nodes: ['alpha', 'beta'],
   nodeLimits: { maxSessions: 1 },
 });
@@ -683,6 +681,4 @@ try {
 } finally {
   await browser?.close();
   await stack.stop();
-  fixture.closeAllConnections();
-  await new Promise((done) => fixture.close(done));
 }

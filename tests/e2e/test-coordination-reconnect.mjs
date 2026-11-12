@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { startFixture } from './kit/fixtures.mjs';
 import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
 
 import { createNetworkProxy } from './kit/network.mjs';
@@ -19,13 +18,6 @@ let closePage = false,
   childLoads = 0,
   geometry;
 const network = await createNetworkProxy({ port: port + 2, upstreamPort: port });
-const fixture = await startFixture('test-coordination-reconnect', port + 1, {
-  getClosePage: () => closePage,
-  setGeometry: (value) => {
-    geometry = value;
-  },
-  onChildLoad: () => childLoads++,
-});
 
 const nodeRoot = join(run, 'node');
 const stack = await startStack({
@@ -34,7 +26,16 @@ const stack = await startStack({
   endpoint,
   browser,
   seed: false,
-  fixtures: false,
+  fixtures: {
+    kind: 'test-coordination-reconnect',
+    context: {
+      getClosePage: () => closePage,
+      setGeometry: (value) => {
+        geometry = value;
+      },
+      onChildLoad: () => childLoads++,
+    },
+  },
   ports: { control: port, viewer: port + 4, fixture: port + 1, peer: port + 3 },
   nodes: { alpha: { remote: { control: 'ws://127.0.0.1:' + (port + 2) + '/api/node' } } },
 });
@@ -286,5 +287,4 @@ try {
   }
   await stack.stop();
   await network.close();
-  await new Promise((done) => fixture.close(done));
 }

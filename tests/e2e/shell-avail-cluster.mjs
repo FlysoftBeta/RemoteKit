@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { startFixture } from './kit/fixtures.mjs';
 import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
 
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -16,14 +15,13 @@ const port = Number(process.argv[3] ?? 33941);
 const origin = `http://127.0.0.1:${port}`;
 const requireControl = createRequire(join(repository, 'control/package.json'));
 await mkdir(run, { recursive: true });
-const fixture = await startFixture('shell-avail-cluster', port + 1, {});
 
 const stack = await startStack({
   scenario: 'shell-avail-cluster',
   run,
   port,
   seed: false,
-  fixtures: false,
+  fixtures: { kind: 'shell-avail-cluster' },
   dev: false,
   nodes: ['alpha', 'beta'],
   ports: { control: port, viewer: port + 4, fixture: port + 1, peers: [port + 2, port + 3] },
@@ -260,5 +258,4 @@ try {
 } finally {
   await browser?.close();
   await stack.stop();
-  await new Promise((done) => fixture.close(done));
 }

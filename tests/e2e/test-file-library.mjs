@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { startFixture } from './kit/fixtures.mjs';
 import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
 
 import { join, resolve } from 'node:path';
@@ -19,11 +18,10 @@ await mkdir(run, { recursive: true });
 const events = [],
   results = [];
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const fixture = await startFixture('test-file-library', port + 1, { events });
 
 const stack = await startStack({
   seed: false,
-  fixtures: false,
+  fixtures: { kind: 'test-file-library', context: { events } },
   ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
   run,
   port,
@@ -216,7 +214,4 @@ try {
   await writeFile(join(run, 'fixture-events.json'), JSON.stringify(events, null, 2));
   await chrome?.close();
   await stack.stop();
-
-  fixture.closeAllConnections();
-  await new Promise((done) => fixture.close(done));
 }

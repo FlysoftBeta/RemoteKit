@@ -30,6 +30,7 @@ const log = async (stage, value) => {
 };
 const archiveDirectory = join(run, 'diagnostics');
 let fixtureVisits = 0;
+// Keep fixture traffic available while Control restarts.
 const fixture = await startFixture('test-diagnostic-collection', port + 1, {
   onVisit: () => fixtureVisits++,
 });

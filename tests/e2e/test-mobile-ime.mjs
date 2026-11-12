@@ -1,4 +1,3 @@
-import { startFixture } from './kit/fixtures.mjs';
 import { launchPersistentViewer } from './kit/viewer.mjs';
 
 import { randomBytes } from 'node:crypto';
@@ -27,11 +26,10 @@ const fixtureOrigin = 'http://127.0.0.1:' + (port + 1);
 await mkdir(run, { recursive: true });
 
 const fixtureEvents = [];
-const fixture = await startFixture('test-mobile-ime', port + 1, { fixtureEvents, run });
 
 const stack = await startStack({
   seed: false,
-  fixtures: false,
+  fixtures: { kind: 'test-mobile-ime', context: { fixtureEvents } },
   ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
   run,
   port,
@@ -613,7 +611,5 @@ try {
     await context?.close();
   } finally {
     await stack.stop();
-    fixture.closeAllConnections();
-    await new Promise((accept) => fixture.close(accept));
   }
 }

@@ -22,7 +22,7 @@ const stack = await startStack({
   scenario: 'native-gestures',
   run,
   seed: false,
-  fixtures: 'gestures',
+  fixtures: { kind: 'gestures' },
   ports: {
     control: Number(values.port) + 3,
     viewer: Number(values.port),
