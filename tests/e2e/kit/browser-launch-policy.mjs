@@ -11,10 +11,17 @@ const extensions = /\.(?:[cm]?[jt]sx?|py|ps1|cmd|bat|sh|c|cc|cpp|h|hpp)$/;
 
 export function browserLaunchViolations(source, file) {
   const errors = [];
+  const ownsLauncher = resolve(repository, file) === launcher;
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
   function fail(node, reason) {
     const { line } = tree.getLineAndCharacterOfPosition(node.getStart(tree));
     errors.push(`${file}:${line + 1}: ${reason}; use kit/browser.mjs launchTestBrowser`);
+  }
+  function insideSeededLauncher(node) {
+    for (let parent = node.parent; parent; parent = parent.parent) {
+      if (ts.isFunctionDeclaration(parent)) return ownsLauncher && parent.name?.text === 'launchTestBrowser';
+    }
+    return false;
   }
   function visit(node) {
     if (ts.isCallExpression(node)) {
@@ -24,13 +31,18 @@ export function browserLaunchViolations(source, file) {
         : ts.isElementAccessExpression(expression) && ts.isStringLiteral(expression.argumentExpression)
           ? expression.argumentExpression.text
           : '';
-      if (['launch', 'launchPersistentContext', 'launchServer'].includes(name))
+      if (
+        ['launch', 'launchServer'].includes(name) ||
+        (name === 'launchPersistentContext' && !insideSeededLauncher(node))
+      )
         fail(node, 'Direct browser launch');
       if (
         /^(?:spawn|spawnSync|execFile|execFileSync|exec|execSync)$/.test(name || expression.getText(tree)) &&
-        /(?:chrome|chromium|msedge|viewer)(?:Exe|Path)?\b|(?:chrome|msedge)\.exe/i.test(
-          node.arguments[0]?.getText(tree) ?? '',
-        )
+        ((ownsLauncher && name.startsWith('spawn')) ||
+          /(?:chrome|chromium|msedge|viewer)(?:Exe|Path)?\b|(?:chrome|msedge)\.exe/i.test(
+            node.arguments[0]?.getText(tree) ?? '',
+          )) &&
+        !insideSeededLauncher(node)
       )
         fail(node, 'Raw browser process');
     }
@@ -38,7 +50,7 @@ export function browserLaunchViolations(source, file) {
   }
   visit(tree);
   const profileFlag = '--user' + '-data-dir';
-  if (source.includes(profileFlag))
+  if (!ownsLauncher && source.includes(profileFlag))
     errors.push(`${file}: raw browser profile argument; use kit/browser.mjs launchTestBrowser`);
   if (
     /\.(?:py|ps1|cmd|bat|sh|c|cc|cpp|h|hpp)$/.test(file) &&
@@ -57,13 +69,28 @@ export function checkBrowserLaunchPolicy() {
   assert.equal(browserLaunchViolations('spawn(chrome, args)', 'probe.mjs').length, 1);
   assert.equal(browserLaunchViolations('process.spawn(viewerExe, args)', 'probe.mjs').length, 1);
   assert.equal(browserLaunchViolations('launchTestBrowser({ profile })', 'probe.mjs').length, 0);
+  const launcherFile = relative(repository, launcher);
+  assert.equal(browserLaunchViolations('chromium.launchPersistentContext(profile)', launcherFile).length, 1);
+  assert.equal(
+    browserLaunchViolations(
+      'export function launchTestBrowser() { return chromium.launchPersistentContext(profile); }',
+      launcherFile,
+    ).length,
+    0,
+  );
+  assert.equal(
+    browserLaunchViolations('export function launchTestBrowser() { return chromium.launch(); }', launcherFile)
+      .length,
+    1,
+  );
+  assert.equal(browserLaunchViolations('childProcess.spawn(executablePath, args)', launcherFile).length, 1);
   const errors = [];
   function scan(directory) {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (['node_modules', '__pycache__', '.git'].includes(entry.name)) continue;
       const path = join(directory, entry.name);
       if (entry.isDirectory()) scan(path);
-      else if (path !== launcher && extensions.test(entry.name))
+      else if (extensions.test(entry.name))
         errors.push(...browserLaunchViolations(readFileSync(path, 'utf8'), relative(repository, path)));
     }
   }
