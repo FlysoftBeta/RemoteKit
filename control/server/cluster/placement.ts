@@ -69,7 +69,7 @@ export class Placement {
   }
   activeSessions(nodeId: string) {
     const row = this.store.db
-      .prepare('SELECT count(*) AS count FROM session_placements WHERE node_id=?')
+      .prepare("SELECT count(*) AS count FROM session_placements WHERE node_id=? AND run_state='running'")
       .get(nodeId) as { count: bigint };
     return Number(row.count);
   }

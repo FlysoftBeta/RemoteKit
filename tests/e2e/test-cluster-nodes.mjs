@@ -127,7 +127,7 @@ async function tap(viewer, path, id) {
 }
 const placementFor = (snapshot, name) =>
   snapshot.placements.find((p) => p.tenant === snapshot.users.find((u) => u.username === name)?.tenant);
-async function hibernate(viewer, name) {
+async function stopAndCommit(viewer, name) {
   await viewer.page.close();
   await until('Viewer detached', async () => {
     const snapshot = await control.call('inspect');
@@ -142,7 +142,7 @@ async function hibernate(viewer, name) {
       const tenant = placementFor(snapshot, name)?.tenant;
       const runtime = snapshot.runtimes.find((entry) => entry.tenant === tenant);
       assert(!runtime?.error?.includes('unclean Browser shutdown'), runtime?.error);
-      return placementFor(snapshot, name)?.run_state === 'stopped' && snapshot;
+      return placementFor(snapshot, name)?.run_state === 'stopped' && placementFor(snapshot, name)?.data_state === 'clean' && snapshot;
     },
     90000,
   );
@@ -212,19 +212,19 @@ try {
     origin: { kind: 'files', channel: 'upload', partitionId: null },
   });
   const before = (await first.state()).workspace.tabs;
-  const checkpoint = await hibernate(first, 'cluster-first');
+  const checkpoint = await stopAndCommit(first, 'cluster-first');
   assert(placementFor(checkpoint, 'cluster-first').checkpoint_id);
   await evidence('checkpoint-committed', checkpoint);
   // The third tenant consumes the source slot while the source stays online as an object peer.
-  await until('source metrics reflect hibernation', async () => {
+  await until('source metrics reflect the stop', async () => {
     const snapshot = await control.call('inspect');
     return snapshot.nodes.find((n) => n.nodeId === source.node_id)?.metrics?.sessions === 0;
   });
   const third = await connect('cluster-third');
   await workspace(third, '/fill-source');
   assert.equal(placementFor(await control.call('inspect'), 'cluster-third').node_id, source.node_id);
-  await hibernate(second, 'cluster-second');
-  await until('destination metrics reflect hibernation', async () => {
+  await stopAndCommit(second, 'cluster-second');
+  await until('destination metrics reflect the stop', async () => {
     const snapshot = await control.call('inspect');
     return snapshot.nodes.find((n) => n.nodeId === other.node_id)?.metrics?.sessions === 0;
   });

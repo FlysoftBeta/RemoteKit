@@ -60,7 +60,7 @@ process.on('message', (message: any) => {
         users: store.db.prepare('SELECT username,tenant FROM users').all(),
         placements: store.db
           .prepare(
-            'SELECT tenant,session_id,node_id,placement_epoch,state,checkpoint_id FROM session_placements',
+            'SELECT tenant,session_id,node_id,placement_epoch,run_state,data_state,pending_commit,checkpoint_id FROM session_placements',
           )
           .all(),
         checkpoints: store.db.prepare('SELECT * FROM checkpoints').all(),

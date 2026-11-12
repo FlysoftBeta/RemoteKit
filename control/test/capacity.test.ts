@@ -166,6 +166,21 @@ test('configured caps remain hard, including placements newer than the metrics',
   }
 });
 
+test('stopped sessions do not hold a configured session slot', () => {
+  const h = cluster({ maxSessions: 1, diskReserveBytes: 100, sessionMemoryBytes: 100 });
+  try {
+    h.nodes.get('beta')!.diskDraining = true;
+    h.placement.resolve('first');
+    assert.throws(() => h.placement.resolve('second'), { code: 'unavailable' });
+    h.store.db
+      .prepare("UPDATE session_placements SET run_state='stopped',data_state='clean' WHERE tenant='first'")
+      .run();
+    assert.equal(h.placement.resolve('second').nodeId, 'alpha');
+  } finally {
+    h.close();
+  }
+});
+
 test('warm bonus applies only below predicted pressure threshold and only to the latest checkpoint', () => {
   const h = cluster();
   try {
