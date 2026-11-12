@@ -1,4 +1,5 @@
 #include "persistence/snapshot_protocol.hpp"
+#include "persistence/snapshot_leases.hpp"
 #include <vss.h>
 #include <vswriter.h>
 #include <vsbackup.h>
@@ -67,12 +68,6 @@ struct Shadow {
     }
   }
 };
-struct Lease {
-  std::shared_ptr<Shadow> shadow;
-  Clock::time_point renewed;
-  uint64_t owner;
-  std::set<std::string> paths;
-};
 class Service {
  public:
   explicit Service(fs::path root) : root_(fs::absolute(root).lexically_normal()) {
@@ -91,14 +86,11 @@ class Service {
   }
   void Disconnect(uint64_t owner) {
     std::lock_guard lock(mutex_);
-    std::erase_if(leases_, [&](const auto& item) { return item.second.owner == owner; });
+    leases_.Disconnect(owner);
   }
   void Expire() {
     std::lock_guard lock(mutex_);
-    const auto now = Clock::now();
-    std::erase_if(leases_, [&](const auto& item) {
-      return now - item.second.renewed >= std::chrono::seconds(120);
-    });
+    leases_.Expire(Clock::now());
   }
   void Request(HANDLE pipe, uint64_t owner, const Json& request) {
     std::lock_guard lock(mutex_);
@@ -114,7 +106,7 @@ class Service {
           CheckPath(root_ / Path(path), true);
         }
         auto shadow = current_.lock();
-        if (shadow && Clock::now() - shadow->created > std::chrono::seconds(2))
+        if (shadow && !CanMerge(shadow->created, Clock::now()))
           throw Failure{VSS_E_SNAPSHOT_SET_IN_PROGRESS};
         if (!shadow) {
           shadow = Take();
@@ -123,7 +115,7 @@ class Service {
         GUID token{};
         Check(CoCreateGuid(&token));
         const auto id = Id(token);
-        Lease lease{shadow, Clock::now(), owner, {}};
+        Lease<Shadow> lease{shadow, Clock::now(), owner, {}};
         Json files = Json::array();
         for (const auto& name : paths) {
           auto path = Map(*shadow, name);
@@ -199,7 +191,16 @@ class Service {
   }
   void CheckPath(const fs::path& path, bool missing) {
     fs::path current;
-    for (const auto& part : path) {
+    auto relative = path;
+    const auto native = path.wstring();
+    const std::wstring prefix = L"\\\\?\\GLOBALROOT\\Device\\";
+    if (native.starts_with(prefix)) {
+      const auto slash = native.find(L'\\', prefix.size());
+      Require(slash != std::wstring::npos);
+      current = native.substr(0, slash + 1);
+      relative = native.substr(slash + 1);
+    }
+    for (const auto& part : relative) {
       current /= part;
       const auto attributes = GetFileAttributesW(current.c_str());
       if (attributes == INVALID_FILE_ATTRIBUTES) {
@@ -214,7 +215,7 @@ class Service {
   fs::path Map(const Shadow& shadow, const std::string& name) {
     return shadow.device / (root_ / Path(name)).lexically_relative(volume_);
   }
-  void AddFile(Lease& lease, Json& files, const std::string& name, const fs::path& path) {
+  void AddFile(Lease<Shadow>& lease, Json& files, const std::string& name, const fs::path& path) {
     if (!lease.paths.insert(name).second)
       return;
     HANDLE file = CreateFileW(
@@ -305,7 +306,7 @@ class Service {
   }
   fs::path root_, volume_, journal_;
   std::mutex mutex_;
-  std::map<std::string, Lease> leases_;
+  Leases<Shadow> leases_;
   std::weak_ptr<Shadow> current_;
 };
 std::wstring AccountSid(DWORD process_id) {

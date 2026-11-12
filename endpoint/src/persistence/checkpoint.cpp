@@ -468,7 +468,8 @@ Result<Json> Checkpoints::Create(const fs::path& raw_directory,
                                  const std::string& tenant,
                                  const std::string& build,
                                  PhaseClock::time_point deadline,
-                                 bool defer_commits) {
+                                 bool defer_commits,
+                                 const SnapshotSource* source) {
   const auto directory = LongPath(raw_directory);
   const fs::path index_path = directory.wstring() + L".checkpoint-index.json";
   RK_ASSIGN_OR_RETURN(previous, Load(index_path));
@@ -476,14 +477,15 @@ Result<Json> Checkpoints::Create(const fs::path& raw_directory,
     previous = Json();
   fs::create_directories(directory);
   auto changes = cache_ ? cache_->Changes() : DirectoryChanges{};
-  if (cache_ && !changes.continuous && ValidIndex(previous)) {
+  if (!source && cache_ && !changes.continuous && ValidIndex(previous)) {
     RK_ASSIGN_OR_RETURN(copy, Copy(directory));
     RK_ASSIGN_OR_RETURN(
         recovered,
         RecoverChanges(directory, copy.is_null() ? 0 : copy["changesAt"].get<int64_t>()));
     changes = std::move(recovered);
   }
-  RK_ASSIGN_OR_RETURN(snapshot, Scan(directory, previous, changes, phases_));
+  RK_ASSIGN_OR_RETURN(snapshot, source ? Result<Json>(source->entries)
+                                       : Scan(directory, previous, changes, phases_));
   Json index = snapshot;
   std::vector<std::string> names;
   Json directories = Json::array();
@@ -503,7 +505,14 @@ Result<Json> Checkpoints::Create(const fs::path& raw_directory,
         const auto& name = names[position];
         const auto& identity = snapshot.at(name);
         std::vector<objects::ObjectInfo> objects;
-        bool reuse = previous.contains(name) && !previous[name].value("directory", false) &&
+        const bool changed = !changes.continuous || changes.paths.contains(name) ||
+                             std::ranges::any_of(changes.subtrees,
+                                                 [&](const std::string& subtree) {
+                                                   return name.starts_with(subtree + "/");
+                                                 }) ||
+                             name == "session.db" || name == "session.db-wal";
+        bool reuse = (!source || !changed) && previous.contains(name) &&
+                     !previous[name].value("directory", false) &&
                      BareIdentity(previous[name]) == identity && previous[name].contains("chunks");
         if (reuse) {
           if (changes.continuous && previous[name].contains("objects")) {
@@ -536,8 +545,10 @@ Result<Json> Checkpoints::Create(const fs::path& raw_directory,
           if (changes.continuous && previous.contains(name) && previous[name].contains("objects"))
             for (const auto& item : previous[name]["objects"])
               known.push_back(ObjectMetadata(item));
-          std::ifstream input(LongPath(directory / Utf8Path(name)), std::ios::binary);
-          if (!input)
+          std::ifstream input;
+          if (!source)
+            input.open(LongPath(directory / Utf8Path(name)), std::ios::binary);
+          if (!source && !input)
             return Error{ErrorCode::kUnavailable, "checkpoint file open failed: " +
                                                       Utf8(LongPath(directory / Utf8Path(name)))};
           uint64_t remaining = identity["size"].get<uint64_t>();
@@ -545,7 +556,13 @@ Result<Json> Checkpoints::Create(const fs::path& raw_directory,
             if (PhaseClock::now() >= deadline)
               return Error{ErrorCode::kUnavailable, "shutdown commit budget exhausted"};
             std::string bytes(static_cast<size_t>(std::min<uint64_t>(remaining, kChunk)), '\0');
-            if (!input.read(bytes.data(), static_cast<std::streamsize>(bytes.size())))
+            if (source) {
+              RK_ASSIGN_OR_RETURN(
+                  content, source->read(name, bytes_read, static_cast<uint32_t>(bytes.size())));
+              if (content.size() != bytes.size())
+                return Error{ErrorCode::kUnavailable, "snapshot file read is incomplete"};
+              bytes = std::move(content);
+            } else if (!input.read(bytes.data(), static_cast<std::streamsize>(bytes.size())))
               return Error{ErrorCode::kUnavailable, "checkpoint file read failed"};
             const auto* existing = objects.size() < known.size() ? &known[objects.size()] : nullptr;
             RK_ASSIGN_OR_RETURN(
@@ -554,9 +571,11 @@ Result<Json> Checkpoints::Create(const fs::path& raw_directory,
             bytes_read += bytes.size();
             remaining -= bytes.size();
           } while (remaining);
-          RK_ASSIGN_OR_RETURN(after, CheckpointIdentity(LongPath(directory / Utf8Path(name))));
-          if (after != identity)
-            return Error{ErrorCode::kConflict, "checkpoint file changed during read"};
+          if (!source) {
+            RK_ASSIGN_OR_RETURN(after, CheckpointIdentity(LongPath(directory / Utf8Path(name))));
+            if (after != identity)
+              return Error{ErrorCode::kConflict, "checkpoint file changed during read"};
+          }
         }
         Json entry = identity;
         entry["chunks"] = Json::array();

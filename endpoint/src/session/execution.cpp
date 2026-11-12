@@ -212,6 +212,11 @@ Result<Json> SessionExecution::Stop(const Json& commit,
   RK_ASSIGN_OR_RETURN(checkpoint,
                       Checkpoints(objects_, {}, nullptr, &cache)
                           .Create(directory_, tenant_, options_.build_id, deadline, deferred));
+  copy["lastVersion"] = {{"manifestId", checkpoint.at("manifestId")},
+                         {"takenAt", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::system_clock::now().time_since_epoch())
+                                         .count()},
+                         {"kind", "stopped"}};
   copy["state"] = "clean";
   copy["base"] = checkpoint.at("manifestId");
   copy["lastCommit"] = {{"requestId", commit}, {"manifestId", checkpoint.at("manifestId")}};
@@ -304,6 +309,16 @@ Result<Json> SessionExecution::Descriptions() {
   }
   return values;
 }
+bool SessionExecution::VersionDue(int64_t now, int64_t interval) const {
+  auto session = runtime_.load();
+  return session && session->VersionDue(now, interval);
+}
+Result<Json> SessionExecution::SaveVersion(SnapshotClient& client, const Json& snapshot) {
+  auto session = runtime_.load();
+  if (!session)
+    return Error{ErrorCode::kConflict, "Session is not running"};
+  return session->SaveVersion(client, snapshot);
+}
 Result<Json> SessionExecution::Observe() {
   if (retired_)
     return Error{ErrorCode::kUnavailable, "Session actor is retired"};
@@ -349,10 +364,15 @@ Result<Json> SessionExecution::Observe() {
             {"stoppedCleanly", copy.at("stoppedCleanly")},
             {"changesAt", copy.at("changesAt")},
             {"committed", copy.at("lastCommit")}};
-    if (copy.at("state") == "clean" && !copy.at("base").is_null()) {
+    data["lastVersion"] = copy.value("lastVersion", Json());
+    if (!copy.at("base").is_null() &&
+        (copy.at("state") == "clean" || copy.contains("lastVersion"))) {
       RK_ASSIGN_OR_RETURN(described, Checkpoints(objects_).Describe(copy.at("base")));
       checkpoint = std::move(described);
       checkpoint["manifestId"] = copy.at("base");
+      const auto version = copy.value("lastVersion", Json::object());
+      checkpoint["kind"] = copy.at("state") == "clean" ? "stopped" : "running";
+      checkpoint["takenAt"] = version.value("takenAt", copy.at("changesAt").get<int64_t>());
     }
   }
   RK_ASSIGN_OR_RETURN(descriptions, Descriptions());

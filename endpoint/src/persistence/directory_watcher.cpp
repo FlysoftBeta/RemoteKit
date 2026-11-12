@@ -7,6 +7,18 @@ namespace remotekit {
 namespace {
 constexpr wchar_t kBarrier[] = L".checkpoint-watcher";
 }
+void DirectoryWatcher::Prune(PhaseClock::time_point through) {
+  std::lock_guard lock(mutex_);
+  for (auto it = changes_.paths.begin(); it != changes_.paths.end();) {
+    if (it->second < through) {
+      changes_.removed.erase(it->first);
+      changes_.subtrees.erase(it->first);
+      it = changes_.paths.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
 DirectoryWatcher::~DirectoryWatcher() {
   Stop();
 }

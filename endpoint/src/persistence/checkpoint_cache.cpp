@@ -61,6 +61,7 @@ Result<void> CheckpointCache::Start(const fs::path& directory) {
   return {};
 }
 Result<void> CheckpointCache::Flush() {
+  std::lock_guard lock(journal_mutex_);
   const auto now = PhaseClock::now();
   auto changes = watcher_.Snapshot();
   for (auto path = changes.paths.begin(); path != changes.paths.end();) {
@@ -74,6 +75,25 @@ Result<void> CheckpointCache::Flush() {
   }
   RK_RETURN_IF_ERROR(Checkpoints::FlushChanges(directory_, changes));
   last_flush_ = now;
+  return {};
+}
+Result<void> CheckpointCache::Version(const Json& version) {
+  std::lock_guard lock(journal_mutex_);
+  RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory_));
+  copy["lastVersion"] = version;
+  copy["base"] = version.at("manifestId");
+  copy["state"] = "dirty";
+  copy["lastCommit"] = nullptr;
+  RK_RETURN_IF_ERROR(Checkpoints::WriteCopy(directory_, copy));
+  const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+  const auto age = std::chrono::milliseconds(
+      std::max<int64_t>(0, now - version.at("takenAt").get<int64_t>() + 2000));
+  watcher_.Prune(PhaseClock::now() - age);
+  RK_RETURN_IF_ERROR(Checkpoints::TruncateChanges(directory_));
+  RK_RETURN_IF_ERROR(Checkpoints::FlushChanges(directory_, watcher_.Snapshot()));
+  last_flush_ = PhaseClock::now();
   return {};
 }
 void CheckpointCache::Stop() {

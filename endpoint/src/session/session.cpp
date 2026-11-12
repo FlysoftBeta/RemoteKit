@@ -1,3 +1,4 @@
+#include "persistence/versions.hpp"
 #include "util/log.hpp"
 #include "session/session.hpp"
 #include "diagnostics/log_files.hpp"
@@ -282,6 +283,8 @@ Result<void> Session::Initialize() {
             {"stoppedCleanly", true}, {"changesAt", 0},
             {"lastCommit", nullptr}};
   RK_RETURN_IF_ERROR(checkpoint_cache.Start(config.directory));
+  opened_at_ = VersionNow();
+  version_at_ = copy.value("lastVersion", Json::object()).value("takenAt", opened_at_);
   copy["placementEpoch"] = config.placement_epoch;
   copy["state"] = "dirty";
   copy["stoppedCleanly"] = false;
@@ -410,6 +413,30 @@ Result<Json> Session::Snapshot(bool output_diagnostics) {
   snapshot["stopBlockers"] = std::move(blockers);
   return snapshot;
 }
+bool Session::VersionDue(int64_t now, int64_t interval) const {
+  return remotekit::VersionDue(Running(), checkpoint_cache.Changes(), now,
+                               std::max(opened_at_, version_at_), interval);
+}
+Result<Json> Session::SaveVersion(SnapshotClient& client, const Json& snapshot) {
+  if (!Running())
+    return Error{ErrorCode::kConflict, "Session stopped before version creation"};
+  const auto prefix = "sessions/" + config.id;
+  RK_ASSIGN_OR_RETURN(entries, SnapshotEntries(snapshot.at("files"), prefix));
+  const auto id = snapshot.at("snapshotId").get<std::string>();
+  SnapshotSource source{entries, [&](const std::string& name, uint64_t offset, uint32_t length) {
+                          return client.Read(id, prefix + "/" + name, offset, length);
+                        }};
+  RK_ASSIGN_OR_RETURN(checkpoint,
+                      Checkpoints(context.objects, config.object_access, nullptr, &checkpoint_cache)
+                          .Create(config.directory, config.tenant, config.options.build_id,
+                                  PhaseClock::time_point::max(), false, &source));
+  Json version{{"manifestId", checkpoint.at("manifestId")},
+               {"takenAt", snapshot.at("takenAt")},
+               {"kind", "running"}};
+  RK_RETURN_IF_ERROR(checkpoint_cache.Version(version));
+  version_at_ = snapshot.at("takenAt").get<int64_t>();
+  return version;
+}
 Result<void> Session::MarkStopped() {
   RK_RETURN_IF_ERROR(checkpoint_cache.Flush());
   RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(config.directory));
@@ -462,6 +489,8 @@ Result<Json> Session::StopAndCommit(const Json& request_id,
                                                 config.options.build_id, deadline, defer_commits));
     stopped_copy["state"] = "clean";
     stopped_copy["base"] = checkpoint["manifestId"];
+    stopped_copy["lastVersion"] = {
+        {"manifestId", checkpoint["manifestId"]}, {"takenAt", VersionNow()}, {"kind", "stopped"}};
     stopped_copy["lastCommit"] = {{"requestId", request_id},
                                   {"manifestId", checkpoint["manifestId"]}};
     RK_RETURN_IF_ERROR(Checkpoints::WriteCopy(config.directory, stopped_copy));

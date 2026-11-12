@@ -1,10 +1,15 @@
 #pragma once
 #include "objects/service.hpp"
+#include <functional>
 #include "persistence/durable_json.hpp"
 #include "persistence/phase_timing.hpp"
 #include "persistence/checkpoint_cache.hpp"
 
 namespace remotekit {
+struct SnapshotSource {
+  Json entries;
+  std::function<Result<std::string>(const std::string&, uint64_t, uint32_t)> read;
+};
 class Checkpoints {
  public:
   explicit Checkpoints(objects::ObjectService& objects,
@@ -16,7 +21,8 @@ class Checkpoints {
                       const std::string& tenant,
                       const std::string& build,
                       PhaseClock::time_point deadline = PhaseClock::time_point::max(),
-                      bool defer_commits = false);
+                      bool defer_commits = false,
+                      const SnapshotSource* source = nullptr);
   Result<void> Restore(const fs::path& directory,
                        const std::string& tenant,
                        const Json& checkpoint);

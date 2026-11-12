@@ -29,12 +29,14 @@ Result<Json> SnapshotClient::Request(const Json& request) {
   return reply.at("result");
 }
 Result<Json> SnapshotClient::Take(const fs::path& root, const std::vector<std::string>& paths) {
+  std::lock_guard lock(mutex_);
   return Request({{"method", "snapshot.take"}, {"root", Utf8(root)}, {"paths", paths}});
 }
 Result<std::string> SnapshotClient::Read(const std::string& id,
                                          const std::string& path,
                                          uint64_t offset,
                                          uint32_t length) {
+  std::lock_guard lock(mutex_);
   if (length > snapshot::kMaxRead)
     return Error{ErrorCode::kInvalidRequest, "snapshot read exceeds 1 MiB"};
   RK_ASSIGN_OR_RETURN(header, Request({{"method", "snapshot.read"},
@@ -48,6 +50,7 @@ Result<std::string> SnapshotClient::Read(const std::string& id,
   return std::string(bytes.begin(), bytes.end());
 }
 Result<void> SnapshotClient::Release(const std::string& id) {
+  std::lock_guard lock(mutex_);
   RK_ASSIGN_OR_RETURN(reply, Request({{"method", "snapshot.release"}, {"snapshotId", id}}));
   return {};
 }

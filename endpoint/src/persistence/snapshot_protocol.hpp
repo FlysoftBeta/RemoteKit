@@ -9,11 +9,11 @@ namespace remotekit::snapshot {
 constexpr uint32_t kMaxRead = 1024 * 1024;
 constexpr uint32_t kMaxFrame = 32 * 1024 * 1024;
 inline bool SafePath(const fs::path& path) {
-  if (path.empty() || path.is_absolute() || path.has_root_name())
+  if (path.empty() || path.is_absolute() || path.has_root_path())
     return false;
   for (const auto& part : path) {
     const auto text = part.wstring();
-    if (text.empty() || text == L"." || text == L".." ||
+    if (text.find(L'\0') != std::wstring::npos || text.empty() || text == L"." || text == L".." ||
         text.find_first_of(L":*?<>|\"") != std::wstring::npos || text.back() == L'.' ||
         text.back() == L' ')
       return false;

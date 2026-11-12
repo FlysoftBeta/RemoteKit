@@ -18,6 +18,8 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
                     PhaseClock::time_point deadline = PhaseClock::time_point::max(),
                     bool deferred = false);
   Result<void> Fence();
+  bool VersionDue(int64_t now, int64_t interval) const;
+  Result<Json> SaveVersion(SnapshotClient& client, const Json& snapshot);
   bool Running() const { return running_.load(); }
   const std::string& Id() const { return id_; }
   uint64_t PlacementEpoch() const { return epoch_; }

@@ -4,6 +4,8 @@
 #include "management/coordination.hpp"
 #include "management/methods.hpp"
 #include "persistence/checkpoint.hpp"
+#include "persistence/versions.hpp"
+#include <stop_token>
 #include "util/log.hpp"
 #include "util/result_macros.hpp"
 #include "util/wire_error.hpp"
@@ -334,18 +336,96 @@ bool Service::HandleRequest(Json request, uint64_t generation) {
   link_.SendReply(generation, response);
   return result && request.value("method", std::string()) == "shutdown";
 }
+void Service::Versions() {
+  SnapshotClient client(options_.node_id);
+  static bool unavailable_streak = false;
+  auto unavailable = [&](const Error& error) {
+    snapshot_available_ = false;
+    if (!unavailable_streak)
+      LogError(LogLevel::kWarn, "snapshot.unavailable", error);
+    unavailable_streak = true;
+  };
+  if (!client.Available()) {
+    unavailable(Error{ErrorCode::kUnavailable, "snapshot service is unavailable"});
+    return;
+  }
+  snapshot_available_ = true;
+  unavailable_streak = false;
+  int64_t interval = 300000;
+#ifndef NDEBUG
+  if (const char* value = std::getenv("REMOTEKIT_TEST_VERSION_INTERVAL_MS"))
+    interval = std::max<int64_t>(100, std::stoll(value));
+#endif
+  std::vector<ManagedSession> candidates, due;
+  {
+    std::lock_guard lock(mutex_);
+    for (const auto& [tenant, managed] : sessions_)
+      candidates.push_back(managed);
+  }
+  std::vector<std::string> paths;
+  for (const auto& managed : candidates) {
+    auto ready = managed.coordinator->Execute([&]() -> Result<Json> {
+      return Json(managed.execution->VersionDue(VersionNow(), interval));
+    });
+    if (ready && ready.value() == true) {
+      due.push_back(managed);
+      paths.push_back("sessions/" + managed.execution->Id());
+    }
+  }
+  if (paths.empty())
+    return;
+  auto taken = client.Take(options_.data, paths);
+  if (!taken) {
+    unavailable(taken.error());
+    return;
+  }
+  for (const auto& managed : due) {
+    auto saved = managed.coordinator->Execute(
+        [&] { return managed.execution->SaveVersion(client, taken.value()); });
+    if (!saved)
+      LogError(LogLevel::kWarn, "snapshot.version_failed", saved.error());
+    else {
+      auto reported = managed.coordinator->Report();
+      if (!reported)
+        LogError(LogLevel::kWarn, "snapshot.report_failed", reported.error());
+    }
+  }
+  auto released = client.Release(taken.value().at("snapshotId"));
+  if (!released)
+    unavailable(released.error());
+}
 int Service::Run() {
   auto listening = objects_.Start(options_.peer_listen);
   if (!listening) {
     LogError(LogLevel::kError, "peer.start_failed", listening.error());
     return 1;
   }
+  std::jthread versions([this](std::stop_token stop) {
+    std::mutex wait_mutex;
+    std::condition_variable_any wake;
+    int64_t interval = 60000;
+#ifndef NDEBUG
+    if (const char* value = std::getenv("REMOTEKIT_TEST_VERSION_CHECK_MS"))
+      interval = std::max<int64_t>(100, std::stoll(value));
+#endif
+    while (!stop.stop_requested()) {
+      try {
+        Versions();
+      } catch (const std::exception& error) {
+        LogError(LogLevel::kWarn, "snapshot.version_failed",
+                 Error{ErrorCode::kUnavailable, error.what()});
+      }
+      std::unique_lock lock(wait_mutex);
+      wake.wait_for(lock, stop, std::chrono::milliseconds(interval), [] { return false; });
+    }
+  });
   std::string line;
   auto next_sweep = PhaseClock::now();
   uint64_t configured_generation = 0;
   metrics_.Start([this] { return session_count_.load(); },
                  [this](Json sample) {
                    sample["event"] = "node.metrics";
+                   sample["snapshot"] = snapshot_available_.load() ? "available" : "unavailable";
                    link_.SendEvent(sample, metrics_generation_.load());
                  });
   while (!failed_) {
@@ -405,6 +485,8 @@ int Service::Run() {
     }
     session_count_ = running;
   }
+  versions.request_stop();
+  versions.join();
   object_workers_.Stop();
   metrics_.Stop();
   auto closed = Clear();

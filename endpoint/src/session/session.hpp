@@ -12,6 +12,7 @@
 #include "session/views.hpp"
 #include "session/clipboard.hpp"
 #include "persistence/checkpoint_cache.hpp"
+#include "persistence/snapshot_client.hpp"
 namespace remotekit {
 class Session {
  public:
@@ -46,6 +47,8 @@ class Session {
                              PhaseClock::time_point deadline = PhaseClock::time_point::max(),
                              bool defer_commits = false);
   Result<void> MarkStopped();
+  bool VersionDue(int64_t now, int64_t interval) const;
+  Result<Json> SaveVersion(SnapshotClient& client, const Json& snapshot);
   uint64_t PlacementEpoch() const { return config.placement_epoch; }
   const std::string& Id() const { return config.id; }
   void BeginManagementRequest(uint64_t generation) {
@@ -84,6 +87,7 @@ class Session {
   BrowserRuntime browser;
   SessionDb store;
   CheckpointCache checkpoint_cache;
+  int64_t opened_at_ = 0, version_at_ = 0;
   const std::shared_ptr<media::ServerTrace> trace;
   ControllerContext context;
   std::atomic<uint64_t> generation_{0};

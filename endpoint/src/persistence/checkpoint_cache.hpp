@@ -14,6 +14,7 @@ class CheckpointCache {
   ~CheckpointCache();
   Result<void> Start(const fs::path& directory);
   Result<void> Flush();
+  Result<void> Version(const Json& version);
   void Stop();
   void MaybeStage(objects::ObjectService& objects, const std::string& tenant);
   std::optional<StagedFile> Find(const std::string& path, const Json& identity) const;

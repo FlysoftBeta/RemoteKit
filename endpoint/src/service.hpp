@@ -37,6 +37,8 @@ class Service {
   objects::ObjectService objects_;
   objects::WorkQueue object_workers_;
   NodeMetrics metrics_;
+  std::atomic<bool> snapshot_available_{false};
+  void Versions();
   std::atomic<size_t> session_count_{0};
   std::atomic<uint64_t> metrics_generation_{0};
   std::atomic<uint64_t> fenced_generation_{0};

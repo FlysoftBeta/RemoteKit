@@ -1,5 +1,6 @@
 #pragma once
 #include "persistence/snapshot_protocol.hpp"
+#include <mutex>
 
 namespace remotekit {
 class SnapshotClient {
@@ -17,6 +18,7 @@ class SnapshotClient {
 
  private:
   Result<Json> Request(const Json& request);
+  std::mutex mutex_;
   HANDLE pipe_ = INVALID_HANDLE_VALUE;
 };
 }  // namespace remotekit

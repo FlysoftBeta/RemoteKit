@@ -5,6 +5,7 @@
 #include "runtime_config_fixture.hpp"
 #include "diagnostics/node_metrics.hpp"
 #include "persistence/checkpoint.hpp"
+#include "persistence/versions.hpp"
 #include "session/session.hpp"
 #include "service.hpp"
 #include <fstream>
@@ -17,6 +18,9 @@
 namespace remotekit {
 class CheckpointCacheProbe {
  public:
+  static void Stage(CheckpointCache& cache, const std::string& name, StagedFile file) {
+    cache.staged_[name] = std::move(file);
+  }
   static void Age(CheckpointCache& cache) {
     std::lock_guard lock(cache.watcher_.mutex_);
     for (auto& [name, changed] : cache.watcher_.changes_.paths)
@@ -120,6 +124,60 @@ Result<Json> Commit(Session& session) {
     return result.error();
   result.value()["manifestId"] = result.value()["base"];
   return result;
+}
+void SnapshotVersions(const fs::path& root) {
+  DirectoryChanges changes;
+  changes.continuous = true;
+  Check(!VersionDue(true, changes, 300000, 0), "unchanged Session is not due");
+  changes.paths["value"] = PhaseClock::now();
+  Check(!VersionDue(false, changes, 300000, 0), "stopped Session is not due");
+  Check(!VersionDue(true, changes, 299999, 0), "five-minute version interval");
+  Check(VersionDue(true, changes, 300000, 0), "changed running Session is due");
+  Check(!VersionDue(true, changes, 300000, 1), "open time starts version interval");
+  const auto data = root / "snapshot-version/data";
+  const auto directory = data / "sessions" / std::string(32, 'e');
+  fs::create_directories(directory);
+  Link link;
+  objects::ObjectService objects(data, link, TestPrivateKey(9), "snapshot", "dev");
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  Write(directory / "value", "live data must never be read");
+  Json identity{{"size", uint64_t(8)}, {"mtime", uint64_t(100)}, {"fileId", "volume:1"}};
+  Json files = Json::array();
+  auto entry = identity;
+  entry["path"] = "sessions/id/value";
+  files.push_back(entry);
+  files.push_back({{"path", "sessions/id/profile/Cache/ignore"}, {"size", 7}});
+  files.push_back({{"path", "sessions/id/removed"}, {"missing", true}});
+  const auto entries = Take(SnapshotEntries(files, "sessions/id"));
+  Check(entries.size() == 1 && entries.contains("value"), "snapshot exclusions and missing files");
+  int reads = 0;
+  SnapshotSource snapshot{
+      entries,
+      [&](const std::string& name, uint64_t offset, uint32_t length) -> Result<std::string> {
+        Check(name == "value" && offset == 0 && length == 8, "read only snapshot paths");
+        ++reads;
+        return std::string("snapshot");
+      }};
+  CheckpointCache cache;
+  const auto staged = Take(objects.Store().WriteChunk(objects.ObjectKeys(), "snapshot"));
+  CheckpointCacheProbe::Stage(cache, "value", {identity, {staged}});
+  const auto first = Take(
+      Checkpoints(objects, {}, nullptr, &cache)
+          .Create(directory, "tenant", "dev", PhaseClock::time_point::max(), false, &snapshot));
+  Check(reads == 0, "matching snapshot identity reuses staged chunks");
+  snapshot.entries["value"]["mtime"] = uint64_t(101);
+  const auto second = Take(
+      Checkpoints(objects, {}, nullptr, &cache)
+          .Create(directory, "tenant", "dev", PhaseClock::time_point::max(), false, &snapshot));
+  Check(reads == 1, "staged and previous identity mismatch reads snapshot");
+  Check(first["manifestId"] == second["manifestId"],
+        "manifest describes snapshot bytes, not live file");
+  snapshot.entries = Json::object();
+  const auto removed = Take(Checkpoints(objects).Create(
+      directory, "tenant", "dev", PhaseClock::time_point::max(), false, &snapshot));
+  Check(removed["manifestId"] != first["manifestId"],
+        "snapshot removal deletes previous manifest file");
 }
 void RoundTrip(const fs::path& root) {
   const std::string session(32, 'a');
@@ -737,6 +795,7 @@ int main(int argc, char** argv) {
     const auto root = fs::absolute(Utf8Path(argv[1])) /
                       ("checkpoint-native-" + std::to_string(GetCurrentProcessId()));
     fs::create_directories(root);
+    SnapshotVersions(root);
     RoundTrip(root);
     DraftCheckpoint(root);
     IncrementalEquality(root);
