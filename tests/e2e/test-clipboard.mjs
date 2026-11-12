@@ -111,7 +111,7 @@ const connect = async (username, setup = false) => {
         true,
       );
   });
-  await connected.page.goto(origin);
+  await connected.page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 120000 });
   await connected.ready();
   await connected.call('auth.settings', {
     currentPassword: password,
