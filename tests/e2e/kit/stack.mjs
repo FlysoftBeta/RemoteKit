@@ -1,3 +1,4 @@
+import { createControlConfig } from '../../config-fixture.mjs';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
@@ -270,13 +271,15 @@ export async function startStack({
       };
     }
     const configPath = join(run, 'control.json');
-    const config = {
+    let config = {
       http: { listen: `127.0.0.1:${ports.control}`, origins: [origin, `http://127.0.0.1:${ports.control}`] },
       storage: { database: join(run, 'control.db'), diagnostics: logs.diagnostics, logs: join(run, 'logs') },
       media,
       nodes: configNodes,
     };
-    for (const [key, value] of Object.entries(configOverrides)) config[key] = { ...config[key], ...value };
+    for (const [key, value] of Object.entries(configOverrides))
+      config[key] = value && typeof value === 'object' ? { ...config[key], ...value } : value;
+    config = createControlConfig(config);
     writeFileSync(configPath, JSON.stringify(config, null, 2));
     const server =
       control === 'release'

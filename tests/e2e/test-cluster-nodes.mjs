@@ -114,7 +114,7 @@ async function stopAndCommit(viewer, name) {
       const snapshot = await control.call('inspect');
       const tenant = placementFor(snapshot, name)?.tenant;
       const runtime = snapshot.runtimes.find((entry) => entry.tenant === tenant);
-      assert(!runtime?.error?.includes('unclean Browser shutdown'), runtime?.error);
+      assert(!runtime?.error?.message?.includes('unclean Browser shutdown'), runtime?.error?.message);
       return (
         placementFor(snapshot, name)?.run_state === 'stopped' &&
         placementFor(snapshot, name)?.data_state === 'clean' &&

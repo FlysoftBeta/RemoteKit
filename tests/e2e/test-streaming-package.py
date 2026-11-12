@@ -104,18 +104,29 @@ def main():
             env.pop(name, None)
         config = deployment / 'config/control.json'
         config.parent.mkdir(parents=True, exist_ok=True)
-        (config.parent / 'manager.json').write_text(json.dumps({'manifest': origin + '/control.manifest'}), encoding='utf-8')
+        (config.parent / 'manager.json').write_text(json.dumps({'version': 1, 'manifest': origin + '/control.manifest', 'checkIntervalMinutes': 60}), encoding='utf-8')
         (config.parent / 'release.key').write_text(base64.b64encode(os.urandom(32)).decode('ascii'), encoding='ascii')
         config.write_text(
             json.dumps(
                 {
+                    'version': 1,
+                    'media': {
+                        'encoder': 'auto', 'fps': 60, 'bitrate': 36000000, 'maxBitrate': 48000000,
+                        'asyncDepth': None, 'gop': None, 'targetUsage': None, 'qsvLowPower': 'auto',
+                        'bufferMs': None, 'rateControl': None, 'idleIdrMs': 150,
+                        'maxEncodeWidth': 4096, 'maxEncodeHeight': 4096,
+                    },
+                    'quotas': {'tenantObjectBytes': None},
                     'http': {'listen': '127.0.0.1:' + str(port), 'origins': [origin]},
                     'storage': {
                         'database': str(run / 'control.db'),
                         'diagnostics': str(run / 'diagnostics'),
+                        'logs': str(run / 'logs'),
                     },
                     'nodes': {'local': {'local': {'root': str(deployment / 'data/node')},
-                                        'peer': {'listen': '127.0.0.1:' + str(peer_port)}}},
+                                        'peer': {'listen': '127.0.0.1:' + str(peer_port), 'address': '127.0.0.1:' + str(peer_port)},
+                                        'rtc': {'ports': None, 'address': None},
+                                        'limits': {'maxSessions': None, 'diskReserveBytes': 0, 'sessionMemoryBytes': None}}},
                 }
             ),
             encoding='utf-8',

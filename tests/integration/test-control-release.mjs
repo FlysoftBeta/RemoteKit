@@ -1,3 +1,4 @@
+import { createControlConfig } from '../config-fixture.mjs';
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -396,15 +397,17 @@ try {
   ]);
   await writeFile(
     path.join(root, 'config/manager.json'),
-    JSON.stringify({ manifest: prefix + 'latest/control.manifest', checkIntervalMinutes: 5 }),
+    JSON.stringify({ version: 1, manifest: prefix + 'latest/control.manifest', checkIntervalMinutes: 5 }),
   );
   await writeFile(
     path.join(root, 'config/control.json'),
-    JSON.stringify({
-      http: { listen: controlUrl.slice(7), origins: [controlUrl] },
-      storage: { database: '../data/control.db', diagnostics: '../data/diagnostics', logs: '../logs' },
-      nodes: { 'release-node': { remote: { control: controlUrl.replace('http:', 'ws:') + '/api/node' } } },
-    }),
+    JSON.stringify(
+      createControlConfig({
+        http: { listen: controlUrl.slice(7), origins: [controlUrl] },
+        storage: { database: '../data/control.db', diagnostics: '../data/diagnostics', logs: '../logs' },
+        nodes: { 'release-node': { remote: { control: controlUrl.replace('http:', 'ws:') + '/api/node' } } },
+      }),
+    ),
   );
   phase = 'fresh';
   console.log('Fresh install with interrupted slice');

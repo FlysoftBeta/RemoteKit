@@ -66,11 +66,14 @@ if (args['control-private-key']) key = Buffer.from(args['control-private-key'], 
 else {
   const file = resolve(root, 'control.key');
   try {
-    key = Buffer.from((await readFile(file, 'utf8')).trim(), 'base64');
+    key = Buffer.from(JSON.parse(await readFile(file, 'utf8')).privateKey, 'base64');
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
     key = randomBytes(32);
-    await writeFile(file, key.toString('base64') + '\n', { flag: 'wx', mode: 0o600 });
+    await writeFile(file, JSON.stringify({ version: 1, privateKey: key.toString('base64') }) + '\n', {
+      flag: 'wx',
+      mode: 0o600,
+    });
   }
 }
 let identity;
@@ -79,6 +82,7 @@ try {
 } catch (error) {
   if (error.code !== 'ENOENT') throw error;
   identity = {
+    version: 1,
     nodeId,
     privateKey: randomBytes(32).toString('base64'),
     controlPublicKey: publicKey(key).toString('base64'),
