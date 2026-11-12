@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
+import { createViewerContext, instrumentViewer, launchBrowser, remoteInputReady } from './kit/viewer.mjs';
 
 import { join, resolve } from 'node:path';
 import { pause, startStack, until } from './kit/stack.mjs';
@@ -190,6 +190,7 @@ async function navigate(v, path) {
 async function remoteClick(v, path, id) {
   const viewport = v.page.locator('.remote-viewport:visible').first();
   await viewport.waitFor();
+  await v.page.waitForFunction(remoteInputReady, await viewport.getAttribute('data-view-id'));
   const b = await viewport.boundingBox();
   const e = await until(
     () => events.findLast((e) => e.type === 'ready' && e.path === path && Math.abs(e.width - b.width) < 3),
@@ -612,13 +613,13 @@ try {
     assert((await second.state()).workspace.tabs.some((tab) => tab.url === fixtureOrigin + '/uncommitted'));
     await shot(second, 'admin-stop-resumed');
   });
-  await step('admin-discard-offline-session', async () => {
-    await navigate(second, '/discard-mutated');
-    await remoteClick(second, '/discard-mutated', 'store');
+  await step('admin-transfer-offline-session', async () => {
+    await navigate(second, '/transfer-mutated');
+    await remoteClick(second, '/transfer-mutated', 'store');
     await until(
       () =>
         events.findLast(
-          (e) => e.type === 'stored' && e.path === '/discard-mutated' && e.storage === 'isolated-new-value',
+          (e) => e.type === 'stored' && e.path === '/transfer-mutated' && e.storage === 'isolated-new-value',
         ),
       'dirty persistent data',
     );
@@ -629,7 +630,7 @@ try {
     await until(
       async () =>
         (await control.call('inspect')).nodes.find((entry) => entry.nodeId === node)?.state === 'offline',
-      'node remains offline for discard',
+      'node remains offline for transfer',
     );
     await shot(second, 'offline-dirty-session');
     await second.page.close();
@@ -637,12 +638,12 @@ try {
     await section(first, '用户');
     await pause(5500);
     await userMenu(first, 'cluster-second');
-    await click(first, first.page.getByRole('menuitem', { name: '放弃未提交的更改', exact: true }));
-    await dialog(first, '放弃未提交的更改', '放弃更改', 'discard-session-dialog');
+    await click(first, first.page.getByRole('menuitem', { name: '转移', exact: true }));
+    await dialog(first, '转移 cluster-second 的 Session', '转移', 'offline-transfer-dialog');
     const p = placement(await control.call('inspect'), 'cluster-second');
     assert.equal(p.run_state, 'stopped');
     assert.equal(p.data_state, 'clean');
-    await shot(first, 'discarded-offline-session');
+    await shot(first, 'transferred-offline-session');
     await section(first, '节点');
     const card = first.page
       .locator('.admin-node')
@@ -657,17 +658,17 @@ try {
       'offline node ready',
       90000,
     );
-    second = await makeViewer('second-after-discard');
+    second = await makeViewer('second-after-transfer');
     await login(second, 'cluster-second');
-    await navigate(second, '/discard-verified');
+    await navigate(second, '/transfer-verified');
     const restored = await until(
-      () => events.findLast((e) => e.type === 'ready' && e.path === '/discard-verified'),
-      'discard data restored',
+      () => events.findLast((e) => e.type === 'ready' && e.path === '/transfer-verified'),
+      'checkpoint data restored after offline transfer',
     );
-    await report('discard-observation', restored);
+    await report('transfer-observation', restored);
     assert.equal(restored.storage, null);
     assert(!restored.cookie.includes('cluster='));
-    await shot(second, 'discard-data-verified');
+    await shot(second, 'transfer-data-verified');
     await second.page.close();
   });
   await step('network-reconnect-and-lock', async () => {
