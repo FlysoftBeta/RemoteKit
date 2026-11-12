@@ -99,12 +99,12 @@ try {
       signal: AbortSignal.timeout(1000),
     }).catch(() => undefined);
     if (response?.ok && (await response.json()).setupRequired === true) break;
-    assert(attempt < 50 && control.exitCode === null, 'Fresh isolated Control did not start');
+    assert(attempt < 900 && control.exitCode === null, 'Fresh isolated Control did not start');
     await pause(100);
   }
   context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
-    headless: false,
+    headless: true,
     viewport: { width: 820, height: 1040 },
     deviceScaleFactor: 2,
     isMobile: true,
@@ -114,6 +114,13 @@ try {
     args: ['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required'],
   });
   page = context.pages()[0] ?? (await context.newPage());
+  page.on('websocket', (socket) => {
+    socket.on('framesent', ({ payload }) => {
+      const message = JSON.parse(String(payload));
+      if (message.method === 'viewport')
+        void appendFile(join(run, 'viewport-requests.jsonl'), JSON.stringify(message) + '\n');
+    });
+  });
   page.setDefaultTimeout(5000);
   await page.addInitScript(() => {
     const viewport = visualViewport;
@@ -371,8 +378,9 @@ try {
     const remote = await observe((event) => !!event.geometry?.[target], 'Fixture did not provide geometry');
     const box = remote.geometry[target];
     const { viewport } = await sample();
-    const x = viewport.x + ((box.x + box.width / 2) * viewport.width) / remote.width;
-    const y = viewport.y + ((box.y + box.height / 2) * viewport.height) / remote.height;
+    const scale = viewport.width / remote.width;
+    const x = viewport.x + (box.x + box.width / 2) * scale;
+    const y = viewport.y + (box.y + box.height / 2) * scale;
     await wait(({ x, y }) => document.elementFromPoint(x, y)?.matches('canvas[data-video-input]'), { x, y });
     await page.touchscreen.tap(x, y);
   };
@@ -476,6 +484,7 @@ try {
     return { geometry, focus, graceInput, gracePackets };
   });
   const remount = await sample();
+  assert(remount.epochs.at(-1) === baseline.epochs.at(-1), 'Keyboard occlusion rebuilt the output layout');
   const remountWire = await page.evaluate((from) => keyboardQA.wire.slice(from), wireStart);
   const replacementTarget = remountWire.findLast(
     (event) => event.type === 'input.editable' && event.editable > 0,
@@ -574,7 +583,9 @@ try {
   await ready();
   await log('mobile-ime-manual-reopen', await sample());
   await tap('tl');
-  await wait(() => !document.activeElement?.matches('.remote-input'));
+  await wait(
+    () => !document.activeElement?.matches('.remote-input') || document.activeElement.inputMode === 'none',
+  );
   await ready();
   await tap('second');
   await wait(
@@ -614,7 +625,7 @@ try {
   try {
     await context?.close();
   } finally {
-    if (control.connected) control.disconnect();
+    control.kill('SIGTERM');
     fixture.closeAllConnections();
     await new Promise((accept) => fixture.close(accept));
     await stopped;

@@ -228,6 +228,7 @@ test('AV sync restarts immediately once per authoritative change, while audio ch
   let current = productSnapshot(),
     offers = 0;
   let projected: typeof current | undefined;
+  let viewportState: typeof current | null = null;
   let finish: ((value: unknown) => void) | undefined;
   const phases: string[] = [];
   rtc.subscribe(() => phases.push(rtc.getSnapshot().phase));
@@ -251,7 +252,12 @@ test('AV sync restarts immediately once per authoritative change, while audio ch
       }),
     },
     control: { request: async () => undefined as never, reconnect() {}, connect() {}, close() {} },
-    viewport: { observe() {}, reset() {} },
+    viewport: {
+      observe(state) {
+        viewportState = state;
+      },
+      reset() {},
+    },
     setAudioChannels() {},
   });
   rtc.subscribe(workspace.operationsChanged);
@@ -263,6 +269,7 @@ test('AV sync restarts immediately once per authoritative change, while audio ch
   projected.workspace.settings.workspace.avSync = true;
   workspace.operationsChanged();
   assert.equal(offers, 1);
+  assert.equal(viewportState, current, 'Viewport requests exclude optimistic windows');
   projected = undefined;
   current = structuredClone(current);
   current.workspace.settings.workspace.audioChannels = { left: false, right: false };

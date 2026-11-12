@@ -11,6 +11,7 @@ const initial: KeyboardContext = {
   focusSource: 'pointer',
   focused: false,
   ready: true,
+  reconfiguring: false,
   now: 0,
 };
 function session(patch: Partial<KeyboardContext> = {}) {
@@ -67,6 +68,19 @@ test('explicit NONE during a media gap is still authoritative', () => {
   observe({ editor: 'unknown', focused: true, ready: false, now: 5 });
   observe({ editor: 'inactive', now: 10 });
   assert.deepEqual(observe({ now: 210 }), { close: 'editor-lost' });
+});
+
+test('an editor replacement retains keyboard attachment until layout settles', () => {
+  const { keyboard, observe } = session();
+  observe({ editor: 'active' });
+  keyboard.attached(false);
+  observe({ focused: true, editor: 'inactive', ready: false, reconfiguring: true, now: 10 });
+  assert.deepEqual(observe({ now: 1000 }), {});
+  assert.equal(keyboard.deadline, undefined);
+  assert.deepEqual(observe({ reconfiguring: false, now: 1100 }), {});
+  assert.equal(keyboard.deadline, 1300);
+  assert.deepEqual(observe({ editor: 'active', ready: true, now: 1200 }), {});
+  assert.equal(keyboard.deadline, undefined);
 });
 test('document and lock are boundaries; disabling auto-open keeps an attached keyboard', () => {
   const { keyboard, observe } = session();

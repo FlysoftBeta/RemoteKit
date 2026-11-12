@@ -125,7 +125,7 @@ test('partial release preserves the other contact without requiring a result', (
   assert.equal(view.getSnapshot().phase, 'released');
 });
 
-test('editing controller defers edits through presentation loss and expires them without a React timer', (t) => {
+function editingFixture(t: import('node:test').TestContext) {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let view: EditingView;
   t.after(() => view?.dispose());
@@ -200,17 +200,73 @@ test('editing controller defers edits through presentation loss and expires them
   );
   const resize = { waiting: false, keyboardOpen: false, keyboardDismissals: 0, blocksInput: () => false };
   view.configure(true, false, resize);
+  return {
+    view,
+    editing,
+    editor,
+    document,
+    sent,
+    resize,
+    get ready() {
+      return ready;
+    },
+    set ready(value: boolean) {
+      ready = value;
+    },
+  };
+}
+
+test('responsive editor replacement keeps local focus and fences the old composition target', (t) => {
+  const f = editingFixture(t);
+  const { view, editing, editor, document, resize } = f;
   view.toggleKeyboard();
-  ready = false;
+  view.compositionStart();
+  view.compositionUpdate('你好');
+  const previous = editing.mobileEditing.current!;
+  f.ready = false;
+  view.configure(true, false, { ...resize, waiting: true, blocksInput: () => true });
+  editing.handle({ ...layout, generation: '0', epoch: '3', views: [], reconfiguring: true });
+  editing.handle({
+    ...previous,
+    revision: '2',
+    view: null,
+    editable: { ...previous.editable, active: false, target: '0', type: 0 },
+  });
+  view.observe();
+  assert.equal(document.activeElement, editor);
+  assert.equal(view.editing.composing, true);
+  editing.handle({
+    ...previous,
+    revision: '3',
+    editable: { ...previous.editable, target: '32', focusSource: 'script', focusRevision: '2' },
+  });
+  editing.handle({ ...layout, generation: '2', epoch: '4' });
+  f.ready = true;
+  view.configure(true, false, resize);
+  view.observe();
+  assert.equal(document.activeElement, editor);
+  assert.equal(view.editing.composing, true);
+  view.compositionEnd('你好');
+  assert.deepEqual(
+    f.sent.filter((event) => event.type === 'ime_commit'),
+    [],
+  );
+});
+
+test('editing controller defers edits through presentation loss and expires them without a React timer', (t) => {
+  const f = editingFixture(t);
+  const { view, sent, resize } = f;
+  view.toggleKeyboard();
+  f.ready = false;
   view.sendEdit({ type: 'ime_commit', text: 'first' });
   assert.equal(sent.length, 0);
-  ready = true;
+  f.ready = true;
   view.observe();
   assert.equal(sent[0].text, 'first');
-  ready = false;
+  f.ready = false;
   view.sendEdit({ type: 'ime_commit', text: 'expired' });
   t.mock.timers.tick(3000);
-  ready = true;
+  f.ready = true;
   view.observe();
   assert.equal(sent.filter((event) => event.text === 'expired').length, 0);
   assert.ok(view.getSnapshot().error);

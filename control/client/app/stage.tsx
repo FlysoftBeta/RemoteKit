@@ -85,7 +85,10 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
       );
       keyboard.settle(now);
       const editing = media.editing.mobileEditing;
-      const owner = editing.views.find((view) => editing.forKeyboard(view))?.id ?? '';
+      const focusedView = focused
+        ? active.closest<HTMLElement>('.remote-viewport')?.dataset.viewId
+        : undefined;
+      const owner = focusedView ?? editing.views.find((view) => editing.forKeyboard(view))?.id ?? '';
       media.viewport.setOcclusion(owner, transitioning ? 0 : keyboard.occludedBottom / scale);
       clearTimeout(settleTimer);
       if (keyboard.deadline !== undefined)

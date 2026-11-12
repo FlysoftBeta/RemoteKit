@@ -134,6 +134,9 @@ export class EditingView extends Store<EditingViewSnapshot> {
     return (
       this.pointerFocus?.owner ??
       this.remoteOwner ??
+      (this.softInputFocused && this.previousEditing?.document === this.editingIdentity
+        ? this.previousEditing?.owner
+        : undefined) ??
       (this.keyboardEnabled && !this.remoteEditable && !this.softInputFocused
         ? this.editingIdentity
         : undefined)
@@ -184,6 +187,8 @@ export class EditingView extends Store<EditingViewSnapshot> {
   observe = () => {
     clearTimeout(this.policyTimer);
     const pointer = this.pointerFocus;
+    const previous = this.previousEditing;
+    const reconfiguring = this.resize.waiting || this.ports.editing.mobileEditing.layoutPending;
     let transferred = false;
     if (pointer) {
       if (
@@ -228,7 +233,6 @@ export class EditingView extends Store<EditingViewSnapshot> {
           break;
         }
     }
-    const previous = this.previousEditing;
     const replaced = previous && previous.document !== this.editingIdentity;
     if (replaced || !this.keyboardEnabled || (!transferred && previous?.owner !== this.editorOwner)) {
       clearTimeout(this.deferredEditingTimer);
@@ -264,6 +268,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
       focusSource: this.remoteEditable?.editable.focusSource ?? 'other',
       focused: this.softInputFocused,
       ready: this.keyboardReady && !this.resize.blocksInput(),
+      reconfiguring,
       now,
     });
     const close = command.close;
@@ -287,8 +292,10 @@ export class EditingView extends Store<EditingViewSnapshot> {
         this.focusEditor(false);
       if (focused && this.editorOwner && node) {
         this.editing.focus(this.editorOwner);
-        if (this.softInputFocused && this.remoteEditable && !this.editing.composing)
-          node.inputMode = editableInputMode(this.remoteEditable.editable.type);
+        if (this.softInputFocused && this.remoteEditable && !this.editing.composing) {
+          const mode = editableInputMode(this.remoteEditable.editable.type);
+          if (node.inputMode !== mode) node.inputMode = mode;
+        }
       }
       if (!dismissedCurrentKeyboard && command.open && !this.softInputFocused) this.focusEditor(true);
     }

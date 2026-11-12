@@ -138,7 +138,7 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
   };
   availabilityChanged = () =>
     this.ports.viewport.observe(
-      this.ports.operations.getSnapshot().state,
+      this.ports.operations.getSnapshot().authoritative,
       this.getSnapshot().status === 'online' && this.ports.authorization.productReady,
     );
 }

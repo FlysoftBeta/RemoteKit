@@ -68,6 +68,15 @@ Result<void> OutputController::ResumeOutput(bool active) {
 }  // namespace remotekit
 
 namespace remotekit {
+namespace {
+Json OutputGeometry(Json configuration) {
+  for (auto& view : configuration["viewConfigs"]) {
+    view.erase("occludedBottom");
+    view.erase("occlusionRevision");
+  }
+  return configuration;
+}
+}  // namespace
 
 Result<void> OutputController::Configure(int width,
                                          int height,
@@ -82,6 +91,29 @@ Result<void> OutputController::Configure(int width,
                      {"viewConfigs", std::move(views)}};
   if (configuration_incarnation == browser.Incarnation() && configuration == next)
     return {};
+  const auto generation = pool.Generation();
+  if (generation && configuration_incarnation == browser.Incarnation() &&
+      OutputGeometry(configuration) == OutputGeometry(next)) {
+    const auto& previous = configuration["viewConfigs"];
+    const auto& configs = next["viewConfigs"];
+    for (size_t index = 0; index < configs.size(); ++index) {
+      const auto& view = configs[index];
+      if (view == previous[index])
+        continue;
+      auto updated = browser.Rpc().Request({{"method", "view.configure"},
+                                            {"session", view["session"]},
+                                            {"view", view["view"]},
+                                            {"occludedBottom", view["occludedBottom"]},
+                                            {"occlusionRevision", view["occlusionRevision"]},
+                                            {"outputGeneration", std::to_string(generation)}});
+      if (!updated)
+        return updated.error();
+      if (!updated.value().value("accepted", false))
+        return Error{ErrorCode::kOutcomeUnknown, "page viewport update was not accepted"};
+    }
+    configuration = next;
+    return {};
+  }
   RK_ASSIGN_OR_RETURN(active, PauseOutput(true));
   auto result = browser.Rpc().Request(next);
   if (!result)

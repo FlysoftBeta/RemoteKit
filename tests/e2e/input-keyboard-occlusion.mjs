@@ -245,7 +245,12 @@ export async function keyboardOcclusion(kind) {
             frame,
             latencyMs:
               frame.at - (occlusionQA.geometries.find((event) => event.at >= before.at)?.at ?? before.at),
-            layouts: wire.filter((e) => e.message.type === 'layout'),
+            layouts: wire.filter(
+              (e) =>
+                e.message.type === 'layout' &&
+                (e.message.generation !== before.layout.generation ||
+                  e.message.epoch !== before.layout.epoch),
+            ),
             barriers: wire.filter((e) => e.message.type === 'presentation.prepare'),
             keyframes: wire.filter((e) => e.message.type === 'frame' && e.message.keyframe),
             waiting: !!document.querySelector('.resize-waiting'),

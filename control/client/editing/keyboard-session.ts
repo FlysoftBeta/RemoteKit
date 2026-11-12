@@ -10,6 +10,7 @@ export interface KeyboardContext {
   focusSource: 'pointer' | 'keyboard' | 'script' | 'other';
   focused: boolean;
   ready: boolean;
+  reconfiguring: boolean;
   now: number;
 }
 export interface KeyboardCommand {
@@ -73,8 +74,11 @@ export class KeyboardSession {
       this.missingUntil = undefined;
       if (next.focused) return { close: 'boundary' };
     }
-    if (next.editor === 'inactive' && previous?.editor !== 'inactive' && next.focused)
-      this.missingUntil = next.now + EDITOR_BLUR_GRACE_MS;
+    if (next.editor === 'inactive' && next.focused) {
+      if (next.reconfiguring) this.missingUntil = undefined;
+      else if (previous?.editor !== 'inactive' || previous.reconfiguring)
+        this.missingUntil = next.now + EDITOR_BLUR_GRACE_MS;
+    }
     if (this.missingUntil !== undefined && next.now >= this.missingUntil) {
       this.dismiss();
       return next.focused ? { close: next.editor === 'inactive' ? 'editor-lost' : 'boundary' } : {};
