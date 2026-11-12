@@ -21,7 +21,7 @@ CREATE TABLE coordination_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1)
 INSERT INTO coordination_state VALUES(1,0,'0');
 CREATE TABLE view_runtime(view_id TEXT PRIMARY KEY,resume_url TEXT,original_browser TEXT);
 CREATE TABLE navigation_recovery(view_id TEXT PRIMARY KEY, navigation_revision INTEGER NOT NULL, state BLOB NOT NULL);
-CREATE TABLE library_assets(asset_id TEXT PRIMARY KEY, size INTEGER NOT NULL, type TEXT NOT NULL, width INTEGER, height INTEGER);
+CREATE TABLE library_assets(asset_id TEXT PRIMARY KEY, size INTEGER NOT NULL, type TEXT, width INTEGER, height INTEGER);
 CREATE TABLE library_drafts(upload_id TEXT PRIMARY KEY, operation TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
  size INTEGER NOT NULL, expires INTEGER NOT NULL, sealed TEXT NOT NULL);
 CREATE TABLE library_selections(selection_id TEXT PRIMARY KEY, state TEXT NOT NULL, document TEXT NOT NULL);

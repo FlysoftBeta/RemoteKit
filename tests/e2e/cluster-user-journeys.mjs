@@ -34,7 +34,7 @@ const stack = await startStack({
   seed: false,
   fixtures: { kind: 'cluster-user-journeys', context: { events } },
   nodes: ['alpha', 'beta'],
-  nodeLimits: { maxSessions: 1 },
+  nodeLimits: { maxSessions: 1, diskReserveBytes: 256 * 1024 ** 2 },
 });
 const control = stack.control;
 const nodes = stack.nodes;
@@ -485,6 +485,8 @@ try {
         () => events.some((e) => e.type === 'stored' && e.storage === 'after-checkpoint-before-kill'),
         'new stored value',
       );
+      // Chromium commits cookies every 30 seconds; allow that and the delayed localStorage commit.
+      await pause(35000);
       const s = await control.call('inspect');
       await killNode(placement(s, 'cluster-first').node_id);
       await pause(900);

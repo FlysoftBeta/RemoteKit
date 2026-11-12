@@ -1,5 +1,6 @@
 #include "files/object_files.hpp"
 #include "media/gpu_device.hpp"
+#include "protocol/file_requests.h"
 #include "util/result_macros.hpp"
 namespace remotekit {
 using media::QpcFrequency;
@@ -19,8 +20,12 @@ Result<Json> ObjectFiles::Execute(const FileJob& job,
                                   const std::string& method,
                                   const Json& params) {
   const auto check = [&] { return Require(job); };
-  if (method == "document.open")
-    return file_library.OpenDocument(Required(params, "assetId"), check);
+  if (method == "document.open") {
+    if (!protocol::ValidDocumentOpenParams(params))
+      return Error{ErrorCode::kInvalidRequest, "invalid_document_open"};
+    return file_library.OpenDocument(Required(params, "assetId"),
+                                     params.at("type").get<std::string>(), check);
+  }
   if (method == "document.resource")
     return file_library.DocumentResource(Required(params, "documentId"),
                                          Required(params, "contentId"),

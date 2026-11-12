@@ -5,6 +5,7 @@ import { RemoteKitError } from '../shared/errors';
 import { documentFixture } from '../client/test-hooks-learning-fixtures';
 import { FileChannel } from '../client/files/file-channel';
 import { decodeIncoming } from '../client/rtc/protocol';
+import { isDocumentOpenParams } from '../../protocol/file_requests';
 
 test('DataChannel document failures are localized once and retain native diagnosis', async () => {
   for (const [reason, expected] of [
@@ -44,7 +45,8 @@ test('DataChannel document failures are localized once and retain native diagnos
             : files.documentOpen.bind(files),
           documentResource: files.documentResource.bind(files),
         },
-        'asset',
+        'a'.repeat(64),
+        'application/pdf',
       );
       const signal = new AbortController().signal;
       if (resource) await source.open(signal);
@@ -84,7 +86,7 @@ test('conversion polling preserves the final DataChannel reason after converting
     },
   } as RTCDataChannel;
   const files = new FileChannel(() => channel);
-  const source = new ChannelDocumentSource(files, 'asset');
+  const source = new ChannelDocumentSource(files, 'a'.repeat(64), 'application/pdf');
   const statuses: string[] = [];
   const opening = source.open(new AbortController().signal, { onStatus: (status) => statuses.push(status) });
   const failed = assert.rejects(opening, {
@@ -117,7 +119,8 @@ test('document source opens the rendition and reconstructs chunked resources', a
         };
       },
     },
-    'asset',
+    'a'.repeat(64),
+    'application/pdf',
   );
   const signal = new AbortController().signal;
   assert.equal((await source.open(signal)).documentId, documentFixture.info.documentId);
@@ -138,7 +141,8 @@ test('conversion polling retries at 1.5 seconds and stops on cancellation', asyn
         throw new Error();
       },
     },
-    'asset',
+    'a'.repeat(64),
+    'application/pdf',
   );
   const statuses: string[] = [];
   const opening = source.open(new AbortController().signal, { onStatus: (status) => statuses.push(status) });
@@ -158,7 +162,8 @@ test('conversion polling retries at 1.5 seconds and stops on cancellation', asyn
         throw new Error();
       },
     },
-    'asset',
+    'a'.repeat(64),
+    'application/pdf',
   ).open(controller.signal);
   await Promise.resolve();
   controller.abort();
@@ -175,7 +180,9 @@ test('long conversions keep polling and typed final errors reach the caller', as
       throw new Error();
     },
   };
-  const opening = new ChannelDocumentSource(channel, 'asset').open(new AbortController().signal);
+  const opening = new ChannelDocumentSource(channel, 'a'.repeat(64), 'application/pdf').open(
+    new AbortController().signal,
+  );
   await Promise.resolve();
   context.mock.timers.tick(300000);
   await new Promise((resolve) => setImmediate(resolve));
@@ -190,7 +197,8 @@ test('long conversions keep polling and typed final errors reach the caller', as
           throw new RemoteKitError(code, '转换失败');
         },
       },
-      'asset',
+      'a'.repeat(64),
+      'application/pdf',
     );
     await assert.rejects(
       source.open(new AbortController().signal),
@@ -209,7 +217,8 @@ test('resource chunks reject non-advancing offsets and changing totals', async (
         documentOpen: async () => ({ state: 'ready', ...documentFixture.info }),
         documentResource: async () => response,
       },
-      'asset',
+      'a'.repeat(64),
+      'application/pdf',
     );
     const signal = new AbortController().signal;
     await source.open(signal);
@@ -238,7 +247,8 @@ test('document methods use the authenticated file channel and its library bindin
     () => channel,
     () => 7,
   );
-  const source = new ChannelDocumentSource(files, 'asset-id');
+  const entry = { assetId: 'a'.repeat(64), type: 'application/pdf' };
+  const source = new ChannelDocumentSource(files, entry.assetId, entry.type);
   const signal = new AbortController().signal;
   await source.open(signal);
   await source.resource('resource-id', signal);
@@ -247,12 +257,34 @@ test('document methods use the authenticated file channel and its library bindin
     ['document.open', 'document.resource'],
   );
   assert.ok(messages.every((message) => message.authEpoch === 7 && message.params.requestId === 'library'));
+  assert.deepEqual(messages[0].params, { requestId: 'library', assetId: entry.assetId, type: entry.type });
   assert.deepEqual(messages[1].params, {
     requestId: 'library',
     documentId: documentFixture.info.documentId,
     contentId: 'resource-id',
     offset: 0,
   });
+});
+
+test('document open requires the complete typed contract and rejects unknown fields', () => {
+  const params = { requestId: 'library', assetId: 'a'.repeat(64), type: 'application/pdf' };
+  assert.ok(isDocumentOpenParams(params));
+  for (const invalid of [
+    { requestId: params.requestId, assetId: params.assetId },
+    { ...params, unknown: true },
+    { ...params, type: 7 },
+    { ...params, type: 'a'.repeat(256) },
+    { ...params, type: 'application/pdf\r\n' },
+    { ...params, assetId: 'not-an-object' },
+  ])
+    assert.equal(isDocumentOpenParams(invalid), false);
+  const files = new FileChannel(() => null);
+  assert.throws(
+    () => files.documentOpen(params.assetId, 7 as unknown as string, new AbortController().signal),
+    {
+      code: 'invalid_request',
+    },
+  );
 });
 
 test('resource loading limits simultaneous file requests and cancels queued reads', async () => {
@@ -269,7 +301,8 @@ test('resource loading limits simultaneous file requests and cancels queued read
         return { data: 'eA==', offset: 1, total: 1, mime: 'text/css' };
       },
     },
-    'asset',
+    'a'.repeat(64),
+    'application/pdf',
   );
   const signal = new AbortController().signal;
   await source.open(signal);

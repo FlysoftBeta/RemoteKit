@@ -4,8 +4,13 @@
 #include "documents/object_documents.hpp"
 #include "files/dc_file_services.hpp"
 #include "files/file_selection.hpp"
+#include "protocol/file_requests.h"
+#ifdef RK_FILE_PHOTO
+#include <webp/encode.h>
+#endif
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -162,7 +167,8 @@ void Documents(const fs::path& root) {
   CHECK(Take(existing.Describe(source.id)).size == source.size);
 
   if (!objects.Documents().Available()) {
-    CHECK(first.OpenDocument(source.id, live).error().code == remotekit::ErrorCode::kUnavailable);
+    CHECK(first.OpenDocument(source.id, "application/octet-stream", live).error().code ==
+          remotekit::ErrorCode::kUnavailable);
     return;
   }
   const auto fixture = fs::path(__FILE__).parent_path() / "fixtures/document.zip";
@@ -170,7 +176,7 @@ void Documents(const fs::path& root) {
       fixture, {}, {{"tenantId", "tenant"}, {"derivedFrom", source.id}, {"kind", "document"}}));
   auto unopened = first.DocumentResource(document.id, std::string(64, 'a'), 0, live);
   CHECK(!unopened && unopened.error().code == remotekit::ErrorCode::kForbidden);
-  const auto info = Take(first.OpenDocument(source.id, live));
+  const auto info = Take(first.OpenDocument(source.id, "application/octet-stream", live));
   CHECK(info["state"] == "ready" && info["documentId"] == document.id);
   const auto archive = Take(remotekit::documents::RenderArchive::OpenFile(fixture));
   const auto manifest = Take(archive.Info());
@@ -197,25 +203,27 @@ void Documents(const fs::path& root) {
   }
   CHECK(!first.DocumentResource(document.id, *resources.begin(), UINT64_MAX, live));
   CHECK(!first.DocumentResource(document.id, std::string(64, 'a'), 0, live));
-  CHECK(Take(second.OpenDocument(source.id, live))["documentId"] == document.id);
+  CHECK(Take(second.OpenDocument(source.id, "application/octet-stream", live))["documentId"] ==
+        document.id);
   LibraryFixture forbidden(root / "forbidden", objects, "other-tenant");
   Take(forbidden.Initialize());
-  CHECK(forbidden.OpenDocument(source.id, live).error().code == remotekit::ErrorCode::kForbidden);
+  CHECK(forbidden.OpenDocument(source.id, "application/octet-stream", live).error().code ==
+        remotekit::ErrorCode::kForbidden);
   CHECK(Take(objects.Dispatch({{"method", "object.render"},
                                {"params", {{"id", source.id}}}}))["documentId"] == document.id);
   std::ofstream(source_path, std::ios::binary | std::ios::trunc) << "MZother unsupported";
   const auto unsupported = Take(objects.Write(source_path, {}, {{"tenantId", "tenant"}}));
-  auto failed = first.OpenDocument(unsupported.id, live);
+  auto failed = first.OpenDocument(unsupported.id, "application/octet-stream", live);
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (failed && failed.value()["state"] == "converting") {
     CHECK(std::chrono::steady_clock::now() < deadline);
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    failed = first.OpenDocument(unsupported.id, live);
+    failed = first.OpenDocument(unsupported.id, "application/octet-stream", live);
   }
   CHECK(!failed && failed.error().code == remotekit::ErrorCode::kRejected);
   const auto located = control.located;
   for (int attempt = 0; attempt < 3; ++attempt)
-    CHECK(first.OpenDocument(unsupported.id, live).error().reason ==
+    CHECK(first.OpenDocument(unsupported.id, "application/octet-stream", live).error().reason ==
           remotekit::ErrorReason::kDocumentUnsupported);
   CHECK(control.located == located && fs::is_empty(root / "first/documents"));
   const auto docx_path = fs::path(__FILE__).parent_path() / "fixtures/document.docx";
@@ -240,12 +248,12 @@ void Documents(const fs::path& root) {
     }
     LibraryFixture reopened(root / "first", objects, "tenant");
     Take(reopened.Initialize());
-    auto result = reopened.OpenDocument(asset.id, live);
+    auto result = reopened.OpenDocument(asset.id, mime, live);
     const auto expires = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (result && result.value()["state"] == "converting") {
       CHECK(std::chrono::steady_clock::now() < expires);
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      result = reopened.OpenDocument(asset.id, live);
+      result = reopened.OpenDocument(asset.id, mime, live);
     }
     CHECK(!result && result.error().code == remotekit::ErrorCode::kRejected &&
           result.error().reason == expected);
@@ -293,6 +301,65 @@ void Puts(const fs::path& root) {
   CHECK(objects.Store().Inspect(id));
 }
 
+void DocumentOpenContract() {
+  const remotekit::Json params{
+      {"requestId", "library"}, {"assetId", std::string(64, 'a')}, {"type", "application/pdf"}};
+  CHECK(remotekit::protocol::ValidDocumentOpenParams(params));
+  auto missing = params;
+  missing.erase("type");
+  auto unknown = params;
+  unknown["unknown"] = true;
+  auto wrong = params;
+  wrong["type"] = 7;
+  for (const auto& invalid : {missing, unknown, wrong})
+    CHECK(!remotekit::protocol::ValidDocumentOpenParams(invalid));
+}
+
+#ifdef RK_FILE_PHOTO
+void HashOnlySelection(const fs::path& root) {
+  Control control;
+  remotekit::objects::ObjectService objects(root / "node", control, {}, "selection", "dev");
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  fs::create_directories(root);
+  const std::vector<uint8_t> pixels(32 * 32 * 4, 255);
+  uint8_t* encoded = nullptr;
+  const auto size = WebPEncodeLosslessRGBA(pixels.data(), 32, 32, 32 * 4, &encoded);
+  CHECK(size > 0);
+  const auto path = root / "source.webp";
+  {
+    std::ofstream stream(path, std::ios::binary);
+    stream.write(reinterpret_cast<const char*>(encoded), size);
+  }
+  WebPFree(encoded);
+  const auto object = Take(objects.Write(path, {}, {{"tenantId", "tenant"}}));
+  const auto live = []() -> remotekit::Result<void> { return {}; };
+  LibraryFixture library(root / "session", objects, "tenant");
+  Take(library.Initialize());
+  FileLibrary::Selection selection{std::string(32, 'a'),
+                                   "chooser",
+                                   {"browser", "1", "1", "1", "1"},
+                                   {{object.id, "selected.webp", "image/webp"}}};
+  selection.accept = {"image/png"};
+  Take(library.Prepare(selection));
+  CHECK(!Take(library.Describe(object.id)).type.has_value());
+  CHECK(!Take(library.Database().Library().Load(remotekit::LibraryTable::kAssets))
+             .at(object.id)
+             .contains("type"));
+  const auto sources = Take(library.SelectionSources(selection, live));
+  CHECK(sources.size() == 1 && sources[0].spec.type == "image/png" &&
+        sources[0].spec.name == "selected.png");
+  std::ifstream stream(sources[0].path, std::ios::binary);
+  std::array<uint8_t, 8> signature{};
+  stream.read(reinterpret_cast<char*>(signature.data()), signature.size());
+  CHECK((signature == std::array<uint8_t, 8>{137, 80, 78, 71, 13, 10, 26, 10}));
+  stream.close();
+  LibraryFixture reopened(root / "session", objects, "tenant");
+  Take(reopened.Initialize());
+  CHECK(!Take(reopened.Describe(object.id)).Json().contains("type"));
+}
+#endif
+
 int main(int argc, char** argv) {
   using remotekit::PhotoTranscode;
   using remotekit::SelectionWebpTranscode;
@@ -322,6 +389,10 @@ int main(int argc, char** argv) {
     return remotekit::Error{remotekit::ErrorCode::kForbidden, "file_transfer_interrupted"};
   };
   const auto session = root / "session";
+  DocumentOpenContract();
+#ifdef RK_FILE_PHOTO
+  HashOnlySelection(root / "hash-only");
+#endif
   Documents(root / "documents");
   Control control;
   const auto source_key = TestPrivateKey(7), target_key = TestPrivateKey(8);

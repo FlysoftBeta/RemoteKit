@@ -252,7 +252,7 @@ export class ServicePeers {
   describeAsset(
     tenant: string,
     params: { assetId: string },
-  ): Promise<import('../../shared/file-library').Asset> {
+  ): Promise<import('../../shared/file-library').AssetDescription> {
     return this.face(tenant, 'service.asset.describe', params);
   }
   async faceCapabilities(tenant: string): Promise<{ available: boolean; modelVersion: string }> {

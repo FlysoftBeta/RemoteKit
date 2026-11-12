@@ -17,7 +17,8 @@ class FileLibrary {
  public:
   using Check = std::function<Result<void>()>;
   struct Asset {
-    std::string id, type;
+    std::string id;
+    std::optional<std::string> type;
     std::uint64_t size{};
     std::uint32_t width{}, height{};
     ServiceJson Json() const;
@@ -60,7 +61,7 @@ class FileLibrary {
   Result<Asset> ImportDownload(const std::filesystem::path& profile, const ServiceJson& download);
   Result<void> Cancel(std::uint64_t grant, const std::string& upload, const Check&);
   Result<Asset> Describe(const std::string& asset) const;
-  Result<ServiceJson> OpenDocument(const std::string& asset, const Check&);
+  Result<ServiceJson> OpenDocument(const std::string& asset, const std::string& type, const Check&);
   Result<ServiceJson> DocumentResource(const std::string& document,
                                        const std::string& content,
                                        uint64_t offset,
@@ -81,6 +82,7 @@ class FileLibrary {
   ServiceJson StopBlockers(const std::function<bool(uint64_t)>& current) const;
 
   Result<void> Prepare(const Selection&);
+  Result<std::vector<FileUploadStore::Source>> SelectionSources(const Selection&, const Check&);
   std::optional<Selection> FindSelection(const std::string& id) const;
   Result<std::optional<Selection::State>> CancelPendingSelections(const FileUploadStore::Binding&,
                                                                   const Check&);

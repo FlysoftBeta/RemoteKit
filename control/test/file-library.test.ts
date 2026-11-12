@@ -52,6 +52,7 @@ function fixture(assetType = 'image/jpeg') {
     [ASSETS.draft, 4],
     [ASSETS.extra, 4],
   ]);
+  const untypedAssets = new Set<string>();
   let losePrepare = false,
     locked = false,
     lockOnDescribe = false;
@@ -65,7 +66,7 @@ function fixture(assetType = 'image/jpeg') {
         return {
           assetId: args.assetId,
           size: assets.get(args.assetId),
-          type: assetType,
+          ...(untypedAssets.has(args.assetId) ? {} : { type: assetType }),
         };
       }
       if (method === 'session.library.prepare') {
@@ -132,6 +133,7 @@ function fixture(assetType = 'image/jpeg') {
     db,
     calls,
     states,
+    untypedAssets,
     run,
     add,
     reopen: () => {
@@ -167,6 +169,17 @@ function fixture(assetType = 'image/jpeg') {
     },
   };
 }
+
+test('library entries require upload media types while hash-only references do not', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  f.untypedAssets.add(ASSETS.original);
+  const snapshot = await f.add(ASSETS.photo, 'library', { originalAssetId: ASSETS.original });
+  assert.equal(snapshot.entries[0].type, 'image/jpeg');
+  assert.equal(snapshot.entries[0].originalAssetId, ASSETS.original);
+  f.untypedAssets.add(ASSETS.draft);
+  await assert.rejects(f.add(ASSETS.draft), { code: 'outcome_unknown' });
+});
 
 test('file catalog validates scoped assets and ordered basket, prunes removed entries and preserves collected originals', async (t) => {
   const f = fixture();

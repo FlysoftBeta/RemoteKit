@@ -108,17 +108,19 @@ inline Result<void> Validate(LibraryTable table, const std::string& id, const Js
       if (!parsed)
         return CorruptRecord(parsed.error().message);
     } else if (table == LibraryTable::kAssets) {
-      Keys(value, {"size", "type"}, {"assetId", "width", "height"});
+      Keys(value, {"size"}, {"assetId", "type", "width", "height"});
       Unsigned(value.at("size"), 0, kFileBytes);
-      Text(value.at("type"), 0, 255);
+      if (value.contains("type"))
+        Text(value.at("type"), 0, 255);
       if (value.contains("assetId"))
         Require(value.at("assetId") == id, "asset identity mismatch");
       Require(value.contains("width") == value.contains("height"), "incomplete asset dimensions");
       for (const auto name : {"width", "height"})
         if (value.contains(name))
           Unsigned(value.at(name), 1, 32768);
-      if (!HexId(id, 64) || !ValidSpec({"asset", value.at("type").get<std::string>(),
-                                        value.at("size").get<uint64_t>()}))
+      if (!HexId(id, 64) ||
+          (value.contains("type") && !ValidSpec({"asset", value.at("type").get<std::string>(),
+                                                 value.at("size").get<uint64_t>()})))
         return CorruptRecord("invalid_asset_metadata");
     } else if (table == LibraryTable::kDrafts) {
       Keys(value, {"operation", "name", "type", "size", "expires", "sealed"});

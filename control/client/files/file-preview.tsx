@@ -119,7 +119,10 @@ const PreviewContent = memo(
     onBasket?: () => void;
     onFiles?: () => void;
   }) {
-    const source = useMemo(() => new ChannelDocumentSource(rpc, entry.assetId), [rpc, entry.assetId]);
+    const source = useMemo(
+      () => new ChannelDocumentSource(rpc, entry.assetId, entry.type),
+      [rpc, entry.assetId, entry.type],
+    );
     const [progress, setProgress] = useState<DocumentProgress | null | undefined>();
     const [progressError, setProgressError] = useState<RemoteKitError | undefined>();
     const pendingProgress = useRef<DocumentProgress>(undefined);

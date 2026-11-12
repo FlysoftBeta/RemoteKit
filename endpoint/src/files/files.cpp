@@ -1,6 +1,5 @@
 #include "util/log.hpp"
 #include "files/files.hpp"
-#include "files/file_selection.hpp"
 #include "rtc/authorization.hpp"
 #include "rtc/peer.hpp"
 #include "session/views.hpp"
@@ -217,41 +216,8 @@ Result<Json> LibraryController::DirectSelectionCommit(const FileJob& job,
   RK_ASSIGN_OR_RETURN(initial, ObserveSelection(*selection, initial_status.value()));
   if (initial != "pending" || selection->state != LibraryState::pending)
     return result(initial);
-  std::vector<remotekit::FileUploadStore::Source> sources;
-  for (const auto& file : selection->files) {
-    RK_ASSIGN_OR_RETURN(asset, file_library.Describe(file.asset_id));
-    std::string name = file.name;
-    if (asset.type == "image/webp") {
-      const auto format = SelectionWebpTranscode(selection->accept);
-      if (format) {
-#ifdef RK_FILE_PHOTO
-        RK_ASSIGN_OR_RETURN(original, file_library.Path(file.asset_id));
-        const auto check = [&] { return files.RequireFileJob(job); };
-        const auto cancelled = [&] { return !check(); };
-        RK_ASSIGN_OR_RETURN(
-            transcoded, file_library.CachedDerivative(
-                            file.asset_id,
-                            *format == PhotoTranscode::kJpeg ? FileLibrary::DerivativeFormat::jpeg
-                                                             : FileLibrary::DerivativeFormat::png,
-                            [&](const fs::path& output) -> Result<FileLibrary::Derivative> {
-                              RK_ASSIGN_OR_RETURN(
-                                  dimensions, TranscodePhoto(original, output, *format, cancelled));
-                              return FileLibrary::Derivative{dimensions.width, dimensions.height};
-                            },
-                            check));
-        asset = std::move(transcoded);
-        auto filename = fs::u8path(name);
-        filename.replace_extension(*format == PhotoTranscode::kJpeg ? ".jpg" : ".png");
-        name = Utf8(filename);
-#else
-        return Error{ErrorCode::kUnavailable, "photo_processing_unavailable"};
-#endif
-      }
-    }
-    RK_ASSIGN_OR_RETURN(path, file_library.Path(asset.id));
-    sources.push_back({{name, asset.type, asset.size}, path});
-  }
-  RK_RETURN_IF_ERROR(CheckSelectionSources(sources, selection->limits));
+  RK_ASSIGN_OR_RETURN(sources, file_library.SelectionSources(
+                                   *selection, [&] { return files.RequireFileJob(job); }));
   Json selected_files = Json::array();
   {
     std::lock_guard lock(file_store_mutex);
