@@ -60,6 +60,21 @@ void DownloadImportTests(const fs::path& root,
 
   SessionDb store(directory);
   Take(store.Open());
+  const auto events = [&] {
+    Json result = Json::array();
+    for (const auto& event : Take(store.Events().Load())) {
+      auto value = event.at("body");
+      value["eventId"] = event.at("eventId");
+      value["type"] = event.at("type");
+      result.push_back(std::move(value));
+    }
+    return result;
+  };
+  const auto acknowledge = [&] {
+    const auto state = Take(store.Events().State());
+    Take(store.Events().Acknowledge(state.at("streamId"),
+                                    std::stoull(state.at("lastSeq").get<std::string>())));
+  };
   unsigned imports = 0;
   std::vector<std::string> order;
   const auto import = [&](const Json& download) -> Result<Json> {
@@ -93,7 +108,7 @@ void DownloadImportTests(const fs::path& root,
     downloads.Initialize();
     downloads.SetImport(import);
     CHECK(!downloads.Observe("incarnation", Json::array({event}), "1", rpc));
-    CHECK(imports == 1 && downloads.Pending() == 1 && downloads.Events().empty());
+    CHECK(imports == 1 && downloads.Pending() == 1 && events().empty());
   }
   fail_remove = false;
   {
@@ -112,7 +127,7 @@ void DownloadImportTests(const fs::path& root,
     Take(downloads.Observe("incarnation", Json::array({event}), "1", rpc));
     CHECK(imports == 1 && downloads.Pending() == 0);
     CHECK(order == std::vector<std::string>({"committed", "remove", "remove", "ack"}));
-    const auto result = downloads.Events().at(0);
+    const auto result = events().at(0);
     CHECK(result.at("type") == "download.imported" && result.at("assetId") == imported.id);
     CHECK(result.at("size") == "8" && result.at("origin") == event.at("origin"));
     endpoint_event = result.at("eventId");
@@ -120,10 +135,10 @@ void DownloadImportTests(const fs::path& root,
   {
     DownloadImports downloads(store.Downloads());
     downloads.Initialize();
-    CHECK(downloads.Events().size() == 1);
-    Take(store.Views().Acknowledge({endpoint_event}));
+    CHECK(events().size() == 1);
+    acknowledge();
     Take(downloads.Initialize());
-    CHECK(downloads.Events().empty());
+    CHECK(events().empty());
   }
   write();
   control.reject_commit = true;
@@ -133,10 +148,10 @@ void DownloadImportTests(const fs::path& root,
     downloads.Initialize();
     downloads.SetImport(import);
     Take(downloads.Observe("next-incarnation", Json::array({event}), "1", rpc));
-    CHECK(imports == 2 && downloads.Events().at(0).at("type") == "download.failed");
-    CHECK(downloads.Events().at(0).at("error").at("code") == "limit_exceeded");
+    CHECK(imports == 2 && events().at(0).at("type") == "download.failed");
+    CHECK(events().at(0).at("error").at("code") == "limit_exceeded");
     CHECK(downloads.Pending() == 0 && !fs::exists(target));
-    Take(store.Views().Acknowledge({downloads.Events().at(0).at("eventId").get<std::string>()}));
+    acknowledge();
     Take(downloads.Initialize());
   }
   control.reject_commit = false;
@@ -153,11 +168,11 @@ void DownloadImportTests(const fs::path& root,
     downloads.SetImport(import);
     Take(downloads.Observe("failure-" + std::to_string(++serial), Json::array({download}), "1",
                            rpc));
-    const auto result = downloads.Events().at(0);
+    const auto result = events().at(0);
     CHECK(result.at("type") == "download.failed" && result.at("error").at("code") == reason);
     CHECK(result.size() == 5 && !result.contains("fileReference"));
     CHECK(!fs::exists(target) && downloads.Pending() == 0);
-    Take(store.Views().Acknowledge({result.at("eventId").get<std::string>()}));
+    acknowledge();
     Take(downloads.Initialize());
   }
   write();

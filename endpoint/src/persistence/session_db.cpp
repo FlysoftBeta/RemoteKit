@@ -1,5 +1,4 @@
 #include "persistence/session_db.hpp"
-#include "persistence/legacy_session_import.hpp"
 #include "session/view_configuration.hpp"
 #include "files/dc_file_services.hpp"
 #include "util/file_io.hpp"
@@ -57,8 +56,13 @@ Result<void> SessionDb::Open() {
   if (closed_)
     return Error{ErrorCode::kInternal, "session store opened after checkpoint close"};
   RK_RETURN_IF_ERROR(CreateDirectories(directory_));
-  RK_RETURN_IF_ERROR(ImportLegacySession(directory_));
   return OpenFile(directory_ / "session.db");
+}
+Result<void> SessionDb::OpenReadOnly(bool immutable) {
+  std::lock_guard lock(mutex_);
+  RK_RETURN_IF_ERROR(db_.OpenReadOnly(directory_ / "session.db", immutable));
+  closed_ = true;
+  return {};
 }
 Result<void> SessionDb::OpenFile(const fs::path& path) {
   RK_RETURN_IF_ERROR(db_.Open(path));
@@ -70,17 +74,37 @@ Result<void> SessionDb::OpenFile(const fs::path& path) {
       return CorruptState("missing session store version");
     version = statement.Int64(0);
   }
-  if (version == 2)
+  if (version == 3)
     return {};
-  if (version == 1)
+  if (version == 1 || version == 2)
     return Write([&]() -> Result<void> {
-      return db_.Execute(R"sql(
+      if (version == 1) {
+        RK_RETURN_IF_ERROR(db_.Execute(R"sql(
 CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,type TEXT NOT NULL,body TEXT NOT NULL);
 CREATE TABLE event_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),stream_id TEXT NOT NULL,acked_through INTEGER NOT NULL);
 INSERT INTO event_state VALUES(1,lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-4'||substr(lower(hex(randomblob(2))),2)||'-8'||substr(lower(hex(randomblob(2))),2)||'-'||lower(hex(randomblob(6))),0);
 CREATE TABLE retired_views(view_id TEXT PRIMARY KEY,event_id TEXT NOT NULL);
-PRAGMA user_version=2;
-)sql");
+)sql"));
+      }
+      RK_RETURN_IF_ERROR(db_.Execute(R"sql(
+INSERT INTO retired_views(view_id,event_id)
+ SELECT view_id,'closed-'||(SELECT stream_id FROM event_state)||'-'||event_id FROM closed_events;
+INSERT INTO events(event_id,type,body)
+ SELECT r.event_id,'view.closed',json_object('browserIncarnation',NULL,'body',json_object('viewId',c.view_id,'reason',c.reason))
+ FROM closed_events c JOIN retired_views r ON r.view_id=c.view_id ORDER BY c.event_id;
+DROP TABLE closed_events;
+INSERT INTO events(event_id,type,body)
+ SELECT event_id,json_extract(result,'$.type'),json_object('browserIncarnation',incarnation,'body',json(json_remove(result,'$.type','$.eventId')))
+ FROM download_imports WHERE browser_ack=1;
+DELETE FROM download_imports WHERE browser_ack=1;
+ALTER TABLE download_imports DROP COLUMN browser_ack;
+ALTER TABLE views ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE coordination_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),placement_epoch INTEGER NOT NULL,desired_revision TEXT NOT NULL);
+INSERT INTO coordination_state VALUES(1,0,'0');
+CREATE TABLE view_runtime(view_id TEXT PRIMARY KEY,resume_url TEXT,original_browser TEXT);
+PRAGMA user_version=3;
+)sql"));
+      return {};
     });
   if (version != 0)
     return CorruptState("unsupported session store version");
@@ -92,21 +116,23 @@ PRAGMA user_version=2;
   }
   return Write([&]() -> Result<void> {
     return db_.Execute(R"sql(
-CREATE TABLE views(view_id TEXT PRIMARY KEY, config TEXT NOT NULL);
+CREATE TABLE views(view_id TEXT PRIMARY KEY, config TEXT NOT NULL,position INTEGER NOT NULL);
 CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,type TEXT NOT NULL,body TEXT NOT NULL);
 CREATE TABLE event_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),stream_id TEXT NOT NULL,acked_through INTEGER NOT NULL);
 INSERT INTO event_state VALUES(1,lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-4'||substr(lower(hex(randomblob(2))),2)||'-8'||substr(lower(hex(randomblob(2))),2)||'-'||lower(hex(randomblob(6))),0);
 CREATE TABLE retired_views(view_id TEXT PRIMARY KEY,event_id TEXT NOT NULL);
-CREATE TABLE closed_events(event_id INTEGER PRIMARY KEY AUTOINCREMENT, view_id TEXT NOT NULL, reason TEXT NOT NULL);
 CREATE TABLE download_imports(event_id TEXT PRIMARY KEY, incarnation TEXT NOT NULL, download TEXT NOT NULL,
- browser_ack INTEGER NOT NULL, result TEXT, attempt INTEGER, error TEXT, retry_at INTEGER);
+ result TEXT, attempt INTEGER, error TEXT, retry_at INTEGER);
+CREATE TABLE coordination_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),placement_epoch INTEGER NOT NULL,desired_revision TEXT NOT NULL);
+INSERT INTO coordination_state VALUES(1,0,'0');
+CREATE TABLE view_runtime(view_id TEXT PRIMARY KEY,resume_url TEXT,original_browser TEXT);
 CREATE TABLE navigation_recovery(view_id TEXT PRIMARY KEY, navigation_revision INTEGER NOT NULL, state BLOB NOT NULL);
 CREATE TABLE library_assets(asset_id TEXT PRIMARY KEY, size INTEGER NOT NULL, type TEXT NOT NULL, width INTEGER, height INTEGER);
 CREATE TABLE library_drafts(upload_id TEXT PRIMARY KEY, operation TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
  size INTEGER NOT NULL, expires INTEGER NOT NULL, sealed TEXT NOT NULL);
 CREATE TABLE library_selections(selection_id TEXT PRIMARY KEY, state TEXT NOT NULL, document TEXT NOT NULL);
 CREATE TABLE library_derivatives(asset_id TEXT NOT NULL, format TEXT NOT NULL, derived_id TEXT NOT NULL, PRIMARY KEY(asset_id, format));
-PRAGMA user_version=2;
+PRAGMA user_version=3;
 )sql");
   });
 }
@@ -139,8 +165,8 @@ Result<void> SessionDb::Delete(const char* sql, const std::string& id) {
 }
 Result<Json> ViewStore::Load() {
   std::lock_guard lock(db_.mutex_);
-  RK_ASSIGN_OR_RETURN(statement,
-                      db_.db_.Prepare("SELECT config,view_id FROM views ORDER BY view_id"));
+  RK_ASSIGN_OR_RETURN(
+      statement, db_.db_.Prepare("SELECT config,view_id FROM views ORDER BY position,view_id"));
   Json views = Json::array();
   for (;;) {
     RK_ASSIGN_OR_RETURN(row, statement.Step());
@@ -163,99 +189,119 @@ Result<void> ViewStore::Save(const Json& views) {
     return CorruptState("invalid views.config collection");
   return db_.Write([&]() -> Result<void> {
     RK_RETURN_IF_ERROR(db_.db_.Execute("DELETE FROM views"));
+    int64_t position = 0;
     for (const auto& view : views) {
       auto valid = View(view);
       if (!valid)
         return CorruptState("invalid views.config: " + valid.error().message);
-      RK_ASSIGN_OR_RETURN(statement, db_.db_.Prepare("INSERT INTO views VALUES(?,?)"));
+      RK_ASSIGN_OR_RETURN(statement, db_.db_.Prepare("INSERT INTO views VALUES(?,?,?)"));
       RK_RETURN_IF_ERROR(statement.Bind(1, view.at("viewId").get<std::string>()));
       RK_RETURN_IF_ERROR(statement.Bind(2, view.dump()));
+      RK_RETURN_IF_ERROR(statement.Bind(3, position++));
       RK_RETURN_IF_ERROR(Done(statement));
     }
     return {};
   });
 }
-Result<Json> ViewStore::Events() {
+Result<void> ViewStore::SaveDesired(const Json& views,
+                                    uint64_t epoch,
+                                    const std::string& revision) {
+  return db_.Write([&]() -> Result<void> {
+    RK_RETURN_IF_ERROR(db_.Events().BeginPlacement(epoch));
+    RK_RETURN_IF_ERROR(Save(views));
+    RK_RETURN_IF_ERROR(db_.db_.Execute(
+        "DELETE FROM retired_views WHERE view_id NOT IN (SELECT view_id FROM views); DELETE FROM "
+        "view_runtime WHERE view_id NOT IN (SELECT view_id FROM views)"));
+    RK_ASSIGN_OR_RETURN(
+        statement,
+        db_.db_.Prepare("UPDATE coordination_state SET desired_revision=? WHERE singleton=1"));
+    RK_RETURN_IF_ERROR(statement.Bind(1, revision));
+    return Done(statement);
+  });
+}
+Result<Json> ViewStore::Retired() {
   std::lock_guard lock(db_.mutex_);
-  RK_ASSIGN_OR_RETURN(
-      statement,
-      db_.db_.Prepare("SELECT event_id, view_id, reason FROM closed_events ORDER BY event_id"));
-  Json events = Json::array();
+  RK_ASSIGN_OR_RETURN(statement,
+                      db_.db_.Prepare("SELECT view_id FROM retired_views ORDER BY view_id"));
+  Json result = Json::array();
   for (;;) {
     RK_ASSIGN_OR_RETURN(row, statement.Step());
     if (!row)
-      break;
-    if (events.size() == 256)
-      return CorruptState("closed event backlog exceeds bound");
-    if (statement.Int64(0) <= 0 || !View({{"viewId", statement.Text(1)}}))
-      return CorruptState("invalid closed event");
-    events.push_back({{"eventId", std::to_string(statement.Int64(0))},
-                      {"type", "view.closed"},
-                      {"viewId", statement.Text(1)},
-                      {"reason", statement.Text(2)}});
+      return result;
+    result.push_back(statement.Text(0));
   }
-  return events;
 }
-Result<Json> ViewStore::Close(const std::string& view, const std::string& reason) {
+Result<Json> ViewStore::Close(const std::string& view,
+                              const std::string& reason,
+                              const Json& incarnation) {
   Json event;
   auto result = db_.Write([&]() -> Result<void> {
     {
-      RK_ASSIGN_OR_RETURN(
-          existing, db_.db_.Prepare("SELECT event_id, reason FROM closed_events WHERE view_id=?"));
+      RK_ASSIGN_OR_RETURN(existing,
+                          db_.db_.Prepare("SELECT event_id FROM retired_views WHERE view_id=?"));
       RK_RETURN_IF_ERROR(existing.Bind(1, view));
       RK_ASSIGN_OR_RETURN(found, existing.Step());
-      if (found)
-        event = {{"eventId", std::to_string(existing.Int64(0))},
+      if (found) {
+        event = {{"eventId", existing.Text(0)},
                  {"type", "view.closed"},
-                 {"viewId", view},
-                 {"reason", existing.Text(1)}};
+                 {"body", {{"viewId", view}, {"reason", reason}}},
+                 {"browserIncarnation", incarnation}};
+        return {};
+      }
     }
-    if (event.is_null()) {
-      RK_ASSIGN_OR_RETURN(events, Events());
-      if (events.size() >= 256)
-        return Error{ErrorCode::kLimitExceeded, "closed event backlog full"};
-      RK_ASSIGN_OR_RETURN(
-          statement,
-          db_.db_.Prepare(
-              "INSERT INTO closed_events(view_id,reason) VALUES(?,?) RETURNING event_id"));
-      RK_RETURN_IF_ERROR(statement.Bind(1, view));
-      RK_RETURN_IF_ERROR(statement.Bind(2, reason));
-      RK_ASSIGN_OR_RETURN(row, statement.Step());
-      if (!row)
-        return CorruptState("missing closed event id");
-      event = {{"eventId", std::to_string(statement.Int64(0))},
-               {"type", "view.closed"},
-               {"viewId", view},
-               {"reason", reason}};
-      RK_RETURN_IF_ERROR(Done(statement));
-    }
-    RK_RETURN_IF_ERROR(db_.Delete("DELETE FROM views WHERE view_id=?", view));
+    const auto identity = "closed-" + db_.directory_.filename().string() + "-" + view;
+    RK_ASSIGN_OR_RETURN(appended,
+                        db_.Events().Append("view.closed", {{"viewId", view}, {"reason", reason}},
+                                            identity, incarnation));
+    event = std::move(appended);
+    RK_ASSIGN_OR_RETURN(retire, db_.db_.Prepare("INSERT INTO retired_views VALUES(?,?)"));
+    RK_RETURN_IF_ERROR(retire.Bind(1, view));
+    RK_RETURN_IF_ERROR(retire.Bind(2, identity));
+    RK_RETURN_IF_ERROR(Done(retire));
+    RK_RETURN_IF_ERROR(db_.Delete("DELETE FROM view_runtime WHERE view_id=?", view));
     return db_.Delete("DELETE FROM navigation_recovery WHERE view_id=?", view);
   });
   if (!result)
     return result.error();
   return event;
 }
-Result<void> ViewStore::Navigate(const std::string& view, const Json& config) {
+Result<void> ViewStore::CommitNavigation(const std::string& view, const std::string& url) {
   return db_.Write([&]() -> Result<void> {
-    RK_RETURN_IF_ERROR(View(config));
-    RK_ASSIGN_OR_RETURN(statement, db_.db_.Prepare("UPDATE views SET config=? WHERE view_id=?"));
-    RK_RETURN_IF_ERROR(statement.Bind(1, config.dump()));
-    RK_RETURN_IF_ERROR(statement.Bind(2, view));
-    RK_RETURN_IF_ERROR(Done(statement));
-    return db_.Delete("DELETE FROM navigation_recovery WHERE view_id=?", view);
+    RK_ASSIGN_OR_RETURN(
+        statement,
+        db_.db_.Prepare("INSERT INTO view_runtime(view_id,resume_url) VALUES(?,?) ON "
+                        "CONFLICT(view_id) DO UPDATE SET resume_url=excluded.resume_url"));
+    RK_RETURN_IF_ERROR(statement.Bind(1, view));
+    RK_RETURN_IF_ERROR(statement.Bind(2, url));
+    return Done(statement);
   });
 }
-Result<void> ViewStore::Acknowledge(const std::set<std::string>& ids) {
-  return db_.Write([&]() -> Result<void> {
-    for (const auto& id : ids) {
-      RK_RETURN_IF_ERROR(
-          db_.Delete("DELETE FROM closed_events WHERE CAST(event_id AS TEXT)=?", id));
-      RK_RETURN_IF_ERROR(
-          db_.Delete("DELETE FROM download_imports WHERE browser_ack=1 AND event_id=?", id));
-    }
-    return {};
+Result<std::string> ViewStore::ResumeUrl(const std::string& view, const std::string& fallback) {
+  std::lock_guard lock(db_.mutex_);
+  RK_ASSIGN_OR_RETURN(statement,
+                      db_.db_.Prepare("SELECT resume_url FROM view_runtime WHERE view_id=?"));
+  RK_RETURN_IF_ERROR(statement.Bind(1, view));
+  RK_ASSIGN_OR_RETURN(row, statement.Step());
+  return row && !statement.IsNull(0) ? statement.Text(0) : fallback;
+}
+Result<bool> ViewStore::SignInCurrent(const std::string& view, const std::string& incarnation) {
+  bool current = false;
+  auto result = db_.Write([&]() -> Result<void> {
+    RK_ASSIGN_OR_RETURN(
+        statement,
+        db_.db_.Prepare(
+            "INSERT INTO view_runtime(view_id,original_browser) VALUES(?,?) ON CONFLICT(view_id) "
+            "DO UPDATE SET original_browser=coalesce(original_browser,excluded.original_browser) "
+            "RETURNING original_browser"));
+    RK_RETURN_IF_ERROR(statement.Bind(1, view));
+    RK_RETURN_IF_ERROR(statement.Bind(2, incarnation));
+    RK_ASSIGN_OR_RETURN(row, statement.Step());
+    current = row && statement.Text(0) == incarnation;
+    return Done(statement);
   });
+  if (!result)
+    return result.error();
+  return current;
 }
 Result<bool> RecoveryStore::Contains(const std::string& view) {
   std::lock_guard lock(db_.mutex_);
@@ -327,7 +373,6 @@ Result<void> ValidateDownloadState(const Json& state) {
     std::set<std::string> ids;
     for (const auto& row : state.at("records")) {
       if (row.at("incarnation").get<std::string>().empty() || !row.at("download").is_object() ||
-          !row.at("browserAck").is_boolean() ||
           !ids.insert(row.at("eventId").get<std::string>()).second)
         return CorruptState("invalid download import row");
       const auto& download = row.at("download");
@@ -339,8 +384,7 @@ Result<void> ValidateDownloadState(const Json& state) {
         if (!result.is_object() || result.at("eventId") != row.at("eventId"))
           return CorruptState("invalid download result");
         result.at("type").get<std::string>();
-      } else if (row.at("browserAck").get<bool>())
-        return CorruptState("missing download result");
+      }
       if (row.contains("attempt"))
         row.at("attempt").get<unsigned>();
       if (row.contains("retryAt"))
@@ -357,9 +401,8 @@ Result<Json> DownloadStore::Load() {
   std::lock_guard lock(db_.mutex_);
   RK_ASSIGN_OR_RETURN(
       statement,
-      db_.db_.Prepare(
-          "SELECT event_id,incarnation,download,browser_ack,result,attempt,error,retry_at FROM "
-          "download_imports ORDER BY rowid"));
+      db_.db_.Prepare("SELECT event_id,incarnation,download,result,attempt,error,retry_at FROM "
+                      "download_imports ORDER BY rowid"));
   Json records = Json::array();
   for (;;) {
     RK_ASSIGN_OR_RETURN(row, statement.Step());
@@ -368,11 +411,9 @@ Result<Json> DownloadStore::Load() {
     auto download = Json::parse(statement.Text(2), nullptr, false);
     if (download.is_discarded())
       return CorruptState("invalid download_imports.download");
-    Json value = {{"eventId", statement.Text(0)},
-                  {"incarnation", statement.Text(1)},
-                  {"download", download},
-                  {"browserAck", statement.Int64(3) != 0}};
-    for (const auto [column, name] : {std::pair{4, "result"}, {6, "error"}}) {
+    Json value = {
+        {"eventId", statement.Text(0)}, {"incarnation", statement.Text(1)}, {"download", download}};
+    for (const auto [column, name] : {std::pair{3, "result"}, {5, "error"}}) {
       if (!statement.IsNull(column)) {
         auto document = Json::parse(statement.Text(column), nullptr, false);
         if (document.is_discarded())
@@ -380,10 +421,10 @@ Result<Json> DownloadStore::Load() {
         value[name] = std::move(document);
       }
     }
-    if (!statement.IsNull(5))
-      value["attempt"] = statement.Int64(5);
-    if (!statement.IsNull(7))
-      value["retryAt"] = statement.Int64(7);
+    if (!statement.IsNull(4))
+      value["attempt"] = statement.Int64(4);
+    if (!statement.IsNull(6))
+      value["retryAt"] = statement.Int64(6);
     records.push_back(std::move(value));
   }
   Json state = {{"records", std::move(records)}};
@@ -396,19 +437,18 @@ Result<void> DownloadStore::Save(const Json& state) {
     RK_RETURN_IF_ERROR(db_.db_.Execute("DELETE FROM download_imports"));
     for (const auto& row : state.at("records")) {
       RK_ASSIGN_OR_RETURN(statement,
-                          db_.db_.Prepare("INSERT INTO download_imports VALUES(?,?,?,?,?,?,?,?)"));
+                          db_.db_.Prepare("INSERT INTO download_imports VALUES(?,?,?,?,?,?,?)"));
       RK_RETURN_IF_ERROR(statement.Bind(1, row.at("eventId").get<std::string>()));
       RK_RETURN_IF_ERROR(statement.Bind(2, row.at("incarnation").get<std::string>()));
       RK_RETURN_IF_ERROR(statement.Bind(3, row.at("download").dump()));
-      RK_RETURN_IF_ERROR(statement.Bind(4, int64_t(row.at("browserAck").get<bool>())));
-      for (const auto [column, name] : {std::pair{5, "result"}, {7, "error"}}) {
+      for (const auto [column, name] : {std::pair{4, "result"}, {6, "error"}}) {
         if (row.contains(name)) {
           RK_RETURN_IF_ERROR(statement.Bind(column, row.at(name).dump()));
         } else {
           RK_RETURN_IF_ERROR(statement.BindNull(column));
         }
       }
-      for (const auto [column, name] : {std::pair{6, "attempt"}, {8, "retryAt"}}) {
+      for (const auto [column, name] : {std::pair{5, "attempt"}, {7, "retryAt"}}) {
         if (row.contains(name)) {
           RK_RETURN_IF_ERROR(statement.Bind(column, row.at(name).get<int64_t>()));
         } else {
@@ -418,6 +458,30 @@ Result<void> DownloadStore::Save(const Json& state) {
       RK_RETURN_IF_ERROR(Done(statement));
     }
     return {};
+  });
+}
+Result<void> DownloadStore::Complete(const std::string& event_id) {
+  return db_.Write([&]() -> Result<void> {
+    Json result;
+    std::string incarnation;
+    {
+      RK_ASSIGN_OR_RETURN(
+          statement,
+          db_.db_.Prepare("SELECT result,incarnation FROM download_imports WHERE event_id=?"));
+      RK_RETURN_IF_ERROR(statement.Bind(1, event_id));
+      RK_ASSIGN_OR_RETURN(row, statement.Step());
+      if (!row || statement.IsNull(0))
+        return CorruptState("download result missing at handoff");
+      result = Json::parse(statement.Text(0), nullptr, false);
+      incarnation = statement.Text(1);
+    }
+    if (!result.is_object() || !result.contains("type"))
+      return CorruptState("invalid download handoff");
+    const auto type = result["type"].get<std::string>();
+    result.erase("type");
+    result.erase("eventId");
+    RK_ASSIGN_OR_RETURN(event, db_.Events().Append(type, result, event_id, incarnation));
+    return db_.Delete("DELETE FROM download_imports WHERE event_id=?", event_id);
   });
 }
 Result<std::map<std::string, Json>> LibraryStore::Load(LibraryTable table) {

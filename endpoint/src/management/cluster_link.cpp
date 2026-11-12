@@ -41,8 +41,8 @@ struct ClusterLink::Impl {
   Connector connect;
   ValidateConfig validate;
   bool local, watch_stdin;
-  std::string build_id, config_hash;
-  Json config, sessions, object_keys, peers;
+  std::string build_id, config_hash, connection_epoch, endpoint_incarnation;
+  Json config, object_keys, peers;
   Peers peer_callback;
   std::mutex mutex, callback_mutex;
   std::condition_variable wake;
@@ -122,38 +122,6 @@ struct ClusterLink::Impl {
       Finish(1);
       return false;
     }
-    if (!reply.contains("sessions") || !reply["sessions"].is_array() ||
-        reply["sessions"].size() > 64) {
-      Finish(1);
-      return false;
-    }
-    std::set<std::string> tenants, session_ids;
-    for (const auto& session : reply["sessions"]) {
-      if (!session.is_object() || !session.contains("tenantId") ||
-          !session["tenantId"].is_string() || !session.contains("sessionId") ||
-          !session["sessionId"].is_string() || !session.contains("placementEpoch") ||
-          !session["placementEpoch"].is_number_integer() ||
-          session["placementEpoch"].get<int64_t>() <= 0 || !session.contains("dataState") ||
-          (session["dataState"] != "clean" && session["dataState"] != "dirty")) {
-        Finish(1);
-        return false;
-      }
-      const auto tenant = session["tenantId"].get<std::string>();
-      const auto id = session["sessionId"].get<std::string>();
-      if (tenant.empty() || tenant.size() > 128 ||
-          !std::all_of(tenant.begin(), tenant.end(),
-                       [](char c) {
-                         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                                (c >= '0' && c <= '9') || c == '-' || c == '_';
-                       }) ||
-          id.size() != 32 ||
-          !std::all_of(id.begin(), id.end(),
-                       [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }) ||
-          !tenants.insert(tenant).second || !session_ids.insert(id).second) {
-        Finish(1);
-        return false;
-      }
-    }
     if (!reply["config"].is_object() || !reply["config"].contains("peer") ||
         !reply["config"].contains("rtc") || !reply.contains("peers") ||
         !reply["peers"].is_array()) {
@@ -191,7 +159,7 @@ struct ClusterLink::Impl {
       return false;
     peers = reply["peers"];
     config = reply["config"];
-    sessions = reply["sessions"];
+    connection_epoch = reply["connectionEpoch"].get<std::string>();
     object_keys = {{"objectKey", reply.value("objectKey", Json())},
                    {"objectIdKey", reply.value("objectIdKey", Json())}};
     config_hash = hash;
@@ -344,12 +312,14 @@ struct ClusterLink::Impl {
 ClusterLink::ClusterLink(Connector connect,
                          bool local,
                          std::string build_id,
+                         std::string incarnation,
                          ValidateConfig validate,
                          bool watch_stdin)
     : impl_(std::make_unique<Impl>()) {
   impl_->connect = std::move(connect);
   impl_->local = local;
   impl_->build_id = std::move(build_id);
+  impl_->endpoint_incarnation = std::move(incarnation);
   impl_->validate = std::move(validate);
   impl_->watch_stdin = watch_stdin;
   impl_->receiver = std::thread([this] {
@@ -408,11 +378,11 @@ bool ClusterLink::Current(uint64_t generation) {
   std::lock_guard lock(impl_->mutex);
   return generation && generation == impl_->active && !impl_->stopping && !impl_->overload;
 }
-std::optional<ManagementLink::ReadyState> ClusterLink::ReadySessions() {
+std::optional<ManagementLink::ReadyState> ClusterLink::ReadyConfiguration() {
   std::lock_guard lock(impl_->mutex);
   if (!impl_->active || impl_->stopping || impl_->overload)
     return {};
-  return ReadyState{impl_->active, impl_->sessions, impl_->object_keys};
+  return ReadyState{impl_->active, impl_->object_keys, impl_->connection_epoch};
 }
 bool ClusterLink::Queue(const Json& message, uint64_t generation, DeliveryFlag delivery) {
   auto bytes = message.dump();
@@ -489,8 +459,17 @@ Result<Json> ClusterLink::RequestUntil(const std::string& name,
     generation = impl_->active;
     impl_->pending.emplace(id, Impl::Pending{generation, {}});
   }
-  fields["id"] = id;
-  fields["request"] = name;
+  const auto tenant = fields.value("tenantId", Json(""));
+  fields.erase("tenantId");
+  fields = {{"id", id},
+            {"request", name},
+            {"tenantId", tenant},
+            {"sessionId", nullptr},
+            {"placementEpoch", nullptr},
+            {"endpointIncarnation", impl_->endpoint_incarnation},
+            {"opId", id},
+            {"replay", false},
+            {"params", std::move(fields)}};
   if (!Queue(fields, generation)) {
     std::lock_guard lock(impl_->mutex);
     impl_->pending.erase(id);

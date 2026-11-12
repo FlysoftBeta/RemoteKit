@@ -26,7 +26,7 @@ Json Recovery() {
           {"navigationRevision", "7"},
           {"chunks", Json::array({{{"data", "YWJj"}, {"bytes", 3}}})}};
 }
-Json Download(bool ack = true) {
+Json Download() {
   return {{"records",
            Json::array(
                {{{"incarnation", "browser"},
@@ -39,7 +39,6 @@ Json Download(bool ack = true) {
                    {"mimeType", "text/plain"},
                    {"size", "3"},
                    {"origin", ""}}},
-                 {"browserAck", ack},
                  {"result", {{"type", "download.imported"}, {"eventId", "download-event"}}}}})}};
 }
 Json Selection(const std::string& state = "pending") {
@@ -77,35 +76,33 @@ void Transactions(const fs::path& path) {
       inject.Execute("CREATE TRIGGER fail_recovery BEFORE DELETE ON navigation_recovery BEGIN "
                      "SELECT RAISE(ABORT,'injected failure'); END"));
   Check(!views.Close("1", "requested"), "close failure");
-  Check(Take(views.Events()).empty() && Take(views.Load()) == Json::array({config}) &&
+  Check(Take(store.Events().Load()).empty() && Take(views.Load()) == Json::array({config}) &&
             Take(recovery.Contains("1")),
         "close rollback preserves every table");
-  auto updated = config;
-  updated["url"] = "new";
-  Check(!views.Navigate("1", updated), "navigation failure");
-  Check(Take(views.Load()) == Json::array({config}) && Take(recovery.Contains("1")),
-        "navigation rollback");
   Take(inject.Execute("DROP TRIGGER fail_recovery"));
-  Take(views.Navigate("1", updated));
-  Check(!Take(recovery.Contains("1")) && Take(views.Load()) == Json::array({updated}),
-        "navigation commits both tables");
-  Take(recovery.Save("1", Recovery()));
+  Take(views.CommitNavigation("1", "new"));
+  Check(Take(views.Load()) == Json::array({config}) &&
+            Take(views.ResumeUrl("1", "fallback")) == "new",
+        "actual navigation does not mutate desired config");
   const auto event = Take(views.Close("1", "requested"));
-  Check(Take(views.Load()).empty() && !Take(recovery.Contains("1")) &&
-            Take(views.Events()).size() == 1,
-        "close removes recovery and view");
+  Check(Take(views.Load()) == Json::array({config}) && !Take(recovery.Contains("1")) &&
+            Take(views.Retired()) == Json::array({"1"}) && Take(store.Events().Load()).size() == 1,
+        "close atomically records retirement and event while retaining desired config");
   Take(store.Downloads().Save(Download()));
   Take(
-      inject.Execute("CREATE TRIGGER fail_ack BEFORE DELETE ON download_imports BEGIN SELECT "
+      inject.Execute("CREATE TRIGGER fail_handoff BEFORE DELETE ON download_imports BEGIN SELECT "
                      "RAISE(ABORT,'injected failure'); END"));
-  Check(!views.Acknowledge({event.at("eventId"), "download-event"}), "ack failure");
-  Check(
-      Take(views.Events()).size() == 1 && Take(store.Downloads().Load()).at("records").size() == 1,
-      "ack rollback");
-  Take(inject.Execute("DROP TRIGGER fail_ack"));
-  Take(views.Acknowledge({event.at("eventId"), "download-event"}));
-  Check(Take(views.Events()).empty() && Take(store.Downloads().Load()).at("records").empty(),
-        "ack transaction");
+  Check(!store.Downloads().Complete("download-event"), "handoff fault");
+  Check(Take(store.Events().Load()).size() == 1 &&
+            Take(store.Downloads().Load()).at("records").size() == 1,
+        "handoff and journal removal roll back together");
+  Take(inject.Execute("DROP TRIGGER fail_handoff"));
+  Take(store.Downloads().Complete("download-event"));
+  Check(Take(store.Events().Load()).size() == 2 &&
+            Take(store.Downloads().Load()).at("records").empty(),
+        "handoff commits event and removes journal");
+  const auto stream = Take(store.Events().State()).at("streamId").get<std::string>();
+  Take(store.Events().Acknowledge(stream, 2));
   const std::string first(32, 'a'), second(32, 'b');
   Take(store.Library().Save(LibraryTable::kSelections, first, Selection()));
   Take(store.Library().Save(LibraryTable::kSelections, second, Selection()));
@@ -141,85 +138,7 @@ void Transactions(const fs::path& path) {
   Check(!late && late.error().code == ErrorCode::kInternal, "write after checkpoint close");
   SessionDb reopened(path);
   Take(reopened.Open());
-  Check(Take(reopened.Views().Events()).empty(), "reopen committed state");
-}
-void Write(const fs::path& path, const Json& value) {
-  fs::create_directories(path.parent_path());
-  std::ofstream(path) << value.dump();
-}
-void Legacy(const fs::path& path) {
-  const std::string asset(64, 'a'), upload(32, 'b'), selection(32, 'c');
-  Write(path / "browser.log", "legacy Browser log");
-  Write(path / "crashes/events.jsonl", "legacy crash event");
-  Write(path / "views.json", Json::array({{{"viewId", "1"}, {"url", "https://example.test"}}}));
-  Write(path / "events.json", {{"next", 42},
-                               {"events", Json::array({{{"eventId", "41"},
-                                                        {"type", "view.closed"},
-                                                        {"viewId", "2"},
-                                                        {"reason", "requested"}}})}});
-  Write(path / "download-imports.json", Download());
-  Write(path / "site-preferences.json", {{"site", "discarded"}});
-  Write(path / "recovery/1.json", Recovery());
-  Write(path / "file-library/metadata" / (asset + ".json"),
-        {{"assetId", asset}, {"size", 3}, {"type", "text/plain"}});
-  Write(path / "file-library/drafts" / (upload + ".json"), {{"operation", "op"},
-                                                            {"name", "a"},
-                                                            {"type", "text/plain"},
-                                                            {"size", 3},
-                                                            {"expires", 2000000000},
-                                                            {"sealed", ""}});
-  fs::create_directories(path / "file-library/incoming");
-  std::ofstream(path / "file-library/incoming" / upload) << "abc";
-  Write(path / "file-library/selections" / (selection + ".json"), Selection());
-  Write(path / "file-library/derivatives" / (asset + "-png.json"), {{"assetId", asset}});
-  std::ofstream(path / "views.json.new") << "incomplete";
-  {
-    SessionDb store(path);
-    Take(store.Open());
-    Check(Take(store.Views().Load()).size() == 1 && Take(store.Views().Events()).size() == 1,
-          "legacy views/events");
-    Check(Take(store.Recovery().Load("1")) == Recovery(), "legacy recovery");
-    Check(Take(store.Downloads().Load()) == Download(), "legacy downloads");
-    for (const auto table : {LibraryTable::kAssets, LibraryTable::kDrafts,
-                             LibraryTable::kSelections, LibraryTable::kDerivatives})
-      Check(Take(store.Library().Load(table)).size() == 1, "legacy library");
-    Check(Take(store.Views().Close("1", "requested")).at("eventId") == "42",
-          "legacy event sequence");
-  }
-  Check(!fs::exists(path / "browser.log") && !fs::exists(path / "crashes"), "legacy logs removed");
-  Check(!fs::exists(path / "views.json") && !fs::exists(path / "events.json") &&
-            !fs::exists(path / "download-imports.json") &&
-            !fs::exists(path / "site-preferences.json") && !fs::exists(path / "views.json.new") &&
-            !fs::exists(path / "recovery") && !fs::exists(path / "file-library/metadata") &&
-            !fs::exists(path / "file-library/drafts") &&
-            !fs::exists(path / "file-library/selections") &&
-            !fs::exists(path / "file-library/derivatives"),
-        "legacy files deleted after commit");
-  Check(fs::exists(path / "file-library/incoming" / upload), "legacy payload retained");
-  const auto invalid = path / "invalid";
-  Write(invalid / "views.json", Json::array({{{"viewId", "1"}}}));
-  std::ofstream(invalid / "events.json") << "{";
-  SessionDb bad(invalid);
-  auto result = bad.Open();
-  Check(!result && result.error().reason == ErrorReason::kCorruptState &&
-            result.error().message.find("events.json") != std::string::npos,
-        "invalid legacy classification");
-  Check(fs::exists(invalid / "views.json") && fs::exists(invalid / "events.json") &&
-            !fs::exists(invalid / "session.db"),
-        "invalid legacy untouched");
-  const auto unavailable = path / "unavailable";
-  Write(unavailable / "views.json", Json::array({{{"viewId", "1"}}}));
-  const auto file = CreateFileW((unavailable / "views.json").c_str(), GENERIC_READ, 0, nullptr,
-                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-  Check(file != INVALID_HANDLE_VALUE, "hold legacy file");
-  SessionDb locked(unavailable);
-  auto failed = locked.Open();
-  CloseHandle(file);
-  Check(!failed && failed.error().code == ErrorCode::kUnavailable,
-        "unreadable legacy classification");
-  Check(fs::exists(unavailable / "views.json") && !fs::exists(unavailable / "session.db"),
-        "unreadable legacy untouched");
-  Take(locked.Open());
+  Check(Take(reopened.Events().Load()).empty(), "reopen committed state");
 }
 void Reads(const fs::path& path) {
   fs::create_directories(path);
@@ -247,7 +166,7 @@ void Reads(const fs::path& path) {
   Check(!unavailable && unavailable.error().code == ErrorCode::kUnavailable, "copy I/O error");
   sqlite::Database db;
   Take(db.Open(path / "unsupported.db"));
-  Take(db.Execute("PRAGMA user_version=3"));
+  Take(db.Execute("PRAGMA user_version=4"));
   Take(db.Close());
   fs::create_directory(path / "unsupported");
   fs::rename(path / "unsupported.db", path / "unsupported/session.db");
@@ -315,7 +234,6 @@ int wmain(int argc, wchar_t** argv) {
     fs::remove_all(root);
     Transactions(root / "transactions");
     EventTransactions(root / "events");
-    Legacy(root / "legacy");
     Reads(root / "reads");
     fs::remove_all(root);
     return 0;

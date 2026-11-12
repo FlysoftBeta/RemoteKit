@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
                          ? cluster::ConnectStdio(key, control_public_key, hello)
                          : cluster::ConnectWebSocket(control, key, control_public_key, hello);
             },
-            process.stdio, build.value(),
+            process.stdio, build.value(), hello.incarnation,
             [&](const Json& config) -> Result<void> {
               auto options =
                   RuntimeOptions::FromConfig(config, process.node_root, build.value(), node_id);
@@ -93,7 +93,7 @@ int main(int argc, char** argv) {
           LogError(LogLevel::kError, "endpoint.start_failed", loaded.error());
           return;
         }
-        Service service(sdk, options, link, key);
+        Service service(sdk, options, link, key, hello.incarnation);
         RunThread(
             "management dispatcher", [&] { exit_code = service.Run(); }, [&] { service.Fail(); });
         if (const auto link_exit = link.ExitCode())

@@ -54,6 +54,33 @@ Result<void> Database::Close() {
   handle_ = nullptr;
   return {};
 }
+Result<void> Database::OpenReadOnly(const std::filesystem::path& path, bool immutable) {
+  if (handle_)
+    return Error{ErrorCode::kInternal, "session store already open"};
+  const auto utf8 = path.generic_u8string();
+  std::string name = "file:";
+  for (const auto character : utf8) {
+    if (character == '%')
+      name += "%25";
+    else if (character == '?')
+      name += "%3f";
+    else if (character == '#')
+      name += "%23";
+    else
+      name += static_cast<char>(character);
+  }
+  name += immutable ? "?mode=ro&immutable=1" : "?mode=ro";
+  const auto code =
+      sqlite3_open_v2(name.c_str(), &handle_,
+                      SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_FULLMUTEX, nullptr);
+  if (code != SQLITE_OK) {
+    const auto error = Failure("read-only open", code);
+    Close();
+    return error;
+  }
+  sqlite3_extended_result_codes(handle_, 1);
+  return Execute("PRAGMA query_only=ON");
+}
 Result<void> Database::Execute(const char* sql) {
   if (!handle_)
     return Failure("execute", SQLITE_MISUSE);

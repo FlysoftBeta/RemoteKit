@@ -54,9 +54,9 @@ class ManagementLink {
   }
   struct ReadyState {
     uint64_t generation;
-    Json sessions;
     Json object_keys;
+    std::string connection_epoch;
   };
-  virtual std::optional<ReadyState> ReadySessions() { return {}; }
+  virtual std::optional<ReadyState> ReadyConfiguration() { return {}; }
 };
 }  // namespace remotekit

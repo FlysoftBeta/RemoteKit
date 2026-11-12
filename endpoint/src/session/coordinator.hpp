@@ -34,6 +34,7 @@ class SessionCoordinator {
   void ManagementLost(uint64_t generation);
   Result<Json> Execute(const std::function<Result<Json>()>& action);
   Json Latest() const;
+  Result<Json> Report();
   const Json& Target() const { return target_; }
 
  private:

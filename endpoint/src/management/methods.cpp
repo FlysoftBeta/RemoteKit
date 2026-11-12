@@ -4,9 +4,6 @@
 namespace remotekit {
 ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
   static const std::map<std::string, Handler> methods{
-      {"clipboard.write",
-       [](Session& session, const Json& request) { return session.WriteClipboard(request); }},
-      {"session.open", [](Session& session, const Json& request) { return session.Open(request); }},
       {"auth.face.begin",
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Face().FaceCommand(Required(request, "method"), request,
@@ -33,12 +30,6 @@ ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Channel().ManageRtcActionResult(request);
        }},
-      {"rtc.authorize",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Authorization().Authorize(
-             request, session.ManagementGeneration(),
-             [&session] { return session.ManagementCurrent(); });
-       }},
       {"rtc.close",
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Channel().ManageRtcClose(request);
@@ -50,14 +41,6 @@ ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
       {"rtc.offer",
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Channel().ManageRtcOffer(request);
-       }},
-      {"session.ensure",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Ensure(request);
-       }},
-      {"session.events.ack",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Views().ManageSessionEventsAck(request);
        }},
       {"session.storage.import",
        [](Session& session, const Json& request) -> Result<Json> {
@@ -71,14 +54,6 @@ ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Views().ManageSessionIdentity(request);
        }},
-      {"session.files.authorize",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Files().AuthorizeFiles(request);
-       }},
-      {"session.library.describe",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Files().Library().LibraryCommand(Required(request, "method"), request);
-       }},
       {"session.library.prepare",
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Files().Library().LibraryCommand(Required(request, "method"), request);
@@ -87,27 +62,11 @@ ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Files().Library().LibraryCommand(Required(request, "method"), request);
        }},
-      {"session.mediaPolicy",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Media().ManageSessionMediaPolicy(request);
-       }},
-      {"session.sitePreferences",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Views().ManageSessionSitePreferences(request);
-       }},
-      {"session.logs.read",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.ReadLog(request);
-       }},
       {"session.snapshot",
        [](Session& session, const Json& request) -> Result<Json> {
-         if (request.contains("outputDiagnostics") && !request["outputDiagnostics"].is_boolean())
-           return Error{ErrorCode::kInvalidRequest, "outputDiagnostics boolean required"};
-         return session.Snapshot(request.value("outputDiagnostics", false));
-       }},
-      {"view.adopt",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Views().ManageViewEnsure(request);
+         if (request.value("outputDiagnostics", Json()) != true)
+           return Error{ErrorCode::kInvalidRequest, "snapshot is an explicit diagnostic capture"};
+         return session.Snapshot(true);
        }},
       {"view.appInfo",
        [](Session& session, const Json& request) -> Result<Json> {
@@ -124,14 +83,6 @@ ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
       {"view.command",
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Views().ManageViewCommand(request);
-       }},
-      {"view.configure",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Views().ManageViewConfigure(request);
-       }},
-      {"view.ensure",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Views().ManageViewEnsure(request);
        }},
       {"view.lifecycle",
        [](Session& session, const Json& request) -> Result<Json> {

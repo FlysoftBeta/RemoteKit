@@ -36,18 +36,22 @@ Session::Session(media::Sdk& api,
                [this] { return browser.Alive() && browser.Rpc().Control() && !browser.Stopping(); },
            .incarnation = [this] { return browser.ProcessIncarnation(); },
            .read = [this] { return browser.Rpc().Request({{"method", "clipboard.read"}}); },
-           .write = [this](const Json& value) -> Result<void> {
+           .write = [this](const Json& value) -> Result<Json> {
              auto request = value;
              request["method"] = "clipboard.write";
-             auto result = browser.Rpc().Request(std::move(request));
-             if (!result)
-               return result.error();
-             return {};
+             return browser.Rpc().Request(std::move(request));
            },
            .sequence = [this] { return output.Slots().ClipboardSequence(); },
            .send =
                [this](const Json& event) {
-                 return management.SendEvent(event, generation_.load());
+                 auto body = event;
+                 body.erase("type");
+                 body.erase("tenantId");
+                 body.erase("sessionId");
+                 const auto identity = "clipboard-" + browser.ProcessIncarnation() + "-" +
+                                       event.at("browserSequence").get<std::string>();
+                 return bool(store.Events().Append("clipboard.changed", body, identity,
+                                                   browser.ProcessIncarnation()));
                }}),
       timing(context),
       authorization(
@@ -203,28 +207,74 @@ Session::Session(media::Sdk& api,
   presentation.SetFirstPresented(
       [this](const std::string& view, int64_t at) { browser.Presented(view, at); });
 }
-Result<Json> Session::Open(const Json& request) {
-  auto key = cluster::DecodeKey(request.at("profileKey").get<std::string>());
+Result<void> Session::StageDesired(const Json& document) {
+  auto key = cluster::DecodeKey(document.at("profileKey").get<std::string>());
   if (!key)
     return key.error();
-  const bool identical = request.at("sessionId") == config.id &&
-                         request.at("placementEpoch") == config.placement_epoch &&
-                         key.value() == config.profile_key;
+  const bool identical = key.value() == config.profile_key &&
+                         document.at("sessionId") == config.id &&
+                         document.at("placementEpoch") == config.placement_epoch;
   SecureZeroMemory(key.value().data(), key.value().size());
   if (!identical)
-    return Error{ErrorCode::kConflict, "session placement conflicts with the open session"};
-  if (request.contains("clipboard"))
-    RK_RETURN_IF_ERROR(clipboard.Seed(request["clipboard"]));
-  return Json{{"sessionId", config.id}, {"placementEpoch", config.placement_epoch}};
+    return Error{ErrorCode::kConflict, "Session identity conflicts"};
+  auto preferences =
+      views.ManageSessionSitePreferences({{"method", "session.sitePreferences"},
+                                          {"sites", document.at("sitePreferences").at("sites")}});
+  if (!preferences)
+    return preferences.error();
+  auto policy = pipeline.ManageSessionMediaPolicy(document.at("mediaPolicy"));
+  if (!policy)
+    return policy.error();
+  Json value = document.at("clipboard").at("value");
+  value["revision"] = document.at("clipboard").at("revision");
+  RK_RETURN_IF_ERROR(clipboard.Write(value));
+  return views.StageDesired(document);
 }
-Result<Json> Session::Ensure(const Json& request) {
-  if (request.contains("clipboard"))
-    RK_RETURN_IF_ERROR(clipboard.Seed(request["clipboard"]));
-  return views.ManageSessionEnsure(request);
+Result<void> Session::AuthorizeDesired(const Json& document, uint64_t generation) {
+  BeginManagementRequest(generation);
+  lock_state_.store(std::make_shared<const Json>(document.at("lock")));
+  const auto& desired = document.at("authorization");
+  const auto rtc = views.RtcSnapshot();
+  const bool current =
+      rtc.at("active").get<bool>() && rtc.at("connectionId") == desired.at("connectionId");
+  const bool unlocked =
+      desired.at("unlocked").get<bool>() && document.at("lock").at("state") == "unlocked";
+  files_applied_ = false;
+  if (!current) {
+    authorization.Close();
+    return {};
+  }
+  auto applied = authorization.Authorize({{"connectionId", desired.at("connectionId")},
+                                          {"epoch", desired.at("epoch")},
+                                          {"unlocked", unlocked}},
+                                         generation, [this] { return ManagementCurrent(); });
+  if (!applied)
+    return applied.error();
+  if (unlocked) {
+    auto granted = files.AuthorizeFiles({{"connectionId", desired.at("connectionId")},
+                                         {"authEpoch", desired.at("epoch")},
+                                         {"library", desired.at("files").at("library")},
+                                         {"requests", desired.at("files").at("requests")}});
+    if (!granted)
+      return granted.error();
+    files_applied_ = true;
+  }
+  return {};
 }
-Result<Json> Session::WriteClipboard(const Json& request) {
-  RK_RETURN_IF_ERROR(clipboard.Write(request));
-  return Json{{"accepted", true}};
+Json Session::AuthorizationSnapshot() const {
+  const auto rtc = views.RtcSnapshot();
+  const bool opened = authorization.Stamp() != 0;
+  return {{"connectionId", rtc.at("connectionId")},
+          {"epoch", authorization.Epoch()},
+          {"unlocked", opened},
+          {"revoked", !opened},
+          {"filesApplied", opened && files_applied_}};
+}
+Json Session::LockSnapshot() const {
+  auto value = *lock_state_.load();
+  if (value.at("state") == "unlocked" && !authorization.Stamp())
+    value["state"] = "unlocking";
+  return value;
 }
 Result<void> Session::Initialize() {
   RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(config.directory));
@@ -342,7 +392,8 @@ Result<Json> Session::Snapshot(bool output_diagnostics) {
   RK_ASSIGN_OR_RETURN(snapshot, views.Snapshot(output_diagnostics));
   snapshot["browserRestart"] = browser.RestartState();
   auto blockers = files.StopBlockers();
-  blockers["unacknowledgedClosedEvents"] = snapshot["events"].size();
+  RK_ASSIGN_OR_RETURN(events, store.Events().State());
+  blockers["unacknowledgedEvents"] = events.at("pending");
   blockers["pendingPageRequests"] = 0;
   blockers["downloadsInProgress"] = snapshot["downloadsInProgress"];
   blockers["pendingDownloadImports"] = views.PendingDownloads();
@@ -360,45 +411,6 @@ Result<Json> Session::Snapshot(bool output_diagnostics) {
   }
   snapshot["stopBlockers"] = std::move(blockers);
   return snapshot;
-}
-Result<Json> Session::ReadLog(const Json& request) const {
-  const auto name = Required(request, "log");
-  fs::path path;
-  if (name == "browser")
-    path = config.options.node_root / "logs/browser" / (config.id + ".log");
-  else if (name == "endpoint")
-    path = config.options.node_root / "logs" / "endpoint.log";
-  else if (name == "endpoint.1")
-    path = config.options.node_root / "logs" / "endpoint.log.1";
-  else if (name == "crashes")
-    path = config.options.node_root / "logs/crashes" / config.id / "events.jsonl";
-  else if (name.starts_with("dump/")) {
-    for (const auto& dump : RecentCrashDumps(config.options.node_root / "logs/crashes" / config.id))
-      if (name == "dump/" + Utf8(dump.filename()))
-        path = dump;
-    if (path.empty())
-      return Error{ErrorCode::kNotFound, "crash dump not found"};
-  } else
-    return Error{ErrorCode::kInvalidRequest, "unknown log"};
-  if (!request.contains("maxBytes"))
-    return Error{ErrorCode::kInvalidRequest, "invalid log window"};
-  const auto& max = request.at("maxBytes");
-  const auto* end = request.contains("end") ? &request.at("end") : nullptr;
-  if (!max.is_number_unsigned() || (end && !end->is_number_unsigned()))
-    return Error{ErrorCode::kInvalidRequest, "invalid log window"};
-  auto window = ReadLogWindow(path, end ? std::optional(end->get<uint64_t>()) : std::nullopt,
-                              max.get<uint64_t>());
-  if (window && name == "crashes") {
-    window.value()["dumps"] = Json::array();
-    for (const auto& dump :
-         RecentCrashDumps(config.options.node_root / "logs/crashes" / config.id)) {
-      std::error_code error;
-      const auto size = fs::file_size(dump, error);
-      if (!error)
-        window.value()["dumps"].push_back({{"name", Utf8(dump.filename())}, {"size", size}});
-    }
-  }
-  return window;
 }
 Result<void> Session::MarkStopped() {
   RK_RETURN_IF_ERROR(checkpoint_cache.Flush());
@@ -431,6 +443,9 @@ Result<Json> Session::StopAndCommit(const Json& request_id,
   }
   auto save = [&]() -> Result<Json> {
     RK_RETURN_IF_ERROR(Shutdown());
+    RK_ASSIGN_OR_RETURN(events, store.Events().State());
+    if (check_blockers && events.at("pending") != 0)
+      return Error{ErrorCode::kBusy, "stop waiting for final event acknowledgments"};
     files.Stop();
     if (!request_id.is_null() && PhaseClock::now() < deadline) {
       RK_RETURN_IF_ERROR(files.PrepareCheckpoint());
@@ -463,6 +478,8 @@ Result<Json> Session::StopAndCommit(const Json& request_id,
     auto saved = save();
     if (!saved) {
       auto error = saved.error();
+      if (error.code == ErrorCode::kBusy)
+        return error;
       error.code = ErrorCode::kOutcomeUnknown;
       error.retry_after_ms.reset();
       return error;

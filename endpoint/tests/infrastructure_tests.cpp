@@ -1,3 +1,4 @@
+#include "coordination_fixture.hpp"
 #include "runtime_config_fixture.hpp"
 #include "cluster/noise.hpp"
 #include "management/link.hpp"
@@ -215,170 +216,68 @@ void ProcessOwnership() {
 }
 class FixtureLink final : public ManagementLink {
  public:
-  sqlite::Database database;
-  std::unique_ptr<sqlite::Transaction> blocked;
-  fs::path directory;
-  std::string checkpoint;
-  std::mutex replies_mutex;
-  std::vector<Json> replies;
+  std::vector<Json> requests, replies, events;
+  std::mutex mutex;
   size_t index = 0;
-  bool fail_json = false;
-  explicit FixtureLink(fs::path path, std::string manifest)
-      : directory(std::move(path)), checkpoint(std::move(manifest)) {}
+  std::optional<ReadyState> ReadyConfiguration() override {
+    return ReadyState{7,
+                      {{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                       {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
+                      "connection"};
+  }
   bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
-    static const std::vector<Json> requests{
-        {{"id", 100}, {"method", "session.snapshot"}, {"tenantId", "tenant"}},
-        {{"id", 101},
-         {"method", "session.open"},
-         {"tenantId", "tenant"},
-         {"sessionId", "bad"},
-         {"placementEpoch", 1},
-         {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
-        {{"id", 103},
-         {"method", "session.open"},
-         {"tenantId", "tenant"},
-         {"sessionId", "0123456789abcdef0123456789abcdef"},
-         {"placementEpoch", 1},
-         {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
-        {{"id", 104},
-         {"method", "session.open"},
-         {"tenantId", "tenant"},
-         {"sessionId", "0123456789abcdef0123456789abcdef"},
-         {"placementEpoch", 1},
-         {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
-        {{"id", 105},
-         {"method", "session.open"},
-         {"tenantId", "tenant"},
-         {"sessionId", "0123456789abcdef0123456789abcdef"},
-         {"placementEpoch", 1},
-         {"profileKey", "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="}},
-        {{"id", 106},
-         {"method", "session.open"},
-         {"tenantId", "tenant"},
-         {"sessionId", "0123456789abcdef0123456789abcdef"},
-         {"placementEpoch", 2},
-         {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
-        {{"id", 107},
-         {"method", "session.open"},
-         {"tenantId", "tenant"},
-         {"sessionId", "1123456789abcdef0123456789abcdef"},
-         {"placementEpoch", 1},
-         {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
-        {{"id", 108},
-         {"method", "session.open"},
-         {"tenantId", "other"},
-         {"sessionId", "0123456789abcdef0123456789abcdef"},
-         {"placementEpoch", 1},
-         {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
-        {{"id", 0}, {"method", "unknown"}, {"tenantId", "new-tenant"}},
-        {{"id", 1}, {"method", "session.snapshot"}, {"tenantId", "tenant"}},
-        {{"id", 2}, {"method", "session.events.ack"}, {"tenantId", "tenant"}, {"eventIds", {"1"}}},
-        {{"id", 3}, {"method", "session.snapshot"}, {"tenantId", "tenant"}},
-        {{"id", 4}, {"method", "session.events.ack"}, {"tenantId", "tenant"}, {"eventIds", {"1"}}},
-        {{"id", 5}, {"method", "session.snapshot"}, {"tenantId", "tenant"}},
-        {{"id", 200}, {"method", "session.mediaPolicy"}, {"tenantId", "tenant"}, {"audio", true}},
-        {{"id", 201}, {"method", "view.appInfo"}, {"tenantId", "tenant"}},
-        {{"id", 202}, {"method", "view.appInfo"}, {"tenantId", "tenant"}, {"viewId", "01"}},
-        {{"id", 203}, {"method", "session.events.ack"}, {"tenantId", "tenant"}},
-        {{"id", 204},
-         {"method", "session.snapshot"},
-         {"tenantId", "tenant"},
-         {"outputDiagnostics", nullptr}},
-        {{"id", 205}, {"method", "session.logs.read"}, {"tenantId", "tenant"}, {"log", "browser"}},
-        {{"id", 206}, {"method", "rtc.close"}, {"tenantId", "tenant"}, {"connectionId", nullptr}},
-        {{"id", 207}, {"method", "session.files.authorize"}, {"tenantId", "tenant"}},
-        {{"id", 208}, {"method", "rtc.authorize"}, {"tenantId", "tenant"}, {"unlocked", nullptr}},
-        {{"id", 209},
-         {"method", "rtc.ice"},
-         {"tenantId", "tenant"},
-         {"connectionId", "connection"}},
-        {{"id", 210}, {"method", "object.put.cancel"}, {"tenantId", ""}, {"putId", nullptr}},
-        {{"id", 211}, {"method", "session.library.describe"}, {"tenantId", "tenant"}},
-        {{"id", 109},
-         {"method", "session.open"},
-         {"tenantId", "json-failure"},
-         {"sessionId", "2123456789abcdef0123456789abcdef"},
-         {"placementEpoch", 2},
-         {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
-        {{"id", 6}, {"method", "shutdown"}}};
+    generation = 7;
     eof = index == requests.size();
     if (eof)
       return false;
-    if (requests[index]["id"] == 2) {
-      Check(bool(database.Open(directory / "sessions/0123456789abcdef0123456789abcdef/session.db")),
-            "open writer");
-      blocked = std::make_unique<sqlite::Transaction>(database);
-      Check(bool(blocked->Begin()), "hold writer");
-    }
-    if (requests[index]["id"] == 4)
-      blocked.reset();
-    generation = 7;
-    auto request = requests[index++];
-    fail_json = request["id"] == 109;
-    if (request.value("method", std::string()) == "session.open") {
-      request["checkpoint"] = checkpoint;
-      request["placementEpoch"] = request["id"] == 106 ? 1 : 2;
-    }
+    auto request = requests[index];
+    request["id"] = index++;
     bytes = request.dump();
     return true;
   }
   bool Current(uint64_t generation) override { return generation == 7; }
-  bool SendReply(uint64_t generation, const Json& reply) override {
-    Check(generation == 7, "request link generation");
-    std::lock_guard lock(replies_mutex);
+  bool SendReply(uint64_t, const Json& reply) override {
+    std::lock_guard lock(mutex);
     replies.push_back(reply);
     return true;
   }
-  bool SendEvent(const Json&, uint64_t, remotekit::DeliveryFlag delivery = {}) override {
-    if (delivery)
-      delivery->MarkWritten();
+  bool SendEvent(const Json& event, uint64_t, DeliveryFlag = {}) override {
+    std::lock_guard lock(mutex);
+    events.push_back(event);
     return true;
   }
   void OnDisconnect(Disconnect) override {}
-  Result<Json> Request(const std::string& method, Json fields) override {
-    if (fail_json)
-      return Json::object().at("missing");
-    if (method == "object.committed.batch")
-      return Json{{"ok", true}};
-    Check(method == "object.locate" && fields["tenantId"] == "tenant" &&
-              fields["ids"] == Json::array({checkpoint}),
-          "warm restore authorization");
-    return Json{{"sources", {{checkpoint, Json::array()}}}};
-  }
+  Result<Json> Request(const std::string&, Json) override { return Json::object(); }
 };
 void ManagementDispatch() {
   TemporaryDirectory directory;
-  objects::ObjectStore objects(directory.path / "data");
-  std::istringstream content(Json{
-      {"version", 2}, {"buildId", "dev"}, {"files", Json::array()}, {"directories", Json::array()}}
-                                 .dump());
-  const auto object = objects.Write(objects::Keys{}, content);
-  Check(bool(object), "warm manifest object");
-  const auto checkpoint = object.value().id;
-  const auto session_directory = directory.path / "data/sessions/0123456789abcdef0123456789abcdef";
-  Check(bool(Checkpoints::WriteCopy(session_directory,
-                                    {{"sessionId", "0123456789abcdef0123456789abcdef"},
-                                     {"placementEpoch", uint64_t(2)},
-                                     {"base", checkpoint},
-                                     {"state", "dirty"},
-                                     {"stoppedCleanly", true},
-                                     {"changesAt", 0},
-                                     {"lastCommit", nullptr}})),
-        "dirty copy fixture");
-  Check(bool(WriteDurableJson(
-            directory.path / "data/sessions/0123456789abcdef0123456789abcdef/events.json",
-            {{"next", 2},
-             {"events", Json::array({{{"eventId", "1"},
-                                      {"type", "view.closed"},
-                                      {"viewId", "1"},
-                                      {"reason", "closed"}}})}})),
-        "event fixture");
-  auto config = TestConfig();
-  auto parsed = RuntimeOptions::FromConfig(config, directory.path, "dev", "test");
+  auto parsed = RuntimeOptions::FromConfig(TestConfig(), directory.path, "dev", "test");
   Check(bool(parsed), "fixture options");
-  FixtureLink link(directory.path / "data", checkpoint);
+  FixtureLink link;
+  auto desired = test::Desired();
+  auto conflict = desired;
+  conflict["profileKey"] = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+  auto stale = desired;
+  stale["placementEpoch"] = 2;
+  auto invalid = desired;
+  invalid["run"] = "running";
+  invalid["commit"] = "invalid";
+  auto logs = test::Rpc("session.logs.read", {{"log", "browser"}, {"maxBytes", 128}}, "log-read");
+  auto replay = logs;
+  replay["replay"] = true;
+  auto unknown = logs;
+  unknown["opId"] = "evicted";
+  unknown["replay"] = true;
+  link.requests = {test::NodeDesired(Json::array({test::Placement()})),
+                   desired,
+                   conflict,
+                   stale,
+                   invalid,
+                   logs,
+                   replay,
+                   unknown};
   media::Sdk sdk;
-  Service service(sdk, parsed.value(), link, cluster::Key{});
+  Service service(sdk, parsed.value(), link, {}, "endpoint");
   Check(service.Run() == 0, "management dispatch");
   auto reply = [&](int id) -> Json {
     for (const auto& value : link.replies)
@@ -386,40 +285,14 @@ void ManagementDispatch() {
         return value;
     throw std::logic_error("missing reply");
   };
-  Check(reply(100)["error"]["code"] == "not_found", "unopened tenant");
-  Check(reply(101)["error"]["code"] == "invalid_request", "invalid session ID");
-  Check(reply(103)["ok"] && reply(104)["ok"], "idempotent session.open");
-  for (int id : {105, 106, 107, 108})
-    Check(reply(id)["error"]["code"] == "conflict", "placement/key/identity conflict");
-  Check(reply(0)["error"]["code"] == "invalid_request", "unknown method error code");
-  Check(reply(1)["result"]["events"].size() == 1, "event loaded");
-  Check(reply(2)["error"]["code"] == "busy", "failed acknowledgement reports persistence failure");
-  Check(reply(3)["result"]["events"].size() == 1, "failed acknowledgement preserves memory");
-  Check(reply(5)["result"]["events"].empty(), "acknowledged events removed");
-  const std::vector<std::pair<int, std::string>> invalid_requests{
-      {200, "invalid media policy maxFps"},
-      {201, "required string: viewId"},
-      {202, "viewId must be nonzero uint64 decimal"},
-      {203, "invalid event ids"},
-      {204, "outputDiagnostics boolean required"},
-      {205, "invalid log window"},
-      {206, "required string: connectionId"},
-      {207, "invalid_file_authorization_count"},
-      {208, "unlocked boolean required"},
-      {209, "Malformed ICE candidate"},
-      {210, "required string: putId"},
-      {211, "required string: assetId"}};
-  for (const auto& [id, message] : invalid_requests)
-    Check(
-        reply(id)["error"]["code"] == "invalid_request" && reply(id)["error"]["message"] == message,
-        "malformed management arguments retain their validation error");
-  Check(reply(109)["error"]["code"] == "internal" &&
-            reply(109)["error"]["message"] == "Unexpected JSON failure in session.open",
-        "unexpected JSON failure identifies the method");
-  SessionDb persisted(directory.path / "data/sessions/0123456789abcdef0123456789abcdef");
-  Check(bool(persisted.Open()) && persisted.Views().Events().value().empty(),
-        "acknowledgement committed");
-  Check(!fs::exists(directory.path / "data/sessions.json"), "no numeric registry");
+  Check(reply(0)["ok"] && reply(1)["ok"], "fence and desired acceptance");
+  Check(reply(2)["error"]["code"] == "conflict" && reply(3)["error"]["code"] == "conflict",
+        "revision and placement conflicts");
+  Check(reply(4)["error"]["code"] == "invalid_request", "running commit rejected");
+  Check(reply(5)["ok"] && reply(6)["result"] == reply(5)["result"], "target-bound RPC replay");
+  Check(reply(7)["error"]["code"] == "outcome_unknown", "missing replay never executes");
+  Check(!link.events.empty() && link.events[0]["event"] == "session.observed",
+        "initial observed replaces copy report");
 }
 }  // namespace
 int main(int argc, char** argv) {

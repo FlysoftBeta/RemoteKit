@@ -78,20 +78,14 @@ int main() {
           "retired file work returns an operational error");
     auto snapshot = session.Views().Snapshot();
     Check(bool(snapshot) && !snapshot.value().at("running").get<bool>() &&
-              snapshot.value().at("events").size() == 1 &&
+              session.PendingEvents().value().size() == 1 &&
               snapshot.value().at("stats").at("audio").at("submitted") == 0,
           "inactive diagnostics assemble controller snapshots without launching browser");
-    const auto desired = session.Views().Desired("2");
-    auto configured = session.Views().ApplyView(
-        {{"viewId", "2"}, {"visible", true}, {"width", 800}, {"height", 600}}, false);
-    Check(!configured && configured.error().code == ErrorCode::kUnavailable &&
-              session.Views().Desired("2") == desired && session.Views().ReconciliationPending(),
-          "failed output configuration preserves desired views and schedules reconciliation");
     Check(bool(session.Stop()) && bool(session.Stop()), "shutdown is idempotent");
   }
   SessionDb store(session_directory);
   Check(bool(store.Open()), "reopen store");
   const auto saved = store.Views().Load().value();
-  Check(saved.size() == 1 && saved.at(0).at("viewId") == "2",
+  Check(saved.size() == 2 && store.Views().Retired().value() == Json::array({"1"}),
         "close reconciliation is durable across composition shutdown");
 }

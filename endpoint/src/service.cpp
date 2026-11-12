@@ -1,22 +1,23 @@
-#include "util/log.hpp"
 #include "service.hpp"
-#include "diagnostics/log_files.hpp"
-#include "util/wire_error.hpp"
-#include "management/methods.hpp"
-#include "session/session.hpp"
 #include "cluster/node_files.hpp"
+#include "diagnostics/log_files.hpp"
+#include "management/coordination.hpp"
 #include "persistence/checkpoint.hpp"
+#include "util/log.hpp"
 #include "util/result_macros.hpp"
-#include <fstream>
+#include "util/wire_error.hpp"
 #include <future>
+
 namespace remotekit {
 Service::Service(media::Sdk& sdk,
                  const RuntimeOptions& options,
                  ManagementLink& link,
-                 const cluster::Key& cluster_key)
+                 const cluster::Key& cluster_key,
+                 std::string incarnation)
     : sdk_(sdk),
       options_(options),
       link_(link),
+      incarnation_(std::move(incarnation)),
       objects_(options.data, link, cluster_key, options.node_id, options.build_id),
       metrics_(options.data) {
   link_.OnPeers([this](const Json& peers) { return objects_.SetPeers(peers); });
@@ -26,8 +27,8 @@ Service::Service(media::Sdk& sdk,
   link_.OnDisconnect([this](uint64_t generation) {
     objects_.CancelPuts();
     std::lock_guard lock(mutex_);
-    for (auto& [tenant, session] : sessions_)
-      session->ManagementLost(generation);
+    for (auto& [tenant, managed] : sessions_)
+      managed.coordinator->ManagementLost(generation);
   });
 }
 Service::~Service() {
@@ -43,250 +44,131 @@ Service::~Service() {
 Result<void> Service::Clear() {
   const auto deadline = PhaseClock::now() + std::chrono::seconds(60);
   objects_.CommitDeadline(deadline);
-  std::vector<std::future<void>> stopping;
-  for (auto& [tenant, session] : sessions_) {
-    stopping.push_back(std::async(std::launch::async, [&session, this] {
-      auto stopped = failed_ ? session->Stop() : session->Shutdown();
-      if (!stopped)
-        LogError(LogLevel::kWarn, "session.shutdown_failed", stopped.error());
-    }));
-  }
-  for (auto& task : stopping)
-    task.get();
-  for (auto& [tenant, session] : sessions_) {
-    const auto request = "node-" + std::to_string(GetCurrentProcessId()) + "-" +
-                         std::to_string(QpcNow()) + "-" + session->Id();
-    auto stopped = session->StopAndCommit(failed_ ? Json() : Json(request), false, deadline,
-                                          !link_.Current(fenced_generation_));
-    if (!stopped)
-      LogError(LogLevel::kWarn, "session.shutdown_commit_failed", stopped.error());
-  }
   decltype(sessions_) closing;
   {
     std::lock_guard lock(mutex_);
     closing.swap(sessions_);
     session_count_ = 0;
   }
+  std::vector<std::future<void>> stopping;
+  for (auto& [tenant, managed] : closing) {
+    managed.coordinator->ManagementLost(0);
+    stopping.push_back(std::async(std::launch::async, [this, managed, deadline] {
+      auto stopped = managed.coordinator->Execute([&]() -> Result<Json> {
+        const auto commit = "node-" + incarnation_ + "-" + managed.execution->Id();
+        return managed.execution->Stop(failed_ ? Json() : Json(commit), false, deadline,
+                                       !link_.Current(fenced_generation_));
+      });
+      if (!stopped)
+        LogError(LogLevel::kWarn, "session.shutdown_commit_failed", stopped.error());
+    }));
+  }
+  for (auto& task : stopping)
+    task.get();
   return {};
 }
 Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
-  if (!request.is_object() || !request.contains("method") || !request["method"].is_string())
+  if (!request.is_object() || !request.value("method", Json()).is_string())
     return Error{ErrorCode::kInvalidRequest, "invalid request envelope"};
   const auto method = request["method"].get<std::string>();
-  if (method == "node.logs.search")
-    return SearchErrorLogs(options_.node_root, Required(request, "errorId"));
-  if (method == "shutdown") {
-    auto closed = Clear();
-    if (!closed)
-      return closed.error();
-    return Json{{"closed", true}};
+  if (method == "node.desired") {
+    RK_RETURN_IF_ERROR(Fence(request, generation));
+    return Json{{"accepted", true}, {"revision", request["revision"]}};
   }
-  if (method == "object.render" || method == "object.derivation" || method == "object.fetch" ||
-      method == "object.delete" || method == "object.inventory" ||
-      method.starts_with("object.put."))
-    return objects_.Dispatch(request);
-  if (method == "session.cold.delete") {
-    if (request.value("tenantId", Json()) != "")
-      return Error{ErrorCode::kInvalidRequest, "session.cold.delete requires empty tenantId"};
-    return DeleteCold(false);
-  }
-  if (method == "session.delete") {
-    if (request.value("tenantId", Json()) != "" || !request.contains("sessionId") ||
-        !request["sessionId"].is_string())
-      return Error{ErrorCode::kInvalidRequest, "invalid session.delete"};
-    return DeleteSession(request["sessionId"].get<std::string>());
-  }
-  const auto handler = ManagementMethods::Find(method);
-  if (!handler && method != "session.stop")
-    return Error{ErrorCode::kInvalidRequest, "unknown endpoint method: " + method};
-  if (!request.contains("tenantId") || !request["tenantId"].is_string())
-    return Error{ErrorCode::kInvalidRequest, "required string: tenantId"};
-  const auto tenant = request["tenantId"].get<std::string>();
-  if (!objects::ValidTenant(tenant))
-    return Error{ErrorCode::kInvalidRequest, "invalid tenant identity"};
-  if (method == "session.open") {
-    if (!request.contains("sessionId") || !request["sessionId"].is_string() ||
-        !request.contains("placementEpoch") || !request["placementEpoch"].is_number_integer() ||
-        request["placementEpoch"].get<int64_t>() <= 0 || !request.contains("profileKey") ||
-        !request["profileKey"].is_string() || !request.contains("checkpoint") ||
-        (!request["checkpoint"].is_null() &&
-         (!request["checkpoint"].is_string() ||
-          !objects::ValidId(request["checkpoint"].get<std::string>()))))
-      return Error{ErrorCode::kInvalidRequest, "invalid session.open"};
-    const auto id = request["sessionId"].get<std::string>();
-    if (id.size() != 32 || !std::all_of(id.begin(), id.end(), [](char c) {
-          return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-        }))
-      return Error{ErrorCode::kInvalidRequest, "invalid sessionId"};
-    auto key = cluster::DecodeKey(request["profileKey"].get<std::string>());
-    if (!key)
-      return key.error();
-    struct ClearKey {
-      cluster::Key& key;
-      ~ClearKey() { SecureZeroMemory(key.data(), key.size()); }
-    } clear_key{key.value()};
-    const auto epoch = request["placementEpoch"].get<uint64_t>();
-    const auto directory = options_.data / "sessions" / id;
-    RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory));
-    if (!copy.is_null() && copy["placementEpoch"].get<uint64_t>() > epoch)
-      return Error{ErrorCode::kConflict, "session placement is fenced"};
-    for (const auto& placement : placements_)
-      if (placement["tenantId"] == tenant &&
-          (placement["placementEpoch"].get<uint64_t>() > epoch ||
-           (placement["placementEpoch"] == epoch && placement["sessionId"] != id)))
-        return Error{ErrorCode::kConflict, "session placement is fenced"};
-    if (sessions_.contains(tenant) && epoch > sessions_.at(tenant)->PlacementEpoch()) {
-      RK_RETURN_IF_ERROR(sessions_.at(tenant)->Stop());
+  if (generation != fenced_generation_ || !link_.Current(generation))
+    return Error{ErrorCode::kUnavailable, "node fencing is not established"};
+  const auto tenant = request.value("tenantId", std::string());
+  const bool node_rpc = method == "node.logs.search" || method == "shutdown" ||
+                        method.starts_with("object.") || method == "session.cold.delete" ||
+                        method == "session.delete";
+  if (node_rpc) {
+    if (request.value("endpointIncarnation", Json()) != incarnation_ ||
+        !request.value("params", Json()).is_object())
+      return Error{ErrorCode::kConflict, "RPC Endpoint target is retired"};
+    std::shared_ptr<RpcResults> results;
+    {
       std::lock_guard lock(mutex_);
-      sessions_.erase(tenant);
-      session_count_ = sessions_.size();
+      auto& cache = node_results_[tenant];
+      if (!cache)
+        cache = std::make_shared<RpcResults>();
+      results = cache;
     }
-    if (!sessions_.contains(tenant)) {
-      for (const auto& [other_tenant, session] : sessions_)
-        if (session->Id() == id)
-          return Error{ErrorCode::kConflict, "sessionId is already open"};
-      auto access = std::make_shared<objects::SessionObjects>(objects_, tenant);
-      auto phases = RestorePhases();
-      phases["event"] = "session.open.timing";
-      phases["tenantId"] = tenant;
-      const auto restore_start = PhaseClock::now();
-      phases["startedQpc"] = QpcNow();
-      const bool reuse = Checkpoints::ReuseCopy(copy, epoch, request["checkpoint"]);
-      if (reuse) {
-        phases["mode"] = "reuse";
-      } else {
-        if (!copy.is_null() && request["checkpoint"].is_null())
-          return Error{ErrorCode::kConflict, "Session copy base differs from requested checkpoint"};
-        RK_RETURN_IF_ERROR(Checkpoints(objects_, access, &phases)
-                               .Restore(directory, tenant, request["checkpoint"]));
-        copy = {{"sessionId", id},      {"placementEpoch", epoch}, {"base", request["checkpoint"]},
-                {"state", "clean"},     {"stoppedCleanly", true},  {"changesAt", 0},
-                {"lastCommit", nullptr}};
-        RK_RETURN_IF_ERROR(Checkpoints::WriteCopy(directory, copy));
-        RK_RETURN_IF_ERROR(Checkpoints::TruncateChanges(directory));
+    return results->Execute(request, [&]() -> Result<Json> {
+      auto params = request["params"];
+      params["tenantId"] = tenant;
+      params["method"] = method;
+      if (method == "node.logs.search")
+        return SearchErrorLogs(options_.node_root, Required(params, "errorId"));
+      if (method == "shutdown") {
+        RK_RETURN_IF_ERROR(Clear());
+        return Json{{"closed", true}};
       }
-      auto session = std::make_unique<Session>(sdk_, options_, tenant, id,
-                                               request["placementEpoch"].get<uint64_t>(),
-                                               key.value(), link_, objects_, access);
-      const auto initialize_start = PhaseClock::now();
-      auto initialized = session->Initialize();
-      if (!initialized)
-        return initialized.error();
-      phases["initialization"] = PhaseMs(initialize_start);
-      phases["restoreTotal"] = PhaseMs(restore_start);
-      session->SetOpenTiming(std::move(phases));
-      {
-        std::lock_guard lock(mutex_);
-        sessions_.emplace(tenant, std::move(session));
-        session_count_ = sessions_.size();
-      }
-    }
-    if (sessions_.at(tenant)->PlacementEpoch() == epoch) {
-      sessions_.at(tenant)->BeginManagementRequest(generation);
-      auto identity = sessions_.at(tenant)->Open(request);
-      if (!identity)
-        return identity.error();
-      placements_.erase(
-          std::remove_if(placements_.begin(), placements_.end(),
-                         [&](const Json& placement) { return placement["tenantId"] == tenant; }),
-          placements_.end());
-      placements_.push_back({{"tenantId", tenant}, {"sessionId", id}, {"placementEpoch", epoch}});
-    }
+      if (method.starts_with("object."))
+        return objects_.Dispatch(params);
+      if (!tenant.empty())
+        return Error{ErrorCode::kInvalidRequest, "node deletion requires empty tenantId"};
+      if (method == "session.cold.delete")
+        return DeleteCold(false);
+      return DeleteSession(Required(params, "sessionId"));
+    });
   }
-  if (method == "session.stop") {
-    if (!request.contains("placementEpoch") || !request["placementEpoch"].is_number_integer() ||
-        request["placementEpoch"].get<int64_t>() <= 0 || !request.contains("commit") ||
-        (!request["commit"].is_null() &&
-         (!request["commit"].is_string() || request["commit"].get<std::string>().empty() ||
-          request["commit"].get<std::string>().size() > 128)))
-      return Error{ErrorCode::kInvalidRequest, "invalid session.stop"};
-    const auto placement =
-        std::find_if(placements_.begin(), placements_.end(),
-                     [&](const Json& value) { return value["tenantId"] == tenant; });
-    if (placement == placements_.end() ||
-        (*placement)["placementEpoch"] != request["placementEpoch"])
-      return Error{ErrorCode::kConflict, "stop placement epoch changed"};
-    const auto directory =
-        options_.data / "sessions" / (*placement)["sessionId"].get<std::string>();
-    RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory));
-    if (copy.is_null())
-      return Error{ErrorCode::kNotFound, "Session copy is missing"};
-    if (copy["placementEpoch"] != request["placementEpoch"])
-      return Error{ErrorCode::kConflict, "stop placement epoch changed"};
-    const auto commit = request["commit"];
-    if (!commit.is_null() && !copy["lastCommit"].is_null() &&
-        copy["lastCommit"]["requestId"] == commit) {
-      RK_ASSIGN_OR_RETURN(details,
-                          Checkpoints(objects_).Describe(copy["lastCommit"]["manifestId"]));
-      details.update(
-          {{"state", copy["state"]}, {"base", copy["base"]}, {"committed", copy["lastCommit"]}});
-      return details;
-    }
-    if (!sessions_.contains(tenant)) {
-      if (copy["state"] == "clean" || commit.is_null()) {
-        Json details = Json::object();
-        if (!copy["base"].is_null()) {
-          RK_ASSIGN_OR_RETURN(checkpoint, Checkpoints(objects_).Describe(copy["base"]));
-          details = std::move(checkpoint);
-        }
-        details.update({{"state", copy["state"]}, {"base", copy["base"]}, {"committed", nullptr}});
-        return details;
-      }
-      if (!copy["stoppedCleanly"].get<bool>())
-        return Error{ErrorCode::kConflict, "stop blocked: lifecycleUncertain"};
-      CheckpointCache cache;
-      RK_RETURN_IF_ERROR(cache.Start(directory));
-      cache.Stop();
-      RK_ASSIGN_OR_RETURN(
-          checkpoint,
-          Checkpoints(objects_, {}, nullptr, &cache).Create(directory, tenant, options_.build_id));
-      copy["state"] = "clean";
-      copy["base"] = checkpoint["manifestId"];
-      copy["lastCommit"] = {{"requestId", commit}, {"manifestId", checkpoint["manifestId"]}};
-      RK_RETURN_IF_ERROR(Checkpoints::WriteCopy(directory, copy));
-      RK_RETURN_IF_ERROR(Checkpoints::TruncateChanges(directory));
-      return Json{{"state", "clean"},
-                  {"base", copy["base"]},
-                  {"committed", copy["lastCommit"]},
-                  {"objects", checkpoint["objects"]},
-                  {"buildId", options_.build_id}};
-    }
-    auto& session = *sessions_.at(tenant);
-    session.BeginManagementRequest(generation);
-    auto result = session.StopAndCommit(commit);
-    if (result || result.error().code == ErrorCode::kOutcomeUnknown) {
-      std::lock_guard lock(mutex_);
-      sessions_.erase(tenant);
-      session_count_ = sessions_.size();
-    }
-    return result;
+  std::shared_ptr<SessionCoordinator> coordinator;
+  {
+    std::lock_guard lock(mutex_);
+    const auto found = sessions_.find(tenant);
+    if (found == sessions_.end())
+      return Error{ErrorCode::kConflict, "Session placement is fenced"};
+    coordinator = found->second.coordinator;
   }
-  if (!sessions_.contains(tenant))
-    return Error{ErrorCode::kNotFound, "tenant session is not open"};
-  auto& session = *sessions_.at(tenant);
-  session.BeginManagementRequest(generation);
-  return handler(session, request);
+  if (method == "session.desired")
+    return coordinator->Publish(request, generation);
+  if (method == "session.events.ack")
+    return coordinator->Acknowledge(request, generation);
+  return coordinator->Request(request, generation);
 }
-Result<void> Service::Fence(const ManagementLink::ReadyState& ready) {
-  RK_RETURN_IF_ERROR(objects_.Configure(ready.object_keys));
-  for (auto it = sessions_.begin(); it != sessions_.end();) {
-    const bool current =
-        std::any_of(ready.sessions.begin(), ready.sessions.end(), [&](const Json& p) {
-          return p["tenantId"] == it->first && p["sessionId"] == it->second->Id() &&
-                 p["placementEpoch"] == it->second->PlacementEpoch();
-        });
-    if (current) {
-      ++it;
-      continue;
+Result<void> Service::Fence(const Json& desired, uint64_t generation) {
+  RK_RETURN_IF_ERROR(coordination::ValidateNodeDesired(desired));
+  if (!link_.Current(generation) || desired["connectionEpoch"] != connection_epoch_)
+    return Error{ErrorCode::kConflict, "node.desired connection is stale"};
+  auto document = desired;
+  document.erase("id");
+  if (node_desired_.is_object()) {
+    const auto revision = std::stoull(document["revision"].get<std::string>());
+    const auto previous = std::stoull(node_desired_["revision"].get<std::string>());
+    if (revision < previous || (revision == previous && document != node_desired_))
+      return Error{ErrorCode::kConflict, "node.desired revision conflicts"};
+  }
+  const auto& placements = desired["sessions"];
+  std::vector<ManagedSession> retiring;
+  {
+    std::lock_guard lock(mutex_);
+    for (auto it = sessions_.begin(); it != sessions_.end();) {
+      const auto& target = it->second.coordinator->Target();
+      const bool current =
+          std::any_of(placements.begin(), placements.end(), [&](const Json& value) {
+            return value["tenantId"] == target["tenantId"] &&
+                   value["sessionId"] == target["sessionId"] &&
+                   value["placementEpoch"] == target["placementEpoch"];
+          });
+      if (current) {
+        ++it;
+      } else {
+        it->second.coordinator->ManagementLost(0);
+        retiring.push_back(it->second);
+        it = sessions_.erase(it);
+      }
     }
-    RK_RETURN_IF_ERROR(it->second->Stop());
-    const auto directory = options_.data / "sessions" / it->second->Id();
+  }
+  for (auto& managed : retiring) {
+    RK_ASSIGN_OR_RETURN(stopped, managed.coordinator->Execute([&]() -> Result<Json> {
+      RK_RETURN_IF_ERROR(managed.execution->Fence());
+      return Json::object();
+    }));
+    const auto directory = options_.data / "sessions" / managed.execution->Id();
     if (fs::exists(directory))
       fs::last_write_time(directory, fs::file_time_type::clock::now());
-    std::lock_guard lock(mutex_);
-    it = sessions_.erase(it);
-    session_count_ = sessions_.size();
   }
+  retiring.clear();
   const auto root = options_.data / "sessions";
   fs::create_directories(root);
   for (const auto& entry : fs::directory_iterator(root)) {
@@ -294,86 +176,89 @@ Result<void> Service::Fence(const ManagementLink::ReadyState& ready) {
     if (name.size() != 42 || !name.ends_with(".copy.json"))
       continue;
     const auto id = name.substr(0, 32);
-    if (std::none_of(ready.sessions.begin(), ready.sessions.end(),
-                     [&](const Json& p) { return p["sessionId"] == id; }))
+    if (std::none_of(placements.begin(), placements.end(),
+                     [&](const Json& value) { return value["sessionId"] == id; }))
       fs::remove(entry.path());
   }
-  for (const auto& placement : ready.sessions) {
-    const auto directory = options_.data / "sessions" / placement["sessionId"].get<std::string>();
+  for (const auto& placement : placements) {
+    const auto directory = root / placement["sessionId"].get<std::string>();
     RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory));
     if (!copy.is_null() &&
         copy["placementEpoch"].get<uint64_t>() < placement["placementEpoch"].get<uint64_t>() &&
-        placement.at("dataState") == "clean") {
+        placement["dataState"] == "clean") {
       fs::remove_all(LongPath(directory));
       fs::remove(LongPath(directory).wstring() + L".copy.json");
       fs::remove(LongPath(directory).wstring() + L".checkpoint-index.json");
       RK_RETURN_IF_ERROR(Checkpoints::TruncateChanges(directory));
+      copy = nullptr;
     }
-  }
-  for (const auto& placement : ready.sessions) {
-    const auto directory = options_.data / "sessions" / placement["sessionId"].get<std::string>();
-    RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory));
-    if (copy.is_null())
-      continue;
-    if (copy["placementEpoch"] != placement["placementEpoch"])
-      continue;
-    Json entry = placement;
-    entry["copy"] = {
-        {"state", copy["state"]}, {"base", copy["base"]}, {"lastCommit", copy["lastCommit"]}};
-    if (copy["state"] == "clean" && !copy["lastCommit"].is_null()) {
+    if (!copy.is_null() && copy["placementEpoch"] == placement["placementEpoch"] &&
+        copy["state"] == "clean" && !copy["lastCommit"].is_null() &&
+        placement["dataState"] == "dirty") {
       RK_ASSIGN_OR_RETURN(details, Checkpoints(objects_).Describe(copy["base"]));
-      if (placement.at("dataState") == "dirty") {
-        std::vector<objects::ObjectInfo> pending;
-        for (const auto& id : details["objects"]) {
-          auto local = objects_.Store().Inspect(id.get<std::string>());
-          if (local)
-            pending.push_back(std::move(local).value());
-        }
-        RK_RETURN_IF_ERROR(
-            objects_.CommittedBatch(pending, placement["tenantId"].get<std::string>()));
+      std::vector<objects::ObjectInfo> pending;
+      for (const auto& id : details["objects"]) {
+        auto local = objects_.Store().Inspect(id.get<std::string>());
+        if (local)
+          pending.push_back(std::move(local).value());
       }
-      entry["checkpoint"] = details;
+      RK_RETURN_IF_ERROR(
+          objects_.CommittedBatch(pending, placement["tenantId"].get<std::string>()));
     }
-    if (!link_.SendEvent(
-            {{"event", "node.ready"}, {"sessions", Json::array({entry})}, {"complete", false}},
-            ready.generation))
-      return Error{ErrorCode::kUnavailable, "Session copy report was not queued"};
+    const auto tenant = placement["tenantId"].get<std::string>();
+    ManagedSession managed;
+    {
+      std::lock_guard lock(mutex_);
+      auto& entry = sessions_[tenant];
+      if (!entry.coordinator) {
+        auto target = placement;
+        target.erase("dataState");
+        entry.execution =
+            std::make_shared<SessionExecution>(sdk_, options_, link_, objects_, target);
+        entry.coordinator =
+            std::make_shared<SessionCoordinator>(target, incarnation_, entry.execution->Hooks());
+      }
+      managed = entry;
+    }
+    managed.execution->Activate(connection_epoch_, generation);
+    managed.coordinator->Activate(connection_epoch_, desired["revision"], generation);
+    RK_ASSIGN_OR_RETURN(observation, managed.coordinator->Report());
   }
-  if (!link_.SendEvent({{"event", "node.ready"}, {"sessions", Json::array()}, {"complete", true}},
-                       ready.generation))
-    return Error{ErrorCode::kUnavailable, "Session copy report was not queued"};
-  placements_ = ready.sessions;
-  fenced_generation_ = ready.generation;
-  metrics_generation_ = ready.generation;
+  node_desired_ = std::move(document);
+  placements_ = placements;
+  fenced_generation_ = generation;
   return {};
 }
-// A deleted Tenant's Session is stopped without a checkpoint and every local copy is removed.
 Result<Json> Service::DeleteSession(const std::string& id) {
-  if (id.size() != 32 || !std::all_of(id.begin(), id.end(), [](char c) {
-        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-      }))
+  if (!coordination::Hex(Json(id), 32))
     return Error{ErrorCode::kInvalidRequest, "invalid sessionId"};
-  bool stopped = false;
-  for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-    if (it->second->Id() != id)
-      continue;
-    RK_RETURN_IF_ERROR(it->second->Stop());
+  ManagedSession retiring;
+  {
     std::lock_guard lock(mutex_);
-    sessions_.erase(it);
-    session_count_ = sessions_.size();
-    stopped = true;
-    break;
+    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+      if (it->second.execution->Id() == id) {
+        retiring = it->second;
+        sessions_.erase(it);
+        break;
+      }
+    }
+  }
+  if (retiring.coordinator) {
+    retiring.coordinator->ManagementLost(0);
+    RK_ASSIGN_OR_RETURN(stopped, retiring.coordinator->Execute([&]() -> Result<Json> {
+      RK_RETURN_IF_ERROR(retiring.execution->Fence());
+      return Json::object();
+    }));
   }
   placements_.erase(std::remove_if(placements_.begin(), placements_.end(),
                                    [&](const Json& p) { return p["sessionId"] == id; }),
                     placements_.end());
-  const auto root = options_.data / "sessions";
   for (const auto* suffix :
        {"", ".copy.json", ".copy.json.new", ".changes", ".checkpoint-index.json",
         ".checkpoint-index.json.new", ".restore", ".discard"})
-    fs::remove_all(root / (id + suffix));
+    fs::remove_all(options_.data / "sessions" / (id + suffix));
   RK_RETURN_IF_ERROR(DeleteSessionLogs(options_.node_root, id));
-  return Json{{"stopped", stopped}};
+  return Json{{"stopped", bool(retiring.coordinator)}};
 }
 Result<Json> Service::DeleteCold(bool expired_only) {
   const auto root = options_.data / "sessions";
@@ -382,26 +267,16 @@ Result<Json> Service::DeleteCold(bool expired_only) {
   std::set<std::string> ids;
   for (const auto& entry : fs::directory_iterator(root)) {
     const auto name = entry.path().filename().string();
-    if (name.size() >= 32) {
-      const auto id = name.substr(0, 32);
-      if (std::all_of(id.begin(), id.end(),
-                      [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }) &&
-          (name.size() == 32 || name.substr(32) == ".copy.json" || name.substr(32) == ".changes" ||
-           name.substr(32) == ".copy.json.new" || name.substr(32) == ".checkpoint-index.json" ||
-           name.substr(32) == ".checkpoint-index.json.new" || name.substr(32) == ".restore" ||
-           name.substr(32) == ".discard"))
-        ids.insert(id);
-    }
+    if (name.size() >= 32 && coordination::Hex(Json(name.substr(0, 32)), 32))
+      ids.insert(name.substr(0, 32));
   }
   for (const auto& id : ids) {
-    if (std::any_of(sessions_.begin(), sessions_.end(),
-                    [&](const auto& item) { return item.second->Id() == id; }))
+    if (std::any_of(placements_.begin(), placements_.end(),
+                    [&](const Json& p) { return p["sessionId"] == id; }))
       continue;
     const auto directory = root / id;
     RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory));
-    const bool placed = std::any_of(placements_.begin(), placements_.end(),
-                                    [&](const Json& p) { return p["sessionId"] == id; });
-    if (placed || (expired_only && !copy.is_null() && copy["state"] == "dirty"))
+    if (expired_only && !copy.is_null() && copy["state"] == "dirty")
       continue;
     const fs::path timestamp =
         fs::exists(directory) ? directory : fs::path(directory.wstring() + L".copy.json");
@@ -409,12 +284,7 @@ Result<Json> Service::DeleteCold(bool expired_only) {
         fs::file_time_type::clock::now() - fs::last_write_time(timestamp) <
             std::chrono::hours(24 * 7))
       continue;
-    // All targets are direct children of the configured sessions root with validated IDs.
-    for (const auto* suffix :
-         {"", ".copy.json", ".copy.json.new", ".changes", ".checkpoint-index.json",
-          ".checkpoint-index.json.new", ".restore", ".discard"})
-      fs::remove_all(root / (id + suffix));
-    RK_RETURN_IF_ERROR(DeleteSessionLogs(options_.node_root, id));
+    RK_ASSIGN_OR_RETURN(result, DeleteSession(id));
     ++deleted;
   }
   return Json{{"deleted", deleted}};
@@ -422,51 +292,33 @@ Result<Json> Service::DeleteCold(bool expired_only) {
 bool Service::HandleRequest(Json request, uint64_t generation) {
   if (!link_.Current(generation))
     return false;
-  Json response = {{"id", nullptr}};
+  Json response = {{"id", request.is_object() ? request.value("id", Json()) : Json()}};
+  if (request.is_object() && request.contains("opId"))
+    response["opId"] = request["opId"];
   Result<Json> result = Error{ErrorCode::kInvalidRequest, "invalid request"};
   try {
-    if (request.is_object())
-      response["id"] = request.value("id", Json(nullptr));
     result = Dispatch(request, generation);
   } catch (const InvalidRequest& error) {
     result = Error{ErrorCode::kInvalidRequest, error.what()};
   } catch (const Json::exception& error) {
-    const auto method = request.is_object() && request.value("method", Json()).is_string()
-                            ? request["method"].get<std::string>()
-                            : "?";
-    LogError(LogLevel::kWarn, "mgmt.invalid_json", Error{ErrorCode::kInternal, error.what()},
-             {{"method", method}});
-    result = Error{ErrorCode::kInternal, "Unexpected JSON failure in " + method};
+    result = Error{ErrorCode::kInvalidRequest, error.what()};
   } catch (const std::filesystem::filesystem_error& error) {
     result = WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
                          error.code().value());
   } catch (const std::exception& error) {
     LogError(LogLevel::kWarn, "mgmt.exception", Error{ErrorCode::kInternal, error.what()});
-    result = Error{ErrorCode::kInternal, "internal endpoint error"};
-  } catch (...) {
-    LogError(LogLevel::kWarn, "mgmt.exception", Error{ErrorCode::kInternal, "unknown exception"});
-    result = Error{ErrorCode::kInternal, "internal endpoint error"};
+    result = Error{ErrorCode::kInternal, "internal Endpoint error"};
   }
-  for (const auto* name : {"profileKey"}) {
-    if (request.is_object() && request.contains(name) && request[name].is_string()) {
-      auto& key = request[name].get_ref<std::string&>();
-      SecureZeroMemory(key.data(), key.size());
-      request.erase(name);
-    }
+  if (request.is_object() && request.value("profileKey", Json()).is_string()) {
+    auto& key = request["profileKey"].get_ref<std::string&>();
+    SecureZeroMemory(key.data(), key.size());
+    request.erase("profileKey");
   }
   response["ok"] = bool(result);
   if (result)
     response["result"] = std::move(result).value();
-  else {
-    auto fields = RequestLogFields(request);
-    if (fields.contains("tenantId")) {
-      std::lock_guard lock(mutex_);
-      const auto session = sessions_.find(fields["tenantId"].get<std::string>());
-      if (session != sessions_.end())
-        fields["sessionId"] = session->second->Id();
-    }
-    response["error"] = WireError(result.error(), "mgmt.request_failed", std::move(fields));
-  }
+  else
+    response["error"] = WireError(result.error(), "mgmt.request_failed", RequestLogFields(request));
   link_.SendReply(generation, response);
   return result && request.value("method", std::string()) == "shutdown";
 }
@@ -476,8 +328,9 @@ int Service::Run() {
     LogError(LogLevel::kError, "peer.start_failed", listening.error());
     return 1;
   }
-  std::string line, maintenance_cursor;
-  auto next_sweep = std::chrono::steady_clock::now();
+  std::string line;
+  auto next_sweep = PhaseClock::now();
+  uint64_t configured_generation = 0;
   metrics_.Start([this] { return session_count_.load(); },
                  [this](Json sample) {
                    sample["event"] = "node.metrics";
@@ -489,50 +342,56 @@ int Service::Run() {
     const bool received = link_.Next(line, generation, eof);
     if (eof)
       break;
-    if (auto ready = link_.ReadySessions(); ready && ready->generation != fenced_generation_) {
-      auto fenced = Fence(*ready);
-      if (!fenced) {
+    if (auto ready = link_.ReadyConfiguration();
+        ready && ready->generation != configured_generation) {
+      auto configured = objects_.Configure(ready->object_keys);
+      if (!configured) {
         failed_ = true;
         break;
       }
-    }
-    if (std::chrono::steady_clock::now() >= next_sweep) {
-      auto swept = DeleteCold(true);
-      if (!swept)
-        LogError(LogLevel::kWarn, "session.cold_sweep_failed", swept.error());
-      next_sweep = std::chrono::steady_clock::now() + std::chrono::hours(1);
+      configured_generation = ready->generation;
+      connection_epoch_ = ready->connection_epoch;
+      node_desired_ = nullptr;
+      fenced_generation_ = 0;
+      metrics_generation_ = ready->generation;
     }
     if (received && link_.Current(generation)) {
-      auto envelope = line.size() <= 1024 * 1024 ? Json::parse(line, nullptr, false) : Json();
+      auto envelope = line.size() <= coordination::kMaxDocumentBytes
+                          ? Json::parse(line, nullptr, false)
+                          : Json();
       SecureZeroMemory(line.data(), line.size());
       line.clear();
       const auto method = envelope.is_object() && envelope.value("method", Json()).is_string()
                               ? envelope["method"].get<std::string>()
                               : std::string();
-      if (method == "object.render" || method == "object.derivation" || method == "object.fetch" ||
-          method == "object.delete" || method == "object.inventory" ||
-          method.starts_with("object.put.")) {
-        const auto request_id = envelope.value("id", Json());
+      if (method == "node.desired" || method == "session.desired" || method == "session.delete" ||
+          method == "session.cold.delete" || method == "shutdown") {
+        if (HandleRequest(std::move(envelope), generation))
+          break;
+      } else {
+        const auto request_id = envelope.is_object() ? envelope.value("id", Json()) : Json();
         if (!object_workers_.Submit([this, request = std::move(envelope), generation]() mutable {
               HandleRequest(std::move(request), generation);
-            })) {
+            }))
           link_.SendReply(generation,
                           {{"id", request_id},
                            {"ok", false},
-                           {"error", {{"code", "busy"}, {"message", "object workers busy"}}}});
-        }
-      } else if (HandleRequest(std::move(envelope), generation))
-        break;
+                           {"error", {{"code", "busy"}, {"message", "management workers busy"}}}});
+      }
     }
-    for (auto& [tenant, session] : sessions_)
-      session->FlushSignals();
-    if (!sessions_.empty()) {
-      auto selected = sessions_.upper_bound(maintenance_cursor);
-      if (selected == sessions_.end())
-        selected = sessions_.begin();
-      maintenance_cursor = selected->first;
-      selected->second->MaintainRecovery();
+    if (PhaseClock::now() >= next_sweep) {
+      auto swept = DeleteCold(true);
+      if (!swept)
+        LogError(LogLevel::kWarn, "session.cold_sweep_failed", swept.error());
+      next_sweep = PhaseClock::now() + std::chrono::hours(1);
     }
+    size_t running = 0;
+    {
+      std::lock_guard lock(mutex_);
+      for (const auto& [tenant, managed] : sessions_)
+        running += managed.execution->Running() ? 1 : 0;
+    }
+    session_count_ = running;
   }
   object_workers_.Stop();
   metrics_.Stop();

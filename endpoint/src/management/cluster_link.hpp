@@ -9,6 +9,7 @@ class ClusterLink final : public ManagementLink {
   ClusterLink(Connector connect,
               bool local,
               std::string build_id,
+              std::string incarnation,
               ValidateConfig validate,
               bool watch_stdin = false);
   ~ClusterLink() override;
@@ -23,7 +24,7 @@ class ClusterLink final : public ManagementLink {
   void OnBinary(Binary callback) override;
   void OnPeers(Peers callback) override;
   Result<Json> Request(const std::string& name, Json fields) override;
-  std::optional<ReadyState> ReadySessions() override;
+  std::optional<ReadyState> ReadyConfiguration() override;
   Result<Json> RequestUntil(const std::string& name,
                             Json fields,
                             std::chrono::steady_clock::time_point deadline) override;

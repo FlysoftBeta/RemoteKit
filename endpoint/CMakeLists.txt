@@ -304,7 +304,7 @@ if(WIN32)
     SQLITE_DEFAULT_FOREIGN_KEYS=1 SQLITE_THREADSAFE=1)
   set_property(TARGET remotekit_sqlite PROPERTY MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
   add_library(remotekit_storage STATIC src/persistence/durable_json.cpp src/persistence/sqlite.cpp src/persistence/event_store.cpp
-    src/persistence/session_db.cpp src/persistence/legacy_session_import.cpp src/persistence/checkpoint.cpp
+    src/persistence/session_db.cpp src/persistence/checkpoint.cpp
     src/persistence/directory_watcher.cpp src/persistence/checkpoint_cache.cpp)
   target_include_directories(remotekit_storage PUBLIC src ${PROJECT_SOURCE_DIR} ${RK_DEPS} ${PROJECT_SOURCE_DIR}/sdk/include)
   target_compile_definitions(remotekit_storage PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -343,6 +343,7 @@ if(WIN32)
     src/auth/raw_camera.cpp
     src/session/session.cpp
     src/session/coordinator.cpp
+    src/session/execution.cpp
     src/session/views.cpp
     src/media/output.cpp
     src/media/pipeline.cpp

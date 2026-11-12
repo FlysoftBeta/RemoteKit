@@ -7,6 +7,9 @@
 namespace remotekit {
 inline constexpr uint64_t kLogWindowBytes = 512 * 1024;
 Result<Json> SearchErrorLogs(const fs::path& node_root, const std::string& error_id);
+Result<Json> ReadSessionLog(const fs::path& node_root,
+                            const std::string& session_id,
+                            const Json& request);
 Result<void> DeleteSessionLogs(const fs::path& node_root, const std::string& session_id);
 std::vector<fs::path> RecentCrashDumps(const fs::path& directory);
 // Reads [max(0, end - max_bytes), end) of a log another process may still be

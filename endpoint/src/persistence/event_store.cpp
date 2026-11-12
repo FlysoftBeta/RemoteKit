@@ -39,6 +39,13 @@ Result<Json> EventStore::State() {
               {"lastSeq", std::to_string(statement.Int64(2))},
               {"pending", statement.Int64(3)}};
 }
+Result<bool> EventStore::Present() {
+  std::lock_guard lock(db_.mutex_);
+  RK_ASSIGN_OR_RETURN(
+      statement,
+      db_.db_.Prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_state'"));
+  return statement.Step();
+}
 Result<Json> EventStore::Load(uint64_t after, size_t limit) {
   if (after > std::numeric_limits<int64_t>::max() || limit > coordination::kMaxEvents)
     return Error{ErrorCode::kInvalidRequest, "invalid event read bound"};
@@ -156,6 +163,29 @@ Result<void> EventStore::Rotate() {
                                            event["browserIncarnation"]));
     }
     return {};
+  });
+}
+Result<void> EventStore::BeginPlacement(uint64_t epoch) {
+  return db_.Write([&]() -> Result<void> {
+    int64_t previous = 0;
+    {
+      RK_ASSIGN_OR_RETURN(
+          statement,
+          db_.db_.Prepare("SELECT placement_epoch FROM coordination_state WHERE singleton=1"));
+      RK_ASSIGN_OR_RETURN(row, statement.Step());
+      if (!row)
+        return CorruptState("missing coordination state");
+      previous = statement.Int64(0);
+    }
+    if (previous > static_cast<int64_t>(epoch))
+      return Error{ErrorCode::kConflict, "event placement is fenced"};
+    if (previous && previous != epoch)
+      RK_RETURN_IF_ERROR(Rotate());
+    RK_ASSIGN_OR_RETURN(
+        statement,
+        db_.db_.Prepare("UPDATE coordination_state SET placement_epoch=? WHERE singleton=1"));
+    RK_RETURN_IF_ERROR(statement.Bind(1, static_cast<int64_t>(epoch)));
+    return Done(statement);
   });
 }
 }  // namespace remotekit

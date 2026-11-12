@@ -118,6 +118,8 @@ Result<Json> SessionCoordinator::Acknowledge(const Json& request, uint64_t gener
 void SessionCoordinator::ManagementLost(uint64_t generation) {
   {
     std::lock_guard lock(mutex_);
+    if (generation == 0)
+      generation = scope_.generation;
     if (scope_.generation == generation)
       scope_.active = false;
   }
@@ -126,6 +128,21 @@ void SessionCoordinator::ManagementLost(uint64_t generation) {
 Json SessionCoordinator::Latest() const {
   std::lock_guard lock(mutex_);
   return latest_;
+}
+Result<Json> SessionCoordinator::Report() {
+  return Execute([this]() -> Result<Json> {
+    Scope scope;
+    {
+      std::lock_guard lock(mutex_);
+      scope = scope_;
+    }
+    Observe(scope, true);
+    const auto value = Latest();
+    if (value.value("connectionEpoch", Json()) != scope.connection ||
+        value.value("nodeRevision", Json()) != scope.node_revision)
+      return Error{ErrorCode::kUnavailable, "initial Session observation was not queued"};
+    return value;
+  });
 }
 Result<void> SessionCoordinator::Converge(const Json& desired, const Scope& scope) {
   if (!Current(scope.generation) || !LatestRevision(desired) ||

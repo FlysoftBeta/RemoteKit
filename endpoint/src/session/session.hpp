@@ -26,22 +26,27 @@ class Session {
           std::shared_ptr<objects::SessionObjects> access = {});
   ~Session();
   Result<void> Initialize();
-  Result<Json> WriteClipboard(const Json& request);
+  Result<void> StageDesired(const Json& document);
+  Result<void> AuthorizeDesired(const Json& document, uint64_t generation);
+  Result<Json> EventState() { return store.Events().State(); }
+  Result<Json> PendingEvents(uint64_t after = 0) { return store.Events().Load(after); }
+  Result<void> AcknowledgeEvents(const std::string& stream, uint64_t up_to) {
+    return store.Events().Acknowledge(stream, up_to);
+  }
+  bool Running() const { return browser.Alive() && !browser.Stopping(); }
+  const std::string& BrowserIncarnation() const { return browser.Incarnation(); }
+  Json AuthorizationSnapshot() const;
+  Json LockSnapshot() const;
   void SetOpenTiming(Json phases) { browser.SetOpenTiming(std::move(phases)); }
   Result<void> Stop();
   Result<void> Shutdown();
   Result<Json> Snapshot(bool output_diagnostics = false);
-  // Raw log windows for diagnostics: this Session's Browser log and the
-  // node's Endpoint log (current and first rotated file).
-  Result<Json> ReadLog(const Json& request) const;
   Result<Json> StopAndCommit(const Json& request_id,
                              bool check_blockers = true,
                              PhaseClock::time_point deadline = PhaseClock::time_point::max(),
                              bool defer_commits = false);
   Result<void> MarkStopped();
   uint64_t PlacementEpoch() const { return config.placement_epoch; }
-  Result<Json> Open(const Json& request);
-  Result<Json> Ensure(const Json& request);
   const std::string& Id() const { return config.id; }
   void BeginManagementRequest(uint64_t generation) {
     generation_ = generation;
@@ -50,12 +55,13 @@ class Session {
   uint64_t ManagementGeneration() const { return generation_; }
   bool ManagementCurrent() const { return management.Current(generation_); }
   Result<void> ManagementLost(uint64_t generation) {
+    files_applied_ = false;
     return authorization.ManagementLost(generation);
   }
   void MaintainRecovery() {
     browser.RecordCrash();
     navigation.MaintainRecovery();
-    views.PollSignIn(generation_.load());
+    views.PollSignIn();
     checkpoint_cache.MaybeStage(context.objects, config.tenant);
   }
   void FlushSignals() { channel.FlushSignals(); }
@@ -81,6 +87,9 @@ class Session {
   const std::shared_ptr<media::ServerTrace> trace;
   ControllerContext context;
   std::atomic<uint64_t> generation_{0};
+  std::atomic<bool> files_applied_{false};
+  std::atomic<std::shared_ptr<const Json>> lock_state_{
+      std::make_shared<const Json>(Json{{"leaseId", nullptr}, {"epoch", 0}, {"state", "locked"}})};
   ClipboardController clipboard;
   ConnectionTiming timing;
   AuthorizationController authorization;

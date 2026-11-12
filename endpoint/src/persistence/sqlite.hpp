@@ -15,6 +15,7 @@ class Database {
   Database(const Database&) = delete;
   Database& operator=(const Database&) = delete;
   Result<void> Open(const std::filesystem::path& path);
+  Result<void> OpenReadOnly(const std::filesystem::path& path, bool immutable);
   Result<void> Close();
   Result<void> Execute(const char* sql);
   Result<Statement> Prepare(const char* sql);

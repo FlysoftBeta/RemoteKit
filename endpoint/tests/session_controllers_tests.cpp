@@ -530,17 +530,18 @@ void SessionManagementRequests() {
             .error()
             .code == ErrorCode::kInvalidRequest);
   auto download_store = persisted.Downloads();
-  CHECK(download_store.Save({{"records", Json::array({{{"eventId", "download-test"},
-                                                       {"incarnation", "browser"},
-                                                       {"download",
-                                                        {{"guid", "guid"},
-                                                         {"eventId", "event"},
-                                                         {"fileReference", "downloads/page.txt"},
-                                                         {"name", "page.txt"},
-                                                         {"mimeType", "text/plain"},
-                                                         {"size", "8"},
-                                                         {"origin", ""}}},
-                                                       {"browserAck", false}}})}}));
+  CHECK(download_store.Save({{"records", Json::array({{
+                                             {"eventId", "download-test"},
+                                             {"incarnation", "browser"},
+                                             {"download",
+                                              {{"guid", "guid"},
+                                               {"eventId", "event"},
+                                               {"fileReference", "downloads/page.txt"},
+                                               {"name", "page.txt"},
+                                               {"mimeType", "text/plain"},
+                                               {"size", "8"},
+                                               {"origin", ""}}},
+                                         }})}}));
   CHECK(session.Views().Initialize());
   CHECK(session.Snapshot().value().at("stopBlockers").at("pendingDownloadImports") == 1);
   CHECK(session.StopAndCommit("controller-test").error().message ==
@@ -566,13 +567,15 @@ void SessionManagementRequests() {
                                                          {"mimeType", "text/plain"},
                                                          {"size", "8"},
                                                          {"origin", ""}}},
-                                                       {"browserAck", true},
                                                        {"result", imported}}})}}));
   CHECK(session.Views().Initialize());
-  CHECK(session.Snapshot().value().at("events") == Json::array({imported}));
-  CHECK(session.Views().ManageSessionEventsAck({{"eventIds", {"download-test"}}}));
+  CHECK(download_store.Complete("download-test"));
+  CHECK(session.PendingEvents().value().size() == 1);
+  const auto event_state = session.EventState().value();
+  CHECK(session.AcknowledgeEvents(event_state.at("streamId"),
+                                  std::stoull(event_state.at("lastSeq").get<std::string>())));
   CHECK(download_store.Load().value().at("records").empty());
-  CHECK(session.Snapshot().value().at("events").empty());
+  CHECK(session.PendingEvents().value().empty());
 }
 
 void PeerFailureCleanup() {
@@ -822,116 +825,87 @@ void DismissalDuringLayout() {
 }
 void ClipboardSynchronization() {
   uint64_t sequence = 0;
-  std::string incarnation = "first";
-  bool ready = false, supersede = false, reject_send = false;
-  int reads = 0;
-  std::vector<std::string> operations;
+  std::string incarnation = "browser";
+  bool ready = false, reject = false, copy_after_write = false;
+  Json contents{{"baseRevision", "0"}, {"text", ""}, {"html", ""}};
   std::vector<Json> events;
-  Json contents{{"text", "plain"}, {"html", "<p>plain</p>"}};
-  ClipboardController clipboard("tenant", "session",
-                                {.ready = [&] { return ready; },
-                                 .incarnation = [&] { return incarnation; },
-                                 .read = [&]() -> Result<Json> {
-                                   ++reads;
-                                   auto result = contents;
-                                   result["sequence"] = std::to_string(sequence);
-                                   if (supersede) {
-                                     supersede = false;
-                                     ++sequence;
-                                     contents["text"] = "newer";
-                                   }
-                                   return result;
-                                 },
-                                 .write = [&](const Json& value) -> Result<void> {
-                                   operations.push_back("seed");
-                                   contents = {{"text", value["text"]}, {"html", value["html"]}};
-                                   return {};
-                                 },
-                                 .sequence = [&]() -> std::optional<uint64_t> { return sequence; },
-                                 .send =
-                                     [&](const Json& event) {
-                                       if (reject_send)
-                                         return false;
-                                       events.push_back(event);
-                                       return true;
-                                     }});
-  CHECK(clipboard.Seed({{"revision", "7"}, {"text", "seed"}, {"html", "<b>seed</b>"}}));
-  CHECK(operations.empty());
+  unsigned writes = 0;
+  ClipboardController clipboard(
+      "tenant", "session",
+      {
+          .ready = [&] { return ready; },
+          .incarnation = [&] { return incarnation; },
+          .read = [&]() -> Result<Json> {
+            auto value = contents;
+            value["sequence"] = std::to_string(sequence);
+            return value;
+          },
+          .write = [&](const Json& value) -> Result<Json> {
+            ++writes;
+            contents = {{"baseRevision", value["revision"]},
+                        {"text", value["text"]},
+                        {"html", value["html"]}};
+            Json result{{"sequence", std::to_string(sequence)},
+                        {"baseRevision", value["revision"]}};
+            if (copy_after_write) {
+              copy_after_write = false;
+              ++sequence;
+              contents["text"] = "copied after write";
+            }
+            return result;
+          },
+          .sequence = [&]() -> std::optional<uint64_t> { return sequence; },
+          .send =
+              [&](const Json& event) {
+                if (reject)
+                  return false;
+                events.push_back(event);
+                return true;
+              },
+      });
+  CHECK(clipboard.Seed({{"revision", "7"}, {"text", "seed"}, {"html", ""}}));
+  CHECK(writes == 0);
   ready = true;
   CHECK(clipboard.BeforeViews());
-  operations.push_back("view.create");
-  CHECK((operations == std::vector<std::string>{"seed", "view.create"}));
+  CHECK(writes == 1 && contents["baseRevision"] == "7");
   CHECK(clipboard.BeforeViews());
-  CHECK(operations.size() == 2);
-  CHECK(clipboard.Poll(true));
-  CHECK(reads == 1 && events.empty());
-  CHECK(clipboard.Poll());
-  CHECK(reads == 1);
+  CHECK(writes == 1);
   ++sequence;
-  contents = {
-      {"text", "copy"}, {"html", "<p>copy</p>"}, {"viewId", "42"}, {"excludeFromHistory", true}};
+  contents["text"] = "native";
   CHECK(clipboard.Poll());
-  CHECK(events.size() == 1 && events.back()["text"] == "copy");
-  CHECK(events.back()["type"] == "clipboard.changed");
-  CHECK(events.back()["tenantId"] == "tenant" && events.back()["sessionId"] == "session");
-  CHECK(events.back()["browserSequence"] == "1");
-  CHECK(events.back()["viewId"] == "42");
-  CHECK(events.back()["excludeFromHistory"] == true);
+  CHECK(events.size() == 1 && events.back()["baseRevision"] == "7");
   ++sequence;
-  supersede = true;
+  contents["text"] = "concurrent native";
+  CHECK(clipboard.Write({{"revision", "8"}, {"text", "device"}, {"html", ""}}));
+  CHECK(events.size() == 2 && events.back()["text"] == "concurrent native" &&
+        events.back()["baseRevision"] == "7");
+  CHECK(contents["text"] == "device" && contents["baseRevision"] == "8");
+  copy_after_write = true;
+  CHECK(clipboard.Write({{"revision", "9"}, {"text", "device next"}, {"html", ""}}));
   CHECK(clipboard.Poll());
-  CHECK(events.size() == 1);
-  CHECK(clipboard.Poll());
-  CHECK(events.size() == 2 && events.back()["text"] == "newer");
-  CHECK(events.back()["browserSequence"] == "3");
-  // Individual format limits belong to Control, so these still carry content.
+  CHECK(events.size() == 3 && events.back()["text"] == "copied after write" &&
+        events.back()["baseRevision"] == "9");
   ++sequence;
-  contents = {{"text", std::string(1024 * 1024 + 1, 't')}, {"html", ""}};
+  contents["text"] = "durable outbox retry";
+  reject = true;
+  CHECK(!clipboard.Poll());
+  reject = false;
   CHECK(clipboard.Poll());
-  CHECK(!events.back().contains("oversize") && events.back()["text"] == contents["text"]);
-  ++sequence;
-  contents = {{"text", ""}, {"html", std::string(4 * 1024 * 1024 + 1, 'h')}};
-  CHECK(clipboard.Poll());
-  CHECK(events.back()["oversize"] == true && events.back()["textBytes"] == 0);
-  CHECK(events.back()["htmlBytes"] == 4 * 1024 * 1024 + 1);
-  CHECK(!events.back().contains("text") && !events.back().contains("html"));
-  // JSON escaping also counts toward the event envelope limit.
-  ++sequence;
-  contents = {{"text", std::string(1024 * 1024, '\x01')}, {"html", ""}};
-  CHECK(clipboard.Poll());
-  CHECK(events.back()["oversize"] == true);
-  ++sequence;
-  contents = {{"text", ""}, {"html", ""}};
-  reject_send = true;
-  CHECK(!clipboard.Poll(true));
-  reject_send = false;
-  const auto count = events.size();
-  CHECK(clipboard.Poll(true));
-  CHECK(events.size() == count + 1 && events.back()["text"] == "" && events.back()["html"] == "");
-  CHECK(clipboard.Seed({{"revision", "9"}, {"text", "stored"}, {"html", ""}}));
-  const auto seeded_operations = operations.size();
-  CHECK(clipboard.BeforeViews());
-  CHECK(operations.size() == seeded_operations && contents["text"] == "");
+  CHECK(events.size() == 4 && events.back()["text"] == "durable outbox retry");
+  CHECK(!clipboard.Seed({{"revision", "8"}, {"text", "old"}, {"html", ""}}));
+  CHECK(!clipboard.Seed({{"revision", "9"}, {"text", "conflicting"}, {"html", ""}}));
   incarnation = "replacement";
   sequence = 0;
+  contents = {{"baseRevision", "0"}, {"text", ""}, {"html", ""}};
   CHECK(clipboard.BeforeViews());
-  CHECK(operations.back() == "seed" && contents["text"] == "stored");
-  CHECK(clipboard.Poll(true));
-  CHECK(events.size() == count + 1);
+  CHECK(contents["baseRevision"] == "9" && contents["text"] == "device next");
   ++sequence;
-  supersede = true;
-  CHECK(clipboard.Poll(true));
-  CHECK(events.size() == count + 2 && events.back()["text"] == "newer");
-  ++sequence;
-  const auto before_device = events.size();
-  CHECK(clipboard.Write({{"revision", "10"}, {"text", "device"}, {"html", ""}}));
-  CHECK(contents["text"] == "device");
-  CHECK(clipboard.Poll(true));
-  CHECK(events.size() == before_device);
+  contents["text"] = std::string(1024 * 1024, '\x01');
+  CHECK(clipboard.Poll());
+  CHECK(events.back()["oversize"] == true && events.back()["baseRevision"] == "9");
   for (const auto* invalid : {"01", "-1", "18446744073709551616"})
     CHECK(!ClipboardController::Valid({{"revision", invalid}, {"text", ""}, {"html", ""}}));
 }
-
 void InputFidelityValidation() {
   const auto nan = std::numeric_limits<double>::quiet_NaN();
   const auto infinity = std::numeric_limits<double>::infinity();
@@ -1021,7 +995,7 @@ void InputFidelityValidation() {
 
   Json layout = {
       {"type", "keyboard.layout"},
-      {"entries", Json::array({Json::array({"KeyA", "q"}), Json::array({"KeyE", "😀😀"})})}};
+      {"entries", Json::array({Json::array({"KeyA", "q"}), Json::array({"KeyE", "馃榾馃榾"})})}};
   CHECK(ParseKeyboardLayout(layout));
   CHECK(ParseKeyboardLayout(layout).value().entries[1].second.size() == 4);
   CHECK(DataRouter::Classify(layout).value() == DataRouter::Kind::kInput);
@@ -1029,8 +1003,8 @@ void InputFidelityValidation() {
        {Json::array(), Json::array({"KeyA"}), Json::array({"KeyA", "a", "b"}),
         Json::array({1, "a"}), Json::array({"KeyA", 1}), Json::array({"", "a"}),
         Json::array({"Bad-Code", "a"}), Json::array({std::string(33, 'A'), "a"}),
-        Json::array({"KeyA", ""}), Json::array({"KeyA", "abcde"}), Json::array({"KeyA", "😀😀a"}),
-        Json::array({"KeyA", std::string("\xff")})}) {
+        Json::array({"KeyA", ""}), Json::array({"KeyA", "abcde"}),
+        Json::array({"KeyA", "馃榾馃榾a"}), Json::array({"KeyA", std::string("\xff")})}) {
     layout["entries"] = Json::array({entry});
     CHECK(!ParseKeyboardLayout(layout));
     CHECK(!DataRouter::Classify(layout));

@@ -151,4 +151,44 @@ Result<Json> ReadLogWindow(const fs::path& path, std::optional<uint64_t> end, ui
               {"end", start + bytes.size()},
               {"data", std::move(data).value()}};
 }
+Result<Json> ReadSessionLog(const fs::path& node_root,
+                            const std::string& session_id,
+                            const Json& request) {
+  const auto name = Required(request, "log");
+  fs::path path;
+  if (name == "browser")
+    path = node_root / "logs/browser" / (session_id + ".log");
+  else if (name == "endpoint")
+    path = node_root / "logs" / "endpoint.log";
+  else if (name == "endpoint.1")
+    path = node_root / "logs" / "endpoint.log.1";
+  else if (name == "crashes")
+    path = node_root / "logs/crashes" / session_id / "events.jsonl";
+  else if (name.starts_with("dump/")) {
+    for (const auto& dump : RecentCrashDumps(node_root / "logs/crashes" / session_id))
+      if (name == "dump/" + Utf8(dump.filename()))
+        path = dump;
+    if (path.empty())
+      return Error{ErrorCode::kNotFound, "crash dump not found"};
+  } else
+    return Error{ErrorCode::kInvalidRequest, "unknown log"};
+  if (!request.contains("maxBytes"))
+    return Error{ErrorCode::kInvalidRequest, "invalid log window"};
+  const auto& max = request.at("maxBytes");
+  const auto* end = request.contains("end") ? &request.at("end") : nullptr;
+  if (!max.is_number_unsigned() || (end && !end->is_number_unsigned()))
+    return Error{ErrorCode::kInvalidRequest, "invalid log window"};
+  auto window = ReadLogWindow(path, end ? std::optional(end->get<uint64_t>()) : std::nullopt,
+                              max.get<uint64_t>());
+  if (window && name == "crashes") {
+    window.value()["dumps"] = Json::array();
+    for (const auto& dump : RecentCrashDumps(node_root / "logs/crashes" / session_id)) {
+      std::error_code error;
+      const auto size = fs::file_size(dump, error);
+      if (!error)
+        window.value()["dumps"].push_back({{"name", Utf8(dump.filename())}, {"size", size}});
+    }
+  }
+  return window;
+}
 }  // namespace remotekit

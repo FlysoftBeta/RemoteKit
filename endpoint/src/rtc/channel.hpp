@@ -91,5 +91,6 @@ class ChannelController : private ControllerContext {
   std::deque<RtcEvent> events;
   DataRouter data_router;
   uint64_t request_generation_ = 0;
+  std::string peer_lease_;
 };
 }  // namespace remotekit

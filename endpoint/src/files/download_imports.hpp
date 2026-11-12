@@ -21,17 +21,7 @@ class DownloadImports {
     return {};
   }
   void SetImport(Import import) { import_ = std::move(import); }
-  size_t Pending() const {
-    return std::count_if(state_["records"].begin(), state_["records"].end(),
-                         [](const Json& row) { return !row.value("browserAck", false); });
-  }
-  Json Events() const {
-    Json events = Json::array();
-    for (const auto& row : state_["records"])
-      if (row.value("browserAck", false))
-        events.push_back(row.at("result"));
-    return events;
-  }
+  size_t Pending() const { return state_["records"].size(); }
   Result<void> Observe(const std::string& incarnation,
                        const Json& events,
                        const std::string& session,
@@ -48,22 +38,21 @@ class DownloadImports {
         auto next = state_;
         next["records"].push_back({{"incarnation", incarnation},
                                    {"download", event},
-                                   {"eventId", "download-" + incarnation + "-" + guid},
-                                   {"browserAck", false}});
+                                   {"eventId", "download-" + incarnation + "-" + guid}});
         RK_RETURN_IF_ERROR(Save(std::move(next)));
       }
     }
-    for (size_t index = 0; index < state_["records"].size(); ++index) {
+    for (size_t index = 0; index < state_["records"].size();) {
       auto row = state_["records"][index];
-      if (row.value("browserAck", false))
-        continue;
       const auto& download = row.at("download");
       if (!row.contains("result")) {
         const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::system_clock::now().time_since_epoch())
                              .count();
-        if (row.value("retryAt", int64_t(0)) > now)
+        if (row.value("retryAt", int64_t(0)) > now) {
+          ++index;
           continue;
+        }
         if (!import_)
           return Error{ErrorCode::kUnavailable, "download_import_unavailable"};
         const auto imported = import_(download);
@@ -88,6 +77,7 @@ class DownloadImports {
             auto next = state_;
             next["records"][index] = row;
             RK_RETURN_IF_ERROR(Save(std::move(next)));
+            ++index;
             continue;
           }
           result.update({{"type", "download.failed"}, {"error", WireError(error)}});
@@ -107,10 +97,8 @@ class DownloadImports {
                                 {"browserIncarnation", incarnation},
                                 {"views", Json::array()},
                                 {"eventIds", Json::array({download.at("eventId")})}}));
-      row["browserAck"] = true;
-      auto next = state_;
-      next["records"][index] = std::move(row);
-      RK_RETURN_IF_ERROR(Save(std::move(next)));
+      RK_RETURN_IF_ERROR(store_.Complete(row.at("eventId")));
+      state_["records"].erase(state_["records"].begin() + index);
     }
     return {};
   }

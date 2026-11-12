@@ -77,14 +77,24 @@ void ChannelController::FlushSignals() {
         [&](const Json& message, DeliveryFlag delivery) {
           if (!authorization.Current(stamp))
             return false;
-          return management.SendEvent(Json({{"event", "client.action"},
-                                            {"tenantId", tenant},
-                                            {"connectionId", peer_controller.Connection()},
-                                            {"authEpoch", authorization.Epoch()},
-                                            {"operationGeneration", message["operationGeneration"]},
-                                            {"operationId", message["operationId"]},
-                                            {"action", message["action"]}}),
-                                      authorization.ManagementGeneration(), std::move(delivery));
+          auto admission = authorization.LockAdmission();
+          if (!authorization.Current(stamp) || peer_lease_.empty())
+            return false;
+          const Json body{{"connectionId", peer_controller.Connection()},
+                          {"authEpoch", authorization.Epoch()},
+                          {"leaseId", peer_lease_},
+                          {"operationGeneration", message["operationGeneration"]},
+                          {"operationId", message["operationId"]},
+                          {"action", message["action"]}};
+          const auto identity = "action-" + message["operationGeneration"].get<std::string>() +
+                                "-" + message["operationId"].get<std::string>();
+          auto persisted =
+              store.Events().Append("client.action", body, identity, browser.Incarnation());
+          if (!persisted)
+            return false;
+          if (delivery)
+            delivery->MarkWritten();
+          return true;
         });
   data_router.Drain();
   peer_controller.FlushSignals();
@@ -204,12 +214,17 @@ Result<Json> ChannelController::Offer(const Json& request, uint64_t generation) 
   if (!request.contains("avSync") || !request.at("avSync").is_boolean())
     return Error{ErrorCode::kInvalidRequest, "invalid RTC avSync"};
   const bool av_sync = request.at("avSync").get<bool>();
-  auto started = views.Start();
-  if (!started)
-    return started.error();
+  if (!browser.Alive() || !browser.Rpc().Control() || browser.Stopping())
+    return Error{ErrorCode::kUnavailable, "Browser is not running"};
+  const auto lease = Required(request, "leaseId");
+  if (lease.empty() || lease.size() > 128)
+    return Error{ErrorCode::kInvalidRequest, "invalid Viewer lease"};
   pipeline.Rates(options.encoding.bitrate, pipeline.MaxFps());
-  return peer_controller.Offer(request, generation, pipeline.MaxFps(), pipeline.Degradation(),
-                               pipeline.Audio(), av_sync);
+  auto result = peer_controller.Offer(request, generation, pipeline.MaxFps(),
+                                      pipeline.Degradation(), pipeline.Audio(), av_sync);
+  if (result)
+    peer_lease_ = lease;
+  return result;
 }
 
 Result<Json> ChannelController::ManageRtcActionResult(const Json& request) {
@@ -324,6 +339,7 @@ void ChannelController::CloseMenus() {
     LogError(LogLevel::kWarn, "menu.cleanup_failed", response.error());
 }
 void ChannelController::Clear() {
+  peer_lease_.clear();
   CloseMenus();
   data_router.Clear();
   direct_services.Bind(0);
