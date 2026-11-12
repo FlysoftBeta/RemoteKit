@@ -52,7 +52,7 @@ def main():
         'passed': False,
         'package': str(package),
         'evidence': str(run),
-        'scope': 'startup: bundled Node + production UI assets + SQLite first-admin registration + authenticated WebSocket state + clock/admin + Endpoint management reconciliation and face model availability + Viewer reattachment lock and password recovery + rejected WS browser action with unchanged workspace; no RTC product operations or media',
+        'scope': 'startup: bundled Node + production UI assets + SQLite first-admin registration + authenticated WebSocket state + clock/admin + Endpoint management reconciliation + product operation committed over WS and persisted across reattachment + Viewer reattachment lock and password recovery; no RTC, service peer, face or media',
         'validationKind': 'startup',
         'browserProductOperationsTested': False,
         'rtcMediaTested': False,
