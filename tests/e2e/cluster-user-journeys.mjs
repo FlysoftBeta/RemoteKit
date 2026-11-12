@@ -420,6 +420,7 @@ try {
   await step('restore-other-node', async () => {
     first = await makeViewer('restored');
     await login(first, 'cluster-first');
+    await focusApp(first, 'browser');
     await first.media();
     const s = await control.call('inspect');
     assert.notEqual(placement(s, 'cluster-first').node_id, source);
