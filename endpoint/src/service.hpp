@@ -34,6 +34,7 @@ class Service {
   const RuntimeOptions& options_;
   ManagementLink& link_;
   const std::string incarnation_;
+  std::atomic<uint64_t> observation_sequence_{0};
   objects::ObjectService objects_;
   objects::WorkQueue object_workers_;
   NodeMetrics metrics_;

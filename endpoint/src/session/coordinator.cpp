@@ -2,10 +2,14 @@
 #include "util/wire_error.hpp"
 
 namespace remotekit {
-SessionCoordinator::SessionCoordinator(Json target, std::string incarnation, Hooks hooks)
+SessionCoordinator::SessionCoordinator(Json target,
+                                       std::string incarnation,
+                                       std::atomic<uint64_t>& observation_sequence,
+                                       Hooks hooks)
     : target_(std::move(target)),
       incarnation_(std::move(incarnation)),
       hooks_(std::move(hooks)),
+      observation_sequence_(observation_sequence),
       worker_([this] { Run(); }) {}
 SessionCoordinator::~SessionCoordinator() {
   {
@@ -290,7 +294,8 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
   const bool changed = encoded != last_encoded_;
   if ((!force && (!changed || now - last_sent_ < std::chrono::milliseconds(100))) || !scope.active)
     return;
-  observation["seq"] = std::to_string(++sequence_);
+  observation["seq"] =
+      std::to_string(observation_sequence_.fetch_add(1, std::memory_order_relaxed) + 1);
   if (hooks_.send(observation, scope.generation)) {
     last_encoded_ = encoded;
     last_sent_ = now;

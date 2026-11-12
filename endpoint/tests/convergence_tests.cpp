@@ -35,56 +35,56 @@ int main(int argc, char** argv) {
       std::lock_guard lock(mutex);
       order.push_back(action);
     };
-    SessionCoordinator coordinator(
-        target, "endpoint",
-        {
-            .authorization = [&](const Json&, uint64_t) -> Result<void> {
-              record("authorization");
-              return {};
-            },
-            .prepare = [&](const Json&) -> Result<void> {
-              record("prepare");
-              ++prepares;
-              return {};
-            },
-            .start = [&]() -> Result<void> {
-              record("start");
-              ++starts;
-              running = true;
-              return {};
-            },
-            .views = [&](const Json&) -> Result<void> {
-              record("views");
-              ++configured;
-              return {};
-            },
-            .stop = [&](const Json&) -> Result<Json> {
-              if (blocked)
-                return Error{ErrorCode::kConflict, "stop blocked: selection"};
-              ++stopped;
-              running = false;
-              return Json{{"state", "clean"}};
-            },
-            .observe = [&]() -> Result<Json> {
-              if (sampling_failed)
-                return Error{ErrorCode::kInternal, "Session copy is corrupt"};
-              return Json{{"browser", running ? "running" : "stopped"},
-                          {"browserIncarnation", running ? Json("browser") : Json()}};
-            },
-            .maintain = [] {},
-            .admit = [&](const Json&, uint64_t) -> Result<void> {
-              if (!authorized)
-                return Error{ErrorCode::kLocked, "authorization revoked"};
-              return {};
-            },
-            .request = [&](const Json&, uint64_t) -> Result<Json> {
-              ++requests;
-              return Json{{"accepted", true}};
-            },
-            .acknowledge = [](const std::string&, uint64_t) -> Result<void> { return {}; },
-            .management_lost = [&](uint64_t) { authorized = false; },
-            .send = [](const Json&, uint64_t) { return true; },
-        });
+    SessionCoordinator::Hooks hooks{
+        .authorization = [&](const Json&, uint64_t) -> Result<void> {
+          record("authorization");
+          return {};
+        },
+        .prepare = [&](const Json&) -> Result<void> {
+          record("prepare");
+          ++prepares;
+          return {};
+        },
+        .start = [&]() -> Result<void> {
+          record("start");
+          ++starts;
+          running = true;
+          return {};
+        },
+        .views = [&](const Json&) -> Result<void> {
+          record("views");
+          ++configured;
+          return {};
+        },
+        .stop = [&](const Json&) -> Result<Json> {
+          if (blocked)
+            return Error{ErrorCode::kConflict, "stop blocked: selection"};
+          ++stopped;
+          running = false;
+          return Json{{"state", "clean"}};
+        },
+        .observe = [&]() -> Result<Json> {
+          if (sampling_failed)
+            return Error{ErrorCode::kInternal, "Session copy is corrupt"};
+          return Json{{"browser", running ? "running" : "stopped"},
+                      {"browserIncarnation", running ? Json("browser") : Json()}};
+        },
+        .maintain = [] {},
+        .admit = [&](const Json&, uint64_t) -> Result<void> {
+          if (!authorized)
+            return Error{ErrorCode::kLocked, "authorization revoked"};
+          return {};
+        },
+        .request = [&](const Json&, uint64_t) -> Result<Json> {
+          ++requests;
+          return Json{{"accepted", true}};
+        },
+        .acknowledge = [](const std::string&, uint64_t) -> Result<void> { return {}; },
+        .management_lost = [&](uint64_t) { authorized = false; },
+        .send = [](const Json&, uint64_t) { return true; },
+    };
+    std::atomic<uint64_t> observation_sequence{0};
+    SessionCoordinator coordinator(target, "endpoint", observation_sequence, hooks);
     coordinator.Activate("connection", "1", 1);
     Await([&] { return coordinator.Latest().value("browser", "") == "failed"; });
     Check(!coordinator.Latest().at("lastError").is_null(), "sampling failure remains observable");
@@ -145,6 +145,17 @@ int main(int argc, char** argv) {
     Check(bool(coordinator.Publish(desired, 2)), "reconnect accepts same desired revision");
     Await([&] { return coordinator.Latest().value("connectionEpoch", Json()) == "reconnected"; });
     Check(stopped == 1, "reconnect does not repeat completed commit");
+    coordinator.ManagementLost(2);
+    const auto previous_sequence = std::stoull(coordinator.Latest().at("seq").get<std::string>());
+    SessionCoordinator reopened(target, "endpoint", observation_sequence, hooks);
+    reopened.Activate("reconnected", "2", 2);
+    desired["revision"] = "3";
+    desired["run"] = "running";
+    desired["commit"] = nullptr;
+    Check(bool(reopened.Publish(desired, 2)), "reopened coordinator accepts desired state");
+    Await([&] { return reopened.Latest().value("converged", false); });
+    Check(std::stoull(reopened.Latest().at("seq").get<std::string>()) > previous_sequence,
+          "coordinators in one Endpoint incarnation share a monotonic observation sequence");
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

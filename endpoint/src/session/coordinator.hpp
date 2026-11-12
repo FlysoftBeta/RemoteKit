@@ -25,7 +25,10 @@ class SessionCoordinator {
     std::function<void(uint64_t)> management_lost;
     std::function<bool(const Json&, uint64_t)> send;
   };
-  SessionCoordinator(Json target, std::string incarnation, Hooks hooks);
+  SessionCoordinator(Json target,
+                     std::string incarnation,
+                     std::atomic<uint64_t>& observation_sequence,
+                     Hooks hooks);
   ~SessionCoordinator();
   SessionCoordinator(const SessionCoordinator&) = delete;
   void Activate(std::string connection, std::string node_revision, uint64_t generation);
@@ -59,14 +62,14 @@ class SessionCoordinator {
   Json desired_;
   Json latest_ = Json::object();
   std::deque<std::function<void()>> jobs_;
-  std::thread worker_;
   bool stopping_ = false, force_observation_ = true;
   std::string prepared_revision_, started_revision_, views_revision_, stopped_revision_;
   std::string browser_incarnation_, applied_clipboard_revision_ = "0";
-  uint64_t sequence_ = 0;
+  std::atomic<uint64_t>& observation_sequence_;
   bool converged_ = false;
   std::optional<Error> error_;
   std::chrono::steady_clock::time_point last_sent_{};
   std::string last_encoded_;
+  std::thread worker_;
 };
 }  // namespace remotekit

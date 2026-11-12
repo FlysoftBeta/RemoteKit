@@ -229,6 +229,45 @@ test('balanced placement publishes desired once per revision and fences reconnec
   }
 });
 
+test('stop and reopen on the same node and epoch accepts the new coordinator observation', async () => {
+  const h = await harness();
+  try {
+    const endpoint = await h.connect();
+    let desired = await h.gateway.synchronize('returning');
+    h.gateway.setDesiredSource(() => desired);
+    endpoint.desiredHandler = (_document, observation) => {
+      observation.checkpoint = null;
+      observation.data = null;
+    };
+    const running = await h.gateway.waitObserved('returning', (value) => value.converged);
+    desired = { ...desired, revision: '2', run: 'stopped', commit: 'stop-returning' };
+    await h.gateway.synchronize('returning');
+    const stopped = await h.gateway.waitObserved(
+      'returning',
+      (value) => value.converged && value.observedRevision === '2' && value.browser === 'stopped',
+    );
+    endpoint.sessions.delete('returning');
+    endpoint.observations.delete('returning');
+    desired = { ...desired, revision: '3', run: 'running', commit: null };
+    await h.gateway.synchronize('returning');
+    const reopened = await h.gateway.waitObserved(
+      'returning',
+      (value) => value.converged && value.observedRevision === '3' && value.browser === 'running',
+    );
+    assert.equal(reopened.endpointIncarnation, running.endpointIncarnation);
+    assert.equal(reopened.connectionEpoch, running.connectionEpoch);
+    assert.equal(reopened.placementEpoch, running.placementEpoch);
+    assert.equal(reopened.sessionId, running.sessionId);
+    assert.ok(BigInt(stopped.seq) > BigInt(running.seq));
+    assert.ok(BigInt(reopened.seq) > BigInt(stopped.seq));
+    endpoint.send(stopped);
+    await endpoint.barrier();
+    assert.equal(h.gateway.observation('returning')?.seq, reopened.seq);
+  } finally {
+    await h.close();
+  }
+});
+
 test('clipboard management events cross the encrypted link and reject stale nodes and sessions', async () => {
   const h = await harness();
   const control = createApplication(h.store, h.gateway);
