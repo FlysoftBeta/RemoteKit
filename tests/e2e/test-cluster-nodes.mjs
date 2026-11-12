@@ -1,3 +1,4 @@
+import { shellViewer } from './shell-avail-support.mjs';
 import { stageRuntime } from './../integration/stage-runtime.mjs';
 /** Real Viewer/H264, two local nodes, checkpoint relocation and demand peer object read.
  * args: playwright module, Edge exe, Endpoint exe, Browser exe, new evidence directory, [port]
@@ -8,7 +9,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
-import { buildHarness, instrumentViewer, startControl, until } from './cluster-test-support.mjs';
+import { buildHarness, startControl, until } from './cluster-test-support.mjs';
 
 const [modulePath, edge, endpoint, browser, output, portArg = '33831'] = process.argv.slice(2);
 assert([modulePath, edge, endpoint, browser, output].every(Boolean));
@@ -83,9 +84,10 @@ async function connect(name, context) {
     data: { username: name, password },
   });
   assert.equal(response.status(), 200, await response.text());
-  const viewer = await instrumentViewer(context, run, name);
+  const viewer = await shellViewer(context, run, name);
   await viewer.page.goto(origin);
   await viewer.ready();
+  await viewer.service();
   await viewer.call('auth.settings', {
     currentPassword: password,
     settings: { lockOnHidden: false, lockOnIdle: false },
@@ -94,6 +96,7 @@ async function connect(name, context) {
 }
 async function workspace(viewer, path) {
   await viewer.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+  await until('browser available', async () => (await viewer.state()).browser.state === 'available');
   const state = await viewer.state();
   const window = state.workspace.windows.at(-1);
   await viewer.action({ type: 'tab.navigate', tabId: window.activeTabId, url: fixtureOrigin + path });
@@ -103,10 +106,10 @@ async function workspace(viewer, path) {
 async function tap(viewer, path, id) {
   await viewer.page.waitForFunction(() => {
     const viewport = document.querySelector('.remote-viewport');
-    const workspace = clusterQA.state?.workspace;
+    const workspace = shellQA.state?.workspace;
     const active = workspace?.tabs.find((tab) => tab.id === workspace.windows[0]?.activeTabId);
     return (
-      clusterQA.layout?.views.some((view) => view.id === active?.webviewId && !view.stale) &&
+      shellQA.layout?.views.some((view) => view.id === active?.webviewId && !view.stale) &&
       viewport?.querySelector('video')?.videoWidth > 0 &&
       !viewport.classList.contains('resize-waiting') &&
       !viewport.querySelector('canvas[data-video-input]')?.classList.contains('no-frame')
@@ -142,7 +145,11 @@ async function stopAndCommit(viewer, name) {
       const tenant = placementFor(snapshot, name)?.tenant;
       const runtime = snapshot.runtimes.find((entry) => entry.tenant === tenant);
       assert(!runtime?.error?.includes('unclean Browser shutdown'), runtime?.error);
-      return placementFor(snapshot, name)?.run_state === 'stopped' && placementFor(snapshot, name)?.data_state === 'clean' && snapshot;
+      return (
+        placementFor(snapshot, name)?.run_state === 'stopped' &&
+        placementFor(snapshot, name)?.data_state === 'clean' &&
+        snapshot
+      );
     },
     90000,
   );

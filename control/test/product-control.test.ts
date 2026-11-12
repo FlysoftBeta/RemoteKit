@@ -1,4 +1,4 @@
-import { observedProductAction, observedOperation } from './server-fixture';
+import { observedProductAction, observedOperation, submitViewerAction } from './server-fixture';
 import { applyDesiredViews } from './coordination-fixture';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -350,17 +350,17 @@ test('automatic Viewer fullscreen and AV sync default off and save explicit bool
       'lease',
     );
     await assert.rejects(
-      requestViewer(control, tenantId, 'lease', 'action', {
+      submitViewerAction(control, tenantId, 'lease', {
         type: 'settings.update',
-        settings: { workspace: { autoFullscreen: 'true' } },
+        settings: { workspace: { autoFullscreen: 'true' as any } },
       }),
       { code: 'invalid_request' },
     );
     for (const avSync of ['true', 1, null]) {
       await assert.rejects(
-        requestViewer(control, tenantId, 'lease', 'action', {
+        submitViewerAction(control, tenantId, 'lease', {
           type: 'settings.update',
-          settings: { workspace: { avSync } },
+          settings: { workspace: { avSync: avSync as any } },
         }),
         { code: 'invalid_request' },
       );
@@ -1548,7 +1548,12 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     );
     const a = connect(socketUrl, cookieA);
     peers.push(a);
-    await a.wait((m) => m.type === 'state');
+    const initialA = await a.wait((m) => m.type === 'state');
+    const envelope = (operationGeneration: string, action: ProductAction) => ({
+      operationId: randomUUID(),
+      operationGeneration,
+      action,
+    });
     assert.deepEqual(
       (
         await a.request('create', 'admin.createUser', { username: 'bob', password: 'password123' })
@@ -1562,25 +1567,20 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
       (await post('/api/actions', { type: 'tab.create', url: 'about:blank' }, cookieA)).status,
       404,
     );
-    assert.equal(
-      (
-        await a.request('1', 'action', {
-          type: 'window.open',
-          appId: 'browser',
-          placement: { mode: 'space' },
-          url: 'about:blank',
-        })
-      ).error.code,
-      'invalid_request',
+    const opened = await a.request(
+      '1',
+      'operation.submit',
+      envelope(initialA.state.operationGeneration, {
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'about:blank',
+      }),
     );
-    const stateA = (
-        await observedProductAction(control, store.accounts.authenticated(cookieA.split('=')[1])!, {
-          type: 'window.open',
-          appId: 'browser',
-          placement: { mode: 'space' },
-          url: 'about:blank',
-        })
-      ).state,
+    assert.equal(opened.result.status, 'committed');
+    const tenantA = store.accounts.authenticated(cookieA.split('=')[1])!;
+    await control.reconciler.reconcileProduct(tenantA);
+    const stateA = control.viewers.productState(tenantA),
       win = stateA.workspace.windows[0],
       tab = stateA.workspace.tabs[0];
     const b = connect(socketUrl, cookieB);
@@ -1599,12 +1599,22 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
         ).error.code,
         'forbidden',
       );
-    const foreign = await b.request('2', 'action', { type: 'tab.activate', tabId: tab.id });
-    assert.equal(foreign.error.code, 'invalid_request');
-    const scope = await b.request('3', 'action', {
-      type: 'window.open',
-      appId: 'browser',
-      placement: { mode: 'space' },
+    const foreign = await b.request(
+      '2',
+      'operation.submit',
+      envelope(initialB.state.operationGeneration, {
+        type: 'tab.activate',
+        tabId: tab.id,
+      }),
+    );
+    assert.equal(foreign.result.status, 'failed');
+    assert.equal(foreign.result.error.code, 'not_found');
+    const scope = await b.request('3', 'operation.submit', {
+      ...envelope(initialB.state.operationGeneration, {
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+      }),
       tenantId: stateA.workspace.tenantId,
     });
     assert.equal(scope.error.code, 'invalid_request');
@@ -1630,7 +1640,7 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     await replacement.request('unlock', 'auth.verify', { method: 'password', secret: 'password123' });
     await replacement.wait((m) => m.type === 'state');
     await assert.rejects(
-      requestViewer(control, stateA.workspace.tenantId, 'stale-lease', 'action', {
+      submitViewerAction(control, stateA.workspace.tenantId, 'stale-lease', {
         type: 'window.open',
         appId: 'browser',
         placement: { mode: 'space' },
