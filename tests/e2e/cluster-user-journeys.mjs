@@ -625,8 +625,12 @@ try {
     const s = await control.call('inspect');
     const node = placement(s, 'cluster-second').node_id;
     assert.notEqual(node, placement(s, 'cluster-first').node_id);
-    await killNode(node, 1);
-    await pause(1800);
+    await control.call('down', { nodeId: node, tenant: placement(s, 'cluster-second').tenant });
+    await until(
+      async () =>
+        (await control.call('inspect')).nodes.find((entry) => entry.nodeId === node)?.state === 'offline',
+      'node remains offline for discard',
+    );
     await shot(second, 'offline-dirty-session');
     await second.page.close();
     await focusApp(first, 'admin');
@@ -645,6 +649,7 @@ try {
       .filter({ has: first.page.getByText(node, { exact: true }) });
     await click(first, card.getByRole('button', { name: '移除节点', exact: true }));
     await dialog(first, '移除节点', '移除', 'offline-node-remove');
+    await control.call('up', { nodeId: node });
     await click(first, card.getByRole('button', { name: '重新添加', exact: true }));
     await dialog(first, '重新添加节点', '重新添加', 'offline-node-readd');
     await until(

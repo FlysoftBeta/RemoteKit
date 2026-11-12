@@ -37,9 +37,13 @@ const server = createHttp(control, {
   origins: [...config.origins],
   clientDir: config.clientDir,
 });
-const removed = nodes.isRemoved;
 const paused = new Set<string>();
-nodes.isRemoved = (id) => paused.has(id) || removed(id);
+for (const node of nodes.all()) {
+  const start = node.start.bind(node);
+  node.start = () => {
+    if (!paused.has(node.nodeId)) start();
+  };
+}
 const notify = (message: object) => {
   if (process.connected) process.send?.(message, () => {});
 };
