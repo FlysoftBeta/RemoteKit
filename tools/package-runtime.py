@@ -127,6 +127,7 @@ def check_endpoint_freshness(build):
                 'build.ninja',
                 'endpoint_service',
                 'remotekit_node',
+                'remotekit_snapshot',
                 'remotekit_control',
                 'remotekit_release',
             ],
@@ -419,6 +420,7 @@ def package_runtime(args, node_runtime):
     for source, relative in document_runtime_trees():
         shutil.copytree(source, binary / relative)
     shutil.copy2(endpoint.parent / 'remotekit_node.exe', binary / 'remotekit_node.exe')
+    shutil.copy2(endpoint.parent / 'remotekit_snapshot.exe', binary / 'remotekit_snapshot.exe')
     vpl = endpoint.parent / 'libvpl.dll'
     if not vpl.is_file():
         raise FileNotFoundError('Build endpoint Release dispatcher: ' + str(vpl))

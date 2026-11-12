@@ -3,6 +3,7 @@
 #include "release/payload.hpp"
 #include "updater/archive.hpp"
 #include "updater/process.hpp"
+#include "updater/snapshot.hpp"
 #include "updater/replacement.hpp"
 #include "util/error_policy.hpp"
 #include <atomic>
@@ -122,6 +123,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
   State state{id, !id.empty() && BaseUsable(root / L"versions" / id), {}};
   Http http(config.proxy, stop, &log);
   std::unique_ptr<updater::ChildProcess> child;
+  std::vector<std::unique_ptr<updater::SnapshotSupervisor>> snapshots;
   ULONGLONG started = 0, restart_at = 0, check_at = 0;
   unsigned backoff = 1, attempt = 0;
   std::atomic<bool> done = false;
@@ -132,6 +134,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
     if (child) {
       child->Stop(60000);
       child.reset();
+      snapshots.clear();
       log.Event(LogLevel::kInfo, "control.stopped");
     }
   };
@@ -181,6 +184,20 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
       if (!child && !id.empty() && now >= restart_at) {
         try {
           child = StartControl(root, id, log, control_log);
+          snapshots.clear();
+          auto bytes = Read(root / L"config/control.json", 1024 * 1024);
+          auto control = ParseJson({reinterpret_cast<const char*>(bytes.data()), bytes.size()});
+          for (const auto& [node_id, node] : control.at("nodes").items()) {
+            if (!node.contains("local"))
+              continue;
+            const auto local_text = node.at("local").at("root").get<std::string>();
+            auto local = fs::path(std::u8string(local_text.begin(), local_text.end()));
+            if (local.is_relative())
+              local = root / L"config" / local;
+            snapshots.push_back(std::make_unique<updater::SnapshotSupervisor>(
+                root / L"versions" / id / L"node/bin/remotekit_snapshot.exe",
+                fs::absolute(local).lexically_normal(), node_id));
+          }
           started = GetTickCount64();
         } catch (const std::exception&) {
           log.Event(LogLevel::kError, "control.start_failed");

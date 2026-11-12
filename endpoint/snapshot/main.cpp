@@ -1,0 +1,409 @@
+#include "persistence/snapshot_protocol.hpp"
+#include <vss.h>
+#include <vswriter.h>
+#include <vsbackup.h>
+#include <sddl.h>
+#include <chrono>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <thread>
+
+namespace remotekit::snapshot {
+using Clock = std::chrono::steady_clock;
+struct Failure {
+  HRESULT hr;
+  bool invalid = false;
+};
+void Check(HRESULT hr) {
+  if (FAILED(hr))
+    throw Failure{hr};
+}
+void Require(bool valid) {
+  if (!valid)
+    throw Failure{E_INVALIDARG, true};
+}
+fs::path Path(const std::string& text) {
+  return fs::path(std::u8string(text.begin(), text.end()));
+}
+std::string Text(const fs::path& path) {
+  auto text = path.generic_u8string();
+  return {text.begin(), text.end()};
+}
+std::string Id(GUID id) {
+  wchar_t text[40]{};
+  StringFromGUID2(id, text, 40);
+  return Text(text);
+}
+int64_t Milliseconds() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+void Wait(IVssAsync* operation) {
+  HRESULT status = E_FAIL;
+  auto result = operation->Wait();
+  if (SUCCEEDED(result))
+    result = operation->QueryStatus(&status, nullptr);
+  operation->Release();
+  Check(result);
+  Check(status);
+}
+struct Shadow {
+  IVssBackupComponents* backup = nullptr;
+  VSS_ID id = GUID_NULL;
+  fs::path device;
+  Clock::time_point created;
+  int64_t taken_at = 0;
+  ~Shadow() {
+    if (backup) {
+      LONG deleted = 0;
+      VSS_ID failed{};
+      backup->DeleteSnapshots(id, VSS_OBJECT_SNAPSHOT, TRUE, &deleted, &failed);
+      backup->Release();
+    }
+  }
+};
+struct Lease {
+  std::shared_ptr<Shadow> shadow;
+  Clock::time_point renewed;
+  uint64_t owner;
+  std::set<std::string> paths;
+};
+class Service {
+ public:
+  explicit Service(fs::path root) : root_(fs::absolute(root).lexically_normal()) {
+    fs::create_directories(root_);
+    CheckPath(root_, false);
+    wchar_t volume[MAX_PATH]{}, filesystem[MAX_PATH]{};
+    Check(GetVolumePathNameW(root_.c_str(), volume, MAX_PATH) ? S_OK
+                                                              : HRESULT_FROM_WIN32(GetLastError()));
+    Check(GetVolumeInformationW(volume, nullptr, 0, nullptr, nullptr, nullptr, filesystem, MAX_PATH)
+              ? S_OK
+              : HRESULT_FROM_WIN32(GetLastError()));
+    Check(_wcsicmp(filesystem, L"NTFS") == 0 ? S_OK : VSS_E_VOLUME_NOT_SUPPORTED);
+    volume_ = volume;
+    journal_ = root_ / L"snapshot-owner.json";
+    Cleanup();
+  }
+  void Disconnect(uint64_t owner) {
+    std::lock_guard lock(mutex_);
+    std::erase_if(leases_, [&](const auto& item) { return item.second.owner == owner; });
+  }
+  void Expire() {
+    std::lock_guard lock(mutex_);
+    const auto now = Clock::now();
+    std::erase_if(leases_, [&](const auto& item) {
+      return now - item.second.renewed >= std::chrono::seconds(120);
+    });
+  }
+  void Request(HANDLE pipe, uint64_t owner, const Json& request) {
+    std::lock_guard lock(mutex_);
+    try {
+      Require(request.is_object() && request.contains("method"));
+      const auto method = request.at("method").get<std::string>();
+      if (method == "snapshot.take") {
+        Require(Path(request.at("root").get<std::string>()).lexically_normal() == root_);
+        const auto paths = request.at("paths").get<std::vector<std::string>>();
+        Require(!paths.empty());
+        for (const auto& path : paths) {
+          Require(SafePath(Path(path)));
+          CheckPath(root_ / Path(path), true);
+        }
+        auto shadow = current_.lock();
+        if (shadow && Clock::now() - shadow->created > std::chrono::seconds(2))
+          throw Failure{VSS_E_SNAPSHOT_SET_IN_PROGRESS};
+        if (!shadow) {
+          shadow = Take();
+          current_ = shadow;
+        }
+        GUID token{};
+        Check(CoCreateGuid(&token));
+        const auto id = Id(token);
+        Lease lease{shadow, Clock::now(), owner, {}};
+        Json files = Json::array();
+        for (const auto& name : paths) {
+          auto path = Map(*shadow, name);
+          CheckPath(path, true);
+          if (fs::is_directory(path)) {
+            AddFile(lease, files, name, path);
+            for (const auto& entry : fs::recursive_directory_iterator(path)) {
+              const auto relative = Text(Path(name) / entry.path().lexically_relative(path));
+              CheckPath(entry.path(), false);
+              AddFile(lease, files, relative, entry.path());
+            }
+          } else {
+            AddFile(lease, files, name, path);
+          }
+        }
+        leases_.emplace(id, std::move(lease));
+        SendJson(pipe, {{"ok", true},
+                        {"result",
+                         {{"snapshotId", id}, {"takenAt", shadow->taken_at}, {"files", files}}}});
+        return;
+      }
+      const auto id = request.at("snapshotId").get<std::string>();
+      auto found = leases_.find(id);
+      Require(found != leases_.end() && found->second.owner == owner);
+      auto& lease = found->second;
+      lease.renewed = Clock::now();
+      if (method == "snapshot.release") {
+        leases_.erase(found);
+        SendJson(pipe, {{"ok", true}, {"result", Json::object()}});
+        return;
+      }
+      Require(method == "snapshot.read");
+      const auto name = request.at("path").get<std::string>();
+      Require(lease.paths.contains(name));
+      const auto offset = request.at("offset").get<uint64_t>();
+      const auto length = request.at("length").get<uint32_t>();
+      Require(length <= kMaxRead);
+      auto path = Map(*lease.shadow, name);
+      HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+      Check(file == INVALID_HANDLE_VALUE ? HRESULT_FROM_WIN32(GetLastError()) : S_OK);
+      LARGE_INTEGER position{};
+      position.QuadPart = static_cast<LONGLONG>(offset);
+      std::vector<uint8_t> bytes(length);
+      DWORD read = 0;
+      const bool ok = SetFilePointerEx(file, position, nullptr, FILE_BEGIN) &&
+                      ReadFile(file, bytes.data(), length, &read, nullptr);
+      const auto error = GetLastError();
+      CloseHandle(file);
+      Check(ok ? S_OK : HRESULT_FROM_WIN32(error));
+      bytes.resize(read);
+      if (SendJson(pipe, {{"ok", true}, {"result", {{"length", read}}}}))
+        Send(pipe, bytes);
+    } catch (const Failure& error) {
+      ErrorReply(pipe, error);
+    } catch (const Json::exception&) {
+      ErrorReply(pipe, {E_INVALIDARG, true});
+    } catch (const fs::filesystem_error& error) {
+      ErrorReply(pipe, {HRESULT_FROM_WIN32(error.code().value())});
+    }
+  }
+
+ private:
+  void ErrorReply(HANDLE pipe, Failure error) {
+    SendJson(
+        pipe,
+        {{"ok", false},
+         {"error",
+          {{"code", error.invalid ? "invalid_request" : "unavailable"},
+           {"message", error.invalid ? "invalid snapshot path or request" : "snapshot unavailable"},
+           {"os", {{"kind", "hresult"}, {"value", int64_t(error.hr)}}}}}});
+  }
+  void CheckPath(const fs::path& path, bool missing) {
+    fs::path current;
+    for (const auto& part : path) {
+      current /= part;
+      const auto attributes = GetFileAttributesW(current.c_str());
+      if (attributes == INVALID_FILE_ATTRIBUTES) {
+        const auto error = GetLastError();
+        if (missing && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND))
+          return;
+        Check(HRESULT_FROM_WIN32(error));
+      }
+      Require(!(attributes & FILE_ATTRIBUTE_REPARSE_POINT));
+    }
+  }
+  fs::path Map(const Shadow& shadow, const std::string& name) {
+    return shadow.device / (root_ / Path(name)).lexically_relative(volume_);
+  }
+  void AddFile(Lease& lease, Json& files, const std::string& name, const fs::path& path) {
+    if (!lease.paths.insert(name).second)
+      return;
+    HANDLE file = CreateFileW(
+        path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+      auto error = GetLastError();
+      if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+        files.push_back({{"path", name}, {"missing", true}});
+        return;
+      }
+      Check(HRESULT_FROM_WIN32(error));
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    const bool ok = GetFileInformationByHandle(file, &info);
+    CloseHandle(file);
+    Check(ok ? S_OK : HRESULT_FROM_WIN32(GetLastError()));
+    Require(!(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT));
+    if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+      files.push_back({{"path", name}, {"directory", true}});
+      return;
+    }
+    files.push_back({{"path", name},
+                     {"size", (uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow},
+                     {"mtime", (uint64_t(info.ftLastWriteTime.dwHighDateTime) << 32) |
+                                   info.ftLastWriteTime.dwLowDateTime},
+                     {"fileId", std::to_string(info.dwVolumeSerialNumber) + ":" +
+                                    std::to_string((uint64_t(info.nFileIndexHigh) << 32) |
+                                                   info.nFileIndexLow)}});
+  }
+  void Cleanup() {
+    std::ifstream input(journal_);
+    if (!input)
+      return;
+    Json record = Json::parse(input, nullptr, false);
+    Require(record.is_object() && record.contains("snapshotId"));
+    GUID id{};
+    Check(CLSIDFromString(Path(record.at("snapshotId").get<std::string>()).c_str(), &id));
+    IVssBackupComponents* backup = nullptr;
+    Check(CreateVssBackupComponents(&backup));
+    HRESULT hr = backup->InitializeForBackup();
+    if (SUCCEEDED(hr))
+      hr = backup->SetContext(VSS_CTX_ALL);
+    if (SUCCEEDED(hr)) {
+      LONG deleted = 0;
+      VSS_ID failed{};
+      hr = backup->DeleteSnapshots(id, VSS_OBJECT_SNAPSHOT, TRUE, &deleted, &failed);
+    }
+    backup->Release();
+    if (hr != VSS_E_OBJECT_NOT_FOUND)
+      Check(hr);
+    fs::remove(journal_);
+  }
+  void SaveOwner(GUID id) {
+    const auto bytes = Json{{"snapshotId", Id(id)}}.dump();
+    HANDLE file = CreateFileW(journal_.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+    Check(file == INVALID_HANDLE_VALUE ? HRESULT_FROM_WIN32(GetLastError()) : S_OK);
+    DWORD written = 0;
+    const bool ok =
+        WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) &&
+        written == bytes.size() && FlushFileBuffers(file);
+    CloseHandle(file);
+    Check(ok ? S_OK : E_FAIL);
+  }
+  std::shared_ptr<Shadow> Take() {
+    auto shadow = std::make_shared<Shadow>();
+    Check(CreateVssBackupComponents(&shadow->backup));
+    Check(shadow->backup->InitializeForBackup());
+    Check(shadow->backup->SetContext(VSS_CTX_FILE_SHARE_BACKUP));
+    VSS_ID set{};
+    Check(shadow->backup->StartSnapshotSet(&set));
+    auto volume = volume_.wstring();
+    Check(shadow->backup->AddToSnapshotSet(volume.data(), GUID_NULL, &shadow->id));
+    SaveOwner(shadow->id);
+    IVssAsync* operation = nullptr;
+    Check(shadow->backup->DoSnapshotSet(&operation));
+    Wait(operation);
+    VSS_SNAPSHOT_PROP properties{};
+    Check(shadow->backup->GetSnapshotProperties(shadow->id, &properties));
+    shadow->device = fs::path(std::wstring(properties.m_pwszSnapshotDeviceObject) + L"\\");
+    shadow->taken_at = (properties.m_tsCreationTimestamp / 10000) - 11644473600000LL;
+    VssFreeSnapshotProperties(&properties);
+    shadow->created = Clock::now();
+    std::cout << Json{{"event", "snapshot.taken"}, {"takenAt", shadow->taken_at}}.dump()
+              << std::endl;
+    return shadow;
+  }
+  fs::path root_, volume_, journal_;
+  std::mutex mutex_;
+  std::map<std::string, Lease> leases_;
+  std::weak_ptr<Shadow> current_;
+};
+std::wstring AccountSid(DWORD process_id) {
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+  Check(process ? S_OK : HRESULT_FROM_WIN32(GetLastError()));
+  HANDLE token = nullptr;
+  const bool opened = OpenProcessToken(process, TOKEN_QUERY, &token);
+  CloseHandle(process);
+  Check(opened ? S_OK : HRESULT_FROM_WIN32(GetLastError()));
+  DWORD size = 0;
+  GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+  std::vector<uint8_t> storage(size);
+  const bool ok = GetTokenInformation(token, TokenUser, storage.data(), size, &size);
+  CloseHandle(token);
+  Check(ok ? S_OK : HRESULT_FROM_WIN32(GetLastError()));
+  LPWSTR sid = nullptr;
+  Check(ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(storage.data())->User.Sid, &sid)
+            ? S_OK
+            : HRESULT_FROM_WIN32(GetLastError()));
+  std::wstring result(sid);
+  LocalFree(sid);
+  return result;
+}
+int Run(int argc, wchar_t** argv) {
+  fs::path root;
+  std::string node;
+  DWORD supervisor = 0;
+  for (int i = 1; i < argc; ++i) {
+    std::wstring arg(argv[i]);
+    if (arg.starts_with(L"--data-root="))
+      root = arg.substr(12);
+    else if (arg.starts_with(L"--node-id="))
+      node = Text(arg.substr(10));
+    else if (arg.starts_with(L"--supervisor-pid="))
+      supervisor = std::stoul(arg.substr(17));
+    else
+      Require(false);
+  }
+  Require(
+      root.is_absolute() && !node.empty() &&
+      node.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") ==
+          std::string::npos &&
+      supervisor != 0);
+  Check(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+  Check(CoInitializeSecurity(nullptr, -1, nullptr, nullptr, RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+                             RPC_C_IMP_LEVEL_IDENTIFY, nullptr, EOAC_NONE, nullptr));
+  Service service(root);
+  auto sddl = L"D:P(A;;GA;;;SY)(A;;GA;;;" + AccountSid(supervisor) + L")";
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  Check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1,
+                                                             &descriptor, nullptr)
+            ? S_OK
+            : HRESULT_FROM_WIN32(GetLastError()));
+  SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
+  std::thread([&service] {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    for (;;) {
+      Sleep(1000);
+      service.Expire();
+    }
+  }).detach();
+  uint64_t owner = 0;
+  for (;;) {
+    HANDLE pipe = CreateNamedPipeW(
+        PipeName(node).c_str(), PIPE_ACCESS_DUPLEX,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        PIPE_UNLIMITED_INSTANCES, kMaxRead + 4096, kMaxRead + 4096, 0, &security);
+    Check(pipe == INVALID_HANDLE_VALUE ? HRESULT_FROM_WIN32(GetLastError()) : S_OK);
+    if (!ConnectNamedPipe(pipe, nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) {
+      CloseHandle(pipe);
+      continue;
+    }
+    std::thread([&service, pipe, connection = ++owner] {
+      CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+      std::vector<uint8_t> bytes;
+      while (Receive(pipe, bytes)) {
+        const auto request = Json::parse(bytes, nullptr, false);
+        service.Request(pipe, connection, request);
+      }
+      service.Disconnect(connection);
+      DisconnectNamedPipe(pipe);
+      CloseHandle(pipe);
+      CoUninitialize();
+    }).detach();
+  }
+}
+}  // namespace remotekit::snapshot
+int wmain(int argc, wchar_t** argv) {
+  try {
+    return remotekit::snapshot::Run(argc, argv);
+  } catch (const remotekit::snapshot::Failure& failure) {
+    std::cout << remotekit::Json{{"event", "snapshot.unavailable"},
+                                 {"os", {{"kind", "hresult"}, {"value", int64_t(failure.hr)}}}}
+                     .dump()
+              << std::endl;
+  } catch (const std::exception& error) {
+    std::cout << remotekit::Json{{"event", "snapshot.failed"}, {"message", error.what()}}.dump()
+              << std::endl;
+  }
+  return 1;
+}

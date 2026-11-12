@@ -2,6 +2,7 @@
 #include "download.hpp"
 #include "process.hpp"
 #include "replacement.hpp"
+#include "snapshot.hpp"
 #include "util/error_policy.hpp"
 #include <thread>
 
@@ -13,6 +14,11 @@ DWORD RunEndpoint(const fs::path& root,
                   Log& log,
                   Log& endpoint_log) {
   auto executable = root / L"runtime" / id / L"bin/endpoint_service.exe";
+  auto config = cluster::LoadNodeFiles(root);
+  if (!config)
+    throw std::runtime_error("cannot load snapshot node identity");
+  SnapshotSupervisor snapshots(executable.parent_path() / L"remotekit_snapshot.exe", root,
+                               config.value().node_id);
   ChildProcess child(executable, L"--node-root=" + Quote(root.wstring()), root, endpoint_log,
                      false);
   log.Event(LogLevel::kInfo, "endpoint.started");
