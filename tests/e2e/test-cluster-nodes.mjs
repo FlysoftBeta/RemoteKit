@@ -1,6 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { createViewerContext, instrumentViewer, launchBrowser, remoteInputReady } from './kit/viewer.mjs';
+import {
+  authorizedFrameReady,
+  createViewerContext,
+  instrumentViewer,
+  launchBrowser,
+  remoteInputReady,
+} from './kit/viewer.mjs';
 
 import { join, resolve } from 'node:path';
 import { startStack, until } from './kit/stack.mjs';
@@ -72,6 +78,7 @@ async function workspace(viewer, path) {
   return window;
 }
 async function tap(viewer, path, id) {
+  await viewer.page.waitForFunction(authorizedFrameReady);
   await viewer.page.waitForFunction(() => {
     const viewport = document.querySelector('.remote-viewport');
     const workspace = clusterQA.state?.workspace;
@@ -288,6 +295,20 @@ try {
     error: error.stack,
     snapshot: await control.call('inspect').catch(String),
     events,
+    input: await Promise.all(
+      contexts
+        .flatMap((context) => context.pages())
+        .map((page) =>
+          page
+            .evaluate(() => ({
+              state: clusterQA.state,
+              layout: clusterQA.layout,
+              frame: clusterQA.frame,
+              wire: clusterQA.inputWire,
+            }))
+            .catch(String),
+        ),
+    ),
   });
 } finally {
   await viewers?.close();

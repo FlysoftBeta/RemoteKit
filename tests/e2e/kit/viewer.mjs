@@ -317,10 +317,15 @@ export async function instrumentViewer(context, evidence, name) {
       pending: new Map(),
       channels: [],
       fileWire: [],
+      inputWire: [],
       authFrames: 0,
       authGrants: 0,
     });
-    const receive = ({ data }) => {
+    const recordInput = (direction, message) => {
+      qa.inputWire.push({ direction, message });
+      if (qa.inputWire.length > 100) qa.inputWire.shift();
+    };
+    const receive = ({ data, currentTarget }) => {
       if (typeof data !== 'string') return;
       let message;
       try {
@@ -332,6 +337,10 @@ export async function instrumentViewer(context, evidence, name) {
       if (message.type === 'layout') qa.layout = message;
       if (message.type === 'library') qa.library = message.snapshot;
       if (message.type === 'auth') qa.auth = message.auth;
+      if (currentTarget instanceof RTCDataChannel) {
+        if (message.type === 'frame') qa.frame = message;
+        if (message.type === 'input.result' || message.type === 'focus') recordInput('in', message);
+      }
       if (message.type === 'files.result') {
         const { data, ...result } = message.result ?? {};
         qa.fileWire.push({
@@ -361,6 +370,7 @@ export async function instrumentViewer(context, evidence, name) {
         channel.send = (raw) => {
           if (typeof raw === 'string') {
             const message = JSON.parse(raw);
+            if (message.type === 'input' || message.type === 'focus') recordInput('out', message);
             if (message.type === 'files.request') {
               const { data, ...params } = message.params;
               qa.fileWire.push({
@@ -1237,6 +1247,17 @@ export async function prepareNativeViewer(host) {
     for (const context of qa.contexts) await context.close();
     qa.contexts = [];
   };
+}
+
+export function authorizedFrameReady() {
+  const qa = window.clusterQA;
+  return (
+    qa.state?.browser.state === 'available' &&
+    qa.auth?.peerEpoch > 0 &&
+    qa.frame?.authEpoch === qa.auth.peerEpoch &&
+    qa.frame?.layoutEpoch === qa.layout?.epoch &&
+    !document.querySelector('.page-overlay')
+  );
 }
 
 export function remoteInputReady(viewId) {
