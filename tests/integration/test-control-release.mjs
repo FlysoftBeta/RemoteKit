@@ -402,8 +402,7 @@ try {
     JSON.stringify({
       http: { listen: controlUrl.slice(7), origins: [controlUrl] },
       storage: { database: '../data/control.db', diagnostics: '../data/diagnostics', logs: '../logs' },
-      cluster: { keyFile: 'cluster.key', controlUrl: controlUrl.replace('http:', 'ws:') + '/api/node' },
-      nodes: { 'release-node': {} },
+      nodes: { 'release-node': { remote: { control: controlUrl.replace('http:', 'ws:') + '/api/node' } } },
     }),
   );
   phase = 'fresh';

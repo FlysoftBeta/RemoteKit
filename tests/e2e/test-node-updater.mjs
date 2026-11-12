@@ -3,7 +3,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { appendFile, copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { buildHarness, startControl, until } from './cluster-test-support.mjs';
@@ -18,12 +18,6 @@ const endpoint = resolve(endpointArg),
 await mkdir(run);
 const nodeRoot = join(run, 'node');
 await mkdir(nodeRoot);
-const key = randomBytes(32).toString('base64');
-await writeFile(join(run, 'cluster.key'), key);
-await writeFile(
-  join(nodeRoot, 'node.json'),
-  JSON.stringify({ control: `ws://127.0.0.1:${port}/api/node`, key, nodeId: 'updater-test' }),
-);
 const installed = join(nodeRoot, 'remotekit_node.exe');
 await copyFile(join(dirname(endpoint), 'remotekit_node.exe'), installed);
 const releases = [];
@@ -31,7 +25,7 @@ const servers = [];
 for (const generation of ['first', 'second']) {
   const runtime = join(run, generation);
   servers.push(await buildHarness(runtime));
-  releases.push(await makeNodeRelease(runtime, endpoint, generation));
+  releases.push(await makeNodeRelease(runtime, endpoint, generation, browser));
 }
 assert.notEqual(releases[0].buildId, releases[1].buildId);
 const configPath = join(run, 'control.json');
@@ -40,13 +34,12 @@ await writeFile(
   JSON.stringify({
     http: { listen: `127.0.0.1:${port}` },
     storage: { database: join(run, 'control.db') },
-    cluster: { keyFile: join(run, 'cluster.key'), controlUrl: `ws://127.0.0.1:${port}/api/node` },
-    nodeDefaults: {
-      browser,
-      dataPath: join(run, 'data'),
-      peer: { listen: `127.0.0.1:${port + 1}`, address: `127.0.0.1:${port + 1}` },
+    nodes: {
+      'updater-test': {
+        remote: { control: `ws://127.0.0.1:${port}/api/node` },
+        peer: { listen: `127.0.0.1:${port + 1}`, address: `127.0.0.1:${port + 1}` },
+      },
     },
-    nodes: { 'updater-test': {} },
   }),
 );
 let control, updater;
@@ -58,6 +51,7 @@ try {
       () => false,
     ),
   );
+  await copyFile(join(run, 'nodes/updater-test/node.json'), join(nodeRoot, 'node.json'));
   updater = spawn(installed, ['run', '--root=' + nodeRoot], {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],

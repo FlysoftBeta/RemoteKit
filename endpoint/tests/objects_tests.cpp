@@ -1,3 +1,4 @@
+#include "peer_fixture.hpp"
 #include "objects/peer.hpp"
 #include <windows.h>
 #include <fstream>
@@ -122,16 +123,19 @@ void Peer(ObjectStore& source,
           const Keys& keys,
           const ObjectInfo& info,
           const std::string& plain) {
-  const cluster::Key cluster_key{7};
-  PeerServer server(source, cluster_key, "source", "dev");
+  const auto source_key = TestPrivateKey(7), target_key = TestPrivateKey(8);
+  PeerSet server_peers, client_peers;
+  Take(server_peers.Update(Json::array({TestPeer("target", "127.0.0.1:1", target_key)})));
+  PeerServer server(source, source_key, "source", "dev", server_peers);
   Take(server.Start("127.0.0.1:0"));
-  PeerClient client(target, cluster_key, "target", "dev");
+  PeerClient client(target, target_key, "target", "dev", client_peers);
   // Interrupt a real TCP/Noise transfer, then resume against the regular peer server.
   auto listener = Take(cluster::TcpListener::Listen("127.0.0.1:0"));
   auto interrupted = std::async(std::launch::async, [&] {
     auto carrier = Take(listener->Accept(5s));
     auto connection = Take(cluster::AcceptCarrier(
-        std::move(carrier), cluster_key, [](const cluster::Json& hello) -> Result<cluster::Json> {
+        std::move(carrier), source_key,
+        [](const cluster::Json& hello, const cluster::Key& public_key) -> Result<cluster::Json> {
           Check(hello["role"] == "peer", "peer hello");
           return cluster::Json{{"type", "node.ready"}, {"buildId", "dev"}};
         }));
@@ -143,20 +147,35 @@ void Peer(ObjectStore& source,
     Take(connection.channel->SendBinary({{"type", "object.chunk"}, {"offset", 0}}, chunk));
     connection.channel->Close();
   });
-  Check(!client.Fetch(info.id, listener->Address()), "interrupted transfer fails");
+  Take(client_peers.Update(Json::array({TestPeer("source", listener->Address(), source_key)})));
+  Check(!client.Fetch(info.id, "source"), "interrupted transfer fails");
   interrupted.get();
   auto partial = Take(target.StoredPath(info.id));
   partial += ".partial";
   Check(fs::file_size(partial) == 12345, "partial retained for resume");
-  const auto fetched = Take(client.Fetch(info.id, server.Address()));
+  Take(client_peers.Update(Json::array({TestPeer("source", server.Address(), source_key)})));
+  const auto fetched = Take(client.Fetch(info.id, "source"));
   Check(fetched.stored_sha256 == info.stored_sha256 && fetched.stored_size == info.stored_size &&
             !fs::exists(partial),
         "resumed stored file verified");
   Check(Read(target, keys, info.id) == plain, "resumed plaintext round trip");
-  PeerClient mismatch(target, cluster_key, "target", std::string(64, 'a'));
-  auto rejected = mismatch.Fetch(info.id, server.Address());
+  PeerClient mismatch(target, target_key, "target", std::string(64, 'a'), client_peers);
+  auto rejected = mismatch.Fetch(info.id, "source");
   Check(!rejected && rejected.error().code == remotekit::ErrorCode::kUnavailable,
         "peer build lock");
+  PeerSet intruder_peers;
+  Take(intruder_peers.Update(Json::array({TestPeer("source", server.Address(), source_key)})));
+  PeerClient intruder(target, TestPrivateKey(9), "target", "dev", intruder_peers);
+  Check(!intruder.Fetch(info.id, "source"),
+        "non-member static key is rejected even with member claim");
+  Take(server_peers.Update(Json::array()));
+  server.Revoke();
+  Check(!client.Fetch(info.id, "source"), "removed member is rejected");
+  Take(server_peers.Update(Json::array({TestPeer("actual-member", "127.0.0.1:1", target_key)})));
+  Check(bool(client.Fetch(info.id, "source")),
+        "peer identity comes from key membership rather than claimed id");
+  Take(client_peers.Update(Json::array({TestPeer("source", server.Address(), TestPrivateKey(9))})));
+  Check(!client.Fetch(info.id, "source"), "wrong responder static key is rejected");
   fs::copy_file(Take(source.StoredPath(info.id)), partial);
   Flip(partial, 25);
   Check(!target.Import(info.id, info.stored_size, info.stored_sha256) && !fs::exists(partial),

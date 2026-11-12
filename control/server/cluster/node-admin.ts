@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { log } from '../log';
 import { RemoteKitError } from '../../shared/errors';
 import type { AdminNode } from '../../shared/admin';
@@ -24,6 +25,11 @@ export class NodeAdmin {
         nodeId: node.nodeId,
         state: this.nodes.isRemoved(node.nodeId) ? 'removed' : node.state.state,
         managed: !!node.configured.local,
+        publicKeyFingerprint: createHash('sha256')
+          .update(Buffer.from(node.configured.publicKey, 'base64'))
+          .digest('hex')
+          .slice(0, 16),
+        bootstrapFile: node.configured.remote ? node.configured.bootstrapFile : null,
         peerAddress: node.config.peer.address,
         buildId: node.state.state === 'ready' ? (node.buildId ?? null) : null,
         pressure: sample?.pressure ?? null,
@@ -31,7 +37,7 @@ export class NodeAdmin {
         underPressure: node.metrics.underPressure(),
         diskDraining: node.diskDraining,
         sessions: sample?.value.sessions ?? this.placement.activeSessions(node.nodeId),
-        maxSessions: node.config.maxSessions,
+        maxSessions: node.limits.maxSessions,
         users: this.placement
           .activeTenants(node.nodeId)
           .flatMap((tenant) => this.store.accounts.userForTenant(tenant)?.username ?? []),
@@ -64,6 +70,7 @@ export class NodeAdmin {
       this.objects.forgetNode(nodeId);
     });
     node.evict();
+    this.nodes.publishPeers();
     void this.objects.tick().catch((err) => log.warn('node.objects_failed', { nodeId, err }));
     return this.list();
   }
@@ -71,6 +78,7 @@ export class NodeAdmin {
     const node = this.nodes.get(nodeId);
     if (!node) throw new RemoteKitError('not_found', '节点未配置');
     this.store.db.prepare('DELETE FROM removed_nodes WHERE node_id=?').run(nodeId);
+    this.nodes.publishPeers();
     node.start();
     return this.list();
   }

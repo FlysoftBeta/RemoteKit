@@ -18,6 +18,7 @@ Service::Service(media::Sdk& sdk,
       link_(link),
       objects_(options.data, link, cluster_key, options.node_id, options.build_id),
       metrics_(options.data) {
+  link_.OnPeers([this](const Json& peers) { return objects_.SetPeers(peers); });
   link_.OnBinary([this](const Json& header, std::span<const uint8_t> bytes) {
     auto written = objects_.PutChunk(header, bytes);
   });
@@ -33,6 +34,7 @@ Service::~Service() {
   object_workers_.Stop();
   link_.OnDisconnect({});
   link_.OnBinary({});
+  link_.OnPeers({});
   auto closed = Clear();
   if (!closed)
     LogError(LogLevel::kWarn, "service.shutdown_failed", closed.error());
@@ -128,8 +130,6 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
       session_count_ = sessions_.size();
     }
     if (!sessions_.contains(tenant)) {
-      if (options_.max_sessions && sessions_.size() >= *options_.max_sessions)
-        return Error{ErrorCode::kUnavailable, "node session capacity reached"};
       for (const auto& [other_tenant, session] : sessions_)
         if (session->Id() == id)
           return Error{ErrorCode::kConflict, "sessionId is already open"};

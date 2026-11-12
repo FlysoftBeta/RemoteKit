@@ -16,6 +16,7 @@ class ObjectService {
                 std::string node,
                 std::string build);
   ~ObjectService();
+  Result<void> SetPeers(const Json& peers);
   Result<void> Start(const std::string& listen);
   ObjectStore& Store() { return store_; }
   documents::ObjectDocuments& Documents() { return *documents_; }
@@ -57,6 +58,7 @@ class ObjectService {
   std::map<std::string, std::shared_ptr<Put>> puts_;
   ObjectStore store_;
   ManagementLink& control_;
+  PeerSet peers_;
   PeerServer server_;
   PeerClient client_;
   std::array<std::mutex, 16> transfers_;

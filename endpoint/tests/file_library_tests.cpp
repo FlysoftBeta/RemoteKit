@@ -1,3 +1,4 @@
+#include "peer_fixture.hpp"
 #include "session_db_fixture.hpp"
 #include "files/file_library.hpp"
 #include "documents/object_documents.hpp"
@@ -323,11 +324,13 @@ int main(int argc, char** argv) {
   const auto session = root / "session";
   Documents(root / "documents");
   Control control;
-  remotekit::objects::ObjectService objects(root / "node", control, remotekit::cluster::Key{},
-                                            "source", "dev");
+  const auto source_key = TestPrivateKey(7), target_key = TestPrivateKey(8);
+  remotekit::objects::ObjectService objects(root / "node", control, source_key, "source", "dev");
   Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
                           {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
-  remotekit::objects::PeerServer peer(objects.Store(), remotekit::cluster::Key{}, "source", "dev");
+  remotekit::objects::PeerSet members;
+  Take(members.Update(remotekit::Json::array({TestPeer("target", "127.0.0.1:1", target_key)})));
+  remotekit::objects::PeerServer peer(objects.Store(), source_key, "source", "dev", members);
   PersistedRecords(root / "persisted-records", objects);
   Take(peer.Start("127.0.0.1:0"));
   const std::string hash = "fd7adb152c05ef80dccf50a1fa4c05d5a3ec6da95575fc312ae7c5d091836351";
@@ -524,10 +527,11 @@ int main(int argc, char** argv) {
   {
     Control target_control;
     target_control.address = peer.Address();
-    remotekit::objects::ObjectService target(root / "target", target_control,
-                                             remotekit::cluster::Key{}, "target", "dev");
+    remotekit::objects::ObjectService target(root / "target", target_control, target_key, "target",
+                                             "dev");
     Take(target.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
                            {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+    Take(target.SetPeers(remotekit::Json::array({TestPeer("source", peer.Address(), source_key)})));
     LibraryFixture library(root / "remote-session", target, "tenant");
     Take(library.Initialize());
     CHECK(!target.Store().Inspect(hash));

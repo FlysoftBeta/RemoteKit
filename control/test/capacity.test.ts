@@ -6,7 +6,8 @@ import { diskFloor } from '../server/cluster/disk';
 import { MetricsHistory } from '../server/cluster/metrics';
 import { NodeRegistry } from '../server/cluster/node-link';
 import { Placement } from '../server/cluster/placement';
-import { nodeDefaults, type NodeConfig } from '../server/config';
+import type { NodeLimits } from '../server/config';
+import { endpointDefaults, testNode } from './node-fixture';
 import { EndpointGateway } from '../server/endpoint/gateway';
 import type { EndpointSnapshot } from '../server/endpoint/types';
 import { ControlDatabase } from '../server/persistence/database';
@@ -18,16 +19,17 @@ import { TestClock } from './server-fixture';
 const closeTo = (actual: number | undefined, expected: number) =>
   assert.ok(actual !== undefined && Math.abs(actual - expected) < 1e-9, `${actual} != ${expected}`);
 
-function cluster(overrides: Partial<NodeConfig> = {}) {
+function cluster(overrides: Partial<NodeLimits> = {}) {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const nodes = new NodeRegistry({
-    key: Buffer.alloc(32).toString('base64'),
+    privateKey: Buffer.alloc(32).toString('base64'),
     buildId: 'dev',
     nodes: Object.fromEntries(
       ['alpha', 'beta'].map((nodeId) => [
         nodeId,
         {
-          config: { ...nodeDefaults, ...overrides, nodeId },
+          ...testNode(nodeId),
+          limits: { ...testNode(nodeId).limits, ...overrides },
           configHash: nodeId,
         },
       ]),
@@ -116,12 +118,12 @@ test('prediction includes memory, disk, both GPU engines, and optional session c
 
 test('disk floor is configured or the greater of two GiB and five percent of the volume', () => {
   const metrics = new MetricsHistory(null);
-  const node = { config: { diskReserveBytes: null as number | null } };
+  const node = { limits: { diskReserveBytes: null as number | null } };
   metrics.record(fakeMetrics({ disk: { total: 10 * 1024 ** 3, free: 0 } }));
   assert.equal(diskFloor(node, metrics.latest()!), 2 * 1024 ** 3);
   metrics.record(fakeMetrics({ disk: { total: 100 * 1024 ** 3, free: 0 } }));
   assert.equal(diskFloor(node, metrics.latest()!), 5 * 1024 ** 3);
-  node.config.diskReserveBytes = 0;
+  node.limits.diskReserveBytes = 0;
   assert.equal(diskFloor(node, metrics.latest()!), 0);
 });
 

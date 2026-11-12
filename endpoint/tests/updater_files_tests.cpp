@@ -20,12 +20,17 @@ int wmain(int argc, wchar_t** argv) {
   try {
     fs::create_directories(root);
     Json config = {{"control", "ws://example.test/api/node"},
-                   {"key", std::string(43, 'A') + "="},
+                   {"privateKey", std::string(43, 'A') + "="},
+                   {"controlPublicKey", std::string(43, 'A') + "="},
                    {"nodeId", "node-1"}};
     Write(root / L"node.json", config);
     auto files = LoadNodeFiles(root);
     Check(static_cast<bool>(files));
-    Check(files.value().node_id == "node-1" && files.value().key == Key{});
+    Check(files.value().node_id == "node-1" && files.value().private_key == Key{});
+    config.erase("control");
+    Write(root / L"node.json", config);
+    Check(bool(LoadNodeFiles(root)));
+    config["control"] = "ws://example.test/api/node";
     config.erase("nodeId");
     Write(root / L"node.json", config);
     Check(!LoadNodeFiles(root));
@@ -34,10 +39,10 @@ int wmain(int argc, wchar_t** argv) {
     Write(root / L"node.json", config);
     Check(!LoadNodeFiles(root));
     config.erase("extra");
-    config["key"] = std::string(42, 'A') + "B=";
+    config["privateKey"] = std::string(42, 'A') + "B=";
     Write(root / L"node.json", config);
     Check(!LoadNodeFiles(root));
-    config["key"] = std::string(43, 'A') + "=";
+    config["privateKey"] = std::string(43, 'A') + "=";
     for (auto id : {"Upper", "-node", "node/name", ""}) {
       config["nodeId"] = id;
       Write(root / L"node.json", config);

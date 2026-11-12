@@ -43,9 +43,11 @@ await writeFile(
   configPath,
   JSON.stringify({
     http: { listen: '127.0.0.1:0', origins: ['http://production.test'] },
-    storage: { database: resolve(deployment, 'data/control.db') },
-    cluster: { controlUrl: 'ws://127.0.0.1:1/api/node' },
-    nodes: { production: {} },
+    storage: {
+      database: resolve(deployment, 'data/control.db'),
+      logs: resolve(scratch, 'logs'),
+    },
+    nodes: { production: { remote: { control: 'ws://127.0.0.1:1/api/node' } } },
     sessionImport: {
       mailbox: 'production@example.test',
       appMailbox: 'app@example.test',
@@ -71,8 +73,7 @@ try {
   child.stdout.on('data', (data) => {
     output += data;
   });
-  // Control announces its listener in its own log file (storage.logs defaults to
-  // `logs` next to the config file), not on stdout.
+  // Control announces its listener in its own log file, not on stdout.
   const logPath = resolve(scratch, 'logs/control.jsonl');
   const port = await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {

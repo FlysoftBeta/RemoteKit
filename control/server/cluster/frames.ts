@@ -2,8 +2,7 @@ import { RemoteKitError } from '../../shared/errors';
 import { MAX_CIPHERTEXT, MAX_TRANSPORT } from './noise';
 
 export const MAX_JSON = 1024 * 1024;
-// JSON escaping can expand the 3 MiB clipboard payload to 18 MiB.
-const MAX_CLIPBOARD_JSON = 20 * 1024 * 1024 - 1;
+const MAX_CLIPBOARD_JSON = MAX_TRANSPORT - 1;
 function jsonLimit(value: Record<string, unknown>) {
   if (value.type === 'clipboard.changed') return 4 * 1024 * 1024 - 1;
   if (value.method === 'clipboard.write') return MAX_CLIPBOARD_JSON;

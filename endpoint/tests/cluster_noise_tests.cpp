@@ -31,11 +31,12 @@ int main(int argc, char** argv) {
     nlohmann::json doc;
     std::ifstream(argv[1]) >> doc;
     auto v = doc["vectors"][0];
-    Key psk = KeyHex(v["init_psks"][0]);
+    Key init_key = KeyHex(v["init_static"]), resp_key = KeyHex(v["resp_static"]);
     TestEphemeral ie{KeyHex(v["init_ephemeral"])}, re{KeyHex(v["resp_ephemeral"])};
     auto prologue = Unhex(v["init_prologue"]);
     std::string text(prologue.begin(), prologue.end());
-    Noise init(Role::kInitiator, psk, text, &ie), resp(Role::kResponder, psk, text, &re);
+    Noise init(Role::kInitiator, init_key, KeyHex(v["init_remote_static"]), text, &ie),
+        resp(Role::kResponder, resp_key, {}, text, &re);
     for (int i = 0; i < 2; ++i) {
       auto payload = Unhex(v["messages"][i]["payload"]);
       auto wire = Take((i == 0 ? init : resp).Write(payload));

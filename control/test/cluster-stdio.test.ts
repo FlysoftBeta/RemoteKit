@@ -1,3 +1,4 @@
+import { publicKey } from '../server/cluster/noise';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
@@ -9,7 +10,7 @@ import { join } from 'node:path';
 import { EndpointLog } from '../server/cluster/endpoint-log';
 import { log } from '../server/log';
 import { NodeRegistry, StdioCarrier } from '../server/cluster/node-link';
-import { nodeDefaults } from '../server/config';
+import { endpointDefaults, testNode, nodePrivateKey } from './node-fixture';
 import { NoiseHandshake } from '../server/cluster/noise';
 import { decodeFrame, encodeJson, encodeStdio, StdioDecoder, jsonObject } from '../server/cluster/frames';
 import childProcess from 'node:child_process';
@@ -43,11 +44,11 @@ for (const outcome of ['success', 'failure', 'stopped', 'dev'] as const) {
       errors.push(args);
     });
     const registry = new NodeRegistry({
-      key: Buffer.alloc(32).toString('base64'),
+      privateKey: Buffer.alloc(32).toString('base64'),
       buildId: outcome === 'dev' ? 'dev' : 'a'.repeat(64),
       nodes: {
         local: {
-          config: { ...nodeDefaults, nodeId: 'local' },
+          ...testNode('local'),
           configHash: 'hash',
           local: {
             root: directory,
@@ -63,6 +64,7 @@ for (const outcome of ['success', 'failure', 'stopped', 'dev'] as const) {
     assert.equal(calls.length, 1);
     if (outcome === 'dev') {
       assert.equal(calls[0].executable, join(directory, 'endpoint_service.exe'));
+      assert.deepEqual(calls[0].args, ['--stdio', `--node-root=${directory}`]);
       return;
     }
     assert.equal(calls[0].executable, join(directory, 'bin/remotekit_node.exe'));
@@ -87,9 +89,9 @@ for (const outcome of ['success', 'failure', 'stopped', 'dev'] as const) {
 test('local stdio shares authenticated handshake, encrypted RPCs and lost-reply certainty', async (t) => {
   const key = Buffer.alloc(32, 17);
   const registry = new NodeRegistry({
-    key: key.toString('base64'),
+    privateKey: key.toString('base64'),
     buildId: 'dev',
-    nodes: { local: { config: { ...nodeDefaults, nodeId: 'local' }, configHash: 'local-hash' } },
+    nodes: { local: { ...testNode('local'), configHash: 'local-hash' } },
   });
   const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(),
@@ -104,7 +106,7 @@ test('local stdio shares authenticated handshake, encrypted RPCs and lost-reply 
   const endpointLog = new EndpointLog(join(log, 'logs', 'endpoint.log'));
   const carrier = new StdioCarrier(child as unknown as ChildProcessWithoutNullStreams, endpointLog);
   registry.accept(carrier, 'local');
-  const handshake = new NoiseHandshake('initiator', key);
+  const handshake = new NoiseHandshake('initiator', nodePrivateKey('local'), publicKey(key));
   const reply = once(child.stdin, 'data');
   const hello = encodeStdio(
     handshake.writeMessage(

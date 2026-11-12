@@ -1,3 +1,4 @@
+import { stageRuntime } from '../integration/stage-runtime.mjs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runtimeConfig } from '../../control/server/config.ts';
@@ -20,22 +21,29 @@ export async function createClusterControl(options: {
   await writeFile(
     configPath,
     JSON.stringify({
-      http: { host: '127.0.0.1', port, origins: [`http://127.0.0.1:${port}`] },
-      database: join(run, 'control.db'),
-      diagnostics: join(run, 'diagnostics'),
-      cluster: {
-        keyFile: 'cluster.key',
-        ...(remote ? { advertiseUrl: `ws://127.0.0.1:${port}/api/node` } : {}),
+      http: { listen: `127.0.0.1:${port}`, origins: [`http://127.0.0.1:${port}`] },
+      storage: {
+        database: join(run, 'control.db'),
+        diagnostics: join(run, 'diagnostics'),
+        logs: join(run, 'logs'),
       },
-      nodeDefaults: { browser, dataPath: join(run, 'endpoint') },
-      nodes: { [nodeId]: remote ? {} : { launch: { executable, root: join(run, 'node') } } },
+      nodes: {
+        [nodeId]: remote
+          ? { remote: { control: `ws://127.0.0.1:${port}/api/node` } }
+          : {
+              local: {
+                executable: stageRuntime(executable, browser, join(run, 'node-runtime/bin')),
+                root: join(run, 'node'),
+              },
+            },
+      },
     }),
   );
   const config = runtimeConfig({ REMOTEKIT_CONTROL_CONFIG: configPath }, []);
   const store = new ControlDatabase(config.dbPath, { buildId: config.buildId });
   const endpoint = new NodeRegistry({
     nodes: config.nodes,
-    key: config.cluster.key,
+    privateKey: config.identity.privateKey,
     buildId: config.buildId,
   });
   const gateway = new EndpointGateway(endpoint, new Placement(store, endpoint));

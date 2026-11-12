@@ -3,7 +3,7 @@
 namespace remotekit::cluster {
 struct NodeFiles {
   std::string control, node_id;
-  Key key{};
+  Key private_key{}, control_public_key{};
   ~NodeFiles();
 };
 bool ValidNodeId(std::string_view value);

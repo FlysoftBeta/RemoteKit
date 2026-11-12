@@ -1,6 +1,6 @@
 import { NodeRegistry } from '../server/cluster/node-link';
 import type { SessionPlacement } from '../server/cluster/placement';
-import { nodeDefaults } from '../server/config';
+import { endpointDefaults, testNode, nodePrivateKey } from './node-fixture';
 import { RemoteKitError } from '../shared/errors';
 import { EndpointGateway } from '../server/endpoint/gateway';
 import type { EndpointLink, EndpointLinkState } from '../server/endpoint/link';
@@ -9,8 +9,8 @@ export function testGateway(
   link: Pick<EndpointLink, 'request' | 'onSignal' | 'onClientAction'> & { state?: EndpointLinkState },
 ): EndpointGateway {
   const nodes = new NodeRegistry({
-    nodes: { fixture: { config: { ...nodeDefaults, nodeId: 'fixture' }, configHash: 'fixture' } },
-    key: Buffer.alloc(32).toString('base64'),
+    nodes: { fixture: testNode('fixture') },
+    privateKey: Buffer.alloc(32).toString('base64'),
     buildId: 'dev',
   });
   const node = nodes.get('fixture')!;

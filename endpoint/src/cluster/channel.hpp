@@ -30,11 +30,17 @@ class Carrier {
 std::unique_ptr<Carrier> HandleCarrier(void* read_handle, void* write_handle);
 Result<Established> ConnectCarrier(std::unique_ptr<Carrier> carrier,
                                    const Key& key,
+                                   const Key& responder_public_key,
                                    const Hello& hello);
-using HelloHandler = std::function<Result<Json>(const Json&)>;
+using HelloHandler = std::function<Result<Json>(const Json&, const Key&)>;
 Result<Established> AcceptCarrier(std::unique_ptr<Carrier> carrier,
                                   const Key& key,
                                   const HelloHandler& reply);
-Result<Established> ConnectWebSocket(const std::string& url, const Key& key, const Hello& hello);
-Result<Established> ConnectStdio(const Key& key, const Hello& hello);
+Result<Established> ConnectWebSocket(const std::string& url,
+                                     const Key& key,
+                                     const Key& responder_public_key,
+                                     const Hello& hello);
+Result<Established> ConnectStdio(const Key& key,
+                                 const Key& responder_public_key,
+                                 const Hello& hello);
 }  // namespace remotekit::cluster

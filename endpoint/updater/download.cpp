@@ -169,7 +169,7 @@ Result<bool> Update(const fs::path& root, HANDLE stop, Log& log, bool service) {
       return files.error();
     std::string previous = ReadCurrent(root);
     auto connection = cluster::ConnectWebSocket(
-        files.value().control, files.value().key,
+        files.value().control, files.value().private_key, files.value().control_public_key,
         {"updater", files.value().node_id, previous.empty() ? "dev" : previous, {}});
     if (!connection)
       return connection.error();

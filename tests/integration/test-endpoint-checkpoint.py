@@ -48,7 +48,7 @@ def main():
     seed = uuid.uuid4().hex
     writing = True
     evidence = []
-    cluster_key = base64.b64encode(os.urandom(32)).decode()
+    control_private_key = base64.b64encode(os.urandom(32)).decode()
     session_id = uuid.uuid4().hex
     tenant = "checkpoint-tenant"
 
@@ -99,7 +99,7 @@ def main():
             address = peer_address()
             self.child = subprocess.Popen(
                 endpoint_command(args.endpoint, args.browser, self.root,
-                                 cluster_key=cluster_key, object_index=run / "objects.json",
+                                 control_private_key=control_private_key, object_index=run / "objects.json",
                                  metrics_file=run / (tag + "-metrics.json"),
                                  peer={"listen": address, "address": address}),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log,
@@ -176,7 +176,7 @@ def main():
         checkpoint = source.call("session.hibernate", placementEpoch=1)
         writing = False
         # Restoration must use peer objects; neither the profile nor its warm marker is copied.
-        shutil.rmtree(source.root / "sessions" / session_id)
+        shutil.rmtree(source.root / "data/sessions" / session_id)
         target = Endpoint("different-absolute-target-root")
         endpoints.append(target)
         target.open(2, checkpoint["manifestId"])
@@ -186,7 +186,7 @@ def main():
         assert snapshot["browserPid"] != initial_snapshot["browserPid"]
         assert snapshot["views"][0]["url"] == origin + "/state", snapshot
         assert source.root.resolve() != target.root.resolve()
-        assert not (source.root / "sessions" / session_id).exists()
+        assert not (source.root / "data/sessions" / session_id).exists()
         inventory = target.call("object.inventory", cursor=None)["objects"]
         assert set(checkpoint["objects"]).issubset({item["id"] for item in inventory})
         subprocess.run(["taskkill", "/PID", str(snapshot["browserPid"]), "/T", "/F"],
@@ -205,7 +205,7 @@ def main():
         running = wait_for(target.state, "warm reopen before deletion", timeout=60)[1]
         assert target.call("session.delete", tenant_id="", sessionId=session_id) == {"stopped": True}
         assert target.call("session.snapshot", ok=False)["code"] == "not_found"
-        leftovers = [path.name for path in (target.root / "sessions").iterdir()
+        leftovers = [path.name for path in (target.root / "data/sessions").iterdir()
                      if path.name.startswith(session_id)]
         assert not leftovers, leftovers
         assert subprocess.run(["tasklist", "/FI", f"PID eq {running['browserPid']}", "/NH"],

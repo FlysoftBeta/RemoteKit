@@ -1,3 +1,4 @@
+#include "peer_fixture.hpp"
 #include "session_db_fixture.hpp"
 #include "runtime_config_fixture.hpp"
 #include "diagnostics/node_metrics.hpp"
@@ -108,22 +109,19 @@ void Write(const fs::path& path, const std::string& bytes) {
 }
 void RoundTrip(const fs::path& root) {
   const std::string session(32, 'a');
-  const auto directory = root / "one/sessions" / session;
+  const auto directory = root / "one/data/sessions" / session;
   auto config = TestConfig();
-  config["dataPath"] = Utf8(root / "one");
-  const auto options = Take(RuntimeOptions::FromConfig(config, root, "dev", "test"));
+  const auto options = Take(RuntimeOptions::FromConfig(config, root / "one", "dev", "test"));
   Link source_link, target_link;
-  cluster::Key cluster_key{7};
-  objects::ObjectService source(root / "one", source_link, cluster_key, "source", "dev");
-  objects::ObjectService target(root / "two", target_link, cluster_key, "target", "dev");
+  const auto source_key = TestPrivateKey(7), target_key = TestPrivateKey(8);
+  objects::ObjectService source(root / "one/data", source_link, source_key, "source", "dev");
+  objects::ObjectService target(root / "two/data", target_link, target_key, "target", "dev");
   Take(source.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
   Take(target.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
   media::Sdk sdk;
-  media::FrameAdmission first_admission;
-  Session first(sdk, options, "tenant", session, 1, cluster::Key{}, source_link, source,
-                first_admission);
+  Session first(sdk, options, "tenant", session, 1, cluster::Key{}, source_link, source);
   Take(first.Initialize());
   Write(directory / "small", "persistent");
   Write(directory / "large", std::string(2 * 1024 * 1024 + 13, 'x'));
@@ -162,12 +160,16 @@ void RoundTrip(const fs::path& root) {
     Check(Read(directory / path) == bytes, "local restored bytes");
   Check(!fs::exists(directory / "profile/Cache") && fs::is_directory(directory / "empty-directory"),
         "exclusions and empty directories");
-  objects::PeerServer peer(source.Store(), cluster_key, "source", "dev");
+  objects::PeerSet members;
+  Take(members.Update(Json::array({TestPeer("target", "127.0.0.1:1", target_key)})));
+  objects::PeerServer peer(source.Store(), source_key, "source", "dev", members);
   Take(peer.Start("127.0.0.1:0"));
+  Take(target.SetPeers(Json::array({TestPeer("source", peer.Address(), source_key),
+                                    TestPeer("failed", "127.0.0.1:1", TestPrivateKey(1))})));
   for (const auto& id : checkpoint["objects"])
     target_link.sources[id.get<std::string>()] =
         Json::array({{{"nodeId", "source"}, {"address", peer.Address()}}});
-  const auto remote_directory = root / "two/sessions" / session;
+  const auto remote_directory = root / "two/data/sessions" / session;
   Take(Checkpoints(target).Restore(remote_directory, "tenant", manifest));
   for (const auto& [path, bytes] : expected)
     Check(Read(remote_directory / path) == bytes, "peer restored bytes");
@@ -235,7 +237,7 @@ void RoundTrip(const fs::path& root) {
   Check(fs::is_empty(root / "new-session"), "null restore creates new Profile");
 }
 void DraftCheckpoint(const fs::path& root) {
-  const auto data = root / "draft-node";
+  const auto data = root / "draft-node/data";
   const std::string session_id(32, 'd');
   const auto directory = data / "sessions" / session_id;
   Link link;
@@ -257,25 +259,23 @@ void DraftCheckpoint(const fs::path& root) {
     }
   }
   auto config = TestConfig();
-  config["dataPath"] = Utf8(data);
-  const auto options = Take(RuntimeOptions::FromConfig(config, root, "dev", "test"));
+  const auto options = Take(RuntimeOptions::FromConfig(config, data.parent_path(), "dev", "test"));
   media::Sdk sdk;
-  media::FrameAdmission admission;
   Json checkpoint;
   {
-    Session session(sdk, options, "tenant", session_id, 1, {}, link, objects, admission);
+    Session session(sdk, options, "tenant", session_id, 1, {}, link, objects);
     Take(session.Initialize());
     checkpoint = Take(session.Hibernate(objects));
   }
   Check(!fs::exists(directory / "file-library/incoming"),
         "draft payloads discarded at hibernation");
-  const auto restored_data = root / "draft-restored";
+  const auto restored_data = root / "draft-restored-node/data";
   const auto restored_directory = restored_data / "sessions" / session_id;
   Take(Checkpoints(objects).Restore(restored_directory, "tenant", checkpoint["manifestId"]));
-  config["dataPath"] = Utf8(restored_data);
-  const auto restored_options = Take(RuntimeOptions::FromConfig(config, root, "dev", "test"));
+  const auto restored_options =
+      Take(RuntimeOptions::FromConfig(config, restored_data.parent_path(), "dev", "test"));
   {
-    Session restored(sdk, restored_options, "tenant", session_id, 2, {}, link, objects, admission);
+    Session restored(sdk, restored_options, "tenant", session_id, 2, {}, link, objects);
     Take(restored.Initialize());
   }
   SessionDb verify(restored_directory);
@@ -325,8 +325,9 @@ void IncrementalEquality(const fs::path& root) {
 }
 void BatchesAndPipeline(const fs::path& root) {
   Link source_link, target_link;
-  objects::ObjectService source(root / "pipeline-source", source_link, {}, "source", "dev");
-  objects::ObjectService target(root / "pipeline-target", target_link, {}, "target", "dev");
+  const auto source_key = TestPrivateKey(2), target_key = TestPrivateKey(3);
+  objects::ObjectService source(root / "pipeline-source", source_link, source_key, "source", "dev");
+  objects::ObjectService target(root / "pipeline-target", target_link, target_key, "target", "dev");
   const Json keys = {{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
                      {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}};
   Take(source.Configure(keys));
@@ -351,8 +352,12 @@ void BatchesAndPipeline(const fs::path& root) {
   const auto first = Take(Checkpoints(source).Create(directory, "tenant", "dev"));
   const auto second = Take(Checkpoints(source).Create(directory, "tenant", "dev"));
   Check(first == second, "parallel checkpoint manifest is deterministic");
-  objects::PeerServer peer(source.Store(), {}, "source", "dev");
+  objects::PeerSet members;
+  Take(members.Update(Json::array({TestPeer("target", "127.0.0.1:1", target_key)})));
+  objects::PeerServer peer(source.Store(), source_key, "source", "dev", members);
   Take(peer.Start("127.0.0.1:0"));
+  Take(target.SetPeers(Json::array({TestPeer("source", peer.Address(), source_key),
+                                    TestPeer("failed", "127.0.0.1:1", TestPrivateKey(1))})));
   for (const auto& id : first["objects"])
     target_link.sources[id.get<std::string>()] =
         Json::array({{{"nodeId", "failed"}, {"address", "127.0.0.1:1"}},
@@ -429,9 +434,7 @@ void Blockers(const fs::path& root) {
   const auto options = Take(RuntimeOptions::FromConfig(TestConfig(), root, "dev", "test"));
   objects::ObjectService objects(options.data, link, cluster::Key{}, "test", "dev");
   media::Sdk sdk;
-  media::FrameAdmission admission;
-  Session session(sdk, options, "tenant", std::string(32, 'b'), 1, cluster::Key{}, link, objects,
-                  admission);
+  Session session(sdk, options, "tenant", std::string(32, 'b'), 1, cluster::Key{}, link, objects);
   Take(session.Initialize());
   Take(session.Views().RecordClosed("1", "closed"));
   const auto snapshot = Take(session.Snapshot());
@@ -459,7 +462,7 @@ void Blockers(const fs::path& root) {
         "revoked upload is not in flight");
 }
 void Metrics(const fs::path& root) {
-  NodeMetrics sampler(root / "one");
+  NodeMetrics sampler(root / "one/data");
   Sleep(150);
   const auto sample = sampler.Sample(2);
   Check(sample["cpu"] >= 0 && sample["cpu"] <= 1, "system CPU fraction");
@@ -591,54 +594,6 @@ void JournalReplay(const fs::path& root) {
   Check(!fs::exists(first.directory.wstring() + L".hibernation.json"),
         "matching open consumes journal");
 }
-class CapacityLink : public Link {
- public:
-  size_t step = 0;
-  std::vector<Json> replies;
-  bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
-    eof = false;
-    generation = 1;
-    Json request{{"id", step}};
-    if (step < 4) {
-      request["method"] = "session.open";
-      request["tenantId"] = "tenant-" + std::to_string(step);
-      request["sessionId"] = std::string(31, 'e') + std::to_string(step);
-      request["placementEpoch"] = 1;
-      request["checkpoint"] = nullptr;
-      request["profileKey"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-    } else {
-      request["method"] = "shutdown";
-    }
-    ++step;
-    bytes = request.dump();
-    return true;
-  }
-  bool SendReply(uint64_t, const Json& reply) override {
-    replies.push_back(reply);
-    return true;
-  }
-};
-void SessionCapacity(const fs::path& root) {
-  for (const bool limited : {false, true}) {
-    auto config = TestConfig();
-    config["maxSessions"] = limited ? Json(1) : Json(nullptr);
-    config["diskReserveBytes"] = nullptr;
-    config["sessionMemoryBytes"] = nullptr;
-    const auto options = Take(
-        RuntimeOptions::FromConfig(config, root / (limited ? "cap" : "uncapped"), "dev", "test"));
-    CapacityLink link;
-    media::Sdk sdk;
-    Service service(sdk, options, link, cluster::Key{});
-    Check(service.Run() == 0, "capacity service");
-    Check(link.replies[0]["ok"], "first Session admitted");
-    for (size_t i = 1; i < 4; ++i) {
-      if (limited)
-        Check(link.replies[i]["error"]["code"] == "unavailable", "session cap is unavailable");
-      else
-        Check(link.replies[i]["ok"], "null session cap admits every Session");
-    }
-  }
-}
 void Fencing(const fs::path& root) {
   const auto options =
       Take(RuntimeOptions::FromConfig(TestConfig(), root / "fence", "dev", "test"));
@@ -666,7 +621,6 @@ int main(int argc, char** argv) {
     Metrics(root);
     Fencing(root);
     JournalReplay(root);
-    SessionCapacity(root);
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;

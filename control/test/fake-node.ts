@@ -1,9 +1,10 @@
+import { nodePrivateKey } from './node-fixture';
 import { EventEmitter, once } from 'node:events';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import type { NodeMetrics } from '../server/cluster/metrics';
 import { RemoteKitError } from '../shared/errors';
 import { WebSocket } from 'ws';
-import { NoiseHandshake, type Transport } from '../server/cluster/noise';
+import { NoiseHandshake, publicKey, type Transport } from '../server/cluster/noise';
 import { decodeFrame, encodeJson, jsonObject } from '../server/cluster/frames';
 
 export class FakeNode extends EventEmitter {
@@ -82,11 +83,16 @@ export class FakeNode extends EventEmitter {
     return {};
   }
   handler: (message: Record<string, any>) => unknown = (message) => this.handle(message);
-  async connect(url: string, key: Buffer, hello: Record<string, unknown> = {}) {
+  async connect(
+    url: string,
+    key: Buffer,
+    hello: Record<string, unknown> = {},
+    privateKey = nodePrivateKey(String(hello.nodeId ?? 'alpha')),
+  ) {
     this.socket = new WebSocket(url);
     this.socket.on('error', () => {});
     await once(this.socket, 'open');
-    const handshake = new NoiseHandshake('initiator', key);
+    const handshake = new NoiseHandshake('initiator', privateKey, publicKey(key));
     const queued: [Buffer, boolean][] = [];
     let receivedHello = false;
     const collect = (data: unknown, binary: boolean) => {

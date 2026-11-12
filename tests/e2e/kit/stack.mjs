@@ -1,3 +1,4 @@
+import { stageRuntime } from '../../integration/stage-runtime.mjs';
 import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -73,7 +74,7 @@ export async function startStack({
   browser = defaultBrowser,
   endpoint = defaultEndpoint,
   dev = true,
-  nodeDefaults = {},
+  media = {},
   run = join(root, 'develop/tmp/e2e', `${scenario}-${Date.now()}`),
 } = {}) {
   mkdirSync(run, { recursive: true });
@@ -92,7 +93,7 @@ export async function startStack({
     vite: join(run, 'vite.log'),
     endpoint: join(run, 'node/logs/endpoint.log'),
     browser: () => {
-      const sessions = join(run, 'endpoint/sessions');
+      const sessions = join(run, 'node/data/sessions');
       return readdirSync(sessions, { withFileTypes: true })
         .filter((entry) => entry.isDirectory())
         .map((entry) => join(sessions, entry.name, 'browser.log'));
@@ -126,10 +127,8 @@ export async function startStack({
         endpoint,
         browser,
         dev,
-        nodeDefaults: {
-          ...nodeDefaults,
-          peer: { listen: `127.0.0.1:${ports.peer}`, address: `127.0.0.1:${ports.peer}` },
-        },
+        media,
+        peer: { listen: `127.0.0.1:${ports.peer}`, address: `127.0.0.1:${ports.peer}` },
         configOverrides: {
           http: {
             listen: `127.0.0.1:${ports.control}`,
@@ -299,7 +298,8 @@ export function startProductStack({
   browser = defaultBrowser,
   dev = false,
   server = join(root, 'control/dist/server.mjs'),
-  nodeDefaults = {},
+  media = {},
+  peer = { listen: `127.0.0.1:${port + 2}`, address: `127.0.0.1:${port + 2}` },
   configOverrides = {},
 }) {
   mkdirSync(run, { recursive: true });
@@ -309,13 +309,16 @@ export function startProductStack({
     JSON.stringify({
       http: { listen: `127.0.0.1:${port}`, origins: [`http://127.0.0.1:${port}`] },
       storage: { database: join(run, 'control.db'), diagnostics: join(run, 'diagnostics') },
-      nodeDefaults: {
-        browser: resolve(browser),
-        dataPath: join(run, 'endpoint'),
-        peer: { listen: `127.0.0.1:${port + 2}`, address: `127.0.0.1:${port + 2}` },
-        ...nodeDefaults,
+      media,
+      nodes: {
+        local: {
+          local: {
+            executable: stageRuntime(endpoint, browser, join(run, 'runtime/bin')),
+            root: join(run, 'node'),
+          },
+          peer,
+        },
       },
-      nodes: { local: { local: { executable: resolve(endpoint), root: join(run, 'node') } } },
       ...configOverrides,
     }),
   );

@@ -35,7 +35,7 @@ def main():
  fixture_origin='http://127.0.0.1:'+str(fixture_server.server_port)
  fixture_url=fixture_origin+'/fixture'
  with (run/'stderr.log').open('wb') as log:
-  child=subprocess.Popen(endpoint_command(a.endpoint, a.browser, run/'state', maxSessions=max(3, a.tenants)),
+  child=subprocess.Popen(endpoint_command(a.endpoint, a.browser, run/'state'),
     stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
   replies=queue.Queue()
   def read():

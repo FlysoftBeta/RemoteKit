@@ -29,12 +29,12 @@ Result<RuntimeOptions> Options(Json config = TestConfig()) {
 }
 void NumericOptions() {
   const std::array names{
-      "fps",      "bitrate",   "maxBitrate",     "asyncDepth",      "gop",        "targetUsage",
-      "bufferMs", "idleIdrMs", "maxEncodeWidth", "maxEncodeHeight", "maxSessions"};
+      "fps",         "bitrate",  "maxBitrate", "asyncDepth",     "gop",
+      "targetUsage", "bufferMs", "idleIdrMs",  "maxEncodeWidth", "maxEncodeHeight"};
   for (const auto* name : names) {
     for (const auto& invalid : {Json("1"), Json(-1), Json(true), Json(1.5), Json(4294967296ULL)}) {
       auto config = TestConfig();
-      config[name] = invalid;
+      config["media"][name] = invalid;
       auto parsed = Options(config);
       Check(!parsed && parsed.error().code == ErrorCode::kInvalidRequest &&
                 parsed.error().message.find(name) != std::string::npos,
@@ -42,18 +42,18 @@ void NumericOptions() {
     }
   }
   auto config = TestConfig();
-  config["fps"] = 120;
+  config["media"]["fps"] = 120;
   Check(bool(Options(config)), "valid boundary");
-  config["fps"] = 121;
+  config["media"]["fps"] = 121;
   Check(!Options(config), "fps range");
   config = TestConfig();
-  config["maxBitrate"] = 100000;
+  config["media"]["maxBitrate"] = 100000;
   Check(!Options(config), "maxBitrate below bitrate");
   config = TestConfig();
-  config["encoder"] = "nvenc";
-  config["qsvLowPower"] = "off";
+  config["media"]["encoder"] = "nvenc";
+  config["media"]["qsvLowPower"] = "off";
   Check(!Options(config), "nvenc rejects qsvLowPower");
-  config["qsvLowPower"] = "auto";
+  config["media"]["qsvLowPower"] = "auto";
   Check(Options(config).value().encoding.qsv_low_power == 0, "nvenc default");
   Check(Options().value().encoding.qsv_low_power == 0x10, "qsv auto resolves on");
   const auto baseline = TestConfig();
@@ -69,22 +69,19 @@ void NumericOptions() {
   config["nodeId"] = "another";
   Check(!Options(config), "node identity mismatch");
   auto options = Options().value();
-  Check(options.max_sessions == 3 && options.disk_reserve_bytes == 10737418240ULL &&
-            options.session_memory_bytes == 2147483648ULL,
-        "numeric node limits");
-  config = TestConfig();
-  for (const auto* field : {"maxSessions", "diskReserveBytes", "sessionMemoryBytes"})
-    config[field] = nullptr;
-  const auto unlimited = Options(config).value();
-  Check(!unlimited.max_sessions && !unlimited.disk_reserve_bytes && !unlimited.session_memory_bytes,
-        "null node limits");
   for (const auto* field : {"maxSessions", "diskReserveBytes", "sessionMemoryBytes"}) {
-    for (const auto& invalid : {Json(-1), Json(1.5), Json("1"), Json(9007199254740992ULL)}) {
-      config = TestConfig();
-      config[field] = invalid;
-      Check(!Options(config), "invalid node limit");
-    }
+    config = TestConfig();
+    config[field] = nullptr;
+    Check(!Options(config), "placement limits are not Endpoint configuration");
   }
+  auto current = TestConfig();
+  auto initial = Options().value();
+  initial.SetConfigSource([&] { return current; });
+  const auto existing = initial;
+  current["media"]["fps"] = 24;
+  const auto next = initial;
+  Check(existing.encoding.fps == 60 && next.encoding.fps == 24,
+        "media snapshots apply only to future Sessions");
   Check(options.data == fs::current_path() / "data" && options.browser.is_absolute(),
         "paths resolved against node root");
   Check(!options.rtc_port_min && !options.rtc_port_max && options.rtc_address.empty(),
@@ -138,13 +135,12 @@ void ProcessArguments() {
   };
   const auto root = "--node-root=" + Utf8(fs::current_path());
   Check(bool(parse({"endpoint", root})), "remote arguments");
-  Check(bool(parse({"endpoint", "--stdio", "--node-id=test", root})), "local arguments");
+  Check(bool(parse({"endpoint", "--stdio", root})), "local arguments");
   for (auto arguments : std::vector<std::vector<std::string>>{
            {"endpoint"},
            {"endpoint", "--node-root=relative"},
            {"endpoint", root, root},
            {"endpoint", root, "--node-id=test"},
-           {"endpoint", "--stdio", root},
            {"endpoint", "--stdio", root, "--node-id=UPPER"},
            {"endpoint", root, "--encoder=auto"},
            {"endpoint", root, "--browser=test"},
@@ -349,7 +345,7 @@ class FixtureLink final : public ManagementLink {
 };
 void ManagementDispatch() {
   TemporaryDirectory directory;
-  objects::ObjectStore objects(directory.path);
+  objects::ObjectStore objects(directory.path / "data");
   std::istringstream content(Json{
       {"version", 2}, {"buildId", "dev"}, {"files", Json::array()}, {"directories", Json::array()}}
                                  .dump());
@@ -357,10 +353,11 @@ void ManagementDispatch() {
   Check(bool(object), "warm manifest object");
   const auto checkpoint = object.value().id;
   Check(bool(WriteDurableJson(
-            directory.path / "sessions/0123456789abcdef0123456789abcdef.checkpoint", checkpoint)),
+            directory.path / "data/sessions/0123456789abcdef0123456789abcdef.checkpoint",
+            checkpoint)),
         "warm copy fixture");
   Check(bool(WriteDurableJson(
-            directory.path / "sessions/0123456789abcdef0123456789abcdef/events.json",
+            directory.path / "data/sessions/0123456789abcdef0123456789abcdef/events.json",
             {{"next", 2},
              {"events", Json::array({{{"eventId", "1"},
                                       {"type", "view.closed"},
@@ -368,10 +365,9 @@ void ManagementDispatch() {
                                       {"reason", "closed"}}})}})),
         "event fixture");
   auto config = TestConfig();
-  config["dataPath"] = Utf8(directory.path);
-  auto parsed = Options(config);
+  auto parsed = RuntimeOptions::FromConfig(config, directory.path, "dev", "test");
   Check(bool(parsed), "fixture options");
-  FixtureLink link(directory.path, checkpoint);
+  FixtureLink link(directory.path / "data", checkpoint);
   media::Sdk sdk;
   Service service(sdk, parsed.value(), link, cluster::Key{});
   Check(service.Run() == 0, "management dispatch");
@@ -411,10 +407,10 @@ void ManagementDispatch() {
   Check(reply(109)["error"]["code"] == "internal" &&
             reply(109)["error"]["message"] == "Unexpected JSON failure in session.open",
         "unexpected JSON failure identifies the method");
-  SessionDb persisted(directory.path / "sessions/0123456789abcdef0123456789abcdef");
+  SessionDb persisted(directory.path / "data/sessions/0123456789abcdef0123456789abcdef");
   Check(bool(persisted.Open()) && persisted.Views().Events().value().empty(),
         "acknowledgement committed");
-  Check(!fs::exists(directory.path / "sessions.json"), "no numeric registry");
+  Check(!fs::exists(directory.path / "data/sessions.json"), "no numeric registry");
 }
 }  // namespace
 int main(int argc, char** argv) {

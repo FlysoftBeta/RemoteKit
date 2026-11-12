@@ -43,7 +43,7 @@ struct WipedKey {
   ~WipedKey() { SecureZeroMemory(value.data(), value.size()); }
 };
 struct Derived {
-  std::array<Key, 3> keys{};
+  std::array<Key, 2> keys{};
   ~Derived() { SecureZeroMemory(keys.data(), sizeof(keys)); }
 };
 struct WipeBuffer {
@@ -72,7 +72,7 @@ Derived Hkdf(const Key& salt, std::span<const uint8_t> input) {
   Bytes previous;
   previous.reserve(33);
   WipeBuffer wipe{previous};
-  for (uint8_t i = 1; i <= 3; ++i) {
+  for (uint8_t i = 1; i <= 2; ++i) {
     previous.push_back(i);
     out.keys[i - 1] = Hash(previous, temp.value, true).value;
     SecureZeroMemory(previous.data(), previous.size());
@@ -111,10 +111,34 @@ WipedKey Dh(Algorithm& alg, BCRYPT_KEY_HANDLE own, const Key& peer) {
   std::reverse_copy(raw.value.begin(), raw.value.end(), result.value.begin());
   return result;
 }
+void ImportPrivate(Algorithm& alg, CryptoKey& key, const Key& bytes) {
+  EccBlob blob{{BCRYPT_ECDH_PRIVATE_GENERIC_MAGIC, 32}};
+  blob.d = bytes;
+  blob.d[0] &= 248;
+  blob.d[31] &= 127;
+  blob.d[31] |= 64;
+  auto status =
+      BCryptImportKeyPair(alg.value, nullptr, BCRYPT_ECCPRIVATE_BLOB, &key.value,
+                          reinterpret_cast<PUCHAR>(&blob), sizeof(blob), BCRYPT_NO_KEY_VALIDATION);
+  SecureZeroMemory(&blob, sizeof(blob));
+  Check(status);
+}
+Key ExportPublic(Algorithm& alg, CryptoKey& key) {
+  Key base{};
+  base[0] = 9;
+  return Dh(alg, key.value, base).value;
+}
 Error CryptoError() {
   return {ErrorCode::kUnauthenticated, "Noise authentication failed"};
 }
 }  // namespace
+Key PublicKey(const Key& private_key) {
+  Algorithm alg{BCRYPT_ECDH_ALGORITHM};
+  Curve(alg);
+  CryptoKey key;
+  ImportPrivate(alg, key, private_key);
+  return ExportPublic(alg, key);
+}
 Key Sha256(std::span<const uint8_t> bytes) {
   return Hash(bytes).value;
 }
@@ -224,37 +248,41 @@ struct Noise::Impl {
   Role role;
   int step = 0;
   bool failed = false;
-  WipedKey ck, psk;
-  Key h{}, public_key{}, remote{};
+  WipedKey ck;
+  Key h{}, public_key{}, remote_ephemeral{}, static_public{}, remote_static{};
   Algorithm alg{BCRYPT_ECDH_ALGORITHM};
-  CryptoKey ephemeral;
+  CryptoKey ephemeral, identity;
   std::unique_ptr<CipherState> cipher;
-  Impl(Role r, const Key& key, std::string_view prologue, const TestEphemeral* test)
-      : role(r), psk{key} {
-    constexpr std::string_view name = "Noise_NNpsk0_25519_AESGCM_SHA256";
+  Impl(Role r,
+       const Key& private_key,
+       std::optional<Key> responder,
+       std::string_view prologue,
+       const TestEphemeral* test)
+      : role(r) {
+    constexpr std::string_view name = "Noise_IK_25519_AESGCM_SHA256";
     std::copy(name.begin(), name.end(), h.begin());
     ck.value = h;
     MixHash({reinterpret_cast<const uint8_t*>(prologue.data()), prologue.size()});
     Curve(alg);
-    if (test) {
-      EccBlob blob{{BCRYPT_ECDH_PRIVATE_GENERIC_MAGIC, 32}};
-      WipedKey clamped{test->private_key};
-      clamped.value[0] &= 248;
-      clamped.value[31] &= 127;
-      clamped.value[31] |= 64;
-      std::copy(clamped.value.begin(), clamped.value.end(), blob.d.begin());
-      auto status = BCryptImportKeyPair(alg.value, nullptr, BCRYPT_ECCPRIVATE_BLOB,
-                                        &ephemeral.value, reinterpret_cast<PUCHAR>(&blob),
-                                        sizeof(blob), BCRYPT_NO_KEY_VALIDATION);
-      SecureZeroMemory(&blob, sizeof(blob));
-      Check(status);
+    ImportPrivate(alg, identity, private_key);
+    static_public = ExportPublic(alg, identity);
+    if (role == Role::kInitiator) {
+      if (!responder)
+        throw std::runtime_error("IK requires responder public key");
+      remote_static = *responder;
+      MixHash(remote_static);
     } else {
+      if (responder)
+        throw std::runtime_error("responder static key must be local");
+      MixHash(static_public);
+    }
+    if (test)
+      ImportPrivate(alg, ephemeral, test->private_key);
+    else {
       Check(BCryptGenerateKeyPair(alg.value, &ephemeral.value, 255, 0));
       Check(BCryptFinalizeKeyPair(ephemeral.value, 0));
     }
-    Key base{};
-    base[0] = 9;
-    public_key = Dh(alg, ephemeral.value, base).value;
+    public_key = ExportPublic(alg, ephemeral);
   }
   void MixHash(std::span<const uint8_t> bytes) {
     Bytes joined(h.begin(), h.end());
@@ -262,50 +290,59 @@ struct Noise::Impl {
     joined.insert(joined.end(), bytes.begin(), bytes.end());
     h = Hash(joined).value;
   }
-  void MixKey(std::span<const uint8_t> input) {
-    Derived derived{Hkdf(ck.value, input)};
+  void MixKey(CryptoKey& own, const Key& peer) {
+    WipedKey shared{Dh(alg, own.value, peer)};
+    Derived derived{Hkdf(ck.value, shared.value)};
     ck.value = derived.keys[0];
     cipher = std::make_unique<CipherState>(derived.keys[1]);
   }
-  void Psk() {
-    Derived derived{Hkdf(ck.value, psk.value)};
-    ck.value = derived.keys[0];
-    MixHash(derived.keys[1]);
-    cipher = std::make_unique<CipherState>(derived.keys[2]);
+  Bytes Encrypt(std::span<const uint8_t> bytes) {
+    auto result = cipher->Encrypt(bytes, h);
+    if (!result)
+      throw std::runtime_error("Noise encryption failed");
+    MixHash(result.value());
+    return std::move(result).value();
   }
-  void E(std::span<const uint8_t> bytes) {
+  Bytes Decrypt(std::span<const uint8_t> bytes) {
+    auto result = cipher->Decrypt(bytes, h);
+    if (!result)
+      throw std::runtime_error("Noise authentication failed");
     MixHash(bytes);
-    MixKey(bytes);
-  }
-  void Ee() {
-    WipedKey shared{Dh(alg, ephemeral.value, remote)};
-    MixKey(shared.value);
+    return std::move(result).value();
   }
 };
-Noise::Noise(Role r, const Key& psk, std::string_view prologue, const TestEphemeral* test)
-    : impl_(std::make_unique<Impl>(r, psk, prologue, test)) {}
+Noise::Noise(Role r,
+             const Key& key,
+             std::optional<Key> responder,
+             std::string_view prologue,
+             const TestEphemeral* test)
+    : impl_(std::make_unique<Impl>(r, key, responder, prologue, test)) {}
 Noise::~Noise() = default;
 Key Noise::handshake_hash() const {
   return impl_->h;
 }
+Key Noise::remote_public_key() const {
+  return impl_->remote_static;
+}
 Result<Bytes> Noise::Write(std::span<const uint8_t> payload) {
   auto& s = *impl_;
-  if (s.failed || s.step != (s.role == Role::kInitiator ? 0 : 1) || payload.size() > 65535 - 48)
+  if (s.failed || s.step != (s.role == Role::kInitiator ? 0 : 1) ||
+      payload.size() > 65535 - (s.step == 0 ? 96 : 48))
     return Error{ErrorCode::kInvalidRequest, "invalid Noise handshake write"};
   try {
-    if (s.step == 0)
-      s.Psk();
-    s.E(s.public_key);
-    if (s.step == 1)
-      s.Ee();
-    auto encrypted = s.cipher->Encrypt(payload, s.h);
-    if (!encrypted) {
-      s.failed = true;
-      return encrypted.error();
-    }
-    s.MixHash(encrypted.value());
+    s.MixHash(s.public_key);
     Bytes out(s.public_key.begin(), s.public_key.end());
-    out.insert(out.end(), encrypted.value().begin(), encrypted.value().end());
+    if (s.step == 0) {
+      s.MixKey(s.ephemeral, s.remote_static);
+      auto encrypted_static = s.Encrypt(s.static_public);
+      out.insert(out.end(), encrypted_static.begin(), encrypted_static.end());
+      s.MixKey(s.identity, s.remote_static);
+    } else {
+      s.MixKey(s.ephemeral, s.remote_ephemeral);
+      s.MixKey(s.ephemeral, s.remote_static);
+    }
+    auto encrypted = s.Encrypt(payload);
+    out.insert(out.end(), encrypted.begin(), encrypted.end());
     ++s.step;
     return out;
   } catch (...) {
@@ -315,24 +352,26 @@ Result<Bytes> Noise::Write(std::span<const uint8_t> payload) {
 }
 Result<Bytes> Noise::Read(std::span<const uint8_t> message) {
   auto& s = *impl_;
-  if (s.failed || s.step != (s.role == Role::kInitiator ? 1 : 0) || message.size() < 48 ||
-      message.size() > 65535) {
+  if (s.failed || s.step != (s.role == Role::kInitiator ? 1 : 0) ||
+      message.size() < (s.step == 0 ? 96 : 48) || message.size() > 65535) {
     s.failed = true;
     return CryptoError();
   }
   try {
-    if (s.step == 0)
-      s.Psk();
-    std::copy_n(message.begin(), 32, s.remote.begin());
-    s.E(s.remote);
-    if (s.step == 1)
-      s.Ee();
-    auto plain = s.cipher->Decrypt(message.subspan(32), s.h);
-    if (!plain) {
-      s.failed = true;
-      return plain.error();
+    std::copy_n(message.begin(), 32, s.remote_ephemeral.begin());
+    s.MixHash(s.remote_ephemeral);
+    size_t offset = 32;
+    if (s.step == 0) {
+      s.MixKey(s.identity, s.remote_ephemeral);
+      auto remote_static = s.Decrypt(message.subspan(32, 48));
+      std::copy(remote_static.begin(), remote_static.end(), s.remote_static.begin());
+      s.MixKey(s.identity, s.remote_static);
+      offset = 80;
+    } else {
+      s.MixKey(s.ephemeral, s.remote_ephemeral);
+      s.MixKey(s.identity, s.remote_ephemeral);
     }
-    s.MixHash(message.subspan(32));
+    auto plain = s.Decrypt(message.subspan(offset));
     ++s.step;
     return plain;
   } catch (...) {

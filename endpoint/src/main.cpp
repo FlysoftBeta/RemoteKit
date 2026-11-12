@@ -29,34 +29,18 @@ int main(int argc, char** argv) {
           return;
         }
         auto process = std::move(parsed).value();
-        cluster::Key key{};
-        struct ClearKey {
-          cluster::Key& key;
-          ~ClearKey() { SecureZeroMemory(key.data(), key.size()); }
-        } clear_key{key};
-        std::string control;
-        if (process.stdio) {
-          auto encoded = Env("REMOTEKIT_CLUSTER_KEY");
-          _putenv_s("REMOTEKIT_CLUSTER_KEY", "");
-          auto decoded = cluster::DecodeKey(encoded);
-          SecureZeroMemory(encoded.data(), encoded.size());
-          if (!decoded) {
-            LogError(LogLevel::kError, "endpoint.start_failed",
-                     Error{ErrorCode::kInvalidRequest, "invalid cluster key"});
-            return;
-          }
-          key = decoded.value();
-          SecureZeroMemory(decoded.value().data(), decoded.value().size());
-        } else {
-          auto files = cluster::LoadNodeFiles(process.node_root);
-          if (!files) {
-            LogError(LogLevel::kError, "endpoint.start_failed", files.error());
-            return;
-          }
-          control = files.value().control;
-          process.node_id = files.value().node_id;
-          key = files.value().key;
+        auto files = cluster::LoadNodeFiles(process.node_root);
+        if (!files ||
+            (process.stdio ? !files.value().control.empty() : files.value().control.empty())) {
+          LogError(LogLevel::kError, "endpoint.start_failed",
+                   files ? Error{ErrorCode::kInvalidRequest, "node.json carrier mismatch"}
+                         : files.error());
+          return;
         }
+        const auto& key = files.value().private_key;
+        const auto& control_public_key = files.value().control_public_key;
+        const auto& control = files.value().control;
+        const auto& node_id = files.value().node_id;
         wchar_t executable[32768]{};
         GetModuleFileNameW(nullptr, executable, 32768);
         auto build = cluster::ReadBuildId(fs::path(executable).parent_path().parent_path());
@@ -68,16 +52,17 @@ int main(int argc, char** argv) {
         if (BCryptGenRandom(nullptr, incarnation.data(), static_cast<ULONG>(incarnation.size()),
                             BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
           return;
-        cluster::Hello hello{"endpoint", process.node_id, build.value(), cluster::Hex(incarnation)};
+        cluster::Hello hello{"endpoint", node_id, build.value(), cluster::Hex(incarnation)};
         ClusterLink link(
             [&] {
-              return process.stdio ? cluster::ConnectStdio(key, hello)
-                                   : cluster::ConnectWebSocket(control, key, hello);
+              return process.stdio
+                         ? cluster::ConnectStdio(key, control_public_key, hello)
+                         : cluster::ConnectWebSocket(control, key, control_public_key, hello);
             },
             process.stdio, build.value(),
             [&](const Json& config) -> Result<void> {
-              auto options = RuntimeOptions::FromConfig(config, process.node_root, build.value(),
-                                                        process.node_id);
+              auto options =
+                  RuntimeOptions::FromConfig(config, process.node_root, build.value(), node_id);
               if (!options) {
                 LogError(LogLevel::kError, "endpoint.start_failed", options.error());
                 return options.error();
@@ -90,9 +75,13 @@ int main(int argc, char** argv) {
           exit_code = link.ExitCode();
           return;
         }
-        auto runtime = RuntimeOptions::FromConfig(config.value(), process.node_root, build.value(),
-                                                  process.node_id);
-        const auto options = std::move(runtime).value();
+        auto runtime =
+            RuntimeOptions::FromConfig(config.value(), process.node_root, build.value(), node_id);
+        auto options = std::move(runtime).value();
+        options.SetConfigSource([&link, initial = config.value()] {
+          auto current = link.WaitReady();
+          return current ? current.value() : initial;
+        });
         auto directory = CreateDirectories(options.data);
         if (!directory) {
           LogError(LogLevel::kError, "endpoint.start_failed", directory.error());

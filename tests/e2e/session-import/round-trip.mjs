@@ -1,3 +1,4 @@
+import { stageRuntime } from '../../integration/stage-runtime.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -17,8 +18,14 @@ await writeFile(
   JSON.stringify({
     http: { listen: `127.0.0.1:${port}`, origins: [origin] },
     storage: { database: join(run, 'control.db') },
-    nodeDefaults: { browser: resolve(browser) },
-    nodes: { local: { local: { executable: resolve(endpoint), root: join(run, 'node') } } },
+    nodes: {
+      local: {
+        local: {
+          executable: stageRuntime(endpoint, browser, join(run, 'node-runtime/bin')),
+          root: join(run, 'node'),
+        },
+      },
+    },
   }),
 );
 const control = startControl(server, config, run);

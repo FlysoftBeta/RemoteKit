@@ -20,7 +20,7 @@ int ClusterEndpoint(const std::filesystem::path& root) {
     if (!PeekNamedPipe(GetStdHandle(STD_INPUT_HANDLE), nullptr, 0, nullptr, &available, nullptr))
       return 0;
     auto connected = cluster::ConnectWebSocket(
-        files.value().control, files.value().key,
+        files.value().control, files.value().private_key, files.value().control_public_key,
         {"endpoint", files.value().node_id, build.value(), std::string(32, '1')});
     if (!connected) {
       Sleep(100);

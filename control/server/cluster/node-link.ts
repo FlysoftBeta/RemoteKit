@@ -17,7 +17,7 @@ import {
   parseWireError,
 } from '../../shared/errors';
 import { log } from '../log';
-import type { ConfiguredNode, NodeConfig } from '../config';
+import type { ConfiguredNode, NodeConfig, NodeLimits } from '../config';
 import { readyTransition, type EndpointLink, type EndpointLinkState } from '../endpoint/link';
 import type { ClipboardChangedEvent, ClientActionEvent, RtcSignal } from '../endpoint/types';
 import {
@@ -113,7 +113,7 @@ interface Pending {
 }
 export interface RegistryOptions {
   nodes: Readonly<Record<string, ConfiguredNode>>;
-  key: string;
+  privateKey: string;
   buildId: string;
   release?: NodeRelease;
   requestTimeoutMs?: number;
@@ -131,6 +131,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   state: EndpointLinkState = { state: 'offline' };
   private events: NodeHistory = {};
   readonly config: Readonly<NodeConfig>;
+  readonly limits: Readonly<NodeLimits>;
   readonly metrics: MetricsHistory;
   buildId?: string;
   diskDraining = false;
@@ -151,7 +152,8 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   ) {
     super();
     this.config = configured.config;
-    this.metrics = new MetricsHistory(this.config.maxSessions, () =>
+    this.limits = configured.limits;
+    this.metrics = new MetricsHistory(this.limits.maxSessions, () =>
       this.registry
         .all()
         .filter((node) => node.state.state === 'ready' && !this.registry.isRemoved(node.nodeId))
@@ -223,15 +225,10 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         }
       }
       if (this.stopped || this.registry.isRemoved(this.nodeId)) return;
-      const child = spawn(
-        launch.executable,
-        ['--stdio', `--node-id=${this.nodeId}`, `--node-root=${launch.root}`],
-        {
-          env: { ...process.env, REMOTEKIT_CLUSTER_KEY: this.registry.options.key },
-          stdio: 'pipe',
-          windowsHide: true,
-        },
-      );
+      const child = spawn(launch.executable, ['--stdio', `--node-root=${launch.root}`], {
+        stdio: 'pipe',
+        windowsHide: true,
+      });
       this.child = child;
       this.registry.accept(
         new StdioCarrier(child, new EndpointLog(join(launch.root, 'logs', 'endpoint.log'))),
@@ -390,6 +387,17 @@ export class NodeLink extends EventEmitter implements EndpointLink {
           ? message.error
           : { code: 'outcome_unknown', message: 'Node returned an invalid error envelope' },
       );
+  }
+  send(message: object) {
+    const connection = this.current;
+    if (!connection) return;
+    try {
+      void connection.carrier
+        .send(connection.transport.send.encrypt(encodeJson(message)))
+        .catch(() => connection.carrier.close());
+    } catch {
+      connection.carrier.close();
+    }
   }
   async sendBinary(header: object, bytes: Buffer, epoch: string) {
     const connection = this.current;
@@ -574,7 +582,7 @@ export class NodeRegistry extends EventEmitter {
       return;
     }
     this.carriers.add(carrier);
-    const handshake = new NoiseHandshake('responder', Buffer.from(this.options.key, 'base64'));
+    const handshake = new NoiseHandshake('responder', Buffer.from(this.options.privateKey, 'base64'));
     let connection: Connection | undefined;
     let link: NodeLink | undefined;
     let role: 'endpoint' | 'updater' | undefined;
@@ -614,16 +622,18 @@ export class NodeRegistry extends EventEmitter {
             throw new Error('Invalid node hello');
           role = hello.role;
           link = this.links.get(hello.nodeId);
-          let reject: string | undefined;
           if (
             !link ||
             this.isRemoved(hello.nodeId) ||
             (expectedNodeId && expectedNodeId !== hello.nodeId) ||
-            (!expectedNodeId && link.configured.local)
-          )
-            reject = 'unknown_node';
-          // Updaters connect with their installed build to fetch its replacement.
-          else if (role === 'endpoint' && hello.buildId !== this.options.buildId) reject = 'build_mismatch';
+            (!expectedNodeId && link.configured.local) ||
+            !handshake.remotePublicKey.equals(Buffer.from(link.configured.publicKey, 'base64'))
+          ) {
+            link?.rejected('identity_mismatch', hello.buildId);
+            throw new Error('Node identity mismatch');
+          }
+          let reject: string | undefined;
+          if (role === 'endpoint' && hello.buildId !== this.options.buildId) reject = 'build_mismatch';
           else if (role === 'updater' && !this.options.release) reject = 'no_release';
           const epoch = randomUUID();
           const reply = reject
@@ -632,6 +642,7 @@ export class NodeRegistry extends EventEmitter {
               ? { type: 'node.release', release: this.options.release!.descriptor }
               : {
                   type: 'node.ready',
+                  peers: this.peers(hello.nodeId),
                   ...this.objectKeys,
                   sessions: this.fencing(hello.nodeId),
                   connectionEpoch: epoch,
@@ -713,6 +724,19 @@ export class NodeRegistry extends EventEmitter {
         carrier.close();
       }
     });
+  }
+  peers(receiver: string) {
+    return this.all()
+      .filter((node) => node.nodeId !== receiver && !this.isRemoved(node.nodeId))
+      .map((node) => ({
+        nodeId: node.nodeId,
+        address: node.config.peer.address,
+        publicKey: node.configured.publicKey,
+      }));
+  }
+  publishPeers() {
+    for (const node of this.all())
+      if (!this.isRemoved(node.nodeId)) node.send({ type: 'node.peers', peers: this.peers(node.nodeId) });
   }
   private async sendPackage(connection: Connection, offset: number) {
     const release = this.options.release!;

@@ -41,6 +41,8 @@ class ManagementLink {
   virtual bool SendReply(uint64_t generation, const Json& reply) = 0;
   virtual bool SendEvent(const Json& event, uint64_t generation, DeliveryFlag delivery = {}) = 0;
   virtual void OnDisconnect(Disconnect callback) = 0;
+  using Peers = std::function<Result<void>(const Json&)>;
+  virtual void OnPeers(Peers) {}
   using Binary = std::function<void(const Json&, std::span<const uint8_t>)>;
   virtual void OnBinary(Binary) {}
   virtual Result<Json> Request(const std::string& name, Json fields) = 0;

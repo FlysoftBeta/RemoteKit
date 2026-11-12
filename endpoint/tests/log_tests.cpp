@@ -161,7 +161,6 @@ void Boundaries(const fs::path& root) {
                    conflict,
                    {{"id", 2}, {"method", "shutdown"}}};
   auto config = TestConfig();
-  config["dataPath"] = (root / "data").string();
   const auto options = Take(RuntimeOptions::FromConfig(config, root, "dev", "test"));
   media::Sdk sdk;
   const auto capture_path = root / "boundaries.jsonl";

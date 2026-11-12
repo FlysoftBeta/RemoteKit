@@ -42,7 +42,8 @@ struct ClusterLink::Impl {
   ValidateConfig validate;
   bool local, watch_stdin;
   std::string build_id, config_hash;
-  Json config, sessions, object_keys;
+  Json config, sessions, object_keys, peers;
+  Peers peer_callback;
   std::mutex mutex, callback_mutex;
   std::condition_variable wake;
   std::deque<Message> incoming, outgoing;
@@ -152,7 +153,14 @@ struct ClusterLink::Impl {
         return false;
       }
     }
-    const auto text = reply["config"].dump();
+    if (!reply["config"].is_object() || !reply["config"].contains("peer") ||
+        !reply["config"].contains("rtc") || !reply.contains("peers") ||
+        !reply["peers"].is_array()) {
+      Finish(1);
+      return false;
+    }
+    const auto text =
+        Json{{"peer", reply["config"]["peer"]}, {"rtc", reply["config"]["rtc"]}}.dump();
     const auto hash =
         cluster::Hex(cluster::Sha256({reinterpret_cast<const uint8_t*>(text.data()), text.size()}));
     if (hash != reply["configHash"].get<std::string>()) {
@@ -172,9 +180,15 @@ struct ClusterLink::Impl {
       Finish(1);
       return false;
     }
+    std::lock_guard callback_lock(callback_mutex);
+    if (peer_callback && !peer_callback(reply["peers"])) {
+      Finish(1);
+      return false;
+    }
     std::lock_guard lock(mutex);
     if (stopping)
       return false;
+    peers = reply["peers"];
     config = reply["config"];
     sessions = reply["sessions"];
     object_keys = {{"objectKey", reply.value("objectKey", Json())},
@@ -224,6 +238,39 @@ struct ClusterLink::Impl {
               continue;
             }
             auto& json = received.value().json;
+            if (json.value("type", Json()) == "node.peers") {
+              std::lock_guard callback_lock(callback_mutex);
+              if (!json.contains("peers") || !json["peers"].is_array() ||
+                  (peer_callback && !peer_callback(json["peers"]))) {
+                protocol_error = true;
+                break;
+              }
+              std::lock_guard lock(mutex);
+              peers = json["peers"];
+              continue;
+            }
+            if (json.value("type", Json()) == "node.config") {
+              if (!json.contains("config") || !json["config"].is_object() ||
+                  !json["config"].contains("peer") || !json["config"].contains("rtc")) {
+                protocol_error = true;
+                break;
+              }
+              const auto text =
+                  Json{{"peer", json["config"]["peer"]}, {"rtc", json["config"]["rtc"]}}.dump();
+              const auto hash = cluster::Hex(
+                  cluster::Sha256({reinterpret_cast<const uint8_t*>(text.data()), text.size()}));
+              if (json.value("configHash", Json()) != hash || !validate(json["config"])) {
+                protocol_error = true;
+                break;
+              }
+              if (hash != config_hash) {
+                Finish(4);
+                break;
+              }
+              std::lock_guard lock(mutex);
+              config = json["config"];
+              continue;
+            }
             // Control requests carry a method; anything else with a string id answers one of ours.
             if (json.is_object() && json.contains("id") && json["id"].is_string() &&
                 !json.contains("method")) {
@@ -320,6 +367,7 @@ ClusterLink::~ClusterLink() {
   {
     std::lock_guard lock(impl_->callback_mutex);
     impl_->disconnected = {};
+    impl_->peer_callback = {};
   }
   impl_->Finish(ExitCode());
   // The receiver retires the channel after leaving its receive loop.
@@ -399,6 +447,19 @@ void ClusterLink::OnDisconnect(Disconnect callback) {
 void ClusterLink::OnBinary(Binary callback) {
   std::lock_guard lock(impl_->callback_mutex);
   impl_->binary = std::move(callback);
+}
+void ClusterLink::OnPeers(Peers callback) {
+  std::lock_guard callback_lock(impl_->callback_mutex);
+  impl_->peer_callback = std::move(callback);
+  Json peers;
+  {
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->ready)
+      return;
+    peers = impl_->peers;
+  }
+  if (impl_->peer_callback && !impl_->peer_callback(peers))
+    impl_->Finish(1);
 }
 Result<Json> ClusterLink::Request(const std::string& name, Json fields) {
   std::array<uint8_t, 16> random{};

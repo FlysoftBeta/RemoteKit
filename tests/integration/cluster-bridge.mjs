@@ -1,9 +1,10 @@
+import { stageRuntime } from './stage-runtime.mjs';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { accept, decode, encode, pipeTransport } from './test-cluster-noise-interop.mjs';
+import { accept, decode, encode, pipeTransport, publicKey } from './test-cluster-noise-interop.mjs';
 
 const args = Object.fromEntries(
   process.argv.slice(2).map((arg) => {
@@ -12,33 +13,34 @@ const args = Object.fromEntries(
     return [arg.slice(2, equal), arg.slice(equal + 1)];
   }),
 );
-const endpoint = resolve(args.endpoint);
+const endpoint = stageRuntime(
+  resolve(args.endpoint),
+  resolve(args.browser),
+  resolve(args['node-root'], 'runtime/bin'),
+);
 const root = resolve(args['node-root']);
 const overrides = JSON.parse(args.config.startsWith('{') ? args.config : await readFile(args.config, 'utf8'));
+const nodeId = 'test-' + createHash('sha256').update(root).digest('hex').slice(0, 16);
 const config = {
-  encoder: 'auto',
-  fps: 60,
-  bitrate: 36000000,
-  maxBitrate: 48000000,
-  asyncDepth: null,
-  gop: null,
-  targetUsage: null,
-  qsvLowPower: 'auto',
-  bufferMs: null,
-  rateControl: null,
-  idleIdrMs: 150,
-  maxEncodeWidth: 4096,
-  maxEncodeHeight: 4096,
-  dataPath: 'data',
-  browser: null,
-  browserTraceDir: null,
-  maxSessions: 3,
-  peer: { listen: '127.0.0.1:0', address: '127.0.0.1:3101' },
-  rtc: { ports: null, address: null },
-  diskReserveBytes: 10737418240,
-  sessionMemoryBytes: 2147483648,
-  ...overrides,
-  nodeId: 'test',
+  nodeId,
+  peer: overrides.peer ?? { listen: '127.0.0.1:0', address: '127.0.0.1:3101' },
+  rtc: overrides.rtc ?? { ports: null, address: null },
+  media: {
+    encoder: 'auto',
+    fps: 60,
+    bitrate: 36000000,
+    maxBitrate: 48000000,
+    asyncDepth: null,
+    gop: null,
+    targetUsage: null,
+    qsvLowPower: 'auto',
+    bufferMs: null,
+    rateControl: null,
+    idleIdrMs: 150,
+    maxEncodeWidth: 4096,
+    maxEncodeHeight: 4096,
+    ...overrides.media,
+  },
 };
 const canonical = (value) =>
   value && typeof value === 'object'
@@ -51,7 +53,7 @@ const canonical = (value) =>
         )
     : value;
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
-const configHash = sha256(JSON.stringify(canonical(config)));
+const configHash = sha256(JSON.stringify(canonical({ peer: config.peer, rtc: config.rtc })));
 let buildId = 'dev';
 try {
   buildId = JSON.parse(await readFile(resolve(dirname(endpoint), '../build.json'), 'utf8')).buildId;
@@ -59,9 +61,50 @@ try {
   if (error.code !== 'ENOENT') throw error;
 }
 await mkdir(root, { recursive: true });
-const key = args['cluster-key'] ? Buffer.from(args['cluster-key'], 'base64') : randomBytes(32);
-const child = spawn(endpoint, ['--stdio', '--node-id=test', '--node-root=' + root], {
-  env: { ...process.env, REMOTEKIT_CLUSTER_KEY: key.toString('base64') },
+let key;
+if (args['control-private-key']) key = Buffer.from(args['control-private-key'], 'base64');
+else {
+  const file = resolve(root, 'control.key');
+  try {
+    key = Buffer.from((await readFile(file, 'utf8')).trim(), 'base64');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    key = randomBytes(32);
+    await writeFile(file, key.toString('base64') + '\n', { flag: 'wx', mode: 0o600 });
+  }
+}
+let identity;
+try {
+  identity = JSON.parse(await readFile(resolve(root, 'node.json'), 'utf8'));
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+  identity = {
+    nodeId,
+    privateKey: randomBytes(32).toString('base64'),
+    controlPublicKey: publicKey(key).toString('base64'),
+  };
+  await writeFile(resolve(root, 'node.json'), JSON.stringify(identity), { flag: 'wx', mode: 0o600 });
+}
+const peerRegistry = args['object-index'] ? args['object-index'] + '.peers.json' : undefined;
+async function readPeers() {
+  if (!peerRegistry) return [];
+  try {
+    return JSON.parse(await readFile(peerRegistry, 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+if (peerRegistry) {
+  const peers = (await readPeers()).filter((peer) => peer.nodeId !== nodeId);
+  peers.push({
+    nodeId,
+    address: config.peer.address,
+    publicKey: publicKey(Buffer.from(identity.privateKey, 'base64')).toString('base64'),
+  });
+  await writeFile(peerRegistry, JSON.stringify(peers));
+}
+const child = spawn(endpoint, ['--stdio', '--node-root=' + root], {
   stdio: ['pipe', 'pipe', 'inherit'],
   windowsHide: true,
 });
@@ -105,17 +148,21 @@ function fail(error) {
   process.stdin.destroy();
 }
 try {
-  channel = await accept(transport, key, (hello) => {
+  const initialPeers = (await readPeers()).filter((peer) => peer.nodeId !== nodeId);
+  channel = await accept(transport, key, (hello, remoteKey) => {
+    if (!remoteKey.equals(publicKey(Buffer.from(identity.privateKey, 'base64'))))
+      throw Error('node identity mismatch');
     if (
       hello.type !== 'node.hello' ||
       hello.role !== 'endpoint' ||
-      hello.nodeId !== 'test' ||
+      hello.nodeId !== nodeId ||
       hello.buildId !== buildId ||
       !/^[0-9a-f]{32}$/.test(hello.incarnation)
     )
       throw Error('invalid endpoint hello');
     return {
       type: 'node.ready',
+      peers: initialPeers,
       connectionEpoch: randomUUID(),
       buildId,
       config,
@@ -128,6 +175,26 @@ try {
   key.fill(0);
   lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const send = (json) => transport.send(channel.send.encrypt(encode(json)));
+  let peerSet = JSON.stringify(initialPeers);
+  let pollingPeers = false;
+  const peerTimer = setInterval(async () => {
+    if (pollingPeers) return;
+    pollingPeers = true;
+    try {
+      const peers = (await readPeers()).filter((peer) => peer.nodeId !== nodeId);
+      const next = JSON.stringify(peers);
+      if (next !== peerSet) {
+        send({ type: 'node.peers', peers });
+        peerSet = next;
+      }
+    } catch (error) {
+      fail(error);
+    } finally {
+      pollingPeers = false;
+    }
+  }, 100);
+  peerTimer.unref();
+  child.once('exit', () => clearInterval(peerTimer));
   const received = (async () => {
     while (true) {
       const { json } = decode(channel.receive.decrypt(await transport.next(45000)));

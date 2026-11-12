@@ -200,7 +200,7 @@ test('Viewer HTTP distinguishes encoding defects, read cancellation and uncertai
 test('a NodeLink write deadline closes the unwritten queue and encoding defects stay internal', async (t) => {
   const { Carrier, NodeRegistry } = await import('../server/cluster/node-link');
   const { CipherState } = await import('../server/cluster/noise');
-  const { nodeDefaults } = await import('../server/config');
+  const { endpointDefaults, testNode } = await import('./node-fixture');
   t.mock.timers.enable({ apis: ['setTimeout'] });
   class QueuedCarrier extends Carrier {
     readonly bufferedAmount = 0;
@@ -219,9 +219,9 @@ test('a NodeLink write deadline closes the unwritten queue and encoding defects 
     }
   }
   const registry = new NodeRegistry({
-    key: Buffer.alloc(32, 1).toString('base64'),
+    privateKey: Buffer.alloc(32, 1).toString('base64'),
     buildId: 'dev',
-    nodes: { local: { config: { ...nodeDefaults, nodeId: 'local' }, configHash: 'local' } },
+    nodes: { local: testNode('local') },
   });
   t.after(() => registry.stop());
   const carrier = new QueuedCarrier();

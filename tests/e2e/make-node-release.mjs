@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { copyFile, mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
+import { basename, dirname, join, extname, relative } from 'node:path';
 import { zstdCompressSync } from 'node:zlib';
 
-/** Minimal real Endpoint release; Control supplies the shared dev Browser path. */
-export async function makeNodeRelease(runtime, endpoint, generation) {
+/** Real node release with the Browser beside the Endpoint. */
+export async function makeNodeRelease(runtime, endpoint, generation, browser) {
   const binary = join(runtime, 'bin');
   await mkdir(binary, { recursive: true });
   const files = new Map();
@@ -14,6 +14,30 @@ export async function makeNodeRelease(runtime, endpoint, generation) {
   ]) {
     const name = basename(source);
     await copyFile(source, join(binary, name));
+    files.set('bin/' + name, await readFile(source));
+  }
+  const browserRoot = dirname(browser);
+  const runtimeEntries = await readdir(browserRoot, { withFileTypes: true });
+  for (const directory of runtimeEntries.filter(
+    (entry) => entry.isDirectory() && ['locales', 'hyphen-data'].includes(entry.name),
+  ))
+    runtimeEntries.push(
+      ...(await readdir(join(browserRoot, directory.name), { recursive: true, withFileTypes: true })),
+    );
+  for (const entry of runtimeEntries) {
+    if (!entry.isFile()) continue;
+    const source = join(entry.parentPath, entry.name);
+    const name = relative(browserRoot, source).replaceAll('\\', '/');
+    if (name.includes('/') && !name.startsWith('locales/') && !name.startsWith('hyphen-data/')) continue;
+    if (
+      !['.dll', '.pak', '.dat', '.bin', '.hyb'].includes(extname(name).toLowerCase()) &&
+      name !== basename(browser) &&
+      name !== 'vk_swiftshader_icd.json'
+    )
+      continue;
+    const target = join(binary, name);
+    await mkdir(dirname(target), { recursive: true });
+    await copyFile(source, target);
     files.set('bin/' + name, await readFile(source));
   }
   files.set('bin/release-generation', Buffer.from(generation));

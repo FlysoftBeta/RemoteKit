@@ -1,4 +1,5 @@
 #include "management/cluster_link.hpp"
+#include "runtime_config_fixture.hpp"
 #include "cluster/node_files.hpp"
 #include <windows.h>
 #include <atomic>
@@ -34,13 +35,15 @@ void Await(Predicate predicate) {
     std::this_thread::sleep_for(10ms);
   }
 }
-Json Ready(Json config = {{"maxSessions", 3}}) {
-  auto text = config.dump();
+Json Ready(Json config = TestConfig()) {
+  auto text =
+      Json{{"peer", config.value("peer", Json())}, {"rtc", config.value("rtc", Json())}}.dump();
   return {
       {"type", "node.ready"},
       {"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
       {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
       {"sessions", Json::array()},
+      {"peers", Json::array()},
       {"buildId", "dev"},
       {"connectionEpoch", "12345678-1234-1234-1234-123456789abc"},
       {"config", config},
@@ -67,14 +70,15 @@ struct Responder {
     Check(CreatePipe(&ar, &bw, nullptr, 65536) != FALSE, "pipe");
     Check(CreatePipe(&br, &aw, nullptr, 65536) != FALSE, "pipe");
     auto responder = std::async(std::launch::async, [&] {
-      return AcceptCarrier(HandleCarrier(br, bw), Key{}, [&](const Json& hello) -> Result<Json> {
-        Check(hello["role"] == "endpoint" && hello["buildId"] == "dev" &&
-                  hello["nodeId"] == "test" && hello["incarnation"] == std::string(32, 'a'),
-              "endpoint hello");
-        return replies[index];
-      });
+      return AcceptCarrier(
+          HandleCarrier(br, bw), Key{}, [&](const Json& hello, const Key&) -> Result<Json> {
+            Check(hello["role"] == "endpoint" && hello["buildId"] == "dev" &&
+                      hello["nodeId"] == "test" && hello["incarnation"] == std::string(32, 'a'),
+                  "endpoint hello");
+            return replies[index];
+          });
     });
-    auto connection = ConnectCarrier(HandleCarrier(ar, aw), Key{},
+    auto connection = ConnectCarrier(HandleCarrier(ar, aw), Key{}, PublicKey(Key{}),
                                      {"endpoint", "test", "dev", std::string(32, 'a')});
     auto accepted = Take(responder.get());
     {
@@ -96,7 +100,7 @@ struct Responder {
   }
 };
 Result<void> Validate(const Json& config) {
-  if (config.contains("maxSessions"))
+  if (config.contains("media"))
     return {};
   return Error{ErrorCode::kInvalidRequest, "invalid config"};
 }
@@ -144,7 +148,7 @@ void Shutdown() {
 void Local() {
   Responder responder({Ready()});
   ClusterLink link([&] { return responder.Connect(); }, true, "dev", Validate);
-  Check(Take(link.WaitReady())["maxSessions"] == 3, "initial config");
+  Check(Take(link.WaitReady())["media"]["fps"] == 60, "initial config");
   auto server = responder.At(0);
   auto generation = Request(link, *server, 1);
   Check(link.SendReply(generation, {{"id", 1}, {"ok", true}}), "reply enqueued");
@@ -186,10 +190,40 @@ void Reconnect() {
   Check(Take(second->Receive(2s)).json["id"] == 2, "only replacement response delivered");
   link.OnDisconnect({});
 }
+void MediaAndPeers() {
+  auto changed = TestConfig();
+  changed["media"]["fps"] = 24;
+  Responder responder({Ready(), Ready(changed)});
+  ClusterLink link([&] { return responder.Connect(); }, false, "dev", Validate);
+  Take(link.WaitReady());
+  auto first = responder.At(0);
+  std::atomic<int> peer_updates{0};
+  link.OnPeers([&](const Json& peers) -> Result<void> {
+    ++peer_updates;
+    return {};
+  });
+  first->Close();
+  auto second = responder.At(1);
+  Request(link, *second, 1);
+  Check(Take(link.WaitReady())["media"]["fps"] == 24 && link.ExitCode() == 0,
+        "media reconnect does not restart");
+  Take(second->Send({{"type", "node.peers"}, {"peers", Json::array()}}));
+  Await([&] { return peer_updates.load() == 3; });
+  auto config = Ready();
+  config["type"] = "node.config";
+  Take(second->Send(config));
+  Await([&] { return Take(link.WaitReady())["media"]["fps"] == 60; });
+  link.OnPeers({});
+}
 void ExitRules() {
   for (const auto& [reply, expected] :
-       std::vector<std::pair<Json, int>>{{Ready({{"maxSessions", 4}}), 4},
-                                         {Ready({{"unknown", 4}}), 4},
+       std::vector<std::pair<Json, int>>{{Ready([] {
+                                            auto config = TestConfig();
+                                            config["peer"]["listen"] = "127.0.0.1:3102";
+                                            return config;
+                                          }()),
+                                          4},
+                                         {Ready({{"unknown", 4}}), 1},
                                          {Reject("build_mismatch"), 3},
                                          {Reject("unknown_node"), 1}}) {
     Responder responder({Ready(), reply});
@@ -376,6 +410,7 @@ int main() {
     Shutdown();
     Local();
     Reconnect();
+    MediaAndPeers();
     ExitRules();
     LimitsAndRetry();
     SupervisorEof();
