@@ -37,6 +37,7 @@ class EncoderRegistry : private ControllerContext {
   void Keyframes();
   Json Snapshot() { return stats->Snapshot(); }
   uint64_t Completed() const { return stats->completed; }
+  int64_t LastEncodedQpc() const { return stats->last_encoded_qpc; }
   uint64_t Bytes() const { return stats->bytes; }
   uint64_t Pending() const { return stats->pending; }
   void SetError(const std::string& error);

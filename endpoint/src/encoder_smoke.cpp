@@ -1,5 +1,6 @@
 #include "media/gpu_device.hpp"
 #include "media/hardware_encoder.hpp"
+#include "media/server_trace.hpp"
 #include <d3d11_4.h>
 #include <chrono>
 #include <cstdio>
@@ -77,6 +78,7 @@ int main(int argc, char** argv) {
     settings.vbr = true;
   }
   auto encoder = nvenc ? CreateNvencEncoder() : CreateQsvEncoder();
+  encoder->SetTrace(ServerTrace::Create("smoke", "qsv"), 1);
   if (!encoder->Configure(device.Get(), settings, error)) {
     fprintf(stderr, "%s\n", error.c_str());
     return 2;
@@ -123,41 +125,28 @@ int main(int argc, char** argv) {
   bool force_key = true;
   bool expect_idr = true;
   auto last_input = std::chrono::steady_clock::now();
-  auto first_low_report = last_input;
   uint32_t input_fps = settings.fps;
   while (completed < total) {
     if (low_fps && completed == phase_end && inflight.empty()) {
-      // Report 2 FPS across two half-second input intervals before allowing the
-      // timebase to fall. Recovery starts at 6 FPS and must jump directly to 60.
       const uint32_t rates[] = {settings.bitrate, 38015000, 38015000, 38015000, 38015000, 38171667};
       const uint32_t cadences[] = {2, 2, 2, 2, 6, 60};
-      const uint32_t expected_fps[] = {settings.fps, settings.fps, 2, 2,
-                                       settings.fps, settings.fps};
       const auto step = completed - 1;
-      if (step == 2)
-        std::this_thread::sleep_until(first_low_report + std::chrono::seconds(1));
-      const auto previous_fps = encoder->ActualSettings().fps;
       input_fps = cadences[step];
       if (!encoder->SetRates(rates[step], input_fps, error, settings.max_bitrate)) {
         fprintf(stderr, "%s\n", error.c_str());
         return 12;
       }
-      if (step == 0)
-        first_low_report = std::chrono::steady_clock::now();
       const auto actual = encoder->ActualSettings();
-      const bool bitrate_changed = rates[step] != (step ? rates[step - 1] : settings.bitrate);
-      const bool cadence_changed = expected_fps[step] != previous_fps;
-      force_key = encoder->TakeKeyframeRequest();
-      expect_idr = force_key;
+      force_key = false;
+      expect_idr = false;
       fprintf(stderr,
               "QSV low-fps frame=%llu inputFps=%u appliedFps=%u level=%u requestedBps=%u "
               "appliedBps=%u recoveryIdr=%d\n",
               completed + 1, input_fps, actual.fps, actual.level_idc, rates[step], actual.bitrate,
               expect_idr);
-      if (actual.fps != expected_fps[step] || !actual.level_idc ||
-          actual.level_idc > settings.level_idc || (cadence_changed && !expect_idr) ||
-          (!cadence_changed && !bitrate_changed && expect_idr)) {
-        fprintf(stderr, "unexpected QSV timebase, level, or IDR request\n");
+      if (actual.fps != 60 || !actual.level_idc || actual.level_idc > settings.level_idc ||
+          actual.bitrate != rates[step] || actual.max_bitrate != settings.max_bitrate) {
+        fprintf(stderr, "unexpected QSV fixed timebase, level, or bitrate snapshot\n");
         return 13;
       }
       ++phase_end;
@@ -170,10 +159,13 @@ int main(int argc, char** argv) {
         fprintf(stderr, "%s\n", error.c_str());
         return 12;
       }
-      force_key |= encoder->TakeKeyframeRequest();
       auto actual = encoder->ActualSettings();
       fprintf(stderr, "rate step requested=%u actual=%u max=%u fps=%u\n", rate, actual.bitrate,
               actual.max_bitrate, actual.fps);
+      if (!nvenc && (actual.fps != 60 || actual.bitrate != rate || actual.max_bitrate != maximum)) {
+        fprintf(stderr, "unexpected QSV bitrate step or fixed timebase\n");
+        return 13;
+      }
       phase_end += 60;
     }
     while (submitted < phase_end && !free.empty()) {
@@ -186,7 +178,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "%s\n", error.c_str());
         return 6;
       }
-      auto result = encoder->Submit(surfaces[index].Get(), force_key, submitted + 1, error);
+      auto result = encoder->Submit(surfaces[index].Get(), force_key, submitted + 1, error,
+                                    FrameContext{QpcNow(), false});
       if (result == CodecResult::busy)
         break;
       if (result != CodecResult::accepted) {

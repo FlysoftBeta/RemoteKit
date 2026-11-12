@@ -420,7 +420,8 @@ class Nvenc final : public HardwareEncoder {
   CodecResult Submit(ID3D11Texture2D* texture,
                      bool keyframe,
                      uint64_t cookie,
-                     std::string& error) override {
+                     std::string& error,
+                     FrameContext) override {
     if (!terminal_error_.empty()) {
       error = terminal_error_;
       return CodecResult::error;

@@ -1,5 +1,6 @@
 #pragma once
 #include "util/file_io.hpp"
+#include "qsv_rate_controller.hpp"
 #include "remotekit_rtc.h"
 #include <windows.h>
 #include <json.hpp>
@@ -30,6 +31,7 @@ struct TraceIds {
   }
 };
 struct TraceRecord {
+  RateTelemetry brc;
   const char *event = "", *reason = nullptr;
   TraceIds ids;
   int64_t qpc = 0, qpc_before = 0, qpc_after = 0, clock_frequency = 0;
@@ -192,6 +194,27 @@ class ServerTrace {
         value["consistent_across_processes"] = r.consistent;
       if (r.high_resolution >= 0)
         value["high_resolution"] = r.high_resolution;
+      if (r.brc.target_bps) {
+        const auto& b = r.brc;
+        value["brc"] = {{"dt_eff", b.dt},
+                        {"dt_raw", b.dt_raw},
+                        {"tau", b.tau},
+                        {"tau_known", b.tau_known},
+                        {"B", b.budget},
+                        {"T", b.target},
+                        {"fullness", b.fullness},
+                        {"fullness_after", b.fullness_after},
+                        {"qp", b.qp},
+                        {"predicted_bits", b.predicted_bits},
+                        {"actual_bits", b.actual_bits},
+                        {"cap", b.cap},
+                        {"recode", b.recodes},
+                        {"cap_hits", b.cap_hits},
+                        {"target_bps", b.target_bps},
+                        {"maximum_bps", b.maximum_bps},
+                        {"keepalive", b.frame.keepalive},
+                        {"idr", b.frame.idr}};
+      }
       out << value.dump() << '\n';
     }
     out.flush();

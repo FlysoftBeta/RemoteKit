@@ -27,6 +27,8 @@ struct RenderSlots::State {
     ComPtr<ID3D11Fence> ready, consumed;
     std::atomic<uint32_t> refs{0};
     uint64_t cookie = 0;
+    int64_t begin_qpc = 0;
+    bool keepalive = false;
     SharedAtlasFrame metadata{};
   };
   remotekit_sdk_render_setup setup{};
@@ -334,7 +336,11 @@ bool RenderSlots::Open(remotekit_sdk_render_setup setup,
   clipboard_state_.store(s);
   return true;
 }
-bool RenderSlots::Begin(uint32_t interval, bool force, std::string& error, bool* sent) {
+bool RenderSlots::Begin(uint32_t interval,
+                        bool force,
+                        std::string& error,
+                        bool* sent,
+                        bool keepalive) {
   PublishGuard publish{*this};
   if (sent)
     *sent = false;
@@ -352,7 +358,7 @@ bool RenderSlots::Begin(uint32_t interval, bool force, std::string& error, bool*
     return true;
   remotekit_sdk_render_request begin{id->generation, id->value, id->slot, interval,
                                      force ? 1u : 0u};
-  const auto begin_qpc = s.trace ? QpcNow() : 0;
+  const auto begin_qpc = QpcNow();
   auto result = s.sdk->remotekit_sdk_render_begin(s.channel, &begin);
   if (result != 0) {
     s.pacing.Reject(*id);
@@ -361,12 +367,15 @@ bool RenderSlots::Begin(uint32_t interval, bool force, std::string& error, bool*
       return false;
     }
   } else {
+    s.slots[id->slot].begin_qpc = begin_qpc;
+    s.slots[id->slot].keepalive = keepalive;
     ++counters_.begins;
     if (sent)
       *sent = true;
     RK_SERVER_TRACE(s.trace, "render_begin", (TraceIds{0, 0, id->generation, 0, 0}),
                     rk_record.slot = id->slot;
-                    rk_record.fence = id->value; rk_record.reason = force ? "force" : "cadence";
+                    rk_record.fence = id->value;
+                    rk_record.reason = keepalive ? "keepalive" : (force ? "force" : "cadence");
                     rk_record.qpc = begin_qpc; rk_record.producer_pid = s.producer_pid;
                     rk_record.leased = static_cast<int>(s.pacing.occupied()););
   }
@@ -495,6 +504,24 @@ SharedAtlasFrame RenderSlots::Metadata(const remotekit_rtc_frame& frame) {
     return {};
   const auto* slot = static_cast<const State::Slot*>(source->release_context);
   return slot && slot->cookie == source->frame_id ? slot->metadata : SharedAtlasFrame{};
+}
+bool RenderSlots::IsKeepalive(const remotekit_rtc_frame& frame) {
+  const auto* source = &frame;
+  while (auto* wrapped = TailRefreshLease::From(*source))
+    source = &wrapped->Source();
+  if (source->release != State::Release)
+    return false;
+  const auto* slot = static_cast<const State::Slot*>(source->release_context);
+  return slot && slot->cookie == source->frame_id ? slot->keepalive : false;
+}
+int64_t RenderSlots::BeginQpc(const remotekit_rtc_frame& frame) {
+  const auto* source = &frame;
+  while (auto* wrapped = TailRefreshLease::From(*source))
+    source = &wrapped->Source();
+  if (source->release != State::Release)
+    return 0;
+  const auto* slot = static_cast<const State::Slot*>(source->release_context);
+  return slot && slot->cookie == source->frame_id ? slot->begin_qpc : 0;
 }
 uint64_t RenderSlots::Generation() const {
   const auto state = clipboard_state_.load();

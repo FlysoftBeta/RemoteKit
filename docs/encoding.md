@@ -49,7 +49,7 @@
 - H.264 constrained baseline：`GopRefDist=1`、`NumRefFrame=1`，无 B 帧、无 lookahead。
 - 生产默认：`TargetUsage=7`、`LowPower=ON`、VBR（TargetKbps / MaxKbps）。
 - VBV = max(目标, 最大码率) × 缓冲时长 / 8，再受 level 的 CPB 上限约束。
-- `RepeatPPS=ON`；ExtBRC、MBBRC 关闭；NAL HRD 一致性和 NAL/VCL VUI HRD 关闭。
+- `RepeatPPS=ON`；ExtBRC 开启（见下文），MBBRC 关闭；NAL HRD 一致性和 NAL/VCL VUI HRD 关闭。
 - 颜色：RGB→YUV 用 limited-range BT.709；VUI 另外声明 `fullrange=0`、primaries/transfer/matrix=1。转换正确和声明正确是两件事，都需要。
 
 ### 转换（VPP）
@@ -66,30 +66,39 @@
 - 码流缓冲按帧面积和实际 VBV 加 65536 字节分配，遇到 `NOT_ENOUGH_BUFFER` 时增长，上限 64MiB。所需输出容量不等于观测到的 AU 大小：一次 8MiB 缓冲在 VBV 约 9.4MB 时失败，而实际 AU 只有 8.6KB。
 - Task 与 Packet 分开：输出码流用时间戳 cookie 关联到原始输入，不假设某次 Submit 的输出属于这次 Submit。`MFX_ERR_MORE_DATA` 也可能意味着输入已被接受并保留。Sync 轮询每次 2ms，总上限 5 秒；驱动 Locked 计数归零前不释放输入。
 
-### QSV 时基去抖
+### QSV 应用侧码控（ExtBRC）
 
-WebRTC 通过 `SetRates` 报告观测输入 FPS。QSV 的码控按名义帧率分配每帧预算，所以名义时基需要跟随实际内容节奏；但每次 60→59→58 的波动都重配时基会产生新序列和 IDR 突发。
+QSV 的名义时基固定为 60/1，整个编码器生命周期不变；每帧 QP 由 Endpoint 自己的 `QsvRateController` 通过 `mfxExtBRC` 回调决定。`SetRates` 只更新控制器的速率快照（目标码率、最大码率），从不调用 `MFXVideoENCODE_Reset`；WebRTC 给出的 FPS 对 QSV 不起作用。
 
-`QsvCadencePolicy`：
+为什么这样做：驱动 VBR 按"目标码率 ÷ 名义帧率"分配每帧预算，而改时基必须开新序列（`StartNewSequence=ON`，否则驱动返回 -15），也就是一个 IDR。时基跟随内容节奏，交互开始和结束就会伴随关键帧突发；时基固定，稀疏更新又会饿死（见[调优经验](tuning.md#编码)）。应用侧码控按真实帧间隔给预算，两边的问题都没有了。
 
-- 观测值持续 1 秒严格低于当前时基的 80%，才降低时基，取该窗口内的最大观测值。
-- 观测值严格高于当前时基的 125% 时，一次性恢复到 Configure 确定的合法上限。
-- 边界值保持不变。暂停取消待处理的窗口。
-- 后端报告低帧率窗口的到期时间，EncoderWorker 在在途编码排空后重放最后一次有效速率，不需要 WebRTC 再次发送相同参数，也不额外开定时线程。
-- 时基有下限：QSV 至少在 CPB 里预留两帧，名义帧率越低每帧预算越大。时基不低于 `ceil(2 × 最大码率 / level CPB)`，否则驱动会把实际 level 抬到协商值之上（曾在 1FPS、高 VBR 上限时初始化为 level 5.0 而协商的是 4.2，编码停止）。
-- 只改码率的 Reset 设置 `StartNewSequence=OFF`，保持序列；真正的时基变化设置 ON 并强制 IDR。
-- 单层 `maxFps` 上调不保证触发 WebRTC 的 Configure，名义上限以最近一次真正的 Configure 为准。
+**预算**（R = 目标码率，M = 最大码率）：
 
-效果（同输入串行对照）：首段运动发送队列均值 72→39ms、窗口峰值 270→167ms，稀疏页面 marker 到 video 提交 p95 463→282ms；新序列次数 17→4。与之配套的是恢复 WebRTC 的超发保护（见下文"码控声明"）。
+- 节奏 τ = 最近 3 个真实帧间隔的中位数。静止超过 2.5 秒或重新初始化后，τ 视为未知。
+- dt = 距上一个真实帧的采集间隔（Begin 的 QPC），夹在 [1/60, 0.5] 秒；τ 已知时取 min(dt, τ)，未知时取 1/60 秒。每帧名义预算 B = R·dt。用 τ 封顶是关键：静止后的第一帧 dt 可达 0.5 秒，如果按 R·dt 给预算，这一帧要在发送端排队约半秒，后面的帧全被堵住。
+- 漏桶：容量 S = R·0.5 秒，按采集时间以 R 排空，按实际编码字节注满，目标水位 S/4。分配目标 T = B × clamp(1 + (S/4 − 水位)/S, 0.5, 1.15)；τ 未知时上限为 1.0。
+- 帧上限：P 帧 min(max(2B, R·33ms), M·0.25 秒)。IDR 目标 T_I = min(4·R·max(τ, 1/60), R·60ms)，上限 max(1.25·T_I, 2B)。
 
-被否决的替代方案及原因见[调优经验](tuning.md#编码)：固定 60FPS 时基、仅 BRC 提示、LowDelayBRC、动态 I/P 帧预算。
+**QP 模型**：I、P 分开维护复杂度，bits ≈ C / 2^((QP−4)/6)，QP 取 [10, 51] 内预测不超过目标的最小整数。P 帧每帧最多变 ±4；上一帧预测偏差超过 2 倍时视为场景切换，重置复杂度并放开一帧的限制。首个 IDR 用 QP 26。
 
-### Reset 与重新初始化
+**超限**：编码结果超过帧上限且尚未重编时，`Update` 返回 `MFX_BRC_BIG_FRAME`，QP 提高 ceil(6·log2(实际/上限))（至少 +2），重编一次；第二次超限照收。保活帧可以用 `PANIC_BIG_FRAME`。不使用 `PANIC_SMALL_FRAME` 和填充。
 
-- 只有 `MFX_ERR_INCOMPATIBLE_VIDEO_PARAM`（-14）走"排空后同 session 重建"：关闭编码组件，在同一 session/设备上重新 Query/Init，校验实际参数，请求 IDR。不退出编码线程，不重建 RTC，不切换呈现后端。
-- 触发示例：1168×752@60 初始 VBV 6000KB，随后请求 1FPS/38.2Mbps 返回 -14，重建后 VBV 约 9543KB。
-- 其他 Reset 错误是明确的 worker 失败，-14 恢复不是掩盖编码语义变化的通用重试。
-- 重建可能产生比协商接收 level 更高的实际 level（曾在 Chrome89 静态页 1FPS 重建后出现 level 5.0，而协商的是 4.2，导致画面停止），所以 Init 后的 level 校验必须保留。
+**保活帧**（见[节奏 · 静止保活帧](pacing.md#静止保活帧)）：QP = 上一个 P 帧 + 6，不更新模型和节奏，字节计入漏桶。
+
+GOP 仍由驱动管理（`GopPicSize = gop`，`IdrInterval = 0`）。时基固定后，不存在"时基只能在关键帧处改变"的约束，不需要由编码线程自己安排 IDR。60/1 与最大码率共同决定 CPB，Init 后照常校验实际 level。
+
+驱动事实（UHD630，驱动 30.0.100.9805，API 1.35）：
+
+- ExtBRC 在 VDENC 和非 LowPower 下都可用，QP 精确生效，`Update` 报告的帧大小与输出一致，重编和 PANIC 都可用。
+- `MaxFrameSize`/`MaxFrameSizeI/P` 在 ExtBRC 下被保留但不起作用，帧上限只能在 `Update` 里执行。
+- `MinFrameSize` 按比特解释，与文档的字节不符。不使用填充。
+- VDENC 下 Submit→Sync 中位数 ExtBRC 6.7ms、VBR 14.1ms（2576×1616，非等码率对比）。
+
+效果（UHD630，1080p，单次运行；对照为时基跟随内容节奏的最好变体）：5 租户（2 个视频 + 3 个滚动）L99 70→50ms，单租户滚动 192→93ms，视频与滚动 FPS 不变。四类内容按 GCC 目标、内容相位配对比较 QP：2Hz −2.4、15Hz −2.1、滚动 −0.5、视频 +0.04，都在一个 QP 档以内。Chrome 157 和 Chrome 89 都能正常解码，包括重编帧和保活帧。
+
+### 运行期不 Reset
+
+QSV 在编码器生命周期内不调用 `MFXVideoENCODE_Reset`：码率变化只改应用侧码控的快照，时基固定。尺寸或参数变化走完整的重新配置（新的 Configure/Init，校验实际参数并从 IDR 开始）。Init 后的 H.264 level 校验必须保留：驱动可能产生比协商接收 level 更高的实际 level（曾在 Chrome89 上出现实际 5.0、协商 4.2，画面停止）。
 
 ## NVENC
 
@@ -135,7 +144,7 @@ level 同时约束单帧大小（MaxFS）和宏块吞吐（MaxMBPS）。一个 l
 
 **QP 来源**：QualityScaler 只看编码器报告的 QP。QSV 通过 `mfxExtEncodedFrameInfo` 返回整帧平均亮度 QP（初始化时 Query 确认驱动支持，不支持即初始化失败），NVENC 返回帧平均 QP，SDK 原样交给 WebRTC，不再解析码流。曾经 QSV 不报 QP、SDK 用 H.264 解析器取最后一个 slice 头的 QP 代替：slice 头 QP 不含宏块级量化，静态文字上恒为 26，而硬件整帧 QP 是 10–16。26 高于升档阈值 24，即使样本足够，Auto 下被降下来的分辨率也永远不会恢复。
 
-后者很关键。现场诊断发现硬件编码的实际输出超出码率预算，而当时声明了可信码控，WebRTC 的编码前超发丢帧保护因此被关掉了。改为不可信后保护恢复。仅这一项把发送队列均值从 72ms 降到约 69ms、marker p95 从 463ms 降到 425ms，最差窗口反而从 269ms 升到 329ms——声明正确是必要条件，但单独并不够，配合时基去抖才得到上面的结果。硬件"速率更新成功"不代表实际输出已经跟上预算，仍需观测编码字节和发送排队。
+后者很关键。现场诊断发现硬件编码的实际输出超出码率预算，而当时声明了可信码控，WebRTC 的编码前超发丢帧保护因此被关掉了。改为不可信后保护恢复。仅这一项把发送队列均值从 72ms 降到约 69ms、marker p95 从 463ms 降到 425ms，最差窗口反而从 269ms 升到 329ms——声明正确是必要条件，但单独并不够。现在 QSV 由应用侧码控逐帧约束帧大小，这条保护在 ExtBRC 下实测不再触发（媒体优化丢帧为 0），声明仍保持不可信。硬件"速率更新成功"不代表实际输出已经跟上预算，仍需观测编码字节和发送排队。
 
 ### 发送节奏
 
@@ -150,7 +159,7 @@ SDK 在没有显式冲突的 field trial 时，设置 `WebRTC-ProbingScreenshare
 
 ## 代码位置
 
-- `endpoint/src/media/encoder_worker.*`、`qsv_encoder.*`、`qsv_cadence_policy.hpp`、`nvenc_encoder.*`、`gpu_device.*`
+- `endpoint/src/media/encoder_worker.*`、`qsv_encoder.*`、`qsv_rate_controller.*`、`nvenc_encoder.*`、`gpu_device.*`
 - `endpoint/src/media/sampling.hpp`（level 表与采样拟合）、`encoders.*`（SDK 编码回调与编码器注册）、`adapter.*`（适配器选择）
 - `browser/sdk/rtc_video_source.cc`（TextureSource 与 AdaptFrame）、`rtc_encoder.cc`（ExternalEncoder 与 EncoderInfo）、`rtc_peer.cc`（peer、field trial、playout delay）
 - `control/client/media/receive-profile.ts`（接收能力探测）

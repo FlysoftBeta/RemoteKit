@@ -1,6 +1,8 @@
 #include "util/log.hpp"
 #include "hardware_encoder.hpp"
-#include "qsv_cadence_policy.hpp"
+#include "gpu_device.hpp"
+#include "qsv_rate_controller.hpp"
+#include <vpl/mfxbrc.h>
 #include "server_trace.hpp"
 #include "media/sampling.hpp"
 #include <vpl/mfxdispatcher.h>
@@ -51,7 +53,7 @@ class Qsv final : public HardwareEncoder {
   mfxExtCodingOption3 options3_{};
   mfxExtVideoSignalInfo signal_{};
   mfxExtCodingOption hrd_options_{};
-  std::array<mfxExtBuffer*, 4> extensions_{};
+  std::array<mfxExtBuffer*, 5> extensions_{};
   mfxFrameAllocator allocator_{};
   std::map<mfxMemId, std::unique_ptr<Memory>> allocations_;
   std::map<uint64_t, std::unique_ptr<Task>> jobs_;
@@ -60,11 +62,45 @@ class Qsv final : public HardwareEncoder {
   std::unique_ptr<Packet> flush_packet_;
   std::string deferred_error_;
   EncoderSettings settings_;
-  QsvCadencePolicy cadence_{0};
+  std::unique_ptr<QsvRateController> controller_;
+  mfxExtBRC external_brc_{};
+  uint32_t frame_order_ = 0;
   QsvLowPowerInfo low_power_;
   std::optional<QsvRateControlInfo> rate_control_;
-  bool initialized_ = false, keyframe_requested_ = false;
-  mfxU16 allocated_buffer_kb_ = 0;
+  bool initialized_ = false;
+  static mfxStatus MFX_CDECL BrInit(mfxHDL, mfxVideoParam*) { return MFX_ERR_NONE; }
+  static mfxStatus MFX_CDECL BrReset(mfxHDL context, mfxVideoParam*) {
+    auto* self = static_cast<Qsv*>(context);
+    RK_SERVER_TRACE(self->trace_, "mfx_reset_return", TraceIds{},
+                    rk_record.encoder = self->trace_encoder_;);
+    return MFX_ERR_NONE;
+  }
+  static mfxStatus MFX_CDECL BrClose(mfxHDL) { return MFX_ERR_NONE; }
+  void TraceBrc(const char* event, const RateTelemetry& sample) {
+    RK_SERVER_TRACE(trace_, event, TraceIds{}, rk_record.encoder = trace_encoder_;
+                    rk_record.cookie = sample.frame.cookie; rk_record.brc = sample;);
+  }
+  static mfxStatus MFX_CDECL BrGet(mfxHDL context,
+                                   mfxBRCFrameParam* frame,
+                                   mfxBRCFrameCtrl* control) {
+    auto* self = static_cast<Qsv*>(context);
+    const auto sample = self->controller_->GetFrameCtrl(frame->EncodedOrder, frame->NumRecode,
+                                                        (frame->FrameType & MFX_FRAMETYPE_I) != 0);
+    control->QpY = sample.qp;
+    self->TraceBrc("brc_get", sample);
+    return MFX_ERR_NONE;
+  }
+  static mfxStatus MFX_CDECL BrUpdate(mfxHDL context,
+                                      mfxBRCFrameParam* frame,
+                                      mfxBRCFrameCtrl*,
+                                      mfxBRCFrameStatus* status) {
+    auto* self = static_cast<Qsv*>(context);
+    const auto result =
+        self->controller_->Update(frame->EncodedOrder, frame->NumRecode, frame->CodedFrameSize);
+    status->BRCStatus = static_cast<mfxU16>(result.recode ? MFX_BRC_BIG_FRAME : MFX_BRC_OK);
+    self->TraceBrc(result.recode ? "brc_recode" : "brc_update", result.telemetry);
+    return MFX_ERR_NONE;
+  }
   static bool Status(mfxStatus status, const char* operation, std::string& error) {
     if (status >= 0)
       return true;
@@ -81,8 +117,7 @@ class Qsv final : public HardwareEncoder {
     return true;
   }
   void ClearFrameBudgetReadback() {
-    // Query/GetVideoParam may synthesize budgets from the old timebase. Never
-    // feed those readbacks into a later Init/Reset as explicit frame limits.
+    // ExtBRC owns frame limits; driver readbacks must not become explicit budgets.
     options_.MaxFrameSize = 0;
     options3_.MaxFrameSizeI = 0;
     options3_.MaxFrameSizeP = 0;
@@ -159,13 +194,8 @@ class Qsv final : public HardwareEncoder {
     error = std::string(operation) + " (MFX " + std::to_string(status) + ")";
     return false;
   }
-  static bool SameGeometry(const mfxFrameInfo& a, const mfxFrameInfo& b) {
-    return a.FourCC == b.FourCC && a.Width == b.Width && a.Height == b.Height &&
-           a.CropX == b.CropX && a.CropY == b.CropY && a.CropW == b.CropW && a.CropH == b.CropH &&
-           a.ChromaFormat == b.ChromaFormat && a.PicStruct == b.PicStruct;
-  }
   static bool MatchesFrameRate(const mfxFrameInfo& frame, uint32_t fps) {
-    return frame.FrameRateExtD && frame.FrameRateExtN == uint64_t{fps} * frame.FrameRateExtD;
+    return frame.FrameRateExtD == 1 && frame.FrameRateExtN == fps;
   }
   std::unique_ptr<Packet> NewPacket() const {
     auto packet = std::make_unique<Packet>();
@@ -254,7 +284,6 @@ class Qsv final : public HardwareEncoder {
       MFXUnload(loader_);
   }
   const char* Name() const override { return "qsv"; }
-  bool TakeKeyframeRequest() override { return std::exchange(keyframe_requested_, false); }
   EncoderSettings ActualSettings() const override {
     auto value = settings_;
     value.width = params_.mfx.FrameInfo.CropW;
@@ -262,8 +291,9 @@ class Qsv final : public HardwareEncoder {
     value.fps = params_.mfx.FrameInfo.FrameRateExtD
                     ? params_.mfx.FrameInfo.FrameRateExtN / params_.mfx.FrameInfo.FrameRateExtD
                     : 0;
-    value.bitrate = params_.mfx.TargetKbps * 1000u;
-    value.max_bitrate = params_.mfx.MaxKbps * 1000u;
+    const auto rates = controller_->Snapshot();
+    value.bitrate = rates.target;
+    value.max_bitrate = rates.maximum;
     value.async_depth = params_.AsyncDepth;
     value.gop = params_.mfx.GopPicSize;
     value.target_usage = params_.mfx.TargetUsage;
@@ -290,7 +320,6 @@ class Qsv final : public HardwareEncoder {
     }
     device_ = device;
     settings_ = settings;
-    cadence_ = QsvCadencePolicy(settings.fps);
     low_power_.requested = static_cast<int>(settings.qsv_low_power);
     ComPtr<ID3D10Multithread> multithread;
     if (SUCCEEDED(device_.As(&multithread)))
@@ -366,6 +395,8 @@ class Qsv final : public HardwareEncoder {
 
  private:
   bool InitEncode(const EncoderSettings& settings, std::string& error) {
+    controller_ = std::make_unique<QsvRateController>(settings.bitrate, settings.max_bitrate);
+    frame_order_ = 0;
     const auto level_budget = remotekit::H264RateLimits(settings.level_idc);
     params_ = {};
     options_ = {};
@@ -385,10 +416,9 @@ class Qsv final : public HardwareEncoder {
     info.CodecProfile = MFX_PROFILE_AVC_CONSTRAINED_BASELINE;
     info.CodecLevel = static_cast<mfxU16>(settings.level_idc);
     info.TargetUsage = static_cast<mfxU16>(settings.target_usage);
-    info.RateControlMethod = settings.vbr ? MFX_RATECONTROL_VBR : MFX_RATECONTROL_CBR;
+    info.RateControlMethod = MFX_RATECONTROL_VBR;
     info.TargetKbps = static_cast<mfxU16>(std::max(1u, settings.bitrate / 1000));
-    info.MaxKbps = static_cast<mfxU16>(
-        std::max(1u, (settings.vbr ? settings.max_bitrate : settings.bitrate) / 1000));
+    info.MaxKbps = static_cast<mfxU16>(std::max(1u, settings.max_bitrate / 1000));
     info.BufferSizeInKB = static_cast<mfxU16>(std::min<uint64_t>(
         level_budget.cpb_kb ? level_budget.cpb_kb : 65535,
         uint64_t(std::max(settings.bitrate, settings.max_bitrate)) * settings.buffer_ms / 8000000));
@@ -404,13 +434,13 @@ class Qsv final : public HardwareEncoder {
     frame.Height = static_cast<mfxU16>((settings.height + 15) & ~15u);
     frame.CropW = static_cast<mfxU16>(settings.width);
     frame.CropH = static_cast<mfxU16>(settings.height);
-    frame.FrameRateExtN = settings.fps;
+    frame.FrameRateExtN = 60;
     frame.FrameRateExtD = 1;
     frame.PicStruct = MFX_PICSTRUCT_PROGRESSIVE;
     options_.Header.BufferId = MFX_EXTBUFF_CODING_OPTION2;
     options_.Header.BufferSz = sizeof(options_);
     options_.LookAheadDepth = 0;
-    options_.ExtBRC = MFX_CODINGOPTION_OFF;
+    options_.ExtBRC = MFX_CODINGOPTION_ON;
     options_.MBBRC = MFX_CODINGOPTION_OFF;
     options_.RepeatPPS = MFX_CODINGOPTION_ON;
     options3_.Header.BufferId = MFX_EXTBUFF_CODING_OPTION3;
@@ -433,6 +463,14 @@ class Qsv final : public HardwareEncoder {
     hrd_options_.VuiVclHrdParameters = MFX_CODINGOPTION_OFF;
     extensions_[2] = reinterpret_cast<mfxExtBuffer*>(&hrd_options_);
     extensions_[3] = reinterpret_cast<mfxExtBuffer*>(&options3_);
+    external_brc_.Header = {MFX_EXTBUFF_BRC, sizeof(external_brc_)};
+    external_brc_.pthis = this;
+    external_brc_.Init = BrInit;
+    external_brc_.Reset = BrReset;
+    external_brc_.Close = BrClose;
+    external_brc_.GetFrameCtrl = BrGet;
+    external_brc_.Update = BrUpdate;
+    extensions_[4] = &external_brc_.Header;
     params_.ExtParam = extensions_.data();
     params_.NumExtParam = static_cast<mfxU16>(extensions_.size());
     mfxExtEncodedFrameInfo frame_info{};
@@ -460,6 +498,11 @@ class Qsv final : public HardwareEncoder {
           "QSV Query changed explicit LowPower request to " + std::to_string(params_.mfx.LowPower);
       return false;
     }
+    if (options_.ExtBRC != MFX_CODINGOPTION_ON ||
+        params_.mfx.RateControlMethod != MFX_RATECONTROL_VBR) {
+      error = "QSV Query did not accept external VBR";
+      return false;
+    }
     if (params_.mfx.GopRefDist != 1) {
       error = "QSV unexpectedly enabled B frames";
       return false;
@@ -480,7 +523,7 @@ class Qsv final : public HardwareEncoder {
     if (!Status(get_status, "MFX GetVideoParam", error))
       return false;
     ReadRateControl();
-    if (!MatchesFrameRate(params_.mfx.FrameInfo, settings.fps)) {
+    if (!MatchesFrameRate(params_.mfx.FrameInfo, 60)) {
       error = "QSV initialization did not apply configured frame rate";
       return false;
     }
@@ -501,7 +544,6 @@ class Qsv final : public HardwareEncoder {
              {{"nalConformance", hrd_options_.NalHrdConformance},
               {"nalVui", hrd_options_.VuiNalHrdParameters},
               {"vclVui", hrd_options_.VuiVclHrdParameters}});
-    allocated_buffer_kb_ = params_.mfx.BufferSizeInKB;
     if (params_.mfx.CodecLevel > settings.level_idc) {
       error = "QSV actual H264 level " + std::to_string(params_.mfx.CodecLevel) +
               " exceeds negotiated level " + std::to_string(settings.level_idc);
@@ -530,7 +572,8 @@ class Qsv final : public HardwareEncoder {
   CodecResult Submit(ID3D11Texture2D* texture,
                      bool key,
                      uint64_t cookie,
-                     std::string& error) override {
+                     std::string& error,
+                     FrameContext context) override {
     if (!deferred_error_.empty()) {
       error = deferred_error_;
       return CodecResult::error;
@@ -547,6 +590,11 @@ class Qsv final : public HardwareEncoder {
     task->surface.Info = params_.mfx.FrameInfo;
     task->surface.Data.MemId = &task->memory;
     task->surface.Data.TimeStamp = cookie;
+    task->surface.Data.FrameOrder = frame_order_;
+    controller_->Prepare(
+        frame_order_,
+        {cookie, static_cast<int64_t>(context.begin_qpc * (1000000.0 / QpcFrequency())),
+         context.keepalive, key});
     if (key)
       task->control.FrameType = MFX_FRAMETYPE_I | MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_REF;
     bool earlier_pending = false;
@@ -560,8 +608,10 @@ class Qsv final : public HardwareEncoder {
     }
     if (deferred_error_.empty() && accepted->stage == Stage::encode_pending) {
       jobs_.erase(cookie);
+      controller_->Cancel(frame_order_);
       return CodecResult::busy;
     }
+    ++frame_order_;
     // Accepted input remains owned until final Sync/Close.
     return CodecResult::accepted;
   }
@@ -660,131 +710,22 @@ class Qsv final : public HardwareEncoder {
       return CodecResult::error;
     }
     output.qp = packet.frame_info.QP;
+    const auto decision = controller_->Complete(task.surface.Data.FrameOrder);
+    output.brc_recodes = decision.recodes;
+    output.brc_cap_hits = decision.cap_hits;
     jobs_.erase(found);
     packets_.pop_front();
     return CodecResult::ready;
   }
-  std::optional<std::chrono::steady_clock::time_point> RateUpdateDeadline() const override {
-    return cadence_.Deadline();
-  }
-  void CancelPendingRateUpdate() override { cadence_.Cancel(); }
-  bool SetRates(uint32_t bitrate,
-                uint32_t observed_fps,
-                std::string& error,
-                uint32_t maximum = 0) override {
-    if (!bitrate || !observed_fps) {
+  bool SetRates(uint32_t bitrate, uint32_t, std::string& error, uint32_t maximum = 0) override {
+    if (!bitrate) {
       error = "QSV invalid rate update";
       return false;
     }
-    if (!jobs_.empty() || !packets_.empty()) {
-      error = "QSV rate reset requires drained queue";
-      return false;
-    }
-    const auto next_max = maximum ? maximum : settings_.max_bitrate;
-    bitrate = std::min(bitrate, next_max);
-    const auto level_budget = remotekit::H264RateLimits(settings_.level_idc);
-    // QSV reserves at least two frames in its coded-picture buffer. A lower
-    // timebase can force the driver above the negotiated level at the same rate.
-    const auto cpb_bits = uint64_t{level_budget.cpb_kb} * 8000;
-    const auto minimum_fps =
-        cpb_bits ? static_cast<uint32_t>((uint64_t{next_max} * 2 + cpb_bits - 1) / cpb_bits) : 1u;
-    const auto fps = std::max(minimum_fps, cadence_.Select(settings_.fps, observed_fps,
-                                                           std::chrono::steady_clock::now()));
-    const bool cadence_changed = fps != settings_.fps;
-    if (bitrate / 1000 == settings_.bitrate / 1000 && next_max == settings_.max_bitrate &&
-        !cadence_changed)
-      return true;
-    auto next = params_;
-    next.mfx.FrameInfo.FrameRateExtN = fps;
-    next.mfx.FrameInfo.FrameRateExtD = 1;
-    next.mfx.TargetKbps = static_cast<mfxU16>(std::max(1u, bitrate / 1000));
-    next.mfx.MaxKbps =
-        static_cast<mfxU16>(std::max(1u, (settings_.vbr ? next_max : bitrate) / 1000));
-    next.mfx.BufferSizeInKB = allocated_buffer_kb_;
-    ClearFrameBudgetReadback();
-    mfxExtEncoderResetOption reset{};
-    reset.Header.BufferId = MFX_EXTBUFF_ENCODER_RESET_OPTION;
-    reset.Header.BufferSz = sizeof(reset);
-    // A changed H264 VUI/HRD timebase needs a new sequence. Pure bitrate
-    // changes retain the existing sequence and do not manufacture an IDR.
-    reset.StartNewSequence = cadence_changed ? MFX_CODINGOPTION_ON : MFX_CODINGOPTION_OFF;
-    std::array<mfxExtBuffer*, 5> reset_extensions = {extensions_[0], extensions_[1], extensions_[2],
-                                                     extensions_[3],
-                                                     reinterpret_cast<mfxExtBuffer*>(&reset)};
-    next.ExtParam = reset_extensions.data();
-    next.NumExtParam = static_cast<mfxU16>(reset_extensions.size());
-    RK_SERVER_TRACE(trace_, "mfx_reset_begin", TraceIds{}, rk_record.encoder = trace_encoder_;);
-    const auto status = MFXVideoENCODE_Reset(session_, &next);
-    RK_SERVER_TRACE(trace_, "mfx_reset_return", TraceIds{}, rk_record.encoder = trace_encoder_;
-                    rk_record.status = status;);
-    const bool reinitialize = status == MFX_ERR_INCOMPATIBLE_VIDEO_PARAM;
-    if (reinitialize) {
-      // Reset cannot grow the initial allocation (for example, VBV at 1 FPS).
-      // The worker has drained accepted jobs. Keep the same session and device
-      // while rebuilding the encode component from the requested settings.
-      const auto geometry = params_.mfx.FrameInfo;
-      LogEvent(LogLevel::kWarn, "qsv.reinit_required",
-               {{"bitrate", bitrate}, {"fps", fps}, {"status", status}});
-      if (!Exact(MFXVideoENCODE_Close(session_), "MFX Encode Close for rate reinit", error))
-        return false;
-      initialized_ = false;
-      auto requested = settings_;
-      requested.bitrate = bitrate;
-      requested.fps = fps;
-      requested.max_bitrate = next_max;
-      if (!InitEncode(requested, error))
-        return false;
-      if (!SameGeometry(geometry, params_.mfx.FrameInfo)) {
-        error = "QSV rate reinit changed required geometry";
-        return false;
-      }
-    } else {
-      if (!Status(status, "MFX rate Reset", error))
-        return false;
-      next.ExtParam = extensions_.data();
-      next.NumExtParam = static_cast<mfxU16>(extensions_.size());
-      params_ = next;
-      RK_SERVER_TRACE(trace_, "mfx_get_params_begin", TraceIds{},
-                      rk_record.encoder = trace_encoder_;);
-      const auto get_status = MFXVideoENCODE_GetVideoParam(session_, &params_);
-      RK_SERVER_TRACE(trace_, "mfx_get_params_return", TraceIds{},
-                      rk_record.encoder = trace_encoder_;
-                      rk_record.status = get_status;);
-      low_power_.get_video_param_status = get_status;
-      low_power_.initialized.reset();
-      if (get_status >= 0)
-        low_power_.initialized = params_.mfx.LowPower;
-      if (!Status(get_status, "MFX GetVideoParam after rate update", error))
-        return false;
-      ReadRateControl();
-    }
-    if (settings_.qsv_low_power && params_.mfx.LowPower != settings_.qsv_low_power) {
-      error = "QSV rate update changed explicit LowPower value";
-      return false;
-    }
-    if (!MatchesFrameRate(params_.mfx.FrameInfo, fps)) {
-      error = "QSV rate update did not apply requested frame rate";
-      return false;
-    }
-    if (!CheckSignal(error))
-      return false;
-    if (params_.mfx.CodecLevel > settings_.level_idc) {
-      error = "QSV rate update exceeded negotiated H264 level";
-      return false;
-    }
-    settings_.bitrate = bitrate;
-    settings_.fps = fps;
-    settings_.max_bitrate = next_max;
-    if (cadence_changed || reinitialize)
-      keyframe_requested_ = true;
-    LogEvent(LogLevel::kInfo, "qsv.rate_changed",
-             {{"reinitialize", reinitialize},
-              {"requestedBitrate", bitrate},
-              {"actualBitrate", params_.mfx.TargetKbps * 1000u},
-              {"fpsNumerator", params_.mfx.FrameInfo.FrameRateExtN},
-              {"fpsDenominator", params_.mfx.FrameInfo.FrameRateExtD},
-              {"newSequence", cadence_changed || reinitialize},
-              {"status", status}});
+    const auto level = remotekit::H264RateLimits(settings_.level_idc);
+    const auto next_max = std::min(maximum ? maximum : settings_.max_bitrate,
+                                   level.bitrate_bps ? level.bitrate_bps : UINT32_MAX);
+    controller_->SetRates(bitrate, next_max);
     return true;
   }
   bool Drain(std::vector<AccessUnit>& result, std::string& error) override {

@@ -68,7 +68,7 @@ class RateBackend final : public HardwareEncoder {
   }
   const char* Name() const override { return "rate-mock"; }
   EncoderSettings ActualSettings() const override { return settings_; }
-  CodecResult Submit(ID3D11Texture2D*, bool, uint64_t, std::string&) override {
+  CodecResult Submit(ID3D11Texture2D*, bool, uint64_t, std::string&, FrameContext) override {
     return CodecResult::error;
   }
   CodecResult Poll(uint32_t, AccessUnit&, std::string&) override { return CodecResult::pending; }
@@ -205,7 +205,7 @@ void TimeoutAndLateCompletion() {
   driver.completion_wait = WAIT_OBJECT_0;
   driver.time += 1s;
   CHECK(encoder->Poll(0, unit, error) == CodecResult::error && error == fault);
-  CHECK(encoder->Submit(nullptr, false, 74, error) == CodecResult::error && error == fault);
+  CHECK(encoder->Submit(nullptr, false, 74, error, {}) == CodecResult::error && error == fault);
   CHECK(!encoder->SetRates(1000, 60, error) && error == fault);
   std::vector<AccessUnit> output;
   CHECK(!encoder->Drain(output, error));

@@ -213,6 +213,7 @@ if(BUILD_TESTING)
 endif()
 if(WIN32)
   add_library(remotekit_media STATIC src/media/gpu_device.cpp src/media/qsv_encoder.cpp
+    src/media/qsv_rate_controller.cpp
     src/media/nvenc_encoder.cpp src/media/render_slots.cpp src/media/encoder_worker.cpp)
   target_include_directories(remotekit_media PUBLIC src ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/sdk/include
     ${RK_DEPS} ${RK_DEPS}/libvpl-2.17.0/api)
@@ -237,10 +238,11 @@ if(WIN32)
     add_custom_command(TARGET endpoint_encoder_stats_tests POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_encoder_stats_tests>)
     add_test(NAME endpoint_encoder_stats COMMAND endpoint_encoder_stats_tests)
-    add_executable(endpoint_qsv_cadence_tests tests/qsv_cadence_tests.cpp)
-    target_include_directories(endpoint_qsv_cadence_tests PRIVATE src ${PROJECT_SOURCE_DIR})
-    target_compile_options(endpoint_qsv_cadence_tests PRIVATE /W4 /utf-8)
-    add_test(NAME endpoint_qsv_cadence COMMAND endpoint_qsv_cadence_tests)
+    add_executable(endpoint_qsv_rate_controller_tests tests/qsv_rate_controller_tests.cpp src/media/qsv_rate_controller.cpp)
+    target_include_directories(endpoint_qsv_rate_controller_tests PRIVATE src)
+    target_compile_features(endpoint_qsv_rate_controller_tests PRIVATE cxx_std_20)
+    target_compile_options(endpoint_qsv_rate_controller_tests PRIVATE /W4 /utf-8)
+    add_test(NAME endpoint_qsv_rate_controller COMMAND endpoint_qsv_rate_controller_tests)
   endif()
   add_library(remotekit_face STATIC src/auth/face_auth.cpp src/auth/face_engine.cpp)
   target_include_directories(remotekit_face PUBLIC src ${PROJECT_SOURCE_DIR})

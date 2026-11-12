@@ -4,6 +4,7 @@
 #include "diagnostics/timing.hpp"
 #include "media/encoders.hpp"
 #include "media/comp_recovery.hpp"
+#include "media/idle_keepalive.hpp"
 #include "media/output.hpp"
 #include "media/presentation.hpp"
 #include "media/render_slots.hpp"
@@ -64,6 +65,7 @@ void MediaPipeline::MediaLoop() {
   uint64_t previous_encoded = registry.Completed(), previous_bytes = registry.Bytes();
   uint64_t previous_delivered = output.Slots().delivered_frames();
   remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
+  remotekit::IdleKeepalive keepalive(QpcFrequency());
   bool has_current_view = false;
 
   bool first_source = true, first_submit = true;
@@ -303,15 +305,22 @@ void MediaPipeline::MediaLoop() {
     }
     const bool tail_ready = idle.TailDue(now_ms) && !tail_attempt &&
                             now_ms >= next_tail_attempt_ms && !presentation_refresh.Pending();
-    if (!output.Suspended() && comp_bitrate.load() && sampling_fps && begin_schedule.Due(now)) {
+    const bool force_tail = tail_ready && tail_begins < 3;
+    const bool force_refresh =
+        result != RenderSlots::Result::ready && presentation_refresh.CanForce(now_ms);
+    const bool force_keepalive =
+        output.Slots().Stats().idle && !force_tail && !force_refresh && !recovery.active() &&
+        !presentation_refresh.Pending() &&
+        keepalive.Due(now, registry.LastEncodedQpc(), tail_attempt || idle.TailDue(now_ms));
+    if (!output.Suspended() && comp_bitrate.load() && sampling_fps &&
+        (begin_schedule.Due(now) || force_keepalive)) {
       const auto interval = static_cast<uint32_t>((1000000ull + sampling_fps - 1) / sampling_fps);
-      output.Slots().Pressure(registry.Pending() > 1);
+      if (!force_keepalive)
+        output.Slots().Pressure(registry.Pending() > 1);
       bool sent = false;
-      const bool force_tail = tail_ready && tail_begins < 3;
-      const bool force_refresh =
-          result != RenderSlots::Result::ready && presentation_refresh.CanForce(now_ms);
-      if (!output.Slots().Begin(interval, force_tail || force_refresh || recovery.active(), error,
-                                &sent)) {
+      if (!output.Slots().Begin(interval,
+                                force_tail || force_refresh || recovery.active() || force_keepalive,
+                                error, &sent, force_keepalive)) {
         if (frame.release)
           frame.release(frame.release_context, frame.frame_id);
         {
@@ -320,13 +329,16 @@ void MediaPipeline::MediaLoop() {
         presentation.InvalidateLayout("render-begin-failed");
         break;
       }
+      if (sent && force_keepalive)
+        keepalive.Sent(now);
       if (sent && force_tail)
         ++tail_begins;
       if (sent && force_refresh)
         presentation_refresh.Forced(now_ms);
       // Begin can drain a Wake queued after Poll. A sent Begin satisfies it.
       observe_wake();
-      begin_schedule.Attempted(now, std::max<int64_t>(1, QpcFrequency() / sampling_fps), sent);
+      if (!force_keepalive)
+        begin_schedule.Attempted(now, std::max<int64_t>(1, QpcFrequency() / sampling_fps), sent);
     }
     if (result == RenderSlots::Result::ready) {
       const bool fresh =

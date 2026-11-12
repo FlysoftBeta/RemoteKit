@@ -36,13 +36,19 @@ class RenderSlots {
             ID3D11Device5*,
             ID3D11DeviceContext4*,
             std::string&);
-  bool Begin(uint32_t interval_us, bool force, std::string&, bool* sent = nullptr);
+  bool Begin(uint32_t interval_us,
+             bool force,
+             std::string&,
+             bool* sent = nullptr,
+             bool keepalive = false);
   void Pressure(bool encoder_backlog);
   bool HasCapacity() const;
   // Borrowed by the owner thread until the next Open or Close.
   HANDLE EventHandle() const;
   Result Poll(remotekit_rtc_frame&, SharedAtlasFrame&, std::string&);
   SharedAtlasFrame LatestMetadata() const;
+  static bool IsKeepalive(const remotekit_rtc_frame& frame);
+  static int64_t BeginQpc(const remotekit_rtc_frame& frame);
   static SharedAtlasFrame Metadata(const remotekit_rtc_frame& frame);
   uint64_t Generation() const;
   std::optional<uint64_t> ClipboardSequence() const;
