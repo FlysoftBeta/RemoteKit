@@ -571,8 +571,8 @@ def package_runtime(args, node_runtime):
             key: validation[key]
             for key in (
                 'passed', 'validationKind', 'scope', 'browserProductOperationsTested',
-                'rtcMediaTested', 'endpointManagementReachable', 'webSocketProductActionRejected',
-                'workspaceUnchanged', 'endpointSha256', 'faceModelsAvailable',
+                'rtcMediaTested', 'endpointManagementReachable', 'webSocketOperationCommitted',
+                'endpointSha256',
             )
         }
         metadata = finalize_payload()
