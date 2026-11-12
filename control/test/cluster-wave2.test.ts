@@ -1083,6 +1083,7 @@ test('GC follows library and selection references, derivatives and the latest fo
         {
           id: 'entry',
           kind: 'file' as const,
+          available: true,
           assetId: id(1),
           name: 'file',
           type: 'text/plain',
@@ -1488,14 +1489,11 @@ test('library imports require indexed object ids and deduplicated derivatives st
       derivedFrom: id(2),
       kind: 'thumbnail',
     });
-    alpha.handler = (request) =>
-      request.method === 'fixture.describe'
-        ? {
-            assetId: request.assetId,
-            size: alpha.objects.get(request.assetId)!.size,
-            type: 'image/png',
-          }
-        : alpha.handle(request);
+    h.control.servicePeers.describeAsset = async (_tenant, { assetId }) => ({
+      assetId,
+      size: alpha.objects.get(assetId)!.size,
+      type: 'image/png',
+    });
     const request = (assetId: string, operationId: string) =>
       h.control.library.request(
         'tenant',
@@ -1570,6 +1568,7 @@ test('GC rechecks references after asynchronous deletes and checkpoints cannot a
         {
           id: 'entry',
           kind: 'file' as const,
+          available: true,
           assetId: id(2),
           name: 'file',
           type: 'text/plain',
@@ -1636,10 +1635,11 @@ test('streamed Control puts deduplicate across tenants, authorize references, ch
       (h.store.db.prepare('SELECT count(*) AS n FROM object_claims').get() as { n: bigint }).n,
       2n,
     );
-    alpha.handler = (r) =>
-      r.method === 'fixture.describe'
-        ? { assetId: r.assetId, size: alpha.objects.get(r.assetId)!.size, type: 'text/plain' }
-        : alpha.handle(r);
+    h.control.servicePeers.describeAsset = async (_tenant, { assetId }) => ({
+      assetId,
+      size: alpha.objects.get(assetId)!.size,
+      type: 'text/plain',
+    });
     const call = (tenant: string, method: string, params: object) =>
       h.control.library.request(
         tenant,
@@ -1751,6 +1751,7 @@ test('durable reference removal starts its own grace even without a GC tick whil
         {
           id: 'entry',
           kind: 'file' as const,
+          available: true,
           assetId: id(1),
           name: 'file',
           type: 'text/plain',

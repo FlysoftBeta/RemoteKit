@@ -152,12 +152,6 @@ export class FakeNode extends EventEmitter {
             },
           });
       }
-      value.library.descriptions = await Promise.all(
-        message.library.describe.map(async (assetId: string) => ({
-          assetId,
-          asset: await this.handler({ method: 'fixture.describe', tenantId: message.tenantId, assetId }),
-        })),
-      );
       await this.desiredHandler?.(message as SessionDesired, value);
       value.nodeRevision = this.nodeRevision;
       value.seq = String(++this.sequence);

@@ -1,6 +1,5 @@
 import { RemoteKitError } from '../../shared/errors';
-import type { Asset } from '../../shared/file-library';
-import type { MediaPolicy, ProductOperation } from '../../shared/product';
+import type { MediaPolicy } from '../../shared/product';
 import type { FileBinding, NativeError, SessionSitePreferencesRequest } from './types';
 
 export const coordinationLimits = {
@@ -8,7 +7,6 @@ export const coordinationLimits = {
   views: 256,
   sites: 4096,
   fileRequests: 64,
-  descriptions: 256,
   documentBytes: 4 * 1024 * 1024 - 1,
   configurationBytes: 1024 * 1024,
   textBytes: 1024 * 1024,
@@ -59,14 +57,13 @@ export interface SessionDesired extends SessionTarget {
     connectionId: string | null;
     epoch: number;
     unlocked: boolean;
-    files: { library: boolean; requests: { id: string; binding: FileBinding }[] };
+    files: { requests: { id: string; binding: FileBinding }[] };
   };
   lock: {
     leaseId: string | null;
     epoch: number;
     state: 'locked' | 'unlocking' | 'unlocked';
   };
-  library: { describe: string[] };
 }
 export interface CopyObservation {
   state: 'clean' | 'dirty';
@@ -263,11 +260,6 @@ export interface SessionObserved extends SessionTarget {
   recovery: { pending: boolean; views: Record<string, RecoveryStatus>; exportPending: boolean };
   rtc: { active: boolean; connectionId: string | null; avSync: boolean | null };
   blockers: StopBlockers;
-  library: {
-    descriptions: (
-      { assetId: string; asset: Asset; error: null } | { assetId: string; asset: null; error: NativeError }
-    )[];
-  };
   events: { streamId: string | null; ackedThrough: string; lastSeq: string };
   stats: { mediaPolicy?: { applied: MediaPolicy | null }; [extension: string]: unknown };
   lastError: NativeError | null;
@@ -291,7 +283,6 @@ export type EventBodies = {
     provider: 'changyan' | 'xinjiaoyu';
     result: Record<string, string>;
   };
-  'client.action': ProductOperation & { connectionId: string; authEpoch: number; leaseId: string };
 };
 export type SessionEvent = {
   [Type in keyof EventBodies]: SessionTarget & {
@@ -365,7 +356,6 @@ export function validateDesired(value: SessionDesired): void {
     'views',
     'authorization',
     'lock',
-    'library',
   ]);
   invalid(
     Object.keys(value).some((field) => !fields.has(field)),
@@ -437,11 +427,6 @@ export function validateDesired(value: SessionDesired): void {
       (value.authorization.connectionId === null &&
         (value.authorization.epoch !== 0 || value.authorization.unlocked)),
     'authorization.epoch',
-  );
-  invalid(
-    value.library.describe.length > coordinationLimits.descriptions ||
-      value.library.describe.some((id) => !/^[0-9a-f]{64}$/.test(id)),
-    'library',
   );
   const { clipboard, ...configuration } = value;
   invalid(
@@ -528,19 +513,6 @@ export function validateSessionEvent(value: unknown): asserts value is SessionEv
       )
         return invalid();
       break;
-    case 'client.action':
-      if (
-        !boundedString(body.connectionId, 128) ||
-        !boundedString(body.leaseId, 128) ||
-        !Number.isSafeInteger(body.authEpoch) ||
-        body.authEpoch < 1 ||
-        !boundedString(body.operationId, 64) ||
-        !boundedString(body.operationGeneration, 64) ||
-        !record(body.action) ||
-        Buffer.byteLength(JSON.stringify(body.action)) > 32768
-      )
-        return invalid();
-      break;
     default:
       return invalid();
   }
@@ -573,9 +545,6 @@ export function validateSessionObserved(value: unknown): asserts value is Sessio
     !record(value.lock) ||
     !record(value.rtc) ||
     !record(value.blockers) ||
-    !record(value.library) ||
-    !Array.isArray(value.library.descriptions) ||
-    value.library.descriptions.length > coordinationLimits.descriptions ||
     !record(value.stats)
   )
     return invalid();

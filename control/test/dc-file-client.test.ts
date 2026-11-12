@@ -96,11 +96,6 @@ test('library asset transfer resumes from the Endpoint offset and uses the libra
   );
   assert.deepEqual(new Uint8Array(await (await client.readPhoto(asset, signal)).arrayBuffer()), data);
   assert.ok(messages.every((message) => message.params.requestId === 'library' && message.authEpoch === 9));
-  assert.deepEqual(await client.commitSelection('chooser', 'selection'), {
-    state: 'unknown',
-    selectionId: 'selection',
-  });
-  assert.deepEqual(messages[messages.length - 1]?.params, { requestId: 'chooser', selectionId: 'selection' });
 });
 
 test('library asset uploads fill four ordered chunk slots and seal only after every valid ACK', async () => {
@@ -259,6 +254,7 @@ test('chooser cancellation uses the authenticated selection command without an u
   const client = new FileChannel(
     () => channel,
     () => 7,
+    'page',
   );
   for (const outcome of ['cancelled', 'validating', 'selected', 'unknown']) {
     state = outcome;
@@ -286,7 +282,7 @@ test('file failures retain the Endpoint code and public message', async () => {
       );
     },
   } as unknown as RTCDataChannel;
-  const client = new FileChannel(() => channel);
+  const client = new FileChannel(() => channel, undefined, 'page');
   await assert.rejects(
     client.cancelSelection('chooser'),
     (error: unknown) =>

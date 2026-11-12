@@ -78,8 +78,18 @@ async function fixture() {
     { identity: 'test', valid: () => true },
     true,
   );
-  const request = (method: string, params: any) =>
-    requestViewer(control, user.tenantId, 'lease', method, params);
+  const request = async (method: string, params: any) => {
+    if (method === 'operation.submit') {
+      const receipt = await requestViewer(control, user.tenantId, 'lease', method, {
+        operationId: randomUUID(),
+        operationGeneration: store.operations.operationGeneration(user.tenantId),
+        action: params,
+      });
+      if (receipt.status === 'failed') throw new RemoteKitError(receipt.error.code, receipt.error.message);
+      return receipt;
+    }
+    return requestViewer(control, user.tenantId, 'lease', method, params);
+  };
   const action = (value: ProductAction) => control.operations.productAction(user.tenantId, value, 'lease');
   const close = async () => {
     await control.close();
@@ -88,36 +98,46 @@ async function fixture() {
   return { clock, store, endpoint, control, user, request, action, close };
 }
 
-test('workspace WS routes preserve bounded local state and split settings while restricting product actions', async () => {
+test('workspace WS operation envelopes preserve bounded local state and split settings', async () => {
   const f = await fixture();
   try {
     const opened = await f.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
     const windowId = opened.state.workspace.windows[0].id;
-    await f.request('window.state', { windowId, state: { view: 'recent', search: 'photo' } });
+    await f.request('operation.submit', {
+      type: 'window.state',
+      windowId,
+      state: { view: 'recent', search: 'photo' },
+    });
     assert.deepEqual(f.store.workspaces.workspace(f.user.tenantId).windows[0].state, {
       view: 'recent',
       search: 'photo',
     });
-    await f.request('action', { type: 'window.state', windowId, state: { partitionId: 'photos' } });
+    await f.request('operation.submit', { type: 'window.state', windowId, state: { partitionId: 'photos' } });
     assert.deepEqual(f.store.workspaces.workspace(f.user.tenantId).windows[0].state, {
       partitionId: 'photos',
     });
-    await assert.rejects(f.request('window.state', { windowId, state: { text: '界'.repeat(2800) } }), {
-      code: 'limit_exceeded',
-    });
+    await assert.rejects(
+      f.request('operation.submit', { type: 'window.state', windowId, state: { text: '界'.repeat(2800) } }),
+      {
+        code: 'limit_exceeded',
+      },
+    );
     for (const state of [[], null])
-      await assert.rejects(f.request('window.state', { windowId, state }), { code: 'invalid_request' });
-    await f.request('action', {
+      await assert.rejects(f.request('operation.submit', { type: 'window.state', windowId, state }), {
+        code: 'invalid_request',
+      });
+    await f.request('operation.submit', {
       type: 'settings.update',
       settings: { workspace: { showStats: true }, browser: { searchEngine: 'bing' } },
     });
     const settings = f.store.workspaces.workspace(f.user.tenantId).settings;
     assert.equal(settings.workspace.showStats, true);
     assert.equal(settings.browser.searchEngine, 'bing');
-    await assert.rejects(
-      f.request('action', { type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
-      { code: 'invalid_request' },
-    );
+    await f.request('operation.submit', {
+      type: 'window.open',
+      appId: 'browser',
+      placement: { mode: 'space' },
+    });
     assert.equal(
       f.endpoint.calls.some((call) => call.method === 'view.created'),
       false,
@@ -278,6 +298,7 @@ test('launcher adapter maps organized and hidden library entries and usage route
     library.excludedSources = [{ app: 'files', channel: 'camera' }];
     library.entries = ['visible', 'hidden', 'hidden-organized'].map((id): LibraryEntry => ({
       kind: 'file',
+      available: true,
       id,
       name: id,
       assetId: id,

@@ -36,7 +36,6 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   Result<void> Acknowledge(const std::string&, uint64_t);
   Result<Json> ReadEvents();
   Result<Json> EventState();
-  Result<Json> Descriptions();
   media::Sdk& sdk_;
   const RuntimeOptions& options_;
   ManagementLink& management_;

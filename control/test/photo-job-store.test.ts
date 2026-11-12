@@ -44,6 +44,7 @@ const destination = {
 };
 const entry: LibraryFileEntry = {
   kind: 'file',
+  available: true,
   id: 'entry',
   assetId: 'c'.repeat(64),
   originalAssetId: originalId,

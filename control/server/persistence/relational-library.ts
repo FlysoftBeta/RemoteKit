@@ -1,9 +1,9 @@
 import type Database from 'better-sqlite3';
-import type { LibraryEntry, LibrarySnapshot } from '../../shared/file-library';
+import type { LibraryEntry, LibrarySnapshot, StoredLibraryEntry } from '../../shared/file-library';
 import { decodeJson, encodeJson } from './codec';
 import { libraryEntry, librarySource, partition } from './documents';
 
-export function entryObjects(entry: LibraryEntry): { id: string; role: string }[] {
+export function entryObjects(entry: StoredLibraryEntry): { id: string; role: string }[] {
   if (entry.kind === 'snippet') return [];
   return [
     { id: entry.assetId, role: 'current' },
@@ -26,7 +26,10 @@ export function readLibrary(db: Database.Database, tenant: string): LibrarySnaps
   return {
     revision: state ? Number(state.revision) : 0,
     basketPartitionId: state?.basket_partition_id ?? null,
-    entries: documents('library_entries', libraryEntry, 'created_at DESC,position'),
+    entries: documents('library_entries', libraryEntry, 'created_at DESC,position').map((entry) => ({
+      ...entry,
+      available: true,
+    })),
     partitions: documents('library_partitions', partition, 'position'),
     basket: (
       db.prepare('SELECT entry_id FROM library_basket WHERE tenant=? ORDER BY position').all(tenant) as {
@@ -44,7 +47,11 @@ export function readLibrary(db: Database.Database, tenant: string): LibrarySnaps
   };
 }
 
-export function writeLibrary(db: Database.Database, tenant: string, snapshot: LibrarySnapshot) {
+export function writeLibrary(
+  db: Database.Database,
+  tenant: string,
+  snapshot: Omit<LibrarySnapshot, 'entries'> & { entries: StoredLibraryEntry[] },
+) {
   let referencesChanged = false;
   const existing = new Map(
     (
@@ -70,7 +77,8 @@ export function writeLibrary(db: Database.Database, tenant: string, snapshot: Li
   for (const entry of snapshot.entries) {
     const position = positions.get(entry.createdAt) ?? 0;
     positions.set(entry.createdAt, position + 1);
-    const data = encodeJson(entry, libraryEntry, `library_entries.data ${tenant}/${entry.id}`);
+    const { available, ...stored } = { ...entry, available: 'available' in entry ? entry.available : true };
+    const data = encodeJson(stored, libraryEntry, `library_entries.data ${tenant}/${entry.id}`);
     const beforeEntry = existing.get(entry.id);
     if (beforeEntry?.data === data) {
       if (Number(beforeEntry.position) !== position)

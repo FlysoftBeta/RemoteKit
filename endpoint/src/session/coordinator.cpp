@@ -244,7 +244,6 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
           {"pendingDownloadImports", 0},
           {"rtcConnected", false},
           {"lifecycleUncertain", true}}},
-        {"library", {{"descriptions", Json::array()}}},
         {"events", {{"streamId", nullptr}, {"ackedThrough", "0"}, {"lastSeq", "0"}}},
         {"stats", Json::object()}};
   }

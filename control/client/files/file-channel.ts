@@ -50,6 +50,7 @@ export class FileChannel {
   constructor(
     private readonly getChannel: () => RTCDataChannel | null,
     private readonly getAuthEpoch = (): number | undefined => undefined,
+    private readonly role: 'objects' | 'page' = 'objects',
   ) {}
   handle(message: Incoming): boolean {
     if (message.type !== 'files.result') return false;
@@ -88,6 +89,8 @@ export class FileChannel {
     params: Record<string, unknown>,
     options: RequestOptions = {},
   ): { response: Promise<T> } {
+    const native = method === 'selection.commit' || method === 'selection.cancel';
+    if (native !== (this.role === 'page')) throw new RemoteKitError('invalid_request', '文件操作通道错误');
     this.syncScope();
     const binding = options.binding ?? this.currentBinding();
     const channel = this.checkBinding(binding, options.signal);

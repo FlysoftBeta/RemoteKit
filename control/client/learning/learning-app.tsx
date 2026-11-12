@@ -34,7 +34,8 @@ export function LearningApp(props: LearningAppProps & { appId: 'study' | 'questi
           workspace.spaces.find((space) => space.id === workspace.activeSpaceId)?.windowIds.includes(win.id),
       );
       if (window)
-        await props.call('window.state', {
+        await props.action({
+          type: 'window.state',
           windowId: window.id,
           state: {
             ...window.state,

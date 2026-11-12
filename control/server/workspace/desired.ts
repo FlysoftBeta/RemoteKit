@@ -100,14 +100,13 @@ export function compileDesired(
       connectionId: peer?.connectionId ?? null,
       epoch: peer?.epoch ?? 0,
       unlocked,
-      files: { library: unlocked, requests: files },
+      files: { requests: files },
     },
     lock: {
       leaseId: viewer?.id ?? null,
       epoch: security?.epoch ?? 0,
       state: lockUnlocked ? 'unlocked' : 'locked',
     },
-    library: { describe: context.endpoint.descriptionRequests(tenant) },
   };
   return { ...desired, revision: context.store.coordination.revision(desired) };
 }

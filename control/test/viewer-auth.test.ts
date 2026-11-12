@@ -58,11 +58,12 @@ class AuthEndpoint implements EndpointLink {
   faceOutcome?: 'no_matching_face' | 'camera_unavailable';
   statusGate?: ReturnType<typeof defer>;
   authGate?: ReturnType<typeof defer>;
+  private readonly signals = new Set<Parameters<NonNullable<EndpointLink['onSignal']>>[0]>();
   private signal?: Parameters<NonNullable<EndpointLink['onSignal']>>[0];
   onSignal(listener: Parameters<NonNullable<EndpointLink['onSignal']>>[0]) {
-    this.signal = listener;
+    this.signals.add(listener);
     return () => {
-      this.signal = undefined;
+      this.signals.delete(listener);
     };
   }
   observe() {
@@ -78,24 +79,38 @@ class AuthEndpoint implements EndpointLink {
       case 'session.desired':
         if ((params.authorization as any).unlocked && this.authGate) await this.authGate.promise;
         return { accepted: true };
+      case 'service.offer':
+        queueMicrotask(() => {
+          for (const listener of this.signals)
+            listener({
+              tenantId: _tenant,
+              connectionId: String(params.connectionId),
+              signal: { type: 'answer', sdp: 'v=0' },
+            });
+        });
+        return { accepted: true, connectionId: params.connectionId };
+      case 'service.authorize':
+        return { applied: true, epoch: params.epoch };
       case 'rtc.offer':
         this.connectionId = String(params.connectionId);
         queueMicrotask(() =>
-          this.signal?.({
-            tenantId: _tenant,
-            connectionId: String(params.connectionId),
-            signal: { type: 'answer', sdp: 'v=0' },
-          }),
+          this.signals.forEach((listener) =>
+            listener({
+              tenantId: _tenant,
+              connectionId: String(params.connectionId),
+              signal: { type: 'answer', sdp: 'v=0' },
+            }),
+          ),
         );
         return { accepted: true, avSync: params.avSync, connectionId: params.connectionId };
       case 'rtc.close':
         this.connectionId = undefined;
         return { closed: true };
-      case 'auth.face.capabilities':
+      case 'service.face.capabilities':
         return { available: true, modelVersion: 'test-sface' };
-      case 'auth.face.begin':
+      case 'service.face.begin':
         return { accepted: true };
-      case 'auth.face.status':
+      case 'service.face.status':
         if (this.statusGate) await this.statusGate.promise;
         return {
           challengeId: params.challengeId,
@@ -124,8 +139,12 @@ async function fixture(t: TestContext, path = ':memory:') {
   await attach('lease', true);
   const request = (method: string, params: object = {}, lease = 'lease') =>
     requestViewer(control, tenant, lease, method, params);
-  const offer = () => request('rtc.offer', { type: 'offer', sdp: 'v=0', attemptId: randomUUID() });
-  return { store, endpoint, control, tenant, user, attach, request, offer, clock };
+  const serviceOffer = () => request('service.offer', { type: 'offer', sdp: 'v=0', attemptId: randomUUID() });
+  const offer = async () => {
+    await serviceOffer();
+    return request('rtc.offer', { type: 'offer', sdp: 'v=0', attemptId: randomUUID() });
+  };
+  return { store, endpoint, control, tenant, user, attach, request, offer, serviceOffer, clock };
 }
 
 test('locks existing peer, rejects product actions and uploads, and resumes with fresh peer epoch', async (t) => {
@@ -137,36 +156,30 @@ test('locks existing peer, rejects product actions and uploads, and resumes with
   const locked = await f.request('auth.lock');
   assert.equal(locked.locked, true);
   assert.equal(locked.peerEpoch, 2);
-  for (const method of ['admin.overview', 'operation.status', 'viewport', 'action'])
+  for (const method of ['admin.overview', 'operation.status', 'viewport', 'operation.submit'])
     await assert.rejects(f.request(method), { code: 'locked' });
   const op = {
-    tenantId: f.tenant,
-    connectionId,
     operationId: randomUUID(),
     operationGeneration: f.store.operations.operationGeneration(f.tenant),
     action: { type: 'window.open' as const, appId: 'browser', placement: { mode: 'space' as const } },
   };
-  await f.control.operations.handleEndpointAction({ ...op, authEpoch: 1 });
+  await assert.rejects(f.request('operation.submit', op), { code: 'locked' });
   assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);
   assert.equal(typeof (await f.request('clock.ping')).serverTime, 'number');
   const unlocked = await f.request('auth.verify', { method: 'password', secret: password });
   assert.equal(unlocked.locked, false);
-  assert.equal(unlocked.peerEpoch, 3);
+  await f.control.servicePeers.authorize(f.tenant);
   assert.equal(f.endpoint.connectionId, connectionId);
   assert.equal(
     f.endpoint.calls.some((c) => c.method === 'rtc.close'),
     false,
   );
-  await f.control.operations.handleEndpointAction({ ...op, authEpoch: 1 });
-  assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);
-  await f.control.operations.handleEndpointAction({ ...op, authEpoch: 3 });
+  await f.request('operation.submit', op);
   assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 1);
-  assert.equal(f.endpoint.calls.find((c) => c.method === 'rtc.actionResult')?.params.authEpoch, 3);
   f.control.rtc.endpointOffline();
-  assert.equal((await f.request('auth.get')).locked, true);
+  assert.equal((await f.request('auth.get')).locked, false);
   assert.equal((await f.request('auth.get')).peerEpoch, 0);
   await f.control.reconciler.endpointReady({ processChanged: false });
-  assert.equal((await f.request('auth.get')).peerEpoch, 4);
 });
 
 test('late unlock acknowledgement cannot restore rights after a subsequent lock', async (t) => {
@@ -175,7 +188,7 @@ test('late unlock acknowledgement cannot restore rights after a subsequent lock'
   await f.request('auth.lock');
   f.endpoint.authGate = defer();
   const pending = f.request('auth.verify', { method: 'password', secret: password });
-  const rejected = assert.rejects(pending, { code: 'outcome_unknown' });
+  await pending;
   while (
     !f.endpoint.calls.some(
       (c) => c.method === 'session.desired' && (c.params.authorization as any).epoch === 3,
@@ -184,7 +197,6 @@ test('late unlock acknowledgement cannot restore rights after a subsequent lock'
     await new Promise((resolve) => setTimeout(resolve, 5));
   await f.request('auth.lock');
   f.endpoint.authGate.resolve();
-  await rejected;
   const state = await f.request('auth.get');
   assert.equal(state.locked, true);
   assert.equal(state.peerEpoch, 4);
@@ -266,9 +278,9 @@ test('face template is encrypted and late matches or enrollment results cannot c
   await f.request('auth.lock');
   const verify = await f.request('auth.face.begin', { purpose: 'verify' });
   assert.equal(JSON.stringify(verify).includes(JSON.stringify(template)), false);
-  const begin = f.endpoint.calls.filter((c) => c.method === 'auth.face.begin').slice(-1)[0];
+  const begin = f.endpoint.calls.filter((c) => c.method === 'service.face.begin').slice(-1)[0];
   assert.deepEqual(begin?.params.template, template);
-  assert.equal(begin?.params.epoch, verify.peerEpoch);
+  assert.equal(begin?.params.epoch, verify.serviceEpoch);
   f.endpoint.faceStatus = 'matched';
   f.endpoint.statusGate = defer();
   const status = f.control.viewers.pollFaceAuth();

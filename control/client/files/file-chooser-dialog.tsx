@@ -109,7 +109,7 @@ export function FileBasketDialog({
   const retaking = new Set(photos.jobs.flatMap((job) => (job.replace ? [job.replace.id] : [])));
   const selection = request?.multiple ? basket : basket.filter((entry) => entry.id === chosen);
   const blocked =
-    selection.filter((entry) => entry.photo?.pending || retaking.has(entry.id)).length +
+    selection.filter((entry) => !entry.available || entry.photo?.pending || retaking.has(entry.id)).length +
     (request?.multiple ? pending.length : 0);
   const basketIds = new Set(snapshot?.basket);
   const available =

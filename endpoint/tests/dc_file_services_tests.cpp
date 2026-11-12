@@ -56,7 +56,7 @@ void CheckSelectionCancellationGrant() {
   services.Start(
       [&](const DcFileServices::Job& job) {
         ++executed;
-        CHECK(job.library_grant != 0);
+        CHECK(job.grant != 0);
         entered = true;
         while (hold)
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -66,10 +66,10 @@ void CheckSelectionCancellationGrant() {
       [] {});
   services.Bind(7, "connection");
   const FileUploadStore::Binding binding{"browser", "1", "1", "1", "1"};
-  services.Authorize("connection", 99, {{"opaque", binding}}, true);
+  services.Authorize("connection", 99, {{"opaque", binding}}, false);
   services.Admit(7, request);
   Until([&] { return entered.load(); });
-  services.Authorize("connection", 99, {{"opaque", binding}}, false);
+  services.Authorize("connection", 99, {}, false);
   hold = false;
   Until([&] { return !current_after_revoke.load(); });
   std::vector<ServiceJson> replies;
@@ -83,10 +83,9 @@ void CheckSelectionCancellationGrant() {
   CHECK(replies.empty());
   services.Admit(7, request);
   flush();
-  CHECK(replies.size() == 1 &&
-        replies.back()["error"]["message"] == "stale_library_authorization" &&
+  CHECK(replies.size() == 1 && replies.back()["error"]["message"] == "stale_file_request" &&
         replies.back()["error"]["code"] == "conflict");
-  services.Authorize("connection", 99, {{"opaque", binding}}, true);
+  services.Authorize("connection", 99, {{"opaque", binding}}, false);
   services.Admit(7, request);
   Until([&] {
     flush();

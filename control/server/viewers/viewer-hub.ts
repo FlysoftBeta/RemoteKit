@@ -1,3 +1,4 @@
+import { browserAvailability } from '../workspace/browser-availability';
 import { reportError } from '../log';
 import { RemoteKitError, wireError } from '../../shared/errors';
 import { canonicalJson } from '../config';
@@ -17,7 +18,7 @@ export class ViewerHub {
     private readonly context: DomainContext,
     private readonly services: Pick<
       DomainServices,
-      'pageRequests' | 'policy' | 'reconciler' | 'rtc' | 'security' | 'learning'
+      'pageRequests' | 'policy' | 'reconciler' | 'rtc' | 'security' | 'learning' | 'servicePeers'
     >,
   ) {}
   productState(tenant: string): ProductState {
@@ -25,6 +26,7 @@ export class ViewerHub {
     const workspace = this.context.store.workspaces.workspace(tenant);
     const user = this.context.store.accounts.userForTenant(tenant);
     const state: ProductState = {
+      browser: browserAvailability(this.context, tenant),
       operationReceipts: this.context.store.operations.recentOperations(tenant),
       serverIncarnation: this.context.serverIncarnation,
       snapshotSequence: runtime.snapshotSequence ?? 0,
@@ -117,6 +119,7 @@ export class ViewerHub {
     const runtime = this.context.tenants.get(tenant);
     this.services.policy.qualityState(tenant).resetFeedback();
     const old = runtime.viewer;
+    void this.contextServiceClose(tenant);
     if (old?.security) {
       void this.services.security.revokePeer(tenant, old.security);
     }
@@ -131,24 +134,20 @@ export class ViewerHub {
     this.context.events.emit('auth', tenant, id, this.authState(tenant, security));
     const previous = runtime.connectionId;
     if (previous) this.services.rtc.clearSignal(previous);
-    return this.context.tenants.serial(tenant, async () => {
-      this.assertViewer(tenant, id);
-      await this.services.rtc.closeMedia(tenant);
-      try {
-        await this.services.reconciler.reconcileProduct(tenant);
-      } catch (err) {
-        log.warn('viewer.reconcile_failed', { tenant, err });
-      }
-      void this.services.security.capabilities(tenant, security);
-      this.push(tenant);
-      return security.locked ? undefined : this.productState(tenant);
-    });
+    void this.services.rtc.closeMedia(tenant).catch((err) => log.warn('rtc.close_failed', { tenant, err }));
+    void this.services.security.capabilities(tenant, security);
+    this.push(tenant);
+    return security.locked ? undefined : this.productState(tenant);
+  }
+  private contextServiceClose(tenant: string) {
+    return this.services.servicePeers.close(tenant);
   }
   async detachViewer(tenant: string, id: string) {
     const runtime = this.context.tenants.get(tenant);
     const viewer = runtime.viewer;
     if (viewer?.id !== id) return;
     this.context.store.reclaim.detach(tenant);
+    void this.services.servicePeers.close(tenant, undefined, id);
     delete runtime.viewer;
     runtime.viewerAbsentSince = this.context.clock.monotonicMs();
     delete runtime.pageRequests.fullscreen;

@@ -70,7 +70,6 @@ class Session {
   void FlushSignals() { channel.FlushSignals(); }
   ViewController& Views() { return views; }
   FileController& Files() { return files; }
-  FaceController& Face() { return face; }
   MediaPipeline& Media() { return pipeline; }
   AuthorizationController& Authorization() { return authorization; }
   ChannelController& Channel() { return channel; }
@@ -105,7 +104,6 @@ class Session {
   MediaPipeline pipeline;
   EncoderRegistry registry;
   AudioOutput audio;
-  FaceController face;
   FileController files;
   NavigationRecovery navigation;
   ViewController views;

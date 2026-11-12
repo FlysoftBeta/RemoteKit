@@ -234,7 +234,11 @@ export function WindowMenus({
                     );
                     const settings = workspace.windows.find((window) => window.appId === 'settings');
                     if (settings)
-                      await call('window.state', { windowId: settings.id, state: { section: 'apps' } });
+                      await action({
+                        type: 'window.state',
+                        windowId: settings.id,
+                        state: { section: 'apps' },
+                      });
                   })
                   .catch(report);
               }

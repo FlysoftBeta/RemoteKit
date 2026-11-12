@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import type { ProductOperation, OperationReceipt } from '../shared/product';
 import { RequestTracker } from '../client/util/request-tracker';
 import { RemoteKitError } from '../shared/errors';
-import { OperationsStore } from '../client/control/operations-store';
+import {
+  OperationsStore as BaseOperationsStore,
+  type OperationsPort,
+} from '../client/control/operations-store';
 import { ControlSession } from '../client/control/control-session';
 import { decodeIncoming, encodeOutgoing, type Outgoing } from '../client/rtc/protocol';
 import { EndpointChannel } from '../client/rtc/endpoint-channel';
@@ -10,8 +14,39 @@ import { diagnostics } from '../client/media/diagnostics';
 import { productSnapshot } from './client-fixture';
 import { AuthorizationScope } from '../client/auth/authorization-scope';
 
+class OperationsStore extends BaseOperationsStore {
+  private readonly replies: Map<string, (receipt: OperationReceipt) => void>;
+  constructor(port: Omit<OperationsPort, 'submit'> & { dispatch(operation: ProductOperation): void }) {
+    const replies = new Map<string, (receipt: OperationReceipt) => void>();
+    super({
+      ...port,
+      submit: (operation) =>
+        new Promise((resolve) => {
+          replies.set(operation.operationId, resolve);
+          port.dispatch(operation);
+        }),
+    });
+    this.replies = replies;
+  }
+  acceptReceipt(receipt: OperationReceipt) {
+    const resolve = this.replies.get(receipt.operationId);
+    if (resolve) {
+      this.replies.delete(receipt.operationId);
+      resolve(receipt);
+    } else {
+      const state = this.getSnapshot().authoritative;
+      if (state)
+        this.acceptSnapshot({
+          ...state,
+          snapshotSequence: (state.snapshotSequence ?? 0) + 1,
+          operationReceipts: [receipt],
+        });
+    }
+  }
+}
+
 test('authorization advances its scope only on lock or peer epoch transitions', () => {
-  const scope = new AuthorizationScope({ rtc: { attempt: 1 }, endpoint: { channel: null } });
+  const scope = new AuthorizationScope({ endpoint: { channel: null } });
   const resets: number[] = [];
   scope.resets.subscribe((token) => resets.push(token));
   scope.observePeerAuthorization(1);
@@ -53,26 +88,19 @@ test('request correlation cleans up synchronous send failure, deadlines and scop
 
 test('retryable receipts resubmit the same operation identity and status final failures stop polling', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const sent: Extract<Outgoing, { type: 'product.action' }>[] = [];
+  const sent: ProductOperation[] = [];
   let store: OperationsStore;
   store = new OperationsStore({
     ready: () => true,
-    send: (message) => {
-      if (message.type !== 'product.action') return;
+    dispatch: (message) => {
       sent.push(message);
       queueMicrotask(() =>
-        store.handle({
-          type: 'product.result',
-          version: 1,
+        store.acceptReceipt({
           operationId: message.operationId,
           operationGeneration: message.operationGeneration,
-          result: {
-            operationId: message.operationId,
-            operationGeneration: message.operationGeneration,
-            ...(sent.length < 3
-              ? { status: 'failed', error: { code: 'busy', message: '繁忙', retryAfterMs: 0 } }
-              : { status: 'committed' }),
-          },
+          ...(sent.length < 3
+            ? { status: 'failed', error: { code: 'busy', message: '繁忙', retryAfterMs: 0 } }
+            : { status: 'committed' }),
         }),
       );
     },
@@ -95,21 +123,14 @@ test('retryable receipts resubmit the same operation identity and status final f
   let polls = 0;
   const stopped = new OperationsStore({
     ready: () => true,
-    send: (message) => {
-      if (message.type === 'product.action')
-        queueMicrotask(() =>
-          stopped.handle({
-            type: 'product.result',
-            version: 1,
-            operationId: message.operationId,
-            operationGeneration: message.operationGeneration,
-            result: {
-              operationId: message.operationId,
-              operationGeneration: message.operationGeneration,
-              status: 'unknown',
-            },
-          }),
-        );
+    dispatch: (message) => {
+      queueMicrotask(() =>
+        stopped.acceptReceipt({
+          operationId: message.operationId,
+          operationGeneration: message.operationGeneration,
+          status: 'unknown',
+        }),
+      );
     },
     status: async () => {
       polls++;
@@ -129,11 +150,11 @@ test('retryable receipts resubmit the same operation identity and status final f
 
 for (const status of ['accepted', 'applying', 'committed', 'unknown', 'failed'] as const)
   test(`operations preserve ${status} as an execution outcome without replay`, async (t) => {
-    const sent: Extract<Outgoing, { type: 'product.action' }>[] = [];
+    const sent: ProductOperation[] = [];
     const store = new OperationsStore({
       ready: () => true,
-      send: (message) => {
-        if (message.type === 'product.action') sent.push(message);
+      dispatch: (message) => {
+        sent.push(message);
       },
       status: async (operation) => ({ ...operation, status: 'unknown' }),
     });
@@ -151,13 +172,7 @@ for (const status of ['accepted', 'applying', 'committed', 'unknown', 'failed'] 
         : { status }),
       revision: 2,
     };
-    store.handle({
-      type: 'product.result',
-      version: 1,
-      operationId: operation.operationId,
-      operationGeneration: operation.operationGeneration,
-      result: receipt,
-    });
+    store.acceptReceipt(receipt);
     if (rejection) await rejection;
     else assert.equal((await result).status, status);
     assert.equal(sent.length, 1);
@@ -169,11 +184,11 @@ for (const status of ['accepted', 'applying', 'committed', 'unknown', 'failed'] 
 
 test('operation polling follows receipts and authoritative revision retires a committed projection', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  let operation!: Extract<Outgoing, { type: 'product.action' }>;
+  let operation!: ProductOperation;
   const store = new OperationsStore({
     ready: () => true,
-    send: (message) => {
-      if (message.type === 'product.action') operation = message;
+    dispatch: (message) => {
+      operation = message;
     },
     status: async () => ({
       operationId: operation.operationId,
@@ -190,13 +205,7 @@ test('operation polling follows receipts and authoritative revision retires a co
     operationGeneration: operation.operationGeneration,
     status: 'applying' as const,
   };
-  store.handle({
-    type: 'product.result',
-    version: 1,
-    operationId: operation.operationId,
-    operationGeneration: operation.operationGeneration,
-    result: receipt,
-  });
+  store.acceptReceipt(receipt);
   await response;
   t.mock.timers.tick(2000);
   for (let i = 0; i < 5; i++) await Promise.resolve();
@@ -211,12 +220,12 @@ test('operation polling follows receipts and authoritative revision retires a co
 
 test('HTTP auth credentials are sent once and never enter pending snapshots through receipt polling', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const sent: Extract<Outgoing, { type: 'product.action' }>[] = [];
+  const sent: ProductOperation[] = [];
   const phases: string[] = [];
   const store = new OperationsStore({
     ready: () => true,
-    send: (message) => {
-      if (message.type === 'product.action') sent.push(message);
+    dispatch: (message) => {
+      sent.push(message);
     },
     status: async (operation) => {
       assert.deepEqual(operation, {
@@ -254,16 +263,10 @@ test('HTTP auth credentials are sent once and never enter pending snapshots thro
   };
   const response = store.action(action);
   assert.deepEqual(sent[0].action, action);
-  store.handle({
-    type: 'product.result',
-    version: 1,
+  store.acceptReceipt({
     operationId: sent[0].operationId,
     operationGeneration: sent[0].operationGeneration,
-    result: {
-      operationId: sent[0].operationId,
-      operationGeneration: sent[0].operationGeneration,
-      status: 'unknown',
-    },
+    status: 'unknown',
   });
   assert.equal((await response).status, 'committed');
   assert.equal(store.getSnapshot().pending[0].phase, 'committed');
@@ -281,12 +284,12 @@ test('HTTP auth credentials are sent once and never enter pending snapshots thro
 });
 
 test('HTTP auth outcome_unknown queries use only operation identity and never resend the action', async (t) => {
-  const sent: Extract<Outgoing, { type: 'product.action' }>[] = [];
+  const sent: ProductOperation[] = [];
   const queries: unknown[] = [];
   const store = new OperationsStore({
     ready: () => true,
-    send: (message) => {
-      if (message.type === 'product.action') sent.push(message);
+    dispatch: (message) => {
+      sent.push(message);
     },
     status: async (operation) => {
       queries.push(operation);
@@ -305,17 +308,11 @@ test('HTTP auth outcome_unknown queries use only operation identity and never re
       password: 'AUTH_SECRET_PASSWORD',
     },
   });
-  store.handle({
-    type: 'product.result',
-    version: 1,
+  store.acceptReceipt({
     operationId: sent[0].operationId,
     operationGeneration: sent[0].operationGeneration,
-    result: {
-      operationId: sent[0].operationId,
-      operationGeneration: sent[0].operationGeneration,
-      status: 'unknown',
-      error: { code: 'outcome_unknown', message: '回复丢失' },
-    },
+    status: 'unknown',
+    error: { code: 'outcome_unknown', message: '回复丢失' },
   });
   assert.equal((await response).status, 'committed');
   assert.deepEqual(queries, [
@@ -328,7 +325,7 @@ test('HTTP auth outcome_unknown queries use only operation identity and never re
 test('authorization loss clears optimistic work and rejects its old correlation', async () => {
   const store = new OperationsStore({
     ready: () => true,
-    send: () => {},
+    dispatch: () => {},
     status: async () => {
       throw new Error('offline');
     },
@@ -346,12 +343,12 @@ test('authorization loss clears optimistic work and rejects its old correlation'
 
 test('an old scope status request cannot block polling in a new scope', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const sent: Extract<Outgoing, { type: 'product.action' }>[] = [];
+  const sent: ProductOperation[] = [];
   let queries = 0;
   const store = new OperationsStore({
     ready: () => true,
-    send: (message) => {
-      if (message.type === 'product.action') sent.push(message);
+    dispatch: (message) => {
+      sent.push(message);
     },
     status: async () => {
       queries++;
@@ -363,16 +360,10 @@ test('an old scope status request cannot block polling in a new scope', async (t
     store.acceptSnapshot(productSnapshot());
     const result = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
     const operation = sent[sent.length - 1];
-    store.handle({
-      type: 'product.result',
-      version: 1,
+    store.acceptReceipt({
       operationId: operation.operationId,
       operationGeneration: operation.operationGeneration,
-      result: {
-        operationId: operation.operationId,
-        operationGeneration: operation.operationGeneration,
-        status: 'applying',
-      },
+      status: 'applying',
     });
     await result;
   };
@@ -472,11 +463,11 @@ test('control requests map send failures and structured errors without leaving d
 });
 
 test('product transport rejection retains its code without querying an unadmitted operation', async (t) => {
-  let operation!: Extract<Outgoing, { type: 'product.action' }>;
+  let operation!: ProductOperation;
   const store = new OperationsStore({
     ready: () => true,
-    send: (message) => {
-      if (message.type === 'product.action') operation = message;
+    dispatch: (message) => {
+      operation = message;
     },
     status: async () => {
       throw new Error('unadmitted operation must not be queried');
@@ -485,17 +476,11 @@ test('product transport rejection retains its code without querying an unadmitte
   t.after(() => store.reset());
   store.acceptSnapshot(productSnapshot());
   const response = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
-  store.handle({
-    type: 'product.result',
-    version: 1,
+  store.acceptReceipt({
     operationId: operation.operationId,
     operationGeneration: operation.operationGeneration,
-    result: {
-      operationId: operation.operationId,
-      operationGeneration: operation.operationGeneration,
-      status: 'failed',
-      error: { code: 'forbidden', message: '无权执行' },
-    },
+    status: 'failed',
+    error: { code: 'forbidden', message: '无权执行' },
   });
   await assert.rejects(
     response,
@@ -507,24 +492,17 @@ test('product transport rejection retains its code without querying an unadmitte
 });
 
 test('a later retryable receipt resubmits the admitted operation with its original identity', async (t) => {
-  const sent: Extract<Outgoing, { type: 'product.action' }>[] = [];
+  const sent: ProductOperation[] = [];
   let store: OperationsStore;
   store = new OperationsStore({
     ready: () => true,
-    send: (message) => {
-      if (message.type !== 'product.action') return;
+    dispatch: (message) => {
       sent.push(message);
       queueMicrotask(() =>
-        store.handle({
-          type: 'product.result',
-          version: 1,
+        store.acceptReceipt({
           operationId: message.operationId,
           operationGeneration: message.operationGeneration,
-          result: {
-            operationId: message.operationId,
-            operationGeneration: message.operationGeneration,
-            status: sent.length === 1 ? 'accepted' : 'committed',
-          },
+          status: sent.length === 1 ? 'accepted' : 'committed',
         }),
       );
     },
@@ -536,17 +514,11 @@ test('a later retryable receipt resubmits the admitted operation with its origin
     (await store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } })).status,
     'accepted',
   );
-  store.handle({
-    type: 'product.result',
-    version: 1,
+  store.acceptReceipt({
     operationId: sent[0].operationId,
     operationGeneration: sent[0].operationGeneration,
-    result: {
-      operationId: sent[0].operationId,
-      operationGeneration: sent[0].operationGeneration,
-      status: 'failed',
-      error: { code: 'busy', message: '繁忙', retryAfterMs: 0 },
-    },
+    status: 'failed',
+    error: { code: 'busy', message: '繁忙', retryAfterMs: 0 },
   });
   for (let index = 0; index < 10; index++) await Promise.resolve();
   assert.equal(sent.length, 2);

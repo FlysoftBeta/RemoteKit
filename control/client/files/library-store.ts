@@ -36,7 +36,7 @@ export interface LibraryState {
   scope?: string;
   cancellations: Readonly<Record<string, SelectionState>>;
 }
-type FilePort = Pick<
+export type FilePort = Pick<
   FileChannel,
   'photoThumbnail' | 'uploadAsset' | 'processPhoto' | 'commitSelection' | 'cancelSelection'
 >;

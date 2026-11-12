@@ -4,7 +4,7 @@ import type { ProductState } from '../../shared/product';
 import { canonicalJson } from '../util/canonical-json';
 import type { Events } from '../util/store';
 import type { FileChannel } from './file-channel';
-import { LibraryStore, type LibraryRequest } from './library-store';
+import { LibraryStore, type LibraryRequest, type FilePort } from './library-store';
 export type { LibraryRequest } from './library-store';
 export function useFileLibrary(
   request: LibraryRequest,

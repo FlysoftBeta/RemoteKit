@@ -227,7 +227,7 @@ export class Placement {
       );
       const winner =
         (assigned && ranked.find((candidate) => candidate.node.nodeId === existing!.nodeId)) || ranked[0];
-      if (!winner) throw new RemoteKitError('unavailable', '没有可用的节点');
+      if (!winner) throw new RemoteKitError('unavailable', '没有可用的节点', { reason: 'no_eligible_node' });
       const { node, predicted } = winner;
       if (predicted >= 0.85) node.reliefRequestedAt = now;
       const placement: SessionPlacement = existing

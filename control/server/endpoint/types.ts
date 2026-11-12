@@ -134,13 +134,6 @@ export interface FileBinding {
   document: string;
   request: string;
 }
-export interface ActionResult {
-  connectionId: string;
-  authEpoch?: number;
-  operationId: string;
-  operationGeneration: string;
-  result: OperationReceipt;
-}
 export interface PrepareSelection {
   selectionId: string;
   requestId: string;

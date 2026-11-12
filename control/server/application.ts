@@ -1,3 +1,4 @@
+import { ServicePeers } from './viewers/service-peers';
 import { SessionEvents } from './workspace/session-events';
 import { compileDesired } from './workspace/desired';
 import { log } from './log';
@@ -55,6 +56,7 @@ export interface DomainServices extends DomainContext {
   navigation: Navigation;
   viewers: ViewerHub;
   rtc: RtcSignaling;
+  servicePeers: ServicePeers;
   operations: OperationPipeline;
   reconciler: Reconciler;
   pageRequests: PageRequests;
@@ -96,11 +98,12 @@ export function createApplication(
     undefined,
     clock,
   );
+  services.servicePeers = new ServicePeers(context, services);
   services.objects = new ObjectIndex(
     store,
     endpoint.nodes,
     tenantObjectBytes,
-    (tenant, node) => endpoint.isPlacedOn(tenant, node),
+    (tenant, node) => endpoint.isPlacedOn(tenant, node) || services.servicePeers.hasGrant(tenant, node),
     (tenant) => Boolean(endpoint.placement.peek(tenant)?.pendingCommit),
   );
   services.nodeAdmin = new NodeAdmin(store, endpoint.nodes, endpoint.placement, services.objects);
@@ -120,18 +123,30 @@ export function createApplication(
   services.workspace = new Workspace(context, services);
   services.library = new FileLibrary(
     store.library,
-    endpoint,
+    {
+      describeAsset: (tenant, params) => services.servicePeers.describeAsset(tenant, params),
+      prepareSelection: endpoint.prepareSelection.bind(endpoint),
+      selectionStatus: endpoint.selectionStatus.bind(endpoint),
+    },
     fileLimits,
     services.objects,
     (tenant, requestId) => services.workspace.fileSourceForRequest(tenant, requestId),
   );
+  services.objects.onAvailabilityChanged = () => {
+    for (const [tenant] of context.tenants.withViewers()) services.library.refreshAvailability(tenant);
+  };
   services.learning = new LearningService(context, services);
   services.clipboard = new ClipboardService(context, services);
   endpoint.setDesiredSource((tenant) => compileDesired(context, services, tenant));
   services.security = new ViewerSecurity(
     store,
     endpoint,
+    services.servicePeers,
     (tenant, viewer, workspace) => {
+      if (!context.closed)
+        void services.servicePeers
+          .authorize(tenant)
+          .catch((err) => log.warn('service.authorize_failed', { tenant, err }));
       const lease = context.tenants.get(tenant).viewer?.id;
       if (!lease || !services.viewers.validSecurity(tenant, viewer)) return;
       context.events.emit('auth', tenant, lease, services.viewers.authState(tenant, viewer));
@@ -167,6 +182,7 @@ export function createApplication(
   services.close = async () => {
     context.closed = true;
     unsubscribeSignals?.();
+    await services.servicePeers.dispose();
     await sessionEvents.close();
     endpoint.setDesiredSource();
     await services.learning.stop();
@@ -200,7 +216,10 @@ export function startApplication(
     );
   }
   const endpointReady = (identity: { processChanged: boolean; nodeId: string }) => {
-    if (!closing) run(control.reconciler.endpointReady(identity));
+    if (!closing) {
+      for (const [tenant] of control.tenants.withViewers()) control.library.refreshAvailability(tenant);
+      run(control.reconciler.endpointReady(identity));
+    }
   };
   nodes.on('ready', endpointReady);
   const endpointOffline = (nodeId: string) => {
@@ -210,7 +229,12 @@ export function startApplication(
   const reconciliationTimer = setInterval(() => {
     if (!closing) {
       run(control.reconciler.tick());
-      run(control.objects.tick());
+      run(
+        control.objects.tick().then(() => {
+          for (const [tenant] of control.tenants.withViewers()) control.library.refreshAvailability(tenant);
+        }),
+      );
+      run(control.servicePeers.tick());
     }
   }, 1500);
   server.listen(config.port, config.host, () => {

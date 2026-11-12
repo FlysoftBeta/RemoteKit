@@ -35,8 +35,11 @@ Result<Json> PeerController::Offer(const Json& request,
   config.context = this;
   config.event = EventCallback;
   config.encoder.struct_size = sizeof(config.encoder);
-  config.encoder.create = [](void* p, uint64_t peer, uint64_t encoder) {
-    return static_cast<PeerController*>(p)->hooks_.create_encoder(peer, encoder);
+  config.encoder.create = [](void* p, uint64_t peer, uint64_t encoder) -> int {
+    auto& self = *static_cast<PeerController*>(p);
+    if (self.role_ == Role::kService)
+      return REMOTEKIT_SDK_INVALID_STATE;
+    return self.hooks_.create_encoder(peer, encoder);
   };
   config.encoder.configure = [](void* p, uint64_t encoder,
                                 const remotekit_rtc_encoder_config* value) {
@@ -89,7 +92,7 @@ Result<Json> PeerController::Offer(const Json& request,
     return Error{media::SdkErrorCode(sync_status), "RTC AV sync failed"};
   av_sync_ = av_sync;
   hooks_.bind(handle, generation);
-  auto policy = Policy(fps, degradation, audio);
+  auto policy = role_ == Role::kBrowser ? Policy(fps, degradation, audio) : Result<void>();
   if (!policy)
     return policy.error();
   const int playout_status = sdk_.remotekit_rtc_set_playout_delay(
@@ -106,7 +109,7 @@ Result<Json> PeerController::Offer(const Json& request,
   if (sdk_.remotekit_rtc_get_receive_level(handle, &level) != 0)
     return Error{ErrorCode::kOutcomeUnknown,
                  "Cannot inspect receiving H264 level after applying offer"};
-  if (!level)
+  if (!level && role_ == Role::kBrowser)
     return Error{ErrorCode::kRejected, "peer has no compatible receiving H264 level"};
   receive_level_ = level;
   auto started = hooks_.started(handle, sdp);

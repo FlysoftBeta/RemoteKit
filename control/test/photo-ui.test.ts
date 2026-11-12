@@ -1,3 +1,4 @@
+import { FilePreview } from '../client/files/file-preview';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { JSDOM } from 'jsdom';
@@ -49,6 +50,7 @@ dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({
 const { createRoot } = await import('react-dom/client');
 const entry: LibraryFileEntry = {
   kind: 'file',
+  available: true,
   id: 'camera',
   assetId: 'webp',
   originalAssetId: 'original',
@@ -255,4 +257,14 @@ test('retake processing keeps its label while rotation uses the normal processin
   };
   assert.equal(photoStatus(entry, job)?.label, '重拍处理中');
   assert.equal(photoStatus(entry, { ...job, rotationTurns: 1 })?.label, '处理中');
+});
+
+test('an open file becomes unavailable without fetching a preview or exposing a retry', async () => {
+  const f = fixture();
+  const unavailable = { ...entry, available: false };
+  await f.render(createElement(FilePreview, { entry: unavailable }));
+  assert.match(f.container.textContent ?? '', /文件暂不可用，恢复后自动继续/);
+  assert.equal(f.container.querySelectorAll('button').length, 0);
+  assert.deepEqual(f.thumbnailRequests, []);
+  await f.close();
 });

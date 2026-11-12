@@ -4,32 +4,6 @@
 namespace remotekit {
 ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
   static const std::map<std::string, Handler> methods{
-      {"auth.face.begin",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Face().FaceCommand(Required(request, "method"), request,
-                                           session.ManagementGeneration(),
-                                           [&session] { return session.ManagementCurrent(); });
-       }},
-      {"auth.face.cancel",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Face().FaceCommand(Required(request, "method"), request,
-                                           session.ManagementGeneration(),
-                                           [&session] { return session.ManagementCurrent(); });
-       }},
-      {"auth.face.capabilities",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Face().FaceCapabilities();
-       }},
-      {"auth.face.status",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Face().FaceCommand(Required(request, "method"), request,
-                                           session.ManagementGeneration(),
-                                           [&session] { return session.ManagementCurrent(); });
-       }},
-      {"rtc.actionResult",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Channel().ManageRtcActionResult(request);
-       }},
       {"rtc.close",
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Channel().ManageRtcClose(request);

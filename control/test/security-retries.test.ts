@@ -41,6 +41,7 @@ function securityFixture() {
   const security = new ViewerSecurity(
     {} as ControlDatabase,
     endpoint,
+    endpoint as unknown as import('../server/viewers/service-peers').ServicePeers,
     () => {},
     () => true,
     () => {},
@@ -93,10 +94,11 @@ test('replacement and detach revocations retain their peer until native lock is 
 test('presence polling failure locks product state and a failed native lock stays retryable', async () => {
   const f = securityFixture();
   await f.security.bind('tenant', f.viewer, 'connection');
+  f.viewer.servicePeer = { connectionId: 'service', epoch: 1, appliedEpoch: 1, requests: 0 };
   f.viewer.challenge = {
     id: 'challenge',
-    peer: f.viewer.peer!,
-    epoch: f.viewer.peer!.epoch,
+    peer: f.viewer.servicePeer!,
+    epoch: f.viewer.servicePeer!.epoch,
     purpose: 'presence',
     expires: Infinity,
     modelVersion: 'test',

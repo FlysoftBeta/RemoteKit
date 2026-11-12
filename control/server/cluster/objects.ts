@@ -122,6 +122,7 @@ export class ObjectIndex {
   }
   private readonly offline = (nodeId: string) => {
     this.readFetches.delete(nodeId);
+    this.onAvailabilityChanged?.();
   };
   private track(work: Promise<unknown>) {
     this.jobs.add(work);
@@ -329,6 +330,7 @@ export class ObjectIndex {
       for (const tenant of quotas) this.checkQuota(tenant);
     });
     for (const effect of effects) effect();
+    this.onAvailabilityChanged?.();
     return { accepted: true };
   }
   committedBatch(node: NodeLink, message: Record<string, any>) {
@@ -376,6 +378,7 @@ export class ObjectIndex {
       });
     }
     for (const effect of effects) effect();
+    this.onAvailabilityChanged?.();
     return { ok: true };
   }
   private commitObject(
@@ -496,6 +499,10 @@ export class ObjectIndex {
     }
     return { sources };
   }
+  available(id: string) {
+    return this.sources(id).length > 0;
+  }
+  onAvailabilityChanged?: () => void;
   private sources(id: string) {
     return (
       this.store.db.prepare('SELECT node_id FROM object_replicas WHERE id=? ORDER BY node_id').all(id) as {

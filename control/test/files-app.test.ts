@@ -9,6 +9,7 @@ const source = { app: 'browser', channel: 'example.com' };
 const now = 20 * 86400_000;
 const entry = (id: string, fields: Partial<LibraryFileEntry> = {}): LibraryFileEntry => ({
   kind: 'file',
+  available: true,
   id,
   name: id,
   assetId: id,

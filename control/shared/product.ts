@@ -1,6 +1,6 @@
 import type { AdminSocketMethods } from './admin';
 import type { DiagnosticMethods } from './diagnostics';
-import type { WireError } from './errors';
+import type { NativeErrorReason, WireError } from './errors';
 import type { LibraryMethods } from './file-library';
 import type { LearningProvider, LearningSocketMethods, LearningState } from './learning';
 import type { AuthMessage, AuthSocketMethods } from './security';
@@ -359,7 +359,13 @@ export interface BackgroundTask {
   entryId?: string;
   error?: WireError;
 }
+export type BrowserAvailability = {
+  state: 'available' | 'starting' | 'unavailable';
+  reason?: NativeErrorReason | 'browser_unavailable';
+  errorId?: string;
+};
 export interface ProductState {
+  browser: BrowserAvailability;
   learning: LearningState;
   operationReceipts?: OperationReceipt[];
   serverIncarnation?: string;
@@ -482,14 +488,7 @@ export interface SocketMethods
     params: { operationId: string; operationGeneration: string };
     result: OperationReceipt;
   };
-  action: {
-    params: Extract<ProductAction, { type: 'settings.update' | 'window.state' }>;
-    result: ProductActionResult;
-  };
-  'window.state': {
-    params: { windowId: string; state: Record<string, unknown> };
-    result: ProductActionResult;
-  };
+  'operation.submit': { params: ProductOperation; result: OperationReceipt };
   'usage.record': {
     params: { item: string; windowId: string; source?: 'launcher' };
     result: { recorded: boolean };
@@ -501,6 +500,15 @@ export interface SocketMethods
   'app.inspect': { params: { tabId: string }; result: AppInspectResult };
   viewport: { params: ViewerViewport; result: ProductState };
   feedback: { params: ProductFeedback; result: { accepted: boolean } };
+  'service.offer': {
+    params: { type: 'offer'; sdp: string; attemptId: string };
+    result: { type: 'answer'; sdp: string; connectionId: string; epoch: number };
+  };
+  'service.ice': {
+    params: { connectionId: string; candidate: unknown; attemptId?: string };
+    result: unknown;
+  };
+  'service.close': { params: { connectionId: string }; result: { closed: boolean } };
   'rtc.offer': {
     params: { type: 'offer'; sdp: string; attemptId: string };
     result: {

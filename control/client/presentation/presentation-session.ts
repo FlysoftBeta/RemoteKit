@@ -94,7 +94,7 @@ export class PresentationSession {
     private readonly ports: {
       endpoint: Pick<EndpointChannel, 'channel' | 'sendChannel'>;
       rtc: Pick<RtcSession, 'peer' | 'attempt' | 'markConnection'>;
-      authorization: Pick<AuthorizationScope, 'productLocked' | 'peerAuthEpoch' | 'productReady'>;
+      authorization: Pick<AuthorizationScope, 'productLocked' | 'peerAuthEpoch' | 'browserReady'>;
     },
   ) {}
   freezeCopies = 0;
@@ -449,7 +449,7 @@ export class PresentationSession {
   fileInputBounds(viewId: string, anchor: FileRequestAnchor) {
     const current = this.videoPlaneFor(viewId);
     if (
-      !this.ports.authorization.productReady ||
+      !this.ports.authorization.browserReady ||
       !this.layout ||
       !current?.plane.ready ||
       document.hidden ||

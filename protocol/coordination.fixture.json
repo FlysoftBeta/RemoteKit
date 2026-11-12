@@ -9,10 +9,24 @@
   "commit": null,
   "profileKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
   "checkpoint": null,
-  "sitePreferences": { "sites": {} },
-  "mediaPolicy": { "audio": false, "maxFps": 60, "degradationPreference": "balanced" },
-  "quality": { "effectiveDpr": 1 },
-  "clipboard": { "revision": "0", "value": { "text": "", "html": "" } },
+  "sitePreferences": {
+    "sites": {}
+  },
+  "mediaPolicy": {
+    "audio": false,
+    "maxFps": 60,
+    "degradationPreference": "balanced"
+  },
+  "quality": {
+    "effectiveDpr": 1
+  },
+  "clipboard": {
+    "revision": "0",
+    "value": {
+      "text": "",
+      "html": ""
+    }
+  },
   "views": [
     {
       "viewId": "1",
@@ -21,7 +35,10 @@
       "width": 1440,
       "height": 900,
       "visible": false,
-      "device": { "mode": "desktop", "deviceScaleFactor": 1 },
+      "device": {
+        "mode": "desktop",
+        "deviceScaleFactor": 1
+      },
       "occludedBottom": 0,
       "occlusionRevision": "1"
     }
@@ -30,8 +47,13 @@
     "connectionId": null,
     "epoch": 0,
     "unlocked": false,
-    "files": { "library": false, "requests": [] }
+    "files": {
+      "requests": []
+    }
   },
-  "lock": { "leaseId": null, "epoch": 0, "state": "locked" },
-  "library": { "describe": [] }
+  "lock": {
+    "leaseId": null,
+    "epoch": 0,
+    "state": "locked"
+  }
 }

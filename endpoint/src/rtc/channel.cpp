@@ -22,10 +22,6 @@ bool ChannelController::ProductCurrent(const Event& event) const {
 }
 
 void ChannelController::HandlePeerEvent(const RtcEvent& event) {
-  if (event.type == REMOTEKIT_RTC_AUTH_DATA_STATE || event.type == REMOTEKIT_RTC_AUTH_DATA) {
-    face.Receive(event);
-    return;
-  }
   if (event.type == REMOTEKIT_RTC_SDP_ANSWER)
     timing.MarkConnection(ConnectionPhase::answer);
   else if (event.type == REMOTEKIT_RTC_ICE)
@@ -71,31 +67,6 @@ void ChannelController::FlushSignals() {
       Send(message, event.authorization);
   }
   const auto stamp = authorization.Stamp();
-  if (stamp)
-    direct_services.DispatchPending(
-        peer_controller.Handle(), 1000.0 * QpcNow() / QpcFrequency(),
-        [&](const Json& message, DeliveryFlag delivery) {
-          if (!authorization.Current(stamp))
-            return false;
-          auto admission = authorization.LockAdmission();
-          if (!authorization.Current(stamp) || peer_lease_.empty())
-            return false;
-          const Json body{{"connectionId", peer_controller.Connection()},
-                          {"authEpoch", authorization.Epoch()},
-                          {"leaseId", peer_lease_},
-                          {"operationGeneration", message["operationGeneration"]},
-                          {"operationId", message["operationId"]},
-                          {"action", message["action"]}};
-          const auto identity = "action-" + message["operationGeneration"].get<std::string>() +
-                                "-" + message["operationId"].get<std::string>();
-          auto persisted =
-              store.Events().Append("client.action", body, identity, browser.Incarnation());
-          if (!persisted)
-            return false;
-          if (delivery)
-            delivery->MarkWritten();
-          return true;
-        });
   data_router.Drain();
   peer_controller.FlushSignals();
   direct_services.Viewports(peer_controller.Handle(), output.Slots().LatestMetadata());
@@ -188,28 +159,6 @@ void ChannelController::FlushServices() {
   });
 }
 
-bool ChannelController::ServiceMessage(const Event& event) {
-  const auto& message = event.message;
-  auto admission = authorization.LockAdmission();
-  if (!ProductCurrent(event))
-    return true;
-  if (!remotekit::ProductActionEnvelope(message, event.bytes.size()))
-    return true;
-  const bool accepted =
-      direct_services.Admit(event.peer, message, 1000.0 * QpcNow() / QpcFrequency());
-  admission.unlock();
-  if (!accepted)
-    Send({{"type", "product.result"},
-          {"version", 1},
-          {"operationId", message["operationId"]},
-          {"connectionId", peer_controller.Connection()},
-          {"operationGeneration", message["operationGeneration"]},
-          {"ok", false},
-          {"error", WireError({ErrorCode::kBusy, "endpoint_backpressure"})}},
-         event.authorization);
-  return true;
-}
-
 Result<Json> ChannelController::Offer(const Json& request, uint64_t generation) {
   if (!request.contains("avSync") || !request.at("avSync").is_boolean())
     return Error{ErrorCode::kInvalidRequest, "invalid RTC avSync"};
@@ -232,28 +181,6 @@ Result<void> ChannelController::ReplayOffer(const Json& request, uint64_t genera
     return Error{ErrorCode::kConflict, "RPC Viewer lease is retired"};
   return peer_controller.ReplaySignals(Required(request, "connectionId"), generation);
 }
-Result<Json> ChannelController::ManageRtcActionResult(const Json& request) {
-  if (Required(request, "connectionId") != peer_controller.Connection() ||
-      !peer_controller.Handle() || !authorization.Stamp())
-    return Json{{"accepted", false}};
-  if (request.value("authEpoch", Json()) != authorization.Epoch())
-    return Json{{"accepted", false}};
-  if (!request.contains("operationId") ||
-      !remotekit::BoundedServiceId(request["operationId"], 36) ||
-      !request.contains("operationGeneration") ||
-      !remotekit::BoundedServiceId(request["operationGeneration"]) || !request.contains("result") ||
-      !request["result"].is_object())
-    return Error{ErrorCode::kInvalidRequest, "invalid action result"};
-  Json result = {{"connectionId", peer_controller.Connection()},
-                 {"operationId", request["operationId"]},
-                 {"operationGeneration", request["operationGeneration"]},
-                 {"result", request["result"]}};
-
-  const bool accepted = direct_services.Result(peer_controller.Handle(), result);
-  pipeline.Wake();
-  return Json{{"accepted", accepted}};
-}
-
 Result<Json> ChannelController::ManageRtcOffer(const Json& request) {
   auto offer_result = Offer(request, request_generation_);
   if (!offer_result)
@@ -288,7 +215,6 @@ DataRouter::Hooks ChannelController::MakeRouterHooks() {
       .stamp = [this] { return authorization.Stamp(); },
       .epoch = [this] { return authorization.Epoch(); },
       .current = [this](const RtcEvent& event) { return ProductCurrent(event); },
-      .product = [this](const RtcEvent& event) { ServiceMessage(event); },
       .presentation = [this](const RtcEvent& event) { presentation.PresentationMessage(event); },
       .input = [this](const RtcEvent& event) { input.QueueInput(event); },
       .files = [this](const RtcEvent& event) { files.Admit(event); },

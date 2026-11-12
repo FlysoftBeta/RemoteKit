@@ -10,21 +10,11 @@
 namespace remotekit {
 class DataRouter {
  public:
-  enum class Kind {
-    kProduct,
-    kPresentation,
-    kInput,
-    kFiles,
-    kClock,
-    kFeedback,
-    kRefresh,
-    kDataState
-  };
+  enum class Kind { kPresentation, kInput, kFiles, kClock, kFeedback, kRefresh, kDataState };
   struct Hooks {
     std::function<uint64_t()> peer, stamp, epoch;
     std::function<bool(const RtcEvent&)> current;
-    std::function<void(const RtcEvent&)> product, presentation, input, files, feedback, refresh,
-        data_state;
+    std::function<void(const RtcEvent&)> presentation, input, files, feedback, refresh, data_state;
     std::function<void(const RtcEvent&)> received;
     std::function<void(const Json&, uint64_t)> send;
   };

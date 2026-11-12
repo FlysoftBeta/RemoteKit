@@ -30,6 +30,8 @@ Service::Service(media::Sdk& sdk,
   link_.OnDisconnect([this](uint64_t generation) {
     objects_.CancelPuts();
     std::lock_guard lock(mutex_);
+    for (auto& [tenant, entry] : service_peers_)
+      entry.second->ManagementLost(generation);
     for (auto& [tenant, managed] : sessions_)
       managed.coordinator->ManagementLost(generation);
   });
@@ -50,6 +52,7 @@ Result<void> Service::Clear() {
   decltype(sessions_) closing;
   {
     std::lock_guard lock(mutex_);
+    service_peers_.clear();
     closing.swap(sessions_);
     session_count_ = 0;
   }
@@ -85,8 +88,8 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
     return Error{ErrorCode::kUnavailable, "node fencing is not established"};
   const auto tenant = request.value("tenantId", std::string());
   const bool node_rpc = method == "node.logs.search" || method == "shutdown" ||
-                        method.starts_with("object.") || method == "session.cold.delete" ||
-                        method == "session.delete";
+                        method.starts_with("service.") || method.starts_with("object.") ||
+                        method == "session.cold.delete" || method == "session.delete";
   if (node_rpc) {
     if (!coordination::Keys(request,
                             {"method", "tenantId", "sessionId", "placementEpoch",
@@ -114,6 +117,29 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
       if (method == "shutdown") {
         RK_RETURN_IF_ERROR(Clear());
         return Json{{"closed", true}};
+      }
+      if (method.starts_with("service.")) {
+        std::shared_ptr<ServicePeer> peer;
+        {
+          std::lock_guard lock(mutex_);
+          auto& entry = service_peers_[tenant];
+          const auto lease = Required(params, "leaseId");
+          if (method == "service.offer" && (!entry.second || entry.first != lease)) {
+            entry = {lease,
+                     std::make_shared<ServicePeer>(sdk_, options_, link_, objects_, tenant, lease)};
+          }
+          if (!entry.second || entry.first != lease)
+            return Error{ErrorCode::kConflict, "Viewer service lease is retired"};
+          peer = entry.second;
+        }
+        auto result = peer->Command(method, params, generation);
+        if (method == "service.close" && result) {
+          std::lock_guard lock(mutex_);
+          const auto found = service_peers_.find(tenant);
+          if (found != service_peers_.end() && found->second.second == peer)
+            service_peers_.erase(found);
+        }
+        return result;
       }
       if (method.starts_with("object."))
         return objects_.Dispatch(params);

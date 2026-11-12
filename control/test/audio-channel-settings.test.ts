@@ -1,3 +1,4 @@
+import { submitViewerAction } from './server-fixture';
 import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
 import { requestViewer } from './server-fixture';
@@ -31,11 +32,11 @@ test('audio output channels default on and persist the complete shared pair atom
     });
     for (const left of [false, true])
       for (const right of [false, true]) {
-        const result = await requestViewer(control, tenant, 'viewer', 'action', {
+        const result = await submitViewerAction(control, tenant, 'viewer', {
           type: 'settings.update',
           settings: { workspace: { audioChannels: { left, right } } },
         });
-        assert.deepEqual(result.state.workspace.settings.workspace.audioChannels, { left, right });
+        assert.equal(result.status, 'committed');
         assert.deepEqual(control.viewers.productState(tenant).workspace.settings.workspace.audioChannels, {
           left,
           right,
@@ -53,9 +54,9 @@ test('audio output channels default on and persist the complete shared pair atom
       null,
     ]) {
       await assert.rejects(
-        requestViewer(control, tenant, 'viewer', 'action', {
+        submitViewerAction(control, tenant, 'viewer', {
           type: 'settings.update',
-          settings: { workspace: { audioChannels: channels } },
+          settings: { workspace: { audioChannels: channels as any } },
         }),
         { code: 'invalid_request' },
       );
@@ -76,7 +77,7 @@ test('audio output channels default on and persist the complete shared pair atom
       right: true,
     });
     await assert.rejects(
-      requestViewer(control, tenant, 'viewer', 'action', {
+      submitViewerAction(control, tenant, 'viewer', {
         type: 'settings.update',
         settings: { workspace: { audioChannels: { left: false, right: false } } },
       }),
@@ -108,7 +109,7 @@ test('audio defaults enable both outputs and failed persistence preserves confir
       throw Error('sqlite fault');
     };
     await assert.rejects(
-      requestViewer(control, tenant, 'viewer', 'action', {
+      submitViewerAction(control, tenant, 'viewer', {
         type: 'settings.update',
         settings: { workspace: { audioChannels: { left: false, right: false } } },
       }),

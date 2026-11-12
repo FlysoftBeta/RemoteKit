@@ -43,12 +43,11 @@ export class Reconciler {
       const tracking = this.context.tenants.get(tenant).reconciliation;
       const running = tracking.inflight;
       if (running) return running;
-      const task = this.context.tenants
-        .serial(tenant, async () => {
-          if (this.context.tenants.get(tenant).pendingRtcCheck)
-            await this.services.rtc.checkReconnectedRtc(tenant);
-          await this.reconcileProduct(tenant);
-        })
+      const task = (async () => {
+        if (this.context.tenants.get(tenant).pendingRtcCheck)
+          await this.services.rtc.checkReconnectedRtc(tenant);
+        await this.context.tenants.serial(tenant, () => this.reconcileProduct(tenant));
+      })()
         .catch((err) => log.warn('reconciler.product_failed', { tenant, err }))
         .finally(() => delete tracking.inflight);
       tracking.inflight = task;
@@ -72,9 +71,11 @@ export class Reconciler {
     }
     for (const runtime of runtimes.filter((runtime) => runtime.viewer || runtime.started)) {
       const tenant = runtime.tenantId;
+      await this.services.rtc.checkReconnectedRtc(tenant).catch((error) => {
+        runtime.lastError = toRemoteKitError(error);
+      });
       await this.context.tenants.serial(tenant, async () => {
         try {
-          await this.services.rtc.checkReconnectedRtc(tenant);
           await this.reconcileProduct(tenant);
         } catch (error) {
           this.context.tenants.get(tenant).lastError = toRemoteKitError(error);
@@ -125,8 +126,15 @@ export class Reconciler {
       this.services.viewers.push(tenant);
       return;
     }
-    if (runtime.viewer && this.context.endpoint.placement.peek(tenant)?.runState !== 'running')
-      this.context.endpoint.placement.resolve(tenant);
+    if (runtime.viewer && this.context.endpoint.placement.peek(tenant)?.runState !== 'running') {
+      try {
+        this.context.endpoint.placement.resolve(tenant);
+      } catch (error) {
+        runtime.lastError = toRemoteKitError(error);
+        this.services.viewers.push(tenant);
+        throw error;
+      }
+    }
     if (!(runtime.viewer !== undefined) && !runtime.started) return;
     const tracking = runtime.reconciliation;
     const desiredKey = JSON.stringify([
@@ -156,13 +164,14 @@ export class Reconciler {
       if (observed) await this.services.popups.observePopups(desired, observed);
       let resourceLimitation = this.services.policy.qualityFor(tenant, desired).resourceLimitation;
       const sent = await this.context.endpoint.synchronize(tenant);
-      if (sent.run === 'running')
-        await this.context.endpoint.waitObserved(
-          tenant,
-          (value) =>
-            BigInt(value.observedRevision) >= BigInt(sent.revision) &&
-            (value.browser === 'running' || value.lastError !== null),
-        );
+      const latest = this.context.endpoint.observation(tenant);
+      if (
+        sent.run === 'running' &&
+        (!latest || latest.browser === 'starting' || BigInt(latest.observedRevision) < BigInt(sent.revision))
+      ) {
+        this.services.viewers.push(tenant);
+        return;
+      }
       runtime.started = true;
       const snapshot = this.context.endpoint.current(tenant),
         state = this.context.store.workspaces.workspace(tenant),

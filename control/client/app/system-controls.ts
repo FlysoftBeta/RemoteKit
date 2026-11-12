@@ -30,11 +30,10 @@ export function useSystemControls({
   showShell: boolean;
   floatingActions: FloatingActions;
 }) {
-  const { ready, channelReady, audioPlayback } = useViewerSessionSelector(
+  const { browserReady, audioPlayback } = useViewerSessionSelector(
     media,
     (snapshot) => ({
-      ready: snapshot.authorization.ready,
-      channelReady: snapshot.observations.channel === '已连接',
+      browserReady: snapshot.authorization.browserReady,
       audioPlayback: media.observations.audio.state,
     }),
     shallowEqual,
@@ -79,7 +78,7 @@ export function useSystemControls({
   useEffect(() => () => diagnostics.dispose(), [diagnostics]);
   useAutoFullscreen(showShell && state?.workspace.settings.workspace.autoFullscreen === true);
   const saveAudio = (channels: AudioChannels) => {
-    if (audioPending.current || status !== 'online' || !ready) return;
+    if (audioPending.current || !shellReady) return;
     audioPending.current = true;
     setAudioSaving(true);
     setAudioError(undefined);
@@ -92,8 +91,8 @@ export function useSystemControls({
         setAudioSaving(false);
       });
   };
-  const productReady = status === 'online' && ready;
-  const pageFullscreen = state?.pageFullscreen;
+  const shellReady = media.workspace.shellReady;
+  const pageFullscreen = browserReady ? state?.pageFullscreen : undefined;
   const fullscreenTarget = pageFullscreen?.target;
   const chosenFullscreen = useWindowFullscreen();
   const activeWindowIds = state?.workspace.spaces.find(
@@ -105,7 +104,9 @@ export function useSystemControls({
     if (chosenFullscreen && state && !chosenOnStage) exitWindowFullscreen();
   }, [chosenFullscreen, chosenOnStage, state]);
   const windowFullscreen = chosenOnStage ? chosenFullscreen : null;
-  const fullscreenWindow = state ? fullscreenWindowId(state, windowFullscreen) : undefined;
+  const fullscreenWindow = state
+    ? fullscreenWindowId({ ...state, pageFullscreen }, windowFullscreen)
+    : undefined;
   const fullscreen = fullscreenWindow ? { windowId: fullscreenWindow } : undefined;
   const exitingFullscreen = pendingOperations.some(
     (entry) =>
@@ -115,7 +116,7 @@ export function useSystemControls({
   );
   const exitFullscreen = useRef<() => void>(() => {});
   exitFullscreen.current = () => {
-    if (fullscreenTarget && productReady && !exitingFullscreen)
+    if (fullscreenTarget && browserReady && !exitingFullscreen)
       void action({ type: 'page.exitFullscreen', target: fullscreenTarget }).catch(report);
   };
   useEffect(() => {
@@ -136,7 +137,7 @@ export function useSystemControls({
     return () => window.removeEventListener('keydown', escape, true);
   }, [fullscreenTarget]);
   const audioBlocked =
-    productReady &&
+    browserReady &&
     audioPlayback === 'blocked' &&
     (state?.workspace.settings.workspace.audioChannels?.left !== false ||
       state?.workspace.settings.workspace.audioChannels?.right !== false);
@@ -149,7 +150,7 @@ export function useSystemControls({
           anchors: FULLSCREEN_EXIT_ANCHORS,
           label: '退出网页全屏',
           icon: 'fullscreen-exit',
-          disabled: !productReady || exitingFullscreen,
+          disabled: !browserReady || exitingFullscreen,
           run: () => exitFullscreen.current(),
         }
       : windowFullscreen
@@ -207,7 +208,8 @@ export function useSystemControls({
     camera,
     diagnostics,
     diagnosticState,
-    productReady,
+    shellReady,
+    browserReady,
     fullscreen,
     windowFullscreen,
     browserFullscreen: {
@@ -217,9 +219,11 @@ export function useSystemControls({
     audio: state
       ? {
           channels: state.workspace.settings.workspace.audioChannels,
-          online: productReady,
+          online: shellReady,
           playback: audioPlayback,
-          resume: () => media.observations.audio.resume(),
+          resume: () => {
+            if (browserReady) media.observations.audio.resume();
+          },
           save: saveAudio,
           busy: audioSaving,
           error: audioError,
@@ -228,7 +232,7 @@ export function useSystemControls({
     sync: {
       pending: pendingOperations.length,
       unknown: pendingOperations.some((entry) => entry.receipt?.status === 'unknown'),
-      channelReady,
+      controlReady: shellReady,
       dismissUnknown: () => media.operations.dismissUnknown(),
     },
   };

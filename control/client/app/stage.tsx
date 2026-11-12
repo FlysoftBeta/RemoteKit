@@ -217,7 +217,7 @@ export function Stage({
   stage: WorkspaceStage;
   controls: Pick<
     SystemControls,
-    'fullscreen' | 'windowFullscreen' | 'productReady' | 'diagnosticState' | 'diagnostics'
+    'fullscreen' | 'windowFullscreen' | 'shellReady' | 'browserReady' | 'diagnosticState' | 'diagnostics'
   >;
   floatingActions: FloatingActions;
   workspaceState: WorkspaceSnapshot;
@@ -237,7 +237,7 @@ export function Stage({
     return () => keyboard.dispose();
   }, [floatingActions]);
   const { shell, width: contentWidth, call, action } = stage;
-  const { fullscreen, productReady, diagnosticState, diagnostics } = controls;
+  const { fullscreen, shellReady, diagnosticState, diagnostics } = controls;
   const { status } = workspaceState;
   const [surfaceFailure, setSurfaceFailure] = useState<RemoteKitError>();
   const report = useCallback((error: unknown) => setSurfaceFailure(failureError(error)), []);
@@ -296,7 +296,7 @@ export function Stage({
                 key={id}
                 size="small"
                 variant={id === activeSpace.focusedWindowId ? 'contained' : 'text'}
-                disabled={!productReady}
+                disabled={!shellReady}
                 onClick={() => void action({ type: 'window.focus', windowId: id }).catch(report)}
               >
                 {appName(workspace, win)}
@@ -317,7 +317,7 @@ export function Stage({
                 <WindowDivider
                   space={activeSpace}
                   index={position - 1}
-                  online={productReady}
+                  online={shellReady}
                   action={action}
                   report={report}
                 />
@@ -327,12 +327,12 @@ export function Stage({
                 state={state}
                 transport={media}
                 action={action}
-                online={productReady}
+                shellReady={shellReady}
                 call={call}
                 weight={sideBySide && position >= 0 ? activeSpace!.weights[position] : 1}
                 appContent={appContent}
                 fileChooser={
-                  fileRequest?.windowId === w.id ? (
+                  controls.browserReady && fileRequest?.windowId === w.id ? (
                     <FileChooserDialog
                       key={fileRequest.id}
                       request={fileRequest}
@@ -374,7 +374,7 @@ export function Stage({
               <Button
                 variant="contained"
                 startIcon={<Add />}
-                disabled={!productReady}
+                disabled={!shellReady}
                 onClick={() => openLauncher()}
               >
                 打开开始屏幕
@@ -385,7 +385,7 @@ export function Stage({
                     size="small"
                     color="inherit"
                     startIcon={<AdminPanelSettingsOutlined />}
-                    disabled={!productReady}
+                    disabled={!shellReady}
                     onClick={() =>
                       void action({
                         type: 'window.open',

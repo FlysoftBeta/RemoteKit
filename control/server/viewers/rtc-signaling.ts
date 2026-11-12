@@ -1,3 +1,4 @@
+import { KeyedSerialQueue } from '../util/serial-queue';
 import { log, reportError } from '../log';
 import { endpointError } from '../endpoint/gateway';
 import { wireError } from '../../shared/errors';
@@ -8,6 +9,7 @@ import type { DomainContext, DomainServices } from '../application';
 import type { RtcSignal } from '../endpoint/types';
 
 export class RtcSignaling {
+  private readonly queue = new KeyedSerialQueue();
   constructor(
     private readonly context: DomainContext,
     private readonly services: Pick<
@@ -100,11 +102,11 @@ export class RtcSignaling {
       throw new RemoteKitError('invalid_request', '无效的 SDP offer');
     if (body.sdp.length > 900000) throw new RemoteKitError('limit_exceeded', 'SDP 超出大小限制');
     const receivedAt = this.context.clock.monotonicMs();
-    return this.context.tenants.serial(tenant, async () => {
+    return this.queue.run(tenant, async () => {
       const timings: Record<string, number> = { queueMs: this.context.clock.monotonicMs() - receivedAt };
       this.services.viewers.assertViewer(tenant, lease);
       this.services.policy.qualityState(tenant).resetFeedback();
-      await this.services.reconciler.reconcileProduct(tenant);
+      await this.context.endpoint.synchronize(tenant);
       timings.reconcileEndMs = this.context.clock.monotonicMs() - receivedAt;
       const security = runtime.viewer!.security;
       const previous = runtime.connectionId ?? runtime.rtc.disconnectedPeer?.connectionId;
@@ -211,7 +213,7 @@ export class RtcSignaling {
     this.services.viewers.assertViewer(tenant, lease);
     const owned = runtime.connectionId === body.connectionId;
     if (owned) this.clearSignal(body.connectionId);
-    return this.context.tenants.serial(tenant, async () => {
+    return this.queue.run(tenant, async () => {
       this.services.viewers.assertViewer(tenant, lease);
       if (runtime.connectionId !== body.connectionId) {
         if (owned) return { closed: true };
@@ -242,7 +244,7 @@ export class RtcSignaling {
     } catch (err) {
       log.warn('rtc.close_failed', { tenant, connectionId: previous, err });
     } finally {
-      runtime.closeRtc();
+      if (runtime.connectionId === previous) runtime.closeRtc();
     }
   }
   endpointOffline(nodeId?: string) {
@@ -250,8 +252,14 @@ export class RtcSignaling {
       if (!nodeId || this.context.endpoint.isPlacedOn(runtime.tenantId, nodeId)) runtime.disconnectRtc();
     for (const [tenant, viewer] of this.context.tenants.withViewers())
       if (viewer.security && (!nodeId || this.context.endpoint.isPlacedOn(tenant, nodeId))) {
-        viewer.security.face = { available: false };
-        void this.services.security.lock(tenant, viewer.security, false, false);
+        this.services.security.forgetPeer(tenant, viewer.security);
+        this.context.events.emit(
+          'auth',
+          tenant,
+          viewer.id,
+          this.services.viewers.authState(tenant, viewer.security),
+        );
+        this.services.viewers.push(tenant);
       }
   }
 }

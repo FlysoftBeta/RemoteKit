@@ -23,13 +23,14 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
     private readonly ports: {
       authorization: Pick<
         AuthorizationScope,
-        'observePeerAuthorization' | 'setProductLocked' | 'productReady'
+        'observePeerAuthorization' | 'setProductLocked' | 'browserReady' | 'serviceAuthEpoch'
       >;
       operations: Pick<OperationsStore, 'acceptSnapshot' | 'getSnapshot'>;
       rtc: Pick<
         RtcSession,
         'observeEndpointGeneration' | 'connect' | 'disconnect' | 'restart' | 'confirmedAvSync' | 'getSnapshot'
       >;
+      serviceRtc: Pick<RtcSession, 'connect' | 'disconnect'>;
       control: Pick<ControlSession, 'request' | 'reconnect' | 'connect' | 'close'>;
       viewport: Pick<ViewportRequests, 'observe' | 'reset'>;
       setAudioChannels(channels: { left: boolean; right: boolean }): void;
@@ -43,11 +44,20 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
       idleRearmed: true,
     });
   }
+  get shellReady() {
+    const { auth, status, localLock } = this.getSnapshot();
+    return (
+      status === 'online' &&
+      auth?.locked === false &&
+      !localLock &&
+      !!this.ports.operations.getSnapshot().authoritative
+    );
+  }
   acceptState(next: ProductState) {
     const current = this.getSnapshot();
     if (current.auth?.locked !== false || current.localLock) return;
     this.ports.operations.acceptSnapshot(next);
-    if (current.auth.peerEpoch > 0) this.ports.authorization.setProductLocked(false);
+    this.ports.authorization.setProductLocked(false);
   }
   acceptStatus(status: ConnectionStatus) {
     const previous = this.getSnapshot();
@@ -58,6 +68,7 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
       this.publish({ ...this.getSnapshot(), auth: null });
       this.started = false;
       this.ports.rtc.disconnect();
+      this.ports.serviceRtc.disconnect();
     }
   }
   acceptAuth(auth: AuthState) {
@@ -65,6 +76,7 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
       previous = current.auth;
     if (previous && auth.epoch < previous.epoch) return;
     if (!auth.locked && current.localLock) return;
+    this.ports.authorization.serviceAuthEpoch = auth.serviceEpoch;
     this.ports.authorization.observePeerAuthorization(auth.peerEpoch);
     if (auth.locked) this.ports.authorization.setProductLocked(true);
     this.publish({
@@ -74,7 +86,7 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
       manualLock: auth.locked ? current.manualLock : false,
       idleRearmed: auth.locked ? current.idleRearmed : true,
     });
-    if (!auth.locked && auth.peerEpoch > 0 && this.ports.operations.getSnapshot().authoritative)
+    if (!auth.locked && this.ports.operations.getSnapshot().authoritative)
       this.ports.authorization.setProductLocked(false);
     if (auth.endpointGeneration !== this.endpointGeneration) {
       this.ports.rtc.observeEndpointGeneration(auth.endpointGeneration);
@@ -83,6 +95,7 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
     if (!this.started) {
       this.started = true;
       void this.ports.rtc.connect();
+      void this.ports.serviceRtc.connect();
     }
   }
   lock = (reason: string) => {
@@ -119,6 +132,7 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
     window.removeEventListener('keydown', this.activity, true);
     this.ports.viewport.reset();
     this.ports.rtc.disconnect();
+    this.ports.serviceRtc.disconnect();
     this.ports.control.close();
   }
   operationsChanged = () => {
@@ -139,6 +153,6 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
   availabilityChanged = () =>
     this.ports.viewport.observe(
       this.ports.operations.getSnapshot().authoritative,
-      this.getSnapshot().status === 'online' && this.ports.authorization.productReady,
+      this.getSnapshot().status === 'online' && this.ports.authorization.browserReady,
     );
 }

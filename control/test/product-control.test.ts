@@ -1,3 +1,4 @@
+import { observedProductAction, observedOperation, submitViewerAction } from './server-fixture';
 import { applyDesiredViews } from './coordination-fixture';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -170,14 +171,16 @@ test('offline startup does not create Browsers; multi-window mutations preserve 
       { identity: 'test-account', valid: () => true },
       true,
     );
-    let result = await control.operations.productAction(
+    let result = await observedProductAction(
+      control,
       user.tenantId,
       { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'https://a.test/' },
       'lease',
     );
     const a = result.state.workspace.windows[0],
       tabA = result.state.workspace.tabs[0];
-    result = await control.operations.productAction(
+    result = await observedProductAction(
+      control,
       user.tenantId,
       { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
       'lease',
@@ -193,18 +196,19 @@ test('offline startup does not create Browsers; multi-window mutations preserve 
     });
     assert.equal(endpoint.views.get(user.tenantId)!.get(tabA.webviewId).visible, false);
     assert.equal(endpoint.views.get(user.tenantId)!.get(tabB.webviewId).width, 700);
-    const next = await control.operations.productAction(
+    const next = await observedProductAction(
+      control,
       user.tenantId,
       { type: 'tab.move', tabId: tabA.id, windowId: b.id },
       'lease',
     );
     assert.equal(next.state.workspace.windows.find((w) => w.id === a.id)!.activeTabId, null);
     assert.equal(next.state.workspace.tabs.find((t) => t.id === tabA.id)!.webviewId, tabA.webviewId);
-    await control.operations.productAction(user.tenantId, { type: 'tab.close', tabId: tabA.id }, 'lease');
-    await control.operations.productAction(user.tenantId, { type: 'tab.close', tabId: tabB.id }, 'lease');
+    await observedProductAction(control, user.tenantId, { type: 'tab.close', tabId: tabA.id }, 'lease');
+    await observedProductAction(control, user.tenantId, { type: 'tab.close', tabId: tabB.id }, 'lease');
     assert.equal(store.workspaces.workspace(user.tenantId).windows.length, 2);
     assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 0);
-    await control.operations.productAction(user.tenantId, { type: 'window.close', windowId: a.id }, 'lease');
+    await observedProductAction(control, user.tenantId, { type: 'window.close', windowId: a.id }, 'lease');
     assert.equal(store.workspaces.workspace(user.tenantId).windows.length, 1);
     await control.reconciler.tick();
     const revision = store.workspaces.workspace(user.tenantId).revision;
@@ -231,7 +235,8 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
       true,
     );
     let state = (
-      await control.operations.productAction(
+      await observedProductAction(
+        control,
         user.tenantId,
         {
           type: 'window.open',
@@ -246,12 +251,13 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
       tab = state.workspace.tabs[0];
     endpoint.pending = true;
     state = (
-      await control.operations.productAction(user.tenantId, { type: 'window.close', windowId: w.id }, 'lease')
+      await observedProductAction(control, user.tenantId, { type: 'window.close', windowId: w.id }, 'lease')
     ).state;
     assert.equal(state.workspace.tabs.length, 1);
     assert.equal(state.workspace.pendingClose?.nativeRequestId, 'close-1');
     state = (
-      await control.operations.productAction(
+      await observedProductAction(
+        control,
         user.tenantId,
         {
           type: 'tab.close',
@@ -264,7 +270,8 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
     ).state;
     assert.equal(state.workspace.windows.length, 1);
     assert.equal(state.workspace.pendingWindowCloseId, null);
-    const site = await control.operations.productAction(
+    const site = await observedProductAction(
+      control,
       user.tenantId,
       { type: 'site.set', origin: 'https://EXAMPLE.com:443/foo', tabletUa: true },
       'lease',
@@ -272,7 +279,8 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
     assert.equal(site.application, undefined);
     assert.deepEqual(site.state.workspace.sites, { 'https://example.com': { tabletUa: true } });
     state = (
-      await control.operations.productAction(
+      await observedProductAction(
+        control,
         user.tenantId,
         {
           type: 'settings.update',
@@ -297,7 +305,8 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
       { clientScaleOverride: 1.5 },
     ])
       await assert.rejects(
-        control.operations.productAction(
+        observedProductAction(
+          control,
           user.tenantId,
           { type: 'settings.update', settings: { workspace: settings as never } },
           'lease',
@@ -334,23 +343,24 @@ test('automatic Viewer fullscreen and AV sync default off and save explicit bool
       { identity: 'test-account', valid: () => true },
       true,
     );
-    await control.operations.productAction(
+    await observedProductAction(
+      control,
       tenantId,
       { type: 'settings.update', settings: { workspace: { autoFullscreen: true, avSync: true } } },
       'lease',
     );
     await assert.rejects(
-      requestViewer(control, tenantId, 'lease', 'action', {
+      submitViewerAction(control, tenantId, 'lease', {
         type: 'settings.update',
-        settings: { workspace: { autoFullscreen: 'true' } },
+        settings: { workspace: { autoFullscreen: 'true' as any } },
       }),
       { code: 'invalid_request' },
     );
     for (const avSync of ['true', 1, null]) {
       await assert.rejects(
-        requestViewer(control, tenantId, 'lease', 'action', {
+        submitViewerAction(control, tenantId, 'lease', {
           type: 'settings.update',
-          settings: { workspace: { avSync } },
+          settings: { workspace: { avSync: avSync as any } },
         }),
         { code: 'invalid_request' },
       );
@@ -387,7 +397,8 @@ test('remote page fullscreen follows the live document, with a document-bound ex
       { identity: 'test-account', valid: () => true },
       true,
     );
-    const { state } = await control.operations.productAction(
+    const { state } = await observedProductAction(
+      control,
       tenantId,
       { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'https://fullscreen.test' },
       'lease',
@@ -408,7 +419,8 @@ test('remote page fullscreen follows the live document, with a document-bound ex
     const second = page()!;
     assert.notEqual(second.target, first.target);
     await assert.rejects(
-      control.operations.productAction(
+      observedProductAction(
+        control,
         tenantId,
         { type: 'page.exitFullscreen', target: first.target },
         'lease',
@@ -428,8 +440,10 @@ test('remote page fullscreen follows the live document, with a document-bound ex
       { identity: 'test-account', valid: () => true },
       true,
     );
+    await control.reconciler.reconcileProduct(tenantId);
     assert.equal(page()?.target, second.target);
-    await control.operations.productAction(
+    await observedProductAction(
+      control,
       tenantId,
       { type: 'page.exitFullscreen', target: second.target },
       'replacement',
@@ -465,7 +479,8 @@ test('automatic reclaim uses eligible background time and canDiscard; activating
       { identity: 'test-account', valid: () => true },
       true,
     );
-    const created = await control.operations.productAction(
+    const created = await observedProductAction(
+        control,
         user.tenantId,
         { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
         'lease',
@@ -528,7 +543,8 @@ async function uncertainTab() {
     true,
   );
   const { workspace } = (
-    await f.control.operations.productAction(
+    await observedProductAction(
+      f.control,
       tenant,
       { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'https://saved.test/' },
       'lease',
@@ -685,8 +701,9 @@ test('unsafe POST checkpoint leaves an explicit tab error and never repeats unlo
     assert.equal(f.view.actual, 0);
     assert.equal(f.view.visible, false);
     assert.match(f.tabState().lifecycleRecoveryError!.message, /POST requires repost confirmation/);
-    await f.control.operations.productAction(f.tenant, { type: 'tab.close', tabId: f.tab.id }, 'lease');
-    await f.control.operations.productAction(
+    await observedProductAction(f.control, f.tenant, { type: 'tab.close', tabId: f.tab.id }, 'lease');
+    await observedProductAction(
+      f.control,
       f.tenant,
       { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'https://saved.test/' },
       'lease',
@@ -702,13 +719,13 @@ test('showStats defaults off, persists as a boolean and rejects other values', a
   const { store, control, user } = await fixture();
   try {
     assert.equal(store.workspaces.workspace(user.tenantId).settings.workspace.showStats, false);
-    const result = await control.operations.productAction(user.tenantId, {
+    const result = await observedProductAction(control, user.tenantId, {
       type: 'settings.update',
       settings: { workspace: { showStats: true } },
     });
     assert.equal(result.state.workspace.settings.workspace.showStats, true);
     await assert.rejects(
-      control.operations.productAction(user.tenantId, {
+      observedProductAction(control, user.tenantId, {
         type: 'settings.update',
         settings: { workspace: { showStats: 'true' } },
       } as any),
@@ -729,10 +746,12 @@ test('UA table precedes Browser/view creation; failed application persists desir
       { identity: 'test-account', valid: () => true },
       true,
     );
+    await control.reconciler.reconcileProduct(user.tenantId);
     const firstSites = endpoint.calls.findIndex((c) => c.method === 'policy.sites.applied'),
       ensure = endpoint.calls.findIndex((c) => c.method === 'browser.started');
     assert.ok(firstSites >= 0 && firstSites < ensure);
-    const created = await control.operations.productAction(
+    const created = await observedProductAction(
+        control,
         user.tenantId,
         {
           type: 'window.open',
@@ -744,7 +763,8 @@ test('UA table precedes Browser/view creation; failed application persists desir
       ),
       w = created.state.workspace.windows[0],
       a = created.state.workspace.tabs[0];
-    const second = await control.operations.productAction(
+    const second = await observedProductAction(
+        control,
         user.tenantId,
         { type: 'tab.create', windowId: w.id, url: 'https://example.test/b' },
         'lease',
@@ -757,6 +777,7 @@ test('UA table precedes Browser/view creation; failed application persists desir
       { type: 'site.set', origin: 'https://example.test', tabletUa: true, tabId: b.id },
       'lease',
     );
+    await assert.rejects(control.reconciler.reconcileProduct(user.tenantId), { code: 'unavailable' });
     assert.equal(pending.application?.status, 'pending');
     assert.equal(store.workspaces.workspace(user.tenantId).sites['https://example.test'].tabletUa, true);
     assert.equal(endpoint.calls.filter((c) => c.method === 'view.command').length, 0);
@@ -771,7 +792,10 @@ test('UA table precedes Browser/view creation; failed application persists desir
       unchanged.state.workspace.tabs.find((t) => t.id === b.id)?.pendingUaReloadOrigin,
       'https://example.test',
     );
-    assert.deepEqual(endpoint.calls, []);
+    assert.equal(
+      endpoint.calls.some((call) => call.method === 'view.command'),
+      false,
+    );
     endpoint.failSites = false;
     endpoint.calls = [];
     control.tenants.get(user.tenantId).reconciliation.retryAt = 0;
@@ -821,7 +845,8 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
       true,
     );
     assert.deepEqual(control.viewers.productState(tenantId).workspace.sites[origin], { tabletUa: true });
-    const { state } = await control.operations.productAction(
+    const { state } = await observedProductAction(
+      control,
       tenantId,
       { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: origin + '/a' },
       'lease',
@@ -837,13 +862,14 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
       } as const,
     };
     endpoint.calls = [];
-    const receipt = await control.operations.submitOperation(tenantId, keyboard, 'lease');
+    const receipt = await observedOperation(control, tenantId, keyboard, 'lease');
     assert.equal(receipt.status, 'committed');
     assert.equal(receipt.application, undefined);
     assert.deepEqual(control.viewers.productState(tenantId).workspace.sites, {
       [origin]: { tabletUa: true },
     });
-    await control.operations.productAction(
+    await observedProductAction(
+      control,
       tenantId,
       { type: 'site.set', origin: 'https://EXAMPLE.test:443/path', tabletUa: true, tabId },
       'lease',
@@ -855,7 +881,8 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
     );
 
     endpoint.calls = [];
-    await control.operations.productAction(
+    await observedProductAction(
+      control,
       tenantId,
       { type: 'site.set', origin, tabletUa: false, tabId },
       'lease',
@@ -871,7 +898,8 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
     );
 
     endpoint.calls = [];
-    await control.operations.productAction(
+    await observedProductAction(
+      control,
       tenantId,
       { type: 'site.set', origin, tabletUa: true, tabId },
       'lease',
@@ -888,7 +916,8 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
     );
 
     endpoint.calls = [];
-    await control.operations.productAction(
+    await observedProductAction(
+      control,
       tenantId,
       { type: 'site.set', origin, tabletUa: true, tabId },
       'lease',
@@ -903,7 +932,8 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
       { tabletUa: true, unknown: true },
     ]) {
       await assert.rejects(
-        control.operations.productAction(
+        observedProductAction(
+          control,
           tenantId,
           { type: 'site.set', origin, ...patch } as ProductAction,
           'lease',
@@ -912,7 +942,8 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
       );
     }
     await assert.rejects(
-      control.operations.productAction(
+      observedProductAction(
+        control,
         tenantId,
         { type: 'site.set', origin: unrelated, tabletUa: false, tabId },
         'lease',
@@ -920,7 +951,8 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
       (error: any) => error.code === 'invalid_request',
     );
     await assert.rejects(
-      control.operations.productAction(
+      observedProductAction(
+        control,
         tenantId,
         { type: 'site.set', origin: 'file:///tmp/a', tabletUa: true },
         'lease',
@@ -931,7 +963,8 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
 
     for (const autoKeyboard of ['true', 1, null]) {
       await assert.rejects(
-        control.operations.productAction(
+        observedProductAction(
+          control,
           tenantId,
           {
             type: 'settings.update',
@@ -978,7 +1011,8 @@ test('popup adoption persists identity first; background stays unfocused, new wi
       true,
     );
     const initial = (
-        await control.operations.productAction(
+        await observedProductAction(
+          control,
           user.tenantId,
           { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'https://opener.test' },
           'lease',
@@ -1079,7 +1113,8 @@ test('expired pending popup is never URL-recreated; closing its product tab does
       true,
     );
     const opener = (
-      await control.operations.productAction(
+      await observedProductAction(
+        control,
         user.tenantId,
         { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
         'lease',
@@ -1113,7 +1148,7 @@ test('expired pending popup is never URL-recreated; closing its product tab does
       endpoint.calls.filter((c) => c.method === 'view.created' || c.method === 'view.adopted').length,
       0,
     );
-    await control.operations.productAction(user.tenantId, { type: 'tab.close', tabId: pending.id }, 'lease');
+    await observedProductAction(control, user.tenantId, { type: 'tab.close', tabId: pending.id }, 'lease');
     popup.status = 'pending';
     await control.reconciler.tick();
     assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 1);
@@ -1135,7 +1170,8 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
       true,
     );
     const tab = (
-      await control.operations.productAction(
+      await observedProductAction(
+        control,
         user.tenantId,
         { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
         'lease',
@@ -1169,13 +1205,14 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
     );
     const other = await registerUser(store, 'another-user', 'password123');
     await assert.rejects(
-      control.operations.productAction(other.tenantId, {
+      observedProductAction(control, other.tenantId, {
         type: 'page.reply',
         dialogId: dialog.id,
         reply: { kind: 'dialog', accept: true },
       }),
     );
-    await control.operations.productAction(
+    await observedProductAction(
+      control,
       user.tenantId,
       { type: 'page.reply', dialogId: dialog.id, reply: { kind: 'dialog', accept: false, text: '取消' } },
       'lease',
@@ -1184,7 +1221,8 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
     assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 1);
     assert.equal(endpoint.calls.find((c) => c.method === 'view.page.reply')!.args.document, '2');
     await assert.rejects(
-      control.operations.productAction(
+      observedProductAction(
+        control,
         user.tenantId,
         { type: 'page.reply', dialogId: dialog.id, reply: { kind: 'dialog', accept: true } },
         'lease',
@@ -1196,7 +1234,8 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
     const old = control.viewers.productState(user.tenantId).pageDialogs[0];
     view.document = '3';
     await assert.rejects(
-      control.operations.productAction(
+      observedProductAction(
+        control,
         user.tenantId,
         { type: 'page.reply', dialogId: old.id, reply: { kind: 'dialog', accept: true } },
         'lease',
@@ -1207,7 +1246,8 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
     const previousBrowser = control.viewers.productState(user.tenantId).pageDialogs[0];
     endpoint.browserPid++;
     await assert.rejects(
-      control.operations.productAction(
+      observedProductAction(
+        control,
         user.tenantId,
         { type: 'page.reply', dialogId: previousBrowser.id, reply: { kind: 'dialog', accept: true } },
         'lease',
@@ -1246,11 +1286,13 @@ test('product media policy precedes ensure and feedback only updates diagnostic 
       { identity: 'test-account', valid: () => true },
       true,
     );
+    await control.reconciler.reconcileProduct(user.tenantId);
     const firstPolicy = endpoint.calls.findIndex((c) => c.method === 'policy.media.applied'),
       firstEnsure = endpoint.calls.findIndex((c) => c.method === 'browser.started');
     assert.ok(firstPolicy >= 0 && firstPolicy < firstEnsure);
     const ws = (
-      await control.operations.productAction(
+      await observedProductAction(
+        control,
         user.tenantId,
         { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
         'lease',
@@ -1311,7 +1353,8 @@ test('quality preference updates only WebRTC degradation policy while client dis
       true,
     );
     const ws = (
-      await control.operations.productAction(
+      await observedProductAction(
+        control,
         user.tenantId,
         { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
         'lease',
@@ -1337,7 +1380,8 @@ test('quality preference updates only WebRTC degradation policy while client dis
       ['smooth', 'maintain-framerate'],
     ] as const) {
       endpoint.calls = [];
-      const result = await control.operations.productAction(
+      const result = await observedProductAction(
+        control,
         user.tenantId,
         { type: 'settings.update', settings: { workspace: { qualityPreference } } },
         'lease',
@@ -1370,7 +1414,8 @@ test('audio channel changes reapply the audio policy without replacing RTC', asy
       { identity: 'test-account', valid: () => true },
       true,
     );
-    await control.operations.productAction(
+    await observedProductAction(
+      control,
       user.tenantId,
       { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
       'lease',
@@ -1382,7 +1427,8 @@ test('audio channel changes reapply the audio policy without replacing RTC', asy
       [false, true],
     ]) {
       endpoint.calls = [];
-      const result = await control.operations.productAction(
+      const result = await observedProductAction(
+        control,
         user.tenantId,
         { type: 'settings.update', settings: { workspace: { audioChannels: { left, right } } } },
         'lease',
@@ -1418,6 +1464,7 @@ test('explicit no-peer media policy clears the previous applied diagnostic', asy
       { identity: 'test-account', valid: () => true },
       true,
     );
+    await control.reconciler.reconcileProduct(user.tenantId);
     assert.deepEqual(control.viewers.productState(user.tenantId).quality.applied, applied);
     applied = null;
     await control.reconciler.tick();
@@ -1501,7 +1548,12 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     );
     const a = connect(socketUrl, cookieA);
     peers.push(a);
-    await a.wait((m) => m.type === 'state');
+    const initialA = await a.wait((m) => m.type === 'state');
+    const envelope = (operationGeneration: string, action: ProductAction) => ({
+      operationId: randomUUID(),
+      operationGeneration,
+      action,
+    });
     assert.deepEqual(
       (
         await a.request('create', 'admin.createUser', { username: 'bob', password: 'password123' })
@@ -1515,25 +1567,20 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
       (await post('/api/actions', { type: 'tab.create', url: 'about:blank' }, cookieA)).status,
       404,
     );
-    assert.equal(
-      (
-        await a.request('1', 'action', {
-          type: 'window.open',
-          appId: 'browser',
-          placement: { mode: 'space' },
-          url: 'about:blank',
-        })
-      ).error.code,
-      'invalid_request',
+    const opened = await a.request(
+      '1',
+      'operation.submit',
+      envelope(initialA.state.operationGeneration, {
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'about:blank',
+      }),
     );
-    const stateA = (
-        await control.operations.productAction(store.accounts.authenticated(cookieA.split('=')[1])!, {
-          type: 'window.open',
-          appId: 'browser',
-          placement: { mode: 'space' },
-          url: 'about:blank',
-        })
-      ).state,
+    assert.equal(opened.result.status, 'committed');
+    const tenantA = store.accounts.authenticated(cookieA.split('=')[1])!;
+    await control.reconciler.reconcileProduct(tenantA);
+    const stateA = control.viewers.productState(tenantA),
       win = stateA.workspace.windows[0],
       tab = stateA.workspace.tabs[0];
     const b = connect(socketUrl, cookieB);
@@ -1552,12 +1599,22 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
         ).error.code,
         'forbidden',
       );
-    const foreign = await b.request('2', 'action', { type: 'tab.activate', tabId: tab.id });
-    assert.equal(foreign.error.code, 'invalid_request');
-    const scope = await b.request('3', 'action', {
-      type: 'window.open',
-      appId: 'browser',
-      placement: { mode: 'space' },
+    const foreign = await b.request(
+      '2',
+      'operation.submit',
+      envelope(initialB.state.operationGeneration, {
+        type: 'tab.activate',
+        tabId: tab.id,
+      }),
+    );
+    assert.equal(foreign.result.status, 'failed');
+    assert.equal(foreign.result.error.code, 'not_found');
+    const scope = await b.request('3', 'operation.submit', {
+      ...envelope(initialB.state.operationGeneration, {
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+      }),
       tenantId: stateA.workspace.tenantId,
     });
     assert.equal(scope.error.code, 'invalid_request');
@@ -1583,7 +1640,7 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     await replacement.request('unlock', 'auth.verify', { method: 'password', secret: 'password123' });
     await replacement.wait((m) => m.type === 'state');
     await assert.rejects(
-      requestViewer(control, stateA.workspace.tenantId, 'stale-lease', 'action', {
+      submitViewerAction(control, stateA.workspace.tenantId, 'stale-lease', {
         type: 'window.open',
         appId: 'browser',
         placement: { mode: 'space' },
@@ -1729,7 +1786,8 @@ test('lease authentication is checked inside queued operations and late old clos
       release = resolve;
     });
     const blocked = control.tenants.serial(user.tenantId, () => gate);
-    const pending = control.operations.productAction(
+    const pending = observedProductAction(
+      control,
       user.tenantId,
       { type: 'window.open', appId: 'browser', placement: { mode: 'space' } },
       'old',
@@ -1768,7 +1826,8 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
       true,
     );
     const state = (
-      await control.operations.productAction(
+      await observedProductAction(
+        control,
         user.tenantId,
         { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
         'lease',
@@ -1802,7 +1861,7 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
     assert.equal(control.viewers.productState(user.tenantId).quality.resourceLimitation, null);
     // An empty window may receive geometry before it has a tab. A later tab
     // creation must surface a limitation rather than break state serialization.
-    await control.operations.productAction(user.tenantId, { type: 'tab.close', tabId: tab.id }, 'lease');
+    await observedProductAction(control, user.tenantId, { type: 'tab.close', tabId: tab.id }, 'lease');
     await requestViewer(control, user.tenantId, 'lease', 'viewport', {
       devicePixelRatio: 1,
       windows: [
@@ -1818,7 +1877,8 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
     });
     endpoint.calls = [];
     const limited = (
-      await control.operations.productAction(
+      await observedProductAction(
+        control,
         user.tenantId,
         { type: 'tab.create', windowId: w.id, url: 'about:blank' },
         'lease',
@@ -1851,7 +1911,7 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
     });
     assert.equal(control.viewers.productState(user.tenantId).quality.resourceLimitation, null);
     assert.equal(control.viewers.productState(user.tenantId).endpointError, null);
-    await control.operations.productAction(user.tenantId, { type: 'window.close', windowId: w.id }, 'lease');
+    await observedProductAction(control, user.tenantId, { type: 'window.close', windowId: w.id }, 'lease');
     assert.equal(control.viewers.productState(user.tenantId).workspace.windows.length, 0);
   } finally {
     await control.viewers.detachViewer(user.tenantId, 'lease');
@@ -1871,7 +1931,8 @@ test('start tabs stay local, first navigation ensures the real target, and expli
       true,
     );
     let state = (
-      await control.operations.productAction(
+      await observedProductAction(
+        control,
         user.tenantId,
         { type: 'window.open', appId: 'browser', placement: { mode: 'space' } },
         'lease',
@@ -1902,7 +1963,8 @@ test('start tabs stay local, first navigation ensures the real target, and expli
       endpoint.calls.some((c) => c.method === 'view.created'),
       false,
     );
-    await control.operations.productAction(
+    await observedProductAction(
+      control,
       user.tenantId,
       { type: 'tab.command', tabId: tab.id, command: 'reload' },
       'lease',
@@ -1911,13 +1973,15 @@ test('start tabs stay local, first navigation ensures the real target, and expli
       endpoint.calls.some((c) => c.method === 'view.command'),
       false,
     );
-    await control.operations.productAction(
+    await observedProductAction(
+      control,
       user.tenantId,
       { type: 'settings.update', settings: { browser: { searchEngine: 'baidu' } } },
       'lease',
     );
     state = (
-      await control.operations.productAction(
+      await observedProductAction(
+        control,
         user.tenantId,
         { type: 'tab.navigate', tabId: tab.id, url: '中文 & hello' },
         'lease',
@@ -1934,7 +1998,8 @@ test('start tabs stay local, first navigation ensures the real target, and expli
       true,
     );
     const blank = (
-      await control.operations.productAction(
+      await observedProductAction(
+        control,
         user.tenantId,
         { type: 'tab.create', windowId: win.id, url: 'about:blank' },
         'lease',
@@ -1943,13 +2008,14 @@ test('start tabs stay local, first navigation ensures the real target, and expli
     assert.equal(blank.kind, 'remote');
     assert.equal(blank.url, 'about:blank');
     const start = (
-      await control.operations.productAction(user.tenantId, { type: 'tab.create', windowId: win.id }, 'lease')
+      await observedProductAction(control, user.tenantId, { type: 'tab.create', windowId: win.id }, 'lease')
     ).state.workspace.tabs[2];
     const closeCount = endpoint.calls.filter((c) => c.method === 'view.close').length;
-    await control.operations.productAction(user.tenantId, { type: 'tab.close', tabId: start.id }, 'lease');
+    await observedProductAction(control, user.tenantId, { type: 'tab.close', tabId: start.id }, 'lease');
     assert.equal(endpoint.calls.filter((c) => c.method === 'view.close').length, closeCount);
     await assert.rejects(
-      control.operations.productAction(
+      observedProductAction(
+        control,
         user.tenantId,
         { type: 'settings.update', settings: { browser: { searchEngine: 'unsafe' } } as any },
         'lease',
@@ -1974,7 +2040,8 @@ test('native file chooser anchor exposes only viewport bounds bound to the pendi
       { identity: 'test-account', valid: () => true },
       true,
     );
-    const { state } = await control.operations.productAction(
+    const { state } = await observedProductAction(
+      control,
       tenant,
       { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'https://a.test/' },
       lease,
@@ -2026,7 +2093,8 @@ test('viewport accepts all sixteen workspace windows and rejects a seventeenth o
     );
     let state = control.viewers.productState(user.tenantId);
     for (let i = 0; i < 16; i++) {
-      ({ state } = await control.operations.productAction(
+      ({ state } = await observedProductAction(
+        control,
         user.tenantId,
         { type: 'window.open', appId: 'files', placement: { mode: 'space' } },
         'lease',
@@ -2076,7 +2144,8 @@ test('viewport revisions reject stale occlusion without changing stable geometry
       { identity: 'test-account', valid: () => true },
       true,
     );
-    const { state } = await control.operations.productAction(
+    const { state } = await observedProductAction(
+      control,
       user.tenantId,
       { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
       'lease',

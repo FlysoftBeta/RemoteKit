@@ -10,6 +10,7 @@
 namespace remotekit {
 class PeerController {
  public:
+  enum class Role { kBrowser, kService };
   enum class State { kNone, kNegotiating, kConnected, kClosing };
   struct Hooks {
     std::function<void(uint64_t, uint64_t)> bind;
@@ -24,8 +25,11 @@ class PeerController {
     std::function<void(uint64_t)> keyframe, destroy_encoder;
     Json log_fields = Json::object();
   };
-  PeerController(media::Sdk& sdk, const RuntimeOptions& options, Hooks hooks)
-      : sdk_(sdk), options_(options), hooks_(std::move(hooks)) {}
+  PeerController(media::Sdk& sdk,
+                 const RuntimeOptions& options,
+                 Hooks hooks,
+                 Role role = Role::kBrowser)
+      : sdk_(sdk), options_(options), hooks_(std::move(hooks)), role_(role) {}
   ~PeerController();
   Result<Json> Offer(const Json& request,
                      uint64_t generation,
@@ -60,6 +64,7 @@ class PeerController {
   media::Sdk& sdk_;
   const RuntimeOptions& options_;
   Hooks hooks_;
+  const Role role_;
   std::atomic<uint64_t> peer_{0}, management_generation_{0};
   std::atomic<State> state_{State::kNone};
   std::atomic<bool> data_open_{false}, av_sync_{false};

@@ -19,6 +19,7 @@ export interface AuthState {
   locked: boolean;
   epoch: number;
   peerEpoch: number;
+  serviceEpoch: number;
   methods: { password: true; pin: boolean; face: boolean };
   settings: AuthSettings;
   face: {

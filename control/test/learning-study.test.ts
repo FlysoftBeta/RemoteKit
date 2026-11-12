@@ -126,6 +126,9 @@ function fixture() {
   const derived = new Map<string, string>();
   let puts = 0;
   const objects = {
+    available() {
+      return true;
+    },
     require() {},
     checkQuota() {},
     derived(id: string) {

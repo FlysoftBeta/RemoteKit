@@ -107,26 +107,6 @@ export class SessionEvents {
             );
             break;
           }
-          case 'client.action': {
-            const runtime = this.context.tenants.get(event.tenantId);
-            const observed = endpoint.observation(event.tenantId);
-            const valid =
-              observed?.browserIncarnation === event.browserIncarnation &&
-              observed.authorization.connectionId === event.body.connectionId &&
-              observed.authorization.epoch === event.body.authEpoch &&
-              observed.authorization.unlocked &&
-              event.body.leaseId === runtime.viewer?.id &&
-              event.body.connectionId === runtime.connectionId &&
-              event.body.authEpoch === runtime.viewer?.security.peer?.appliedEpoch &&
-              runtime.viewer?.security.locked === false;
-            if (valid)
-              await this.services.operations.handleEndpointAction({
-                ...event.body,
-                tenantId: event.tenantId,
-              });
-            store.transaction(() => settle(valid ? 'receipt-committed' : 'authorization-retired'));
-            break;
-          }
         }
       }
       store.transaction(() => store.coordination.advance(event));

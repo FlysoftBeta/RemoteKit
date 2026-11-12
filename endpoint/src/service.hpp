@@ -4,6 +4,7 @@
 #include "objects/service.hpp"
 #include "diagnostics/node_metrics.hpp"
 #include "session/execution.hpp"
+#include "rtc/service_peer.hpp"
 #include <map>
 #include <mutex>
 #include <atomic>
@@ -53,6 +54,7 @@ class Service {
     std::shared_ptr<SessionCoordinator> coordinator;
   };
   std::map<std::string, ManagedSession> sessions_;
+  std::map<std::string, std::pair<std::string, std::shared_ptr<ServicePeer>>> service_peers_;
   std::map<std::string, std::shared_ptr<RpcResults>> node_results_;
   std::atomic<bool> failed_{false};
 };

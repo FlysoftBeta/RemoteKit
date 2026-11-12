@@ -92,6 +92,12 @@ export function FilePreview(
   },
 ) {
   const { rpc, online } = useLibrary();
+  if (!props.entry.available)
+    return (
+      <div className="file-plain-preview" role="status">
+        文件暂不可用，恢复后自动继续
+      </div>
+    );
   return props.entry.kind === 'file' ? (
     <PreviewContent {...props} entry={props.entry} rpc={rpc} online={online} />
   ) : null;

@@ -87,7 +87,8 @@ export async function openLauncherItem({
         .filter((win) => win.appId === 'files')
         .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
       if (win) {
-        await call('window.state', {
+        await action({
+          type: 'window.state',
           windowId: win.id,
           state: {
             ...win.state,
@@ -115,13 +116,16 @@ export function OverlayHost({
   state: ProductState;
   media: ViewerSession;
   stage: Pick<WorkspaceStage, 'shell' | 'snapshots' | 'call' | 'action'>;
-  controls: Pick<SystemControls, 'productReady' | 'lock' | 'audio' | 'sync' | 'browserFullscreen'>;
+  controls: Pick<
+    SystemControls,
+    'shellReady' | 'browserReady' | 'lock' | 'audio' | 'sync' | 'browserFullscreen'
+  >;
   overlays: WorkspaceOverlays;
   foreground: ReturnType<typeof selectVisibility>['foreground'];
   readAnnouncement(id: string): Promise<unknown>;
 }) {
   const { shell, snapshots, call, action } = stage;
-  const { productReady, lock } = controls;
+  const { shellReady, browserReady, lock } = controls;
   const workspace = state.workspace;
   const activeSpace = workspace.spaces.find((space) => space.id === workspace.activeSpaceId);
   const pending = workspace.pendingClose;
@@ -149,14 +153,14 @@ export function OverlayHost({
     openLauncherItem({ item, placement, reuseExisting, state, action, call, media });
   return (
     <>
-      {productReady && (
+      {browserReady && (
         <PageDialogs
           state={state}
           action={action}
           activeId={foreground?.kind === 'page' ? foreground.id : null}
         />
       )}
-      {productReady && !overlays.launcherOpen && (
+      {shellReady && !overlays.launcherOpen && (
         <AnnouncementDialog announcements={state.announcements} read={readAnnouncement} />
       )}
       {overlays.launcherVisible && (
@@ -172,7 +176,7 @@ export function OverlayHost({
           report={report}
           call={call}
           exiting={!overlays.launcherOpen}
-          online={productReady}
+          online={shellReady}
           close={() => overlays.closeLauncher()}
           navigate={async (value, placement) => {
             await action(launcherNavigation(value, placement ?? launcherPlacement(workspace)));
@@ -186,9 +190,9 @@ export function OverlayHost({
         />
       )}
       <Dialog
-        open={productReady && !!pending && !pending.awaiting}
+        open={browserReady && !!pending && !pending.awaiting}
         onClose={() =>
-          productReady &&
+          browserReady &&
           pending &&
           void action({
             type: 'tab.close',

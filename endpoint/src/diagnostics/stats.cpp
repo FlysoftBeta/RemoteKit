@@ -16,7 +16,6 @@ using ConnectionPhase = ConnectionTiming::ConnectionPhase;
 using Event = RtcEvent;
 Json Diagnostics::Stats() {
   auto value = registry.Snapshot();
-  value["face"] = face.Stats();
   const auto pipeline_state = pipeline.Snapshot();
   value["mediaPolicy"] = pipeline_state.at("mediaPolicy");
   const auto slots = output.Slots().Stats();

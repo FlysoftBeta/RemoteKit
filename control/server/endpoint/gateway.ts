@@ -10,7 +10,7 @@ import {
 import { rpcId } from './rpc-results';
 import { log } from '../log';
 import { RemoteKitError, isRemoteKitError, endpointError as convertEndpointError } from '../../shared/errors';
-import type { Asset, SelectionState } from '../../shared/file-library';
+import type { SelectionState } from '../../shared/file-library';
 import type {
   BrowserIdentity,
   ImportChunk,
@@ -21,10 +21,7 @@ import type { NodeRegistry } from '../cluster/node-link';
 import type { Placement } from '../cluster/placement';
 import type {
   Accepted,
-  ActionResult,
   EndpointSnapshot,
-  FaceBinding,
-  FaceStatusReply,
   LifecycleRequest,
   LogWindow,
   LogWindowRequest,
@@ -50,10 +47,6 @@ export class EndpointSnapshotError extends RemoteKitError {
   }
 }
 export class EndpointGateway {
-  private readonly descriptions = new Map<string, Set<string>>();
-  descriptionRequests(tenant: string) {
-    return [...(this.descriptions.get(tenant) ?? [])];
-  }
   private desiredSource?: (tenant: string) => SessionDesired;
   private readonly sent = new Map<string, string>();
   constructor(
@@ -200,7 +193,6 @@ export class EndpointGateway {
   }
   forget(tenant: string) {
     this.sent.delete(tenant);
-    this.descriptions.delete(tenant);
   }
   isPlacedOn(tenant: string, nodeId: string) {
     return this.placement.peek(tenant)?.nodeId === nodeId;
@@ -340,25 +332,6 @@ export class EndpointGateway {
     if (node?.state.state !== 'ready' || node.state.connectionEpoch !== event.connectionEpoch) return;
     await node.publish(event);
   }
-  async describeAsset(tenant: string, args: { assetId: string }): Promise<Asset> {
-    let requested = this.descriptions.get(tenant);
-    if (!requested) this.descriptions.set(tenant, (requested = new Set()));
-    if (requested.size >= 256 && !requested.has(args.assetId))
-      throw new RemoteKitError('busy', 'Too many asset descriptions');
-    requested.add(args.assetId);
-    try {
-      await this.synchronize(tenant);
-      const value = await this.waitObserved(tenant, (observation) =>
-        observation.library.descriptions.some((entry) => entry.assetId === args.assetId),
-      );
-      const description = value.library.descriptions.find((entry) => entry.assetId === args.assetId)!;
-      if (description.error) throw endpointError(description.error);
-      return description.asset;
-    } finally {
-      requested.delete(args.assetId);
-      if (!requested.size) this.descriptions.delete(tenant);
-    }
-  }
   readLog(tenant: string, request: LogWindowRequest): Promise<LogWindow> {
     return this.invoke<LogWindow>('session.logs.read', tenant, request);
   }
@@ -373,9 +346,6 @@ export class EndpointGateway {
   }
   async closeRtc(tenant: string, args: { connectionId: string }): Promise<Accepted> {
     return this.invoke<Accepted>('rtc.close', tenant, args);
-  }
-  async actionResult(tenant: string, args: ActionResult): Promise<Accepted> {
-    return this.invoke<Accepted>('rtc.actionResult', tenant, args);
   }
   async navigate(
     tenant: string,
@@ -415,21 +385,6 @@ export class EndpointGateway {
   }
   async lifecycle(tenant: string, args: LifecycleRequest): Promise<Accepted> {
     return this.invoke<Accepted>('view.lifecycle', tenant, args);
-  }
-  async faceCapabilities(tenant: string): Promise<{ available: boolean; modelVersion?: string }> {
-    return this.invoke<{ available: boolean; modelVersion?: string }>('auth.face.capabilities', tenant);
-  }
-  async cancelFace(tenant: string, args: FaceBinding): Promise<Accepted> {
-    return this.invoke<Accepted>('auth.face.cancel', tenant, args);
-  }
-  async beginFace(
-    tenant: string,
-    args: FaceBinding & { purpose: string; timeoutMs: number; template?: number[] },
-  ): Promise<Accepted> {
-    return this.invoke<Accepted>('auth.face.begin', tenant, args);
-  }
-  async faceStatus(tenant: string, args: FaceBinding): Promise<FaceStatusReply> {
-    return this.invoke<FaceStatusReply>('auth.face.status', tenant, args);
   }
   async prepareSelection(tenant: string, args: PrepareSelection): Promise<Accepted> {
     return this.invoke<Accepted>('session.library.prepare', tenant, args);

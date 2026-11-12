@@ -14,8 +14,6 @@ Result<DataRouter::Kind> DataRouter::Classify(const Json& message) {
   if (!message.is_object() || !message.contains("type") || !message["type"].is_string())
     return Error{ErrorCode::kInvalidRequest, "invalid DataChannel envelope"};
   const auto& type = message["type"].get_ref<const std::string&>();
-  if (type == "product.action")
-    return Kind::kProduct;
   if (type == "media.presentation" || type == "presentation.ready")
     return Kind::kPresentation;
   if (type == "keyboard.layout") {
@@ -214,9 +212,6 @@ void DataRouter::Drain() {
 void DataRouter::Dispatch(const Message& message) {
   const auto& event = message.event;
   switch (message.kind) {
-    case Kind::kProduct:
-      hooks_.product(event);
-      break;
     case Kind::kPresentation:
       hooks_.presentation(event);
       break;

@@ -40,7 +40,7 @@ export function WindowFrame({
   state,
   transport,
   action: dispatchAction,
-  online,
+  shellReady,
   appContent,
   fileChooser,
   call,
@@ -54,7 +54,7 @@ export function WindowFrame({
   state: ProductState;
   transport: ViewerSession;
   action: Action;
-  online: boolean;
+  shellReady: boolean;
   fileChooser?: React.ReactNode;
   appContent: (
     appId: 'settings' | 'admin',
@@ -91,6 +91,7 @@ export function WindowFrame({
   const failureOperation =
     windowFailure || receiptFailure ? '完成页面操作' : (surfaceFailure?.operation ?? '完成页面操作');
   const productLocked = useViewerSessionSelector(transport, (snapshot) => snapshot.authorization.locked);
+  const browserReady = useViewerSessionSelector(transport, (snapshot) => snapshot.authorization.browserReady);
   const presentationError = useViewerSessionSelector(transport, (snapshot) => snapshot.presentation.error);
   const drop = useDropTarget('window', win.id);
   const dragging = useWindowDragging();
@@ -101,7 +102,7 @@ export function WindowFrame({
     focused =
       state.workspace.spaces.find((space) => space.id === state.workspace.activeSpaceId)?.focusedWindowId ===
       win.id;
-  const [viewState, onState] = useWindowState(win, call, report);
+  const [viewState, onState] = useWindowState(win, action, report);
   const app = state.workspace.apps.find((app) => `web:${app.id}` === win.appId);
   const browser = win.appId === 'browser';
   const local = isLocalApp(win.appId);
@@ -109,7 +110,7 @@ export function WindowFrame({
     ? BUILTIN_APP_TITLES[win.appId]
     : (app?.name ?? BUILTIN_APP_TITLES.browser);
   const creatingTab = win.id.startsWith('pending-') || !!win.activeTabId?.startsWith('pending-');
-  const navigationReady = online && !creatingTab;
+  const navigationReady = shellReady && !creatingTab;
   const content = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const node = content.current;
@@ -125,10 +126,10 @@ export function WindowFrame({
   const signInHost = useMemo(
     () => ({
       transport,
-      keyboardActive: online && (focused || fullscreen) && visible,
+      keyboardActive: browserReady && (focused || fullscreen) && visible,
       measure: (width: number, height: number) => onGeometry(win.id, width, height),
     }),
-    [transport, online, focused, fullscreen, visible, onGeometry, win.id, action, report],
+    [transport, browserReady, focused, fullscreen, visible, onGeometry, win.id, action, report],
   );
   let origin = '';
   try {
@@ -138,7 +139,7 @@ export function WindowFrame({
     diagnostics.record('window-frame', error);
   }
   const activate = () => {
-    if (!focused && online) void action({ type: 'window.focus', windowId: win.id }).catch(report);
+    if (!focused && shellReady) void action({ type: 'window.focus', windowId: win.id }).catch(report);
   };
   const navigation = useBrowserNavigation({
     win,
@@ -146,7 +147,7 @@ export function WindowFrame({
     active,
     focused: focused && !local,
     fullscreen,
-    online,
+    online: shellReady,
     navigationReady,
     action,
     report,
@@ -156,7 +157,7 @@ export function WindowFrame({
     (dialog) => dialog.windowId === win.id && dialog.tabId === active?.id,
   );
   const { submit } = navigation;
-  const handle = <WindowHandle win={win} state={state} online={online} action={action} report={report} />;
+  const handle = <WindowHandle win={win} state={state} online={shellReady} action={action} report={report} />;
   return (
     <section
       ref={drop.ref}
@@ -199,7 +200,7 @@ export function WindowFrame({
                     tab={active?.signIn ? active : undefined}
                     call={call}
                     action={action}
-                    online={online}
+                    online={shellReady}
                     transport={transport}
                   />
                 </Suspense>
@@ -217,7 +218,7 @@ export function WindowFrame({
               state={state}
               active={active}
               tabs={tabs}
-              online={online}
+              online={shellReady}
               creatingTab={creatingTab}
               navigationReady={navigationReady}
               origin={origin}
@@ -233,7 +234,7 @@ export function WindowFrame({
               app={app}
               title={title}
               origin={origin}
-              online={online}
+              online={shellReady}
               handle={handle}
               run={navigation.run}
               openMore={menus.openMore}
@@ -245,9 +246,11 @@ export function WindowFrame({
               error={failure}
               context={{ operation: failureOperation, scope: 'surface', targetId: win.id }}
             />
-            {online && prompt && (prompt.kind === 'permission' || prompt.kind === 'protocol_handler') && (
-              <PermissionPrompt key={prompt.id} dialog={prompt} action={action} />
-            )}
+            {browserReady &&
+              prompt &&
+              (prompt.kind === 'permission' || prompt.kind === 'protocol_handler') && (
+                <PermissionPrompt key={prompt.id} dialog={prompt} action={action} />
+              )}
             {!active || active.kind === 'start' ? (
               <>
                 <StartPage
@@ -270,7 +273,7 @@ export function WindowFrame({
                   transport={transport}
                   viewId={active.webviewId}
                   overlay={state.workspace.settings.workspace.showStats ?? false}
-                  keyboardActive={online && (focused || fullscreen) && visible}
+                  keyboardActive={browserReady && (focused || fullscreen) && visible}
                   autoKeyboard={state.workspace.settings.workspace.autoKeyboard}
                   onFocus={activate}
                 />
@@ -308,7 +311,7 @@ export function WindowFrame({
             <IdleKeepAliveNotice
               tenant={state.workspace.tenantId}
               tab={active}
-              visible={visible && online && !productLocked}
+              visible={visible && shellReady && !productLocked}
               acknowledge={(command) => {
                 void action(command).catch(report);
               }}
@@ -320,7 +323,7 @@ export function WindowFrame({
             active={active}
             browser={browser}
             origin={origin}
-            online={online}
+            online={shellReady}
             action={action}
             call={call}
             transport={transport}

@@ -108,7 +108,7 @@ export function DocumentTab({
         {entry.kind === 'file' && (
           <Tool
             title={inBasket ? '从文件篮移除' : '加入文件篮'}
-            disabled={!online || busy || (!inBasket && basket.length >= 64)}
+            disabled={!online || busy || (!inBasket && (!entry.available || basket.length >= 64))}
             onClick={() => void toggleBasket(entry)}
           >
             <Badge variant="dot" color="primary" invisible={!inBasket}>

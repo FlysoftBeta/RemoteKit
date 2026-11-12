@@ -35,10 +35,11 @@ POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字
 | 方法 | 用途 |
 |---|---|
 | `viewport` | devicePixelRatio、refreshHz?、windows（最多 16 项，每项 windowId、稳定 width/height、visible、occludedBottom、occlusionRevision）；遮挡不进入 atlas 计划 |
-| `rtc.offer` / `rtc.ice` / `rtc.close` | 信令（trickle） |
+| `rtc.offer` / `rtc.ice` / `rtc.close` | Session peer 信令（trickle） |
+| `service.offer` / `service.ice` / `service.close` | service peer 信令（只有 DataChannel；Control 选节点，见[Control · 连接](control-plane.md#连接)） |
+| `operation.submit` | 产品操作 `{operationId, operationGeneration, action}`，回复收据（见[Control · 操作](control-plane.md#操作)） |
 | `clock.ping` | Control 时钟（产品新鲜度） |
 | `operation.status` | 查询操作收据 |
-| `settings.update` | 保存设置 |
 | `feedback` | 诊断用媒体反馈 |
 | `auth.get/lock/verify/settings/password`、`auth.face.begin/cancel/remove` | 锁屏与凭据 |
 | `admin.overview/users/storage/nodes/diagnostics/announcements` | 管理员：各分区数据 |
@@ -52,11 +53,16 @@ POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字
 | `clipboard.get` / `clipboard.set` | `{}` → `{revision,text}` / `{text}` → `{revision}`，当前用户剪贴板 |
 | `diagnostics.start/sample/stop/status` | 诊断收集 |
 
-其余产品动作只走 DataChannel，WS 不提供旁路。
+产品操作只有 `operation.submit` 一条路径（设置、窗口视图状态也是）；DataChannel 上没有产品动作。
 
 ## Viewer ↔ Endpoint（WebRTC）
 
-一个 PeerConnection：H.264 视频 track（atlas）、Opus 立体声音频 track（客户端 recvonly），以及两条可靠有序 DataChannel：`remotekit`（JSON）与 `remotekit-auth`（人脸图像）。产品消息双向附带 `authEpoch`，接收和执行时都拒绝旧代次，重试保留原代次。
+两条 PeerConnection（职责见[Control · 连接](control-plane.md#连接)）：
+
+- **Session peer**：H.264 视频 track（atlas）、Opus 立体声音频 track（客户端 recvonly）、可靠有序 DataChannel `remotekit`（JSON）。
+- **service peer**：没有媒体；DataChannel `remotekit`（JSON，文件服务）与 `remotekit-auth`（人脸图像）。
+
+消息双向附带该 peer 的 `authEpoch`，接收和执行时都拒绝旧代次，重试保留原代次。下表除 `files.request/result` 外都在 Session peer 上。
 
 DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`；通用失败为 `{type:"error", error:{…}}`，auth 通道相同。
 
@@ -74,7 +80,6 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 | `input.selection` | revision、页面身份（session/id/instance/document）或 null；outputGeneration/layoutEpoch；handles:{start,end,insertion}（各为 null 或根 DIP 的 {x,y,lineHeight}）；`menu`：null 或 {id、根 DIP 锚点 x/y/width/height、handleHeight、commands（cut/copy/paste/selectAll 中可用者，固定顺序）、more} |
 | `view.viewport` | viewId、session/instance/document、outputGeneration、pageHeight（DIP）、occlusionRevision；可靠去重反馈，不改变呈现 ready |
 | `input.contextMenu` | revision、页面身份或 null；`menu`：null 或 {id、根 DIP 按下点 x/y、source mouse/touch/keyboard、link {url,text}?、image {src}?、selection?、editable {undo,redo,cut,copy,paste,selectAll}?} |
-| `product.result` | `{operationId, operationGeneration, connectionId, result:收据}`；失败只在收据里表达（`status:"failed"` + `error`，或 `status:"unknown"`） |
 | `files.result` | 文件 RPC 结果 |
 | `clock.pong` | serverTimeMs、serverMonotonicMs |
 | `stats` | 服务端测量 |
@@ -91,8 +96,7 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 | `input` | 完整身份、outputGeneration、layoutEpoch、sequence、event |
 | `editing.dismiss` | 完整 InputTarget、outputGeneration/layoutEpoch、sequence、target、revision；与 input 共享顺序，用户收起时 blur 远端元素 |
 | `keyboard.layout` | Session 级 `entries: [[code,key], ...]`，最多 256 项，由当前已授权连接提供 |
-| `product.action` | `{version:1, operationId, operationGeneration, action}` |
-| `files.request` | `{version:1, requestId, method, params}`：asset.begin/chunk/seal/cancel/describe/read、document.open{assetId}/document.resource{documentId, contentId, offset}（见[文件与相机 · 文档预览](files-and-camera.md#文档预览)）、selection.commit、photo.burst.begin/sample/end/cancel、photo.thumbnail/process |
+| `files.request` | `{version:1, requestId, method, params}`。service peer：asset.begin/chunk/seal/cancel/describe/read、document.open{assetId}/document.resource{documentId, contentId, offset}（见[文件与相机 · 文档预览](files-and-camera.md#文档预览)）、photo.burst.begin/sample/end/cancel、photo.thumbnail/process。Session peer：只有 selection.commit/cancel（把文件交给页面） |
 | `clock.ping` | requestId |
 
 **input.event**
@@ -109,7 +113,7 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 | `selection.extent` | which start/end/insertion、x/y（根 DIP），完整有序输入门禁 |
 | `context_command` | menu（菜单 ID）、command undo/redo/cut/copy/paste/selectAll/copyLinkAddress/copyImage/copyImageAddress/dismiss；非 dismiss 需要焦点，过期执行返回 `conflict`，旧 dismiss 成功但不操作 |
 
-**`remotekit-auth`**：`auth.camera.ready/config/accept/frame` JSON 消息，加 68 字节头的 RGB24 二进制块，见[认证](auth.md#人脸验证)。
+**`remotekit-auth`**（service peer）：`auth.camera.ready/config/accept/frame` JSON 消息，加 68 字节头的 RGB24 二进制块，见[认证](auth.md#人脸验证)。
 
 ## Control ↔ Endpoint
 
@@ -128,7 +132,9 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
           session.events.ack{tenantId, sessionId, placementEpoch, streamId, upTo}
 一次性    {id, method, opId, replay, endpointIncarnation, tenantId, sessionId, placementEpoch, params}
 回复      {id, ok:true, result} | {id, ok:false, error:{code, message, reason?, retryAfterMs?, errorId?}}
-其他事件  {event:"rtc.signal" | "node.metrics", ...}
+其他事件  {event:"rtc.signal" | "node.metrics", ...}（rtc.signal 同时用于两种 peer）
+service peer service.offer/ice/close/authorize{connectionId, leaseId, epoch?, unlocked?}、service.asset.describe、
+          service.face.capabilities/begin/cancel/status（不打开 Session、不启动 Browser）
 反向请求  {id, request:"object.committed" | "object.committed.batch" | "object.locate" | "object.claims.refresh", ...}（Endpoint → Control，回复形状相同）
 Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, offset}+≤1MiB … object.put.end{putId}
           → {objectId, size, storedSize, storedSha256}；object.put.cancel{putId}
@@ -149,7 +155,7 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 | `authorization` / `lock` | RTC 授权（connectionId、epoch、unlocked、文件授权）与锁定状态；先于其他字段生效 |
 | `library.describe` | 需要 Endpoint 描述的资产 |
 
-**事件类型**：`view.closed`、`download.imported`、`download.failed`、`clipboard.changed`（带 `baseRevision`，超限时只带大小）、`view.signIn`、`client.action`。
+**事件类型**：`view.closed`、`download.imported`、`download.failed`、`clipboard.changed`（带 `baseRevision`，超限时只带大小）、`view.signIn`。
 
 **一次性方法**（都带 `opId`，见[协调协议](cluster.md#协调协议)）：
 

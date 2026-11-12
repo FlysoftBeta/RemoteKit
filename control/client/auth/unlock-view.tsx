@@ -49,6 +49,9 @@ export function UnlockView({
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
   }, [camera, close]);
+  useEffect(() => {
+    if (method === 'face' && !auth?.methods.face) setMethod('password');
+  }, [method, auth?.methods.face]);
   const lifetime = useRef(new AbortController());
   useEffect(() => () => lifetime.current.abort(), []);
   const submit = async (event: React.FormEvent) => {
@@ -93,6 +96,11 @@ export function UnlockView({
         ) : (
           <>
             <Typography color="text.secondary">{auth.user.username}</Typography>
+            {!auth.face.available && (
+              <Typography variant="caption" color="text.secondary">
+                {auth.face.reason ?? '人脸服务正在连接，请使用密码或 PIN。'}
+              </Typography>
+            )}
             {(auth.methods.pin || auth.methods.face) && (
               <ToggleButtonGroup
                 exclusive

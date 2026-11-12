@@ -62,3 +62,17 @@
   padding: 8px;
   z-index: var(--z-stats);
 }
+
+.browser-unavailable {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-page-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--text-secondary);
+  background: var(--surface);
+}

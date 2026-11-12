@@ -286,29 +286,6 @@ Result<void> SessionExecution::Acknowledge(const std::string& stream, uint64_t u
   last_events_sent_ = {};
   return {};
 }
-Result<Json> SessionExecution::Descriptions() {
-  Json values = Json::array();
-  const auto desired = desired_.load();
-  if (!desired)
-    return values;
-  std::map<std::string, Json> assets;
-  if (reader_) {
-    RK_ASSIGN_OR_RETURN(saved, reader_->Library().Load(LibraryTable::kAssets));
-    assets = std::move(saved);
-  }
-  for (const auto& id : desired->at("library").at("describe")) {
-    Result<Json> result = Error{ErrorCode::kNotFound, "asset is not present"};
-    if (auto session = runtime_.load())
-      result =
-          session->Files().Library().LibraryCommand("session.library.describe", {{"assetId", id}});
-    else if (assets.contains(id.get<std::string>()))
-      result = assets.at(id.get<std::string>());
-    values.push_back({{"assetId", id},
-                      {"asset", result ? result.value() : Json()},
-                      {"error", result ? Json() : WireError(result.error())}});
-  }
-  return values;
-}
 bool SessionExecution::VersionDue(int64_t now, int64_t interval) const {
   auto session = runtime_.load();
   return session && session->VersionDue(now, interval);
@@ -375,7 +352,6 @@ Result<Json> SessionExecution::Observe() {
       checkpoint["takenAt"] = version.value("takenAt", copy.at("changesAt").get<int64_t>());
     }
   }
-  RK_ASSIGN_OR_RETURN(descriptions, Descriptions());
   return Json{{"browser", starting_ ? "starting"
                           : running ? "running"
                                     : "stopped"},
@@ -391,7 +367,6 @@ Result<Json> SessionExecution::Observe() {
               {"recovery", snapshot.at("recovery")},
               {"rtc", snapshot.at("rtc")},
               {"blockers", blockers},
-              {"library", {{"descriptions", descriptions}}},
               {"events", events},
               {"stats", snapshot.at("stats")}};
 }
@@ -452,12 +427,7 @@ Result<void> SessionExecution::Admit(const Json& request, uint64_t generation) {
        method == "session.identity") &&
       params.value("browserIncarnation", Json()) != session->BrowserIncarnation())
     return Error{ErrorCode::kConflict, "RPC Browser is retired"};
-  if ((method.starts_with("auth.face.") || method == "rtc.actionResult") &&
-      method != "auth.face.capabilities") {
-    const auto rtc = session->AuthorizationSnapshot();
-    if (params.value("connectionId", Json()) != rtc.at("connectionId"))
-      return Error{ErrorCode::kConflict, "RPC peer is retired"};
-  }
+
   return {};
 }
 Result<Json> SessionExecution::Request(const Json& request, uint64_t generation) {

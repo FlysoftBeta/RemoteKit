@@ -95,7 +95,10 @@ test('non-modal cards do not claim foreground or block a file chooser in the sam
   assert.equal(selectVisibility(state, 1440).foreground, null);
   assert.deepEqual(state, before);
   state.fileRequests = [request];
-  assert.deepEqual(selectVisibility(state, 1440).foreground, { kind: 'file', id: request.id });
+  assert.deepEqual(selectVisibility(state, 1440).foreground, {
+    kind: 'file',
+    id: request.id,
+  });
   state.workspace.windows[0].activeTabId = 'background-tab';
   assert.equal(selectVisibility(state, 1440).foreground, null);
 });

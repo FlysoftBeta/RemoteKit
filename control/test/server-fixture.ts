@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import type { ProductAction, ProductOperation } from '../shared/product';
+import { nativeError } from '../shared/errors';
 import { createHash } from 'node:crypto';
 import { observedSession } from './coordination-fixture';
 import type { SessionDesired } from '../server/endpoint/coordination';
@@ -216,4 +219,41 @@ export async function registerUser(store: ControlDatabase, username: string, pas
   if (accounts.setupStatus().setupRequired) return accounts.setup(username, password);
   await accounts.createUser(username, password);
   return accounts.login(username, password);
+}
+
+export async function submitViewerAction(
+  services: DomainServices,
+  tenant: string,
+  lease: string,
+  action: ProductAction,
+) {
+  const receipt = await requestViewer(services, tenant, lease, 'operation.submit', {
+    operationId: randomUUID(),
+    operationGeneration: services.store.operations.operationGeneration(tenant),
+    action,
+  });
+  if (receipt.status === 'failed') throw nativeError(receipt.error);
+  return receipt;
+}
+
+export async function observedProductAction(
+  services: DomainServices,
+  tenant: string,
+  action: ProductAction,
+  lease?: string,
+) {
+  const result = await services.operations.productAction(tenant, action, lease);
+  await services.reconciler.reconcileProduct(tenant);
+  return { ...result, state: services.viewers.productState(tenant) };
+}
+
+export async function observedOperation(
+  services: DomainServices,
+  tenant: string,
+  operation: ProductOperation,
+  lease: string,
+) {
+  await services.operations.submitOperation(tenant, operation, lease);
+  await services.reconciler.reconcileProduct(tenant);
+  return services.operations.operationStatus(tenant, operation);
 }

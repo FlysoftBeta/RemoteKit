@@ -85,7 +85,7 @@ test('RTC publishes channels, receivers and tracks independently of presentation
   assert.equal(rtc.getSnapshot().phase, 'establishing');
   assert.deepEqual(
     peers[0].channels.map((channel) => channel.label),
-    ['remotekit', 'remotekit-auth'],
+    ['remotekit'],
   );
   assert.equal(events.filter((event) => event.type === 'receiver').length, 2);
   const track = { kind: 'video' } as MediaStreamTrack;
@@ -242,7 +242,13 @@ test('AV sync restarts immediately once per authoritative change, while audio ch
   });
   const workspace = new WorkspaceSession({
     rtc,
-    authorization: { observePeerAuthorization() {}, setProductLocked() {}, productReady: true },
+    serviceRtc: { connect: async () => {}, disconnect() {} },
+    authorization: {
+      serviceAuthEpoch: 0,
+      observePeerAuthorization() {},
+      setProductLocked() {},
+      browserReady: true,
+    },
     operations: {
       acceptSnapshot() {},
       getSnapshot: () => ({
@@ -321,4 +327,46 @@ test('RTC cancellation closes the prior attempt without an error or retry', asyn
   assert.equal(peers[0].closed, true);
   assert.equal(rtc.getSnapshot().phase, 'idle');
   assert.ok(events.filter((event) => event.type === 'diagnostics').every((event) => !event.change.error));
+});
+
+test('browser and service peers keep simultaneous signaling and channels independent', async (t) => {
+  const { rtc, peers } = environment(t);
+  const service = new RtcSession('service');
+  t.after(() => service.disconnect());
+  t.mock.method(Date, 'now', () => 12345);
+  const attempts = new Map<string, string>();
+  const rpc: ControlRpc = async (method, params: any) => {
+    if (method.endsWith('.offer')) {
+      attempts.set(method, params.attemptId);
+      return { ...answer, connectionId: method };
+    }
+    return {};
+  };
+  rtc.setControlRpc(rpc);
+  service.setControlRpc(rpc);
+  await Promise.all([rtc.connect(), service.connect()]);
+  assert.notEqual(attempts.get('rtc.offer'), attempts.get('service.offer'));
+  assert.deepEqual(
+    peers[1].channels.map((channel) => channel.label),
+    ['remotekit', 'remotekit-auth'],
+  );
+  const browserAttempt = attempts.get('rtc.offer')!;
+  const serviceAttempt = attempts.get('service.offer')!;
+  rtc.receiveServerSignal({
+    type: 'rtc.signal',
+    attemptId: serviceAttempt,
+    connectionId: 'service.offer',
+    signal: { type: 'ice', candidate: { candidate: 'service' } },
+  });
+  service.receiveServerSignal({
+    type: 'rtc.signal',
+    attemptId: browserAttempt,
+    connectionId: 'rtc.offer',
+    signal: { type: 'ice', candidate: { candidate: 'browser' } },
+  });
+  await flush();
+  assert.deepEqual(
+    peers.map((peer) => peer.candidates),
+    [[], []],
+  );
 });

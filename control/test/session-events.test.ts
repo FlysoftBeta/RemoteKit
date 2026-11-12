@@ -51,7 +51,6 @@ function fixture() {
         for (const window of workspace.windows) if (window.activeTabId === tab.id) window.activeTabId = null;
       },
     },
-    operations: { handleEndpointAction: async () => {} },
     library: { consumeDownload: async () => {} },
     learning: {
       signIn: {
@@ -210,7 +209,7 @@ test('HTML-only concurrent native clipboard copies survive as snippets and accou
   }
 });
 
-test('failed download catalog commits never acknowledge and retired client actions never retarget a Viewer', async () => {
+test('failed download catalog commits never acknowledge', async () => {
   const f = fixture();
   try {
     f.services.library.consumeDownload = async () => {
@@ -224,25 +223,6 @@ test('failed download catalog commits never acknowledge and retired client actio
     assert.equal(f.acknowledgments.length, 0);
     f.services.library.consumeDownload = async () => {};
     await f.events.receive('node', download);
-    let executed = false;
-    f.services.operations.handleEndpointAction = async () => {
-      executed = true;
-    };
-    const action = f.event('2', {
-      type: 'client.action',
-      body: {
-        connectionId: 'old',
-        authEpoch: 2,
-        leaseId: 'old-lease',
-        operationId: 'operation',
-        operationGeneration: 'generation',
-        action: { type: 'tab.create', windowId: 'window' },
-      },
-    });
-    await f.events.receive('node', action);
-    assert.equal(executed, false);
-    assert.equal(f.store.coordination.receive(action), 'authorization-retired');
-    assert.equal(f.acknowledgments[1].upTo, '2');
   } finally {
     await f.close();
   }

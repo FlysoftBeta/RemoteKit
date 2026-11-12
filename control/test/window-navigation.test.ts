@@ -30,6 +30,7 @@ const startTab: ProductTab = {
 
 function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
   return {
+    browser: { state: 'available' },
     learning: {
       accounts: { changyan: { status: 'signed_out' }, xinjiaoyu: { status: 'signed_out' } },
       study: { retentionDays: 7, syncing: false },
@@ -89,7 +90,7 @@ function Frame({ state, online }: { state: ProductState; online: boolean }) {
       win,
       state,
       transport: transport as unknown as ViewerSession,
-      online,
+      shellReady: online,
       action: unexpected,
       appContent: () => null,
       call: unexpected,

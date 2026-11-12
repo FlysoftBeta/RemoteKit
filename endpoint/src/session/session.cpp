@@ -61,11 +61,7 @@ Session::Session(media::Sdk& api,
               .peer = [this] { return peer_controller.Handle(); },
               .connection = [this] { return peer_controller.Connection(); },
               .files_closed = [this] { files.Bind(0); },
-              .revoked =
-                  [this] {
-                    face.Cancel();
-                    channel.Revoke();
-                  },
+              .revoked = [this] { channel.Revoke(); },
               .wake = [this] { pipeline.Wake(); },
               .opened = [this](uint64_t handle) { channel.Opened(handle); },
               .files_opened =
@@ -170,7 +166,6 @@ Session::Session(media::Sdk& api,
              browser, store, management, trace, objects, config.object_access},
             peer_controller,
             authorization),
-      face(context, authorization),
       files(context, authorization, views, peer_controller),
       navigation(context, views),
       views(context, peer_controller, presentation, output, registry, navigation, diagnostics),
@@ -184,8 +179,7 @@ Session::Session(media::Sdk& api,
                   views,
                   input,
                   timing,
-                  channel,
-                  face),
+                  channel),
       channel(context,
               peer_controller,
               authorization,
@@ -193,7 +187,6 @@ Session::Session(media::Sdk& api,
               presentation,
               input,
               files,
-              face,
               output,
               pipeline,
               registry,
@@ -252,7 +245,6 @@ Result<void> Session::AuthorizeDesired(const Json& document, uint64_t generation
   if (unlocked) {
     auto granted = files.AuthorizeFiles({{"connectionId", desired.at("connectionId")},
                                          {"authEpoch", desired.at("epoch")},
-                                         {"library", desired.at("files").at("library")},
                                          {"requests", desired.at("files").at("requests")}});
     if (!granted)
       return granted.error();
@@ -314,7 +306,6 @@ void Session::BindPeerResources(uint64_t handle) {
   channel.Bind(handle);
 }
 Result<void> Session::StartPeerResources(uint64_t handle, const std::string& sdp) {
-  face.Start(handle);
   if (sdp.find("m=audio ") != std::string::npos) {
     auto opened = audio.OpenAudio();
     if (!opened)
@@ -326,7 +317,6 @@ Result<void> Session::StartPeerResources(uint64_t handle, const std::string& sdp
 }
 void Session::StopPeerResources() {
   authorization.Close();
-  face.Stop();
   audio.Stop();
   input.Stop();
   pipeline.Join();

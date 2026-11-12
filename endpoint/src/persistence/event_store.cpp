@@ -74,9 +74,8 @@ Result<Json> EventStore::Append(const std::string& type,
                                 const Json& body,
                                 const std::string& event_id,
                                 const Json& incarnation) {
-  static const std::set<std::string> types = {"view.closed",     "download.imported",
-                                              "download.failed", "clipboard.changed",
-                                              "view.signIn",     "client.action"};
+  static const std::set<std::string> types = {"view.closed", "download.imported", "download.failed",
+                                              "clipboard.changed", "view.signIn"};
   if (!types.contains(type) || !body.is_object() || event_id.empty() || event_id.size() > 128 ||
       (!incarnation.is_null() && !incarnation.is_string()))
     return Error{ErrorCode::kInvalidRequest, "invalid Session event"};
