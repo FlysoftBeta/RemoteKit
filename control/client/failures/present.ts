@@ -22,7 +22,7 @@ export interface FailureContext {
   capacity?: CapacityKind;
   connection?: boolean;
   credential?: 'control' | 'changyan' | 'xinjiaoyu' | 'mailbox';
-  issue?: 'permission' | 'credentials' | 'lease' | 'configuration' | 'content' | 'validation';
+  issue?: 'permission' | 'credentials' | 'lease' | 'configuration' | 'content' | 'validation' | 'revision';
   consequence?: string;
   text?: string;
   longText?: string;
@@ -189,6 +189,12 @@ export function presentFailure(value: RemoteKitError | WireError, context: Failu
   }
   if (error.code === 'invalid_request' && context.input)
     return user(context.text ?? failureText.invalidInput, '修改内容', 'edit');
+  if (error.code === 'conflict' && context.issue !== 'revision')
+    return {
+      class: 'B',
+      text: error.message,
+      ...(context.action ? { action: context.action } : {}),
+    };
   if (error.code === 'conflict' || error.code === 'not_found')
     return user(
       context.text ?? (error.code === 'not_found' ? failureText.missing : failureText.changed),

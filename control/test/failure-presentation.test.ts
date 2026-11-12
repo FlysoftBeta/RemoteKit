@@ -79,6 +79,24 @@ test('canceled is silent', () => {
   });
 });
 
+test('ordinary conflicts show the server message and reserve changed-content wording for revisions', () => {
+  for (const message of ['用户名已存在', '在线节点不能移除', '不能转让给已停用的账户']) {
+    const presentation = presentFailure(new RemoteKitError('conflict', message), {
+      ...context,
+      text: 'Generic failure',
+    });
+    assert.equal(presentation.class, 'B');
+    assert.equal(presentation.text, message);
+    assert.equal(presentation.action, undefined);
+  }
+  const revision = presentFailure(new RemoteKitError('conflict', 'Revision differs'), {
+    ...context,
+    issue: 'revision',
+  });
+  assert.equal(revision.text, failureText.changed);
+  assert.equal(revision.action?.label, '查看当前内容');
+});
+
 test('capacity context selects the corrective action', () => {
   const error = new RemoteKitError('limit_exceeded', '');
   for (const [capacity, label] of [

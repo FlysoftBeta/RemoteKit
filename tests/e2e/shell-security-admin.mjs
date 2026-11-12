@@ -97,6 +97,8 @@ await runScenario('shell-security-admin', async (v, stack) => {
     await type(duplicate.getByLabel('密码', { exact: true }), stack.password);
     await click(button('创建', duplicate));
     await duplicate.locator('.failure-note').waitFor();
+    assert.match(await duplicate.locator('.failure-note').innerText(), /用户名已存在/);
+    assert.doesNotMatch(await duplicate.innerText(), /内容已在别处更改/);
     await v.shot('duplicate-user-error');
     await click(button('取消', duplicate));
     await select('存储');
