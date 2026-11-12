@@ -20,18 +20,26 @@ async (host) => {
       throw Error('Display transition requires the health-only mode');
     if (!Number.isInteger(displaySeconds) || displaySeconds < 20 || displaySeconds > 60)
       throw Error('Display health window must be 20–60 seconds');
-    const context = await host
-      .context()
-      .browser()
-      .browserType()
-      .launchPersistentContext(evidence + '/viewer', {
-        executablePath,
-        headless,
-        viewport: { width: 1920, height: 1080 },
-        deviceScaleFactor: 1,
-        hasTouch: touchSmoke,
-        args: ['--fake-vsync-rate=60', '--no-first-run'],
-      });
+    const { pathToFileURL } = await import('node:url');
+    const { dirname, join, resolve } = await import('node:path');
+    const { existsSync } = await import('node:fs');
+    let root = resolve(evidence);
+    while (!existsSync(join(root, 'tests/e2e/kit/browser.mjs'))) {
+      const parent = dirname(root);
+      if (parent === root) throw Error('Evidence must be inside the RemoteKit repository');
+      root = parent;
+    }
+    const { launchTestBrowser } = await import(pathToFileURL(join(root, 'tests/e2e/kit/browser.mjs')).href);
+    const context = await launchTestBrowser({
+      profile: evidence + '/viewer',
+      browserType: host.context().browser().browserType(),
+      executablePath,
+      headless,
+      viewport: { width: 1920, height: 1080 },
+      deviceScaleFactor: 1,
+      hasTouch: touchSmoke,
+      args: ['--fake-vsync-rate=60', '--no-first-run'],
+    });
     const page = context.pages()[0] ?? (await context.newPage());
     try {
       await context.addInitScript(() => {

@@ -14,8 +14,8 @@
 //   node tools/cdp.mjs upload <selector> <file> [...] (sets a file input; fires change)
 //   node tools/cdp.mjs shot <out.png> [--clip x,y,w,h]
 //   node tools/cdp.mjs close
-import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { launchTestBrowser } from '../tests/e2e/kit/browser.mjs';
+import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -114,12 +114,11 @@ if (command === 'launch') {
   const profile = option('profile');
   const [width, height] = option('size', '1280x800').split('x').map(Number);
   if (!chrome || !profile) throw new Error('launch needs --chrome and --profile');
-  mkdirSync(profile, { recursive: true });
-  const child = spawn(
-    chrome,
-    [
+  const child = await launchTestBrowser({
+    profile,
+    executablePath: chrome,
+    args: [
       `--remote-debugging-port=${port}`,
-      `--user-data-dir=${profile}`,
       `--window-size=${width},${height}`,
       '--no-first-run',
       '--no-default-browser-check',
@@ -130,8 +129,8 @@ if (command === 'launch') {
       ...args.slice(1),
       args[0] ?? 'about:blank',
     ],
-    { detached: true, stdio: 'ignore' },
-  );
+    spawnOptions: { detached: true, stdio: 'ignore' },
+  });
   child.unref();
   for (let attempt = 0; attempt < 50; attempt++) {
     try {

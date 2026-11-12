@@ -1,3 +1,5 @@
+import { checkBrowserLaunchPolicy } from './kit/browser-launch-policy.mjs';
+import { waitForLogonBudget } from './kit/browser.mjs';
 import { execFileSync, spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -65,6 +67,8 @@ if (values.list) {
   );
   process.exit(0);
 }
+checkBrowserLaunchPolicy();
+
 const out = resolve(values.out ?? join(repository, 'develop/tmp/e2e', `run-${Date.now()}`));
 mkdirSync(out, { recursive: true });
 const playwright =
@@ -103,6 +107,7 @@ function summary() {
   writeFileSync(join(out, 'summary.md'), table.join('\n') + '\n');
 }
 async function run(item, slot) {
+  await waitForLogonBudget();
   const { scenario, browser, pointer, viewport } = item;
   const port = basePort + slot * 20;
   if (port + 19 > 65535) throw Error('Port allocation exceeds 65535');

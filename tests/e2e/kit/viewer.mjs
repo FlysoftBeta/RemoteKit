@@ -1,9 +1,8 @@
+import { launchTestBrowser } from './browser.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { runPath, startStack, until } from './stack.mjs';
@@ -706,15 +705,6 @@ export function parseViewport(value) {
     throw Error('Expected viewport WIDTHxHEIGHT');
   return { width, height };
 }
-export function playwright() {
-  return createRequire(import.meta.url)(
-    process.env.REMOTEKIT_PLAYWRIGHT ??
-      join(
-        homedir(),
-        '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright',
-      ),
-  );
-}
 export async function launchBrowser(options = {}) {
   const browserName = process.env.E2E_BROWSER;
   if (browserName) {
@@ -724,7 +714,8 @@ export async function launchBrowser(options = {}) {
         ? 'C:/src/tmp/chrome89-google/app/chrome.exe'
         : 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
   }
-  return playwright().chromium.launch({ headless: true, ...options });
+  const context = await launchTestBrowser(options);
+  return context.browser();
 }
 export function createViewerContext(browser, options = {}) {
   const viewport = parseViewport(process.env.E2E_VIEWPORT);
@@ -737,7 +728,8 @@ export function createViewerContext(browser, options = {}) {
 }
 export function launchPersistentViewer(profile, options) {
   const viewport = parseViewport(process.env.E2E_VIEWPORT);
-  return playwright().chromium.launchPersistentContext(profile, {
+  return launchTestBrowser({
+    profile,
     ...options,
     headless: true,
     ...(viewport ? { viewport } : {}),
@@ -867,7 +859,7 @@ export async function prepareNativeViewer(host) {
     await qa.page.keyboard.press('Control+A');
     await qa.page.keyboard.insertText(text);
   };
-  qa.launch = async ({
+  qa.openViewer = async ({
     version = 157,
     run,
     port = 33471,

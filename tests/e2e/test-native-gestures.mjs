@@ -41,7 +41,7 @@ try {
   await prepareGestures(host);
   await prepareRetirement(host);
   const qa = host._clientGestureQA;
-  await qa.launch({
+  await qa.openViewer({
     ready: true,
     gpuGranted: true,
     version: values.browser === 'chrome89' ? 89 : 157,
@@ -126,12 +126,12 @@ async function prepareGestures(host) {
   const assert = (value, message) => {
     if (!value) throw Error(message);
   };
-  qa.launch = async (options) => {
+  qa.openViewer = async (options) => {
     assert(
       options?.ready === true && options?.gpuGranted === true,
       'Explicit root READY and GPU grant required',
     );
-    const result = await base.launch({ port: 33581, ...options });
+    const result = await base.openViewer({ port: 33581, ...options });
     await base.ready();
     await base.context.addInitScript(() => {
       const q = (window.clientGestureQA = {
