@@ -3,6 +3,7 @@
 #include "sdk_loader.hpp"
 #include "protocol/shared_render_slots.h"
 #include "server_trace.hpp"
+#include "frame_admission.hpp"
 #include <memory>
 #include <optional>
 #include <vector>
@@ -11,7 +12,7 @@
 namespace remotekit::media {
 class RenderSlots {
  public:
-  RenderSlots();
+  explicit RenderSlots(FrameAdmission& admission);
   ~RenderSlots();
   enum class Phase { kClosed, kRunning, kStopping, kFailed };
   struct StatsSnapshot {
@@ -24,6 +25,7 @@ class RenderSlots {
              heldSlots = 0, activeDepth = 0;
     uint64_t retiredGenerations = 0, retiredGenerationsCompleted = 0,
              unknownGpuRetainedGenerations = 0, unknownGpuRetentions = 0;
+    FrameAdmission::Snapshot admission;
   };
   StatsSnapshot Stats() const;
   enum class Result { idle, ready, error };
@@ -43,6 +45,12 @@ class RenderSlots {
              bool keepalive = false);
   void Pressure(bool encoder_backlog);
   bool HasCapacity() const;
+  void WithdrawAdmission();
+  bool AdmissionPending() const { return admission_pending_; }
+  bool CanAttemptAdmission() const { return !admission_pending_ || admission_woken_; }
+  void AdmissionWoken() { admission_woken_ = true; }
+  void SetAdmissionPriority(FrameAdmission::Priority priority);
+  HANDLE AdmissionEventHandle() const;
   // Borrowed by the owner thread until the next Open or Close.
   HANDLE EventHandle() const;
   Result Poll(remotekit_rtc_frame&, SharedAtlasFrame&, std::string&);
@@ -62,6 +70,11 @@ class RenderSlots {
 
  private:
   struct State;
+  FrameAdmission& admission_;
+  std::shared_ptr<FrameAdmission::Client> admission_client_;
+  uint64_t admission_adapter_ = 0, next_incarnation_ = 0;
+  bool admission_pending_ = false, admission_woken_ = false;
+  FrameAdmission::Priority admission_priority_ = FrameAdmission::Priority::normal;
   std::shared_ptr<State> state_;
   std::atomic<std::shared_ptr<State>> clipboard_state_;
   std::vector<std::shared_ptr<State>> retired_;

@@ -38,6 +38,7 @@ class MediaPipeline : private ControllerContext {
   void Start();
   bool Join();
   void Wake();
+  void InputReceived(int64_t qpc);
   void Queue(const RtcEvent& event);
   void Refresh();
   void RequestRefresh(const RtcEvent& event);
@@ -68,6 +69,7 @@ class MediaPipeline : private ControllerContext {
 
   std::atomic<bool> refresh_connected{false};
   std::atomic<int64_t> last_media_refresh_qpc{0};
+  std::atomic<int64_t> last_input_qpc{0};
   // MediaLoop snapshots the policy once per iteration so layout and texture
   // submission cannot use different sampling budgets during a policy update.
  public:

@@ -5,6 +5,7 @@
 #include "diagnostics/node_metrics.hpp"
 #include "session/execution.hpp"
 #include "rtc/service_peer.hpp"
+#include "media/frame_admission.hpp"
 #include <map>
 #include <mutex>
 #include <atomic>
@@ -36,6 +37,7 @@ class Service {
   ManagementLink& link_;
   const std::string incarnation_;
   std::atomic<uint64_t> observation_sequence_{0};
+  media::FrameAdmission frame_admission_;
   objects::ObjectService objects_;
   objects::WorkQueue object_workers_;
   NodeMetrics metrics_;

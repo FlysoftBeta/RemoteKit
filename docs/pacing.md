@@ -36,6 +36,19 @@ Comp 发 Begin 的门禁：RTC 已授权、产品可见、输出存在、WebRTC 
 
 经验：生产者的接纳队列几乎为空时（实测 Work 排队 <0.01ms），加深深度只会增加滞留中的工作，解决不了接收端的瓶颈。
 
+## 跨租户 GPU 准入
+
+同一块 GPU 上的所有租户共用一个准入池（`FrameAdmission`，Service 持有，按 adapter LUID 区分），最多 3 帧同时在途。每个租户的 Comp 在发 Begin 前领一张许可：
+
+- 先在本地预留 Slot，再申请许可，最后才发给 SDK。许可按 (incarnation, generation, slot, value) 记账，只归还一次：发送回滚、匹配的 Reject 或观察到的 consumed fence。无法证明 GPU 已完成的工作在拆除时继续占着许可。
+- 尾 IDR、呈现刷新、恢复采样、保活这些 force Begin 走同一条路。
+- 每个租户最多一个等待中的申请。没拿到许可的 Begin 不轮询，等自己的自动复位事件；这个事件和渲染事件、定时器一起在 Comp 的等待里。不允许发 Begin 时（断线、未授权、暂停、码率为 0）撤回申请。
+- 授予顺序分两类：最近 500ms 内收到过用户输入的租户（交互类）先，其余按先来先得。客户端算的惯性滚动在惯性期间持续发送滚动输入，所以惯性也算交互。等待中收到输入会升级为交互类。
+
+为什么需要它：GPU 饱和时（平板 5 租户，2576×1616 atlas，视频引擎约 94%），每个租户各自按节拍发 Begin，驱动按提交顺序排队，滚动帧排在视频帧后面，渲染→VPP→编码的整段延迟拉长。限制在途帧数把排队挪到 Endpoint 自己手里，再让交互租户插队。
+
+效果（UHD630，ExtBRC，单次运行，L99 含许可等待）：平板 5 租户 L99 183→112ms、滚动 FPS 25→34、视频 FPS 41→39；1080p 5 租户 GPU 未饱和，L99 约 50ms，在噪声范围内不变。
+
 ## Idle 与 Wake
 
 页面静止时 Rend 回复 `Reject(Idle)`，并记录确立 Idle 的完整身份 (g, s, v)。Comp 停止常规 Begin。
@@ -115,6 +128,8 @@ WebRTC 在 BALANCED（质量"自动"）下可以立即降低分辨率（启动�
 
 - 节拍、深度、Begin 调度：`endpoint/src/media/comp_pacing.hpp`
 - Slot 状态与 Fence 观察：`endpoint/src/media/render_slots.*`
+- 跨租户 GPU 准入：`endpoint/src/media/frame_admission.*`（Service 持有）；输入到达时间由 `rtc/channel.cpp` 交给 `MediaPipeline::InputReceived`
+- 静止保活：`endpoint/src/media/idle_keepalive.hpp`
 - 尾 IDR：`endpoint/src/media/idle_idr.hpp`、`tail_refresh.hpp`
 - 呈现刷新：`endpoint/src/media/presentation_refresh.hpp`
 - 媒体循环：`endpoint/src/media/pipeline.*`（MediaPipeline），输出生命周期 `output.*`

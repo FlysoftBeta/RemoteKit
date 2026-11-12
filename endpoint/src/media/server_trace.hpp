@@ -33,6 +33,8 @@ struct TraceIds {
 struct TraceRecord {
   RateTelemetry brc;
   const char *event = "", *reason = nullptr;
+  const char* admission_class = nullptr;
+  uint64_t admission_wait_us = 0;
   TraceIds ids;
   int64_t qpc = 0, qpc_before = 0, qpc_after = 0, clock_frequency = 0;
   uint64_t peer = 0, encoder = 0, cookie = 0, fence = 0, completed_fence = 0, bytes = 0,
@@ -170,6 +172,10 @@ class ServerTrace {
       add("bytes", r.bytes);
       if (r.reason)
         value["reason"] = r.reason;
+      if (r.admission_class) {
+        value["admission_class"] = r.admission_class;
+        value["permit_wait_us"] = r.admission_wait_us;
+      }
       for (auto [name, number] : {std::pair{"pool_pending", r.pending},
                                   {"pool_leased", r.leased},
                                   {"queue", r.queue},

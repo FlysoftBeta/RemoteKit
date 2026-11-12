@@ -253,8 +253,8 @@ Result<void> Service::Fence(const Json& desired, uint64_t generation) {
       if (!entry.coordinator) {
         auto target = placement;
         target.erase("dataState");
-        entry.execution =
-            std::make_shared<SessionExecution>(sdk_, options_, link_, objects_, target);
+        entry.execution = std::make_shared<SessionExecution>(sdk_, options_, link_, objects_,
+                                                             frame_admission_, target);
         entry.coordinator = std::make_shared<SessionCoordinator>(
             target, incarnation_, observation_sequence_, entry.execution->Hooks());
       }

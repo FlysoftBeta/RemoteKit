@@ -10,11 +10,13 @@ SessionExecution::SessionExecution(media::Sdk& sdk,
                                    const RuntimeOptions& options,
                                    ManagementLink& management,
                                    objects::ObjectService& objects,
+                                   media::FrameAdmission& frame_admission,
                                    Json target)
     : sdk_(sdk),
       options_(options),
       management_(management),
       objects_(objects),
+      frame_admission_(frame_admission),
       tenant_(target.at("tenantId")),
       id_(target.at("sessionId")),
       epoch_(target.at("placementEpoch")),
@@ -115,7 +117,7 @@ Result<void> SessionExecution::Prepare(const Json& document) {
       phases["mode"] = "reuse";
     }
     session = std::make_shared<Session>(sdk_, options_, tenant_, id_, epoch_, key.value(),
-                                        management_, objects_, access);
+                                        management_, objects_, frame_admission_, access);
     RK_RETURN_IF_ERROR(session->Initialize());
     session->BeginManagementRequest(generation_.load());
     phases["restoreTotal"] = PhaseMs(start);

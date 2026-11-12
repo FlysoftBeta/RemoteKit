@@ -237,6 +237,8 @@ DataRouter::Hooks ChannelController::MakeRouterHooks() {
           },
       .received =
           [this](const RtcEvent& event) {
+            if (event.message.value("type", Json()) == "input")
+              pipeline.InputReceived(event.received_qpc);
             if (event.message.value("type", Json()) != "input" || !event.trace_input_sequence)
               return;
             RK_SERVER_TRACE(

@@ -193,7 +193,9 @@ void RoundTrip(const fs::path& root) {
   Take(target.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
   media::Sdk sdk;
-  Session first(sdk, options, "tenant", session, 1, cluster::Key{}, source_link, source);
+  media::FrameAdmission frame_admission;
+  Session first(sdk, options, "tenant", session, 1, cluster::Key{}, source_link, source,
+                frame_admission);
   Take(first.Initialize());
   Write(directory / "small", "persistent");
   Write(directory / "large", std::string(2 * 1024 * 1024 + 13, 'x'));
@@ -317,7 +319,8 @@ void DraftCheckpoint(const fs::path& root) {
   media::Sdk sdk;
   Json checkpoint;
   {
-    Session session(sdk, options, "tenant", session_id, 1, {}, link, objects);
+    media::FrameAdmission frame_admission;
+    Session session(sdk, options, "tenant", session_id, 1, {}, link, objects, frame_admission);
     Take(session.Initialize());
     checkpoint = Take(Commit(session));
   }
@@ -328,7 +331,9 @@ void DraftCheckpoint(const fs::path& root) {
   const auto restored_options =
       Take(RuntimeOptions::FromConfig(config, restored_data.parent_path(), "dev", "test"));
   {
-    Session restored(sdk, restored_options, "tenant", session_id, 2, {}, link, objects);
+    media::FrameAdmission frame_admission;
+    Session restored(sdk, restored_options, "tenant", session_id, 2, {}, link, objects,
+                     frame_admission);
     Take(restored.Initialize());
   }
   SessionDb verify(restored_directory);
@@ -501,7 +506,9 @@ void Blockers(const fs::path& root) {
   const auto options = Take(RuntimeOptions::FromConfig(TestConfig(), root, "dev", "test"));
   objects::ObjectService objects(options.data, link, cluster::Key{}, "test", "dev");
   media::Sdk sdk;
-  Session session(sdk, options, "tenant", std::string(32, 'b'), 1, cluster::Key{}, link, objects);
+  media::FrameAdmission frame_admission;
+  Session session(sdk, options, "tenant", std::string(32, 'b'), 1, cluster::Key{}, link, objects,
+                  frame_admission);
   Take(session.Initialize());
   Take(session.Views().RecordClosed("1", "closed"));
   const auto snapshot = Take(session.Snapshot());
@@ -678,7 +685,9 @@ void DeferredCommit(const fs::path& root) {
                           {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
   Json committed;
   {
-    Session session(sdk, options, "tenant", offline.session, 1, {}, offline, objects);
+    media::FrameAdmission frame_admission;
+    Session session(sdk, options, "tenant", offline.session, 1, {}, offline, objects,
+                    frame_admission);
     Take(session.Initialize());
     Write(options.data / "sessions" / offline.session / "payload", "offline state");
     committed =
@@ -696,7 +705,9 @@ void DeferredCommit(const fs::path& root) {
         "reconnect registers deferred manifest");
   const auto limited =
       Take(RuntimeOptions::FromConfig(TestConfig(), root / "budget", "dev", "test"));
-  Session session(sdk, limited, "tenant", offline.session, 1, {}, offline, objects);
+  media::FrameAdmission frame_admission;
+  Session session(sdk, limited, "tenant", offline.session, 1, {}, offline, objects,
+                  frame_admission);
   Take(session.Initialize());
   const auto stopped = Take(session.StopAndCommit("budget", false, PhaseClock::now()));
   const auto copy = Take(Checkpoints::Copy(limited.data / "sessions" / offline.session));
