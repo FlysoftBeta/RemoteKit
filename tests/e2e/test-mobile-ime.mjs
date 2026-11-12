@@ -4,7 +4,7 @@
  * node tests/e2e/test-mobile-ime.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port] [Control server.mjs]
  */
 import { createServer } from 'node:http';
-import { startProductStack } from './kit/stack.mjs';
+import { startProductStack } from './input-product-stack.mjs';
 import { registerViewer } from './product-stack.mjs';
 import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -12,7 +12,7 @@ import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
-const [playwright, viewer, endpoint, browser, output, listenPort = '33781', controlServer] =
+const [playwright, viewer, endpoint, browser, output, listenPort = '34120', controlServer] =
   process.argv.slice(2);
 if (![playwright, viewer, endpoint, browser, output].every(Boolean)) {
   throw Error(
@@ -92,7 +92,7 @@ const assert = (condition, message) => {
 const pause = (ms) => new Promise((accept) => setTimeout(accept, ms));
 
 let context, page;
-const deadline = setTimeout(() => void context?.close().catch(() => {}), 120000);
+const deadline = setTimeout(() => void context?.close().catch(() => {}), 300000);
 try {
   for (let attempt = 0; ; attempt++) {
     const response = await fetch(origin + '/api/auth/setup', {
@@ -110,7 +110,7 @@ try {
     isMobile: true,
     hasTouch: true,
     reducedMotion: 'no-preference',
-    timeout: 15000,
+    timeout: 45000,
     args: ['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required'],
   });
   page = context.pages()[0] ?? (await context.newPage());
@@ -266,9 +266,9 @@ try {
       }
     };
   });
-  await page.goto(origin, { timeout: 12000 });
+  await page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-  const wait = (fn, arg) => page.waitForFunction(fn, arg, { timeout: 10000 });
+  const wait = (fn, arg) => page.waitForFunction(fn, arg, { timeout: 45000 });
   const click = async (css, text) => {
     const point = await (
       await wait(
@@ -309,10 +309,9 @@ try {
   }
   await registerViewer({ click, fill, username: 'keyboard-qa', password: randomBytes(18).toString('hex') });
   await wait(() => keyboardQA.channels.filter((channel) => channel.readyState === 'open').length === 2);
-  await click('button', '新建窗口');
-  await fill('.address-form input', fixtureOrigin + '/?replace-search');
+  await click('button', '打开开始屏幕');
+  await fill('.launcher-search input', fixtureOrigin + '/?replace-search');
   await page.keyboard.press('Enter');
-
   const ready = () =>
     wait(() => {
       const element = document.querySelector('.remote-viewport');

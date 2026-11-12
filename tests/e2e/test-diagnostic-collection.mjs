@@ -97,6 +97,7 @@ function readArchive(compressed) {
 function startControl() {
   const control = startProductStack({
     run,
+    dev: true,
     port,
     endpoint,
     browser,

@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFile, copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { buildHarness, startControl, until } from './cluster-test-support.mjs';
+import { buildHarness, startControl, until } from './cluster-release-support.mjs';
 import { makeNodeRelease } from './make-node-release.mjs';
 
 const [endpointArg, browserArg, output, portArg = '33851'] = process.argv.slice(2);
@@ -23,9 +23,17 @@ await copyFile(join(dirname(endpoint), 'remotekit_node.exe'), installed);
 const releases = [];
 const servers = [];
 for (const generation of ['first', 'second']) {
-  const runtime = join(run, generation);
-  servers.push(await buildHarness(runtime));
-  releases.push(await makeNodeRelease(runtime, endpoint, generation, browser));
+  const runtime = join(
+    process.env.REMOTEKIT_E2E_RELEASE_SOURCE ? resolve(process.env.REMOTEKIT_E2E_RELEASE_SOURCE) : run,
+    generation,
+  );
+  if (process.env.REMOTEKIT_E2E_RELEASE_SOURCE) {
+    servers.push(join(runtime, 'control/dist/server.mjs'));
+    releases.push(JSON.parse(await readFile(join(runtime, 'release/node.json'), 'utf8')));
+  } else {
+    servers.push(await buildHarness(runtime));
+    releases.push(await makeNodeRelease(runtime, endpoint, generation, browser));
+  }
 }
 assert.notEqual(releases[0].buildId, releases[1].buildId);
 const configPath = join(run, 'control.json');
@@ -88,9 +96,20 @@ try {
   control = startControl(servers[1], configPath, run);
   await verify(1);
   const supervisor = await readFile(join(nodeRoot, 'logs/supervisor.log'), 'utf8');
-  assert(supervisor.includes('endpoint exit 3'), supervisor);
-  for (const release of releases) assert(supervisor.includes('activated runtime ' + release.buildId));
-  assert.equal((await readdir(join(nodeRoot, 'runtime'))).length, 2);
+  const records = supervisor
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line));
+  assert(
+    records.some((record) => record.ev === 'endpoint.exited' && record.exitCode === 3),
+    supervisor,
+  );
+  for (const release of releases)
+    assert(
+      records.some((record) => record.ev === 'runtime.activated' && record.buildId === release.buildId),
+      supervisor,
+    );
+  assert.deepEqual(await readdir(join(nodeRoot, 'runtime')), [releases[1].buildId]);
   await writeFile(
     join(run, 'pass.json'),
     JSON.stringify({ releases, exit3: true, current: releases[1].buildId }, null, 2),

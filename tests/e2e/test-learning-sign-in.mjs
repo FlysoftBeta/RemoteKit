@@ -1,17 +1,29 @@
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { cliOptions, launch } from './kit/viewer.mjs';
-import { startStack } from './kit/stack.mjs';
+import { startStack, runPath } from './files-stack.mjs';
+import { fakeLearningProvider } from './files-learning-provider.mjs';
 
 const options = cliOptions();
-const stack = await startStack({ scenario: 'learning-sign-in', browser: options['browser-path'] });
+process.env.FILES_PORT ??=
+  Number(options.port) >= 34200 && Number(options.port) < 34300 ? options.port : '34200';
+const run = process.env.FILES_RUN ?? runPath('learning-sign-in');
+mkdirSync(run, { recursive: true });
+process.env.FILES_CAPTCHA = '1';
+const providerFixture = await fakeLearningProvider(
+  run,
+  options['browser-path'] ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe',
+);
+Object.assign(process.env, providerFixture.env);
+const stack = await startStack({ scenario: 'learning-sign-in', browser: providerFixture.launcher, run });
 console.log('RUN ' + stack.run);
 let viewer;
 const results = [];
 try {
   viewer = await launch({ ...options, stack });
   const { page } = viewer;
+  if (options.pointer === 'touch') await page.setViewportSize({ width: 390, height: 844 });
   const account = (provider) => viewer.state.learning.accounts[provider];
   for (const [app, provider] of [
     ['学习', 'changyan'],
@@ -63,32 +75,27 @@ try {
         await viewer.refresh();
         if (account(provider).status !== 'signing_in' || account(provider).step !== 'verification') break;
         await viewer.shot(provider + '-widget-' + index);
-        if (index === 6) await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        // Fixture verification remains open until the user cancels.
         await page.waitForTimeout(400);
       }
     } else {
-      await page.waitForFunction(() => {
-        const video = document.querySelector('.learning-sign-in-view video');
-        if (!video?.videoWidth) return false;
-        const sample = document.createElement('canvas');
-        sample.width = sample.height = 1;
-        const draw = sample.getContext('2d');
-        draw.drawImage(video, video.videoWidth * 0.64, video.videoHeight * 0.46, 1, 1, 0, 0, 1, 1);
-        const [red, green, blue] = draw.getImageData(0, 0, 1, 1).data;
-        if (red < 235 || green < 235 || blue < 235) return false;
-        draw.drawImage(video, video.videoWidth * 0.64, video.videoHeight * 0.72, 1, 1, 0, 0, 1, 1);
-        const [buttonRed, buttonGreen, buttonBlue] = draw.getImageData(0, 0, 1, 1).data;
-        return buttonBlue > buttonRed + 80 && buttonBlue > buttonGreen + 60;
-      });
-      await page.locator('.learning-sign-in-view .resize-waiting').waitFor({ state: 'hidden' });
+      const geometry = providerFixture.events.filter((event) => event.type === 'geometry').at(-1);
+      assert(geometry, 'fixture login geometry');
       const inputBounds = await box.boundingBox();
-      await page.mouse.click(
-        inputBounds.x + inputBounds.width * 0.64,
-        inputBounds.y + inputBounds.height * 0.46,
-      );
+      const x = inputBounds.x + geometry.username.x + geometry.username.width / 2;
+      const y = inputBounds.y + geometry.username.y + geometry.username.height / 2;
+      if (options.pointer === 'touch') await page.touchscreen.tap(x, y);
+      else await page.mouse.click(x, y);
       await page.locator('.remote-open-keyboard').waitFor();
       await page.keyboard.type('remotekit-keyboard-check', { delay: 35 });
       await page.keyboard.insertText('中文');
+      await viewer.until(
+        () =>
+          providerFixture.events.some(
+            (event) => event.type === 'input' && event.value === 'remotekit-keyboard-check中文',
+          ),
+        'fixture received keyboard text',
+      );
     }
     await page.waitForTimeout(provider === 'changyan' ? 0 : 1800);
     await viewer.shot(provider + '-input');
@@ -136,4 +143,5 @@ try {
   writeFileSync(join(stack.run, 'results.json'), JSON.stringify(results, null, 2));
   await viewer?.close();
   await stack.stop();
+  await providerFixture.close();
 }

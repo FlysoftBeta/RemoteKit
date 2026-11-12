@@ -1,7 +1,7 @@
 /**
  * Edge / Chrome 89, isolated Control and native H264 clipboard verification.
  * node tests/e2e/test-clipboard.mjs <playwright module> <viewer exe>
- *   <endpoint exe> <browser exe> <unused evidence directory> [port=35300]
+ *   <endpoint exe> <browser exe> <unused evidence directory> [port=34120]
  */
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -10,14 +10,14 @@ import { mkdir, readFile, writeFile, appendFile, readdir } from 'node:fs/promise
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { zstdDecompressSync } from 'node:zlib';
-import { startProductStack, until } from './kit/stack.mjs';
+import { startProductStack, until } from './input-product-stack.mjs';
 import { instrumentViewer, requireControl } from './cluster-test-support.mjs';
 
-const [modulePath, viewerExe, endpoint, browser, output, portArg = '35300'] = process.argv.slice(2);
+const [modulePath, viewerExe, endpoint, browser, output, portArg = '34120'] = process.argv.slice(2);
 assert([modulePath, viewerExe, endpoint, browser, output].every(Boolean));
 const run = resolve(output);
 const port = Number(portArg);
-assert(Number.isInteger(port) && port >= 35300 && port + 2 <= 35399);
+assert(Number.isInteger(port) && port >= 34100 && port + 3 <= 34199);
 const origin = `http://127.0.0.1:${port}`;
 const fixtureOrigin = `http://127.0.0.1:${port + 1}`;
 const marker = 'RKCLIP' + randomUUID().replaceAll('-', '');
@@ -78,6 +78,35 @@ const connect = async (username, setup = false) => {
   });
   assert.equal(response.status(), 200, await response.text());
   const connected = await instrumentViewer(context, run, username);
+  await context.addInitScript(() => {
+    window.inputClipboardQA = { wire: [], local: [] };
+    const q = window.inputClipboardQA;
+    const send = RTCDataChannel.prototype.send;
+    RTCDataChannel.prototype.send = function (raw) {
+      try {
+        const message = JSON.parse(raw);
+        q.wire.push({ at: performance.now(), direction: 'out', message });
+      } catch {}
+      if (!this.__inputClipboardObserved) {
+        this.__inputClipboardObserved = true;
+        this.addEventListener('message', ({ data }) => {
+          try {
+            const message = JSON.parse(data);
+            if (['input.result', 'input.editable', 'focus', 'layout'].includes(message.type))
+              q.wire.push({ at: performance.now(), direction: 'in', message });
+          } catch {}
+        });
+      }
+      return send.call(this, raw);
+    };
+    for (const type of ['pointerdown', 'pointerup', 'focusin', 'focusout', 'keydown', 'keyup', 'paste'])
+      document.addEventListener(
+        type,
+        (event) =>
+          q.local.push({ at: performance.now(), type, target: event.target.className, key: event.key }),
+        true,
+      );
+  });
   await connected.page.goto(origin);
   await connected.ready();
   await connected.call('auth.settings', {
@@ -114,6 +143,7 @@ const project = async (id) => {
   };
 };
 const click = async (id, options) => {
+  await ready();
   const rect = await project(id);
   await user.page.mouse.click(rect.x + rect.width / 2, rect.y + rect.height / 2, options);
   await pause(200);
@@ -188,10 +218,21 @@ try {
   await ready();
   const before = revision();
   const rect = await project('copy');
-  await user.page.mouse.move(rect.x + 1, rect.y + rect.height / 2);
-  await user.page.mouse.down();
-  await user.page.mouse.move(rect.x + rect.width - 1, rect.y + rect.height / 2, { steps: 20 });
-  await user.page.mouse.up();
+  const mouseCdp = await user.context.newCDPSession(user.page);
+  const dragMouse = (type, x, buttons) =>
+    mouseCdp.send('Input.dispatchMouseEvent', {
+      type,
+      x,
+      y: rect.y + rect.height / 2,
+      buttons,
+      button: buttons || type === 'mouseReleased' ? 'left' : 'none',
+      clickCount: 1,
+    });
+  await dragMouse('mouseMoved', rect.x + 1, 0);
+  await dragMouse('mousePressed', rect.x + 1, 1);
+  for (let step = 1; step <= 20; step++)
+    await dragMouse('mouseMoved', rect.x + 1 + ((rect.width - 2) * step) / 20, 1);
+  await dragMouse('mouseReleased', rect.x + rect.width - 1, 0);
   await until(() => latest().selection === marker, 'mouse text selection');
   await user.page.keyboard.press('Control+C');
   await until(() => row()?.text === marker, 'Control clipboard record');
@@ -334,6 +375,19 @@ try {
   console.error(error.stack);
   if (user?.page && !user.page.isClosed())
     await user.page.screenshot({ path: join(run, 'failure.png') }).catch(() => {});
+  if (user?.page && !user.page.isClosed())
+    await writeFile(
+      join(run, 'input-wire.json'),
+      JSON.stringify(
+        await user.page.evaluate(() => ({
+          probe: inputClipboardQA,
+          active: document.activeElement?.outerHTML,
+          text: document.body.innerText,
+        })),
+        null,
+        2,
+      ),
+    );
   process.exitCode = 1;
 } finally {
   clearTimeout(deadline);

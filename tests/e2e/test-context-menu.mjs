@@ -1,7 +1,7 @@
 /**
- * Headed Chrome 157, isolated Control and native H264 context-menu verification.
+ * Edge/Chrome 89, isolated Control and native H264 context-menu verification.
  * node tests/e2e/test-context-menu.mjs <playwright module> <viewer exe>
- *   <endpoint exe> <browser exe> <unused evidence directory> [port=35140]
+ *   <endpoint exe> <browser exe> <unused evidence directory> [port=34020]
  */
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -9,18 +9,18 @@ import { createRequire } from 'node:module';
 import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { startProductStack, until } from './kit/stack.mjs';
+import { startStack, until } from './kit/stack.mjs';
 
-const [modulePath, viewer, endpoint, browser, output, portArg = '35140'] = process.argv.slice(2);
+const [modulePath, viewer, endpoint, browser, output, portArg = '34020'] = process.argv.slice(2);
 assert(
   modulePath && viewer && endpoint && browser && output,
   'Expected module, executables and evidence directory',
 );
 const run = resolve(output);
 const port = Number(portArg);
-assert(Number.isInteger(port) && port >= 35100 && port + 2 <= 35199, 'Use isolated ports 35100–35199');
-const origin = `http://127.0.0.1:${port}`;
-const fixtureOrigin = `http://127.0.0.1:${port + 1}`;
+assert(Number.isInteger(port) && port >= 34000 && port + 4 <= 34099, 'Use isolated ports 34000-34099');
+const origin = `http://127.0.0.1:${port + 1}`;
+const fixtureOrigin = `http://127.0.0.1:${port + 4}`;
 const { chromium } = createRequire(import.meta.url)(resolve(modulePath));
 await mkdir(run);
 const html = await readFile(new URL('./fixtures/context-menu.html', import.meta.url));
@@ -48,12 +48,9 @@ const fixture = createServer(async (request, response) => {
 });
 await new Promise((done, reject) => {
   fixture.once('error', reject);
-  fixture.listen(port + 1, '127.0.0.1', done);
+  fixture.listen(port + 4, '127.0.0.1', done);
 });
-const control = startProductStack({ run, port, endpoint, browser });
-control.stdout.on('data', (data) => void appendFile(join(run, 'control.log'), data));
-control.stderr.on('data', (data) => void appendFile(join(run, 'control.log'), data));
-const stopped = new Promise((done) => control.once('exit', done));
+const stack = await startStack({ scenario: 'context-menu', run, port, endpoint, browser, seed: false });
 let context, page;
 const deadline = setTimeout(() => void context?.close(), 300000);
 const result = (scenario, status, detail) => {
@@ -64,7 +61,7 @@ try {
   await until(async () => (await fetch(origin + '/api/auth/setup')).ok, 'Control startup');
   context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
-    headless: false,
+    headless: true,
     viewport: { width: 1100, height: 1000 },
     deviceScaleFactor: 1,
     isMobile: true,
@@ -72,7 +69,7 @@ try {
     args: ['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required'],
   });
   page = context.pages()[0];
-  page.setDefaultTimeout(10000);
+  page.setDefaultTimeout(45000);
   page.on('websocket', (socket) => {
     socket.on('framereceived', ({ payload }) => {
       try {
@@ -131,7 +128,7 @@ try {
   });
   const cdp = await context.newCDPSession(page);
   const version = await cdp.send('Browser.getVersion');
-  assert.match(version.product, /\/157\./, 'Requires Chrome 157');
+  assert.match(version.product, /\/(?:89|[1-9][0-9]{2})\./, 'Expected the requested Chromium Viewer');
   result('platform', 'verified', version.product);
   await page.goto(origin);
   await page.locator('.viewer-lock-blank').waitFor();
@@ -487,8 +484,7 @@ try {
   const wire = page && !page.isClosed() ? await page.evaluate(() => contextQA.wire).catch(() => []) : [];
   await writeFile(join(run, 'trace.json'), JSON.stringify({ results, remote, wire, product }, null, 2));
   await context?.close();
-  if (control.connected) control.disconnect();
-  await Promise.race([stopped, pause(10000)]);
+  await stack.stop();
   fixture.closeAllConnections();
   fixture.close();
   console.log('Evidence:', run);

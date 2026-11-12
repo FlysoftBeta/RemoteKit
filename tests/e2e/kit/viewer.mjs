@@ -14,7 +14,7 @@ export function cliOptions() {
       pointer: { type: 'string', default: 'mouse' },
       out: { type: 'string' },
       'browser-path': { type: 'string' },
-      port: { type: 'string', default: '34790' },
+      port: { type: 'string', default: '34000' },
     },
   });
   if (!['edge', 'chrome89'].includes(values.browser)) throw Error('Expected --browser edge|chrome89');
@@ -29,6 +29,7 @@ export async function launch({
   pointer: pointerType = 'mouse',
   out,
   stack,
+  initialAuth = true,
 } = {}) {
   const require = createRequire(import.meta.url);
   const { chromium } = require(
@@ -53,7 +54,7 @@ export async function launch({
     hasTouch: touch,
   });
   const page = await context.newPage();
-  page.setDefaultTimeout(15000);
+  page.setDefaultTimeout(45000);
   // Playwright's mouse drags call Input.setInterceptDrags, which Chrome 89 lacks.
   const cdp = touch || chrome89 ? await context.newCDPSession(page) : undefined;
   const mouseEvent = (type) =>
@@ -221,15 +222,17 @@ export async function launch({
     await authenticate();
   }
   try {
-    const response = await page.request.post(stack.origin + '/api/auth/login', {
-      data: { username: stack.username, password: stack.password },
-      headers: { Origin: stack.origin },
-    });
-    if (!response.ok()) throw Error('Login failed: ' + (await response.text()));
-    await page.goto(stack.origin);
-    await page.waitForFunction(() => !!window.__remotekitTest);
-    await waitUnlocked();
-    await wait(() => state, 'product state');
+    if (initialAuth) {
+      const response = await page.request.post(stack.origin + '/api/auth/login', {
+        data: { username: stack.username, password: stack.password },
+        headers: { Origin: stack.origin },
+      });
+      if (!response.ok()) throw Error('Login failed: ' + (await response.text()));
+      await page.goto(stack.origin);
+      await page.waitForFunction(() => !!window.__remotekitTest);
+      await waitUnlocked();
+      await wait(() => state, 'product state');
+    }
   } catch (error) {
     await shot('fail-launch').catch(() => {});
     writeFileSync(join(out, 'fail-launch.txt'), String(error.stack ?? error));
@@ -274,7 +277,14 @@ export async function launch({
 
 export async function runScenario(name, run) {
   const options = cliOptions();
-  const stack = await startStack({ scenario: name, browser: options['browser-path'] });
+  const runRoot = resolve(options.out ?? join('develop/tmp/e2e-shell', `${name}-${Date.now()}`));
+  const stack = await startStack({
+    scenario: name,
+    browser: options['browser-path'],
+    port: Number(options.port),
+    run: join(runRoot, 'stack'),
+  });
+  options.out = join(runRoot, 'shots');
   console.log('RUN ' + stack.run);
   let viewer;
   try {

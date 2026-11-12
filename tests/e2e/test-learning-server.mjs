@@ -4,12 +4,12 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { fakeLearningProvider } from './kit/learning-provider.mjs';
-import { startStack, seedUser, until } from './kit/stack.mjs';
+import { fakeLearningProvider } from './files-learning-provider.mjs';
+import { startStack, seedUser, until } from './files-stack.mjs';
 import { instrumentViewer, requireControl } from './cluster-test-support.mjs';
 
-const browserPath = process.argv[2] ?? 'C:/src/chromium/src/out/dev/remotekit_browser.exe';
-const run = resolve('develop/tmp/e2e/learning-server-' + Date.now());
+const browserPath = process.argv[2] ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe';
+const run = resolve(process.env.FILES_RUN ?? 'develop/tmp/e2e-files/learning-server-' + Date.now());
 await mkdir(run, { recursive: true });
 const provider = await fakeLearningProvider(run, browserPath);
 const savedEnv = { ...process.env };
@@ -28,7 +28,10 @@ const { chromium } = createRequire(import.meta.url)(
   process.env.REMOTEKIT_PLAYWRIGHT ??
     join(homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'),
 );
-const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const browser = await chromium.launch({
+  executablePath: process.env.FILES_VIEWER ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  headless: true,
+});
 const Database = requireControl('better-sqlite3');
 const db = new Database(join(run, 'control.db'));
 const viewers = [];
@@ -41,7 +44,11 @@ async function stage(name, action) {
   await writeFile(join(run, 'results.json'), JSON.stringify(results, null, 2));
 }
 async function connect(name) {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const context = await browser.newContext({
+    viewport:
+      process.env.FILES_POINTER === 'touch' ? { width: 390, height: 844 } : { width: 1600, height: 1000 },
+    hasTouch: process.env.FILES_POINTER === 'touch',
+  });
   const response = await context.request.post(stack.origin + '/api/auth/login', {
     headers: { Origin: stack.origin },
     data: { username: name, password: stack.password },
@@ -138,6 +145,8 @@ try {
     const opened = await first.call('document.open', { requestId: 'library', assetId: docx.assetId }, true);
     assert.equal(opened.state, 'ready', JSON.stringify(opened));
     results.push({ name: 'pre-render-open', durationMs: Date.now() - start });
+    if (process.env.FILES_POINTER === 'touch')
+      await first.page.getByText('数学作业 1', { exact: true }).click();
     await first.page.getByRole('button').filter({ hasText: '共享数学讲义.docx' }).first().click();
     await first.page.getByRole('document', { name: '文档第 1 页' }).waitFor();
     await first.page.waitForFunction(
@@ -225,7 +234,11 @@ try {
     await writeFile(join(run, 'bank-video.json'), JSON.stringify(video, null, 2));
     const x = box.x + ((geometry.username.x + geometry.username.width / 2) * box.width) / geometry.width;
     const y = box.y + ((geometry.username.y + geometry.username.height / 2) * box.height) / geometry.height;
-    await first.page.mouse.click(x, y);
+    await (
+      process.env.FILES_POINTER === 'touch'
+        ? first.page.touchscreen.tap.bind(first.page.touchscreen)
+        : first.page.mouse.click.bind(first.page.mouse)
+    )(x, y);
     await until(() => provider.events.some((event) => event.type === 'focus'), 'Browser username focus');
     await first.page.locator('.remote-open-keyboard').waitFor();
     await first.page.keyboard.type('keyboard-student', { delay: 25 });
@@ -236,7 +249,11 @@ try {
       'Browser keyboard input',
     );
     await first.page.screenshot({ path: join(run, 'bank-sign-in-typed.png') });
-    await first.page.mouse.click(
+    await (
+      process.env.FILES_POINTER === 'touch'
+        ? first.page.touchscreen.tap.bind(first.page.touchscreen)
+        : first.page.mouse.click.bind(first.page.mouse)
+    )(
       box.x + ((geometry.login.x + geometry.login.width / 2) * box.width) / geometry.width,
       box.y + ((geometry.login.y + geometry.login.height / 2) * box.height) / geometry.height,
     );
@@ -276,16 +293,29 @@ try {
     assert.equal(request.textBookId, 'book');
     assert.equal(request.isDesc, false);
     assert.equal(request.search, 'fixture');
+    if (process.env.FILES_POINTER === 'touch')
+      await first.page.getByRole('button', { name: '筛选', exact: true }).click();
     await first.page.getByRole('combobox', { name: '教材' }).click();
     await first.page.getByRole('option', { name: /数学必修第一册/ }).click();
     await first.page.getByRole('button', { name: '第一章 集合', exact: true }).click();
-    await first.page.getByRole('button', { name: '题型', exact: true }).click();
-    await first.page.getByRole('menuitem', { name: '选择题', exact: true }).click();
-    await first.page.keyboard.press('Escape');
-    await first.page.getByRole('button', { name: '难度', exact: true }).click();
-    await first.page.getByRole('menuitem', { name: '基础题', exact: true }).click();
-    await first.page.getByRole('button', { name: '排序', exact: true }).click();
-    await first.page.getByRole('menuitem', { name: '最早', exact: true }).click();
+    if (process.env.FILES_POINTER === 'touch') {
+      await first.page.getByRole('combobox', { name: '题型', exact: true }).click();
+      await first.page.getByRole('option', { name: '选择题', exact: true }).click();
+      await first.page.keyboard.press('Escape');
+      await first.page.getByRole('combobox', { name: '难度', exact: true }).click();
+      await first.page.getByRole('option', { name: '基础题', exact: true }).click();
+      await first.page.locator('.bank-drawer-controls').getByRole('combobox').nth(2).click();
+      await first.page.getByRole('option', { name: '最早', exact: true }).click();
+      await first.page.getByRole('button', { name: '关闭筛选', exact: true }).click();
+    } else {
+      await first.page.getByRole('button', { name: '题型', exact: true }).click();
+      await first.page.getByRole('menuitem', { name: '选择题', exact: true }).click();
+      await first.page.keyboard.press('Escape');
+      await first.page.getByRole('button', { name: '难度', exact: true }).click();
+      await first.page.getByRole('menuitem', { name: '基础题', exact: true }).click();
+      await first.page.getByRole('button', { name: '排序', exact: true }).click();
+      await first.page.getByRole('menuitem', { name: '最早', exact: true }).click();
+    }
     await first.page.getByRole('textbox', { name: '搜索题目', exact: true }).fill('viewer-filter');
     await until(
       () =>
@@ -322,6 +352,7 @@ try {
   for (const [index, viewer] of viewers.entries()) {
     if (!viewer.page.isClosed()) {
       await viewer.page.screenshot({ path: join(run, 'failure-' + index + '.png') });
+      await writeFile(join(run, 'failure-' + index + '.html'), await viewer.page.content());
       await writeFile(
         join(run, 'failure-state-' + index + '.json'),
         JSON.stringify(await viewer.state(), null, 2),

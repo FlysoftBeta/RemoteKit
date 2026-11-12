@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdir, symlink } from 'node:fs/promises';
+import { appendFile, mkdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,23 +19,12 @@ export async function until(label, probe, timeout = 45000) {
   throw Error('Timed out: ' + label);
 }
 export async function buildHarness(runtime) {
-  const control = join(runtime, 'control');
-  await mkdir(join(control, 'dist'), { recursive: true });
-  await symlink(join(repository, 'control/node_modules'), join(control, 'node_modules'), 'junction');
-  await symlink(join(repository, 'control/dist/client'), join(control, 'dist/client'), 'junction');
-  const server = join(control, 'dist/server.mjs');
-  await requireControl('esbuild').build({
-    entryPoints: [join(repository, 'tests/e2e/cluster-harness.mts')],
-    outfile: server,
-    bundle: true,
-    platform: 'node',
-    format: 'esm',
-    packages: 'external',
-  });
-  return server;
+  // Run the harness from source; shared product artifacts remain read-only.
+  await mkdir(runtime, { recursive: true });
+  return join(repository, 'tests/e2e/cluster-harness.mts');
 }
 export function startControl(server, configPath, evidence) {
-  const child = spawn(process.execPath, [server], {
+  const child = spawn(process.execPath, ['--import', './control/node_modules/tsx/dist/loader.mjs', server], {
     cwd: repository,
     env: { ...process.env, REMOTEKIT_CONTROL_CONFIG: configPath },
     windowsHide: true,

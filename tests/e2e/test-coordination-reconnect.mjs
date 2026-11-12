@@ -6,21 +6,14 @@ import { createServer } from 'node:http';
 import { connect, createServer as createProxy } from 'node:net';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
-import { stageRuntime } from '../integration/stage-runtime.mjs';
-import {
-  buildHarness,
-  instrumentViewer,
-  pause,
-  requireControl,
-  startControl,
-  until,
-} from './cluster-test-support.mjs';
+import { stageProductRuntime as stageRuntime } from './kit/stack.mjs';
+import { instrumentViewer, pause, requireControl, startControl, until } from './cluster-test-support.mjs';
 
-const [modulePath, edge, endpoint, browser, output, portArg = '33951'] = process.argv.slice(2);
+const [modulePath, edge, endpoint, browser, output, portArg = '34050'] = process.argv.slice(2);
 assert([modulePath, edge, endpoint, browser, output].every(Boolean));
 const run = resolve(output),
   port = Number(portArg),
-  origin = 'http://127.0.0.1:' + port;
+  origin = 'http://127.0.0.1:' + (port + 4);
 await mkdir(run);
 let management = true,
   closePage = false,
@@ -73,7 +66,8 @@ const fixture = createServer(async (request, response) => {
   );
 });
 await new Promise((done) => fixture.listen(port + 1, '127.0.0.1', done));
-const server = await buildHarness(join(run, 'runtime'));
+await mkdir(join(run, 'runtime'));
+const server = resolve('tests/e2e/shell-cluster-harness.mts');
 const configPath = join(run, 'control.json'),
   nodeRoot = join(run, 'node');
 await mkdir(nodeRoot);
@@ -81,7 +75,7 @@ await writeFile(
   configPath,
   JSON.stringify({
     http: { listen: '127.0.0.1:' + port, origins: [origin] },
-    storage: { database: join(run, 'control.db') },
+    storage: { database: join(run, 'control.db'), logs: join(run, 'logs') },
     nodes: {
       alpha: {
         remote: { control: 'ws://127.0.0.1:' + (port + 2) + '/api/node' },
@@ -91,6 +85,20 @@ await writeFile(
   }),
 );
 const control = startControl(server, configPath, run);
+const vite = spawn(
+  process.execPath,
+  [resolve('tests/e2e/kit/vite.mjs'), String(port + 4), join(run, 'vite-cache')],
+  {
+    cwd: resolve('control'),
+    windowsHide: true,
+    stdio: 'ignore',
+    env: { ...process.env, REMOTEKIT_VITE_CONTROL: 'http://127.0.0.1:' + port },
+  },
+);
+await writeFile(
+  join(run, 'pids.jsonl'),
+  JSON.stringify({ control: control.child.pid, vite: vite.pid }) + '\n',
+);
 let native, viewers, context;
 try {
   await until('remote bootstrap', async () =>
@@ -102,8 +110,13 @@ try {
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  await appendFile(join(run, 'pids.jsonl'), JSON.stringify({ native: native.pid }) + '\n');
+  await mkdir(join(nodeRoot, 'logs'), { recursive: true });
   for (const stream of ['stdout', 'stderr'])
-    native[stream].on('data', (bytes) => void appendFile(join(run, 'endpoint.' + stream + '.log'), bytes));
+    native[stream].on('data', (bytes) => {
+      void appendFile(join(run, 'endpoint.' + stream + '.log'), bytes);
+      if (stream === 'stderr') void appendFile(join(nodeRoot, 'logs/endpoint.log'), bytes);
+    });
   await until('remote node ready', () =>
     Promise.resolve(control.events.some((event) => event.event === 'node.ready')),
   );
@@ -121,7 +134,7 @@ try {
   });
   assert.equal(setup.status(), 200, await setup.text());
   const viewer = await instrumentViewer(context, run, 'viewer');
-  await viewer.page.goto(origin);
+  await viewer.page.goto(origin, { timeout: 120000 });
   await viewer.ready();
   await viewer.call('auth.settings', {
     currentPassword: password,
@@ -204,8 +217,88 @@ try {
     false,
   );
   assert.equal(childLoads, loads);
+  // The bootstrap path is shown for remote nodes (docs/cluster.md); managed
+  // local nodes intentionally omit that distribution path.
+  await viewer.page.getByRole('button', { name: '开始', exact: true }).click();
+  await viewer.page
+    .getByRole('dialog', { name: '开始屏幕' })
+    .locator('[data-tile-key]')
+    .filter({ has: viewer.page.getByText('管理', { exact: true }) })
+    .click();
+  const adminWindow = await until('admin window', async () =>
+    (await viewer.state()).workspace.windows.find((win) => win.appId === 'admin'),
+  );
+  const admin = viewer.page.locator(`[data-window-id="${adminWindow.id}"]`);
+  const nodeTab = admin.getByRole('tab', { name: '节点', exact: true });
+  if (await nodeTab.count()) await nodeTab.click();
+  else await admin.getByRole('button', { name: '节点', exact: true }).click();
+  await admin.getByText('公钥指纹', { exact: true }).waitFor();
+  await admin.getByText(/node\.json/).waitFor();
+  assert.match(await admin.innerText(), /nodes[\\/]alpha[\\/]node\.json/);
+  await viewer.page.screenshot({ path: join(run, 'remote-node-fingerprint-path.png') });
+  // The shared cluster harness exposes an existing monotonic clock hook. Only
+  // elapsed absence is advanced; all Viewer actions below remain real UI input.
+  const beforeAbsence = await viewer.state();
+  await viewer.page.close();
+  await until(
+    'detached viewer and settled native session',
+    async () => {
+      const snapshot = await control.call('inspect');
+      const observed = snapshot.observations[placement.tenant];
+      return (
+        !snapshot.runtimes.find((runtime) => runtime.tenant === placement.tenant)?.viewer &&
+        observed?.converged &&
+        !observed.rtc?.active
+      );
+    },
+    90000,
+  );
+  await control.call('advance', { ms: 11 * 60 * 1000 });
+  const absent = await control.call('inspect');
+  await writeFile(join(run, 'absence-before.json'), JSON.stringify({ beforeAbsence, absent }, null, 2));
+  const returning = await instrumentViewer(context, run, 'returning-viewer');
+  await returning.page.goto(origin, { timeout: 120000 });
+  await returning.page.locator('.viewer-lock-blank').waitFor();
+  await pause(500);
+  for (const direction of ['Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right'])
+    await returning.page.keyboard.press('Arrow' + direction);
+  await returning.page.locator('input[autocomplete="current-password"]').click();
+  await returning.page.keyboard.type(password, { delay: 80 });
+  await returning.page.getByRole('button', { name: '解锁', exact: true }).click();
+  await returning.ready(120000);
+  const returnedMedia = await returning.media();
+  const afterAbsence = await returning.state();
+  for (const tab of beforeAbsence.workspace.tabs)
+    assert(afterAbsence.workspace.tabs.some((next) => next.id === tab.id && next.url === tab.url));
+  await returning.page.screenshot({ path: join(run, 'normal-long-absence-return.png') });
+  await writeFile(
+    join(run, 'absence-return.json'),
+    JSON.stringify({ beforeAbsence, absent, afterAbsence, returnedMedia }, null, 2),
+  );
   await writeFile(join(run, 'result.json'), JSON.stringify({ before, after, child, childLoads }, null, 2));
   console.log('Disconnected self-close persisted, removed the tab, and did not recreate its page: ' + run);
+} catch (error) {
+  const pages = context?.pages() ?? [];
+  const snapshots = [];
+  for (const [index, page] of pages.entries()) {
+    await page.screenshot({ path: join(run, `failure-${index}.png`) }).catch(() => {});
+    snapshots.push(
+      await page
+        .evaluate(() => ({
+          text: document.body.innerText,
+          state: window.__remotekitTest?.state(),
+          auth: window.clusterQA?.auth,
+          peers: window.clusterQA?.peers.map((peer) => peer.connectionState),
+        }))
+        .catch(() => ({})),
+    );
+  }
+  await writeFile(
+    join(run, 'failure.json'),
+    JSON.stringify({ error: String(error.stack), snapshots }, null, 2),
+  );
+  console.error(error.stack);
+  process.exitCode = 1;
 } finally {
   management = false;
   for (const socket of sockets) socket.destroy();
@@ -215,6 +308,7 @@ try {
     native.stdin.end();
     await new Promise((done) => native.once('exit', done));
   }
+  vite.kill();
   await control.stop();
   await new Promise((done) => proxy.close(done));
   await new Promise((done) => fixture.close(done));

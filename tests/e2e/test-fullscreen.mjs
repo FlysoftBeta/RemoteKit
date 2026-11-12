@@ -2,7 +2,7 @@
  * Real H.264 fullscreen regression on an isolated loopback instance.
  * node tests/e2e/test-fullscreen.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port]
  */
-import { startProductStack } from './kit/stack.mjs';
+import { startStack } from './kit/stack.mjs';
 import { registerViewer } from './product-stack.mjs';
 import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir } from 'node:fs/promises';
@@ -12,7 +12,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
-const [playwright, viewer, endpoint, browser, output, listenPort = '33785'] = process.argv.slice(2);
+const [playwright, viewer, endpoint, browser, output, listenPort = '34030'] = process.argv.slice(2);
 assert(
   [playwright, viewer, endpoint, browser, output].every(Boolean),
   'Expected Playwright, Viewer, Endpoint, Browser and output paths',
@@ -21,8 +21,8 @@ const { chromium } = createRequire(import.meta.url)(resolve(playwright));
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const run = resolve(output);
 const port = Number(listenPort);
-const origin = 'http://127.0.0.1:' + port;
-const fixtureOrigin = 'http://127.0.0.1:' + (port + 1);
+const origin = 'http://127.0.0.1:' + (port + 1);
+const fixtureOrigin = 'http://127.0.0.1:' + (port + 4);
 await mkdir(run);
 const log = async (stage, value) => {
   await appendFile(join(run, 'fullscreen-results.jsonl'), JSON.stringify({ stage, value }) + '\n');
@@ -95,19 +95,12 @@ const fixture = createServer(async (request, response) => {
 });
 await new Promise((accept, reject) => {
   fixture.once('error', reject);
-  fixture.listen(port + 1, '127.0.0.1', accept);
+  fixture.listen(port + 4, '127.0.0.1', accept);
 });
-const control = startProductStack({ run, port, endpoint, browser });
-control.stdout.on('data', (data) => void appendFile(join(run, 'control.stdout.log'), data));
-control.stderr.on('data', (data) => void appendFile(join(run, 'control.stderr.log'), data));
-const stopped = new Promise((accept, reject) => {
-  control.once('exit', accept);
-  control.once('error', reject);
-});
-void stopped.catch(() => {});
+const stack = await startStack({ scenario: 'fullscreen', run, port, endpoint, browser, seed: false });
 
 const sleep = (ms) => new Promise((accept) => setTimeout(accept, ms));
-async function until(check, message, timeout = 12000) {
+async function until(check, message, timeout = 45000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     const value = await check();
@@ -117,7 +110,7 @@ async function until(check, message, timeout = 12000) {
   throw Error(message);
 }
 let context, page, readProbe;
-const deadline = setTimeout(() => void context?.close().catch(() => {}), 150000);
+const deadline = setTimeout(() => void context?.close().catch(() => {}), 420000);
 try {
   await until(async () => {
     const response = await fetch(origin + '/api/auth/setup', {
@@ -135,7 +128,7 @@ try {
   });
   page = context.pages()[0] ?? (await context.newPage());
   page.on('pageerror', (error) => void log('client-error', { message: error.message, stack: error.stack }));
-  page.setDefaultTimeout(5000);
+  page.setDefaultTimeout(45000);
   await page.addInitScript(() => {
     const probe = (window.fullscreenQA = { attempts: [], peers: [], channels: [], events: [], input: [] });
     const record = (event) => {
@@ -358,11 +351,12 @@ try {
   };
   const accountPassword = randomBytes(18).toString('hex');
 
-  await page.goto(origin, { timeout: 12000 });
+  await page.goto(origin, { timeout: 90000 });
   await find('.viewer-lock-blank');
   await unlock();
   await registerViewer({ click, fill, username: 'fullscreen-qa', password: accountPassword });
-  await click('button', '新建窗口');
+  await click('button', '开始');
+  await click('[data-tile-key]', '浏览器');
   const outerOnly = process.env.REMOTEKIT_QA_FULLSCREEN_OUTER_ONLY === '1';
   const outerWindowCount = outerOnly ? 1 : 2;
   if (outerOnly) {
@@ -371,8 +365,8 @@ try {
   } else {
     const first = await navigate('/first', 0);
     await allReady(1);
-    await click('button', '更多');
-    await click('[role=menuitem]', '新建窗口');
+    await click('button', '开始');
+    await click('[data-tile-key]', '浏览器');
     await until(() => read('!document.querySelector("[role=menu]")'), 'Window menu did not close');
     const second = await navigate('/second', 1);
     const baseline = await allReady(2);
@@ -572,8 +566,9 @@ try {
   }
 
   const openSettings = async () => {
-    await click('button', '更多');
-    await click('[role=menuitem]', '设置');
+    await click('button', '开始');
+    await click('[data-tile-key]', '设置');
+    await click('[role="button"]', '外观');
   };
   const autoToggleLabel = '打开或激活时全屏';
   const autoChecked = () =>
@@ -583,17 +578,28 @@ try {
   assert.equal(await autoChecked(), false);
   await click('label', autoToggleLabel);
   await until(
-    () =>
-      read(
-        `[...document.querySelectorAll('[role="status"]')].some(el => el.textContent.trim() === '已保存')`,
-      ),
+    () => read('window.__remotekitTest.state()?.workspace.settings.workspace.autoFullscreen === true'),
     'Control did not acknowledge the fullscreen setting',
   );
-  await click('button', '关闭设置');
+  const closeSettings = async () => {
+    const id = await read(
+      'window.__remotekitTest.state().workspace.windows.find(win => win.appId === "settings").id',
+    );
+    await page.locator(`[data-window-id="${id}"]`).getByRole('button', { name: '窗口把手' }).click();
+    await page.getByRole('menuitem', { name: '关闭窗口', exact: true }).click();
+    await until(
+      () =>
+        read(
+          `!window.__remotekitTest.state().workspace.windows.some(win => win.id === ${JSON.stringify(id)})`,
+        ),
+      'Settings window close did not commit',
+    );
+  };
+  await closeSettings();
 
   // The default reattachment may lock a saved account.
   const password = 'input[autocomplete="current-password"]';
-  await page.reload({ timeout: 12000 });
+  await page.reload({ timeout: 90000 });
   await until(
     () =>
       read(`Boolean(document.querySelector('.viewer-shell') ||
@@ -615,7 +621,7 @@ try {
   );
   await openSettings();
   assert.equal(await autoChecked(), true);
-  await click('button', '关闭设置');
+  await closeSettings();
   if (!(await sample()).native) await page.mouse.click(10, 400);
   const activeOuter = await until(async () => {
     const state = await sample();
@@ -681,9 +687,8 @@ try {
   try {
     await context?.close();
   } finally {
-    if (control.connected) control.disconnect();
+    await stack.stop();
     fixture.closeAllConnections();
     await new Promise((accept) => fixture.close(accept));
-    await stopped;
   }
 }

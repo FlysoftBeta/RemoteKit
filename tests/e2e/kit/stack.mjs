@@ -1,10 +1,18 @@
 import { stageRuntime } from '../../integration/stage-runtime.mjs';
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createServer as createSocketServer } from 'node:net';
 import { promisify } from 'node:util';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
@@ -75,8 +83,11 @@ export async function startStack({
   endpoint = defaultEndpoint,
   dev = true,
   media = {},
-  run = join(root, 'develop/tmp/e2e', `${scenario}-${Date.now()}`),
+  port: basePort,
+  seed = true,
+  run = join(root, 'develop/tmp/e2e-shell', `${scenario}-${Date.now()}`),
 } = {}) {
+  run = resolve(run);
   mkdirSync(run, { recursive: true });
   const allocated = new Set();
   async function port() {
@@ -86,7 +97,14 @@ export async function startStack({
     allocated.add(value);
     return value;
   }
-  const ports = { control: await port(), viewer: await port(), fixture: await port(), peer: await port() };
+  const base = Number(basePort ?? process.env.REMOTEKIT_E2E_PORT);
+  if (basePort !== undefined || process.env.REMOTEKIT_E2E_PORT) {
+    if (!Number.isInteger(base) || base < 1024 || base + 3 > 65535)
+      throw Error('Expected a valid explicit base port');
+  }
+  const ports = Number.isInteger(base)
+    ? { control: base, viewer: base + 1, fixture: base + 2, peer: base + 3 }
+    : { control: await port(), viewer: await port(), fixture: await port(), peer: await port() };
   const origin = `http://127.0.0.1:${dev ? ports.viewer : ports.control}`;
   const logs = {
     control: join(run, 'control.log'),
@@ -103,6 +121,7 @@ export async function startStack({
   const children = [];
   function record(child, log) {
     children.push(child);
+    appendFileSync(join(run, 'pids.jsonl'), JSON.stringify({ pid: child.pid, log }) + '\n');
     child.stdout.on('data', (chunk) => appendFileSync(log, chunk));
     child.stderr.on('data', (chunk) => appendFileSync(log, chunk));
     child.on('error', (error) => appendFileSync(log, String(error)));
@@ -153,14 +172,13 @@ export async function startStack({
         logs.vite,
       );
     await until(
-      async () =>
-        (await fetch(`${origin}/api/auth/status`, { signal: AbortSignal.timeout(1000) })).status < 500,
+      async () => (await fetch(`${origin}/api/auth/setup`, { signal: AbortSignal.timeout(1000) })).ok,
       'Control ready',
     );
     await until(async () => (await fetch(origin, { signal: AbortSignal.timeout(1000) })).ok, 'Viewer ready');
     const username = `e2e-${Date.now()}`;
     const password = 'workspace-e2e-password';
-    await seedUser(join(run, 'control.db'), username, password);
+    if (seed) await seedUser(join(run, 'control.db'), username, password);
     return {
       run,
       ports,
@@ -275,10 +293,11 @@ async function startFixture(port, run) {
                 text: await file.text(),
               }))) }),
             });
-            fetch('/event', {
+            const geometry = () => fetch('/event', {
               method: 'POST',
-              body: JSON.stringify({ path: location.pathname, width: innerWidth, height: innerHeight }),
+              body: JSON.stringify({ path: location.pathname, width: innerWidth, height: innerHeight, geometry: Object.fromEntries([...document.querySelectorAll('textarea,button,a,input')].map((el,i) => [el.tagName.toLowerCase()+'-'+i, el.getBoundingClientRect().toJSON()])) }),
             });
+            geometry(); addEventListener('resize', geometry);
           </script>
           ${filesystem}
         </html>`,
@@ -289,6 +308,16 @@ async function startFixture(port, run) {
     fixture.listen(port, '127.0.0.1', done);
   });
   return fixture;
+}
+
+export function stageProductRuntime(endpoint, browser, destination) {
+  const executable = stageRuntime(endpoint, browser, destination);
+  for (const name of ['face-models', 'models', 'documents']) {
+    const source = join(dirname(resolve(endpoint)), name);
+    const target = join(destination, name);
+    if (existsSync(source) && !existsSync(target)) symlinkSync(source, target, 'junction');
+  }
+  return executable;
 }
 
 export function startProductStack({
@@ -302,18 +331,23 @@ export function startProductStack({
   peer = { listen: `127.0.0.1:${port + 2}`, address: `127.0.0.1:${port + 2}` },
   configOverrides = {},
 }) {
+  run = resolve(run);
   mkdirSync(run, { recursive: true });
   const configPath = join(run, 'control.json');
   writeFileSync(
     configPath,
     JSON.stringify({
       http: { listen: `127.0.0.1:${port}`, origins: [`http://127.0.0.1:${port}`] },
-      storage: { database: join(run, 'control.db'), diagnostics: join(run, 'diagnostics') },
+      storage: {
+        database: join(run, 'control.db'),
+        diagnostics: join(run, 'diagnostics'),
+        logs: join(run, 'logs'),
+      },
       media,
       nodes: {
         local: {
           local: {
-            executable: stageRuntime(endpoint, browser, join(run, 'runtime/bin')),
+            executable: stageProductRuntime(endpoint, browser, join(run, 'runtime/bin')),
             root: join(run, 'node'),
           },
           peer,

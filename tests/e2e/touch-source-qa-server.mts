@@ -4,17 +4,19 @@ import { fileURLToPath } from 'node:url';
 import { readFile, mkdir, writeFile, appendFile } from 'node:fs/promises';
 import { createHttp } from '../../control/server/http/server.ts';
 const root = fileURLToPath(new URL('../../', import.meta.url)),
-  run = process.env.REMOTEKIT_TOUCH_QA_RUN ?? `${root}/develop/tmp/touch-source-qa-${Date.now()}`;
+  run = process.env.REMOTEKIT_TOUCH_QA_RUN ?? `${root}/develop/tmp/e2e-input/touch-source-${Date.now()}`,
+  port = Number(process.argv[2] ?? 34192),
+  fixturePort = port + 1;
 await mkdir(run, { recursive: true });
 const { store, endpoint, control } = await createClusterControl({
   run,
   executable: `${root}/build/endpoint/endpoint/endpoint_service.exe`,
-  browser: 'C:/src/chromium/src/out/dev/remotekit_browser.exe',
-  port: 33281,
+  browser: 'C:/src/chromium/src/out/rel/remotekit_browser.exe',
+  port,
 });
 const latest = new Map<string, any>();
 const server = createHttp(control, {
-  origins: ['http://127.0.0.1:33281'],
+  origins: [`http://127.0.0.1:${port}`],
   clientDir: `${root}/control/dist/client`,
   nodes: endpoint,
 });
@@ -27,7 +29,7 @@ const fixture = createServer(async (req, res) => {
       res.end();
       return;
     }
-    const url = new URL(req.url!, 'http://127.0.0.1:33282');
+    const url = new URL(req.url!, `http://127.0.0.1:${fixturePort}`);
     if (url.pathname === '/telemetry') {
       let body = '';
       for await (const chunk of req) {
@@ -73,11 +75,11 @@ const fixture = createServer(async (req, res) => {
     res.end(String(error));
   }
 });
-await new Promise<void>((r) => fixture.listen(33282, '0.0.0.0', r));
-await new Promise<void>((r) => server.listen(33281, '127.0.0.1', r));
+await new Promise<void>((r) => fixture.listen(fixturePort, '127.0.0.1', r));
+await new Promise<void>((r) => server.listen(port, '127.0.0.1', r));
 endpoint.start();
 const timer = setInterval(() => void control.reconciler.tick().catch(console.error), 1500);
-await writeFile(`${root}/develop/tmp/touch-source-qa-active.json`, JSON.stringify({ run, pid: process.pid }));
+await writeFile(`${run}/active.json`, JSON.stringify({ run, pid: process.pid, port, fixturePort }));
 console.log('TOUCH QA READY ' + run);
 let closing = false;
 async function close() {

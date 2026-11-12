@@ -6,11 +6,11 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { instrumentViewer } from './cluster-test-support.mjs';
-import { startStack, until } from './kit/stack.mjs';
+import { startStack, until } from './files-stack.mjs';
 
 const before = process.argv.includes('--before');
 const selectedDevice = process.argv.find((arg) => arg.startsWith('--device='))?.split('=')[1];
-const output = resolve('develop/tmp/e2e/files-ui', `${before ? 'before' : 'after'}-${Date.now()}`);
+const output = resolve(process.env.FILES_RUN ?? `develop/tmp/e2e-files/files-ui-${Date.now()}`);
 const require = createRequire(import.meta.url);
 const { chromium } = require(
   process.env.REMOTEKIT_PLAYWRIGHT ??
@@ -42,7 +42,7 @@ const fixture = createServer(async (request, response) => {
       })});
     </script>`);
 });
-await new Promise((done) => fixture.listen(0, '127.0.0.1', done));
+await new Promise((done) => fixture.listen(Number(process.env.FILES_PORT ?? 34200) + 1, '127.0.0.1', done));
 const fixtureOrigin = `http://127.0.0.1:${fixture.address().port}`;
 const results = [];
 try {
@@ -50,14 +50,18 @@ try {
     const out = join(output, device);
     mkdirSync(out, { recursive: true });
     stack = await startStack({ scenario: `files-ui-${device}`, run: join(out, 'stack') });
-    const tablet = device === 'chrome89';
+    const tablet = process.env.FILES_POINTER ? process.env.FILES_POINTER === 'touch' : device === 'chrome89';
     const browser = await chromium.launch(
-      tablet
+      device === 'chrome89'
         ? { executablePath: 'C:/src/tmp/chrome89-google/app/chrome.exe', headless: true }
         : { channel: 'msedge', headless: true },
     );
     const context = await browser.newContext({
-      viewport: tablet ? { width: 800, height: 1280 } : { width: 1600, height: 1000 },
+      viewport: tablet
+        ? process.env.FILES_POINTER
+          ? { width: 390, height: 844 }
+          : { width: 800, height: 1280 }
+        : { width: 1600, height: 1000 },
       deviceScaleFactor: tablet ? 2 : 1,
       hasTouch: tablet,
     });
@@ -198,7 +202,7 @@ try {
       const gridBox = await grid.boundingBox();
       await page.mouse.move(
         gridBox.x + gridBox.width / 2,
-        Math.min(gridBox.y + 30, (tablet ? 1280 : 1000) - 20),
+        Math.min(gridBox.y + 30, page.viewportSize().height - 20),
       );
       await page.mouse.wheel(0, 650);
       await page.waitForTimeout(300);

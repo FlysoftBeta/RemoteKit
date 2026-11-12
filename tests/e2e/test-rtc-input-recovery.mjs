@@ -5,9 +5,13 @@ import { startStack, until } from './kit/stack.mjs';
 import { launch } from './kit/viewer.mjs';
 
 const phase = process.env.QA_PHASE ?? 'after';
-const root = resolve('develop/tmp/e2e/rtc-input', phase, String(Date.now()));
+const root = resolve(process.env.QA_OUT ?? 'develop/tmp/e2e-shell/rtc-input', phase, String(Date.now()));
 mkdirSync(root, { recursive: true });
-const stack = await startStack({ scenario: 'rtc-input', run: join(root, 'stack') });
+const stack = await startStack({
+  scenario: 'rtc-input',
+  run: join(root, 'stack'),
+  port: Number(process.env.REMOTEKIT_E2E_PORT ?? 34040),
+});
 console.log('Evidence: ' + root);
 let viewer;
 try {
@@ -150,10 +154,9 @@ try {
       );
       await viewer.unlock();
       await page.waitForTimeout(1200);
-      const retry = page.getByRole('button', { name: '重试', exact: true });
-      if (await retry.count()) await retry.first().tap();
+      assert.equal(await page.getByRole('button', { name: '重试', exact: true }).count(), 0);
       let recovered = false;
-      let retryVerified = false;
+      let automaticUiVerified = false;
       try {
         await until(
           () =>
@@ -162,7 +165,7 @@ try {
                 qa.peers.some((peer) => peer.connectionState === 'connected') &&
                 !!document.querySelector('canvas[data-video-input]:not(.no-frame)'),
             ),
-          'RTC Retry recovery',
+          'automatic RTC recovery',
           20000,
         );
         recovered = true;
@@ -171,45 +174,45 @@ try {
         await page.getByRole('button', { name: '添加文件', exact: true }).waitFor();
         await page.getByText('还没有文件', { exact: true }).waitFor();
         await viewer.shot('automatic-recovery-files');
-        // Exercise the visible Retry action after a structured signaling outage
-        // exhausts policy retries. Native peers and the rest of the stack stay real.
+        assert.equal(await page.getByRole('button', { name: '重试', exact: true }).count(), 0);
+        // Keep the prolonged signaling-outage coverage while following the
+        // current policy: recovery continues automatically, with no Retry button.
         await page.evaluate(async () => {
           const { RemoteKitError } = await import('/shared/errors.ts');
-          const rtc = qa.rtc;
-          qa.resumeSignaling = rtc.controlRpc;
-          rtc.controlRpc = (method, params) =>
+          qa.resumeSignaling = qa.rtc.controlRpc;
+          qa.rtc.controlRpc = (method, params) =>
             method === 'rtc.offer'
               ? Promise.reject(
-                  new RemoteKitError('unavailable', 'forced signaling outage', { retryAfterMs: 0 }),
+                  new RemoteKitError('unavailable', 'forced signaling outage', { retryAfterMs: 500 }),
                 )
               : qa.resumeSignaling(method, params);
-          rtc.connectionFailed(
-            new RemoteKitError('unavailable', 'forced signaling outage', { retryAfterMs: 0 }),
+          qa.rtc.connectionFailed(
+            new RemoteKitError('unavailable', 'forced signaling outage', { retryAfterMs: 500 }),
           );
         });
-        const explicitRetry = page.getByRole('button', { name: '重试', exact: true });
-        await explicitRetry.first().waitFor();
-        await viewer.shot('retry-ready');
+        await page.waitForTimeout(3500);
+        assert.equal(await page.getByRole('button', { name: '重试', exact: true }).count(), 0);
+        await viewer.shot('signaling-outage-automatic');
         await page.evaluate(() => {
           qa.rtc.controlRpc = qa.resumeSignaling;
         });
-        await explicitRetry.first().tap();
         await until(
           () => page.evaluate(() => qa.peers.some((peer) => peer.connectionState === 'connected')),
-          'explicit RTC Retry',
+          'signaling outage recovered automatically',
+          90000,
         );
         await page.getByText('还没有文件', { exact: true }).waitFor();
-        retryVerified = true;
+        automaticUiVerified = true;
       } catch (error) {
         writeFileSync(join(out, 'recovery-error.txt'), String(error));
       }
-      await viewer.shot('retry-recovery');
+      await viewer.shot('automatic-recovery');
       writeFileSync(
         join(out, 'recovery.json'),
         JSON.stringify(
           {
             recovered,
-            retryVerified,
+            automaticUiVerified,
             state: await viewer.refresh(),
             peers: await page.evaluate(() => qa.peers.map((peer) => peer.connectionState)),
             text: await page.locator('body').innerText(),
@@ -220,7 +223,7 @@ try {
       );
       if (phase === 'after') {
         assert.ok(recovered, 'transport restoration did not recover');
-        assert.ok(retryVerified, 'explicit RTC Retry did not recover');
+        assert.ok(automaticUiVerified, 'automatic recovery UI did not settle');
       }
     }
     writeFileSync(join(out, 'trace.json'), JSON.stringify(await page.evaluate(() => qa.trace), null, 2));

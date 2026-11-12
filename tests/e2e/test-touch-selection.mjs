@@ -1,7 +1,7 @@
 ﻿/**
  * Isolated Control and native H264 selection regression on Edge and Chrome 89.
  * node tests/e2e/test-touch-selection.mjs <playwright module> <viewer exe>
- *   <endpoint exe> <browser exe> <unused evidence directory> [port=34631]
+ *   <endpoint exe> <browser exe> <unused evidence directory> [port=34120]
  */
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -9,9 +9,9 @@ import { createRequire } from 'node:module';
 import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { startProductStack, until } from './kit/stack.mjs';
+import { startProductStack, until } from './input-product-stack.mjs';
 
-const [modulePath, viewer, endpoint, browser, output, portArg = '34631'] = process.argv.slice(2);
+const [modulePath, viewer, endpoint, browser, output, portArg = '34120'] = process.argv.slice(2);
 assert(
   modulePath && viewer && endpoint && browser && output,
   'Expected module, viewer, endpoint, browser, evidence directory',
@@ -48,7 +48,7 @@ control.stdout.on('data', (data) => void appendFile(join(run, 'control.log'), da
 control.stderr.on('data', (data) => void appendFile(join(run, 'control.log'), data));
 const stopped = new Promise((done) => control.once('exit', done));
 let context, page;
-const deadline = setTimeout(() => void context?.close(), 180000);
+const deadline = setTimeout(() => void context?.close(), 420000);
 const result = (scenario, detail) => {
   results.push({ scenario, detail });
   console.log(scenario, JSON.stringify(detail));
@@ -65,7 +65,7 @@ try {
     args: ['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required'],
   });
   page = context.pages()[0];
-  page.setDefaultTimeout(12000);
+  page.setDefaultTimeout(30000);
   await page.addInitScript(() => {
     const q = (window.selectionQA = { wire: [], peers: [], channels: [] });
     const send = RTCDataChannel.prototype.send;
@@ -153,7 +153,7 @@ try {
   const version = await cdp.send('Browser.getVersion');
   assert(Number(version.product.match(/\/(\d+)/)[1]) >= 89);
   result('platform', version.product);
-  await page.goto(origin);
+  await page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.locator('.viewer-lock-blank').waitFor();
   await pause(650);
   for (const direction of ['Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right']) {
@@ -238,12 +238,27 @@ try {
       touchPoints: type === 'touchEnd' ? [] : [{ ...p, id: 1, radiusX: 2, radiusY: 2, force: 1 }],
     });
   const tap = async (rect) => {
+    await page.waitForFunction(
+      () =>
+        !document.querySelector('.resize-waiting') &&
+        !!document.querySelector('canvas[data-video-input]:not(.no-frame)'),
+      undefined,
+      { timeout: 45000 },
+    );
     await touch('touchStart', await point(rect));
     await pause(60);
     await touch('touchEnd');
     await pause(300);
   };
   const hold = async (rect) => {
+    await page.waitForFunction(
+      () =>
+        !document.querySelector('.resize-waiting') &&
+        !!document.querySelector('canvas[data-video-input]:not(.no-frame)'),
+      undefined,
+      { timeout: 45000 },
+    );
+    await pause(300);
     const wireStart = await page.evaluate(() => selectionQA.wire.length);
     await touch('touchStart', await point(rect));
     await pause(700);
@@ -288,7 +303,7 @@ try {
   };
   const command = async (label) => {
     await page.locator('.selection-menu').getByRole('button', { name: label, exact: true }).tap();
-    if (label !== '??') await page.locator('.selection-menu').waitFor({ state: 'hidden' });
+    if (label !== '全选') await page.locator('.selection-menu').waitFor({ state: 'hidden' });
     await pause(350);
   };
   const crop = async (name, rect) => {

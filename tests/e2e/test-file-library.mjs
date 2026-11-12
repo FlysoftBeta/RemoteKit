@@ -6,17 +6,17 @@ import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { startProductStack, until } from './kit/stack.mjs';
+import { startProductStack, until } from './files-stack.mjs';
 import { instrumentViewer } from './cluster-test-support.mjs';
 
-const [modulePath, viewerExe, endpoint, browser, output, listenPort = '33791', server] =
+const [modulePath, viewerExe, endpoint, browser, output, listenPort = '34200', server] =
   process.argv.slice(2);
 assert([modulePath, viewerExe, endpoint, browser, output].every(Boolean));
 const run = resolve(output),
   port = Number(listenPort);
 const origin = 'http://127.0.0.1:' + port,
   fixtureOrigin = 'http://127.0.0.1:' + (port + 1);
-await mkdir(run);
+await mkdir(run, { recursive: true });
 const events = [],
   results = [];
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -93,7 +93,11 @@ async function stage(name, work) {
 try {
   await until(async () => (await fetch(origin + '/api/auth/setup').catch(() => null))?.ok, 'Control ready');
   chrome = await chromium.launch({ executablePath: resolve(viewerExe), headless: true });
-  const context = await chrome.newContext({ viewport: { width: 1152, height: 900 } });
+  const context = await chrome.newContext({
+    viewport:
+      process.env.FILES_POINTER === 'touch' ? { width: 390, height: 844 } : { width: 1600, height: 1000 },
+    hasTouch: process.env.FILES_POINTER === 'touch',
+  });
   const password = randomUUID();
   const response = await context.request.post(origin + '/api/auth/setup', {
     headers: { Origin: origin },
@@ -130,12 +134,18 @@ try {
       'remote geometry',
     );
     const target = geometry.boxes[id];
-    await page.mouse.click(
+    await (
+      process.env.FILES_POINTER === 'touch'
+        ? page.touchscreen.tap.bind(page.touchscreen)
+        : page.mouse.click.bind(page.mouse)
+    )(
       box.x + ((target.x + 20) * box.width) / geometry.width,
       box.y + ((target.y + 20) * box.height) / geometry.height,
     );
   }
   async function chooser(id) {
+    await page.getByRole('dialog', { name: '文件篮', exact: true }).waitFor({ state: 'hidden' });
+    await page.waitForTimeout(400);
     await tap(id);
     return until(
       async () => (await viewer.state()).fileRequests.find((request) => request.state === 'pending'),
