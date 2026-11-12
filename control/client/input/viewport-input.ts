@@ -179,6 +179,10 @@ export class ViewportInput {
   }
   private pointer(event: PointerEvent, action: PointerAction) {
     const touch = event.pointerType === 'touch';
+    if (action === 'down') {
+      event.preventDefault();
+      if (document.activeElement !== this.editor) (document.activeElement as HTMLElement | null)?.blur?.();
+    }
     const pen = penInput(event);
     const button = pen && event.button === 5 ? 1 : ([1, 2, 3, 4, 5][event.button] ?? 0);
     const surface = this.surface;
@@ -240,15 +244,14 @@ export class ViewportInput {
       this.focused();
       if (touch && !this.touch.contactIds.length)
         this.tap = { id: event.pointerId, x: event.clientX, y: event.clientY, at: performance.now() };
-      if (!touch && event.button === 0) this.ports.input.focusPointer(surface);
+      if (touch || event.button === 0) this.ports.input.focusPointer(surface);
       else this.ports.input.ensureInputFocus(surface);
-      if (!touch) {
-        if (event.button === 0) {
-          this.editing.beginPointerFocus();
-          this.editing.activateKeyboard();
-        }
-        if (this.editor.inputMode === 'none') this.editing.focusEditor(false);
+      if (touch || event.button === 0) {
+        this.editing.beginPointerFocus();
+        if (!touch) this.editing.activateKeyboard();
       }
+      if (this.editor.inputMode === 'none' || document.activeElement !== this.editor)
+        this.editing.focusEditor(false);
       this.canvas.setPointerCapture(event.pointerId);
       if (!touch)
         this.pressed = {

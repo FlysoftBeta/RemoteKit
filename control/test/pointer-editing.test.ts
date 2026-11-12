@@ -1,8 +1,9 @@
-import test, { type TestContext } from 'node:test';
+﻿import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { inputFixture } from './client-fixture';
 import { ViewportInput } from '../client/input/viewport-input';
 import type { Surface, Layout } from '../client/presentation/types';
+import { deviceClipboard } from '../client/clipboard/device-clipboard';
 
 function fixture(t: TestContext) {
   const transport = inputFixture();
@@ -104,10 +105,10 @@ function fixture(t: TestContext) {
     Object.assign(event, values);
     target.dispatchEvent(event);
   }
-  const click = () => {
+  const click = (pointerType = 'mouse') => {
     const value = {
       pointerId: 1,
-      pointerType: 'mouse',
+      pointerType,
       button: 0,
       buttons: 1,
       clientX: 30,
@@ -168,6 +169,7 @@ function fixture(t: TestContext) {
     layout,
     viewport,
     editor,
+    document,
     click,
     ack,
     owner,
@@ -178,6 +180,57 @@ function fixture(t: TestContext) {
     channel,
   };
 }
+
+test('paste survives confirmation of its pointer focus while clipboard synchronization is pending', async (t) => {
+  const f = fixture(t);
+  let finish!: (value: { revision: string }) => void;
+  const pending = new Promise<{ revision: string }>((resolve) => {
+    finish = resolve;
+  });
+  Object.assign(f.document, { hasFocus: () => false });
+  deviceClipboard.configure('paste-test', true, () => pending);
+  t.after(() => deviceClipboard.configure(undefined, false, async () => ({ revision: '0' })));
+  f.click();
+  f.ack();
+  f.emit(f.editor, 'paste', { clipboardData: { getData: () => 'clipboard text' } });
+  await new Promise((resolve) => setImmediate(resolve));
+  f.owner();
+  finish({ revision: '1' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    f
+      .events()
+      .filter((event) => event.windows_key_code === 86)
+      .map((event) => event.action),
+    ['down', 'up'],
+  );
+});
+
+test('touch focuses the proxy and queues the first characters before remote editable feedback', (t) => {
+  const f = fixture(t);
+  let blurred = false;
+  f.document.activeElement = {
+    blur() {
+      blurred = true;
+      f.document.activeElement = f.document.body;
+    },
+  };
+  f.click('touch');
+  assert.equal(f.document.activeElement, f.editor);
+  assert.equal(blurred, true);
+  f.text('Tap');
+  f.ack();
+  f.owner();
+  f.text('ped');
+  assert.equal(
+    f
+      .events()
+      .filter((event) => event.text)
+      .map((event) => event.text)
+      .join(''),
+    'Tapped',
+  );
+});
 
 test('immediate typing follows its pointer through the exact focus ACK and keeps all characters in order', (t) => {
   const f = fixture(t);

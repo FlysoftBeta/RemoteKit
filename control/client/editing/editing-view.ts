@@ -50,6 +50,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     owner: string;
     focusRevision: string;
     revision: string;
+    confirmedOwner?: string;
   };
   private pointerSequence = 0;
   private readonly keyboardSession = new KeyboardSession();
@@ -207,6 +208,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
       ) {
         this.pointerFocus = undefined;
         const composition = this.editing.transfer(pointer.owner, this.editorOwner!);
+        pointer.confirmedOwner = this.editorOwner;
         transferred = true;
         if (composition) this.sendEdit(composition);
       }
@@ -563,11 +565,20 @@ export class EditingView extends Store<EditingViewSnapshot> {
     if (!this.editing.matches(this.editorOwner)) return;
     event.preventDefault();
     const owner = this.editorOwner;
+    const pointer = this.pointerFocus;
+    const sequence = this.pointerSequence;
+    const document = this.editingIdentity;
     const text = event.clipboardData?.getData('text/plain');
     const pending = text === undefined ? Promise.resolve() : deviceClipboard.send(text);
     void pending
       .then(() => {
-        if (owner !== this.editorOwner || !this.editing.matches(owner)) return;
+        if (
+          document !== this.editingIdentity ||
+          sequence !== this.pointerSequence ||
+          (owner !== this.editorOwner && pointer?.confirmedOwner !== this.editorOwner) ||
+          !this.editing.matches(this.editorOwner)
+        )
+          return;
         this.sendEdit({
           type: 'key',
           action: 'down',
