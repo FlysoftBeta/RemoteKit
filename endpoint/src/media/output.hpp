@@ -53,6 +53,8 @@ class OutputController : private ControllerContext {
   MediaPipeline& pipeline;
   ConnectionTiming& timing;
   RenderSlots pool;
+  Json configuration;
+  std::string configuration_incarnation;
   std::function<Result<void>(bool)> clipboard_poll;
   std::atomic<bool> output_suspended{false}, has_visible_output{false};
   std::atomic<double> capture_clock_uncertainty_ms{0};

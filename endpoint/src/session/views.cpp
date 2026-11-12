@@ -251,23 +251,11 @@ Result<void> ViewController::RefitOutput() {
 }
 
 Result<void> ViewController::ReconcileOutput() {
-  auto paused = output.PauseOutput();
-  if (!paused) {
-    reconciliation_pending = true;
-    next_reconciliation = QpcNow() + QpcFrequency();
-    output.Suspend();
-    return paused.error();
-  }
-  const bool active = paused.value();
   auto reconcile = [&]() -> Result<void> {
     auto geometry = DesiredGeometry();
     if (!geometry)
       return geometry.error();
-    auto configured = GeometryConfig(geometry.value());
-    if (!configured)
-      return configured.error();
-
-    return output.ResumeOutput(active);
+    return GeometryConfig(geometry.value());
   };
   auto result = reconcile();
   reconciliation_pending = !result;

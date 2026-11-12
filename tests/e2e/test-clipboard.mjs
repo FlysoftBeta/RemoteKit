@@ -175,7 +175,9 @@ async function privacy() {
   assert.equal(complete.status, 'complete');
   const artifacts = await files(run);
   const logs = artifacts.filter((path) =>
-    /(?:control|endpoint|browser)(?:\.log(?:\.\d+)?|[\\/]stderr\.log)$/.test(path),
+    /(?:control|endpoint|browser)(?:\.(?:log|jsonl)(?:\.\d+)?|[\\/]stderr\.log)$|[\\/]logs[\\/]browser[\\/][^\\/]+\.log$/.test(
+      path,
+    ),
   );
   const archives = artifacts.filter((path) => path.endsWith('.tar.zst'));
   assert(logs.length >= 3, 'Expected Control, Endpoint and Browser logs');
@@ -199,7 +201,7 @@ try {
   await until(async () => (await fetch(origin + '/api/auth/setup')).ok, 'Control startup');
   chrome = await chromium.launch({
     executablePath: resolve(viewerExe),
-    headless: false,
+    headless: true,
     args: ['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required'],
   });
   const version = await (await chrome.newBrowserCDPSession()).send('Browser.getVersion');
@@ -216,6 +218,19 @@ try {
   });
   await until(() => latest(), 'fixture ready');
   await ready();
+  const layoutIdentity = () =>
+    user.page.evaluate(() => {
+      const layout = inputClipboardQA.wire.findLast(
+        (entry) => entry.direction === 'in' && entry.message.type === 'layout',
+      )?.message;
+      return layout && { generation: layout.generation, epoch: layout.epoch };
+    });
+  const unchangedLayout = await layoutIdentity();
+  assert(unchangedLayout && unchangedLayout.generation !== '0');
+  await user.call('clipboard.set', { text: 'desired-state layout regression' });
+  await ready();
+  assert.deepEqual(await layoutIdentity(), unchangedLayout, 'Clipboard convergence retains input layout');
+  result('0 identical desired views retain layout', unchangedLayout);
   const before = revision();
   const rect = await project('copy');
   const mouseCdp = await user.context.newCDPSession(user.page);

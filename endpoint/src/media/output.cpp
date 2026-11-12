@@ -5,6 +5,7 @@
 #include "media/presentation.hpp"
 #include "rtc/authorization.hpp"
 #include "rtc/peer.hpp"
+#include "util/result_macros.hpp"
 namespace remotekit {
 using ConnectionPhase = ConnectionTiming::ConnectionPhase;
 using Event = RtcEvent;
@@ -73,16 +74,22 @@ Result<void> OutputController::Configure(int width,
                                          float scale,
                                          Json views,
                                          bool visible) {
-  auto result =
-      browser.Rpc().Request({{"method", "output.configure"},
-                             {"width", width},
-                             {"height", height},
-                             {"device_scale", scale},
-                             {"allocation_alignment", RuntimeOptions::kAtlasAllocationAlignment},
-                             {"viewConfigs", std::move(views)}});
+  const Json next = {{"method", "output.configure"},
+                     {"width", width},
+                     {"height", height},
+                     {"device_scale", scale},
+                     {"allocation_alignment", RuntimeOptions::kAtlasAllocationAlignment},
+                     {"viewConfigs", std::move(views)}};
+  if (configuration_incarnation == browser.Incarnation() && configuration == next)
+    return {};
+  RK_ASSIGN_OR_RETURN(active, PauseOutput(true));
+  auto result = browser.Rpc().Request(next);
   if (!result)
     return result.error();
   has_visible_output = visible;
+  RK_RETURN_IF_ERROR(ResumeOutput(active));
+  configuration = next;
+  configuration_incarnation = browser.Incarnation();
   return {};
 }
 Result<void> OutputController::Close() {
