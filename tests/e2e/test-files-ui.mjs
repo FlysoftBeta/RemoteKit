@@ -9,7 +9,7 @@ import { createViewerContext, instrumentViewer, launchBrowser } from './kit/view
 import assert from 'node:assert/strict';
 
 const selectedDevice = process.argv.find((arg) => arg.startsWith('--device='))?.split('=')[1];
-const output = resolve(process.env.E2E_RUN ?? `develop/tmp/e2e-files/files-ui-${Date.now()}`);
+const output = resolve(process.env.E2E_RUN ?? `develop/tmp/e2e/files-ui-${Date.now()}`);
 const require = createRequire(import.meta.url);
 
 mkdirSync(output, { recursive: true });

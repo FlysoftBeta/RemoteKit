@@ -7,7 +7,7 @@ import { createViewerContext, instrumentViewer, launchBrowser } from './kit/view
 import assert from 'node:assert/strict';
 
 const browserPath = process.argv[2] ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe';
-const run = resolve(process.env.E2E_RUN ?? 'develop/tmp/e2e-files/learning-server-' + Date.now());
+const run = resolve(process.env.E2E_RUN ?? 'develop/tmp/e2e/learning-server-' + Date.now());
 await mkdir(run, { recursive: true });
 const stack = await startStack({ scenario: 'learning-server', run, browser: browserPath, learning: true });
 const provider = stack.provider;

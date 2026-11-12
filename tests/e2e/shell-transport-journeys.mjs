@@ -6,7 +6,7 @@ import { launch } from './kit/viewer.mjs';
 // Complete network loss (HTTP plus existing WS/RTC), real input and upload closure.
 import assert from 'node:assert/strict';
 
-const root = resolve(process.argv[2] ?? 'develop/tmp/e2e-shell/transport-journeys');
+const root = resolve(process.argv[2] ?? 'develop/tmp/e2e/transport-journeys');
 const port = Number(process.env.REMOTEKIT_E2E_PORT ?? 34080);
 mkdirSync(root, { recursive: true });
 const results = [];

@@ -9,12 +9,13 @@ import {
   readFileSync,
   readdirSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { createServer as createSocketServer } from 'node:net';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { stageRuntime } from '../../integration/stage-runtime.mjs';
@@ -177,6 +178,10 @@ export async function startStack({
       await allocate(requested.peers?.[i] ?? (i === 0 ? requested.peer : undefined) ?? offset(3 + i)),
     );
   ports.peer = ports.peers[0];
+  // LibreOffice's profile files exceed its Windows path limit under descriptive evidence paths.
+  const runtimeRoot = join(root, 'develop/tmp/e2e', `.stack-${randomUUID().slice(0, 8)}`);
+  mkdirSync(dirname(runtimeRoot), { recursive: true });
+  symlinkSync(run, runtimeRoot, 'junction');
   const sourceViewer = control === 'source' && dev;
   const origin = viewerOrigin ?? `http://127.0.0.1:${sourceViewer ? ports.viewer : ports.control}`;
   const children = [];
@@ -216,7 +221,10 @@ export async function startStack({
   }
   let provider;
   let stopped = false;
-  const onExit = () => children.toReversed().forEach(stopTree);
+  const onExit = () => {
+    children.toReversed().forEach(stopTree);
+    unlinkSync(runtimeRoot);
+  };
   process.once('exit', onExit);
   async function stop() {
     if (stopped) return;
@@ -234,6 +242,7 @@ export async function startStack({
       await promisify(server.close.bind(server))();
     }
     await provider?.close();
+    unlinkSync(runtimeRoot);
   }
   try {
     if (learning) {
@@ -252,12 +261,12 @@ export async function startStack({
     for (const [i, id] of nodeIds.entries()) {
       const options = typeof nodeOptions === 'object' && !Array.isArray(nodeOptions) ? nodeOptions[id] : {};
       if (!options.remote && !executable)
-        executable = stageProductRuntime(endpoint, browser, join(run, 'runtime/bin'));
+        executable = stageProductRuntime(endpoint, browser, join(runtimeRoot, 'runtime/bin'));
       configNodes[id] = {
         limits: { diskReserveBytes: 2 * 1024 ** 3, ...nodeLimits, ...options.limits },
         ...(options.remote
           ? { remote: options.remote }
-          : { local: { executable, root: join(run, id === 'local' ? 'node' : `${id}/root`) } }),
+          : { local: { executable, root: join(runtimeRoot, id === 'local' ? 'node' : `${id}/root`) } }),
         peer: { listen: `127.0.0.1:${ports.peers[i]}`, address: `127.0.0.1:${ports.peers[i]}` },
       };
     }
@@ -367,10 +376,11 @@ export async function startStack({
       advance: (ms) => call('advance', { ms }),
       readLog: (name) => readFileSync(logs[name], 'utf8'),
       async startRemote(id, nodeRoot = join(run, id, 'root')) {
+        nodeRoot = join(runtimeRoot, relative(run, nodeRoot));
         await until(() => existsSync(join(run, 'nodes', id, 'node.json')), 'remote bootstrap');
         mkdirSync(nodeRoot, { recursive: true });
         copyFileSync(join(run, 'nodes', id, 'node.json'), join(nodeRoot, 'node.json'));
-        const binary = stageProductRuntime(endpoint, browser, join(run, 'runtime/bin'));
+        const binary = stageProductRuntime(endpoint, browser, join(runtimeRoot, 'runtime/bin'));
         return record(
           spawn(binary, ['--node-root=' + nodeRoot], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }),
           join(run, id + '-endpoint.log'),

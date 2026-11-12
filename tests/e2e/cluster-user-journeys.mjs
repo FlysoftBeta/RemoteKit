@@ -25,8 +25,8 @@ const report = async (stage, value) => {
 };
 const fixture = await startFixture('cluster-user-journeys', port + 2, { events, run });
 
-const endpoint = resolve('build/endpoint/endpoint/endpoint_service.exe'),
-  remote = 'C:/src/chromium/src/out/rel/remotekit_browser.exe';
+const endpoint = resolve(process.env.REMOTEKIT_ENDPOINT ?? 'build/endpoint/endpoint/endpoint_service.exe'),
+  remote = process.env.REMOTEKIT_BROWSER ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe';
 const stack = await startStack({
   scenario: 'cluster-user-journeys',
   run,

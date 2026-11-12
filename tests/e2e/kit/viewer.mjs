@@ -1248,3 +1248,18 @@ export async function prepareNativeViewer(host) {
     invoke: 'host._robustViewerQA.launch({version:157|89,run:absoluteRunPath,password:disposablePassword})',
   };
 }
+
+export function remoteInputReady(viewId) {
+  const selected = viewId ?? document.querySelector('.remote-viewport')?.dataset.viewId;
+  for (const element of document.querySelectorAll('*')) {
+    const key = Object.keys(element).find((name) => name.startsWith('__reactFiber$'));
+    for (let fiber = key && element[key]; fiber; fiber = fiber.return) {
+      for (let hook = fiber.memoizedState; hook; hook = hook.next) {
+        const session = hook.memoizedState;
+        if (session?.presentation && session?.rtc && session?.endpoint)
+          return !!session.presentation.canInput(selected);
+      }
+    }
+  }
+  return false;
+}

@@ -42,7 +42,7 @@ def main():
     source = p.add_mutually_exclusive_group(required=True)
     source.add_argument('--root', type=Path, help='Installed deployment root (modified by smoke)')
     source.add_argument('--payload', type=Path, help='Install into a scratch deployment root')
-    p.add_argument('--work-dir', type=Path, default=ROOT / 'develop/tmp/package-smoke')
+    p.add_argument('--work-dir', type=Path, default=ROOT / 'develop/tmp/e2e/package-smoke')
     a = p.parse_args()
     deployment = a.root.resolve() if a.root else None
     package = None

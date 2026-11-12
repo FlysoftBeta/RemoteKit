@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { startStack, until } from './kit/stack.mjs';
 import { launch } from './kit/viewer.mjs';
 
-const root = resolve(process.env.E2E_RUN ?? 'develop/tmp/e2e-input');
+const root = resolve(process.env.E2E_RUN ?? 'develop/tmp/e2e/input-journeys');
 const telemetry = new Map();
 const pendingImages = new Set();
 const fixture = await startFixture('input-user-journeys', Number(process.env.E2E_PORT) + 5, {

@@ -10,7 +10,7 @@ export async function keyboardOcclusion(kind) {
   if (playwright) process.env.REMOTEKIT_PLAYWRIGHT = resolve(playwright);
   const browserName = /chrome89/i.test(viewer ?? '') ? 'chrome89' : 'edge';
   const mode = geometry ?? (browserName === 'chrome89' ? 'content' : 'visual');
-  const run = resolve(output ?? `develop/tmp/occlusion/${kind}-${browserName}-${Date.now()}`);
+  const run = resolve(output ?? `develop/tmp/e2e/occlusion/${kind}-${browserName}-${Date.now()}`);
   await mkdir(run, { recursive: true });
   const events = [];
   const fixture = createServer(async (request, response) => {

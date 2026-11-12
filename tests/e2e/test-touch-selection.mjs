@@ -5,7 +5,9 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { startStack, until } from './kit/stack.mjs'; /**
+import { startStack, until } from './kit/stack.mjs';
+
+/**
  * Isolated Control and native H264 selection regression on Edge and Chrome 89.
  * node tests/e2e/test-touch-selection.mjs <playwright module> <viewer exe>
  *   <endpoint exe> <browser exe> <unused evidence directory> [port=34120]

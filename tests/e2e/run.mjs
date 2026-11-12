@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -23,6 +23,7 @@ const { values, positionals } = parseArgs({
     'browser-build': { type: 'string', default: 'rel' },
     control: { type: 'string', default: 'source' },
     release: { type: 'string' },
+    endpoint: { type: 'string' },
     verify1: { type: 'boolean' },
     list: { type: 'boolean' },
     timeout: { type: 'string', default: '1200000' },
@@ -69,6 +70,7 @@ mkdirSync(out, { recursive: true });
 const playwright =
   process.env.REMOTEKIT_PLAYWRIGHT ??
   join(homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const endpoint = resolve(values.endpoint ?? defaultEndpoint);
 const embedder =
   values['browser-build'] === 'dev' ? 'C:/src/chromium/src/out/dev/remotekit_browser.exe' : defaultBrowser;
 const queue = [];
@@ -143,7 +145,7 @@ async function run(item, slot) {
         ];
       break;
     case 'positional':
-      args = [playwright, viewer, defaultEndpoint, embedder, evidence, String(port)];
+      args = [playwright, viewer, endpoint, embedder, evidence, String(port)];
       break;
     case 'files-ui':
       args = [`--device=${browser}`];
@@ -182,13 +184,14 @@ async function run(item, slot) {
       args = [evidence];
       break;
     case 'node':
-      args = [defaultEndpoint, embedder, evidence, String(port)];
+      args = [endpoint, embedder, evidence, String(port)];
       break;
   }
   const env = {
     ...process.env,
     REMOTEKIT_PLAYWRIGHT: playwright,
     REMOTEKIT_BROWSER: embedder,
+    REMOTEKIT_ENDPOINT: endpoint,
     E2E_RUN: evidence,
     E2E_PORT: String(port),
     E2E_BROWSER: browser,
@@ -201,23 +204,25 @@ async function run(item, slot) {
     QA_PHONE: pointer === 'touch' ? '1' : '0',
     REMOTEKIT_E2E_PORT: String(port),
     REMOTEKIT_QA_HEADLESS: '1',
-    REMOTEKIT_CAMERA_PYTHON: resolve('develop/tmp/doc-scan/exp/venv/Scripts/python.exe'),
   };
   if (viewport !== 'default') env.E2E_VIEWPORT = viewport;
   if (values.dpr) env.E2E_DPR = values.dpr;
   console.log(`START ${scenario.name} ${browser} ${pointer} ${evidence}`);
   const log = createWriteStream(join(evidence, 'scenario.log'));
-  const child = spawn(
-    scenario.kind === 'package' ? 'C:/src/depot_tools/python3.bat' : process.execPath,
-    [file, ...args],
-    {
-      cwd: repository,
-      shell: scenario.kind === 'package',
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env,
-    },
-  );
+  const executable =
+    scenario.kind === 'package'
+      ? execFileSync('C:/src/depot_tools/python3.bat', ['-c', '"import sys; print(sys.executable)"'], {
+          shell: true,
+          windowsHide: true,
+          encoding: 'utf8',
+        }).trim()
+      : process.execPath;
+  const child = spawn(executable, [file, ...args], {
+    cwd: repository,
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env,
+  });
   active.add(child);
   let driverFailure;
   const driverJourney =
@@ -262,6 +267,8 @@ async function run(item, slot) {
     status: timedOut ? 'TIMEOUT' : code === 0 && !driverFailure ? 'PASS' : 'FAIL',
     ...(driverFailure ? { reason: driverFailure } : {}),
     code,
+    endpoint,
+    embedder,
     evidence,
   };
   results.push(result);

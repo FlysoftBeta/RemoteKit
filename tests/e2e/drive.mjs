@@ -7,6 +7,7 @@ options.port ??= '34000';
 const stack = await startStack({
   scenario: 'drive',
   browser: options['browser-path'],
+  port: Number(options.port) + 1,
   run: options.out,
 });
 let viewer;

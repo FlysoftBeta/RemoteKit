@@ -6,7 +6,7 @@ import { createViewerContext, launch } from './kit/viewer.mjs';
 // Real Viewer journeys. Test hooks only read authoritative state or reveal unlock.
 import assert from 'node:assert/strict';
 
-const root = resolve(process.argv[2] ?? 'develop/tmp/e2e-shell/journeys');
+const root = resolve(process.argv[2] ?? 'develop/tmp/e2e/journeys');
 mkdirSync(root, { recursive: true });
 const stack = await startStack({
   scenario: 'shell-journeys',

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { startFixture } from './kit/fixtures.mjs';
-import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
+import { createViewerContext, instrumentViewer, launchBrowser, remoteInputReady } from './kit/viewer.mjs';
 
 import { join, resolve } from 'node:path';
 import { startStack, until } from './kit/stack.mjs';
@@ -85,6 +85,7 @@ async function tap(viewer, path, id) {
       !viewport.querySelector('canvas[data-video-input]')?.classList.contains('no-frame')
     );
   });
+  await viewer.page.waitForFunction(remoteInputReady);
   const region = viewer.page.locator('.remote-viewport').first();
   const box = await region.boundingBox();
   const geometry = await until(

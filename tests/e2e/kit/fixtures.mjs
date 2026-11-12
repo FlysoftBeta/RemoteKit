@@ -469,3 +469,80 @@ const fixtureHandlers = {
       );
     },
 };
+
+export async function cameraFixtures(run) {
+  const { launchBrowser } = await import('./viewer.mjs');
+  const browser = await launchBrowser({ channel: 'msedge' });
+  const cameras = new Map();
+  try {
+    const page = await browser.newPage();
+    for (const sample of [3, 4]) {
+      const bytes = await readFile(new URL(`../fixtures/camera-scan-${sample}.jpg`, import.meta.url));
+      const encoded = await page.evaluate(
+        async (source) => {
+          const image = new Image();
+          image.src = source;
+          await image.decode();
+          const width = 1920,
+            height = 1080;
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const drawing = canvas.getContext('2d');
+          drawing.imageSmoothingQuality = 'high';
+          const scale = Math.max(width / image.width, height / image.height);
+          const imageWidth = Math.round(image.width * scale),
+            imageHeight = Math.round(image.height * scale);
+          drawing.drawImage(
+            image,
+            Math.floor((width - imageWidth) / 2),
+            Math.floor((height - imageHeight) / 2),
+            imageWidth,
+            imageHeight,
+          );
+          const pixels = drawing.getImageData(0, 0, width, height).data;
+          // Fake camera files use planar YUV420 with limited-range BT.601 samples.
+          const frame = new Uint8Array((width * height * 3) / 2);
+          const plane = width * height;
+          const clamp = (value) => Math.max(0, Math.min(255, Math.round(value)));
+          for (let y = 0; y < height; y++)
+            for (let x = 0; x < width; x++) {
+              const index = (y * width + x) * 4;
+              frame[y * width + x] = clamp(
+                16 + 0.257 * pixels[index] + 0.504 * pixels[index + 1] + 0.098 * pixels[index + 2],
+              );
+              if (x % 2 || y % 2) continue;
+              let red = 0,
+                green = 0,
+                blue = 0;
+              for (const offset of [0, 4, width * 4, width * 4 + 4]) {
+                red += pixels[index + offset] / 4;
+                green += pixels[index + offset + 1] / 4;
+                blue += pixels[index + offset + 2] / 4;
+              }
+              const chroma = (y / 2) * (width / 2) + x / 2;
+              frame[plane + chroma] = clamp(128 - 0.148 * red - 0.291 * green + 0.439 * blue);
+              frame[plane + plane / 4 + chroma] = clamp(128 + 0.439 * red - 0.368 * green - 0.071 * blue);
+            }
+          const chunks = [];
+          for (let offset = 0; offset < frame.length; offset += 32768)
+            chunks.push(String.fromCharCode(...frame.subarray(offset, offset + 32768)));
+          return btoa(chunks.join(''));
+        },
+        'data:image/jpeg;base64,' + bytes.toString('base64'),
+      );
+      const target = join(run, `camera-${sample}.y4m`);
+      await writeFile(
+        target,
+        Buffer.concat([
+          Buffer.from('YUV4MPEG2 W1920 H1080 F30:1 Ip A1:1 C420jpeg\nFRAME\n'),
+          Buffer.from(encoded, 'base64'),
+        ]),
+      );
+      cameras.set(sample, target);
+    }
+    return cameras;
+  } finally {
+    await browser.close();
+  }
+}

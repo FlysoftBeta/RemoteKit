@@ -11,7 +11,7 @@ import { startStack, until } from './kit/stack.mjs';
 import assert from 'node:assert/strict';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
-const run = resolve(process.argv[2] ?? join(repository, 'develop/tmp/b2e-shots'));
+const run = resolve(process.argv[2] ?? join(repository, 'develop/tmp/e2e/shell-avail'));
 const port = Number(process.argv[3] ?? 33941);
 const origin = `http://127.0.0.1:${port}`;
 const requireControl = createRequire(join(repository, 'control/package.json'));

@@ -1,11 +1,9 @@
-import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFile, mkdir, writeFile } from 'node:fs/promises';
-import { startFixture } from './kit/fixtures.mjs';
+import { cameraFixtures, startFixture } from './kit/fixtures.mjs';
 import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
 
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { startStack, until } from './kit/stack.mjs';
 
 /** Real fake-camera capture, document processing, rotation and native FileList delivery. */
@@ -20,56 +18,7 @@ const origin = `http://127.0.0.1:${port}`;
 const fixtureOrigin = `http://127.0.0.1:${port + 1}`;
 await mkdir(run, { recursive: true });
 
-function cameraFile(sample) {
-  const source = fileURLToPath(new URL(`./fixtures/camera-scan-${sample}.jpg`, import.meta.url));
-  const target = join(run, `camera-${sample}.y4m`);
-  const ffmpeg = process.env.REMOTEKIT_FFMPEG ?? 'ffmpeg';
-  if (spawnSync(ffmpeg, ['-version'], { windowsHide: true, stdio: 'ignore' }).status === 0) {
-    execFileSync(
-      ffmpeg,
-      [
-        '-y',
-        '-i',
-        source,
-        '-vf',
-        'scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080',
-        '-frames:v',
-        '1',
-        '-r',
-        '30',
-        '-pix_fmt',
-        'yuv420p',
-        target,
-      ],
-      { windowsHide: true, stdio: 'pipe' },
-    );
-  } else {
-    const python =
-      process.env.REMOTEKIT_CAMERA_PYTHON ??
-      fileURLToPath(new URL('../../develop/tmp/doc-scan/exp/venv/Scripts/python.exe', import.meta.url));
-    execFileSync(
-      python,
-      [
-        '-c',
-        `
-import cv2, pathlib, sys
-image = cv2.imread(sys.argv[1])
-height, width = image.shape[:2]
-scale = max(1920 / width, 1080 / height)
-image = cv2.resize(image, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_CUBIC)
-y, x = (image.shape[0] - 1080) // 2, (image.shape[1] - 1920) // 2
-frame = cv2.cvtColor(image[y:y + 1080, x:x + 1920], cv2.COLOR_BGR2YUV_I420)
-pathlib.Path(sys.argv[2]).write_bytes(b'YUV4MPEG2 W1920 H1080 F30:1 Ip A1:1 C420jpeg' + bytes([10]) + b'FRAME' + bytes([10]) + frame.tobytes())
-`,
-        source,
-        target,
-      ],
-      { windowsHide: true, stdio: 'pipe' },
-    );
-  }
-  return target;
-}
-const cameras = new Map([3, 4].map((sample) => [sample, cameraFile(sample)]));
+const cameras = await cameraFixtures(run);
 const events = [];
 const results = [];
 const rpcEvidence = [];

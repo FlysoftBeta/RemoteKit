@@ -313,7 +313,13 @@ try {
   const baseline = await allReady(2);
   assert.equal(baseline.toolbar, 2);
   assert.equal(baseline.tabs, 2);
-  assert.equal(baseline.channels.filter((channel) => channel[2] === 'open').length, 2);
+  assert.deepEqual(
+    baseline.channels
+      .filter((channel) => channel[2] === 'open')
+      .map((channel) => channel[1])
+      .sort(),
+    ['remotekit', 'remotekit', 'remotekit-auth'],
+  );
   const codecs = await until(async () => {
     const values = await read(`(async () => {
         const stats = await fullscreenQA.peers.at(-1).getStats();
