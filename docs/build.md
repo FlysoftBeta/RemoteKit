@@ -103,7 +103,7 @@ recover-credentials.cmd
 bin/node.exe  bin/remotekit_control.exe  bin/remotekit_node.exe
 control/dist/…  control/node_modules/…  control/runtime-manifest.json
 licenses/…
-node/…                     节点运行时：Endpoint、Browser、SDK、oneVPL、CRT、文档与人脸依赖
+node/…                     节点运行时：Endpoint、快照进程、Browser、SDK、oneVPL、CRT、文档与人脸依赖
 ```
 
 **payload** 是这个树的确定性 PAX tar（按路径排序，mtime、uid/gid、属主名与权限固定），同样内容总是得到同样字节，这是增量能对齐的前提。构建 ID 由 `bin/`、`control/`、`node/bin/` 下文件的路径和 hash 计算。`remotekit_control.exe` 与 `remotekit_node.exe` 静态链接 CRT，各自是单个可执行文件；Endpoint 仍用 `/MD`，`node/bin/` 带 Release CRT。

@@ -121,7 +121,7 @@ control/
     main.ts, application.ts, config.ts   组合根与配置
     http/          HTTP 路由与 WebSocket 分发表
     auth/          账户、Viewer 锁定与 peer 授权、人脸挑战、密码学
-    admin/         管理员的用户管理（创建、凭据重置、停用、转让、停止、放弃未提交更改、删除）
+    admin/         管理员的用户管理（创建、凭据重置、停用、转让、停止、转移 Session、删除）
     persistence/   迁移（冻结基线 + 编号步骤）、存储文档解码器、完整性自检与各仓库（账户、安全、workspace、操作收据、关系化文件库）
     recovery/      损坏数据库的凭据恢复（入口 recover-credentials.ts，单独打包）
     cluster/       集群通道（Noise、帧、节点链路）、放置、密钥派生、对象索引、指标、更新包、节点管理、Session 清理队列
@@ -156,7 +156,7 @@ endpoint/
     management/    ClusterLink（管理链路）与方法表
     objects/       加密对象存储、节点间传输（PeerServer/PeerClient）
     platform/      Windows 作业与进程
-    persistence/   Session 存储（session.db、SQLite 封装、旧格式导入）、checkpoint 与增量扫描
+    persistence/   Session 存储（session.db、SQLite 封装、旧格式导入）、checkpoint 与增量扫描、运行中的版本与快照客户端
     session/       Session（组装）、BrowserRuntime/BrowserRpc、ViewController、导航恢复
     rtc/           PeerController、授权、DataChannel 路由与通道、发件箱
     media/         Comp 节拍、Slot、输出、媒体管线、呈现屏障、编码器（QSV/NVENC）、适配器、音频、追踪
@@ -165,6 +165,7 @@ endpoint/
     files/         文件库、暂存、照片处理、DC 文件服务
     documents/     文档渲染：类型判断、LibreOffice 转 PDF、pdfrender、渲染队列、归档读取
     diagnostics/ util/
+  snapshot/        remotekit_snapshot.exe：VSS 卷影副本、按租约读取（由监管者启动）
   updater/         remotekit_node.exe：服务、监管、下载、zstd + tar 解包、自我替换（与管理器共用）
   release/         发布格式：HKDF/AES-GCM、manifest、分片资产、HTTP、更新规划、patch 解码、payload 安装；remotekit_release.exe 发布工具
   manager/         remotekit_control.exe：Control 主机的管理器

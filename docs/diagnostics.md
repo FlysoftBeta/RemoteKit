@@ -9,6 +9,7 @@
 | Control | `<storage.logs>/control.jsonl`（打包版为根目录 `logs/`），16 MiB 轮转、保留 `.1`–`.4` | Control 自己（`control/server/log.ts`）；启动前和单元测试中写 stderr |
 | Control 控制台 | `logs/control.stdout.log` | 管理器转写子进程原始输出，只在 Node 崩溃等日志器之外的情况有内容 |
 | 管理器 / 节点监管 | `logs/manager.log`、`<节点根>/logs/supervisor.log` | 同格式 |
+| 快照进程 | `<节点根>/logs/snapshot.log` | 监管者转写 `remotekit_snapshot.exe` 的 JSON 行 |
 | Endpoint | `<节点根>/logs/endpoint.log`，16 MiB 轮转、保留 `.1`–`.4` | Endpoint 写 stderr，由监管者（或本地节点时由 Control）落盘 |
 | Browser | `<节点根>/logs/browser/<sessionId>.log`，启动前超过 16 MiB 改名为 `.log.1` | Chromium 原生日志（非结构化），Endpoint 以 `--log-file` 指定 |
 | 崩溃 | `<节点根>/logs/crashes/<sessionId>/`（Crashpad dump 与 `events.jsonl`） | Browser（`--crash-dir`）与 Endpoint |

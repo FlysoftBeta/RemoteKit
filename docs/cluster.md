@@ -78,7 +78,8 @@ Control 包和节点运行时的根目录有相同的 `build.json{buildId}`。bu
 
 `remotekit_node.exe` 是独立的 updater 与监管者：不依赖 SDK、Chromium 或媒体代码，只链接集群通道库、内嵌的 zstd 解压与自带的 PAX tar 读取器，只使用 Windows 10（1809+）的接口。
 
-- `run --root=<dir>` 前台运行；`service-install/service-uninstall` 注册 Windows 服务 `RemoteKitNode`（自动启动，失败 5 秒后重启）。
+- `run --root=<dir>` 前台运行；`service-install/service-uninstall` 注册 Windows 服务 `RemoteKitNode`（自动启动，失败 5 秒后重启，LocalSystem）。
+- 同时监管快照进程 `runtime/<current>/bin/remotekit_snapshot.exe`（见[运行中的版本](#运行中的版本)）：它是普通子进程而不是另一个 Windows 服务，继承监管者的账户，随运行时一起更新，不需要额外的安装或权限；日志在 `logs/snapshot.log`，退出后同样 1、2、4…30 秒退避。Control 主机的管理器为本地节点做同样的监管。监管者不是以服务（LocalSystem）运行时，快照进程没有建卷影副本的权限，节点只是没有运行中的版本。
 - 启动 `runtime/<current>/bin/endpoint_service.exe --node-root=<root>`，stdin 是管道：关闭 stdin 即请求优雅关闭（最多等 30 秒）。Endpoint 的 stdout/stderr 写入 `<root>/logs/endpoint.log`（16 MiB 轮转，保留 `.1`–`.4`），监管自身的记录在 `logs/supervisor.log`；两者都是 JSON 行（格式见[诊断 · 日志](diagnostics.md#日志)），子进程原始输出按字节转写。Control 经 stdio 启动的本地 Endpoint 用同样的文件与轮转记录 stderr，两种部署下节点日志位置一致。退出码 3（需要更新）→ 更新后启动；4（配置变化）→ 立即重启；其他 → 1、2、4…30 秒退避，健康运行 60 秒后复位。
 - 更新：以 role `updater` 连接（updater 自己的 buildId 可以较旧），拿到 `node.release{buildId, sha256, size}`，用 `package.get{offset}` 断点续传下载到 `downloads/`，校验大小与 SHA-256，在进程内流式解 zstd 多帧、解 tar（只接受 `node/` 下的普通文件与目录，拒绝链接、设备名、备用数据流、绝对路径与 `..`），核对 `node/build.json`，移到 `runtime/<buildId>`，原子替换 `current`；自更新完成后删除其他运行时与 `downloads/`，监管者启动时也做同样的清理，只保留当前运行时。
 - 新运行时里的 `remotekit_node.exe` 与正在运行的不同时：把运行中的文件改名为 `.old`，复制新文件，用相同参数启动新监管者后退出；替换失败则回滚 `current`。
@@ -103,7 +104,7 @@ Control 与 Endpoint 之间只有三种交互，没有逐方法的恢复路径�
 
 - Session 由 Control 的 `session.desired{sessionId, placementEpoch, checkpoint, profileKey, run, …}` 打开（见[协调协议](#协调协议)）；Profile 密钥由 DEK 经 HKDF-SHA256 派生，Endpoint 只放在内存里并在销毁时清零。Endpoint 只在 `session.open` 时创建 Session，目录 `<dataPath>/sessions/<sessionId>`；同参数幂等，同 Tenant 不同 sessionId 或 epoch 回退为 `conflict`，未打开的 Tenant 上的其他方法为 `not_found`。
 - Profile 密钥经 Endpoint 新建的匿名管道交给 Browser：只把读端放进 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 继承，参数 `--profile-key-handle=<句柄值>`；Browser 在创建任何 BrowserContext 之前读出恰好 32 字节，不足、多余或句柄无效都拒绝启动（见[页面生命周期 · Profile](page-lifecycle.md#profile-持久化)）。Browser 进程内的会话编号固定为 1，Profile 位于 `<sessionDir>/session-1/profile-1`。
-- **fencing**：每次重新放置都使 epoch 加一。`node.desired` 列出放在该节点上的全部 Session（不论运行与否，带 epoch 与 `dataState`）；Endpoint 在每次（重新）连接时终止并遗忘不在清单中或 epoch 过旧的 Session，删除它们的副本记录，目录变成冷副本（7 天后或磁盘压力时删除，`session.cold.delete{}`）；epoch 更新而清单说是 `clean` 的旧副本直接删除（例如管理员放弃了它的未提交更改）。
+- **fencing**：每次重新放置都使 epoch 加一。`node.desired` 列出放在该节点上的全部 Session（不论运行与否，带 epoch 与 `dataState`）；Endpoint 在每次（重新）连接时终止并遗忘不在清单中或 epoch 过旧的 Session，删除它们的副本记录，目录变成冷副本（7 天后或磁盘压力时删除，`session.cold.delete{}`）；epoch 更新而清单说是 `clean` 的旧副本直接删除（例如管理员把它转移到了别的节点）。
 
 ## 对象存储
 
@@ -112,7 +113,7 @@ Control 与 Endpoint 之间只有三种交互，没有逐方法的恢复路径�
 - **密钥**：Control 首次启动时生成 32 字节集群对象密钥（`cluster_object_secret`），以 HKDF-SHA256 派生 `objectKey` 与 `objectIdKey`（info `remotekit object key 2` / `remotekit object id key 2`），在 `node.ready` 里经已认证的集群通道下发给每个节点；节点只放在内存里。Tenant DEK 只再派生 Profile 密钥。
 - **存储文件** `<dataPath>/objects/<id 前 2 位>/<id>.rko`：头部（`RKO2`、明文大小、1MiB 段大小、段数）后接逐段记录（是否 zstd 压缩、长度、AES-256-GCM 密文）。只有压缩后更小才压缩。nonce 由 objectKey 对 (id, 段号) 的 HMAC 派生，AAD 绑定 id、段号与段数；逐段校验，读写都按段流式进行，从不把整个对象放进内存。整个文件的 SHA-256（`storedSha256`）让不持有密钥的节点也能校验副本。
 - **索引**（Control）：`objects(id, size, stored_size, stored_sha256, created_at)`、`object_replicas(id, node_id)`、`object_derivations(id, source_id, kind)`（`kind` 为 `thumbnail` 或 `document`），节点清单对账的 `object_inventory_orphans(node_id, id)`。
-- **认领与引用**：`object.committed{objectId, size, storedSize, storedSha256, tenantId?, derivedFrom?, kind?, putId?}` 登记对象，带 `tenantId` 时同时写入 `object_claims(tenant, id)`——Tenant 在持久引用出现之前（上传 seal、派生物、下载导入、Control 写入）对它的读取权。持久引用按 Tenant 计算：文件库条目、未决选择、最新 2 个 checkpoint 的 `checkpoint_objects(tenant, manifest_id, id)`，以及被引用对象的派生物。没有持久引用的认领 2 小时后过期；一个对象在所有 Tenant 都不再引用或认领时记入 `object_gc`，满 2 小时从所有副本删除（时间戳持久化，Control 重启不重置宽限期）。
+- **认领与引用**：`object.committed{objectId, size, storedSize, storedSha256, tenantId?, derivedFrom?, kind?, putId?}` 登记对象，带 `tenantId` 时同时写入 `object_claims(tenant, id)`——Tenant 在持久引用出现之前（上传 seal、派生物、下载导入、Control 写入）对它的读取权。持久引用按 Tenant 计算：文件库条目、未决选择、最新 4 个版本 的 `checkpoint_objects(tenant, manifest_id, id)`，以及被引用对象的派生物。没有持久引用的认领 2 小时后过期；一个对象在所有 Tenant 都不再引用或认领时记入 `object_gc`，满 2 小时从所有副本删除（时间戳持久化，Control 重启不重置宽限期）。
 - **配额**：`quotas.tenantObjectBytes` 按 Tenant 引用或认领的**不同对象**大小之和计算；共享对象对每个引用它的 Tenant 全额计费，所以去重不会让一个用户的配额依赖别人。`object.committed` 与文件库导入时检查。
 - **读取授权**：Endpoint Session 只能读它的 Tenant 引用或认领的对象。每个 Session 有一个授权集，只由三处填充：本 Session 自己写入的对象、Control 推送的文件库描述、对本 Tenant 成功的 `object.locate{tenantId, ids}`（Control 只为有权的 id 返回副本地址，否则 `forbidden`）。节点本地恰好有某个副本不构成读取权限。Viewer 下载、Browser 暂存、缩略图与照片输入、checkpoint 恢复（含热副本）都经过这个授权集。
 - **副本**：目标为 min(2, 就绪节点数)，Control 让磁盘占用最低的节点执行 `object.fetch{ids, sources}`（每节点最多 4 个并发）。节点上线后 Control 分页读取 `object.inventory{cursor}` 对账：索引里没有、首次观察起超过 2 小时的对象删除，节点上缺失的副本从索引移除。只登记副本的提交不带 `tenantId`。
@@ -144,7 +145,7 @@ Endpoint 自己的 Session 状态在 Session 目录的 `session.db`（SQLite，W
 
 ## Session 副本与提交
 
-checkpoint 不是 Session 数据的唯一形态：节点上的 Session 目录可以比任何已提交的 checkpoint 更新。模型显式接受这一点——每份本地副本有一条副本记录 `<sessionId>.copy.json`：`{sessionId, placementEpoch, base, state, stoppedCleanly, changesAt, lastCommit}`。`state` 为 `clean` 表示目录与 `base`（manifest id）完全一致；为 `dirty` 表示可能含有任何 checkpoint 都没有的更改。Session 为运行而打开时（Browser 启动之前）副本即记为 `dirty`、`stoppedCleanly:false`，只有成功提交后才回到 `clean`。已经传输的块不等于可用：只有提交了 manifest 的 checkpoint 才能用来恢复。
+Session 数据以**版本**（checkpoint）保存：一个版本是一份 manifest 加它引用的块，块组合起来是 Session 目录的一个完整、合法、不撕裂的状态。版本有两种来源，都是一致点：Browser 干净停止时的提交（`stopped`），以及运行中按卷影副本生成的版本（`running`，见[运行中的版本](#运行中的版本)）。节点上的 Session 目录可以比最新版本更新——模型显式接受这一点，`dirty` 只表示"有比最新版本更新的更改"。每份本地副本有一条副本记录 `<sessionId>.copy.json`：`{sessionId, placementEpoch, base, state, stoppedCleanly, changesAt, lastCommit, lastVersion}`。`state` 为 `clean` 表示目录与 `base`（manifest id）完全一致；为 `dirty` 表示目录在 `base` 之后还有更改。Session 为运行而打开时（Browser 启动之前）副本即记为 `dirty`、`stoppedCleanly:false`，只有干净停止并提交后才回到 `clean`；运行中的版本只推进 `base` 与 `lastVersion{manifestId, takenAt, kind}`，副本仍是 `dirty`。已经传输的块不等于可用：只有登记了 manifest 的版本才能用来恢复。
 
 **同节点打开沿用本地副本**。期望状态要求运行而 Session 尚未打开时：有该 Session 的副本记录、epoch 不比请求新、且（`dirty` 或 `base` 等于请求的 checkpoint）时，**原样使用目录**，不恢复、不回退——Endpoint 进程重启（更新、配置变化、崩溃）后同节点重新打开不会丢掉上次提交之后的更改，从未提交过的 Session 也照常打开。`stoppedCleanly:false`（Endpoint 或 Browser 意外退出）时，Chromium 自己恢复它的数据库，与桌面 Chrome 崩溃后相同。其他情况按请求的 checkpoint 恢复：本地索引对得上时逐文件校验修补（warm），否则物化到 `.restore` 再原子替换（cold），然后写 `clean` 副本记录。epoch 过旧仍按 fencing 拒绝。
 
@@ -152,7 +153,7 @@ checkpoint 不是 Session 数据的唯一形态：节点上的 Session 目录可
 
 **块持续产出**。运行中的 Session 后台低优先级把静默 10 秒以上的变化文件预先切块存为对象：读前读后各记一次文件身份，读期间变化的作废；全节点共享 16 MiB/s 的速率上限，每个 Session 同时一个文件。不超过 1MiB 的文件是一个对象，更大的按 1MiB 固定切块（SQLite 原地改页、LevelDB 只追加或整文件新建，固定切块的增量效果最好）；未变的文件复用索引里的块。预存的块以该 Tenant 的认领提交，Endpoint 每 30 分钟用 `object.claims.refresh{tenantId, ids}` 续期仍未提交的块，Control 只为该 Tenant 已认领的 id 续期。
 
-**提交需要一致点**。目前唯一的一致点是 Browser 干净停止。期望状态 `run:"stopped"`，`commit` 为提交请求 ID 或 null：
+**停止时的提交**。期望状态 `run:"stopped"`，`commit` 为提交请求 ID 或 null：
 
 1. 有阻塞项则 `conflict`（指明是哪一项）：未确认的自然关闭事件、未决原生选择、上传中、页面请求（对话框、文件选择）、下载中、RTC 连接存在、生命周期不确定、导航恢复未完成。计数由各自的所有者组件报告在快照的 `stopBlockers` 字段里。
 2. 优雅关闭 Browser：`BrowserRuntime::Shutdown()` 先导出所有导航状态有变化的 view（总计最多 20 秒），再发 `browser.shutdown`，等 Browser 作业中的进程全部退出（最多 30 秒）；只有退出码 0 且作业为空才算干净，不干净则 `unavailable`。强制终止只用于故障与 fencing。
@@ -164,9 +165,44 @@ checkpoint 不是 Session 数据的唯一形态：节点上的 Session 目录可
 
 **优雅关闭 Endpoint**（服务停止、退出码 3/4）：停止每个 Session，并在全节点 60 秒预算内用节点生成的 requestId 逐个提交；没来得及的保持 `dirty`、`stoppedCleanly:true`——同节点重新打开仍沿用它。重连后每个 Session 的第一份观察状态带副本记录（`data`）；Control 把它没有请求过的提交当作请求过的一样校验对象并提交指针；校验完成前不重新打开该 Session，避免按旧指针恢复。
 
-**Control 侧**：放置是 `run_state × data_state`。停止并提交时先在事务里写 `pending_commit`（epoch 不变），然后发布带这个 requestId 的期望状态；不需要单独的请求、超时或补发——观察状态报告 `committed.requestId` 等于它时，校验对象、提交 checkpoint 指针（保留最新 2 个），改为 `stopped/clean`，下一份期望文档清除 `commit`。重连只是重发期望状态。未决提交期间认领受保护，不会被 GC。
+### 运行中的版本
 
-**放置规则**：`clean` 的 Session 可以放到任何合格节点（从 checkpoint 恢复，或沿用同一 manifest 的本地副本）。`dirty` 的 Session 只能在持有它的节点上运行；那个节点离线时 Session 是 `unavailable`，reason `session_data_on_offline_node`（Viewer："会话数据所在节点离线，恢复后自动继续"）。再平衡只移动 `clean` 的 Session。管理 App → 用户对这种 Session 提供"放弃未提交的更改"：确认框显示最后一次提交时间，确认后 epoch 加一、隔离旧副本、以最新已提交的 checkpoint 记为 `stopped/clean`。
+运行中的 Chromium 一直在写 SQLite（主文件 + `-wal`）与 LevelDB（`MANIFEST`、`.ldb`、`.log`），`session.db` 也是 WAL。在不同时刻逐个读取变化的文件，可能拼出一个从未同时存在过的状态。所以运行中的版本从 **VSS 卷影副本**读取：它是整卷在某一瞬间的镜像，等同于那一刻断电，这些数据库本来就能从这种状态恢复。干净停止仍是最好的一致点，停止时照常提交。
+
+**快照进程** `remotekit_snapshot.exe`（`endpoint/snapshot/`，静态 CRT，不依赖 SDK、Chromium 与媒体代码）由节点监管者启动，参数是节点数据根、nodeId 与监管者 PID；Endpoint 不直接接触 VSS。接口是命名管道 `\\.\pipe\remotekit-snapshot-<nodeId>`，DACL 只允许 SYSTEM 与监管者的账户，拒绝远程客户端；帧为 `u32le 长度 + JSON`，文件数据另起一个二进制帧。
+
+- `snapshot.take{root, paths}`：`root` 必须等于启动参数里的数据根，路径必须是根下的相对路径，拒绝 `..`、绝对路径与任何一级是 reparse point 的路径。为该卷建一个非持久、不调用 writer 的卷影副本（`VSS_CTX_FILE_SHARE_BACKUP`、`VSS_BT_COPY`），在副本里递归枚举这些路径，返回 `{snapshotId, takenAt, files:[{path, size, mtime, fileId} | {path, directory} | {path, missing}]}`。目录在卷影副本里枚举，因此快照瞬间的新建、改名与删除都如实反映。`takenAt` 取卷影副本的创建时间。
+- `snapshot.read{snapshotId, path, offset, length ≤ 1 MiB}`：只能读 `take` 返回过的路径。
+- `snapshot.release{snapshotId}`。租约：每个请求续期，120 秒没有请求或连接断开即释放；最后一个租约释放时删除卷影副本。同一卷同时只有一个卷影副本，2 秒内到达的 `take` 合并到同一个，之后有租约未释放时新的 `take` 为 `unavailable`。卷影副本 ID 在创建前写入 `snapshot-owner.json`，进程启动时删除上次遗留的那一个，从不碰其他卷影副本。
+- 错误用统一错误码：VSS 不可用、非 NTFS、卷影存储不足 → `unavailable`，HRESULT 在 `os` 中；路径或请求非法 → `invalid_request`。
+
+**调度**（Endpoint，节点级线程）：每 60 秒检查一次，运行中的 Session 有待提交的变化、且距上一个版本（或打开）≥ 5 分钟即到期；同一节点到期的 Session 共用一次 `take`（路径为各自的 `sessions/<id>`）。每个到期的 Session 在自己的协调执行器里生成版本：
+
+1. 用卷影副本里的元数据代替扫描结果；应用与停止提交相同的排除规则。
+2. 不在变更列表里、身份（大小、last write time、文件 ID）与上一份索引一致的文件复用索引里的块；在变更列表里的文件和 `session.db`、`session.db-wal` 一律从卷影副本重新读取，不读活目录。读取、切块、加密与登记沿用提交的流水线，预存的块只在身份与卷影副本一致时复用。
+3. 写 manifest，副本记录写 `base` 与 `lastVersion{kind: running}`（`state` 保持 `dirty`），变更列表只删去早于 `takenAt − 2 秒` 的条目（快照之后的写入仍是待提交的更改），在观察状态里报告 `checkpoint{manifestId, objects, buildId, kind: running, takenAt}`。
+
+生成版本期间该 Session 的协调执行器被占用（期望状态的应用在其后排队）；一次只读这 5 分钟内变化的文件，通常不到一秒。快照进程不可用时跳过版本：日志每次连续失败只记一条 `snapshot.unavailable`，`node.metrics` 带 `snapshot: unavailable`，管理 App 的节点页显示"快照服务不可用"；Session 照常运行，停止时照常提交。开发构建可以用 `REMOTEKIT_TEST_VERSION_INTERVAL_MS`、`REMOTEKIT_TEST_VERSION_CHECK_MS` 缩短间隔，发布构建没有这两个开关。
+
+### Control 侧
+
+放置是 `run_state × data_state`。停止并提交时先在事务里写 `pending_commit`（epoch 不变），然后发布带这个 requestId 的期望状态；不需要单独的请求、超时或补发——观察状态报告 `committed.requestId` 等于它时，校验对象、登记版本，改为 `stopped/clean`，下一份期望文档清除 `commit`。重连只是重发期望状态。未决提交期间认领受保护，不会被 GC。
+
+运行中的版本：观察状态里 `checkpoint.kind` 为 `running`、副本 `dirty`、Browser 运行中、且 `lastVersion` 与 checkpoint 一致时，同样校验对象并登记，只推进 `checkpoint_id`，`data_state` 保持 `dirty`。同一 manifest 与 `takenAt` 重复报告是幂等的。每个 Tenant 保留最新 **4** 个版本（两种来源一起计），它们的对象保持引用，更早的按 GC 规则回收。复制（目标 min(2, 就绪节点数) 个副本）优先处理每个 Tenant 最新版本的对象。
+
+**最新的完整版本**：从新到旧找第一个"manifest 与每个块在至少一个就绪、未移除的节点上有副本"的版本。`clean` 的 Session 打开时恢复的就是它：最新版本缺块（还没复制出去、所在节点离线）时自动退回上一个完整版本；一个完整版本都没有时 `unavailable`，reason `session_data_on_offline_node`。
+
+**放置规则**：`clean` 的 Session 可以放到任何合格节点（恢复最新的完整版本，或沿用同一 manifest 的本地副本）。`dirty` 的 Session 只能在持有它的节点上运行——那个节点上的目录比任何版本都新；节点离线时就等它回来，Session 是 `unavailable`，reason `session_data_on_offline_node`（Viewer："会话数据所在节点离线，恢复后自动继续"）。再平衡只移动 `clean` 的 Session。
+
+**转移**（管理 App → 用户 → 转移，`admin.transfer{username, nodeId?}`）把一个用户的 Session 搬到另一个节点，用户先被强制下线：
+
+- 源节点在线：先在源节点停止并提交（不丢更改），再放到目标节点（epoch 加一）。没有其他在线节点时直接拒绝，不先停止。
+- 源节点离线：尽力而为。epoch 加一，以最新的完整版本记为 `stopped/clean`，之后的更改丢失；一个完整版本都没有时从空白浏览器数据开始（按 Control 的有限产品信息重建工作区）。确认框写明恢复哪个时间的版本或将从空白开始。旧副本由 fencing 隔离：源节点回来时期望状态里已没有它。
+- 指定目标节点时记下这个选择（`transfer_pending`），下次打开优先放在那里且 epoch 不再加一；不指定时由下次打开按放置规则选择，源节点不在候选里。
+
+转移只针对 Session 数据；文件库对象与放置无关，不需要转移。
+
+### 恢复、停止策略与可搬迁性
 
 **打开（恢复时）**：manifest 的块一次批量 `object.locate`（同时授予读取权），本地已有的块与网络拉取并行解码，缺失的块最多 8 个并发、每个来源最多 4 个传输，按偏移写入，新副本批量登记。取不到则以 `unavailable` 失败、不动目录。Tab 保留产品状态，经现有的导航恢复流程回到原页面。
 
@@ -204,4 +240,4 @@ Endpoint 每 5 秒发 `node.metrics`：系统 CPU 忙碌比例、内存总量/�
 
 ## 节点移除
 
-只能移除未就绪的节点，需确认：记录到 `removed_nodes`，该节点上的 Tenant epoch 加一并以最新已提交的 checkpoint（没有则为空 Profile，按 Control 的有限产品信息重建工作区）变为 `stopped/clean`，它的副本从索引移除。节点上还有未提交更改的 Session 时，确认框列出这些用户与各自最后一次提交时间，确认即放弃这些更改；被移除的节点握手时得到 `unknown_node`，直到管理员重新加入。`removed_nodes` 由 `NodeAdmin`（`control/server/cluster/node-admin.ts`）独占，它在一个事务里调用 Placement 的 `evacuate` 与对象索引的 `forgetNode`，各自只清理自己的表。节点列表只来自配置文件。节点失联本身不会自动触发重新放置：未提交的更改只在那台机器上，放弃它们只能由管理员明确决定。
+只能移除未就绪的节点。移除等于对放在该节点上的每个用户执行一次（源节点离线的）[转移](#control-侧)：确认框列出这些用户与各自最新完整版本的时间（没有则注明从空白开始），确认后记录到 `removed_nodes`，这些 Session epoch 加一、以最新的完整版本记为 `stopped/clean`，它的副本从索引移除；被移除的节点握手时得到 `unknown_node`，直到管理员重新加入。`removed_nodes` 由 `NodeAdmin`（`control/server/cluster/node-admin.ts`）独占，它在一个事务里调用 Placement 的 `evacuate` 与对象索引的 `forgetNode`，各自只清理自己的表。节点列表只来自配置文件。节点失联本身不会自动触发重新放置：比最新版本更新的更改只在那台机器上，放弃它们只能由管理员明确决定。

@@ -42,7 +42,7 @@ POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字
 | `feedback` | 诊断用媒体反馈 |
 | `auth.get/lock/verify/settings/password`、`auth.face.begin/cancel/remove` | 锁屏与凭据 |
 | `admin.overview/users/storage/nodes/diagnostics/announcements` | 管理员：各分区数据 |
-| `admin.createUser/resetPassword/clearSecondFactors/signOut/setDisabled/transferAdmin/stop/discardChanges/resetSession/deleteUser` | 管理员：按 `username` 操作用户，返回新的用户列表 |
+| `admin.createUser/resetPassword/clearSecondFactors/signOut/setDisabled/transferAdmin/stop/transfer/resetSession/deleteUser` | 管理员：按 `username` 操作用户，返回新的用户列表；`transfer` 可带目标 `nodeId` |
 | `admin.removeNode/readdNode` | 管理员：按 `nodeId` |
 | `admin.deleteDiagnostic/downloadDiagnostic` | 管理员：按诊断 `id`；下载返回一次性 URL |
 | `admin.publishAnnouncement/updateAnnouncement/deleteAnnouncement` | 管理员：发布 `{title, body}`、按 `id` 编辑（`republish` 清空已读）或删除，返回新的公告列表 |
