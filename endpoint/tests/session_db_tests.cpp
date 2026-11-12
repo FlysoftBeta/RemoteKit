@@ -253,6 +253,13 @@ void EventTransactions(const fs::path& path) {
   SessionDb reopened(path);
   Take(reopened.Open());
   Check(Take(reopened.Events().Load()) == retained, "outbox survives reopen");
+  const auto next = Take(reopened.Events().Append(
+      "view.closed", {{"viewId", "2"}, {"reason", "script"}}, "after-restart", "new-browser"));
+  Check(std::stoull(next.at("seq").get<std::string>()) >
+            std::stoull(retained.at(0).at("seq").get<std::string>()),
+        "durable stream sequence advances across Endpoint and Browser restart");
+  Check(Take(reopened.Events().State()).at("streamId") == rotated.at("streamId"),
+        "process restart retains the durable event stream");
 }
 }  // namespace
 int wmain(int argc, wchar_t** argv) {

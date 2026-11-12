@@ -274,6 +274,21 @@ void PresentationOwnership() {
   CHECK(sent.back()["type"] == "layout");
   presentation.InvalidateLayout("reconfigure");
   CHECK(presentation.Epoch() > epoch && !presentation.Allows("1", epoch));
+  const auto invalid = presentation.Epoch();
+  ++frame->generation;
+  const auto resumed = presentation.ObserveLayout(*frame);
+  CHECK(resumed > invalid && presentation.ObserveLayout(*frame) == resumed);
+  ++scope.peer;
+  outbox.Bind(scope);
+  presentation.Bind(scope.peer);
+  const auto replaced = presentation.ObserveLayout(*frame);
+  CHECK(replaced > resumed && presentation.ObserveLayout(*frame) == replaced);
+  frame->generation = 1;
+  view.instance_generation = 1;
+  view.document_generation = 1;
+  const auto browser_restarted = presentation.ObserveLayout(*frame);
+  CHECK(browser_restarted > replaced);
+  CHECK(presentation.ObserveLayout(*frame) == browser_restarted);
 }
 
 void AuthorizationTokens() {

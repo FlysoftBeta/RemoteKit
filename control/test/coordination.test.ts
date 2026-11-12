@@ -196,3 +196,78 @@ test('encoded management, event and observation bounds are inclusive', () => {
   observation.stats.padding += 'x';
   assert.throws(() => validateSessionObserved(observation));
 });
+
+import { mkdtempSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+import { emptyWorkspace } from '../server/persistence/workspaces';
+import type { OperationReceipt } from '../shared/product';
+
+test('persisted coordination, operation, workspace, library and clipboard counters survive Control restart', () => {
+  const directory = mkdtempSync(resolve('../develop/tmp/arch3-counter-'));
+  const path = join(directory, 'control.db');
+  let store = new ControlDatabase(path, { buildId: 'test' });
+  const document = desired();
+  const tenant = document.tenantId;
+  store.accounts.insertUser({
+    id: 'user',
+    username: 'user',
+    tenant,
+    salt: '',
+    password_hash: '',
+    is_admin: 0,
+  });
+  const workspace = emptyWorkspace(tenant);
+  store.workspaces.writeWorkspace(workspace);
+  workspace.settings.workspace.clipboardSync = true;
+  store.workspaces.saveWorkspace(workspace);
+  const workspaceRevision = workspace.revision;
+  const desiredRevision = store.coordination.revision(document);
+  const generation = store.operations.operationGeneration(tenant);
+  const first: OperationReceipt = {
+    operationId: 'first',
+    operationGeneration: generation,
+    status: 'committed',
+  };
+  store.operations.reserveOperation(tenant, { type: 'window.close', windowId: 'window' }, first);
+  store.library.save(tenant, {
+    revision: 12,
+    entries: [],
+    basket: [],
+    partitions: [],
+    sources: [],
+    excludedSources: [],
+    basketPartitionId: null,
+  });
+  const libraryRevision = store.library.snapshot(tenant).revision;
+  store.clipboards.record('user', { text: 'first', html: '' });
+  store.reclaim.close();
+  store.db.close();
+  store = new ControlDatabase(path, { buildId: 'test' });
+  try {
+    assert.equal(
+      store.coordination.revision({ ...document, connectionEpoch: 'new-connection' }),
+      desiredRevision,
+    );
+    assert.ok(BigInt(store.coordination.revision({ ...document, run: 'stopped' })) > BigInt(desiredRevision));
+    assert.equal(store.operations.operationGeneration(tenant), generation);
+    const second: OperationReceipt = {
+      operationId: 'second',
+      operationGeneration: generation,
+      status: 'committed',
+    };
+    store.operations.reserveOperation(tenant, { type: 'window.close', windowId: 'window' }, second);
+    assert.ok(BigInt(second.operationSequence!) > BigInt(first.operationSequence!));
+    const current = store.workspaces.workspace(tenant);
+    assert.equal(current.revision, workspaceRevision);
+    current.settings.workspace.clipboardSync = false;
+    store.workspaces.saveWorkspace(current);
+    assert.ok(current.revision > workspaceRevision);
+    assert.equal(store.library.snapshot(tenant).revision, libraryRevision);
+    store.library.availabilityChanged(tenant);
+    assert.equal(store.library.snapshot(tenant).revision, libraryRevision + 1);
+    assert.equal(store.clipboards.record('user', { text: 'second', html: '' })!.revision, '2');
+  } finally {
+    store.reclaim.close();
+    store.db.close();
+  }
+});

@@ -569,3 +569,28 @@ test('one publisher coalesces a burst and republishes placements on reconnect', 
     await h.close();
   }
 });
+
+test('Endpoint incarnation replacement accepts a fresh observation sequence and fences old observations', async () => {
+  const h = await harness();
+  try {
+    const first = await h.connect();
+    await h.gateway.published('one');
+    const old = await h.gateway.waitObserved('one', (value) => value.browser === 'running');
+    const replacement = await h.connect();
+    const fresh = await h.gateway.waitObserved(
+      'one',
+      (value) => value.endpointIncarnation === replacement.incarnation && value.browser === 'running',
+    );
+    assert.notEqual(fresh.endpointIncarnation, old.endpointIncarnation);
+    assert.notEqual(fresh.connectionEpoch, old.connectionEpoch);
+    assert.equal(fresh.sessionId, old.sessionId);
+    assert.equal(fresh.placementEpoch, old.placementEpoch);
+    assert.ok(BigInt(fresh.seq) <= BigInt(old.seq));
+    const link = h.registry.get('alpha')!;
+    assert.equal(link.state.state, 'ready');
+    first.close();
+    assert.equal(h.gateway.observation('one')!.endpointIncarnation, replacement.incarnation);
+  } finally {
+    await h.close();
+  }
+});
