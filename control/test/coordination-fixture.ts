@@ -97,7 +97,7 @@ export function observedSession(
       rtcConnected: false,
       lifecycleUncertain: false,
     },
-    library: { descriptions: [] },
+
     events: { streamId: 'fixture-stream', ackedThrough: '0', lastSeq: '0' },
     stats: snapshot.stats ?? {},
     lastError: snapshot.status ?? null,

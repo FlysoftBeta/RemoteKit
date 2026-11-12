@@ -3,20 +3,13 @@ import { AuthCameraChannel, type CameraBinding } from './auth-camera-channel';
 import { Events } from '../util/store';
 
 import type { EndpointChannel } from '../rtc/endpoint-channel';
-import type { RtcSession } from '../rtc/rtc-session';
 
 export class AuthorizationScope {
-  constructor(
-    private readonly ports: { rtc: Pick<RtcSession, 'attempt'>; endpoint: Pick<EndpointChannel, 'channel'> },
-  ) {}
+  constructor(private readonly ports: { endpoint: Pick<EndpointChannel, 'channel'> }) {}
   readonly authCamera = new AuthCameraChannel(() => this.notify());
 
   get authCameraReady() {
     return this.authCamera.ready;
-  }
-
-  get cameraDiagnostics() {
-    return { peerAttempt: this.ports.rtc.attempt, ...this.authCamera.diagnostics };
   }
 
   setAuthCamera(stream?: MediaStream, binding?: CameraBinding) {
@@ -37,7 +30,7 @@ export class AuthorizationScope {
     return this.epoch;
   }
 
-  get productReady() {
+  get browserReady() {
     return (
       !this.productLocked &&
       (this.peerAuthEpoch ?? 0) > 0 &&
@@ -48,7 +41,10 @@ export class AuthorizationScope {
   observePeerAuthorization(epoch: number) {
     if (epoch === this.peerAuthEpoch) return;
     this.epoch = epoch;
-    this.setProductLocked(true, true);
+    this.token++;
+    this.resets.emit(this.token);
+    this.transitions.emit({ locked: this.locked, token: this.token, epoch });
+    this.notify();
   }
 
   setProductLocked(locked: boolean, force = false) {
@@ -73,18 +69,18 @@ export class AuthorizationScope {
       locked: this.productLocked,
       peerEpoch: this.peerAuthEpoch,
       token: this.token,
-      ready: this.productReady,
+      browserReady: this.browserReady,
     });
     this.listeners.forEach((listener) => listener());
   }
 
   private readonly listeners = new Set<() => void>();
 
-  private snapshot: { locked: boolean; peerEpoch?: number; token: number; ready: boolean } = {
+  private snapshot: { locked: boolean; peerEpoch?: number; token: number; browserReady: boolean } = {
     locked: true,
     peerEpoch: 0,
     token: 0,
-    ready: false,
+    browserReady: false,
   };
 
   subscribe = (listener: () => void) => {
@@ -99,10 +95,17 @@ export class AuthorizationScope {
     if (event.type !== 'writable') this.notify();
   };
   onRtc = (event: import('../rtc/rtc-session').RtcEvent) => {
-    if (event.type === 'authChannel') this.authCamera.bind(event.channel);
-    else if (event.type === 'closed') {
+    if (event.type === 'closed') {
       this.observePeerAuthorization(0);
+    }
+  };
+  serviceAuthEpoch = 0;
+  onServiceRtc = (event: import('../rtc/rtc-session').RtcEvent) => {
+    if (event.type === 'authChannel') this.authCamera.bind(event.channel);
+    if (event.type === 'closed') {
+      this.serviceAuthEpoch = 0;
       this.authCamera.bind(undefined);
     }
+    this.notify();
   };
 }

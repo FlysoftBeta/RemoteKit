@@ -34,14 +34,14 @@ export function WorkspaceSettings({
   sessionImportCall: SessionImportCall;
   controls: Pick<
     SystemControls,
-    'authRequest' | 'camera' | 'idle' | 'lock' | 'diagnosticState' | 'diagnostics' | 'productReady'
+    'authRequest' | 'camera' | 'idle' | 'lock' | 'diagnosticState' | 'diagnostics' | 'shellReady'
   >;
   workspaceState: WorkspaceSnapshot;
   auth: NonNullable<WorkspaceSnapshot['auth']>;
   logout(): void;
 }) {
   const { status } = workspaceState;
-  const { authRequest, camera, idle, lock, diagnosticState, diagnostics, productReady } = controls;
+  const { authRequest, camera, idle, lock, diagnosticState, diagnostics, shellReady } = controls;
   const workspace = state.workspace;
   return (
     <SettingsApp
@@ -50,7 +50,7 @@ export function WorkspaceSettings({
       onState={onState}
       action={action}
       call={call}
-      online={productReady}
+      online={shellReady}
       logout={logout}
       security={
         <SecuritySettings
@@ -65,7 +65,7 @@ export function WorkspaceSettings({
       sessionImport={
         <Suspense fallback={null}>
           <SessionImportSettings
-            online={productReady}
+            online={shellReady}
             call={sessionImportCall}
             action={action}
             windowId={

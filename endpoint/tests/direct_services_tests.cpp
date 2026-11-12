@@ -14,15 +14,6 @@ void Check(bool value, const char* message) {
     std::exit(1);
   }
 }
-Json Action(unsigned n = 0) {
-  char id[37];
-  std::snprintf(id, sizeof(id), "00000000-0000-4000-8000-%012u", n);
-  return {{"type", "product.action"},
-          {"version", 1},
-          {"operationId", id},
-          {"operationGeneration", "generation"},
-          {"action", {{"type", "tab.navigate"}, {"url", "https://example.com/"}}}};
-}
 void ContextMenuTests() {
   using namespace remotekit;
   static_assert(kSharedRenderVersion == 8);
@@ -221,139 +212,9 @@ int main() {
   ViewportTests();
   FocusProvenanceTests();
   ContextMenuTests();
-  Check(remotekit::ProductActionEnvelope(Action(), 200), "valid action");
-  auto invalid = Action();
-  invalid["action"]["type"] = "window.open";
-  Check(remotekit::ProductActionEnvelope(invalid, 200), "forward workspace action");
-  invalid["action"]["type"] = "future.action";
-  Check(remotekit::ProductActionEnvelope(invalid, 200), "Control owns action semantics");
-  for (const auto& type :
-       {Json(), Json(1), Json(""), Json("bad type"), Json(std::string(129, 'a'))}) {
-    invalid["action"]["type"] = type;
-    Check(!remotekit::ProductActionEnvelope(invalid, 200), "reject malformed action type");
-  }
-  invalid = Action();
-  invalid["operationId"] = "not-uuid";
-  Check(!remotekit::ProductActionEnvelope(invalid, 200), "reject invalid operation id");
-  Check(!remotekit::ProductActionEnvelope(Action(), 65536), "bounded action");
   remotekit::DirectServices services;
-  services.Bind(1, "connection");
-  Check(!services.Admit(2, Action(), 0), "old peer admission");
-  Check(services.Admit(1, Action(), 0), "admit action");
-  Check(services.Admit(1, Action(), 0), "duplicate pending action");
-  unsigned dispatched = 0;
-  services.DispatchPending(1, 1, [&](auto, auto delivery) {
-    delivery->MarkWritten();
-    ++dispatched;
-    return true;
-  });
-  services.DispatchPending(1, 2, [&](auto, auto delivery) {
-    delivery->MarkWritten();
-    ++dispatched;
-    return true;
-  });
-  Check(dispatched == 1, "never blindly replay");
-  auto reply = Action();
-  reply.erase("action");
-  reply["result"] = {{"status", "committed"}};
-  Check(!services.Result(2, reply), "old peer result");
-  Check(services.Result(1, reply), "route matching result");
-  std::vector<Json> sent;
-  services.Flush(1, [](auto) { return 6; });
-  services.Flush(1, [&](auto bytes) {
-    sent.push_back(Json::parse(bytes));
-    return 0;
-  });
-  Check(sent.size() == 1 && sent[0]["type"] == "product.result" && !sent[0].contains("ok") &&
-            !sent[0].contains("error"),
-        "BUSY retains result");
-  services.Admit(1, Action(1), 0);
-  services.DispatchPending(1, 1, [](auto, auto) { return false; });
-  services.Flush(1, [&](auto bytes) {
-    sent.push_back(Json::parse(bytes));
-    return 0;
-  });
-  Check(sent.back()["result"]["error"]["code"] == "unavailable" &&
-            sent.back()["result"]["error"]["message"] == "control_unavailable",
-        "explicit management disconnect");
-  Check(sent.back()["result"]["status"] == "failed", "never forwarded is explicitly rejected");
-  services.Admit(1, Action(2), 0);
-  services.DispatchPending(1, 1, [](auto, auto delivery) {
-    delivery->MarkWritten();
-    return true;
-  });
-  services.DispatchPending(1, 15000, [](auto, auto delivery) {
-    delivery->MarkWritten();
-    return true;
-  });
-  services.Flush(1, [&](auto bytes) {
-    sent.push_back(Json::parse(bytes));
-    return 0;
-  });
-  Check(sent.back()["result"]["error"]["code"] == "outcome_unknown" &&
-            sent.back()["result"]["error"]["message"] == "control_result_unknown",
-        "ambiguous accepted message expires without replay");
-  std::ifstream fixture(std::filesystem::path(__FILE__).parent_path() /
-                        "fixtures/product-action-timeout.json");
-  Check(fixture.good(), "timeout fixture available");
-  Json expected;
-  fixture >> expected;
-  const auto error_id = sent.back()["result"]["error"]["errorId"].get<std::string>();
-  Check(remotekit::ValidErrorId(error_id), "timeout carries Endpoint error id");
-  expected["result"]["error"]["errorId"] = error_id;
-  Check(sent.back() == expected, "native timeout wire matches Client semantic fixture");
-  auto late = Action(2);
-  late["result"] = {{"status", "committed"}};
-  Check(!services.Result(1, late),
-        "late result cannot overwrite already returned uncertain receipt");
-  services.DispatchPending(1, 16000, [&](auto, auto) {
-    Check(false, "timeout cannot replay operation");
-    return true;
-  });
-  services.Admit(1, Action(3), 0);
-  services.DispatchPending(1, 15000, [](auto, auto) {
-    Check(false, "expired undispatched operation cannot forward");
-    return true;
-  });
-  services.Flush(1, [&](auto bytes) {
-    sent.push_back(Json::parse(bytes));
-    return 0;
-  });
-  Check(sent.back()["result"]["status"] == "failed" &&
-            sent.back()["result"]["error"]["code"] == "unavailable" &&
-            sent.back()["result"]["error"]["message"] == "control_unavailable",
-        "undispatched expiration is known failure");
-  remotekit::DeliveryFlag queued;
-  services.Admit(1, Action(4), 0);
-  services.DispatchPending(1, 1, [&](auto, auto delivery) {
-    queued = delivery;
-    return true;
-  });
-  services.DispatchPending(1, 15000, [](auto, auto) { return true; });
-  bool wrote = false;
-  Check(!queued->Dispatch([&] {
-                 wrote = true;
-                 return true;
-               })
-                .has_value() &&
-            !wrote,
-        "expired queued action cannot be sent later");
-  services.Flush(1, [&](auto bytes) {
-    sent.push_back(Json::parse(bytes));
-    return 0;
-  });
-  Check(sent.back()["result"]["status"] == "failed" &&
-            sent.back()["result"]["error"]["code"] == "unavailable",
-        "queue admission is not delivery");
-  for (unsigned n = 0; n < 64; ++n)
-    Check(services.Admit(1, Action(n), 0), "bounded capacity admission");
-  Check(!services.Admit(1, Action(64), 0), "bounded backpressure");
   services.Bind(3);
-  Check(!services.Result(3, reply), "replacement discards routing receipts");
-  services.Flush(3, [&](auto) {
-    Check(false, "old result cannot migrate");
-    return 0;
-  });
+  std::vector<Json> sent;
   remotekit::SharedAtlasFrame frame{};
   frame.generation = 1;
   frame.view_count = 1;

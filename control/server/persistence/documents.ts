@@ -1,5 +1,6 @@
 import type {
   LibraryEntry,
+  StoredLibraryEntry,
   LibraryPartition,
   LibrarySnapshot,
   LibrarySource,
@@ -82,6 +83,7 @@ export const wireError = object(
       'no_document_contour',
       'corrupt_state',
       'session_data_on_offline_node',
+      'no_eligible_node',
     ),
     retryAfterMs: i(),
     errorId: s({ pattern: /^[cev]-[0-9a-f]{10}$/ }),
@@ -345,7 +347,7 @@ export const libraryEntry = union(
     },
   ),
   object({ ...entryFields, kind: literal('snippet'), preview: s(), origin: snippetOrigin }, { detail: s() }),
-) satisfies Codec<LibraryEntry>;
+) satisfies Codec<StoredLibraryEntry>;
 export const librarySnapshot = object({
   revision: i(),
   entries: array(libraryEntry, { max: 4096 }),
@@ -354,7 +356,7 @@ export const librarySnapshot = object({
   sources: array(object({ app: s(), channel: s(), count: i(), excluded: b() })),
   excludedSources: array(librarySource),
   basketPartitionId: nullable(s()),
-}) satisfies Codec<LibrarySnapshot>;
+}) satisfies Codec<Omit<LibrarySnapshot, 'entries'> & { entries: StoredLibraryEntry[] }>;
 export const selection = object({
   selectionId: s(),
   requestId: s(),

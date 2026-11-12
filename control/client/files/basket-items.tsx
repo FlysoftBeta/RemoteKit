@@ -144,6 +144,7 @@ export function BasketItems({
   // Items that need a decision open their panel directly; the rest open the item menu.
   const open = (item: BasketItem, anchor: HTMLElement) => {
     const state = item.job?.state ?? item.entry?.photo?.pending;
+    if (item.entry && !item.entry.available) return;
     if (!item.entry || state === 'choice' || state === 'scan-error' || state === 'error')
       setPanel(panel?.id === item.id ? undefined : { id: item.id, view: 'photo' });
     else setMenu({ id: item.id, anchor });
@@ -166,7 +167,7 @@ export function BasketItems({
         checked={chosen === item.id}
         name="chooser-file"
         onChange={() => onChoose(item.id)}
-        disabled={locked || !!item.entry.photo?.pending || !!item.job}
+        disabled={locked || !item.entry.available || !!item.entry.photo?.pending || !!item.job}
         icon={<RadioButtonUnchecked />}
         checkedIcon={<CheckCircle />}
         slotProps={{ input: { 'aria-label': `选择 ${item.name}` } }}
@@ -206,7 +207,7 @@ export function BasketItems({
               assetId: entry?.assetId ?? item.id,
               blob: entry ? undefined : job?.preview,
               localOnly: !entry,
-              meta: entry ? formatFileSize(entry.size) : '拍摄的照片',
+              meta: entry ? (entry.available ? formatFileSize(entry.size) : '暂不可用') : '拍摄的照片',
               status: photoStatus(entry, job),
               selected: chosen === item.id,
             };

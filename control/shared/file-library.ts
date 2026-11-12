@@ -23,6 +23,7 @@ export interface LibraryAssetFields {
 }
 
 interface LibraryEntryFields {
+  available: boolean;
   detail?: string;
   id: string;
   name: string;
@@ -53,6 +54,7 @@ export interface LibrarySnippetEntry extends LibraryEntryFields {
 }
 
 export type LibraryEntry = LibraryFileEntry | LibrarySnippetEntry;
+export type StoredLibraryEntry = Omit<LibraryFileEntry, 'available'> | Omit<LibrarySnippetEntry, 'available'>;
 
 export interface LibrarySource {
   app: string;

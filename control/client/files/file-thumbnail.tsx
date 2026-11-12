@@ -64,10 +64,14 @@ export function FileThumbnail({
   fit?: 'cover' | 'contain';
   localOnly?: boolean;
 }) {
-  const { online, thumbnails, photos } = useLibrary();
+  const { online, thumbnails, photos, snapshot } = useLibrary();
   const rotationTurns =
     photos.jobs.find((job) => job.replace?.id === entryId && job.replace?.assetId === assetId)
       ?.rotationTurns ?? 0;
+  const available =
+    !entryId ||
+    snapshot?.entries.find((entry) => entry.id === entryId)?.kind === 'snippet' ||
+    snapshot?.entries.some((entry) => entry.id === entryId && entry.kind === 'file' && entry.available);
   const decodable = /^image\/(jpeg|png|webp)$/i.test(type);
   const kind = KINDS[fileKind(type, name)];
   const Icon = kind.icon;
@@ -98,7 +102,7 @@ export function FileThumbnail({
       setLoading(false);
     };
     let release: (() => void) | undefined;
-    if (!visible) display({});
+    if (!visible || !available) display({});
     else if (blob) display({ blob });
     else if (!localOnly && online && decodable) {
       setLoading(true);
@@ -108,7 +112,7 @@ export function FileThumbnail({
       release?.();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [assetId, blob, decodable, localOnly, online, thumbnails, visible]);
+  }, [assetId, available, blob, decodable, localOnly, online, thumbnails, visible]);
 
   const shown = visible && url;
   return (

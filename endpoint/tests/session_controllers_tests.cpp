@@ -27,8 +27,7 @@ using namespace remotekit;
 
 void RouterClassificationAndAdmission() {
   using Kind = DataRouter::Kind;
-  const std::vector<std::pair<std::string, Kind>> kinds{{"product.action", Kind::kProduct},
-                                                        {"media.presentation", Kind::kPresentation},
+  const std::vector<std::pair<std::string, Kind>> kinds{{"media.presentation", Kind::kPresentation},
                                                         {"presentation.ready", Kind::kPresentation},
                                                         {"input", Kind::kInput},
                                                         {"focus", Kind::kInput},
@@ -108,7 +107,6 @@ void RouterClassificationAndAdmission() {
                          [&](const RtcEvent& event) {
                            return event.peer == peer && stamp && event.authorization == stamp;
                          },
-                     .product = record,
                      .presentation = record,
                      .input = record,
                      .files = record,
@@ -121,7 +119,7 @@ void RouterClassificationAndAdmission() {
     message["authEpoch"] = epoch;
     return router.Receive({0, message.dump(), "", 0, peer});
   };
-  CHECK(receive({{"type", "product.action"}}));
+  CHECK(receive({{"type", "clock.ping"}}));
   CHECK(dispatched.empty());
   stamp = 12;
   router.Drain();
@@ -138,7 +136,7 @@ void RouterClassificationAndAdmission() {
         replies.back()["error"]["message"].is_string());
   stamp = 0;
   CHECK(receive({{"type", "media.presentation"}}));
-  CHECK(receive({{"type", "product.action"}}));
+  CHECK(receive({{"type", "clock.ping"}}));
   router.Drain();
   CHECK(dispatched.back() == "media.presentation" && dispatched.size() == 2);
   stamp = 13;
@@ -689,6 +687,30 @@ void PeerFailureCleanup() {
   CHECK(!fixture.av_sync && fixture.audio && !controller.AvSync());
   controller.Close();
   CHECK(fixture.closes == 11 && fixture.stops_with_handle == 11);
+  sdk.remotekit_rtc_get_receive_level = [](uint64_t, uint32_t* level) {
+    *level = 0;
+    return 0;
+  };
+  unsigned started = 0;
+  PeerController service(sdk, options,
+                         {.bind = [](uint64_t, uint64_t) {},
+                          .started = [&](uint64_t, const std::string&) -> Result<void> {
+                            ++started;
+                            return {};
+                          },
+                          .stopping = [] {},
+                          .drained = [] {},
+                          .event = [](const RtcEvent&) {},
+                          .signal = [](uint64_t, const Json&) {}},
+                         PeerController::Role::kService);
+  fixture.calls.clear();
+  CHECK(service.Offer({{"connectionId", "service"}, {"sdp", "data-only offer"}}, 3, 60, 0, false,
+                      false));
+  CHECK(started == 1 && service.ReceiveLevel() == 0);
+  CHECK((fixture.calls == std::vector<std::string>{"avSync", "remote"}));
+  CHECK(fixture.config.encoder.create(fixture.config.context, service.Handle(), 1) ==
+        REMOTEKIT_SDK_INVALID_STATE);
+  service.Close();
 }
 
 void OrderedTouchInput() {

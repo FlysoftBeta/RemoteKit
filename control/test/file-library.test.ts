@@ -56,7 +56,7 @@ function fixture(assetType = 'image/jpeg') {
   const endpoint = {
     async request(method: string, tenant: string, args: any = {}): Promise<any> {
       calls.push({ method, tenant, args });
-      if (method === 'session.library.describe') {
+      if (method === 'service.asset.describe') {
         if (lockOnDescribe) locked = true;
         if (tenant !== 'tenant' || !assets.has(args.assetId))
           throw new RemoteKitError('not_found', 'asset_missing');
@@ -80,7 +80,7 @@ function fixture(assetType = 'image/jpeg') {
   };
   const gateway = {
     describeAsset: (tenant: string, args: { assetId: string }) =>
-      endpoint.request('session.library.describe', tenant, args),
+      endpoint.request('service.asset.describe', tenant, args),
     prepareSelection: (tenant: string, args: unknown) =>
       endpoint.request('session.library.prepare', tenant, args),
     selectionStatus: (tenant: string, args: { selectionId: string }) =>
@@ -94,6 +94,7 @@ function fixture(assetType = 'image/jpeg') {
     gateway,
     limits,
     {
+      available: () => true,
       checkQuota: () => {},
       require: (tenant, id) => {
         if (tenant !== 'tenant' || !assets.has(id)) throw new RemoteKitError('not_found', 'Object missing');
@@ -137,6 +138,7 @@ function fixture(assetType = 'image/jpeg') {
         gateway,
         limits,
         {
+          available: () => true,
           checkQuota: () => {},
           require: (tenant, id) => {
             if (tenant !== 'tenant' || !assets.has(id))
@@ -183,7 +185,7 @@ test('file catalog validates scoped assets and ordered basket, prunes removed en
   });
   assert.deepEqual(retry, second);
   assert.equal(
-    f.calls.filter((c) => c.method === 'session.library.describe' && c.args.assetId === ASSETS.photo).length,
+    f.calls.filter((c) => c.method === 'service.asset.describe' && c.args.assetId === ASSETS.photo).length,
     1,
   );
   await assert.rejects(f.add(ASSETS.photo, 'basket'), { code: 'conflict' });
@@ -442,6 +444,7 @@ test('photo choice and scan failure remain blocked until confirmed in place', as
   const replaced = await f.run('replace', replacement);
   assert.deepEqual(replaced.entries[0], {
     kind: 'file',
+    available: true,
     id: entry.id,
     assetId: ASSETS.photo,
     size: 3,

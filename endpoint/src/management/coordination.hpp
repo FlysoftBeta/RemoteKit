@@ -79,7 +79,7 @@ inline Result<void> ValidateDesired(const Json& value) {
   if (!Keys(value,
             {"method", "connectionEpoch", "tenantId", "sessionId", "placementEpoch", "revision",
              "run", "commit", "profileKey", "checkpoint", "sitePreferences", "mediaPolicy",
-             "quality", "clipboard", "views", "authorization", "lock", "library"},
+             "quality", "clipboard", "views", "authorization", "lock"},
             {"id"}) ||
       value["method"] != "session.desired" || !value["connectionEpoch"].is_string() ||
       !Counter(value["revision"], true))
@@ -141,16 +141,14 @@ inline Result<void> ValidateDesired(const Json& value) {
       (!auth["connectionId"].is_null() && !auth["connectionId"].is_string()) ||
       !Epoch(auth["epoch"], auth["connectionId"].is_null()) || !auth["unlocked"].is_boolean() ||
       (auth["connectionId"].is_null() && (auth["epoch"] != 0 || auth["unlocked"] != false)) ||
-      !Keys(auth["files"], {"library", "requests"}) || !auth["files"]["library"].is_boolean() ||
-      !auth["files"]["requests"].is_array() || auth["files"]["requests"].size() > 64 ||
-      !Keys(lock, {"leaseId", "epoch", "state"}) || !Epoch(lock["epoch"], true) ||
-      (!lock["leaseId"].is_null() && !lock["leaseId"].is_string()) ||
+      !Keys(auth["files"], {"requests"}) || !auth["files"]["requests"].is_array() ||
+      auth["files"]["requests"].size() > 64 || !Keys(lock, {"leaseId", "epoch", "state"}) ||
+      !Epoch(lock["epoch"], true) || (!lock["leaseId"].is_null() && !lock["leaseId"].is_string()) ||
       (lock["state"] != "locked" && lock["state"] != "unlocking" && lock["state"] != "unlocked"))
     return Error{ErrorCode::kInvalidRequest, "invalid desired authorization"};
   if (!Keys(value["sitePreferences"], {"sites"}) ||
       !value["sitePreferences"]["sites"].is_object() ||
-      value["sitePreferences"]["sites"].size() > 4096 || !Keys(value["library"], {"describe"}) ||
-      !value["library"]["describe"].is_array() || value["library"]["describe"].size() > 256)
+      value["sitePreferences"]["sites"].size() > 4096)
     return Error{ErrorCode::kInvalidRequest, "invalid desired policy"};
   RK_RETURN_IF_ERROR(ValidateSitePreferences(value["sitePreferences"]));
   std::set<std::string> requests;
@@ -170,9 +168,6 @@ inline Result<void> ValidateDesired(const Json& value) {
       if (!Counter(binding[field], true))
         return Error{ErrorCode::kInvalidRequest, "invalid desired file binding"};
   }
-  for (const auto& asset : value["library"]["describe"])
-    if (!Hex(asset, 64))
-      return Error{ErrorCode::kInvalidRequest, "invalid described asset"};
   auto configuration = value;
   configuration.erase("clipboard");
   if (configuration.dump().size() > 1024 * 1024 || value.dump().size() > kMaxDocumentBytes)

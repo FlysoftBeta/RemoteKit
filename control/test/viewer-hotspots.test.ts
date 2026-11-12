@@ -7,7 +7,9 @@ import { productSnapshot } from './client-fixture';
 test('duplicate authoritative content keeps store identity and advances its ordering watermark', () => {
   const store = new OperationsStore({
     ready: () => true,
-    send: () => {},
+    submit: async () => {
+      throw new Error('unused');
+    },
     status: async () => {
       throw new Error('unused');
     },

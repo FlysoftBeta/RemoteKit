@@ -13,6 +13,10 @@ import { EndpointChannel } from './rtc/endpoint-channel';
 import { RtcSession } from './rtc/rtc-session';
 export class ViewerSession {
   readonly rtc: RtcSession;
+  readonly serviceRtc: RtcSession;
+  readonly serviceEndpoint: EndpointChannel;
+  readonly pageFiles: FileChannel;
+  readonly libraryFiles;
   readonly presentation: PresentationSession;
   readonly input: InputPipeline;
   readonly touch: TouchSession;
@@ -35,6 +39,7 @@ export class ViewerSession {
     let authorization: AuthorizationScope;
     let editing: EditingSession;
     rtc = this.rtc = new RtcSession();
+    const serviceRtc = (this.serviceRtc = new RtcSession('service'));
     presentation = this.presentation = new PresentationSession({
       get endpoint() {
         return endpoint;
@@ -83,9 +88,6 @@ export class ViewerSession {
       },
     });
     authorization = this.authorization = new AuthorizationScope({
-      get rtc() {
-        return rtc;
-      },
       get endpoint() {
         return endpoint;
       },
@@ -95,21 +97,46 @@ export class ViewerSession {
         return rtc;
       },
     });
+    const serviceEndpoint = (this.serviceEndpoint = new EndpointChannel({
+      authorization: {
+        get productLocked() {
+          return authorization.productLocked;
+        },
+        get peerAuthEpoch() {
+          return authorization.serviceAuthEpoch;
+        },
+      },
+    }));
     const files = (this.files = new FileChannel(
-      () => (authorization.productLocked ? null : endpoint.channel),
-      () => authorization.peerAuthEpoch,
+      () => (authorization.productLocked ? null : serviceEndpoint.channel),
+      () => authorization.serviceAuthEpoch,
     ));
+    const pageFiles = (this.pageFiles = new FileChannel(
+      () => (authorization.browserReady ? endpoint.channel : null),
+      () => authorization.peerAuthEpoch,
+      'page',
+    ));
+    this.libraryFiles = Object.assign(files, {
+      photoThumbnail: files.photoThumbnail.bind(files),
+      uploadAsset: files.uploadAsset.bind(files),
+      processPhoto: files.processPhoto.bind(files),
+      commitSelection: pageFiles.commitSelection.bind(pageFiles),
+      cancelSelection: pageFiles.cancelSelection.bind(pageFiles),
+    });
     let workspace: WorkspaceSession;
     const control = (this.control = new ControlSession(
       (state) => workspace.acceptState(state),
       (status) => workspace.acceptStatus(status),
-      (signal) => rtc.receiveServerSignal(signal),
+      (signal) => {
+        rtc.receiveServerSignal(signal);
+        serviceRtc.receiveServerSignal(signal);
+      },
       (auth) => workspace.acceptAuth(auth),
     ));
     const viewport = (this.viewport = new ViewportRequests((params) => control.request('viewport', params)));
     const operations = (this.operations = new OperationsStore({
-      ready: () => authorization.productReady && control.getSnapshot().phase === 'online',
-      send: (message) => endpoint.send(message),
+      ready: () => workspace.shellReady,
+      submit: (operation) => control.request('operation.submit', operation),
       status: (operation) =>
         control.request('operation.status', {
           operationId: operation.operationId,
@@ -120,11 +147,19 @@ export class ViewerSession {
       authorization,
       operations,
       rtc,
+      serviceRtc,
       control,
       viewport,
       setAudioChannels: (channels) => observations.audio.setChannels(channels),
     });
     rtc.setControlRpc((method, params) => control.request(method, params as never));
+    serviceRtc.setControlRpc((method, params) => control.request(method, params as never));
+    serviceRtc.events.subscribe(authorization.onServiceRtc);
+    serviceRtc.events.subscribe(serviceEndpoint.onRtc);
+    serviceEndpoint.events.subscribe(serviceRtc.onChannel);
+    serviceEndpoint.events.subscribe(authorization.onChannel);
+    serviceEndpoint.events.subscribe(files.onChannel);
+    serviceEndpoint.messages.subscribe(files.handle.bind(files));
 
     operations.subscribe(workspace.operationsChanged);
     rtc.subscribe(workspace.operationsChanged);
@@ -140,13 +175,12 @@ export class ViewerSession {
     endpoint.events.subscribe(presentation.onChannel);
     endpoint.events.subscribe(input.onChannel);
     endpoint.events.subscribe(observations.onChannel);
-    endpoint.events.subscribe(files.onChannel);
+    endpoint.events.subscribe(pageFiles.onChannel);
     endpoint.messages.subscribe(editing.handle.bind(editing));
     endpoint.messages.subscribe(presentation.handle.bind(presentation));
     endpoint.messages.subscribe(observations.handle.bind(observations));
     endpoint.messages.subscribe(input.handle.bind(input));
-    endpoint.messages.subscribe(operations.handle.bind(operations));
-    endpoint.messages.subscribe(files.handle.bind(files));
+    endpoint.messages.subscribe(pageFiles.handle.bind(pageFiles));
     presentation.subscribeFrames(input.flushFocusedInput.bind(input));
     presentation.observations.subscribe(observations.onPresentation);
     authorization.resets.subscribe(presentation.reset.bind(presentation));
@@ -154,8 +188,13 @@ export class ViewerSession {
     authorization.resets.subscribe(touch.reset.bind(touch));
     authorization.resets.subscribe(editing.reset.bind(editing));
     authorization.resets.subscribe(observations.resetMediaDiagnostics.bind(observations));
-    authorization.resets.subscribe(operations.reset.bind(operations));
-    authorization.resets.subscribe(files.disconnect.bind(files));
+    authorization.transitions.subscribe(({ locked }) => {
+      if (locked) operations.reset();
+    });
+    authorization.resets.subscribe(pageFiles.disconnect.bind(pageFiles));
+    authorization.transitions.subscribe(({ locked }) => {
+      if (locked) files.disconnect();
+    });
     authorization.transitions.subscribe(observations.onAuthorization);
     authorization.transitions.subscribe(presentation.onAuthorization);
     observations.onAuthorization();

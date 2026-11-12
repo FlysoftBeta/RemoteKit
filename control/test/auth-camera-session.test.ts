@@ -16,6 +16,7 @@ function auth(): AuthState {
     locked: true,
     epoch: 1,
     peerEpoch: 2,
+    serviceEpoch: 2,
     methods: { password: true, pin: false, face: true },
     settings: {
       lockOnHidden: true,
@@ -137,7 +138,7 @@ test('automatic verification never prompts for camera permission and respects it
   assert.equal(f.calls.length, 0);
 });
 
-test('camera source uses the current peer epoch and is released on authorization changes', async (t) => {
+test('camera source follows the service epoch independently of the browser epoch', async (t) => {
   const f = fixture(t);
   f.session.configure(f.options);
   await f.session.start('verify');
@@ -156,6 +157,8 @@ test('camera source uses the current peer epoch and is released on authorization
     binding: { challengeId: 'challenge', authEpoch: 2 },
   });
   f.session.configure({ ...f.options, auth: { ...pending, peerEpoch: 3 } });
+  assert.equal(f.session.getSnapshot().stream, f.stream);
+  f.session.configure({ ...f.options, auth: { ...pending, serviceEpoch: 3 } });
   assert.equal(f.session.getSnapshot().stream, undefined);
   assert.equal(f.stopped(), 1);
   assert.equal(f.sources[f.sources.length - 1]?.stream, undefined);

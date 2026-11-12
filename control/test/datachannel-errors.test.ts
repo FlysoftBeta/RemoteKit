@@ -37,19 +37,3 @@ test('DataChannel failures require a known error code and string message', () =>
   assert.equal(httpStatus.busy, 503);
   assert.equal(formatError(new RemoteKitError('busy', 'public detail')), 'public detail');
 });
-
-test('product receipts require structured errors', () => {
-  const packet = {
-    type: 'product.result',
-    version: 1,
-    operationId: '1',
-    operationGeneration: '2',
-    result: {
-      operationId: '1',
-      operationGeneration: '2',
-      status: 'failed',
-      error: { code: 'forbidden', message: '无权执行' },
-    },
-  };
-  assert.deepEqual(decodeIncoming(packet), packet);
-});

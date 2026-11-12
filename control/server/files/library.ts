@@ -12,6 +12,7 @@ import type {
   SnippetOrigin,
 } from '../../shared/file-library';
 import type { ObjectIndex } from '../cluster/objects';
+import type { ServicePeers } from '../viewers/service-peers';
 import type { EndpointGateway } from '../endpoint/gateway';
 import type { DownloadEvent } from '../endpoint/types';
 import { log } from '../log';
@@ -146,23 +147,51 @@ function entries(snapshot: LibrarySnapshot, entryIds: string[]) {
 /** Catalog and native selection bookkeeping. Files themselves stay on the Endpoint. */
 export class FileLibrary {
   private readonly queues = new KeyedSerialQueue();
+  private readonly availability = new Map<string, string>();
+  private project(tenant: string, snapshot: LibrarySnapshot) {
+    return {
+      ...snapshot,
+      entries: snapshot.entries.map((entry) =>
+        entry.kind === 'file'
+          ? {
+              ...entry,
+              available: [entry.assetId, ...(entry.photo?.candidateAssetIds ?? [])].every((id) =>
+                this.objects.available(id),
+              ),
+            }
+          : entry,
+      ),
+    };
+  }
+  refreshAvailability(tenant: string) {
+    let snapshot = this.project(tenant, this.repository.snapshot(tenant));
+    const key = JSON.stringify(
+      snapshot.entries.map((entry) => [entry.id, entry.kind === 'snippet' || entry.available]),
+    );
+    const previous = this.availability.get(tenant);
+    this.availability.set(tenant, key);
+    if (previous === key) return;
+    if (previous !== undefined) {
+      this.repository.availabilityChanged(tenant);
+      snapshot = this.project(tenant, this.repository.snapshot(tenant));
+    }
+    this.onChanged?.(tenant, this.project(tenant, snapshot));
+  }
   onDeleted?: (tenant: string, entryIds: string[]) => void;
   onChanged?: (tenant: string, snapshot: LibrarySnapshot) => void;
 
   constructor(
     private readonly repository: LibraryRepository,
-    private readonly endpoint: Pick<
-      EndpointGateway,
-      'describeAsset' | 'prepareSelection' | 'selectionStatus'
-    >,
+    private readonly endpoint: Pick<EndpointGateway, 'prepareSelection' | 'selectionStatus'> &
+      Pick<ServicePeers, 'describeAsset'>,
     private limits: FileLimits,
-    private readonly objects: Pick<ObjectIndex, 'require' | 'checkQuota'>,
+    private readonly objects: Pick<ObjectIndex, 'require' | 'checkQuota' | 'available'>,
     private readonly fileSourceForRequest: (tenant: string, requestId: string) => LibrarySource | null,
   ) {}
   recordSnippet(tenant: string, text: string, origin: SnippetOrigin, copiedAt: number) {
     return this.queues.run(tenant, async () => {
       const snapshot = this.repository.recordSnippet(tenant, text, origin, copiedAt);
-      if (snapshot) this.onChanged?.(tenant, snapshot);
+      if (snapshot) this.onChanged?.(tenant, this.project(tenant, snapshot));
     });
   }
   importFromControl(
@@ -209,6 +238,7 @@ export class FileLibrary {
         this.objects.checkQuota(tenant);
         snapshot.entries.unshift({
           kind: 'file',
+          available: true,
           id: entryId,
           assetId,
           name,
@@ -222,7 +252,7 @@ export class FileLibrary {
         });
         committed();
       });
-      this.onChanged?.(tenant, snapshot);
+      this.onChanged?.(tenant, this.project(tenant, snapshot));
       return { entryId };
     });
   }
@@ -248,7 +278,7 @@ export class FileLibrary {
           }
         },
       );
-      this.onChanged?.(tenant, snapshot);
+      this.onChanged?.(tenant, this.project(tenant, snapshot));
     });
   }
   consumeDownload(tenant: string, event: DownloadEvent) {
@@ -307,6 +337,7 @@ export class FileLibrary {
         this.objects.checkQuota(tenant);
         snapshot.entries.unshift({
           kind: 'file',
+          available: true,
           id: randomUUID(),
           assetId,
           name,
@@ -420,6 +451,7 @@ export class FileLibrary {
         entryId = randomUUID();
       snapshot.entries.unshift({
         kind: 'file',
+        available: true,
         id: entryId,
         assetId,
         name,
@@ -497,9 +529,10 @@ export class FileLibrary {
       if (!request || request.state !== 'pending') throw new RemoteKitError('conflict', '文件选择请求已失效');
       if ((!request.multiple && entryIds.length !== 1) || entryIds.length > request.limits.maxFiles)
         throw new RemoteKitError('limit_exceeded', '文件数量超出页面限制', { capacity: 'selection' });
-      const snapshot = this.repository.snapshot(tenant),
+      const snapshot = this.project(tenant, this.repository.snapshot(tenant)),
         selected = entries(snapshot, entryIds).map((entry) => {
           if (entry.kind !== 'file') throw invalid('剪贴片段不能用于文件选择');
+          if (!entry.available) throw new RemoteKitError('unavailable', '文件暂不可用，恢复后自动继续');
           return entry;
         });
       if (selected.some((entry) => entry.photo?.pending))
@@ -573,7 +606,17 @@ export class FileLibrary {
     authorize: () => void,
     resolve: (requestId: string) => InternalFileRequest | undefined,
   ) {
-    return this.queues.run(tenant, () => this.apply(tenant, method, params, authorize, resolve));
+    return this.queues.run(tenant, async () => {
+      const result = await this.apply(tenant, method, params, authorize, resolve);
+      if (result && typeof result === 'object' && 'entries' in result)
+        return this.project(tenant, result as LibrarySnapshot);
+      if (result && typeof result === 'object' && 'snapshot' in result)
+        return {
+          ...result,
+          snapshot: this.project(tenant, (result as { snapshot: LibrarySnapshot }).snapshot),
+        };
+      return result;
+    });
   }
   private async apply(
     tenant: string,
@@ -608,8 +651,13 @@ export class FileLibrary {
           (snapshot) => {
             if (snapshot.revision !== expectedRevision)
               throw new RemoteKitError('conflict', '文件篮已更新，请刷新后重试');
-            if (entries(snapshot, basket).some((entry) => entry.kind !== 'file'))
-              throw invalid('剪贴片段不能加入文件篮');
+            const added = entries(
+              this.project(tenant, snapshot),
+              basket.filter((id) => !snapshot.basket.includes(id)),
+            );
+            if (added.some((entry) => entry.kind !== 'file')) throw invalid('剪贴片段不能加入文件篮');
+            if (added.some((entry) => !entry.available))
+              throw new RemoteKitError('unavailable', '文件暂不可用，恢复后自动继续');
             snapshot.basket = basket;
             this.repository.prune(tenant, snapshot);
           },

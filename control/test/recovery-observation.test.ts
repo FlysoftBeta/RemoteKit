@@ -1,3 +1,4 @@
+import { observedProductAction } from './server-fixture';
 import { applyDesiredViews } from './coordination-fixture';
 import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
@@ -50,7 +51,8 @@ async function fixture() {
     true,
   );
   const tab = (
-    await control.operations.productAction(
+    await observedProductAction(
+      control,
       tenant,
       {
         type: 'window.open',
@@ -136,7 +138,8 @@ test('new navigation intent during recovery survives blank snapshot and normal c
   const { store, endpoint, control, tenant, tab } = await fixture();
   try {
     const address = 'https://new-intent.test/target';
-    await control.operations.productAction(
+    await observedProductAction(
+      control,
       tenant,
       { type: 'tab.navigate', tabId: tab.id, url: address },
       'lease',

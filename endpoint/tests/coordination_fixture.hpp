@@ -25,9 +25,8 @@ inline Json Desired(const std::string& session = std::string(32, 'a'),
        {{"connectionId", nullptr},
         {"epoch", 0},
         {"unlocked", false},
-        {"files", {{"library", false}, {"requests", Json::array()}}}}},
-      {"lock", {{"leaseId", nullptr}, {"epoch", 0}, {"state", "locked"}}},
-      {"library", {{"describe", Json::array()}}}};
+        {"files", {{"requests", Json::array()}}}}},
+      {"lock", {{"leaseId", nullptr}, {"epoch", 0}, {"state", "locked"}}}};
 }
 inline Json NodeDesired(const Json& sessions = Json::array(),
                         const std::string& connection = "connection",

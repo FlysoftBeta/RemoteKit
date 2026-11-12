@@ -93,7 +93,6 @@ export interface ContextMenuMessage {
   menu: ContextMenu | null;
 }
 
-import type { OperationReceipt, ProductOperation } from '../../shared/product';
 import type { CaptureTiming } from '../media/capture-latency';
 import type { MediaFeedback } from '../media/media-feedback';
 import type { PresentationBarrier } from '../presentation/video-presentation';
@@ -141,13 +140,6 @@ export type FileResult = {
   result?: unknown;
   error?: WireError;
 };
-export type ProductResult = {
-  type: 'product.result';
-  version: 1;
-  operationId: string;
-  operationGeneration: string;
-  result: OperationReceipt;
-};
 export interface ViewViewportMessage {
   type: 'view.viewport';
   viewId: string;
@@ -170,7 +162,6 @@ export type Incoming = Authorized &
     | FocusMessage
     | FrameMessage
     | FileResult
-    | ProductResult
     | { type: 'clock.pong'; version: 1; requestId: string; serverTimeMs: number; serverMonotonicMs: number }
     | { type: 'presentation.mode'; version: 1; backend: 'video' }
     | ({ type: 'presentation.prepare' } & PresentationBarrier)
@@ -203,7 +194,6 @@ export type Outgoing = Authorized &
         method: FileMethod;
         params: Record<string, unknown>;
       }
-    | ({ type: 'product.action'; version: 1 } & ProductOperation)
     | { type: 'clock.ping'; version: 1; requestId: string }
     | { type: 'media.refresh' }
     | { type: 'media.presentation'; version: 1; backend: 'video'; restart?: true }
@@ -257,16 +247,7 @@ function surface(v: unknown): v is Surface {
     optional(v, 'stale', (value) => typeof value === 'boolean')
   );
 }
-function receipt(v: unknown) {
-  return (
-    object(v) &&
-    strings(v, ['operationId', 'operationGeneration']) &&
-    ['accepted', 'applying', 'committed', 'failed', 'unknown'].includes(String(v.status)) &&
-    (v.status === 'failed' ? wireError(v.error) : optional(v, 'error', wireError)) &&
-    optional(v, 'revision', integer) &&
-    optional(v, 'resolved', (value) => typeof value === 'boolean')
-  );
-}
+
 function contextUrl(value: unknown): boolean {
   if (!string(value) || new TextEncoder().encode(value).length > 2048) return false;
   try {
@@ -443,17 +424,6 @@ function valid(v: Record<string, unknown>): boolean {
       );
     case 'files.result':
       return v.version === 1 && string(v.requestId) && typeof v.ok === 'boolean' && resultError(v);
-    case 'product.result':
-      return (
-        v.version === 1 &&
-        strings(v, ['operationId', 'operationGeneration']) &&
-        receipt(v.result) &&
-        object(v.result) &&
-        v.result.operationId === v.operationId &&
-        v.result.operationGeneration === v.operationGeneration &&
-        v.ok === undefined &&
-        v.error === undefined
-      );
     case 'clock.pong':
       return v.version === 1 && string(v.requestId) && numbers(v, ['serverTimeMs', 'serverMonotonicMs']);
     case 'presentation.mode':

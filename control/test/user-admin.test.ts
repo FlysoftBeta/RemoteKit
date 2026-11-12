@@ -104,8 +104,8 @@ test('admin methods check the server role, reject scoped params and need the cur
     assert.deepEqual(
       users.map((entry: any) => [entry.username, entry.isAdmin, entry.online, entry.session.state]),
       [
-        ['administrator', true, true, 'running'],
-        ['ordinary', false, true, 'running'],
+        ['administrator', true, true, 'none'],
+        ['ordinary', false, true, 'none'],
       ],
     );
     const overview = await h.call('admin.overview');

@@ -65,6 +65,12 @@ const handlers: Record<string, Handler> = {
     serverTime: services.clock.wallMs(),
     ...(typeof params.clientTime === 'number' ? { clientTime: params.clientTime } : {}),
   }),
+  'service.offer': ({ services, authority }, params) =>
+    services.servicePeers.offer(authority.tenantId, params, authority.leaseId),
+  'service.ice': ({ services, authority }, params) =>
+    services.servicePeers.ice(authority.tenantId, params, authority.leaseId),
+  'service.close': ({ services, authority }, params) =>
+    services.servicePeers.close(authority.tenantId, params.connectionId, authority.leaseId),
   'rtc.offer': ({ services, authority }, params) =>
     services.rtc.offer(authority.tenantId, params, authority.leaseId),
   'rtc.ice': ({ services, authority }, params) => services.rtc.ice(authority.tenantId, params),
@@ -73,17 +79,8 @@ const handlers: Record<string, Handler> = {
   'operation.status': product(({ services, authority }, params) =>
     services.operations.operationStatus(authority.tenantId, params),
   ),
-  action: product(({ services, authority }, params) => {
-    if (!['settings.update', 'window.state'].includes(params.type))
-      throw new RemoteKitError('invalid_request', '产品操作必须通过WebRTC数据通道');
-    return services.operations.productAction(authority.tenantId, params, authority.leaseId);
-  }),
-  'window.state': product(({ services, authority }, params) =>
-    services.operations.productAction(
-      authority.tenantId,
-      { ...params, type: 'window.state' },
-      authority.leaseId,
-    ),
+  'operation.submit': product(({ services, authority }, params) =>
+    services.operations.submitOperation(authority.tenantId, params, authority.leaseId, authority.epoch),
   ),
   'usage.record': product(({ services, authority }, params) =>
     services.workspace.recordFile(authority.tenantId, params),
@@ -476,7 +473,15 @@ export function attachViewerSocket(
                 const currentIdentity = control.accounts.identity(token);
                 if (!currentIdentity) throw new RemoteKitError('unauthenticated', '登录已过期');
                 const maintenance =
-                  immediate || ['rtc.offer', 'rtc.ice', 'rtc.close'].includes(request.method);
+                  immediate ||
+                  [
+                    'rtc.offer',
+                    'rtc.ice',
+                    'rtc.close',
+                    'service.offer',
+                    'service.ice',
+                    'service.close',
+                  ].includes(request.method);
                 const epoch = control.viewers.productEpoch(peer.tenant, lease);
                 const result = await dispatchViewerRequest(
                   control,

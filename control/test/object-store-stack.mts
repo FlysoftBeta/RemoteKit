@@ -109,9 +109,6 @@ try {
     'RKO2',
   );
   await endpoint.snapshot('stranger');
-  await assert.rejects(node.request('session.library.describe', 'stranger', { assetId: first.id }), {
-    code: 'forbidden',
-  });
   store.db.exec('UPDATE object_claims SET claimed_at=0');
   await control.objects.gc();
   await library('first', 'delete', { operationId: randomUUID(), ids: [entries.get('first')] });

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { Action } from './product-dialogs';
 import type { ProductWindow, SocketMethods } from '../../shared/product';
 import { recover } from '../failures/recovery';
 import { canonicalJson } from '../util/canonical-json';
@@ -9,7 +10,7 @@ export type WorkspaceCall = <K extends keyof SocketMethods>(
   params: SocketMethods[K]['params'],
 ) => Promise<SocketMethods[K]['result']>;
 
-export function useWindowState(win: ProductWindow, call: WorkspaceCall, report: (error: unknown) => void) {
+export function useWindowState(win: ProductWindow, action: Action, report: (error: unknown) => void) {
   const [value, setValue] = useState<Record<string, unknown>>(win.state ?? {});
   const dirty = useRef(false);
   const latest = useRef(value);
@@ -35,7 +36,7 @@ export function useWindowState(win: ProductWindow, call: WorkspaceCall, report: 
         dirty.current = false;
         return;
       }
-      void recover(() => call('window.state', { windowId: win.id, state }), abort.signal, report)
+      void recover(() => action({ type: 'window.state', windowId: win.id, state }), abort.signal, report)
         .then(() => {
           report(undefined);
           saved.current = serialized;
@@ -47,7 +48,7 @@ export function useWindowState(win: ProductWindow, call: WorkspaceCall, report: 
       clearTimeout(timer);
       abort.abort();
     };
-  }, [value, win.id, call, report]);
+  }, [value, win.id, action, report]);
   return [
     value,
     (next: unknown) => {

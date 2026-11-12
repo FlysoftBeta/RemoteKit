@@ -1,3 +1,4 @@
+import { browserAvailability } from './browser-availability';
 import { endpointError } from '../endpoint/gateway';
 import { createHash } from 'node:crypto';
 import { parseWireError, RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
@@ -386,6 +387,10 @@ export class PageRequests {
     return result;
   }
   async closeProductTab(state: ProductWorkspace, tab: ProductTab) {
+    if (browserAvailability(this.context, state.tenantId).state !== 'available') {
+      this.removeProductTab(state, tab);
+      return;
+    }
     if (tab.signIn) {
       this.removeProductTab(state, tab);
       void this.services.learning.signIn.cancel(state.tenantId, tab.signIn);
@@ -451,7 +456,8 @@ export class PageRequests {
     }
   }
   private async advanceWindowClose(state: ProductWorkspace) {
-    if (state.pendingClose) return;
+    if (state.pendingClose && browserAvailability(this.context, state.tenantId).state === 'available') return;
+    state.pendingClose = null;
     while (state.pendingWindowCloseId) {
       const id = state.pendingWindowCloseId;
       for (const tab of state.tabs.filter((t) => t.windowId === id)) {

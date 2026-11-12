@@ -97,7 +97,8 @@ enum class ErrorReason {
   kBrowserStateTooLarge,
   kNoDocumentContour,
   kCorruptState,
-  kSessionDataOnOfflineNode
+  kSessionDataOnOfflineNode,
+  kNoEligibleNode
 };
 constexpr std::string_view ErrorReasonName(ErrorReason value) {
   switch (value) {
@@ -125,6 +126,8 @@ constexpr std::string_view ErrorReasonName(ErrorReason value) {
       return "no_document_contour";
     case ErrorReason::kCorruptState:
       return "corrupt_state";
+    case ErrorReason::kNoEligibleNode:
+      return "no_eligible_node";
     case ErrorReason::kSessionDataOnOfflineNode:
       return "session_data_on_offline_node";
   }
@@ -155,6 +158,8 @@ constexpr std::optional<ErrorReason> ParseErrorReason(std::string_view name) {
     return ErrorReason::kNoDocumentContour;
   if (name == "corrupt_state")
     return ErrorReason::kCorruptState;
+  if (name == "no_eligible_node")
+    return ErrorReason::kNoEligibleNode;
   if (name == "session_data_on_offline_node")
     return ErrorReason::kSessionDataOnOfflineNode;
   return std::nullopt;

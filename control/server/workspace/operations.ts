@@ -1,3 +1,4 @@
+import { requireBrowser } from './browser-availability';
 import { operationPayload } from '../persistence/operations';
 import { reportError } from '../log';
 import { randomUUID } from 'node:crypto';
@@ -53,63 +54,15 @@ export class OperationPipeline {
       }
     );
   }
-  async handleEndpointAction(
-    event: ProductOperation & { tenantId: string; connectionId: string; authEpoch?: number },
-  ) {
-    if (this.context.closed) return;
-    const { tenantId: tenant, connectionId } = event,
-      lease = this.context.tenants.forConnection(connectionId)?.connectionLease;
-    if (!lease || this.context.tenants.get(tenant).connectionId !== connectionId) return;
-    const security = this.context.tenants.get(tenant).viewer?.security;
-    if (
-      security &&
-      (!this.services.viewers.productAllowed(tenant, lease) ||
-        !event.authEpoch ||
-        event.authEpoch !== security.peer?.appliedEpoch)
-    )
-      return;
-    let receipt: OperationReceipt;
-    try {
-      receipt = await this.submitOperation(tenant, event, lease, connectionId);
-    } catch (error) {
-      receipt = {
-        operationId: event.operationId,
-        operationGeneration: event.operationGeneration,
-        status: 'failed',
-        error: wireError(
-          reportError(toRemoteKitError(error), 'operation.failed', { tenant, operation: event.operationId }),
-        ),
-      };
-    }
-    // A replaced peer never receives a late result from an accepted old operation.
-    if (
-      this.context.tenants.get(tenant).connectionId !== connectionId ||
-      !this.services.viewers.productAllowed(tenant, lease) ||
-      (security && event.authEpoch !== security.peer?.appliedEpoch)
-    )
-      return;
-    await this.context.endpoint
-      .actionResult(tenant, {
-        connectionId,
-        ...(event.authEpoch !== undefined ? { authEpoch: event.authEpoch } : {}),
-        operationId: event.operationId,
-        operationGeneration: event.operationGeneration,
-        result: receipt,
-      })
-      .catch(() => {});
-  }
   async submitOperation(
     tenant: string,
     operation: ProductOperation,
     lease: string,
-    connectionId?: string,
+    epoch = this.context.tenants.get(tenant).viewer?.security?.epoch,
   ): Promise<OperationReceipt> {
     const runtime = this.context.tenants.get(tenant);
-    const epoch = runtime.viewer?.security?.epoch;
     return this.context.tenants.serial(tenant, async () => {
       this.services.viewers.assertProductViewer(tenant, lease, epoch);
-      if (connectionId && runtime.connectionId !== connectionId)
-        throw new RemoteKitError('conflict', 'RTC连接已被替换');
       if (
         !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
           operation.operationId,
@@ -290,9 +243,9 @@ export class OperationPipeline {
       }
     });
     this.services.viewers.push(tenant);
-    if (['site.permission', 'site.protocolHandler.remove', 'site.permissions.reset'].includes(body.type))
-      await this.context.endpoint.synchronize(tenant);
     for (const effect of plan.effects) {
+      if (['navigate', 'command', 'replyClose', 'replyPage', 'exitFullscreen'].includes(effect.kind))
+        requireBrowser(this.context, tenant);
       switch (effect.kind) {
         case 'navigate':
           await this.services.navigation.navigate(state, effect);
@@ -334,13 +287,7 @@ export class OperationPipeline {
     if (receipt && !['tab.navigate', 'tab.command'].includes(action.type) && !closePending)
       settle(receipt, { status: 'committed', application });
     this.saveWorkspace(state, receipt);
-    if (
-      !['window.state', 'site.permission', 'site.protocolHandler.remove', 'site.permissions.reset'].includes(
-        action.type,
-      ) &&
-      (action.type !== 'site.set' || plan.siteUaChanged)
-    )
-      await this.services.reconciler.reconcileProduct(tenant).catch(() => {});
+    await this.context.endpoint.synchronize(tenant).catch(() => {});
     if (plan.siteUaChanged) {
       const latest = this.context.store.workspaces.workspace(tenant);
       if (

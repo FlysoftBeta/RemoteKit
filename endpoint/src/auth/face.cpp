@@ -1,11 +1,11 @@
 #include "auth/face.hpp"
 #include "util/wire_error.hpp"
-#include "diagnostics/timing.hpp"
+#include "media/gpu_device.hpp"
+#include "util/thread.hpp"
 #include "rtc/authorization.hpp"
-#include "rtc/peer.hpp"
 namespace remotekit {
-using ConnectionPhase = ConnectionTiming::ConnectionPhase;
-using Event = RtcEvent;
+using media::QpcFrequency;
+using media::QpcNow;
 fs::path FaceController::FaceModels() {
   wchar_t executable[32768]{};
   GetModuleFileNameW(nullptr, executable, 32768);
@@ -60,17 +60,6 @@ Json FaceController::FaceCapabilities() {
   if (!capability.reason.empty())
     result["reason"] = capability.reason;
   return result;
-}
-
-Json FaceController::Stats() {
-  const auto failures = faces.GateFailures();
-  Json gates = Json::object();
-  constexpr const char* names[] = {"none",     "noQualifiedFace", "multipleFaces",
-                                   "boundary", "nonfinite",       "liveV1SE",
-                                   "liveV2",   "liveMean",        "embedding"};
-  for (size_t i = 1; i < failures.size(); ++i)
-    gates[names[i]] = failures[i];
-  return {{"gateFailures", std::move(gates)}};
 }
 
 Result<Json> FaceController::FaceCommand(const std::string& method,

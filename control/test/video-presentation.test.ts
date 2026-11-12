@@ -126,7 +126,7 @@ function environment(t: TestContext) {
     bufferedAmount: 0,
   } as unknown as RTCDataChannel;
   const rtc = { peer: {} as RTCPeerConnection, attempt: 1, markConnection: () => {} };
-  const authorization = { productLocked: false, peerAuthEpoch: 1, productReady: true };
+  const authorization = { productLocked: false, peerAuthEpoch: 1, browserReady: true };
   const presentation = new PresentationSession({
     endpoint: { channel, sendChannel: (_channel, message) => channel.send(JSON.stringify(message)) },
     rtc,

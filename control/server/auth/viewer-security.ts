@@ -1,3 +1,4 @@
+import type { ServicePeers } from '../viewers/service-peers';
 import { log, reportError } from '../log';
 import { wireError } from '../../shared/errors';
 import { endpointError } from '../endpoint/gateway';
@@ -40,6 +41,7 @@ export interface ViewerSecurityState {
   // Public epoch is scoped to this Viewer lease and guards asynchronous work.
   readonly epoch: number;
   peer?: Peer;
+  servicePeer?: Peer;
   challenge?: Challenge;
   face: Omit<AuthState['face'], 'enrolled'> & { modelVersion?: string };
   polling: boolean;
@@ -51,6 +53,7 @@ export class ViewerSecurity {
   constructor(
     private readonly store: ControlDatabase,
     private readonly endpoint: EndpointGateway,
+    private readonly service: ServicePeers,
     private readonly changed: (tenant: string, viewer: ViewerSecurityState, workspace: boolean) => void,
     private readonly valid: (tenant: string, viewer: ViewerSecurityState) => boolean,
     private readonly locked: (tenant: string, viewer: ViewerSecurityState) => void,
@@ -81,6 +84,7 @@ export class ViewerSecurity {
       locked: viewer.locked,
       epoch: viewer.epoch,
       peerEpoch: viewer.peer?.appliedEpoch ?? 0,
+      serviceEpoch: viewer.servicePeer?.appliedEpoch ?? 0,
       settings,
       methods: {
         password: true,
@@ -102,9 +106,9 @@ export class ViewerSecurity {
   }
 
   async capabilities(tenant: string, viewer: ViewerSecurityState) {
-    const peer = viewer.peer;
-    const result = await this.endpoint.faceCapabilities(tenant).catch(() => undefined);
-    if (!this.valid(tenant, viewer) || viewer.peer !== peer) return;
+    const peer = viewer.servicePeer;
+    const result = await this.service.faceCapabilities(tenant).catch(() => undefined);
+    if (!this.valid(tenant, viewer) || viewer.servicePeer !== peer) return;
     const available =
       result?.available === true &&
       typeof result.modelVersion === 'string' &&
@@ -118,15 +122,19 @@ export class ViewerSecurity {
         ? viewer.face.available
           ? viewer.face.reason
           : undefined
-        : 'Endpoint 人脸模型不可用',
+        : '文件和人脸服务暂无可用节点',
     };
     this.changed(tenant, viewer, false);
   }
 
   forgetPeer(tenant: string, viewer: ViewerSecurityState) {
-    this.clearChallenge(tenant, viewer);
     viewer.peer = undefined;
-    viewer.face = { available: false };
+  }
+
+  forgetServicePeer(tenant: string, viewer: ViewerSecurityState) {
+    this.clearChallenge(tenant, viewer, false, false);
+    viewer.servicePeer = undefined;
+    viewer.face = { available: false, reason: '文件和人脸服务暂无可用节点' };
   }
 
   async revokePeer(tenant: string, viewer: ViewerSecurityState) {
@@ -173,11 +181,6 @@ export class ViewerSecurity {
         await this.apply(tenant, viewer, false);
         void this.capabilities(tenant, viewer);
         return;
-      }
-      if (!viewer.locked) {
-        transitionLock(viewer, 'locked');
-        this.changed(tenant, viewer, false);
-        this.locked(tenant, viewer);
       }
       throw error;
     }
@@ -239,17 +242,11 @@ export class ViewerSecurity {
   private async unlock(tenant: string, viewer: ViewerSecurityState, epoch: number) {
     this.check(tenant, viewer, epoch, true);
     this.clearChallenge(tenant, viewer, true);
-    transitionLock(viewer, 'unlocking', false);
-    try {
-      await this.apply(tenant, viewer, true);
-    } catch (error) {
-      if (this.valid(tenant, viewer) && viewer.epoch === epoch)
-        await this.lock(tenant, viewer).catch((err) => log.error('security.lock_failed', { tenant, err }));
-      throw error;
-    }
-    this.check(tenant, viewer, epoch, true);
     transitionLock(viewer, 'unlocked');
     this.changed(tenant, viewer, true);
+    void this.apply(tenant, viewer, true).catch((err) =>
+      log.warn('security.authorize_failed', { tenant, err }),
+    );
   }
 
   private clearChallenge(tenant: string, viewer: ViewerSecurityState, preserve = false, send = true) {
@@ -262,7 +259,7 @@ export class ViewerSecurity {
       if (viewer.face.available) delete viewer.face.reason;
     }
     if (challenge && send)
-      void this.endpoint
+      void this.service
         .cancelFace(tenant, this.faceBinding(challenge))
         .catch((err) => log.warn('security.cancel_face_failed', { tenant, challengeId: challenge.id, err }));
   }
@@ -277,7 +274,7 @@ export class ViewerSecurity {
     purpose: FacePurpose,
     generation: number,
   ) {
-    const peer = viewer.peer,
+    const peer = viewer.servicePeer,
       modelVersion = viewer.face.modelVersion;
     const record = this.store.security.security(viewer.user.id);
     if (!peer || peer.appliedEpoch !== peer.epoch || !viewer.face.available || !modelVersion)
@@ -313,7 +310,7 @@ export class ViewerSecurity {
     };
     viewer.challenge = challenge;
     try {
-      const result = await this.endpoint.beginFace(tenant, {
+      const result = await this.service.beginFace(tenant, {
         ...this.faceBinding(challenge),
         purpose,
         timeoutMs,
@@ -338,14 +335,8 @@ export class ViewerSecurity {
 
   async poll(tenant: string, viewer: ViewerSecurityState) {
     const peer = viewer.peer;
-    if (
-      viewer.locked &&
-      peer &&
-      peer.appliedEpoch !== peer.epoch &&
-      peer.requests === 0 &&
-      this.valid(tenant, viewer)
-    )
-      await this.apply(tenant, viewer, false).catch((err) =>
+    if (peer && peer.appliedEpoch !== peer.epoch && peer.requests === 0 && this.valid(tenant, viewer))
+      await this.apply(tenant, viewer, !viewer.locked).catch((err) =>
         log.error('security.reapply_failed', { tenant, err }),
       );
     const challenge = viewer.challenge;
@@ -353,7 +344,7 @@ export class ViewerSecurity {
     viewer.polling = true;
     const generation = viewer.epoch;
     try {
-      const result = await this.endpoint
+      const result = await this.service
         .faceStatus(tenant, this.faceBinding(challenge))
         .catch((error: unknown) => {
           log.warn('security.face_status_failed', { tenant, challengeId: challenge.id, err: error });
@@ -371,7 +362,7 @@ export class ViewerSecurity {
         !this.valid(tenant, viewer) ||
         viewer.epoch !== generation ||
         viewer.challenge !== challenge ||
-        viewer.peer !== challenge.peer ||
+        viewer.servicePeer !== challenge.peer ||
         challenge.peer.appliedEpoch !== challenge.epoch
       )
         return;

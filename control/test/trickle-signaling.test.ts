@@ -1,3 +1,4 @@
+import { submitViewerAction } from './server-fixture';
 import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
 import { requestViewer } from './server-fixture';
@@ -61,7 +62,7 @@ test('pending trickle offers allow other tenants and bind early candidates to co
       { identity: 'test-account', valid: () => true },
       true,
     );
-    await requestViewer(control, a.tenantId, 'lease-a', 'action', {
+    await submitViewerAction(control, a.tenantId, 'lease-a', {
       type: 'settings.update',
       settings: { workspace: { avSync: true } },
     });

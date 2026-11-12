@@ -115,7 +115,7 @@ export class AuthCameraSession extends Store<CameraState> {
       !this.port.authCameraReady ||
       this.environment.hidden() ||
       (previous && previous.auth?.epoch !== options.auth?.epoch) ||
-      (previous && previous.auth?.peerEpoch !== options.auth?.peerEpoch) ||
+      (previous && previous.auth?.serviceEpoch !== options.auth?.serviceEpoch) ||
       (this.explicit === 'verify' && options.auth?.locked !== true) ||
       (this.explicit === 'enroll' && options.auth?.locked !== false)
     )
@@ -258,7 +258,7 @@ export class AuthCameraSession extends Store<CameraState> {
   private syncSource() {
     const options = this.options,
       face = options?.auth?.face,
-      peerEpoch = options?.auth?.peerEpoch;
+      peerEpoch = options?.auth?.serviceEpoch;
     if (
       options?.online &&
       this.port.authCameraReady &&

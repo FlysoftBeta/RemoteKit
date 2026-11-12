@@ -51,6 +51,9 @@ export interface Selection {
 
 export class LibraryRepository {
   constructor(private readonly db: Database.Database) {}
+  availabilityChanged(tenant: string) {
+    this.db.prepare('UPDATE library_state SET revision=revision+1 WHERE tenant=?').run(tenant);
+  }
   snippet(tenant: string, entryId: string): { text: string; html: string } {
     const row = this.db
       .prepare('SELECT text,html FROM library_snippets WHERE tenant=? AND entry_id=?')
@@ -88,6 +91,7 @@ export class LibraryRepository {
       const firstLine = text.split(/\r\n|\r|\n/).find((line) => line.trim()) ?? '';
       snapshot.entries.unshift({
         kind: 'snippet',
+        available: true,
         id: entryId,
         name: '',
         type: 'text/plain',

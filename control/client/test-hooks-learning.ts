@@ -51,6 +51,7 @@ export function installLearningMock() {
     locked: false,
     epoch: 1,
     peerEpoch: 1,
+    serviceEpoch: 1,
     methods: { password: true, pin: false, face: false },
     settings: {
       lockOnHidden: false,
@@ -66,7 +67,7 @@ export function installLearningMock() {
   const request = ControlSession.prototype.request;
   const rtcConnect = RtcSession.prototype.connect;
   const accept = OperationsStore.prototype.acceptSnapshot;
-  const productReady = Object.getOwnPropertyDescriptor(AuthorizationScope.prototype, 'productReady')!;
+  const browserReady = Object.getOwnPropertyDescriptor(AuthorizationScope.prototype, 'browserReady')!;
   const documentOpen = FileChannel.prototype.documentOpen;
   const documentResource = FileChannel.prototype.documentResource;
   const apply = async (command: ProductAction) => {
@@ -120,7 +121,7 @@ export function installLearningMock() {
     return fake.request(method, params);
   };
   RtcSession.prototype.connect = async () => {};
-  Object.defineProperty(AuthorizationScope.prototype, 'productReady', {
+  Object.defineProperty(AuthorizationScope.prototype, 'browserReady', {
     get: () => true,
     configurable: true,
   });
@@ -198,7 +199,7 @@ export function installLearningMock() {
     ControlSession.prototype.request = request;
     RtcSession.prototype.connect = rtcConnect;
     OperationsStore.prototype.acceptSnapshot = accept;
-    Object.defineProperty(AuthorizationScope.prototype, 'productReady', productReady);
+    Object.defineProperty(AuthorizationScope.prototype, 'browserReady', browserReady);
     FileChannel.prototype.documentOpen = documentOpen;
     FileChannel.prototype.documentResource = documentResource;
     delete (window as Partial<Window>).__remotekitLearning;

@@ -149,8 +149,10 @@ export type NativeErrorReason =
   | 'browser_state_too_large'
   | 'no_document_contour'
   | 'corrupt_state'
-  | 'session_data_on_offline_node';
+  | 'session_data_on_offline_node'
+  | 'no_eligible_node';
 const nativeMessages: Record<NativeErrorReason, string> = {
+  no_eligible_node: '没有可用的节点，恢复后自动继续',
   session_data_on_offline_node: '会话数据所在节点离线，恢复后自动继续',
   browser_crashed: '浏览器异常退出，正在恢复…',
   browser_restarting: '浏览器正在恢复，请稍候…',

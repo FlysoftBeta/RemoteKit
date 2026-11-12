@@ -5,7 +5,6 @@ import { recordedAction, type RecordedAction } from '../../shared/recorded-actio
 import { operationFailure } from '../failures/operations';
 import { waitForRecovery } from '../failures/recovery';
 import { diagnostics } from '../media/diagnostics';
-import type { Incoming, Outgoing } from '../rtc/protocol';
 import { canonicalJson } from '../util/canonical-json';
 import { RequestTracker } from '../util/request-tracker';
 import { Store } from '../util/store';
@@ -24,7 +23,7 @@ export interface OperationsSnapshot {
 }
 export interface OperationsPort {
   ready(): boolean;
-  send(message: Outgoing): void;
+  submit(operation: ProductOperation): Promise<OperationReceipt>;
   status(operation: Pick<ProductOperation, 'operationId' | 'operationGeneration'>): Promise<OperationReceipt>;
 }
 
@@ -77,22 +76,6 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     );
   }
 
-  handle(message: Incoming) {
-    if (message.type !== 'product.result') return;
-    const entry = this.getSnapshot().pending.find(
-      (entry) =>
-        entry.operationId === message.operationId &&
-        entry.operationGeneration === message.operationGeneration,
-    );
-    if (!entry) return;
-    if (this.requests.resolve(entry.operationId, message.result)) {
-      if (message.result.status !== 'failed' || retryDelay(message.result.error, 0) === undefined)
-        this.receipt(message.result);
-      return;
-    }
-    if (!this.retryReceipt(entry, message.result)) this.receipt(message.result);
-  }
-
   action = async (command: ProductAction): Promise<OperationReceipt> => {
     const scope = this.scope;
     let current = this.getSnapshot();
@@ -143,13 +126,16 @@ export class OperationsStore extends Store<OperationsSnapshot> {
         let receipt: OperationReceipt;
         try {
           receipt = await this.requests.request(operation.operationId, 20000, () => {
-            this.port.send({
-              type: 'product.action',
-              version: 1,
-              operationId: operation.operationId,
-              operationGeneration: operation.operationGeneration,
-              action: command,
-            });
+            void this.port
+              .submit({
+                operationId: operation.operationId,
+                operationGeneration: operation.operationGeneration,
+                action: command,
+              })
+              .then(
+                (receipt) => this.requests.resolve(operation.operationId, receipt),
+                (error) => this.requests.reject(operation.operationId, error),
+              );
             this.update(
               this.getSnapshot().pending.map((entry) =>
                 entry.operationId === operation.operationId ? { ...entry, phase: 'sent' } : entry,
@@ -165,7 +151,10 @@ export class OperationsStore extends Store<OperationsSnapshot> {
           else receipt = { ...operation, status: 'failed', error: wireError(failure) };
         }
         if (scope !== this.scope) throw new RemoteKitError('locked', '授权已改变');
-        if (receipt.status === 'unknown' && !receipt.resolved) receipt = await this.query(operation);
+        if (receipt.status === 'unknown' && !receipt.resolved) {
+          this.receipt(receipt);
+          receipt = await this.query(operation);
+        }
         const failure = parseWireError(receipt.error);
         const delay = failure && retryDelay(failure, attempt);
         if (receipt.status === 'failed' && delay !== undefined) {

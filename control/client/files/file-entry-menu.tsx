@@ -60,6 +60,7 @@ export function FileEntryMenu({
   const basket = basketEntries(snapshot);
   const inBasket = basket.some((item) => item.id === entry?.id);
   const disabled = !online || busy || !snapshot;
+  const unavailable = entry?.kind === 'file' && !entry.available;
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
     setError(undefined);
@@ -115,7 +116,7 @@ export function FileEntryMenu({
           </MenuItem>
         )}
         {onOpen && (
-          <MenuItem disabled={disabled} onClick={() => choose(onOpen)}>
+          <MenuItem disabled={disabled || unavailable} onClick={() => choose(onOpen)}>
             <ListItemIcon>
               <VisibilityOutlined fontSize="small" />
             </ListItemIcon>
@@ -125,7 +126,7 @@ export function FileEntryMenu({
           </MenuItem>
         )}
         {onOpen && entry?.photo && (
-          <MenuItem disabled={disabled} onClick={() => choose(onOpen)}>
+          <MenuItem disabled={disabled || unavailable} onClick={() => choose(onOpen)}>
             <ListItemIcon>
               <TuneOutlined fontSize="small" />
             </ListItemIcon>
@@ -134,7 +135,7 @@ export function FileEntryMenu({
         )}
         {entry?.kind === 'file' && (
           <MenuItem
-            disabled={disabled || (!inBasket && basket.length >= 64)}
+            disabled={disabled || (!inBasket && (unavailable || basket.length >= 64))}
             onClick={() =>
               choose(
                 (item) =>
@@ -183,7 +184,7 @@ export function FileEntryMenu({
           </MenuItem>
         )}
         {onSelect && (
-          <MenuItem disabled={disabled} onClick={() => choose(onSelect)}>
+          <MenuItem disabled={disabled || unavailable} onClick={() => choose(onSelect)}>
             <ListItemIcon>
               <CheckBoxOutlined fontSize="small" />
             </ListItemIcon>

@@ -261,12 +261,14 @@ export function LibraryTab({
                   .filter(Boolean)
                   .join(' › ');
   const openPreview = (entry: LibraryEntry) => {
+    if (entry.kind === 'file' && !entry.available) return;
     if (entry.photo) {
       setPhoto(entry.id);
       void recordUsage(entry.id, windowId).catch((failure) => diagnostics.record('file-usage', failure));
     } else onOpen(entry);
   };
   const openEntry = (entry: LibraryEntry, anchor: HTMLElement) => {
+    if (entry.kind === 'file' && !entry.available) return;
     if (selecting) toggleSelected(entry.id);
     else if (entry.kind === 'snippet')
       void run(async () => {
@@ -1009,6 +1011,8 @@ const LibraryEntryView = memo(
   }: LibraryEntryProps) {
     const { photos } = useLibrary();
     const job = photos.jobs.find((item) => item.replace?.id === entry.id);
+    const unavailable = entry.kind === 'file' && !entry.available;
+    if (unavailable) meta = '暂不可用';
     if (entry.kind === 'snippet')
       return (
         <SnippetView
@@ -1027,7 +1031,7 @@ const LibraryEntryView = memo(
       <Checkbox
         className="library-check"
         checked={selected}
-        disabled={disabled}
+        disabled={disabled || unavailable}
         onChange={() => onSelect(entry.id)}
         slotProps={{ input: { 'aria-label': `选择 ${entry.name}` } }}
         sx={
@@ -1070,11 +1074,11 @@ const LibraryEntryView = memo(
         type={entry.type}
         assetId={entry.assetId}
         meta={meta}
-        status={photoStatus(entry, job)}
+        status={unavailable ? undefined : photoStatus(entry, job)}
         selected={selected}
         pressed={selecting ? selected : undefined}
         open={open}
-        disabled={disabled}
+        disabled={disabled || unavailable}
         marker={basketMarker(entry)}
         start={entryCheckbox(entry, true)}
         onOpen={(anchor) => onOpen(entry.id, anchor)}
@@ -1088,10 +1092,10 @@ const LibraryEntryView = memo(
         assetId={entry.assetId}
         meta={meta}
         detail={entry.detail}
-        status={photoStatus(entry, job)}
+        status={unavailable ? undefined : photoStatus(entry, job)}
         selected={selected}
         pressed={selecting ? selected : undefined}
-        disabled={disabled}
+        disabled={disabled || unavailable}
         leading={entryCheckbox(entry, false)}
         onOpen={(anchor) => onOpen(entry.id, anchor)}
         onLongPress={() => onLongPress(entry.id)}
@@ -1104,7 +1108,7 @@ const LibraryEntryView = memo(
                     aria-label={inBasket ? `从文件篮移除 ${entry.name}` : `加入文件篮 ${entry.name}`}
                     aria-pressed={inBasket}
                     color={inBasket ? 'primary' : 'default'}
-                    disabled={disabled || (!inBasket && basketFull)}
+                    disabled={disabled || unavailable || (!inBasket && basketFull)}
                     onClick={() => onBasket(entry.id)}
                   >
                     {inBasket ? (

@@ -364,6 +364,8 @@ if(WIN32)
     src/media/audio.cpp
     src/auth/face.cpp
     src/files/files.cpp
+    src/files/object_files.cpp
+    src/rtc/service_peer.cpp
     src/diagnostics/stats.cpp
     src/diagnostics/log_files.cpp
     src/diagnostics/node_metrics.cpp

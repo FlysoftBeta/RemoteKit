@@ -22,45 +22,11 @@ inline bool BoundedServiceId(const ServiceJson& value, size_t maximum = 128) {
                      value.get_ref<const std::string&>().end(),
                      [](unsigned char c) { return c >= 33 && c <= 126; });
 }
-inline bool ProductActionEnvelope(const ServiceJson& message, size_t bytes) {
-  if (bytes > 33792 || !message.is_object() || message.value("version", ServiceJson()) != 1 ||
-      !message.contains("operationId") || !BoundedServiceId(message["operationId"], 36) ||
-      !message.contains("operationGeneration") ||
-      !BoundedServiceId(message["operationGeneration"]) || !message.contains("action") ||
-      !message["action"].is_object() || message["action"].dump().size() > 32768)
-    return false;
-  const auto& id = message["operationId"].get_ref<const std::string&>();
-  if (id.size() != 36)
-    return false;
-  for (size_t i = 0; i < id.size(); ++i) {
-    if (i == 8 || i == 13 || i == 18 || i == 23) {
-      if (id[i] != '-')
-        return false;
-    } else if (!((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f') ||
-                 (id[i] >= 'A' && id[i] <= 'F')))
-      return false;
-  }
-  const auto type = message["action"].value("type", ServiceJson());
-  // Control validates the action union; Endpoint only owns the bounded envelope.
-  return BoundedServiceId(type);
-}
-
-// Routing receipts only: Control owns operation semantics and product state.
-// Together requests, outstanding receipts and replies occupy at most 64 slots.
-// No operation is replayed across a management disconnect or a peer replacement.
 class DirectServices {
   const Json log_fields_;
-  struct Pending {
-    ServiceJson message;
-    double since;
-    bool queued = false;
-    DeliveryFlag delivery = std::make_shared<DeliveryState>();
-  };
   mutable std::mutex mutex_;
   uint64_t peer_ = 0;
   std::string connection_;
-  std::map<std::string, Pending> pending_;
-  std::deque<std::string> results_;
   std::map<uint64_t, std::string> viewports_;
   std::map<uint64_t, std::string> pending_viewports_;
   std::string context_menu_;
@@ -75,24 +41,6 @@ class DirectServices {
   uint64_t editable_revision_ = 0;
   ServiceJson editable_focus_;
   uint64_t editable_focus_revision_ = 0;
-  static std::string Key(const ServiceJson& value) {
-    return value.at("operationGeneration").get<std::string>() + "\n" +
-           value.at("operationId").get<std::string>();
-  }
-  ServiceJson Failure(const ServiceJson& request, const char* error, bool unknown = false) const {
-    return {{"type", "product.result"},
-            {"version", 1},
-            {"operationId", request.at("operationId")},
-            {"connectionId", connection_},
-            {"operationGeneration", request.at("operationGeneration")},
-            {"result",
-             {{"operationId", request.at("operationId")},
-              {"operationGeneration", request.at("operationGeneration")},
-              {"status", unknown ? "unknown" : "failed"},
-              {"error",
-               WireError({unknown ? ErrorCode::kOutcomeUnknown : ErrorCode::kUnavailable, error},
-                         "dc.request_failed", RequestLogFields(request, log_fields_))}}}};
-  }
 
  public:
   explicit DirectServices(Json log_fields = Json::object()) : log_fields_(std::move(log_fields)) {}
@@ -102,8 +50,6 @@ class DirectServices {
     viewports_.clear();
     pending_viewports_.clear();
     connection_ = std::move(connection);
-    pending_.clear();
-    results_.clear();
     editable_.clear();
     editable_value_ = nullptr;
     editable_revision_ = 0;
@@ -116,63 +62,6 @@ class DirectServices {
     context_menu_identity_ = nullptr;
     ++context_menu_ticket_;
     context_menu_revision_ = 0;
-  }
-  bool Admit(uint64_t peer, const ServiceJson& message, double now) {
-    std::lock_guard lock(mutex_);
-    if (!peer || peer != peer_)
-      return false;
-    const auto key = Key(message);
-    if (pending_.contains(key))
-      return true;
-    if (pending_.size() + results_.size() >= 64)
-      return false;
-    pending_.emplace(key, Pending{message, now});
-    return true;
-  }
-  template <class Dispatch>
-  void DispatchPending(uint64_t peer, double now, Dispatch dispatch) {
-    std::lock_guard lock(mutex_);
-    if (!peer || peer != peer_)
-      return;
-    unsigned budget = 8;
-    for (auto it = pending_.begin(); it != pending_.end();) {
-      auto& item = it->second;
-      if (now - item.since >= 15000) {
-        // Once forwarded, a timeout cannot prove rejection. Return a queryable
-        // uncertain receipt; never replay the operation to obtain another reply.
-        const bool dispatched = item.delivery->CancelAndWasWritten();
-        results_.push_back(Failure(item.message,
-                                   dispatched ? "control_result_unknown" : "control_unavailable",
-                                   dispatched)
-                               .dump());
-        it = pending_.erase(it);
-        continue;
-      }
-      if (!item.queued && budget) {
-        --budget;
-        if (!dispatch(item.message, item.delivery)) {
-          results_.push_back(Failure(item.message, "control_unavailable").dump());
-          it = pending_.erase(it);
-          continue;
-        }
-        item.queued = true;
-      }
-      ++it;
-    }
-  }
-  bool Result(uint64_t peer, const ServiceJson& message) {
-    std::lock_guard lock(mutex_);
-    if (!peer || peer != peer_ || message.dump().size() > 16384)
-      return false;
-    const auto found = pending_.find(Key(message));
-    if (found == pending_.end())
-      return false;
-    auto result = message;
-    result["type"] = "product.result";
-    result["version"] = 1;
-    results_.push_back(result.dump());
-    pending_.erase(found);
-    return true;
   }
   void Viewports(uint64_t peer, const SharedAtlasFrame& frame) {
     std::lock_guard lock(mutex_);
@@ -408,11 +297,6 @@ class DirectServices {
     std::lock_guard lock(mutex_);
     if (!peer || peer != peer_)
       return;
-    for (unsigned n = 0; n < 4 && !results_.empty(); ++n) {
-      if (send(results_.front()) != 0)
-        return;
-      results_.pop_front();
-    }
     for (auto it = pending_viewports_.begin(); it != pending_viewports_.end();) {
       if (send(it->second) != 0)
         return;
@@ -426,8 +310,5 @@ class DirectServices {
       context_menu_.clear();
   }
 };
-
-// Consume a too-long line completely without retaining its tail. Return a
-// fixed invalid request so the caller can report an error and read the next line.
 
 }  // namespace remotekit

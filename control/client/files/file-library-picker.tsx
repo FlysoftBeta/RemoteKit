@@ -167,10 +167,10 @@ export function FileLibraryPicker({
                 name={entry.name}
                 type={entry.type}
                 assetId={entry.assetId}
-                meta={formatFileSize(entry.size)}
+                meta={entry.available ? formatFileSize(entry.size) : '暂不可用'}
                 selected={order >= 0}
                 pressed={order >= 0}
-                disabled={order < 0 && full}
+                disabled={!entry.available || (order < 0 && full)}
                 index={order >= 0 ? order + 1 : undefined}
                 marker={
                   order >= 0 ? (

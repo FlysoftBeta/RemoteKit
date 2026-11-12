@@ -127,8 +127,8 @@ export function presentFailure(value: RemoteKitError | WireError, context: Failu
   if (error.reason === 'session_data_on_offline_node')
     return {
       class: 'A',
-      text: '会话数据所在节点离线，恢复后自动继续',
-      longText: '会话数据所在节点离线，恢复后自动继续',
+      text: context.text ?? '会话数据所在节点离线，恢复后自动继续',
+      longText: context.text ?? '会话数据所在节点离线，恢复后自动继续',
       connection: true,
     };
   if (error.code === 'canceled') return { class: 'silent', text: '' };

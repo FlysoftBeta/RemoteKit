@@ -104,8 +104,8 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
   );
   const library = useFileLibrary(
     libraryRequest,
-    media.files,
-    controls.productReady,
+    media.libraryFiles,
+    controls.shellReady,
     showShell,
     identity.current,
     state?.fileRequests.map((request) => request.id) ?? [],
@@ -284,7 +284,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
                   appId === 'admin' ? (
                     <Suspense fallback={null}>
                       <AdminApp
-                        online={controls.productReady}
+                        online={controls.shellReady}
                         self={state.user.username}
                         call={adminCall}
                         viewState={viewState}

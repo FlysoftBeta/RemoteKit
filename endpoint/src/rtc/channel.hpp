@@ -13,7 +13,6 @@ class ControlOutbox;
 class PresentationController;
 class InputController;
 class FileController;
-class FaceController;
 class OutputController;
 class MediaPipeline;
 class EncoderRegistry;
@@ -28,7 +27,6 @@ class ChannelController : private ControllerContext {
                     PresentationController& presentation,
                     InputController& input,
                     FileController& files,
-                    FaceController& face,
                     OutputController& output,
                     MediaPipeline& pipeline,
                     EncoderRegistry& registry,
@@ -41,7 +39,6 @@ class ChannelController : private ControllerContext {
         presentation(presentation),
         input(input),
         files(files),
-        face(face),
         output(output),
         pipeline(pipeline),
         registry(registry),
@@ -66,10 +63,8 @@ class ChannelController : private ControllerContext {
   void Send(const Json& message, uint64_t expected_stamp = 0);
   void FlushControl();
   void FlushServices();
-  bool ServiceMessage(const RtcEvent& event);
   Result<Json> Offer(const Json& request, uint64_t generation);
   Result<void> ReplayOffer(const Json& request, uint64_t generation);
-  Result<Json> ManageRtcActionResult(const Json& request);
   Result<Json> ManageRtcOffer(const Json& request);
   Result<Json> ManageRtcClose(const Json& request);
   Result<Json> ManageRtcIce(const Json& request);
@@ -81,7 +76,6 @@ class ChannelController : private ControllerContext {
   PresentationController& presentation;
   InputController& input;
   FileController& files;
-  FaceController& face;
   OutputController& output;
   MediaPipeline& pipeline;
   EncoderRegistry& registry;

@@ -40,6 +40,7 @@ export const libraryFixture: LibrarySnapshot = {
     {
       id: 'learning-file',
       kind: 'file',
+      available: true,
       assetId: 'learning-document',
       name: '二次函数课堂讲义.pdf',
       type: 'application/pdf',
@@ -102,6 +103,7 @@ export function learningProductFixture(appId = 'study', signed = true): ProductS
     snapshotSequence: 1,
     operationGeneration: 'mock-generation',
     user: { id: 'learning-mock-user', username: '同学', isAdmin: false },
+    browser: { state: 'available' },
     learning: {
       accounts: {
         changyan: signed
@@ -335,13 +337,6 @@ export class LearningFakeTransport {
         this.changed();
         result = method === 'learning.signOut' ? { signedOut: true } : { cancelled: true };
         break;
-      case 'window.state': {
-        const win = this.state.workspace.windows.find((win) => win.id === p.windowId);
-        if (win) win.state = p.state;
-        this.changed();
-        result = { state: this.state };
-        break;
-      }
       case 'viewport':
       case 'feedback':
         result = this.state;

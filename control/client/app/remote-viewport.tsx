@@ -207,6 +207,9 @@ export function RemoteViewport({
       <SurfaceState
         live
         error={
+          (product.state?.browser.state === 'unavailable'
+            ? new RemoteKitError('unavailable', '', { reason: product.state.browser.reason })
+            : undefined) ??
           snapshot.presentationError ??
           (viewportFailure?.code === 'limit_exceeded' ? undefined : viewportFailure) ??
           (snapshot.rtcPhase === 'exhausted'
@@ -226,7 +229,16 @@ export function RemoteViewport({
               ? '更新远程画面尺寸'
               : '连接浏览器',
           scope: 'surface',
-          connection: !snapshot.presentationError && !viewportFailure,
+          connection:
+            product.state?.browser.state !== 'unavailable' && !snapshot.presentationError && !viewportFailure,
+          text:
+            product.state?.browser.state === 'unavailable'
+              ? product.state.browser.reason === 'session_data_on_offline_node'
+                ? '浏览器暂不可用：数据所在节点离线，恢复后自动继续'
+                : product.state.browser.reason === 'no_eligible_node'
+                  ? '浏览器暂不可用：没有可用的节点，恢复后自动继续'
+                  : '浏览器暂不可用，恢复后自动继续'
+              : undefined,
           targetId: viewId,
         }}
       />

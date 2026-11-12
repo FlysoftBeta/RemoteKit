@@ -27,6 +27,8 @@ export type RtcEvent =
   | { type: 'closed' }
   | { type: 'diagnostics'; change: Partial<Diagnostics> };
 export class RtcSession {
+  constructor(readonly role: 'browser' | 'service' = 'browser') {}
+
   readonly connectionAttempts: {
     attemptId: string;
     signalingMode: string;
@@ -126,7 +128,13 @@ export class RtcSession {
     method: 'rtc.offer' | 'rtc.ice' | 'rtc.close' | 'clock.ping' | 'feedback',
     params: unknown,
   ): Promise<T> {
-    if (this.controlRpc) return this.controlRpc(method, params) as Promise<T>;
+    if (this.controlRpc)
+      return this.controlRpc(
+        this.role === 'service' && method.startsWith('rtc.')
+          ? (method.replace('rtc.', 'service.') as 'service.offer' | 'service.ice' | 'service.close')
+          : method,
+        params,
+      ) as Promise<T>;
     return Promise.reject(new RemoteKitError('unavailable', 'Control WebSocket 未连接'));
   }
 
@@ -238,7 +246,7 @@ export class RtcSession {
     this.closeLocal();
     this.signaling = undefined;
     const attempt = ++this.attemptNumber;
-    this.signalAttemptId = `${Date.now()}-${attempt}`;
+    this.signalAttemptId = `${this.role}-${Date.now()}-${attempt}`;
     this.transition({ phase: 'establishing', attemptId: this.signalAttemptId });
     this.connectionAttempts.push({
       attemptId: this.signalAttemptId,
@@ -271,19 +279,21 @@ export class RtcSession {
           this.markConnection('iceConnected');
       };
       this.currentPeer = peer;
-      const transceiver = peer.addTransceiver('video', { direction: 'recvonly' });
-      this.events.emit({ type: 'receiver', receiver: transceiver.receiver, kind: 'video' });
-      this.events.emit({
-        type: 'receiver',
-        receiver: peer.addTransceiver('audio', { direction: 'recvonly' }).receiver,
-        kind: 'audio',
-      });
-      const codecs = RTCRtpReceiver.getCapabilities?.('video')?.codecs;
-      if (codecs && typeof transceiver.setCodecPreferences === 'function')
-        transceiver.setCodecPreferences([
-          ...codecs.filter((codec) => codec.mimeType.toLowerCase() === 'video/h264'),
-          ...codecs.filter((codec) => codec.mimeType.toLowerCase() !== 'video/h264'),
-        ]);
+      const codecs = this.role === 'browser' ? RTCRtpReceiver.getCapabilities?.('video')?.codecs : undefined;
+      if (this.role === 'browser') {
+        const transceiver = peer.addTransceiver('video', { direction: 'recvonly' });
+        this.events.emit({ type: 'receiver', receiver: transceiver.receiver, kind: 'video' });
+        this.events.emit({
+          type: 'receiver',
+          receiver: peer.addTransceiver('audio', { direction: 'recvonly' }).receiver,
+          kind: 'audio',
+        });
+        if (codecs && typeof transceiver.setCodecPreferences === 'function')
+          transceiver.setCodecPreferences([
+            ...codecs.filter((codec) => codec.mimeType.toLowerCase() === 'video/h264'),
+            ...codecs.filter((codec) => codec.mimeType.toLowerCase() !== 'video/h264'),
+          ]);
+      }
       peer.onconnectionstatechange = () => {
         if (this.peer !== peer) return;
         if (peer.connectionState === 'connected') {
@@ -317,15 +327,16 @@ export class RtcSession {
         this.events.emit({ type: 'track', track: event.track });
       };
       this.events.emit({ type: 'channel', channel: peer.createDataChannel('remotekit', { ordered: true }) });
-      this.events.emit({
-        type: 'authChannel',
-        channel: peer.createDataChannel('remotekit-auth', { ordered: true }),
-      });
+      if (this.role === 'service')
+        this.events.emit({
+          type: 'authChannel',
+          channel: peer.createDataChannel('remotekit-auth', { ordered: true }),
+        });
       peer.ondatachannel = (event) => {
         if (this.currentPeer === peer && this.attempt === attempt && event.channel.label === 'remotekit')
           this.events.emit({ type: 'channel', channel: event.channel });
       };
-      if (this.controlRpc) {
+      if (this.controlRpc && this.role === 'browser') {
         this.markConnection('receiveProbeStart');
         if (!this.productReceiveSelection)
           this.productReceiveSelection = await selectProductReceiveProfile(codecs);
@@ -338,7 +349,10 @@ export class RtcSession {
       const originalOffer = await peer.createOffer();
       if (attempt !== this.attempt) return;
       this.markConnection('createOfferEnd');
-      const effectiveOffer = configureReceiveOffer(originalOffer.sdp ?? '', this.receiveProfile, codecs);
+      const effectiveOffer =
+        this.role === 'browser'
+          ? configureReceiveOffer(originalOffer.sdp ?? '', this.receiveProfile, codecs)
+          : { sdp: originalOffer.sdp ?? '', changes: [] };
       effectiveOffer.sdp = stereoOpusOffer(effectiveOffer.sdp);
       this.signaling = {
         receiveSelection: this.productReceiveSelection,
