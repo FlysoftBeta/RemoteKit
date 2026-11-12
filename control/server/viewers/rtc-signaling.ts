@@ -108,6 +108,7 @@ export class RtcSignaling {
       this.services.policy.qualityState(tenant).resetFeedback();
       await this.context.endpoint.synchronize(tenant);
       timings.reconcileEndMs = this.context.clock.monotonicMs() - receivedAt;
+      this.services.viewers.assertViewer(tenant, lease);
       const security = runtime.viewer!.security;
       const previous = runtime.connectionId ?? runtime.rtc.disconnectedPeer?.connectionId;
       if (previous) {
@@ -119,6 +120,7 @@ export class RtcSignaling {
           runtime.closeRtc();
         }
       }
+      this.services.viewers.assertViewer(tenant, lease);
       this.services.security.forgetPeer(tenant, security);
       const connectionId = randomUUID();
       try {

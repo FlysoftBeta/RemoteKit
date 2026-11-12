@@ -112,6 +112,57 @@ test('pending trickle offers allow other tenants and bind early candidates to co
     store.db.close();
   }
 });
+test('Viewer detach while desired state is publishing cancels the offer before native admission', async () => {
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  const endpoint = new SignalEndpoint();
+  const control = createApplication(store, testGateway(endpoint));
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((done) => {
+    release = done;
+  });
+  const publishing = new Promise<void>((done) => {
+    entered = done;
+  });
+  try {
+    const account = await registerUser(store, 'retired-offer', 'password123');
+    await control.viewers.attachViewer(
+      account.tenantId,
+      'lease',
+      () => {},
+      { identity: 'account', valid: () => true },
+      true,
+    );
+    const synchronize = control.endpoint.synchronize.bind(control.endpoint);
+    let block = true;
+    control.endpoint.synchronize = async (tenant) => {
+      if (block) {
+        block = false;
+        entered();
+        await gate;
+      }
+      return synchronize(tenant);
+    };
+    const offer = control.rtc.offer(
+      account.tenantId,
+      { type: 'offer', sdp: 'v=0\r\n', attemptId: 'detached' },
+      'lease',
+    );
+    const rejected = assert.rejects(offer, { code: 'conflict' });
+    await publishing;
+    const detached = control.viewers.detachViewer(account.tenantId, 'lease');
+    while (control.tenants.get(account.tenantId).viewer) await new Promise((done) => setImmediate(done));
+    release();
+    await rejected;
+    await detached;
+    assert(!endpoint.calls.some((call) => call.method === 'rtc.offer'));
+  } finally {
+    release();
+    await control.close();
+    store.db.close();
+  }
+});
+
 test('close cancels a pending answer immediately and late answers are ignored', async () => {
   const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     endpoint = new SignalEndpoint(),
