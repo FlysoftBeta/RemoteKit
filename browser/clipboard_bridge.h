@@ -27,6 +27,8 @@ class ClipboardBridge final : public ui::ClipboardObserver {
   void SourceChanged(uint64_t sequence, content::ClipboardEndpoint source);
   const ViewRegistry& views_;
   std::string view_id_;
+  std::string applied_revision_ = "0";
+  std::string base_revision_ = "0";
   const base::RepeatingCallback<void(uint64_t)> changed_;
   uint64_t sequence_ = 0;
   bool applying_ = false;

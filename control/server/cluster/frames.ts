@@ -4,6 +4,12 @@ import { MAX_CIPHERTEXT, MAX_TRANSPORT } from './noise';
 export const MAX_JSON = 1024 * 1024;
 const MAX_CLIPBOARD_JSON = MAX_TRANSPORT - 1;
 function jsonLimit(value: Record<string, unknown>) {
+  if (
+    value.method === 'session.desired' ||
+    value.event === 'session.observed' ||
+    value.event === 'session.event'
+  )
+    return MAX_TRANSPORT - 1;
   if (value.type === 'clipboard.changed') return 4 * 1024 * 1024 - 1;
   if (value.method === 'clipboard.write') return MAX_CLIPBOARD_JSON;
   if ((value.method === 'session.open' || value.method === 'session.ensure') && value.clipboard)

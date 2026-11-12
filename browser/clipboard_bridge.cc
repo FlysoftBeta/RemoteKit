@@ -30,6 +30,7 @@ void ClipboardBridge::OnClipboardDataChanged() {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   if (applying_)
     return;
+  base_revision_ = applied_revision_;
   view_id_.clear();
   ++sequence_;
   content::GetSourceClipboardEndpoint(
@@ -55,6 +56,7 @@ base::DictValue ClipboardBridge::Read(int id) const {
   return ControlResult::Success(
       id, base::DictValue()
               .Set("sequence", base::NumberToString(sequence_))
+              .Set("baseRevision", base_revision_)
               .Set("viewId", view_id_)
               .Set("excludeFromHistory",
                    ui::Clipboard::GetForCurrentThread()->IsMarkedByOriginatorAsConfidential())
@@ -67,9 +69,17 @@ base::DictValue ClipboardBridge::Write(int id, const base::DictValue& request) {
     return ControlResult::Failure(id, protocol::ErrorCode::kInvalidRequest,
                                   "Invalid clipboard value");
   base::AutoReset<bool> applying(&applying_, true);
-  ui::ScopedClipboardWriter writer(ui::ClipboardBuffer::kCopyPaste);
-  writer.WriteText(base::UTF8ToUTF16(*request.FindString("text")));
-  writer.WriteHTML(base::UTF8ToUTF16(*request.FindString("html")), "");
-  return ControlResult::Success(id);
+  weak_.InvalidateWeakPtrs();
+  applied_revision_ = *request.FindString("revision");
+  base_revision_ = applied_revision_;
+  view_id_.clear();
+  {
+    ui::ScopedClipboardWriter writer(ui::ClipboardBuffer::kCopyPaste);
+    writer.WriteText(base::UTF8ToUTF16(*request.FindString("text")));
+    writer.WriteHTML(base::UTF8ToUTF16(*request.FindString("html")), "");
+  }
+  return ControlResult::Success(id, base::DictValue()
+                                        .Set("sequence", base::NumberToString(sequence_))
+                                        .Set("baseRevision", base_revision_));
 }
 }  // namespace remotekit::browser

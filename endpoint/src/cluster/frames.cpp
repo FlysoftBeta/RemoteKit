@@ -6,6 +6,10 @@ Error Invalid() {
 }
 }  // namespace
 size_t JsonLimit(const Json& message) {
+  if (message.value("method", Json()) == "session.desired" ||
+      message.value("event", Json()) == "session.observed" ||
+      message.value("event", Json()) == "session.event")
+    return kMaxPlaintext - 1;
   if (message.value("type", Json()) == "clipboard.changed")
     return 4 * 1024 * 1024 - 1;
   const auto method = message.value("method", Json());

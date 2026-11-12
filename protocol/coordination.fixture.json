@@ -1,0 +1,37 @@
+{
+  "method": "session.desired",
+  "connectionEpoch": "connection",
+  "tenantId": "tenant",
+  "sessionId": "11111111111111111111111111111111",
+  "placementEpoch": 1,
+  "revision": "1",
+  "run": "running",
+  "commit": null,
+  "profileKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "checkpoint": null,
+  "sitePreferences": { "sites": {} },
+  "mediaPolicy": { "audio": false, "maxFps": 60, "degradationPreference": "balanced" },
+  "quality": { "effectiveDpr": 1 },
+  "clipboard": { "revision": "0", "value": { "text": "", "html": "" } },
+  "views": [
+    {
+      "viewId": "1",
+      "presence": "ensure",
+      "url": "about:blank",
+      "width": 1440,
+      "height": 900,
+      "visible": false,
+      "device": { "mode": "desktop", "deviceScaleFactor": 1 },
+      "occludedBottom": 0,
+      "occlusionRevision": "1"
+    }
+  ],
+  "authorization": {
+    "connectionId": null,
+    "epoch": 0,
+    "unlocked": false,
+    "files": { "library": false, "requests": [] }
+  },
+  "lock": { "leaseId": null, "epoch": 0, "state": "locked" },
+  "library": { "describe": [] }
+}

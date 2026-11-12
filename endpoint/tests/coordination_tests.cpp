@@ -1,0 +1,54 @@
+#include "management/coordination.hpp"
+#include <fstream>
+#include <iostream>
+#include <stdexcept>
+
+using namespace remotekit;
+namespace {
+void Check(bool value, const char* message) {
+  if (!value)
+    throw std::runtime_error(message);
+}
+}  // namespace
+int main(int argc, char** argv) {
+  try {
+    Check(argc == 2, "fixture required");
+    std::ifstream input(argv[1]);
+    Json desired;
+    input >> desired;
+    Check(bool(coordination::ValidateDesired(desired)), "valid desired fixture");
+    auto invalid = desired;
+    invalid["commit"] = "commit";
+    Check(!coordination::ValidateDesired(invalid), "running commit rejected");
+    invalid = desired;
+    invalid["views"].push_back(invalid["views"][0]);
+    Check(!coordination::ValidateDesired(invalid), "duplicate views rejected");
+    invalid = desired;
+    invalid["views"][0]["occludedBottom"] = 901;
+    Check(!coordination::ValidateDesired(invalid), "invalid occlusion rejected");
+    invalid = desired;
+    invalid["unrecognized"] = true;
+    Check(!coordination::ValidateDesired(invalid), "unknown fields rejected");
+    for (const auto* value : {"0", "1", "18446744073709551615"})
+      Check(coordination::Counter(value), "valid counter");
+    for (const auto* value : {"01", "-1", "18446744073709551616", "1.0"})
+      Check(!coordination::Counter(value), "invalid counter");
+    Check(!coordination::Counter("0", true), "positive counter");
+    Json node{{"method", "node.desired"},
+              {"connectionEpoch", "connection"},
+              {"revision", "1"},
+              {"sessions", Json::array()}};
+    Check(bool(coordination::ValidateNodeDesired(node)), "empty fencing list");
+    node["sessions"].push_back({{"tenantId", "tenant"},
+                                {"sessionId", std::string(32, '1')},
+                                {"placementEpoch", 1},
+                                {"dataState", "dirty"}});
+    Check(bool(coordination::ValidateNodeDesired(node)), "fencing list");
+    node["sessions"].push_back(node["sessions"][0]);
+    Check(!coordination::ValidateNodeDesired(node), "duplicate fence rejected");
+    return 0;
+  } catch (const std::exception& error) {
+    std::cerr << error.what() << '\n';
+    return 1;
+  }
+}

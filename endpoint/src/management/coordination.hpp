@@ -1,0 +1,163 @@
+#pragma once
+
+#include "session/view_configuration.hpp"
+#include "util/result_macros.hpp"
+#include <set>
+
+namespace remotekit::coordination {
+inline constexpr size_t kMaxSessions = 64;
+inline constexpr size_t kMaxViews = 256;
+inline constexpr size_t kMaxResults = 1024;
+inline constexpr size_t kMaxEvents = 4096;
+inline constexpr size_t kMaxEventBytes = 32 * 1024 * 1024;
+inline constexpr size_t kMaxDocumentBytes = 4 * 1024 * 1024 - 1;
+
+inline bool Counter(const Json& value, bool positive = false) {
+  if (!value.is_string())
+    return false;
+  const auto& text = value.get_ref<const std::string&>();
+  uint64_t result = 0;
+  const auto parsed = std::from_chars(text.data(), text.data() + text.size(), result);
+  return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() &&
+         std::to_string(result) == text && (!positive || result != 0);
+}
+inline bool Hex(const Json& value, size_t size) {
+  if (!value.is_string())
+    return false;
+  const auto& text = value.get_ref<const std::string&>();
+  return text.size() == size && std::all_of(text.begin(), text.end(), [](char c) {
+           return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+         });
+}
+inline bool Epoch(const Json& value, bool zero = false) {
+  return value.is_number_integer() && value >= (zero ? 0 : 1) && value <= 9007199254740991ULL;
+}
+inline bool Keys(const Json& value,
+                 std::initializer_list<const char*> required,
+                 std::initializer_list<const char*> optional = {}) {
+  if (!value.is_object())
+    return false;
+  std::set<std::string> allowed;
+  for (const auto* name : required) {
+    if (!value.contains(name))
+      return false;
+    allowed.insert(name);
+  }
+  for (const auto* name : optional)
+    allowed.insert(name);
+  for (const auto& [name, item] : value.items())
+    if (!allowed.contains(name))
+      return false;
+  return true;
+}
+inline Result<void> ValidateTarget(const Json& value) {
+  if (!value.contains("tenantId") || !value["tenantId"].is_string() ||
+      value["tenantId"].get_ref<const std::string&>().empty() ||
+      !Hex(value.value("sessionId", Json()), 32) || !Epoch(value.value("placementEpoch", Json())))
+    return Error{ErrorCode::kInvalidRequest, "invalid Session target"};
+  return {};
+}
+inline Result<void> ValidateNodeDesired(const Json& value) {
+  if (!Keys(value, {"method", "connectionEpoch", "revision", "sessions"}, {"id"}) ||
+      value["method"] != "node.desired" || !value["connectionEpoch"].is_string() ||
+      !Counter(value["revision"], true) || !value["sessions"].is_array() ||
+      value["sessions"].size() > kMaxSessions)
+    return Error{ErrorCode::kInvalidRequest, "invalid node.desired"};
+  std::set<std::string> tenants, sessions;
+  for (const auto& session : value["sessions"]) {
+    RK_RETURN_IF_ERROR(ValidateTarget(session));
+    if (!Keys(session, {"tenantId", "sessionId", "placementEpoch", "dataState"}) ||
+        (session["dataState"] != "clean" && session["dataState"] != "dirty") ||
+        !tenants.insert(session["tenantId"].get<std::string>()).second ||
+        !sessions.insert(session["sessionId"].get<std::string>()).second)
+      return Error{ErrorCode::kInvalidRequest, "invalid fencing list"};
+  }
+  return {};
+}
+inline Result<void> ValidateDesired(const Json& value) {
+  if (!Keys(value,
+            {"method", "connectionEpoch", "tenantId", "sessionId", "placementEpoch", "revision",
+             "run", "commit", "profileKey", "checkpoint", "sitePreferences", "mediaPolicy",
+             "quality", "clipboard", "views", "authorization", "lock", "library"},
+            {"id"}) ||
+      value["method"] != "session.desired" || !value["connectionEpoch"].is_string() ||
+      !Counter(value["revision"], true))
+    return Error{ErrorCode::kInvalidRequest, "invalid session.desired"};
+  RK_RETURN_IF_ERROR(ValidateTarget(value));
+  const auto& commit = value["commit"];
+  if ((value["run"] != "running" && value["run"] != "stopped") ||
+      (!commit.is_null() &&
+       (!commit.is_string() || commit.get_ref<const std::string&>().empty() ||
+        commit.get_ref<const std::string&>().size() > 128 || value["run"] == "running")) ||
+      !value["profileKey"].is_string() ||
+      (!value["checkpoint"].is_null() && !Hex(value["checkpoint"], 64)))
+    return Error{ErrorCode::kInvalidRequest, "invalid desired run or checkpoint"};
+  const auto& clipboard = value["clipboard"];
+  if (!Keys(clipboard, {"revision", "value"}) || !Counter(clipboard["revision"]) ||
+      !Keys(clipboard["value"], {"text", "html"}) || !clipboard["value"]["text"].is_string() ||
+      !clipboard["value"]["html"].is_string() ||
+      clipboard["value"]["text"].get_ref<const std::string&>().size() > 1024 * 1024 ||
+      clipboard["value"]["html"].get_ref<const std::string&>().size() > 2 * 1024 * 1024)
+    return Error{ErrorCode::kInvalidRequest, "invalid desired clipboard"};
+  if (!Keys(value["quality"], {"effectiveDpr"}) || !value["quality"]["effectiveDpr"].is_number() ||
+      !std::isfinite(value["quality"]["effectiveDpr"].get<double>()) ||
+      value["quality"]["effectiveDpr"] <= 0 || !value["views"].is_array() ||
+      value["views"].size() > kMaxViews)
+    return Error{ErrorCode::kInvalidRequest, "invalid desired quality or views"};
+  std::set<std::string> views;
+  for (const auto& view : value["views"]) {
+    if (!Keys(view,
+              {"viewId", "presence", "url", "width", "height", "visible", "device",
+               "occludedBottom", "occlusionRevision"},
+              {"signIn", "adopt"}) ||
+        !Counter(view["viewId"], true) || !views.insert(view["viewId"].get<std::string>()).second ||
+        (view["presence"] != "ensure" && view["presence"] != "ifPresent") ||
+        !view["url"].is_string() || !view["visible"].is_boolean() ||
+        !Counter(view["occlusionRevision"]) ||
+        !Keys(view["device"], {"mode", "deviceScaleFactor"}) ||
+        view["device"]["mode"] != "desktop" ||
+        view["device"]["deviceScaleFactor"] != value["quality"]["effectiveDpr"] ||
+        (view.contains("signIn") && view.contains("adopt")))
+      return Error{ErrorCode::kInvalidRequest, "invalid desired view"};
+    RK_RETURN_IF_ERROR(ValidateViewConfiguration(view));
+    if (view["occludedBottom"] > view["height"])
+      return Error{ErrorCode::kInvalidRequest, "invalid desired view occlusion"};
+    if (view.contains("adopt") && (!Keys(view["adopt"], {"browserIncarnation", "provisionalId"}) ||
+                                   !view["adopt"]["browserIncarnation"].is_string() ||
+                                   !view["adopt"]["provisionalId"].is_string()))
+      return Error{ErrorCode::kInvalidRequest, "invalid desired adoption"};
+  }
+  const auto& media = value["mediaPolicy"];
+  if (!Keys(media, {"audio", "maxFps", "degradationPreference"}) || !media["audio"].is_boolean() ||
+      !media["maxFps"].is_number_integer() || media["maxFps"] < 1 || media["maxFps"] > 240 ||
+      (media["degradationPreference"] != "maintain-resolution" &&
+       media["degradationPreference"] != "balanced" &&
+       media["degradationPreference"] != "maintain-framerate"))
+    return Error{ErrorCode::kInvalidRequest, "invalid desired media policy"};
+  const auto& auth = value["authorization"];
+  const auto& lock = value["lock"];
+  if (!Keys(auth, {"connectionId", "epoch", "unlocked", "files"}) ||
+      (!auth["connectionId"].is_null() && !auth["connectionId"].is_string()) ||
+      !Epoch(auth["epoch"], auth["connectionId"].is_null()) || !auth["unlocked"].is_boolean() ||
+      (auth["connectionId"].is_null() && (auth["epoch"] != 0 || auth["unlocked"] != false)) ||
+      !Keys(auth["files"], {"library", "requests"}) || !auth["files"]["library"].is_boolean() ||
+      !auth["files"]["requests"].is_array() || auth["files"]["requests"].size() > 64 ||
+      !Keys(lock, {"leaseId", "epoch", "state"}) || !Epoch(lock["epoch"], true) ||
+      (!lock["leaseId"].is_null() && !lock["leaseId"].is_string()) ||
+      (lock["state"] != "locked" && lock["state"] != "unlocking" && lock["state"] != "unlocked"))
+    return Error{ErrorCode::kInvalidRequest, "invalid desired authorization"};
+  if (!Keys(value["sitePreferences"], {"sites"}) ||
+      !value["sitePreferences"]["sites"].is_object() ||
+      value["sitePreferences"]["sites"].size() > 4096 || !Keys(value["library"], {"describe"}) ||
+      !value["library"]["describe"].is_array() || value["library"]["describe"].size() > 256)
+    return Error{ErrorCode::kInvalidRequest, "invalid desired policy"};
+  for (const auto& asset : value["library"]["describe"])
+    if (!Hex(asset, 64))
+      return Error{ErrorCode::kInvalidRequest, "invalid described asset"};
+  auto configuration = value;
+  configuration.erase("clipboard");
+  if (configuration.dump().size() > 1024 * 1024 || value.dump().size() > kMaxDocumentBytes)
+    return Error{ErrorCode::kLimitExceeded, "desired document exceeds bound"};
+  return {};
+}
+}  // namespace remotekit::coordination
