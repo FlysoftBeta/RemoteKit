@@ -1857,3 +1857,73 @@ test('offline lock and unlock queue desired state and navigation reports the ava
     await h.close();
   }
 });
+
+test('chunk commits do no library recomputes and last replica loss refreshes only referencing tenants', async (t) => {
+  const h = await harness(null);
+  try {
+    const alpha = await h.connect('alpha');
+    await h.gateway.published('tenant');
+    for (let index = 0; index < 50; ++index) {
+      const tenant = `online-${index}`;
+      h.store.workspaces.writeWorkspace(emptyWorkspace(tenant));
+      h.control.tenants.get(tenant).viewer = {
+        id: tenant,
+        revoke() {},
+        authentication: { identity: tenant, valid: () => true },
+        security: h.control.security.create({ id: tenant } as any, true),
+      };
+    }
+    const recomputed: string[] = [];
+    const refresh = h.control.library.refreshAvailability.bind(h.control.library);
+    t.mock.method(h.control.library, 'refreshAvailability', (tenant: string) => {
+      recomputed.push(tenant);
+      refresh(tenant);
+    });
+    for (let start = 0; start < 10000; start += 1000) {
+      h.control.objects.committedBatch(h.nodes.get('alpha')!, {
+        tenantId: 'tenant',
+        objects: Array.from({ length: 1000 }, (_, i) => ({
+          objectId: id(start + i + 1),
+          size: 10,
+          storedSize: 50,
+          storedSha256: id(start + i + 10001),
+        })),
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 275));
+    assert.deepEqual(recomputed, []);
+    for (const tenant of ['online-2', 'online-19'])
+      h.store.library.save(tenant, {
+        revision: 0,
+        entries: [
+          {
+            id: 'file',
+            kind: 'file',
+            available: true,
+            assetId: id(1),
+            name: 'file',
+            type: 'text/plain',
+            size: 10,
+            createdAt: 0,
+            partitionId: null,
+            collected: true,
+            source: { app: 'files', channel: 'upload' },
+          },
+        ],
+        basket: [],
+        partitions: [],
+        sources: [],
+        excludedSources: [],
+        basketPartitionId: null,
+      });
+    const offline = once(h.nodes.get('alpha')!, 'offline');
+    alpha.close();
+    await offline;
+    for (let i = 0; i < 10; ++i) h.control.library.objectsChanged([id(1)]);
+    await new Promise((resolve) => setTimeout(resolve, 275));
+    assert.deepEqual(recomputed.sort(), ['online-19', 'online-2']);
+    assert.equal(h.control.objects.available(id(1)), false);
+  } finally {
+    await h.close();
+  }
+});

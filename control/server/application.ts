@@ -132,9 +132,7 @@ export function createApplication(
     services.objects,
     (tenant, requestId) => services.workspace.fileSourceForRequest(tenant, requestId),
   );
-  services.objects.onAvailabilityChanged = () => {
-    for (const [tenant] of context.tenants.withViewers()) services.library.refreshAvailability(tenant);
-  };
+  services.objects.onAvailabilityChanged = (ids) => services.library.objectsChanged(ids);
   services.learning = new LearningService(context, services);
   services.clipboard = new ClipboardService(context, services);
   endpoint.setDesiredSource((tenant) => compileDesired(context, services, tenant));
@@ -197,6 +195,7 @@ export function createApplication(
     await services.learning.stop();
     await services.sessionImporter.stop();
     await context.tenants.close();
+    services.library.close();
     await services.objects.close();
     await services.sessionPurge.close();
     store.reclaim.close();
@@ -226,7 +225,6 @@ export function startApplication(
   }
   const endpointReady = (identity: { processChanged: boolean; nodeId: string }) => {
     if (!closing) {
-      for (const [tenant] of control.tenants.withViewers()) control.library.refreshAvailability(tenant);
       run(control.reconciler.endpointReady(identity));
     }
   };
@@ -238,11 +236,7 @@ export function startApplication(
   const reconciliationTimer = setInterval(() => {
     if (!closing) {
       run(control.reconciler.tick());
-      run(
-        control.objects.tick().then(() => {
-          for (const [tenant] of control.tenants.withViewers()) control.library.refreshAvailability(tenant);
-        }),
-      );
+      run(control.objects.tick().then(() => {}));
       run(control.servicePeers.tick());
     }
   }, 1500);

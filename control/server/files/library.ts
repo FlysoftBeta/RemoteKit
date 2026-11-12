@@ -148,6 +148,22 @@ function entries(snapshot: LibrarySnapshot, entryIds: string[]) {
 export class FileLibrary {
   private readonly queues = new KeyedSerialQueue();
   private readonly availability = new Map<string, string>();
+  private readonly availabilityTimers = new Map<string, NodeJS.Timeout>();
+  objectsChanged(ids: string[]) {
+    for (const tenant of this.repository.referencingTenants(ids)) {
+      if (this.availabilityTimers.has(tenant)) continue;
+      const timer = setTimeout(() => {
+        this.availabilityTimers.delete(tenant);
+        this.refreshAvailability(tenant);
+      }, 250);
+      timer.unref();
+      this.availabilityTimers.set(tenant, timer);
+    }
+  }
+  close() {
+    for (const timer of this.availabilityTimers.values()) clearTimeout(timer);
+    this.availabilityTimers.clear();
+  }
   private project(tenant: string, snapshot: LibrarySnapshot) {
     return {
       ...snapshot,

@@ -51,6 +51,16 @@ export interface Selection {
 
 export class LibraryRepository {
   constructor(private readonly db: Database.Database) {}
+  referencingTenants(ids: string[]) {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT tenant FROM library_entry_objects
+      WHERE object_id IN (SELECT value FROM json_each(?))`,
+        )
+        .all(JSON.stringify(ids)) as { tenant: string }[]
+    ).map((row) => row.tenant);
+  }
   availabilityChanged(tenant: string) {
     this.db.prepare('UPDATE library_state SET revision=revision+1 WHERE tenant=?').run(tenant);
   }

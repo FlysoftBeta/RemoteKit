@@ -69,6 +69,7 @@ export class ObjectIndex {
   private readonly jobs = new Set<Promise<unknown>>();
   private maintenance?: Promise<void>;
   private closed = false;
+  private readonly availableObjects = new Set<string>();
   constructor(
     private readonly store: ControlDatabase,
     readonly nodes: NodeRegistry,
@@ -116,13 +117,20 @@ export class ObjectIndex {
     nodes.handlers.set('object.committed.batch', (node, message) => this.committedBatch(node, message));
     nodes.handlers.set('object.locate', (node, message) => this.locate(node, message));
     nodes.handlers.set('object.derivation', (node, message) => this.derivation(node, message));
+    for (const row of this.store.db
+      .prepare(
+        `SELECT DISTINCT id FROM object_replicas
+      WHERE node_id IN (SELECT value FROM json_each(?))`,
+      )
+      .all(JSON.stringify(this.readyNodeIds())) as { id: string }[])
+      this.availableObjects.add(row.id);
     nodes.on('ready', this.ready);
     nodes.on('metrics', this.metrics);
     nodes.on('offline', this.offline);
   }
   private readonly offline = (nodeId: string) => {
     this.readFetches.delete(nodeId);
-    this.onAvailabilityChanged?.();
+    this.nodeAvailabilityChanged(nodeId);
   };
   private track(work: Promise<unknown>) {
     this.jobs.add(work);
@@ -132,6 +140,7 @@ export class ObjectIndex {
   }
   private readonly ready = ({ nodeId }: { nodeId: string }) => {
     this.readFetches.delete(nodeId);
+    this.nodeAvailabilityChanged(nodeId);
     this.store.db
       .prepare("UPDATE object_render_failures SET retry_at=0 WHERE reason='unavailable' AND build_id=?")
       .run(this.nodes.options.buildId);
@@ -330,7 +339,7 @@ export class ObjectIndex {
       for (const tenant of quotas) this.checkQuota(tenant);
     });
     for (const effect of effects) effect();
-    this.onAvailabilityChanged?.();
+    this.refreshObjectAvailability([message.objectId]);
     return { accepted: true };
   }
   committedBatch(node: NodeLink, message: Record<string, any>) {
@@ -378,7 +387,7 @@ export class ObjectIndex {
       });
     }
     for (const effect of effects) effect();
-    this.onAvailabilityChanged?.();
+    this.refreshObjectAvailability(message.objects.map((item: { objectId: string }) => item.objectId));
     return { ok: true };
   }
   private commitObject(
@@ -502,7 +511,56 @@ export class ObjectIndex {
   available(id: string) {
     return this.sources(id).length > 0;
   }
-  onAvailabilityChanged?: () => void;
+  onAvailabilityChanged?: (ids: string[]) => void;
+  private readyNodeIds(exclude?: string) {
+    return this.nodes
+      .all()
+      .filter(
+        (node) =>
+          node.nodeId !== exclude && node.state.state === 'ready' && !this.nodes.isRemoved(node.nodeId),
+      )
+      .map((node) => node.nodeId);
+  }
+  private updateAvailability(rows: { id: string; replicas: bigint }[]) {
+    const changed: string[] = [];
+    for (const row of rows) {
+      const available = row.replicas > 0n;
+      if (available === this.availableObjects.has(row.id)) continue;
+      if (available) this.availableObjects.add(row.id);
+      else this.availableObjects.delete(row.id);
+      changed.push(row.id);
+    }
+    if (changed.length) this.onAvailabilityChanged?.(changed);
+  }
+  private refreshObjectAvailability(ids: string[]) {
+    this.updateAvailability(
+      this.store.db
+        .prepare(
+          `SELECT requested.value AS id, count(r.node_id) AS replicas
+      FROM json_each(?) requested LEFT JOIN object_replicas r ON r.id=requested.value
+      AND r.node_id IN (SELECT value FROM json_each(?)) GROUP BY requested.value`,
+        )
+        .all(JSON.stringify(ids), JSON.stringify(this.readyNodeIds())) as { id: string; replicas: bigint }[],
+    );
+  }
+  private nodeAvailabilityChanged(nodeId: string, exclude = false) {
+    this.updateAvailability(
+      this.store.db
+        .prepare(
+          `SELECT affected.id, count(ready.node_id) AS replicas
+      FROM object_replicas affected LEFT JOIN object_replicas ready ON ready.id=affected.id
+      AND ready.node_id IN (SELECT value FROM json_each(?)) WHERE affected.node_id=? GROUP BY affected.id`,
+        )
+        .all(JSON.stringify(this.readyNodeIds(exclude ? nodeId : undefined)), nodeId) as {
+        id: string;
+        replicas: bigint;
+      }[],
+    );
+  }
+  private removeReplica(id: string, nodeId: string) {
+    this.store.db.prepare('DELETE FROM object_replicas WHERE id=? AND node_id=?').run(id, nodeId);
+    this.refreshObjectAvailability([id]);
+  }
   private sources(id: string) {
     return (
       this.store.db.prepare('SELECT node_id FROM object_replicas WHERE id=? ORDER BY node_id').all(id) as {
@@ -673,14 +731,13 @@ export class ObjectIndex {
               .run(item.id, node.nodeId);
           else if (indexed) {
             await node.request('object.delete', '', { ids: [item.id] });
-            this.store.db
-              .prepare('DELETE FROM object_replicas WHERE id=? AND node_id=?')
-              .run(item.id, node.nodeId);
+            this.removeReplica(item.id, node.nodeId);
           } else
             this.store.db
               .prepare('INSERT OR IGNORE INTO object_inventory_orphans VALUES (?,?,?)')
               .run(node.nodeId, item.id, Date.now());
         }
+        this.refreshObjectAvailability(page.objects.map((item: { id: string }) => item.id));
         cursor = page.next;
         if (cursor !== null && seen.has(cursor))
           throw new RemoteKitError('internal', '文件清单游标重复', { detail: 'Inventory cursor repeated' });
@@ -691,9 +748,7 @@ export class ObjectIndex {
         .prepare('SELECT id FROM object_replicas WHERE node_id=?')
         .all(node.nodeId) as { id: string }[])
         if (!present.has(item.id) && !this.fetches.get(node.nodeId)?.has(item.id))
-          this.store.db
-            .prepare('DELETE FROM object_replicas WHERE id=? AND node_id=?')
-            .run(item.id, node.nodeId);
+          this.removeReplica(item.id, node.nodeId);
       for (const item of this.store.db
         .prepare('SELECT id FROM object_inventory_orphans WHERE node_id=?')
         .all(node.nodeId) as { id: string }[])
@@ -771,9 +826,7 @@ export class ObjectIndex {
           if (node?.state.state !== 'ready') continue;
           await node.request('object.delete', '', { ids: [object.id] });
           references = undefined;
-          this.store.db
-            .prepare('DELETE FROM object_replicas WHERE id=? AND node_id=?')
-            .run(object.id, node.nodeId);
+          this.removeReplica(object.id, node.nodeId);
         }
         if (!this.store.db.prepare('SELECT 1 FROM object_replicas WHERE id=?').get(object.id))
           this.store.transaction(() => {
@@ -934,9 +987,7 @@ export class ObjectIndex {
         }
         if (elsewhere.length < target) continue;
         await node.request('object.delete', '', { ids: [object.id] });
-        this.store.db
-          .prepare('DELETE FROM object_replicas WHERE id=? AND node_id=?')
-          .run(object.id, node.nodeId);
+        this.removeReplica(object.id, node.nodeId);
         free = Math.max(free + Number(object.stored_size), node.metrics.latest()?.value.disk.free ?? 0);
       }
     }
@@ -1000,6 +1051,7 @@ export class ObjectIndex {
     };
   }
   forgetNode(nodeId: string) {
+    this.nodeAvailabilityChanged(nodeId, true);
     this.store.db.prepare('DELETE FROM object_replicas WHERE node_id=?').run(nodeId);
     this.store.db.prepare('DELETE FROM object_inventory_orphans WHERE node_id=?').run(nodeId);
   }
