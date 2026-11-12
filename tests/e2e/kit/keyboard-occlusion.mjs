@@ -216,6 +216,21 @@ export async function keyboardOcclusion(kind) {
         { start: before.frames, height: pageHeight },
         { timeout: 15000 },
       );
+      await page.waitForFunction(
+        ({ start, height }) => {
+          const frame = occlusionQA.frames
+            .slice(start)
+            .find((entry) => entry.correct && Math.abs(entry.pageHeight - height) <= 1);
+          return (
+            frame &&
+            occlusionQA.wire.some(
+              (entry) => entry.message.type === 'frame' && entry.message.rtpTimestamp === frame.rtp,
+            )
+          );
+        },
+        { start: before.frames, height: pageHeight },
+        { timeout: 15000 },
+      );
       const sample = await page.evaluate(
         ({ before, pageHeight }) => {
           const frames = occlusionQA.frames.slice(before.frames);
@@ -230,7 +245,15 @@ export async function keyboardOcclusion(kind) {
               frame.at - (occlusionQA.geometries.find((event) => event.at >= before.at)?.at ?? before.at),
             layouts: wire.filter((e) => e.message.type === 'layout'),
             barriers: wire.filter((e) => e.message.type === 'presentation.prepare'),
-            keyframes: wire.filter((e) => e.message.type === 'frame' && e.message.keyframe),
+            // Data-channel metadata can arrive after a later occlusion has started.
+            keyframes: wire.filter(
+              (entry) =>
+                entry.message.type === 'frame' &&
+                entry.message.keyframe &&
+                entry.message.viewports?.some(
+                  (view) => view.viewId === frame.viewId && view.occlusionRevision === frame.revision,
+                ),
+            ),
             waiting: !!document.querySelector('.resize-waiting'),
             frozen: !!document.querySelector('.remote-resize-freeze'),
             box: document.querySelector('.remote-viewport').getBoundingClientRect().toJSON(),
