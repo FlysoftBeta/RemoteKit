@@ -18,15 +18,13 @@
 锁定必须真正停止产品数据，而不只是本地遮挡：
 
 1. Control 立即停止产品动作和完整状态推送（锁定期间 WS 只推送 auth 与必要的信令），本地状态立即变为锁定。
-2. Control 通知 Endpoint 安装新的授权代次（`rtc.authorize{connectionId, epoch, unlocked:false}`）。Endpoint 撤销旧的产品授权：退役排队中的旧输入、产品动作、文件授权；SDK 停止视频与音频 RTP 发送并清空产品媒体。媒体帧在异步编码全程携带接纳时的代次，旧代次的帧不会在解锁后被发出。
+2. Control 通知 Endpoint 给两条 peer 安装新的授权代次（Session peer：`rtc.authorize{connectionId, epoch, unlocked:false}`；service peer：`service.authorize`）。Endpoint 撤销旧的授权：退役排队中的旧输入与文件授权；SDK 停止视频与音频 RTP 发送并清空产品媒体。媒体帧在异步编码全程携带接纳时的代次，旧代次的帧不会在解锁后被发出。
 3. 客户端本地隐藏画面、音频和弹窗。已经在网络或 SCTP 缓冲里的数据无法收回，所以本地呈现的锁定也是执行的一部分。
-4. peer、两条 DataChannel 和接收 track 都保留；认证通道继续可用。
+4. peer、DataChannel 和接收 track 都保留；service peer 上的认证通道继续可用。
 
-解锁只在 Endpoint ACK 新代次、并重新完成布局屏障与关键帧之后才生效；解锁时 `media.presentation` 带 `restart:true` 重新发布布局，处理 RTC 和 WS 到达顺序不同的情况。
+**解锁只靠 Control**：密码与 PIN 在 Control 校验通过即解锁外壳（`shellReady`），不需要任何 Endpoint 在线——Session 所在节点离线时用户照样能登录、解锁、使用开始屏幕、设置、我的文件与学习。peer 的授权随后经期望状态与 `service.authorize` 跟上：之后出现的 peer 被授权时不会重新锁定外壳，授权失败只影响 `browserReady`（远端页面）或文件服务。远端页面在 Endpoint ACK 新代次、并重新完成布局屏障与关键帧之后才恢复交互；解锁时 `media.presentation` 带 `restart:true` 重新发布布局，处理 RTC 和 WS 到达顺序不同的情况。
 
-**两个代次**：`AuthState.epoch` 是 Viewer 验证代次（Control 内部的异步工作用它作废迟到的结果）；`peerEpoch` 是 Endpoint 已确认的连接权限代次。产品 DataChannel 消息携带创建时的 `authEpoch`，重试时保留原值；Endpoint 在接收和实际执行时都拒绝旧代次。两者不能混用。管理连接断开时，Endpoint 立即关闭授权，但不重置"最后提交的 unlocked"——相同代次的解锁不能重新打开一个因管理断开而撤销的门，必须更高的代次。
-
-首次登录时曾在 RTC 与授权就绪之前就显示了可操作的工作区，创建操作被误报为"已锁定"。现在 UI 的动作准入要求三者同时满足：产品状态到达、peer 授权已确认、产品 DataChannel 已打开。
+**代次**：`AuthState.epoch` 是 Viewer 验证代次（Control 内部的异步工作用它作废迟到的结果，产品操作在排队执行时也按它重新准入）；每条 peer 另有 Endpoint 已确认的连接权限代次。DataChannel 消息携带创建时的 `authEpoch`，重试时保留原值；Endpoint 在接收和实际执行时都拒绝旧代次。两者不能混用。管理连接断开时，Endpoint 立即关闭授权，但不重置"最后提交的 unlocked"——相同代次的解锁不能重新打开一个因管理断开而撤销的门，必须更高的代次。
 
 ## 凭据存储
 
@@ -55,9 +53,11 @@ recover-credentials.cmd                停止 Control 后执行
 
 **分工**：Control 发起挑战并裁定授权；Endpoint 负责取帧和推理；客户端只采集。图像不经过 Control，不压缩，不落盘。
 
-**挑战**：绑定 Viewer、connectionId、peer 授权代次、随机 challengeId、用途（enroll / verify / presence）、模型版本和过期时间。enroll 60 秒、verify 30 秒、presence 120 秒；Control 约每 500ms 轮询状态。过期、取消、被替换的结果不能解锁。enroll 要求已解锁且提供当前密码；verify 要求已锁定且有当前模型的模板；presence 要求开启"离开即锁定"。
+**不依赖 Session**：模板在 Control，推理只需要节点自带的模型，所以人脸验证（enroll / verify / presence）整个走 Viewer 的 service peer，与 Session 在哪里、是否在运行无关。`FaceController` 由 service peer 持有；模型加载、推理串行与 OpenCV 线程上限按节点共享。只要有任何就绪节点就提供人脸选项；一个就绪节点都没有时解锁界面只显示密码与 PIN，并说明原因。
 
-**传输**：同一 peer 上第二条可靠有序 DataChannel `remotekit-auth`，不加摄像头 RTP track，不建第二个 peer。
+**挑战**：绑定 Viewer、service peer 的 connectionId 与授权代次、随机 challengeId、用途（enroll / verify / presence）、模型版本和过期时间。enroll 60 秒、verify 30 秒、presence 120 秒；Control 约每 500ms 轮询状态。过期、取消、被替换的结果不能解锁。enroll 要求已解锁且提供当前密码；verify 要求已锁定且有当前模型的模板；presence 要求开启"离开即锁定"。
+
+**传输**：service peer 上的可靠有序 DataChannel `remotekit-auth`，与文件通道并列；不加摄像头 RTP track，不为鉴权另建 peer。service peer 换节点或代次变化时，进行中的挑战作废。
 
 ```
 Client   auth.camera.ready{实际尺寸, RGB24, 最高 5fps}

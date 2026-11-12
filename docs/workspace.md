@@ -25,7 +25,7 @@
 - **study**（学习）、**questions**（题库）：本地渲染，单例；登录时窗口里有一个 Control 拥有的登录 Tab（见[学习与题库](learning.md#登录)）。
 - **admin**（管理）：本地渲染，单例，只有管理员能打开（见[控制面 · 账户与管理 App](control-plane.md#账户与管理-app)）。
 
-内置 App 的 appId、标题与单例/本地属性集中在 `shared/product.ts`（`BUILTIN_APP_TITLES`、`isSingletonApp`、`isLocalApp`）。本地窗口（files、settings、admin）不产生远端渲染需求。App 视图状态（files 的标签页及每个文件库标签的视图/搜索、窗口的排列方式，settings 与 admin 的分区）是窗口的 `state`：有界 JSON（≤8KiB），客户端 500ms 去抖后经 WS `window.state` 写回，不走 DataChannel 与操作收据；重连或换设备后原样恢复。地址草稿、滚动位置不持久化。
+内置 App 的 appId、标题与单例/本地属性集中在 `shared/product.ts`（`BUILTIN_APP_TITLES`、`isSingletonApp`、`isLocalApp`）。本地窗口（files、settings、admin）不产生远端渲染需求。App 视图状态（files 的标签页及每个文件库标签的视图/搜索、窗口的排列方式，settings 与 admin 的分区）是窗口的 `state`：有界 JSON（≤8KiB），客户端 500ms 去抖后作为 `window.state` 操作经 `operation.submit` 写回；重连或换设备后原样恢复。地址草稿、滚动位置不持久化。
 
 ### 弹窗与新 Tab
 

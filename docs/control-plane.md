@@ -32,9 +32,16 @@ Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、�
 
 ## 连接
 
-**Viewer ↔ Control**：WebSocket `/api/socket`，承载认证状态、产品快照、设置与文件目录等元数据服务、视口观测、RTC 信令、操作收据查询。
+**Viewer ↔ Control**：WebSocket `/api/socket`，承载认证状态、产品快照、全部产品操作（`operation.submit`）、设置与文件目录等元数据服务、视口观测、RTC 信令、操作收据查询。
 
-**Viewer ↔ Endpoint**：WebRTC。视频、音频、输入、产品动作、文件字节、照片分析都走它。产品动作经 DataChannel 到 Endpoint，再由 Endpoint 经管理连接转交 Control 的唯一提交器（见下文"操作"）。
+**Viewer ↔ Endpoint**：WebRTC，两条互相独立的连接：
+
+- **Session peer**：连到 Session 所在节点，承载视频、音频、输入、页面请求（对话框、权限、文件选择）以及把文件交给页面的原生选择提交（`selection.commit/cancel`）。只有 Session 在运行时才有。
+- **service peer**：只有 DataChannel、没有媒体，连到任意就绪节点，承载文件字节（上传、读取、文档阅读、缩略图、照片处理）与人脸验证（`remotekit-auth`）。它不打开 Session、不启动 Browser。Control 选节点：Session 正在某个就绪节点上运行就用那个节点，否则用预测负载最低的就绪节点；已连上的 service peer 不随负载或 Session 位置迁移（迁移会切断进行中的传输），只在它的节点失联时由 Control 发 `rtc.signal error` 让 Viewer 重新协商。每个 Viewer 只有这一条非 Session 的 peer，不为鉴权或文件再建别的连接。
+
+**两种就绪**：`shellReady` = WS 在线 + Control 侧已解锁 + 有权威的产品快照，开始屏幕、窗口管理、设置、我的文件、学习、管理、公告都只看它；`browserReady` = Session peer 已授权且产品 DataChannel 已打开，只约束远端页面的交互、页面请求、原生全屏与媒体控制。RTC 断开或 peer 代次变化不会锁定外壳、不清空产品快照与操作队列，只撤销属于那条连接的东西（输入、媒体、它的文件授权）。
+
+**浏览器可用性**：`ProductState.browser = {state: 'available' | 'starting' | 'unavailable', reason?, errorId?}`，与放置分开发布：`viewer.attach` 与快照推送从不等待放置或 Browser 对账。`unavailable` 的 reason 为 `session_data_on_offline_node`（数据所在节点离线，等它回来）、`no_eligible_node`（没有可用节点）或最近一次 Browser 失败的 reason；远端页面区域在原处显示一句状态文字（A 类：自动恢复，没有重试按钮，管理员可以[转移](cluster.md#control-侧)）。
 
 **Control ↔ Endpoint**：集群通道（Noise 握手 + AES-GCM，见[多节点 · 集群通道](cluster.md#集群通道)）上的 JSON 请求/回复/事件。本地节点由 Control 启动，走 stdio；远端节点主动连接 `/api/node`（WebSocket）。请求超时 20 秒，JSON 消息上限 1MiB，5 秒握手期限，每节点最多 256 个在途请求。
 
@@ -54,21 +61,22 @@ Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、�
 
 ```
 Client  生成 operationId（UUID）+ operationGeneration，本地显示 pending 投影
-        → DC product.action{version:1, operationId, operationGeneration, action}
-Endpoint 校验当前 peer 与授权代次 → 管理事件 client.action → Control
-Control  每 Tenant 串行：
-         校验 connection/Viewer 租约
+        → WS operation.submit{operationId, operationGeneration, action}
+Control  按已认证的 Viewer 租约与 Control 授权代次准入；每 Tenant 串行：
+         在排队执行时重新核对租约与授权代次
          → 写入收据 accepted（同 ID 同 payload：直接返回原收据；同 ID 不同 payload：冲突）
          → 分配 Tenant 内单调的 operationSequence
-         → applying → 执行（改 workspace + 调用 Endpoint）
+         → applying → 执行（改 workspace；需要 Browser 的效果交给 Endpoint）
          → workspace 变更与收据在同一个 SQLite 事务中提交
-         → rtc.actionResult 回给 Endpoint → DC product.result 回给 Client
-         → 新的 workspace 快照经 WS 推送
+         → 收据作为请求的回复返回 Client，新的 workspace 快照经 WS 推送
+         → 发布新的期望状态，Session 收敛
 ```
+
+所有产品操作（包括设置与窗口视图状态）走这一条路径，没有旁路。一条 WS 连接是有序的，相互依赖的操作保持先后；远端输入仍然靠焦点、布局与输出屏障与之对齐。需要 Browser 执行的操作（`tab.navigate`、`tab.command`、页面回复、退出页面全屏）照常先提交产品意图，Browser 不可用时以 `unavailable` + 放置 reason 失败，显示在对应窗口上；关闭含有远端标签的窗口时 Session 不可达，就只在产品状态里关闭，Session 下次运行时按期望的视图列表清理，此时没有 beforeunload。
 
 收据状态：`accepted → applying → committed | failed | unknown`。`failed` 带结构化 `error:{code, message}`，调用方按 code 处理（见[错误模型](architecture.md#错误模型)）；generation 已轮换的旧收据是 `failed` + `conflict`。
 
-- **unknown** 表示可能已经执行。Endpoint 转发后 15 秒没有结果、或 Native 调用超时，都是 unknown；把超时当作失败会让用户用新 ID 重做，造成重复副作用。unknown 通过 `operation.status` 查询收敛，从不用新 ID 重做。Endpoint 在转发前就失败的操作是 `failed` + `unavailable`，可以原样重试。
+- **unknown** 表示可能已经执行。WS 在提交后断开、或 Native 调用超时，都是 unknown；把超时当作失败会让用户用新 ID 重做，造成重复副作用。unknown 通过 `operation.status` 查询收敛，从不用新 ID 重做。
 - 收据状态由错误码决定，不由异常类型决定：`outcome_unknown`（以及已受理变更的 `internal`）→ unknown；其余 code 都是确定没有执行 → failed，code 原样保存在收据里。
 - 导航和带确认的关闭在获得明确的 Native 证据前保持 applying。
 - 只改产品数据的操作可以先 committed，而 Endpoint 应用仍在 pending（例如站点偏好）。

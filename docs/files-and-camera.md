@@ -12,7 +12,7 @@
 
 同一个资产可以被多个条目引用，各条目有独立的名称、来源、分区和收集状态。资产 id 本身不授予访问：Session 只能读它的 Tenant 引用或认领的对象；没有集群对象密钥的一方也无法用内容 hash 推出 id。对象格式、副本与回收见[多节点 · 对象存储](cluster.md#对象存储)。
 
-**数据路径**：文件字节和照片分析全部走已有的 WebRTC DataChannel（`files.request/result`，version 1），由 Session 拥有的有界磁盘线程处理；元数据走鉴权的 WebSocket。Control 只授权不透明的绑定，从不打开 Endpoint 的磁盘路径——Control 与 Endpoint 可以在不同机器上。哈希、拷贝、OpenCV 不持有媒体锁或 Browser 锁。
+**数据路径**：文件字节和照片分析全部走 Viewer 的 service peer 上的 DataChannel（`files.request/result`，version 1），它连到任意就绪节点，不需要 Session 在运行；只有把文件交给页面的原生选择提交（`selection.commit/cancel`）走 Session peer。两边各自有有界磁盘线程；元数据走鉴权的 WebSocket。Control 只授权不透明的绑定，从不打开 Endpoint 的磁盘路径——Control 与 Endpoint 可以在不同机器上。哈希、拷贝、OpenCV 不持有媒体锁或 Browser 锁。
 
 ## 原生文件选择
 
