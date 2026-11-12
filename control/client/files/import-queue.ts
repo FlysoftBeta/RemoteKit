@@ -1,9 +1,9 @@
-import { retryDelay, errorHandling } from '../../shared/error-policy';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type { LibraryMethods, LibrarySnapshot } from '../../shared/file-library';
 import { FILE_LIMITS } from '../../shared/product';
 import { operationId } from '../control/product-operations';
-import { formatError } from '../util/format-error';
+import { notices, presentFailure } from '../failures';
+import { recoveryDelay } from '../failures/recovery';
 import { Store } from '../util/store';
 import type { FileChannel } from './file-channel';
 
@@ -20,8 +20,8 @@ interface ImportBatch {
 interface ImportState {
   readonly remaining: number;
   readonly busy: boolean;
-  readonly error?: string;
-  readonly retryable?: boolean;
+  readonly error?: RemoteKitError;
+  readonly jobs: { id: string; name: string; error?: RemoteKitError }[];
 }
 interface ImportServices {
   rpc: Pick<FileChannel, 'uploadAsset'>;
@@ -32,31 +32,50 @@ interface ImportServices {
 }
 
 export class ImportQueue extends Store<ImportState> {
+  private visible = 0;
+  show = () => {
+    this.visible++;
+    this.emit();
+    return () => {
+      this.visible--;
+      this.emit();
+    };
+  };
   private batches: ImportBatch[] = [];
   private controller?: AbortController;
   private online = false;
   private scope?: string;
-  private error?: string;
-  private retryable?: boolean;
+  private error?: RemoteKitError;
+  private retryTimer?: ReturnType<typeof setTimeout>;
+  private attempt = 0;
   constructor(
     private readonly services: ImportServices,
     private readonly destination: 'library' | 'basket',
   ) {
-    super({ remaining: 0, busy: false });
+    super({ remaining: 0, busy: false, jobs: [] });
   }
   configure(online: boolean, scope: string | undefined) {
+    if (online === this.online && scope === this.scope) return;
     if (scope !== this.scope) this.discard();
     this.scope = scope;
     this.online = online;
     if (!online) this.controller?.abort();
+    else if (
+      this.batches.length &&
+      !this.controller &&
+      (!this.error || recoveryDelay(this.error, 0) !== undefined)
+    )
+      void this.upload();
   }
   enqueue = (files: File[], basketSize: number, origin: ImportBatch['origin'], afterId?: string) => {
     if (!files.length) return false;
     const maxFiles = this.destination === 'basket' ? 64 - basketSize - this.getSnapshot().remaining : 64;
     if (files.length > maxFiles)
-      throw new RemoteKitError('limit_exceeded', `本次最多可添加 ${maxFiles} 个文件`);
+      throw new RemoteKitError('limit_exceeded', `本次最多可添加 ${maxFiles} 个文件`, {
+        capacity: this.destination === 'basket' ? 'basket' : 'selection',
+      });
     if (files.some((file) => file.size > FILE_LIMITS.maxFileBytes))
-      throw new RemoteKitError('limit_exceeded', '单个文件不能超过 256 MiB');
+      throw new RemoteKitError('limit_exceeded', '单个文件不能超过 256 MiB', { capacity: 'file' });
     const empty = !this.batches.length;
     this.batches.push({
       jobs: files.map((file) => ({ file, operationId: operationId() })),
@@ -67,11 +86,16 @@ export class ImportQueue extends Store<ImportState> {
     if (empty) void this.upload();
     return true;
   };
+  capacityChanged = () => {
+    if (this.error?.code === 'limit_exceeded') void this.upload();
+  };
   discard = () => {
+    for (const batch of this.batches)
+      for (const job of batch.jobs) notices.resolve('task:upload:' + job.operationId);
     this.controller?.abort();
     this.batches = [];
     this.error = undefined;
-    this.retryable = undefined;
+    clearTimeout(this.retryTimer);
     this.emit();
   };
   dispose = () => {
@@ -79,11 +103,11 @@ export class ImportQueue extends Store<ImportState> {
     this.discard();
   };
   upload = async () => {
-    if (!this.batches.length || this.controller || !this.online || this.retryable === false) return;
+    if (!this.batches.length || this.controller || !this.online) return;
     const abort = new AbortController();
     this.controller = abort;
     this.error = undefined;
-    this.retryable = undefined;
+    clearTimeout(this.retryTimer);
     this.emit();
     let batch: ImportBatch | undefined;
     try {
@@ -108,36 +132,55 @@ export class ImportQueue extends Store<ImportState> {
           const index = next.basket.indexOf(batch.afterId);
           if (index >= 0) batch.afterId = next.basket[index + 1] ?? batch.afterId;
         }
+        this.attempt = 0;
+        notices.resolve('task:upload:' + job.operationId);
+        if (!this.visible)
+          notices.post('task:upload:' + job.operationId, { class: 'B', text: '文件已导入我的文件' });
         batch.jobs.shift();
         if (!batch.jobs.length) this.batches.shift();
         this.emit();
       }
     } catch (error) {
       if (!abort.signal.aborted && this.batches[0] === batch) {
-        this.error = formatError(error);
-        this.retryable =
-          error instanceof RemoteKitError &&
-          (retryDelay(error, 0) !== undefined ||
-            error.code === 'limit_exceeded' ||
-            (errorHandling(error.code) === 'reconcile' && !!batch?.jobs[0]?.assetId));
+        this.error = toRemoteKitError(error);
+        const delay = recoveryDelay(this.error, this.attempt++);
+        if (delay !== undefined) this.retryTimer = setTimeout(() => void this.upload(), delay);
       }
     } finally {
       this.controller = undefined;
       this.emit();
-      if (abort.signal.aborted && this.batches.length && this.batches[0] !== batch) void this.upload();
+      if (abort.signal.aborted && this.online && this.batches.length) void this.upload();
     }
   };
   private emit() {
+    for (const batch of this.batches)
+      for (const job of batch.jobs) {
+        const key = 'task:upload:' + job.operationId;
+        if (this.visible) notices.resolve(key);
+        else
+          notices.post(
+            key,
+            presentFailure(this.error ?? new RemoteKitError('unavailable', ''), {
+              operation: '导入文件',
+              scope: 'global',
+              targetId: job.operationId,
+              itemName: job.file.name,
+            }),
+          );
+      }
     this.publish({
       remaining: this.batches.reduce((total, batch) => total + batch.jobs.length, 0),
       busy: !!this.controller && !this.controller.signal.aborted,
       error: this.error,
-      retryable: this.retryable,
+      jobs: this.batches.flatMap((batch, batchIndex) =>
+        batch.jobs.map((job, index) => ({
+          id: job.operationId,
+          name: job.file.name,
+          error: batchIndex === 0 && index === 0 ? this.error : undefined,
+        })),
+      ),
     });
   }
 }
 
-export type ImportControls = Pick<
-  ImportQueue,
-  'subscribe' | 'getSnapshot' | 'enqueue' | 'discard' | 'upload'
->;
+export type ImportControls = Pick<ImportQueue, 'subscribe' | 'getSnapshot' | 'enqueue' | 'discard' | 'show'>;

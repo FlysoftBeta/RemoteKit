@@ -1,13 +1,14 @@
-import { log } from '../server/log';
-import { AtRestKey } from '../server/auth/crypto';
+import Database from 'better-sqlite3';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import Database from 'better-sqlite3';
+import { AtRestKey } from '../server/auth/crypto';
+import type { DownloadEvent } from '../server/endpoint/types';
 import { FileLibrary } from '../server/files/library';
+import { log } from '../server/log';
 import { LibraryRepository } from '../server/persistence/library';
 import { migrate } from '../server/persistence/schema';
 import { PageRequests } from '../server/workspace/page-requests';
-import type { DownloadEvent } from '../server/endpoint/types';
+import { RemoteKitError } from '../shared/errors';
 import type { ProductWorkspace } from '../shared/product';
 
 const imported: DownloadEvent = {
@@ -33,8 +34,10 @@ function fixture() {
     );
   let library = manager();
   const acknowledgements: string[][] = [];
+  const runtime = { backgroundTasks: new Map() };
   const consumer = new PageRequests(
     {
+      tenants: { get: () => runtime },
       endpoint: {
         ackEvents: async (_tenant: string, { eventIds }: { eventIds: string[] }) => {
           assert.ok(db.prepare('SELECT 1 FROM file_library_operations WHERE tenant=?').get('tenant'));
@@ -48,11 +51,13 @@ function fixture() {
         return library;
       },
       operations: { saveWorkspace: () => {} },
+      viewers: { push: () => {} },
     } as never,
   );
   const state = { tenantId: 'tenant', tabs: [] } as unknown as ProductWorkspace;
   return {
     db,
+    runtime,
     repository,
     acknowledgements,
     consume: (events: DownloadEvent[]) => consumer.consumeClosedEvents(state, { events }),
@@ -129,8 +134,7 @@ test('download source origin handles default ports, empty origins and opaque ori
   }
 });
 
-test('excluded download sources and full catalogs durably omit entries, including replay', async (t) => {
-  const warn = t.mock.method(log, 'warn', () => {});
+test('excluded sources omit entries and full catalogs retain the download until space is available', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
   const snapshot = f.repository.snapshot('tenant');
@@ -146,22 +150,18 @@ test('excluded download sources and full catalogs durably omit entries, includin
   const full = f.repository.snapshot('tenant');
   full.entries = Array.from({ length: 4096 }, (_, index) => ({ ...full.entries[0], id: String(index) }));
   f.repository.save('tenant', full);
-  await f.consume([{ ...imported, eventId: 'full' }]);
-  assert.equal(f.repository.snapshot('tenant').entries.length, 4096);
-  assert.deepEqual(
-    warn.mock.calls.map((call) => call.arguments),
-    [
-      [
-        'library.download_omitted_catalog_full',
-        { tenant: 'tenant', assetId: imported.assetId, name: imported.name },
-      ],
-    ],
+  await assert.rejects(
+    f.consume([{ ...imported, eventId: 'full' }]),
+    (error: RemoteKitError) => error.code === 'limit_exceeded',
   );
+  assert.equal(f.repository.snapshot('tenant').entries.length, 4096);
+  assert.equal(f.runtime.backgroundTasks.get('full').error.capacity, 'catalog');
   full.entries = [];
   f.repository.save('tenant', full);
   f.reopen();
   await f.consume([{ ...imported, eventId: 'full' }]);
-  assert.equal(f.repository.snapshot('tenant').entries.length, 0);
+  assert.equal(f.repository.snapshot('tenant').entries.length, 1);
+  assert.equal(f.runtime.backgroundTasks.get('full').state, 'complete');
 });
 
 test('failed downloads only log and acknowledge; a failed catalog commit never acknowledges', async (t) => {

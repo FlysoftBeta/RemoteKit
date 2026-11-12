@@ -1,5 +1,6 @@
 import type { ProductState } from '../shared/product';
 import { OperationsStore } from './control/operations-store';
+import { showFailureScene } from './failures/test-scenes';
 import { installLearningMock } from './test-hooks-learning';
 
 if (import.meta.env.DEV && new URLSearchParams(location.search).has('learningMock')) installLearningMock();
@@ -9,6 +10,7 @@ declare global {
     __remotekitTest: {
       state(): ProductState | null;
       unlock(): Promise<void>;
+      failures: typeof showFailureScene;
     };
   }
 }
@@ -21,6 +23,7 @@ OperationsStore.prototype.acceptSnapshot = function (state) {
 };
 
 window.__remotekitTest = {
+  failures: showFailureScene,
   state: () => JSON.parse(JSON.stringify(operations?.getSnapshot().authoritative ?? null)),
   async unlock() {
     // RevealScreen owns the pattern and its completed-pattern action. Authentication

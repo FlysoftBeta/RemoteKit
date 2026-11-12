@@ -1,7 +1,9 @@
-import './audio-controls.css';
 import { VolumeOffOutlined, VolumeUpOutlined } from '@mui/icons-material';
 import { Button, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material';
+import { RemoteKitError } from '../../shared/errors';
+import { FailureNote } from '../failures';
 import type { AudioChannels, AudioPlaybackState } from '../media/audio-output';
+import './audio-controls.css';
 
 type Choice = 'left' | 'right' | 'none';
 
@@ -20,7 +22,7 @@ export function AudioControls({
   save: (channels: AudioChannels) => void;
   resume: () => void;
   busy: boolean;
-  error: string;
+  error: RemoteKitError | undefined;
 }) {
   const silent = !channels.left && !channels.right;
   const selected: Choice[] = silent
@@ -37,7 +39,7 @@ export function AudioControls({
     if (value.left || value.right) resume();
     save(value);
   };
-  const status = error;
+  const status = busy ? '正在保存声音设置…' : silent ? '声音已关闭' : '声音已开启';
   return (
     <div className="menu-audio">
       <div className="menu-audio-row">
@@ -60,14 +62,12 @@ export function AudioControls({
           <ToggleButton value="none">不播放</ToggleButton>
         </ToggleButtonGroup>
       </div>
-      <Typography
-        variant="caption"
-        aria-live="polite"
-        color={error ? 'error' : 'text.secondary'}
-        className="menu-audio-status"
-      >
-        {status}
-      </Typography>
+      <FailureNote error={error} context={{ operation: '保存声音设置', scope: 'field' }} />
+      {!error && (
+        <Typography variant="caption" className="menu-audio-status">
+          {status}
+        </Typography>
+      )}
       {!silent && playback === 'blocked' && (
         <Button size="small" startIcon={<VolumeUpOutlined />} onClick={resume}>
           点击开启声音

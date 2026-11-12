@@ -1,9 +1,9 @@
-import { log } from '../log';
-import { EndpointSnapshotError, endpointError } from '../endpoint/gateway';
-import { retryDelay, errorHandling } from '../../shared/error-policy';
+import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
-import { settle } from './operations';
+import { EndpointSnapshotError, endpointError } from '../endpoint/gateway';
+import { log } from '../log';
 import { normalizedUsagePage } from '../navigation-url';
+import { settle } from './operations';
 import { pageUsageIdentity } from './workspace';
 
 import type { ProductTab } from '../../shared/product';
@@ -89,7 +89,7 @@ export class Reconciler {
           await this.services.rtc.checkReconnectedRtc(tenant);
           await this.reconcileProduct(tenant);
         } catch (error) {
-          this.context.tenants.get(tenant).lastError = toRemoteKitError(error).message;
+          this.context.tenants.get(tenant).lastError = toRemoteKitError(error);
         }
         this.services.viewers.push(tenant);
       });
@@ -130,7 +130,7 @@ export class Reconciler {
         log.warn('reconciler.hibernate_failed', { tenant, err }),
       );
       runtime.lastErrorKey = 'hibernating';
-      runtime.lastError = '正在保存会话，请稍候';
+      runtime.lastError = undefined;
       this.services.viewers.push(tenant);
       return;
     }
@@ -480,7 +480,7 @@ export class Reconciler {
       if (resourceLimitation) {
         const changed = runtime.lastErrorKey !== 'resource_limit';
         runtime.lastErrorKey = 'resource_limit';
-        runtime.lastError = resourceLimitation;
+        runtime.lastError = new RemoteKitError('limit_exceeded', resourceLimitation, { capacity: 'windows' });
         if (changed) this.services.viewers.push(tenant);
       } else {
         tracking.error = undefined;
@@ -503,7 +503,7 @@ export class Reconciler {
             ? 0
             : Infinity;
       runtime.lastErrorKey = 'endpoint';
-      runtime.lastError = failure.message;
+      runtime.lastError = failure;
       this.services.viewers.push(tenant);
       throw error;
     }

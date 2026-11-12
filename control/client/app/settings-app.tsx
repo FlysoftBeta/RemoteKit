@@ -1,4 +1,3 @@
-import './settings-app.css';
 import {
   AccountCircleOutlined,
   AppsOutlined,
@@ -7,13 +6,12 @@ import {
   CampaignOutlined,
   ExpandMore,
   ImportExportOutlined,
-  LockOutlined,
   KeyboardOutlined,
+  LockOutlined,
   PaletteOutlined,
   TvOutlined,
 } from '@mui/icons-material';
 import {
-  Alert,
   Avatar,
   Button,
   Chip,
@@ -31,14 +29,16 @@ import {
   Typography,
 } from '@mui/material';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { AppDefinition, InstalledApp, ProductState } from '../../shared/product';
-import type { Action } from './product-dialogs';
-import type { WorkspaceCall } from './window-state';
+import { failureError, FailureNote } from '../failures';
+import { AnnouncementList } from './announcements';
 import { AppFields } from './app-editor';
 import { AppIcon } from './app-icon';
+import type { Action } from './product-dialogs';
+import './settings-app.css';
+import type { WorkspaceCall } from './window-state';
 import { WorkspacePreferences } from './workspace-preferences';
-import { AnnouncementList } from './announcements';
-import { formatError } from '../util/format-error';
 
 const sections = [
   ['appearance', '外观', <PaletteOutlined />],
@@ -79,6 +79,7 @@ export function SettingsApp({
   const [narrow, setNarrow] = useState(false);
   const [pushed, setPushed] = useState(!!viewState.section);
   const [message, setMessage] = useState('');
+  const [usageFailure, setUsageFailure] = useState<RemoteKitError>();
   const [clearing, setClearing] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const section = typeof viewState.section === 'string' ? viewState.section : 'appearance';
@@ -162,6 +163,7 @@ export function SettingsApp({
                   退出登录
                 </Button>
               </div>
+              <FailureNote error={usageFailure} context={{ operation: '清除使用记录', scope: 'surface' }} />
               {message && (
                 <Typography variant="body2" color="text.secondary" role="status">
                   {message}
@@ -182,7 +184,7 @@ export function SettingsApp({
                       setClearing(false);
                       void call('usage.clear', { scope: 'all' })
                         .then(() => setMessage('已清除使用记录'))
-                        .catch((error) => setMessage(formatError(error)));
+                        .catch((error) => setUsageFailure(failureError(error)));
                     }}
                   >
                     清除
@@ -218,13 +220,13 @@ function InstalledAppEditor({
     themeColor: app.themeColor,
   });
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const [uninstalling, setUninstalling] = useState(false);
   const run = (command: Parameters<Action>[0]) => {
     setBusy(true);
-    setError('');
+    setError(undefined);
     void action(command)
-      .catch((error) => setError(formatError(error)))
+      .catch((error) => setError(failureError(error)))
       .finally(() => setBusy(false));
   };
   return (
@@ -250,7 +252,7 @@ function InstalledAppEditor({
             onChange={(e) => setValue({ ...value, name: e.target.value })}
           />
           <AppFields value={value} onChange={setValue} />
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && <FailureNote error={error} context={{ operation: '保存应用设置', scope: 'surface' }} />}
           <div className="installed-app-actions">
             <Button color="error" disabled={!online || busy} onClick={() => setUninstalling(true)}>
               卸载

@@ -1023,7 +1023,7 @@ test('WS connection rejects out-of-order runtime states, old socket callbacks, a
     emit(first, { ...state, snapshotSequence: 3 });
     assert.equal(seen.length, 2);
     first.readyState = 3;
-    connection.restart();
+    connection.connect();
     const replacement = sockets[1];
     emit(replacement, { ...state, serverIncarnation: 'replacement', snapshotSequence: 1 });
     emit(first, { ...state, snapshotSequence: 100 });

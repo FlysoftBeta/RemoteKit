@@ -52,7 +52,7 @@ export function pruneSite(state: ProductWorkspace, origin: string) {
 }
 export function ensureSite(state: ProductWorkspace, origin: string): SitePreferences {
   if (!state.sites[origin] && Object.keys(state.sites).length >= 4096)
-    throw new RemoteKitError('limit_exceeded', '站点设置已达上限');
+    throw new RemoteKitError('limit_exceeded', '站点设置已达上限', { capacity: 'site-settings' });
   return (state.sites[origin] ??= {});
 }
 export function sitePayload(state: ProductWorkspace): SessionSitePreferencesRequest['sites'] {

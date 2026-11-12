@@ -1,39 +1,34 @@
-import { KeyboardViewport } from '../editing/keyboard-viewport';
-import './stage.css';
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Add, AdminPanelSettingsOutlined, Logout, WebAssetOutlined } from '@mui/icons-material';
-import { Alert, Button, Typography } from '@mui/material';
+import { Button, Typography } from '@mui/material';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { ProductState } from '../../shared/product';
-import type { ViewerSession } from '../viewer-session';
-import type { WorkspaceSnapshot } from '../control/workspace-session';
 import type { OperationsSnapshot } from '../control/operations-store';
-import { useViewerSessionSelector } from './use-viewer-session';
-import { formatError } from '../util/format-error';
+import type { WorkspaceSnapshot } from '../control/workspace-session';
+import { KeyboardViewport } from '../editing/keyboard-viewport';
+import { NoticeCenter, SurfaceState, failureError, notices, presentFailure } from '../failures';
 import { FileChooserDialog } from '../files/file-chooser-dialog';
-import { DiagnosticCollectionView } from './diagnostic-collection-view';
-import { FloatingDock } from './floating-dock';
-import type { FloatingActions } from './floating-actions';
-import { deadZoneHeight, useTopInsetProbe } from './top-inset';
-import { setUiScale } from './ui-scale';
-import { selectVisibility } from './visibility';
-import { useWindowFullscreen } from './window-fullscreen';
-import { WindowFrame } from './window-frame';
-import { WindowDivider } from './window-divider';
+import type { ViewerSession } from '../viewer-session';
 import { appName } from './app-icon';
-import { SpaceSnapshots } from './space-snapshots';
+import { DiagnosticCollectionView } from './diagnostic-collection-view';
+import type { FloatingActions } from './floating-actions';
+import { FloatingDock } from './floating-dock';
 import { usePagePreviews } from './page-previews';
 import type { Action } from './product-dialogs';
-import type { WorkspaceCall } from './window-state';
+import { SpaceSnapshots } from './space-snapshots';
+import './stage.css';
 import type { SystemControls } from './system-controls';
+import { deadZoneHeight, useTopInsetProbe } from './top-inset';
+import { setUiScale } from './ui-scale';
+import { useViewerSessionSelector } from './use-viewer-session';
+import { selectVisibility } from './visibility';
+import { WindowDivider } from './window-divider';
 import { useDropTarget, useWindowDragging } from './window-drag';
+import { WindowFrame } from './window-frame';
+import { useWindowFullscreen } from './window-fullscreen';
+import type { WorkspaceCall } from './window-state';
 export function useWorkspaceStage(media: ViewerSession, state: ProductState | null, showShell: boolean) {
   const [snapshots] = useState(() => new SpaceSnapshots());
-  const [stageNotice, setStageNotice] = useState('');
-  useEffect(() => {
-    if (!stageNotice) return;
-    const timer = setTimeout(() => setStageNotice(''), 3500);
-    return () => clearTimeout(timer);
-  }, [stageNotice]);
   const [width, setWidth] = useState(0);
   const shell = useRef<HTMLElement>(null);
   const keyboardViewport = useRef(new KeyboardViewport());
@@ -193,7 +188,7 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
     previousSpace.current = { id: workspace?.activeSpaceId ?? null, windowIds: space?.windowIds ?? [] };
     snapshots.retain(state?.workspace.windows.map((win) => win.id) ?? []);
   }, [state?.workspace.activeSpaceId, state?.workspace.windows, snapshots]);
-  return { shell, snapshots, width, scale, deadZone, action, call, stageNotice, notify: setStageNotice };
+  return { shell, snapshots, width, scale, deadZone, action, call };
 }
 export type WorkspaceStage = ReturnType<typeof useWorkspaceStage>;
 export function Stage({
@@ -205,6 +200,7 @@ export function Stage({
   workspaceState,
   operationState,
   viewportNotice,
+  interactionFailure,
   obscured,
   foreground,
   appContent,
@@ -222,7 +218,8 @@ export function Stage({
   floatingActions: FloatingActions;
   workspaceState: WorkspaceSnapshot;
   operationState: OperationsSnapshot;
-  viewportNotice: string;
+  viewportNotice: RemoteKitError | undefined;
+  interactionFailure?: RemoteKitError;
   obscured: boolean;
   foreground: ReturnType<typeof selectVisibility>['foreground'];
   appContent: React.ComponentProps<typeof WindowFrame>['appContent'];
@@ -231,10 +228,25 @@ export function Stage({
   children: React.ReactNode;
 }) {
   const rtcPhase = useViewerSessionSelector(media, (snapshot) => snapshot.rtc.phase);
-  const { shell, width: contentWidth, stageNotice, call, action } = stage;
+  const { shell, width: contentWidth, call, action } = stage;
   const { fullscreen, productReady, diagnosticState, diagnostics } = controls;
-  const { status, error } = workspaceState;
-  const report = media.workspace.report;
+  const { status } = workspaceState;
+  const [surfaceFailure, setSurfaceFailure] = useState<RemoteKitError>();
+  const report = useCallback((error: unknown) => setSurfaceFailure(failureError(error)), []);
+  useEffect(() => {
+    if (status === 'online') notices.resolve('control:connection');
+    else
+      notices.post(
+        'control:connection',
+        presentFailure(media.control.error ?? new RemoteKitError('unavailable', ''), {
+          operation: '恢复工作区连接',
+          scope: 'global',
+          connection: true,
+          issue: status === 'revoked' ? 'lease' : undefined,
+        }),
+      );
+    return () => notices.resolve('control:connection');
+  }, [status, media]);
   const onGeometry = media.viewport.setGeometry;
   const workspace = state.workspace;
   const visibility = selectVisibility(state, contentWidth, controls.windowFullscreen);
@@ -264,53 +276,8 @@ export function Stage({
       ref={shellRef}
     >
       <DiagnosticCollectionView state={diagnosticState} dismiss={() => diagnostics.dismiss()} />
-      <div className="shell-notices" aria-live="polite">
-        {stageNotice && <Alert severity="info">{stageNotice}</Alert>}
-        {status !== 'online' && (
-          <Alert
-            severity="warning"
-            action={
-              status === 'failed' && (
-                <Button color="inherit" size="small" onClick={() => media.control.restart()}>
-                  重试
-                </Button>
-              )
-            }
-          >
-            {status === 'failed' ? '暂时无法连接' : '正在恢复连接…'}
-          </Alert>
-        )}
-        {status === 'online' && !productReady && (
-          <Alert
-            severity={rtcPhase === 'exhausted' ? 'warning' : 'info'}
-            action={
-              rtcPhase === 'exhausted' && (
-                <Button color="inherit" size="small" onClick={() => void media.rtc.connect()}>
-                  重试
-                </Button>
-              )
-            }
-          >
-            {rtcPhase === 'exhausted' ? '浏览器连接失败' : '正在连接浏览器…'}
-          </Alert>
-        )}
-        {(error || operationState.error || viewportNotice || state.endpointError) && (
-          <Alert
-            severity="warning"
-            onClose={() => {
-              media.workspace.dismissError();
-              media.viewport.dismissNotice();
-            }}
-          >
-            {error ||
-              (operationState.error && formatError(operationState.error)) ||
-              viewportNotice ||
-              (state.quality.resourceLimitation
-                ? '当前画面尺寸超出可用范围，请缩小窗口或关闭部分窗口。'
-                : state.endpointError)}
-          </Alert>
-        )}
-      </div>
+      <NoticeCenter />
+
       <FloatingDock actions={floatingActions} />
       {!sideBySide && activeSpace && activeSpace.windowIds.length > 1 && !fullscreen && (
         <div className="narrow-window-switcher" aria-label="空间内窗口">
@@ -366,16 +333,28 @@ export function Stage({
                     />
                   ) : undefined
                 }
-                report={report}
+
                 onGeometry={onGeometry}
                 visible={visibility.visibleWindowIds.includes(w.id)}
                 fullscreen={fullscreen?.windowId === w.id}
+                surfaceFailure={
+                  w.id === activeSpace?.focusedWindowId && (interactionFailure ?? surfaceFailure)
+                    ? {
+                        error: (interactionFailure ?? surfaceFailure)!,
+                        operation: interactionFailure ? '保存拖动结果' : '更新窗口布局',
+                      }
+                    : undefined
+                }
               />
             </React.Fragment>
           );
         })}
         {windows.length === 0 && (
           <div className="workspace-empty">
+            <SurfaceState
+              error={interactionFailure ?? surfaceFailure}
+              context={{ operation: interactionFailure ? '保存拖动结果' : '更新窗口布局', scope: 'surface' }}
+            />
             <div className="workspace-empty-body">
               <WebAssetOutlined className="workspace-empty-icon" />
               <Typography component="h1" variant="h6">

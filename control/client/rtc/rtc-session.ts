@@ -8,9 +8,8 @@ import {
 } from '../media/receive-profile';
 import { type Diagnostics } from '../media/types';
 
-import { RemoteKitError, parseWireError, toRemoteKitError } from '../../shared/errors';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
-import { formatError } from '../util/format-error';
+import { RemoteKitError, parseWireError, toRemoteKitError } from '../../shared/errors';
 import { diagnostics } from '../media/diagnostics';
 import { Events } from '../util/store';
 import type { ControlRpc } from './session-port';
@@ -19,7 +18,7 @@ export type RtcState =
   | { phase: 'idle' }
   | { phase: 'establishing' | 'connected'; attemptId: string }
   | { phase: 'retryWait'; attemptId: string; dueAt: number }
-  | { phase: 'exhausted' | 'stopped' };
+  | { phase: 'exhausted' | 'stopped'; error?: RemoteKitError };
 export type RtcEvent =
   | { type: 'channel' | 'authChannel'; channel: RTCDataChannel }
   | { type: 'track'; track: MediaStreamTrack }
@@ -173,16 +172,15 @@ export class RtcSession {
     if (this.state.phase === 'stopped' || this.state.phase === 'retryWait') return;
     const handling = errorHandling(error.code);
     if (retryDelay(error, this.retryCount) === undefined && handling !== 'reconcile') {
-      this.transition({ phase: 'exhausted' });
-      this.observe({ connection: '连接失败', error: formatError(error) });
+      this.transition({ phase: 'exhausted', error });
+      this.observe({ connection: '连接失败', error: error.message });
       return;
     }
-    if (this.retryCount === 3) {
-      this.transition({ phase: 'exhausted' });
-      this.observe({ connection: '连接失败', error: formatError(error) });
-      return;
-    }
-    const delay = retryDelay(error, this.retryCount++) ?? 1000;
+    const delay = Math.min(
+      60_000,
+      retryDelay(error, this.retryCount) ?? 1000 * 2 ** Math.min(this.retryCount, 6),
+    );
+    this.retryCount++;
     this.transition({ phase: 'retryWait', attemptId, dueAt: Date.now() + delay });
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined;
@@ -213,7 +211,7 @@ export class RtcSession {
       this.observe({ connection: '未连接', error: undefined });
       return;
     }
-    const reason = formatError(failure);
+    const reason = failure.message;
     const attemptId = this.signalAttemptId ?? String(this.attempt);
     const trace = this.connectionAttempts[this.connectionAttempts.length - 1];
     if (trace) {

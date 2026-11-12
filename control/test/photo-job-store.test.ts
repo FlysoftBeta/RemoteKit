@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
-import { RemoteKitError } from '../shared/errors';
-import type { LibraryFileEntry, LibraryMethods, LibrarySnapshot } from '../shared/file-library';
 import type { CapturedBurst } from '../client/files/camera-capture';
 import type { FileChannel, ProcessedPhoto } from '../client/files/file-channel';
 import { PhotoJobStore, type PhotoServices } from '../client/files/photo-job-store';
+import { RemoteKitError } from '../shared/errors';
+import type { LibraryFileEntry, LibraryMethods, LibrarySnapshot } from '../shared/file-library';
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 const originalId = 'a'.repeat(64);
@@ -147,10 +147,10 @@ test('photo processing errors are retryable jobs and retry reuses the uploaded o
   f.store.capture(job.id, Promise.resolve(burst));
   await flush();
   assert.equal(f.store.getSnapshot()[0].state, 'error');
-  assert.equal(f.store.getSnapshot()[0].retryable, true);
+  assert.equal(f.store.getSnapshot()[0].error?.code, 'unavailable');
   assert.equal(f.mutations.length, 0);
   f.setProcess(async () => result);
-  f.store.retry(job.id);
+  t.mock.timers.tick(1000);
   await flush();
   assert.equal(f.uploads.length, 1);
   assert.equal(f.calls.length, 2);
@@ -170,7 +170,17 @@ test('scan failure saves a pending JPEG, releases its slot and resolves to a pho
   const saved = f.mutations[0].params as LibraryMethods['library.import']['params'];
   assert.equal(saved.assetId, originalId);
   assert.equal(saved.name, `photo-${job.id}.jpg`);
-  assert.deepEqual(saved.photo, { mode: 'scan', pending: 'scan-error', warning: 'no document' });
+  assert.deepEqual(saved.photo, {
+    mode: 'scan',
+    pending: 'scan-error',
+    processingFailure: {
+      code: 'rejected',
+      message: 'no document',
+      reason: undefined,
+      errorId: saved.photo!.processingFailure!.errorId,
+    },
+  });
+  assert.match(saved.photo!.processingFailure!.errorId!, /^v-[0-9a-f]{10}$/);
   const pending: LibraryFileEntry = {
     ...entry,
     assetId: saved.assetId,
@@ -361,10 +371,10 @@ test('rotation failures use retry and cancel and keep the original source', asyn
   await flush();
   const job = f.store.getSnapshot()[0];
   assert.equal(job.state, 'error');
-  assert.equal(job.retryable, true);
+  assert.equal(job.error?.code, 'unavailable');
   assert.equal(job.rotationTurns, 1);
   f.setProcess(async () => result);
-  f.store.retry(job.id);
+  t.mock.timers.tick(1000);
   await flush();
   assert.ok(f.calls.every((call) => call.source === target.assetId && call.turns === 0));
   assert.equal(f.mutations[0].params.originalAssetId, target.assetId);

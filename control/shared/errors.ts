@@ -13,9 +13,22 @@ export type ErrorCode =
   | 'outcome_unknown'
   | 'canceled'
   | 'internal';
+export type ErrorCapacity =
+  'storage' | 'basket' | 'catalog' | 'windows' | 'tabs' | 'site-settings' | 'field' | 'selection' | 'file';
+const capacities: ErrorCapacity[] = [
+  'storage',
+  'basket',
+  'catalog',
+  'windows',
+  'tabs',
+  'site-settings',
+  'field',
+  'selection',
+  'file',
+];
 // errorId names the log record that holds this error's full diagnosis
-// (`c-` Control, `e-` Endpoint). It is assigned once and forwarded unchanged.
-const errorIdPattern = /^[ce]-[0-9a-f]{10}$/;
+// (`c-` Control, `e-` Endpoint, `v-` Viewer). It is assigned once and forwarded unchanged.
+const errorIdPattern = /^[cev]-[0-9a-f]{10}$/;
 export function isErrorId(value: unknown): value is string {
   return typeof value === 'string' && errorIdPattern.test(value);
 }
@@ -24,6 +37,7 @@ export class RemoteKitError extends Error {
   readonly reason?: string;
   readonly retryAfterMs?: number;
   readonly cause?: unknown;
+  readonly capacity?: ErrorCapacity;
   errorId?: string;
   constructor(
     readonly code: ErrorCode,
@@ -34,6 +48,7 @@ export class RemoteKitError extends Error {
       retryAfterMs?: number;
       cause?: unknown;
       errorId?: string;
+      capacity?: ErrorCapacity;
     },
   ) {
     super(message);
@@ -41,6 +56,7 @@ export class RemoteKitError extends Error {
     this.detail = options?.detail;
     this.reason = options?.reason;
     this.cause = options?.cause;
+    this.capacity = options?.capacity;
     if (isErrorId(options?.errorId)) this.errorId = options!.errorId;
     if (supportsRetryHint(code) && validRetryHint(options?.retryAfterMs))
       this.retryAfterMs = options!.retryAfterMs;
@@ -76,6 +92,8 @@ export const httpStatus: Record<ErrorCode, number> = {
 export type WireError = {
   code: ErrorCode;
   message: string;
+  reason?: NativeErrorReason;
+  capacity?: ErrorCapacity;
   retryAfterMs?: number;
   errorId?: string;
 };
@@ -95,6 +113,10 @@ export function parseWireError(value: unknown): RemoteKitError | undefined {
   )
     return;
   return new RemoteKitError(wire.code as ErrorCode, wire.message, {
+    capacity: capacities.includes(wire.capacity as ErrorCapacity)
+      ? (wire.capacity as ErrorCapacity)
+      : undefined,
+    reason: nativeReasonMessage(wire.reason) ? (wire.reason as NativeErrorReason) : undefined,
     retryAfterMs: validRetryHint(wire.retryAfterMs) ? wire.retryAfterMs : undefined,
     errorId: isErrorId(wire.errorId) ? wire.errorId : undefined,
   });
@@ -103,6 +125,8 @@ export function wireError(error: RemoteKitError): WireError {
   return {
     code: error.code,
     message: error.message,
+    ...(error.capacity ? { capacity: error.capacity } : {}),
+    ...(nativeReasonMessage(error.reason) ? { reason: error.reason as NativeErrorReason } : {}),
     ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
     ...(error.errorId === undefined ? {} : { errorId: error.errorId }),
   };

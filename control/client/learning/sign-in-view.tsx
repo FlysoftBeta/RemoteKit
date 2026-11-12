@@ -1,7 +1,8 @@
 import { useContext, useLayoutEffect, useRef, useState } from 'react';
 import type { ProductTab } from '../../shared/product';
 import { RemoteViewport } from '../app/remote-viewport';
-import { InlineError, LoadingRows } from './common';
+import { SurfaceState } from '../failures';
+import { LoadingRows } from './common';
 import { SignInHost } from './sign-in-host';
 
 export function SignInView({ tab }: { tab?: ProductTab }) {
@@ -21,12 +22,14 @@ export function SignInView({ tab }: { tab?: ProductTab }) {
     return () => observer.disconnect();
   }, [host, tab?.id]);
   const error =
-    tab?.lifecycleRecoveryError ||
-    (tab?.popup?.status === 'failed' ? tab.popup.error || '登录页面打开失败' : '');
+    tab?.lifecycleRecoveryError || (tab?.popup?.status === 'failed' ? tab.popup.error : undefined);
   return (
     <div className="learning-sign-in-view" ref={box}>
       {error ? (
-        <InlineError error={error} retry={() => tab && host?.retry(tab.id)} />
+        <SurfaceState
+          error={error}
+          context={{ operation: '打开登录页面', scope: 'surface', credential: 'changyan' }}
+        />
       ) : (
         <>
           {tab && host && (

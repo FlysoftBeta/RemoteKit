@@ -1,6 +1,5 @@
-import { decodeJson, encodeJson } from './codec';
-import * as codecs from './documents';
 import type Database from 'better-sqlite3';
+import { parseWireError, wireError, type WireError } from '../../shared/errors';
 import type {
   ControlEvent,
   DeviceEvent,
@@ -14,6 +13,8 @@ import type {
 import type { AtRestKey } from '../auth/crypto';
 import type { ImportEvent } from '../session-import/envelope';
 import type { MailCursor } from '../session-import/mailbox';
+import { decodeJson, encodeJson } from './codec';
+import * as codecs from './documents';
 
 export interface DeviceRow {
   keyId: string;
@@ -35,7 +36,6 @@ export interface StoredImport extends ImportRecord {
     cookies: import('../../shared/session-import').ApplyCounts;
     localStorage: import('../../shared/session-import').ApplyCounts;
   };
-  errorCode?: import('../../shared/errors').ErrorCode;
   retryAt?: number;
 }
 export interface OutgoingEvent {
@@ -55,7 +55,7 @@ function record(row: any): StoredImport {
     cookies: Number(row.cookies),
     origins: Number(row.origins),
     rejectedItems: Number(row.rejected_items),
-    error: row.error,
+    error: row.error ? wireError(parseWireError(JSON.parse(row.error))!) : null,
     storageJob: row.storage_job
       ? decodeJson(row.storage_job, codecs.storageJob, `session_imports.storage_job ${row.id}`)
       : undefined,
@@ -63,7 +63,6 @@ function record(row: any): StoredImport {
     applyCounts: row.apply_counts
       ? decodeJson(row.apply_counts, codecs.applyCounts, `session_imports.apply_counts ${row.id}`)
       : undefined,
-    errorCode: row.error_code ?? undefined,
     retryAt: row.retry_at === null ? undefined : Number(row.retry_at),
     receivedAt: Number(row.received_at),
     finishedAt: row.finished_at === null ? null : Number(row.finished_at),
@@ -75,7 +74,6 @@ function visibleRecord({
   storageJob,
   chunkIndex,
   applyCounts,
-  errorCode,
   retryAt,
   ...value
 }: StoredImport): ImportRecord {
@@ -89,7 +87,7 @@ export class SessionImportsRepository {
   saveApplyCounts(id: string, chunkIndex: number, counts: NonNullable<StoredImport['applyCounts']>) {
     this.db
       .prepare(
-        'UPDATE session_imports SET chunk_index=?,apply_counts=?,storage_job=NULL,error_code=NULL,retry_at=NULL WHERE id=?',
+        'UPDATE session_imports SET chunk_index=?,apply_counts=?,storage_job=NULL,error=NULL,retry_at=NULL WHERE id=?',
       )
       .run(chunkIndex, encodeJson(counts, codecs.applyCounts, `session_imports.apply_counts ${id}`), id);
   }
@@ -351,14 +349,7 @@ export class SessionImportsRepository {
     const row = this.db.prepare('SELECT * FROM session_imports WHERE id=?').get(id) as any;
     return row ? record(row) : undefined;
   }
-  saveImport(
-    tenant: string,
-    keyId: string,
-    event: ImportEvent,
-    now: number,
-    error: string | null,
-    errorCode?: import('../../shared/errors').ErrorCode,
-  ) {
+  saveImport(tenant: string, keyId: string, event: ImportEvent, now: number, error: WireError | null) {
     const id = event.id.toLowerCase();
     const payload = error
       ? null
@@ -379,7 +370,7 @@ export class SessionImportsRepository {
       : [];
     this.db
       .prepare(
-        `INSERT INTO session_imports(id,tenant,key_id,sites,state,payload,cookies,origins,rejected_items,error,error_code,received_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sites=excluded.sites,state=excluded.state,payload=excluded.payload,cookies=excluded.cookies,origins=excluded.origins,rejected_items=0,error=excluded.error,error_code=excluded.error_code,retry_at=NULL,storage_job=NULL,chunk_index=0,apply_counts=NULL,received_at=excluded.received_at,finished_at=excluded.finished_at`,
+        `INSERT INTO session_imports(id,tenant,key_id,sites,state,payload,cookies,origins,rejected_items,error,received_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sites=excluded.sites,state=excluded.state,payload=excluded.payload,cookies=excluded.cookies,origins=excluded.origins,rejected_items=0,error=excluded.error,retry_at=NULL,storage_job=NULL,chunk_index=0,apply_counts=NULL,received_at=excluded.received_at,finished_at=excluded.finished_at`,
       )
       .run(
         id,
@@ -391,8 +382,7 @@ export class SessionImportsRepository {
         Array.isArray(event.cookies) ? event.cookies.length : 0,
         Array.isArray(event.localStorage) ? event.localStorage.length : 0,
         0,
-        error,
-        error ? (errorCode ?? 'invalid_request') : null,
+        error ? JSON.stringify(error) : null,
         now,
         error ? now : null,
       );
@@ -432,14 +422,14 @@ export class SessionImportsRepository {
     id: string,
     state: 'applied' | 'failed' | 'discarded',
     rejectedItems: number,
-    error: string | null,
+    error: WireError | null,
     now: number,
   ) {
     this.db
       .prepare(
         "UPDATE session_imports SET state=?,payload=NULL,rejected_items=?,error=?,finished_at=? WHERE tenant=? AND id=? AND state='pending'",
       )
-      .run(state, rejectedItems, error, now, tenant, id);
+      .run(state, rejectedItems, error ? JSON.stringify(error) : null, now, tenant, id);
   }
   devices(tenant: string) {
     return (

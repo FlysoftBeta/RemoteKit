@@ -1,14 +1,14 @@
-import { retryDelay } from '../../shared/error-policy';
 import { RemoteKitError } from '../../shared/errors';
 import type { ProductState, ViewerViewport } from '../../shared/product';
-import { formatError } from '../util/format-error';
+import { recoveryDelay } from '../failures/recovery';
+
+import { selectVisibility } from '../app/visibility';
+import { currentWindowFullscreen } from '../app/window-fullscreen';
 import { diagnostics } from '../media/diagnostics';
 import { canonicalJson } from '../util/canonical-json';
 import { Store } from '../util/store';
-import { selectVisibility } from '../app/visibility';
-import { currentWindowFullscreen } from '../app/window-fullscreen';
 
-export class ViewportRequests extends Store<string> {
+export class ViewportRequests extends Store<RemoteKitError | undefined> {
   private readonly geometry = new Map<string, { width: number; height: number }>();
   private occlusion = { viewId: '', bottom: 0 };
   private readonly revisions = new Map<string, { key: string; revision: string }>();
@@ -32,7 +32,7 @@ export class ViewportRequests extends Store<string> {
   private visible = true;
   private available = false;
   constructor(private readonly request: (params: ViewerViewport) => Promise<unknown>) {
-    super('');
+    super(undefined);
   }
   observe(state: ProductState | null, available: boolean) {
     if (this.state === state && this.available === available) return;
@@ -64,10 +64,10 @@ export class ViewportRequests extends Store<string> {
     this.timer = undefined;
     this.state = null;
     this.geometry.clear();
-    this.publish('');
+    this.publish(undefined);
   }
   dismissNotice() {
-    this.publish('');
+    this.publish(undefined);
   }
   private schedule() {
     clearTimeout(this.timer);
@@ -131,7 +131,7 @@ export class ViewportRequests extends Store<string> {
           if (serial === this.serial) {
             this.pending = undefined;
             this.acknowledged = key;
-            this.publish('');
+            this.publish(undefined);
             this.attempts = 0;
             this.retry = undefined;
             this.failedKey = undefined;
@@ -147,22 +147,21 @@ export class ViewportRequests extends Store<string> {
           if (serial !== this.serial) return;
           const failure =
             error instanceof RemoteKitError ? error : new RemoteKitError('internal', '画面尺寸更新失败');
-          const delay = retryDelay(failure, this.attempts++);
-          if (delay !== undefined && this.attempts <= 4) {
-            this.retry = { key, at: Date.now() + delay };
-            this.timer = setTimeout(() => {
-              this.timer = undefined;
-              this.schedule();
-            }, delay);
+          const delay = recoveryDelay(failure, this.attempts++);
+          if (delay !== undefined) {
+            this.publish(failure);
+            this.retry = { key, at: Date.now() + Math.min(60_000, delay) };
+            this.timer = setTimeout(
+              () => {
+                this.timer = undefined;
+                this.schedule();
+              },
+              Math.min(60_000, delay),
+            );
             return;
           }
           this.failedKey = key;
-          if (serial === this.serial && this.available)
-            this.publish(
-              formatError(
-                error instanceof RemoteKitError ? error : new RemoteKitError('internal', '画面尺寸更新失败'),
-              ),
-            );
+          if (serial === this.serial && this.available) this.publish(failure);
         });
     }, 100);
   }

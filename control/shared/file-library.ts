@@ -1,3 +1,4 @@
+import type { WireError } from './errors';
 export interface Asset {
   assetId: string;
   size: number;
@@ -11,7 +12,8 @@ export interface PhotoMetadata {
   quarterTurns?: 1 | 2 | 3;
   candidateAssetIds?: string[];
   pending?: 'choice' | 'scan-error';
-  warning?: string;
+  advisory?: 'low-quality';
+  processingFailure?: WireError;
 }
 
 export interface LibraryAssetFields {

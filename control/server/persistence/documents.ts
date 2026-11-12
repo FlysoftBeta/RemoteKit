@@ -1,3 +1,23 @@
+import type {
+  LibraryEntry,
+  LibraryPartition,
+  LibrarySnapshot,
+  LibrarySource,
+} from '../../shared/file-library';
+import type {
+  Favorite,
+  InstalledApp,
+  OperationReceipt,
+  ProductSettings,
+  ProductSpace,
+  ProductTab,
+  SitePreferences,
+} from '../../shared/product';
+import type { RecordedAction } from '../../shared/recorded-action';
+import type { AuthSettings } from '../../shared/security';
+import type { ControlEvent, ImportChunk, ImportSite } from '../../shared/session-import';
+import type { AccountSession } from '../learning/providers/changyan/auth';
+import type { XinjiaoyuSession } from '../learning/providers/xinjiaoyu/client';
 import {
   array,
   boolean,
@@ -12,32 +32,61 @@ import {
   union,
   type Codec,
 } from './codec';
-import type {
-  Favorite,
-  InstalledApp,
-  OperationReceipt,
-  ProductSettings,
-  ProductSpace,
-  ProductTab,
-  SitePreferences,
-} from '../../shared/product';
-import type { AuthSettings } from '../../shared/security';
-import type {
-  LibraryEntry,
-  LibraryPartition,
-  LibrarySnapshot,
-  LibrarySource,
-} from '../../shared/file-library';
-import type { ControlEvent, ImportChunk, ImportSite } from '../../shared/session-import';
-import type { RecordedAction } from '../../shared/recorded-action';
-import type { AccountSession } from '../learning/providers/changyan/auth';
-import type { XinjiaoyuSession } from '../learning/providers/xinjiaoyu/client';
 import type { Selection } from './library';
 
 const s = string;
 const b = boolean;
 const n = number;
 const i = integer;
+export const errorCode = literal(
+  'invalid_request',
+  'unauthenticated',
+  'forbidden',
+  'locked',
+  'not_found',
+  'conflict',
+  'limit_exceeded',
+  'rate_limited',
+  'busy',
+  'unavailable',
+  'rejected',
+  'outcome_unknown',
+  'canceled',
+  'internal',
+);
+export const wireError = object(
+  { code: errorCode, message: s() },
+  {
+    capacity: literal(
+      'storage',
+      'basket',
+      'catalog',
+      'windows',
+      'tabs',
+      'site-settings',
+      'field',
+      'selection',
+      'file',
+    ),
+    reason: literal(
+      'browser_crashed',
+      'browser_restarting',
+      'output_failed',
+      'document_encrypted',
+      'document_corrupt',
+      'document_unsupported',
+      'document_too_complex',
+      'file_too_large',
+      'storage_quota_exceeded',
+      'browser_state_too_large',
+      'no_document_contour',
+      'corrupt_state',
+    ),
+    retryAfterMs: i(),
+    errorId: s({ pattern: /^[cev]-[0-9a-f]{10}$/ }),
+  },
+);
+
 export const windowState = record(jsonValue);
 const tabKind = literal('start', 'remote');
 export const tab = object(
@@ -59,9 +108,12 @@ export const tab = object(
       phase: literal('unload', 'unloaded', 'restore'),
       submittedAt: n(),
     }),
-    lifecycleRecoveryError: s(),
+    lifecycleRecoveryError: wireError,
     pendingUaReloadOrigin: s(),
-    popup: object({ provisionalId: s(), status: literal('pending', 'adopted', 'failed') }, { error: s() }),
+    popup: object(
+      { provisionalId: s(), status: literal('pending', 'adopted', 'failed') },
+      { error: wireError },
+    ),
     navigation: object(
       {
         operationId: s(),
@@ -160,26 +212,6 @@ export const authSettings = object({
   lockOnDeparture: b(),
   faceEnabled: b(),
 }) satisfies Codec<AuthSettings>;
-export const errorCode = literal(
-  'invalid_request',
-  'unauthenticated',
-  'forbidden',
-  'locked',
-  'not_found',
-  'conflict',
-  'limit_exceeded',
-  'rate_limited',
-  'busy',
-  'unavailable',
-  'rejected',
-  'outcome_unknown',
-  'canceled',
-  'internal',
-);
-export const wireError = object(
-  { code: errorCode, message: s() },
-  { retryAfterMs: i(), errorId: s({ pattern: /^[ce]-[0-9a-f]{10}$/ }) },
-);
 const receiptFields = { operationId: s(), operationGeneration: s() };
 const receiptOptional = {
   browserIncarnation: s(),
@@ -292,7 +324,8 @@ export const libraryEntry = union(
           quarterTurns: literal(1, 2, 3),
           candidateAssetIds: array(s()),
           pending: literal('choice', 'scan-error'),
-          warning: s(),
+          advisory: literal('low-quality'),
+          processingFailure: wireError,
         },
       ),
     },
@@ -358,7 +391,14 @@ export const controlEvent = union(
     cookies: counts,
     localStorage: counts,
   }),
-  object({ ...eventFields, type: literal('importFailed'), ref: i(), id: s(), retryable: b(), reason: s() }),
+  object({
+    ...eventFields,
+    type: literal('importFailed'),
+    ref: i(),
+    id: s(),
+    retryable: b(),
+    error: wireError,
+  }),
   object({ ...eventFields, type: literal('revoked') }),
 ) satisfies Codec<ControlEvent>;
 const incomingFields = { ...eventFields, receivedAt: n(), device: s(), publicKey: s() };

@@ -360,7 +360,14 @@ test('global capacity includes finalization, and shutdown drains even when Endpo
   const stopping = manager.request(viewer('a'), 'diagnostics.stop', { id: started[0].id });
   await assert.rejects(manager.request(viewer('e'), 'diagnostics.start', {}), { code: 'busy' });
   await manager.shutdown();
-  assert.deepEqual(await stopping, { id: started[0].id, status: 'failed', reason: 'archive-write-failed' });
+  const failed = await stopping;
+  assert.deepEqual(
+    { ...failed, error: undefined },
+    { id: started[0].id, status: 'failed', reason: 'archive-write-failed', error: undefined },
+  );
+  assert(failed.status === 'failed');
+  assert.equal(failed.error?.code, 'internal');
+  assert.match(failed.error?.errorId ?? '', /^c-[0-9a-f]{10}$/);
   assert.equal(
     (await manager.request(viewer('b'), 'diagnostics.status', { id: started[1].id })).status,
     'failed',

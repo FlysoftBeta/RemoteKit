@@ -1,18 +1,14 @@
-import { RemoteKitError } from '../../shared/errors';
-import { useAutoFocus } from '../editing/local-autofocus';
-import './launcher.css';
 import {
   AddToQueue,
   Close,
-  OpenInNew,
-  Search,
-  ViewWeekOutlined,
   Fullscreen,
   FullscreenExit,
   LockOutlined,
+  OpenInNew,
+  Search,
+  ViewWeekOutlined,
 } from '@mui/icons-material';
 import {
-  Alert,
   ButtonBase,
   IconButton,
   InputAdornment,
@@ -24,24 +20,28 @@ import {
   Typography,
 } from '@mui/material';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import {
   isSingletonApp,
   type LauncherItem,
   type ProductState,
   type WindowPlacement,
 } from '../../shared/product';
-import { fileTypeColor, FileThumbnail, FileTypeIcon } from '../files/file-thumbnail';
+import { useAutoFocus } from '../editing/local-autofocus';
+import { failureError, FailureNote } from '../failures';
+import { recover } from '../failures/recovery';
 import { useLibrary } from '../files/file-library-state';
-import { launcherLayout, contrastColor, originColor, type LauncherTile } from './launcher-layout';
+import { FileThumbnail, fileTypeColor, FileTypeIcon } from '../files/file-thumbnail';
 import { AppIcon } from './app-icon';
-import { useItemDrag, useWindowDragging, type PointerStart } from './window-drag';
-import { scaledAnchor, uiScale } from './ui-scale';
-import type { WorkspaceCall } from './window-state';
-import { LauncherSpaces } from './launcher-spaces';
-import type { SpaceSnapshots } from './space-snapshots';
-import type { Action } from './product-dialogs';
 import { dominantColor } from './dominant-color';
-import { formatError } from '../util/format-error';
+import { contrastColor, launcherLayout, originColor, type LauncherTile } from './launcher-layout';
+import { LauncherSpaces } from './launcher-spaces';
+import './launcher.css';
+import type { Action } from './product-dialogs';
+import type { SpaceSnapshots } from './space-snapshots';
+import { scaledAnchor, uiScale } from './ui-scale';
+import { useItemDrag, useWindowDragging, type PointerStart } from './window-drag';
+import type { WorkspaceCall } from './window-state';
 
 export function Launcher({
   state,
@@ -85,7 +85,7 @@ export function Launcher({
   }, [exiting]);
   const [items, setItems] = useState<LauncherItem[]>([]);
   const [query, setQuery] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const [busy, setBusy] = useState(false);
   const [width, setWidth] = useState(1024);
   const [menu, setMenu] = useState<{ item: LauncherItem; anchor: HTMLElement }>();
@@ -119,23 +119,25 @@ export function Launcher({
   }, []);
   useEffect(() => {
     let disposed = false;
+    const abort = new AbortController();
     const timer = setTimeout(
       () => {
-        void call('launcher.get', query.trim() ? { query } : {})
+        void recover(() => call('launcher.get', query.trim() ? { query } : {}), abort.signal, setError)
           .then((result) => {
             if (!disposed) {
               setItems(result.items);
-              setError('');
+              setError(undefined);
             }
           })
           .catch((error) => {
-            if (!disposed) setError(formatError(error));
+            if (!disposed) setError(failureError(error));
           });
       },
       query ? 150 : 0,
     );
     return () => {
       disposed = true;
+      abort.abort();
       clearTimeout(timer);
     };
   }, [call, query]);
@@ -145,7 +147,7 @@ export function Launcher({
     setBusy(true);
     void task()
       .then(close)
-      .catch((error) => setError(formatError(error)))
+      .catch((error) => setError(failureError(error)))
       .finally(() => setBusy(false));
   };
   const checkCapacity = (item?: LauncherItem, reuseExisting = false) => {
@@ -157,7 +159,7 @@ export function Launcher({
       reuseExisting &&
       state.workspace.windows.some((win) => win.appId === (item?.kind === 'file' ? 'files' : 'browser'));
     if (state.workspace.windows.length >= 16 && !singleton && !reuse)
-      throw new RemoteKitError('limit_exceeded', '窗口已满，请先关闭一些窗口');
+      throw new RemoteKitError('limit_exceeded', '窗口已满，请先关闭一些窗口', { capacity: 'windows' });
   };
   const open = (item: LauncherItem, target?: WindowPlacement, reuseExisting = false) =>
     perform(async () => {
@@ -241,7 +243,12 @@ export function Launcher({
           }}
         />
       </form>
-      {error && <Alert severity="error">{error}</Alert>}
+      {error && (
+        <FailureNote
+          error={error}
+          context={{ operation: '打开项目', scope: 'surface', capacity: 'windows' }}
+        />
+      )}
       <div className="launcher-body">
         <div
           className={`launcher-groups${edges.left ? ' fade-left' : ''}${edges.right ? ' fade-right' : ''}`}
@@ -298,7 +305,7 @@ export function Launcher({
                             checkCapacity(tile);
                             liftItem(pointer, tile);
                           } catch (error) {
-                            setError(formatError(error));
+                            setError(failureError(error));
                           }
                         }}
                       >

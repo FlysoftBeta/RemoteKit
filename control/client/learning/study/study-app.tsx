@@ -1,7 +1,6 @@
-import { formatError } from '../../util/format-error';
-import { ArrowBack, AttachFileOutlined, MoreHoriz, SyncOutlined, SchoolOutlined } from '@mui/icons-material';
+import { onFailureAction } from '../../failures';
+import { ArrowBack, AttachFileOutlined, MoreHoriz, SchoolOutlined, SyncOutlined } from '@mui/icons-material';
 import {
-  Alert,
   Button,
   ButtonBase,
   Chip,
@@ -13,33 +12,27 @@ import {
   LinearProgress,
   Menu,
   MenuItem,
-  TextField,
   Slider,
+  TextField,
   Tooltip,
 } from '@mui/material';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { scaledAnchor } from '../../app/ui-scale';
-import type { ClassMaterial, HomeworkSummary, MaterialType } from '../../../shared/learning';
+import { RemoteKitError } from '../../../shared/errors';
 import type { LibraryEntry } from '../../../shared/file-library';
-import { FilePreview } from '../../files/file-preview';
-import { useLibrary } from '../../files/file-library-state';
+import type { ClassMaterial, HomeworkSummary, MaterialType } from '../../../shared/learning';
+import { scaledAnchor } from '../../app/ui-scale';
 import { operationId } from '../../control/product-operations';
+import { failureError, FailureNote, SurfaceState } from '../../failures';
+import { recover } from '../../failures/recovery';
+import { useLibrary } from '../../files/file-library-state';
+import { FilePreview } from '../../files/file-preview';
 import { VirtualList } from '../../ui/virtual-list';
-import type { LearningAppProps } from '../learning-app';
-import {
-  day,
-  InlineError,
-  LoadingRows,
-  Segments,
-  SubjectChip,
-  SubjectDot,
-  time,
-  useContentWidth,
-} from '../common';
-import { LearningQueries, usePaged, useQuery } from '../queries';
-import { SignInCard } from '../sign-in-card';
+import { day, LoadingRows, Segments, SubjectChip, SubjectDot, time, useContentWidth } from '../common';
 import { LearningHtml } from '../html';
+import type { LearningAppProps } from '../learning-app';
+import { LearningQueries, usePaged, useQuery } from '../queries';
 import { QuestionCard } from '../question-card';
+import { SignInCard } from '../sign-in-card';
 import { AttachmentRow, MaterialRow } from './attachment';
 
 const materialTypes: [MaterialType, string][] = [
@@ -90,6 +83,13 @@ export function StudyApp(
   const sync = state.learning.study;
   const previousSync = useRef(sync.lastSyncAt);
   const [login, setLogin] = useState(false);
+  useEffect(
+    () =>
+      onFailureAction((kind, context) => {
+        if (kind === 'provider-login' && context.credential === 'changyan') setLogin(true);
+      }),
+    [],
+  );
   const signed = account.status === 'signed_in' || account.status === 'expired' || login;
   const [section, setSection] = useState<'homework' | 'materials'>('homework');
   const [bucket, setBucket] = useState<'active' | 'completed'>('active');
@@ -102,11 +102,9 @@ export function StudyApp(
   const [preview, setPreview] = useState<LibraryEntry>();
   const [menu, setMenu] = useState<HTMLElement>();
   const [retention, setRetention] = useState<number>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const [revision, setRevision] = useState(0);
-  const failedOperation = useRef<() => Promise<unknown>>(undefined);
-  const [materialAttempt, setMaterialAttempt] = useState(0);
-  const [materialError, setMaterialError] = useState('');
+  const [materialError, setMaterialError] = useState<RemoteKitError | undefined>();
   const queries = useMemo(() => new LearningQueries(call), [call, signed, revision]);
   const subjects = useQuery(
     `subjects:${revision}`,
@@ -165,13 +163,14 @@ export function StudyApp(
       setRevision((value) => value + 1);
     }
   }, [sync.lastSyncAt, sync.syncing]);
+  const actionAbort = useRef(new AbortController());
+  useEffect(() => () => actionAbort.current.abort(), []);
   const run = async (operation: () => Promise<unknown>) => {
-    failedOperation.current = operation;
-    setError('');
+    setError(undefined);
     try {
-      await operation();
+      await recover(operation, actionAbort.current.signal, setError);
     } catch (failure) {
-      setError(formatError(failure));
+      setError(failureError(failure));
     }
   };
   const back = () => {
@@ -198,23 +197,26 @@ export function StudyApp(
   useEffect(() => {
     if (!selectedMaterial || materialEntry || !online) return;
     let active = true;
-    setMaterialError('');
+    const abort = new AbortController();
+    let savedEntryId = materialEntryId;
+    setMaterialError(undefined);
     const open = async () => {
-      const entryId =
-        materialEntryId ??
-        (await call('study.attachment.save', { key: selectedMaterial.attachment.key })).entryId;
+      const entryId = (savedEntryId ??= (
+        await call('study.attachment.save', { key: selectedMaterial.attachment.key })
+      ).entryId);
       const snapshot = await library.refresh();
       const entry = snapshot.entries.find((item) => item.id === entryId);
-      if (!entry) throw new Error('文件尚未就绪');
+      if (!entry) throw new RemoteKitError('unavailable', '文件尚未就绪');
       if (active) setPreview(entry);
     };
-    void open().catch((failure) => {
-      if (active) setMaterialError(formatError(failure));
+    void recover(open, abort.signal, setMaterialError).catch((failure) => {
+      if (active) setMaterialError(failureError(failure));
     });
     return () => {
       active = false;
+      abort.abort();
     };
-  }, [selectedMaterial, online, materialAttempt, call, library.refresh]);
+  }, [selectedMaterial, online, call, library.refresh]);
   const shownPreview = preview ?? materialEntry;
   const basket = async (entry: LibraryEntry) => {
     const snapshot = library.snapshot;
@@ -260,7 +262,7 @@ export function StudyApp(
             <Tooltip
               title={
                 sync.error
-                  ? `同步失败：${sync.error}`
+                  ? sync.error.message
                   : sync.lastSyncAt
                     ? `上次同步 ${new Date(sync.lastSyncAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}`
                     : '立即同步'
@@ -282,19 +284,27 @@ export function StudyApp(
           </IconButton>
         </div>
       </div>
-      {!online && <Alert severity="info">连接已断开，恢复后可继续学习</Alert>}
+      {!online && (
+        <SurfaceState
+          error={new RemoteKitError('unavailable', '')}
+          context={{ operation: '读取学习资料', scope: 'surface' }}
+        />
+      )}
       {account.status === 'expired' && (
-        <Alert severity="warning" action={<Button onClick={() => setLogin(true)}>重新登录</Button>}>
-          畅言登录已过期
-        </Alert>
+        <SurfaceState
+          error={new RemoteKitError('unauthenticated', '')}
+          context={{
+            operation: '读取学习资料',
+            scope: 'surface',
+            credential: 'changyan',
+            action: { label: '登录畅言', run: () => setLogin(true) },
+          }}
+        />
       )}
       {error && (
-        <InlineError
+        <SurfaceState
           error={error}
-          retry={() => {
-            setError('');
-            if (failedOperation.current) void run(failedOperation.current);
-          }}
+          context={{ operation: '读取学习资料', scope: 'surface', credential: 'changyan' }}
         />
       )}
       {!signed ? (
@@ -384,8 +394,18 @@ export function StudyApp(
               </div>
               <div className="study-list-body">
                 <div className="learning-results">
-                  {subjects.error && <InlineError error={subjects.error} retry={subjects.retry} />}
-                  {list.error && <InlineError error={list.error} retry={list.retry} />}
+                  {subjects.error && (
+                    <SurfaceState
+                      error={subjects.error}
+                      context={{ operation: '读取学习资料', scope: 'surface', credential: 'changyan' }}
+                    />
+                  )}
+                  {list.error && (
+                    <SurfaceState
+                      error={list.error}
+                      context={{ operation: '读取学习资料', scope: 'surface', credential: 'changyan' }}
+                    />
+                  )}
                   {list.loading && !list.items.length ? (
                     <LoadingRows />
                   ) : !list.items.length ? (
@@ -468,7 +488,6 @@ export function StudyApp(
                           onClick={() => {
                             setSelected({ kind: 'material', item });
                             setPreview(undefined);
-                            setMaterialAttempt((value) => value + 1);
                           }}
                         />
                       )}
@@ -514,9 +533,9 @@ export function StudyApp(
                     {selectedMaterial.sharedBy} · {day(selectedMaterial.sharedAt)}
                   </p>
                   {materialError ? (
-                    <InlineError
+                    <SurfaceState
                       error={materialError}
-                      retry={() => setMaterialAttempt(materialAttempt + 1)}
+                      context={{ operation: '读取学习资料', scope: 'surface', credential: 'changyan' }}
                     />
                   ) : (
                     <LoadingRows />
@@ -528,7 +547,10 @@ export function StudyApp(
                   <span>{section === 'homework' ? '选择一项作业查看详情' : '选择一份资料预览'}</span>
                 </div>
               ) : detail.error ? (
-                <InlineError error={detail.error} retry={detail.retry} />
+                <SurfaceState
+                  error={detail.error}
+                  context={{ operation: '读取学习资料', scope: 'surface', credential: 'changyan' }}
+                />
               ) : !detail.value ? (
                 <LoadingRows />
               ) : (
@@ -630,7 +652,9 @@ export function StudyApp(
             自动保存最近 {retention ?? 7}{' '}
             天内布置的作业与班级资料附件。超过天数的附件会从我的文件中移除，已整理到分区的文件会保留。
           </p>
-          {error && <p className="learning-error">{error}</p>}
+          {error && (
+            <FailureNote error={error} context={{ operation: '保存保留时间', scope: 'field', input: true }} />
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setRetention(undefined)}>取消</Button>

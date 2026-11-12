@@ -1,31 +1,38 @@
-import { KeyboardPreferenceContext } from '../editing/local-autofocus';
-import { Suspense, lazy, useCallback, useEffect, useState, useSyncExternalStore } from 'react';
-import { ViewerSession } from '../viewer-session';
+import { Suspense, lazy, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import { BlankScreen, RevealScreen } from '../auth/lock-screen';
 import { UnlockView } from '../auth/unlock-view';
-import { FileLibraryContext, useFileLibrary, type LibraryRequest } from '../files/file-library-state';
-import type { AdminCall } from './admin/shared';
-import type { SessionImportCall } from './session-import';
-import { FloatingActions, FloatingActionsContext } from './floating-actions';
-import { Stage, useWorkspaceStage } from './stage';
-import { OverlayHost, openLauncherItem, useWorkspaceOverlays } from './overlay-host';
-import { useSystemControls } from './system-controls';
-import { WorkspaceSettings } from './workspace-settings';
-import { selectVisibility } from './visibility';
-import { WindowDragProvider } from './window-drag';
 import { appClipboard } from '../clipboard/app-clipboard';
 import { deviceClipboard } from '../clipboard/device-clipboard';
+import { KeyboardPreferenceContext } from '../editing/local-autofocus';
+import { failureError, notices, onFailureAction, presentFailure } from '../failures';
+import { useBackgroundNotices } from '../failures/background';
+import { recover } from '../failures/recovery';
+import { FileLibraryContext, useFileLibrary, type LibraryRequest } from '../files/file-library-state';
+import { ViewerSession } from '../viewer-session';
+import type { AdminCall } from './admin/shared';
+import { FloatingActions, FloatingActionsContext } from './floating-actions';
+import { OverlayHost, openLauncherItem, useWorkspaceOverlays } from './overlay-host';
+import type { SessionImportCall } from './session-import';
+import { Stage, useWorkspaceStage } from './stage';
+import { useSystemControls } from './system-controls';
+import { selectVisibility } from './visibility';
+import { WindowDragProvider } from './window-drag';
+import { WorkspaceSettings } from './workspace-settings';
 
 // Only the administrator downloads the console App.
 const AdminApp = lazy(() => import('./admin/console').then((m) => ({ default: m.AdminApp })));
 
 export function WorkspaceView({ logout, expired }: { logout(): void; expired(): void }) {
+  const [dragFailure, setDragFailure] = useState<RemoteKitError>();
   const [media] = useState(() => new ViewerSession());
   const [floatingActions] = useState(() => new FloatingActions());
   const workspaceState = useSyncExternalStore(media.workspace.subscribe, media.workspace.getSnapshot);
   const operationState = useSyncExternalStore(media.operations.subscribe, media.operations.getSnapshot);
   const viewportNotice = useSyncExternalStore(media.viewport.subscribe, media.viewport.getSnapshot);
   const { auth, localLock, status } = workspaceState;
+  const identity = useRef<string | undefined>(undefined);
+  if (auth?.user.id) identity.current = auth.user.id;
   const { state } = operationState;
   const showShell = !!state && !localLock && auth?.locked === false;
   useEffect(() => {
@@ -33,15 +40,33 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
     const set = (text: string) => media.control.request('clipboard.set', { text });
     appClipboard.configure(scope, set);
     let active = true;
+    const abort = new AbortController();
     if (scope)
-      void media.control
-        .request('clipboard.get', {})
+      void recover(
+        () => media.control.request('clipboard.get', {}),
+        abort.signal,
+        (error) =>
+          notices.post(
+            'clipboard:initial',
+            presentFailure(error, { operation: '同步共享剪贴板', scope: 'global' }),
+          ),
+      )
         .then((value) => {
-          if (active) appClipboard.receive(value);
+          if (active) {
+            appClipboard.receive(value);
+            notices.resolve('clipboard:initial');
+          }
         })
-        .catch(media.workspace.report);
+        .catch((error) => {
+          if (active)
+            notices.post(
+              'clipboard:initial',
+              presentFailure(failureError(error), { operation: '同步共享剪贴板', scope: 'global' }),
+            );
+        });
     return () => {
       active = false;
+      abort.abort();
       appClipboard.configure(undefined, set);
     };
   }, [media, showShell, status, auth?.user.id]);
@@ -72,6 +97,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
     (method, params) => media.control.request(method, params),
     [media],
   );
+  useBackgroundNotices(state, status === 'online' && showShell, sessionImportCall);
   const libraryRequest = useCallback<LibraryRequest>(
     (method, params) => media.control.request(method, params),
     [media],
@@ -81,7 +107,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
     media.files,
     controls.productReady,
     showShell,
-    auth?.user.id,
+    identity.current,
     state?.fileRequests.map((request) => request.id) ?? [],
     media.control.library,
     state,
@@ -96,11 +122,101 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
     return () => {
       active = false;
       media.workspace.stop();
+      notices.clear();
     };
   }, [media]);
   useEffect(() => {
     if (status === 'expired') expired();
   }, [status, expired]);
+  useEffect(
+    () =>
+      onFailureAction((kind, context) => {
+        if (kind === 'reload') location.reload();
+        else if (kind === 'sign-in') expired();
+        else if (kind === 'unlock') media.workspace.lock('manual');
+        else if (kind === 'choose-file') {
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.onchange = () => {
+            const files = Array.from(input.files ?? []);
+            try {
+              library
+                .importQueue('library')
+                .enqueue(files, 0, { kind: 'files', channel: 'upload', partitionId: null });
+            } catch (error) {
+              setDragFailure(failureError(error));
+            }
+          };
+          input.click();
+          void stage
+            .action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } })
+            .catch((error) => setDragFailure(failureError(error)));
+        } else if (kind === 'files')
+          void stage
+            .action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } })
+            .catch((error) => setDragFailure(failureError(error)));
+        else if (kind === 'site-settings')
+          void stage
+            .action({ type: 'window.open', appId: 'settings', placement: { mode: 'space' } })
+            .catch((error) => setDragFailure(failureError(error)));
+        else if (kind === 'tabs') {
+          const workspace = media.operations.getSnapshot().state?.workspace;
+          const windowId =
+            context.ownerKey ??
+            workspace?.tabs.find((tab) => tab.id === context.targetId)?.windowId ??
+            context.targetId;
+          if (windowId && workspace?.windows.some((win) => win.id === windowId))
+            void stage
+              .action({ type: 'window.focus', windowId })
+              .catch((error) => setDragFailure(failureError(error)));
+        } else if (kind === 'provider-login') {
+          void stage
+            .action({
+              type: 'window.open',
+              appId: context.credential === 'xinjiaoyu' ? 'questions' : 'study',
+              placement: { mode: 'space' },
+            })
+            .catch((error) => setDragFailure(failureError(error)));
+        } else if (kind === 'windows') overlays.openLauncher();
+      }),
+    [media, stage.action, expired, library.importQueue],
+  );
+  useEffect(() => {
+    const error =
+      viewportNotice?.code === 'limit_exceeded'
+        ? viewportNotice
+        : state?.endpointErrorKind === 'output-capacity'
+          ? state.endpointError
+          : undefined;
+    if (error)
+      notices.post(
+        'capacity:output',
+        presentFailure(error, {
+          operation: '调整远程画面',
+          scope: 'global',
+          capacity: 'windows',
+          text: '画面尺寸超出可用范围，部分画面尚未显示',
+        }),
+      );
+    else notices.resolve('capacity:output');
+  }, [viewportNotice, state?.endpointError]);
+  const seenTasks = useRef(new Map<string, string>());
+  useEffect(() => {
+    for (const task of state?.backgroundTasks ?? []) {
+      if (seenTasks.current.get(task.id) === task.state) continue;
+      seenTasks.current.set(task.id, task.state);
+      notices.post(
+        'task:download:' + task.id,
+        task.error
+          ? presentFailure(task.error, {
+              operation: '下载到我的文件',
+              scope: 'global',
+              targetId: task.id,
+            })
+          : { class: 'B', text: `${task.name} 已下载到我的文件` },
+      );
+    }
+  }, [state?.backgroundTasks]);
   const pending = state?.workspace.pendingClose;
   const foreground =
     state && !overlays.launcherOpen && !(pending && !pending.awaiting)
@@ -116,7 +232,8 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
               request={controls.authRequest}
               camera={controls.camera}
               close={close}
-              retry={() => (status === 'revoked' ? location.reload() : media.control.restart())}
+              connectionError={media.control.error}
+              revoked={status === 'revoked'}
             />
           )}
         </RevealScreen>
@@ -136,7 +253,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
               state={state}
               snapshots={stage.snapshots}
               action={stage.action}
-              report={media.workspace.report}
+              report={(error) => setDragFailure(failureError(error))}
               openItem={async (item, placement) => {
                 await openLauncherItem({
                   item,
@@ -145,7 +262,6 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
                   action: stage.action,
                   call: stage.call,
                   media,
-                  notify: stage.notify,
                 });
                 overlays.closeLauncher();
               }}
@@ -159,6 +275,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
                 workspaceState={workspaceState}
                 operationState={operationState}
                 viewportNotice={viewportNotice}
+                interactionFailure={dragFailure}
                 obscured={overlays.launcherOpen}
                 foreground={foreground}
                 openLauncher={overlays.openLauncher}

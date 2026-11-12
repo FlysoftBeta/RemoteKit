@@ -1,16 +1,16 @@
-import { log } from '../log';
-import type { LearningState, LearningSocketMethods, BankQuery, MaterialType } from '../../shared/learning';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, wireError } from '../../shared/errors';
+import type { BankQuery, LearningSocketMethods, LearningState, MaterialType } from '../../shared/learning';
 import type { DomainContext, DomainServices } from '../application';
+import { log } from '../log';
+import { assertWindowMutable, findWindow } from '../workspace/model';
+import { closeSignInTab, openSignInTab } from '../workspace/sign-in';
 import { LearningAccounts } from './accounts';
 import { BankService } from './bank-service';
 import { MediaProxy } from './media-proxy';
+import { XinjiaoyuProvider } from './providers/xinjiaoyu/resources';
 import { SignIn } from './sign-in';
 import { StudyService } from './study-service';
 import { StudySync } from './study-sync';
-import { XinjiaoyuProvider } from './providers/xinjiaoyu/resources';
-import { openSignInTab, closeSignInTab } from '../workspace/sign-in';
-import { assertWindowMutable, findWindow } from '../workspace/model';
 
 export const learningMethods = [
   'learning.signIn',
@@ -34,13 +34,15 @@ export const learningMethods = [
 function string(value: unknown): string {
   if (typeof value !== 'string' || !value || /[\x00-\x1f\x7f]/.test(value))
     throw new RemoteKitError('invalid_request', '无效的学习参数');
-  if (value.length > 1024) throw new RemoteKitError('limit_exceeded', '学习参数超过长度限制');
+  if (value.length > 1024)
+    throw new RemoteKitError('limit_exceeded', '学习参数超过长度限制', { capacity: 'field' });
   return value;
 }
 function page(value: unknown, max = 100_000): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1)
     throw new RemoteKitError('invalid_request', '无效的页码或数量');
-  if (value > max) throw new RemoteKitError('limit_exceeded', '页码或数量超过限制');
+  if (value > max)
+    throw new RemoteKitError('limit_exceeded', '页码或数量超过限制', { capacity: 'selection' });
   return value;
 }
 function choice<T extends string>(value: unknown, options: readonly T[]): T {
@@ -50,7 +52,8 @@ function choice<T extends string>(value: unknown, options: readonly T[]): T {
 function strings(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) throw new RemoteKitError('invalid_request', '无效筛选条件');
-  if (value.length > 100) throw new RemoteKitError('limit_exceeded', '筛选条件超过数量限制');
+  if (value.length > 100)
+    throw new RemoteKitError('limit_exceeded', '筛选条件超过数量限制', { capacity: 'selection' });
   return value.map(string);
 }
 
@@ -141,7 +144,10 @@ export class LearningService {
       for (const tab of [...state.tabs])
         if (tab.signIn) {
           closeSignInTab(state, tab.id);
-          this.accounts.setState(tenant, tab.signIn, { status: 'failed', message: '登录已中断，请重新登录' });
+          this.accounts.setState(tenant, tab.signIn, {
+            status: 'failed',
+            error: wireError(new RemoteKitError('rejected', '登录已中断')),
+          });
         }
       context.store.workspaces.saveWorkspace(state);
     }

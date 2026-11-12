@@ -92,6 +92,7 @@ export function placeWindow(
     target = windowSpace(workspace, placement.besideWindowId);
     if (!target.windowIds.includes(windowId) && target.windowIds.length >= WORKSPACE_LIMITS.windowsPerSpace)
       throw new RemoteKitError('limit_exceeded', '每个空间最多支持 3 个窗口', {
+        capacity: 'windows',
         detail: 'Each space supports up to 3 windows',
       });
     const previousIndex = target.windowIds.indexOf(windowId);

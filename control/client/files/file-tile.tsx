@@ -1,3 +1,4 @@
+import { FailureNote, type Presentation } from '../failures';
 import { Box, ButtonBase, CircularProgress, Typography } from '@mui/material';
 import React, { useRef } from 'react';
 import { FileThumbnail } from './file-thumbnail';
@@ -7,6 +8,7 @@ import { OverflowText } from '../app/overflow-text';
 export interface FileStatus {
   label: string;
   tone: 'progress' | 'warning';
+  failure?: Presentation;
 }
 
 const LONG_PRESS_MS = 450;
@@ -174,7 +176,7 @@ export function FileTile({
             size={compact ? 'small' : 'large'}
             sx={compact ? { height: 84 } : { aspectRatio: '4 / 3' }}
           />
-          {status && (
+          {status && !status.failure && (
             <Box sx={{ position: 'absolute', left: 6, right: 6, bottom: 6, display: 'flex' }}>
               <StatusBadge status={status} />
             </Box>
@@ -195,6 +197,7 @@ export function FileTile({
           </Typography>
         </Box>
       </ButtonBase>
+      {status?.failure && <FailureNote presentation={status.failure} />}
       {index !== undefined && (
         <Box
           component="span"
@@ -287,7 +290,7 @@ export function FileRow({
           </Typography>
         )}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}>
-          {status && <StatusBadge status={status} />}
+          {status && !status.failure && <StatusBadge status={status} />}
           <Typography noWrap color="text.secondary" sx={{ fontSize: 12, lineHeight: '18px' }}>
             {meta}
           </Typography>
@@ -336,6 +339,7 @@ export function FileRow({
       ) : (
         <Box sx={bodySx}>{body}</Box>
       )}
+      {status?.failure && <FailureNote presentation={status.failure} />}
       {trailing && <Box sx={{ display: 'flex', alignItems: 'center', flex: 'none' }}>{trailing}</Box>}
     </Box>
   );

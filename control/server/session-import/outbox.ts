@@ -1,13 +1,14 @@
-import { log as structuredLog } from '../log';
-import { mailError } from './mail-error';
-import { errorHandling, retryDelay } from '../../shared/error-policy';
-import nodemailer from 'nodemailer';
 import type { SendMailOptions } from 'nodemailer';
+import nodemailer from 'nodemailer';
+import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { wireError, type WireError } from '../../shared/errors';
 import type { ControlEvent, ImportMessage, MailboxStatus } from '../../shared/session-import';
 import type { SessionImportConfig } from '../config';
-import type { SessionImportsRepository, OutgoingEvent } from '../persistence/session-imports';
+import { reportError, log as structuredLog } from '../log';
+import type { OutgoingEvent, SessionImportsRepository } from '../persistence/session-imports';
 import { systemClock, type Clock } from '../util/clock';
-import { sealMessage, publicKeyId } from './envelope';
+import { publicKeyId, sealMessage } from './envelope';
+import { mailError } from './mail-error';
 
 export interface MailTransport {
   sendMail(mail: SendMailOptions): Promise<unknown>;
@@ -73,11 +74,10 @@ export class ImportOutbox {
   private running?: Promise<void>;
   private stopped = false;
   private blocked = false;
-  private errorCode?: import('../../shared/errors').ErrorCode;
   private failures = new Map<string, { attempts: number; retryAt: number }>();
   private volatile: QueuedEvent[] = [];
   private lastErrorAt: number | null = null;
-  private lastError: string | null = null;
+  private failure: WireError | null = null;
   constructor(
     private readonly store: SessionImportsRepository,
     private readonly keys: () => Keys,
@@ -97,8 +97,7 @@ export class ImportOutbox {
     return {
       pending: this.store.outgoing().length + this.volatile.length,
       lastErrorAt: this.lastErrorAt,
-      lastError: this.lastError,
-      errorCode: this.errorCode,
+      error: this.failure,
     };
   }
   flush(): Promise<void> {
@@ -164,17 +163,16 @@ export class ImportOutbox {
           this.volatile = this.volatile.filter((r) => !sent.has(r));
         }
         this.failures.delete(keyId);
-        if (!this.failures.size) this.lastError = null;
+        if (!this.failures.size) this.failure = null;
       } catch (error) {
         const attempts = (this.failures.get(keyId)?.attempts ?? 0) + 1;
         const failure = mailError(error, true);
-        this.errorCode = failure.code;
         const wait = retryDelay(failure, attempts - 1);
         this.blocked = wait === undefined && errorHandling(failure.code) !== 'reconcile';
         this.failures.set(keyId, { attempts, retryAt: now + (wait ?? 60_000) });
         this.lastErrorAt = this.clock.wallMs();
-        this.lastError = failure.message;
-        this.log('Session import outbox: ' + this.lastError);
+        this.failure = wireError(reportError(failure, 'session_import.outbox_failed'));
+        this.log('Session import outbox: ' + failure.message);
       }
     }
   }

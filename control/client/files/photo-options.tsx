@@ -1,6 +1,7 @@
-import { Alert, Box, Button, ButtonBase, CircularProgress, Typography } from '@mui/material';
+import { Box, Button, ButtonBase, CircularProgress, Typography } from '@mui/material';
 import { useState } from 'react';
 import type { LibraryEntry } from '../../shared/file-library';
+import { FailureNote } from '../failures';
 import { FileImagePreview } from './file-image-preview';
 import { useLibrary } from './file-library-state';
 import { FileThumbnail } from './file-thumbnail';
@@ -42,7 +43,8 @@ export function PhotoOptions({
         onClose={() => setPreview(undefined)}
       />
     );
-  if (pending === 'error') return <Alert severity="warning">{job?.error}</Alert>;
+  if (pending === 'error')
+    return <FailureNote error={job?.error} context={{ operation: '处理照片', scope: 'surface' }} />;
   if (!entry) return null;
   if (pending === 'choice' && selected)
     return (
@@ -98,24 +100,21 @@ export function PhotoOptions({
   if (pending === 'scan-error' && original)
     return (
       <>
-        <Alert severity="warning">文档扫描未完成。{job?.error ?? entry?.photo?.warning}</Alert>
+        <FailureNote
+          error={job?.error ?? entry?.photo?.processingFailure}
+          context={{ operation: '生成扫描件', scope: 'item' }}
+        />
         <Button
           disabled={disabled}
           onClick={() => photos.resolve(entry, destination, original, true, job?.id)}
         >
           使用原图
         </Button>
-        <Button
-          disabled={disabled}
-          onClick={() => photos.resolve(entry, destination, original, false, job?.id)}
-        >
-          重试扫描
-        </Button>
       </>
     );
   return (
     <>
-      {entry?.photo?.warning && <Alert severity="warning">{entry?.photo?.warning}</Alert>}
+      {entry?.photo?.advisory && <p>照片可能不够清晰，原图已保留</p>}
       {entry?.originalAssetId && (
         <>
           <Button disabled={disabled} onClick={() => setPreview(entry.originalAssetId)}>

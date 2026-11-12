@@ -1,9 +1,10 @@
-import './start-page.css';
-import { formatError } from '../util/format-error';
 import { ArrowForward, Search } from '@mui/icons-material';
-import type { Favorite } from '../../shared/product';
 import { ButtonBase, IconButton, InputBase, Typography } from '@mui/material';
 import { useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
+import type { Favorite } from '../../shared/product';
+import { failureError, FailureNote } from '../failures';
+import './start-page.css';
 
 export function StartPage({
   engineLabel,
@@ -18,7 +19,7 @@ export function StartPage({
 }) {
   const [value, setValue] = useState(''),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState('');
+    [error, setError] = useState<RemoteKitError | undefined>();
   const composing = useRef(false),
     pending = useRef(false),
     input = useRef<HTMLInputElement>(null);
@@ -35,10 +36,10 @@ export function StartPage({
             if (!online || pending.current || composing.current || !value.trim()) return;
             pending.current = true;
             setBusy(true);
-            setError('');
+            setError(undefined);
             void onSubmit(value.trim())
               .catch((reason) => {
-                setError(`未能打开，请重试：${formatError(reason)}`);
+                setError(failureError(reason));
                 input.current?.focus();
               })
               .finally(() => {
@@ -70,7 +71,7 @@ export function StartPage({
                 event.preventDefault();
               if (event.key === 'Escape') {
                 setValue('');
-                setError('');
+                setError(undefined);
               }
             }}
           />
@@ -90,7 +91,7 @@ export function StartPage({
               onClick={() => {
                 setBusy(true);
                 void onSubmit(favorite.url)
-                  .catch((error) => setError(formatError(error)))
+                  .catch((error) => setError(failureError(error)))
                   .finally(() => setBusy(false));
               }}
             >
@@ -102,9 +103,7 @@ export function StartPage({
           ))}
         </div>
         {error && (
-          <Typography className="start-page-error" color="error" role="alert">
-            {error}
-          </Typography>
+          <FailureNote error={error} context={{ operation: '打开网页', scope: 'field', input: true }} />
         )}
       </div>
     </div>

@@ -1,10 +1,10 @@
+import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import type { LibrarySnapshot } from '../../shared/file-library';
+import type { ProductState } from '../../shared/product';
 import { canonicalJson } from '../util/canonical-json';
-import { createContext, useContext, useMemo, useEffect, useState, useSyncExternalStore } from 'react';
+import type { Events } from '../util/store';
 import type { FileChannel } from './file-channel';
 import { LibraryStore, type LibraryRequest } from './library-store';
-import type { ProductState } from '../../shared/product';
-import type { LibrarySnapshot } from '../../shared/file-library';
-import type { Events } from '../util/store';
 export type { LibraryRequest } from './library-store';
 export function useFileLibrary(
   request: LibraryRequest,
@@ -28,12 +28,19 @@ export function useFileLibrary(
     store.photos.getSnapshot,
     store.photos.getSnapshot,
   );
+  const activeSpace = product?.workspace.spaces.find((space) => space.id === product.workspace.activeSpaceId);
+  const photoVisible =
+    !!product?.workspace.windows.some(
+      (win) => win.appId === 'files' && activeSpace?.windowIds.includes(win.id),
+    ) || requestIds.length > 0;
+  useEffect(() => store.photos.setVisible(photoVisible), [store, photoVisible]);
   const apps = product?.workspace.apps;
   const stableApps = useMemo(() => apps ?? [], [canonicalJson(apps)]);
   return useMemo(
     () => ({
       ...state,
       apps: stableApps,
+      importQueue: store.importQueue,
       refresh: store.refresh,
       recordUsage: store.recordUsage,
       snippet: store.snippet,
@@ -48,7 +55,6 @@ export function useFileLibrary(
         update: store.photos.update,
         cancel: store.photos.cancel,
         capture: store.photos.capture,
-        retry: store.photos.retry,
         resolve: store.photos.resolve,
         rotate: store.photos.rotate,
       },

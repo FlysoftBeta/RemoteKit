@@ -1,16 +1,18 @@
-import { RemoteKitError, parseWireError } from '../../shared/errors';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
-import { request as httpRequest } from './http-request';
-import type { ProductState, RtcServerSignal, SocketMessage } from '../../shared/product';
-import type { SocketMethods } from './socket-methods';
-import type { AuthState } from '../../shared/security';
-import { diagnostics } from '../media/diagnostics';
-import { RequestTracker } from '../util/request-tracker';
-import { snapshotNewer } from './product-operations';
-import { Events } from '../util/store';
+import { RemoteKitError, parseWireError } from '../../shared/errors';
 import type { LibrarySnapshot } from '../../shared/file-library';
+import type { ProductState, RtcServerSignal, SocketMessage } from '../../shared/product';
+import type { AuthState } from '../../shared/security';
 import { appClipboard } from '../clipboard/app-clipboard';
 import { deviceClipboard } from '../clipboard/device-clipboard';
+import { operationFailure } from '../failures/operations';
+import { viewerErrors } from '../failures/reporting';
+import { diagnostics } from '../media/diagnostics';
+import { RequestTracker } from '../util/request-tracker';
+import { Events } from '../util/store';
+import { request as httpRequest } from './http-request';
+import { snapshotNewer } from './product-operations';
+import type { SocketMethods } from './socket-methods';
 
 const stableConnectionMs = 10_000;
 
@@ -31,6 +33,12 @@ export class ControlSession {
     };
   };
   private status = (phase: ConnectionStatus) => {
+    viewerErrors.connect(
+      phase === 'online'
+        ? (report) => this.socket!.send(JSON.stringify({ type: 'client.error', report }))
+        : undefined,
+    );
+    if (phase === 'online') this.error = undefined;
     if (phase !== 'online')
       deviceClipboard.configure(undefined, false, (text) => this.request('clipboard.set', { text }));
     this.snapshot = Object.freeze(phase === 'reconnecting' ? { phase, attempt: this.attempts } : { phase });
@@ -38,6 +46,7 @@ export class ControlSession {
     this.changed(phase);
   };
   readonly lifecycle: { startedAt: number; marks: Record<string, number>; error?: string }[] = [];
+  error?: RemoteKitError;
   private latestState: ProductState | null = null;
   private socket?: WebSocket;
   private get stopped() {
@@ -132,7 +141,7 @@ export class ControlSession {
       this.rejectPending();
       if (this.stopped) return;
       // Only a connection that stayed up counts as recovered; one the server drops right after
-      // auth keeps counting toward the retry limit instead of looping forever.
+      // auth keeps its reconnect backoff.
       const authAt = trace.marks.firstAuth;
       if (authAt !== undefined && trace.marks.closed - authAt >= stableConnectionMs) this.attempts = 0;
       if (event.code === 4001 || event.code === 4002) {
@@ -151,6 +160,7 @@ export class ControlSession {
           diagnostics.record('control-auth-check', error);
           const failure =
             error instanceof RemoteKitError ? error : new RemoteKitError('unavailable', '连接不可用');
+          this.error = failure;
           const handling = errorHandling(failure.code);
           if (handling === 'sign-in') {
             this.status('expired');
@@ -162,11 +172,11 @@ export class ControlSession {
             return;
           }
           const delay = retryDelay(failure, this.attempts);
-          if (delay === undefined) {
+          if (delay === undefined && failure.code !== 'outcome_unknown') {
             this.status('failed');
             return;
           }
-          this.retry(delay);
+          this.retry(delay ?? 30_000);
         });
     };
     ws.onerror = () => {
@@ -174,18 +184,15 @@ export class ControlSession {
     };
   }
   private authCheckLocked() {
-    this.status('failed');
+    this.retry();
   }
   private retry(delay?: number) {
     if (this.stopped || this.socket) return;
-    if (++this.attempts > 5) {
-      this.status('failed');
-      return;
-    }
+    this.attempts++;
     this.status('reconnecting');
     this.timer = setTimeout(
       () => this.connect(),
-      delay ?? retryDelay(new RemoteKitError('unavailable', ''), this.attempts - 1)!,
+      Math.min(30_000, delay ?? retryDelay(new RemoteKitError('unavailable', ''), this.attempts - 1)!),
     );
   }
   request<K extends keyof SocketMethods>(
@@ -201,20 +208,20 @@ export class ControlSession {
     } catch (error) {
       return Promise.reject(new RemoteKitError('internal', '控制请求编码失败', { detail: String(error) }));
     }
-    return this.pending.request(id, 20000, () => {
-      this.socket!.send(encoded);
-    }) as Promise<SocketMethods[K]['result']>;
-  }
-  restart() {
-    if (this.stopped) return;
-    this.attempts = 0;
-    this.connect();
+    return this.pending
+      .request(id, 20000, () => {
+        this.socket!.send(encoded);
+      })
+      .catch((error) => {
+        throw operationFailure(error, method, params);
+      }) as Promise<SocketMethods[K]['result']>;
   }
   reconnect() {
     if (this.stopped) return;
     this.socket?.close();
   }
   close(preserveState = false) {
+    viewerErrors.connect(undefined);
     deviceClipboard.configure(undefined, false, (text) => this.request('clipboard.set', { text }));
     if (!preserveState) {
       this.snapshot = { phase: 'stopped' };

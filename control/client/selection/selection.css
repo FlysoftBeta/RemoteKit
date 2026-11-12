@@ -67,10 +67,13 @@
 .selection-handle-end::before {
   transform: translateX(10px);
 }
-.selection-error {
-  position: absolute;
-  left: 8px;
-  bottom: 8px;
-  padding: 8px;
-  background: var(--surface);
+.selection-layer .selection-menu-failure {
+  height: auto;
+  flex-wrap: wrap;
+  width: max-content;
+  max-width: min(480px, calc(100% - 16px));
+  border-radius: 12px;
+}
+.selection-menu-failure .failure-note {
+  flex-basis: 100%;
 }

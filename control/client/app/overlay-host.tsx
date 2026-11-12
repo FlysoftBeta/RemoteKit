@@ -1,25 +1,26 @@
-import { RemoteKitError } from '../../shared/errors';
-import React, { useEffect, useState } from 'react';
 import { Button, Dialog, DialogActions, DialogContent, DialogTitle } from '@mui/material';
+import { useEffect, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import {
   isSingletonApp,
   type LauncherItem,
   type ProductState,
   type WindowPlacement,
 } from '../../shared/product';
+import { SurfaceState, failureError, notices } from '../failures';
 import type { ViewerSession } from '../viewer-session';
+import { AnnouncementDialog } from './announcements';
+import { AudioControls } from './audio-controls';
+import { useFloatingAction } from './floating-actions';
 import { Launcher } from './launcher';
 import { launcherActions, launcherNavigation, launcherPlacement } from './launcher-actions';
-import { useFloatingAction } from './floating-actions';
-import { useWindowFullscreen } from './window-fullscreen';
 import { PageDialogs, type Action } from './product-dialogs';
-import { AudioControls } from './audio-controls';
-import { SyncStatus } from './sync-status';
-import { AnnouncementDialog } from './announcements';
-import { waitForWorkspaceRevision, type WorkspaceCall } from './window-state';
 import type { WorkspaceStage } from './stage';
+import { SyncStatus } from './sync-status';
 import type { SystemControls } from './system-controls';
 import type { selectVisibility } from './visibility';
+import { useWindowFullscreen } from './window-fullscreen';
+import { waitForWorkspaceRevision, type WorkspaceCall } from './window-state';
 
 export function useWorkspaceOverlays() {
   const [overlay, setOverlay] = useState<{ kind: 'launcher' }>();
@@ -60,7 +61,6 @@ export async function openLauncherItem({
   action,
   call,
   media,
-  notify,
 }: {
   item: LauncherItem;
   placement?: WindowPlacement;
@@ -69,14 +69,13 @@ export async function openLauncherItem({
   action: Action;
   call: WorkspaceCall;
   media: ViewerSession;
-  notify(message: string): void;
 }) {
   const workspace = state.workspace;
   const activeSpace = workspace.spaces.find((space) => space.id === workspace.activeSpaceId);
   const singleton =
     !!item.appId && isSingletonApp(item.appId) && workspace.windows.some((win) => win.appId === item.appId);
   if (workspace.windows.length >= 16 && !singleton && !reuseExisting)
-    throw new RemoteKitError('limit_exceeded', '窗口已满，请先关闭一些窗口');
+    throw new RemoteKitError('limit_exceeded', '窗口已满，请先关闭一些窗口', { capacity: 'windows' });
   const wasFull =
     !placement && !reuseExisting && !singleton && activeSpace && activeSpace.windowIds.length >= 3;
   const commands = launcherActions(workspace, item, placement, reuseExisting);
@@ -98,7 +97,11 @@ export async function openLauncherItem({
       }
     }
   }
-  if (wasFull) notify('当前窗口组已满，已在新窗口组打开');
+  if (wasFull)
+    notices.post('capacity:group-fallback:' + commands[0].type, {
+      class: 'B',
+      text: '当前窗口组已满，已在新窗口组打开',
+    });
 }
 export function OverlayHost({
   state,
@@ -111,18 +114,19 @@ export function OverlayHost({
 }: {
   state: ProductState;
   media: ViewerSession;
-  stage: Pick<WorkspaceStage, 'shell' | 'snapshots' | 'call' | 'action' | 'notify'>;
+  stage: Pick<WorkspaceStage, 'shell' | 'snapshots' | 'call' | 'action'>;
   controls: Pick<SystemControls, 'productReady' | 'lock' | 'audio' | 'sync' | 'browserFullscreen'>;
   overlays: WorkspaceOverlays;
   foreground: ReturnType<typeof selectVisibility>['foreground'];
   readAnnouncement(id: string): Promise<unknown>;
 }) {
-  const { shell, snapshots, call, action, notify } = stage;
+  const { shell, snapshots, call, action } = stage;
   const { productReady, lock } = controls;
   const workspace = state.workspace;
   const activeSpace = workspace.spaces.find((space) => space.id === workspace.activeSpaceId);
   const pending = workspace.pendingClose;
-  const report = media.workspace.report;
+  const [failure, setFailure] = useState<RemoteKitError>();
+  const report = (error: unknown) => setFailure(failureError(error));
   const windowFullscreen = useWindowFullscreen();
   // The Start button stays out of the way of a page or window shown fullscreen; its exit control
   // takes that place.
@@ -142,7 +146,7 @@ export function OverlayHost({
         },
   );
   const activate = (item: LauncherItem, placement?: WindowPlacement, reuseExisting?: boolean) =>
-    openLauncherItem({ item, placement, reuseExisting, state, action, call, media, notify });
+    openLauncherItem({ item, placement, reuseExisting, state, action, call, media });
   return (
     <>
       {productReady && (
@@ -153,7 +157,7 @@ export function OverlayHost({
         />
       )}
       {productReady && !overlays.launcherOpen && (
-        <AnnouncementDialog announcements={state.announcements} read={readAnnouncement} report={report} />
+        <AnnouncementDialog announcements={state.announcements} read={readAnnouncement} />
       )}
       {overlays.launcherVisible && (
         <Launcher
@@ -173,7 +177,10 @@ export function OverlayHost({
           navigate={async (value, placement) => {
             await action(launcherNavigation(value, placement ?? launcherPlacement(workspace)));
             if (!placement && activeSpace && activeSpace.windowIds.length >= 3)
-              notify('当前窗口组已满，已在新窗口组打开');
+              notices.post('capacity:group-fallback:navigate', {
+                class: 'B',
+                text: '当前窗口组已满，已在新窗口组打开',
+              });
           }}
           activate={activate}
         />
@@ -192,6 +199,7 @@ export function OverlayHost({
         }
       >
         <DialogTitle>离开此页面？</DialogTitle>
+        <SurfaceState error={failure} context={{ operation: '确认页面关闭结果', scope: 'surface' }} />
         <DialogContent>此页面可能有未保存的内容。</DialogContent>
         <DialogActions>
           <Button

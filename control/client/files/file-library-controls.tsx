@@ -1,24 +1,22 @@
 import { FileUploadOutlined } from '@mui/icons-material';
 import {
-  Alert,
   Box,
   Button,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
+  LinearProgress,
   Typography,
 } from '@mui/material';
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { LibraryFileEntry, LibraryPartition, LibrarySnapshot } from '../../shared/file-library';
 import { ScaledSelect } from '../app/scaled-select';
-import { formatError } from '../util/format-error';
+import { failureError, FailureNote } from '../failures';
 import { useLibrary } from './file-library-state';
 import type { ImportControls } from './import-queue';
-
-export function fileError(error: unknown) {
-  return formatError(error);
-}
+import './upload-queue.css';
 
 export function basketEntries(snapshot?: LibrarySnapshot): LibraryFileEntry[] {
   if (!snapshot) return [];
@@ -112,11 +110,11 @@ export function useDeviceImport({
   partitionId?: string | null;
   requestId?: string;
   onDone?: () => void;
-  onError: (message: string) => void;
+  onError: (error: RemoteKitError | undefined) => void;
 }) {
   const { snapshot } = useLibrary();
   const input = useRef<HTMLInputElement>(null);
-  const { remaining, busy, error, retryable } = useSyncExternalStore(
+  const { remaining, busy, jobs } = useSyncExternalStore(
     queue.subscribe,
     queue.getSnapshot,
     queue.getSnapshot,
@@ -135,9 +133,9 @@ export function useDeviceImport({
         requestId ? { kind: 'request', requestId } : { kind: 'files', channel: 'upload', partitionId },
         afterId,
       );
-      if (accepted) onError('');
+      if (accepted) onError(undefined);
     } catch (failure) {
-      onError(fileError(failure));
+      onError(failureError(failure));
     }
   };
   const view = (
@@ -154,25 +152,7 @@ export function useDeviceImport({
           add(files);
         }}
       />
-      {error && <Alert severity="warning">{error}</Alert>}
-      {!!remaining && !busy && !disabled && (
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-          <Typography variant="body2" sx={{ mr: 'auto' }}>
-            还有 {remaining} 个文件未上传
-          </Typography>
-          <Button size="small" onClick={queue.discard}>
-            放弃
-          </Button>
-          <Button
-            size="small"
-            variant="contained"
-            disabled={retryable === false}
-            onClick={() => void queue.upload()}
-          >
-            继续上传
-          </Button>
-        </Box>
-      )}
+      <UploadQueueView jobs={jobs} busy={busy} onDiscard={!disabled ? queue.discard : undefined} />
     </>
   );
   return { pick: () => !disabled && input.current?.click(), add, view, busy, remaining };
@@ -248,5 +228,76 @@ export function FileDropZone({
         </Box>
       )}
     </Box>
+  );
+}
+
+type UploadJob = { id: string; name: string; error?: RemoteKitError };
+
+export function UploadQueueView({
+  jobs,
+  busy,
+  onDiscard,
+}: {
+  jobs: UploadJob[];
+  busy: boolean;
+  onDiscard?: () => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const failed = jobs.find((job) => job.error);
+  return (
+    <div data-upload-queue className="upload-queue">
+      {!!jobs.length && (
+        <>
+          <div className="upload-queue-toolbar">
+            <span>上传队列 · {jobs.length} 个文件</span>
+            <Button size="small" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+              {expanded ? '收起上传队列' : '展开上传队列'}
+            </Button>
+            {!busy && onDiscard && (
+              <Button size="small" onClick={onDiscard}>
+                放弃上传
+              </Button>
+            )}
+          </div>
+          {expanded ? (
+            <div className="upload-jobs">
+              {jobs.map((job, index) => (
+                <UploadJobNote key={job.id} job={job} busy={busy && index === 0} />
+              ))}
+            </div>
+          ) : failed ? (
+            <FailureNote
+              error={failed.error}
+              context={{
+                operation: '导入文件',
+                scope: 'surface',
+                targetId: failed.id,
+                itemName: failed.name,
+              }}
+            />
+          ) : busy ? (
+            <LinearProgress aria-label="正在上传文件" />
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+}
+
+export function UploadJobNote({ job, busy = false }: { job: UploadJob; busy?: boolean }) {
+  return (
+    <div data-upload-job={job.id}>
+      {!job.error && (
+        <span>
+          {job.name}
+          {!busy && ' · 等待上传'}
+        </span>
+      )}
+      {busy && !job.error && <LinearProgress aria-label={`正在上传 ${job.name}`} />}
+      <FailureNote
+        error={job.error}
+        context={{ operation: '导入文件', scope: 'item', targetId: job.id, itemName: job.name }}
+      />
+    </div>
   );
 }

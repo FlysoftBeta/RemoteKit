@@ -407,8 +407,10 @@ test('browser status reasons map once at the Endpoint boundary and keep uncertai
       runtime.reconciliation.error = undefined;
       runtime.started = true;
       await assert.rejects(control.reconciler.reconcileProduct('one'), { message });
-      assert.equal(runtime.lastError, message);
-      assert.equal(control.viewers.productState('one').endpointError, message);
+      assert.equal(runtime.lastError?.message, message);
+      assert.equal(runtime.lastError?.reason, reason);
+      assert.equal(control.viewers.productState('one').endpointError?.message, message);
+      assert.equal(control.viewers.productState('one').endpointError?.code, 'unavailable');
     }
     node.handler = () => ({
       running: false,

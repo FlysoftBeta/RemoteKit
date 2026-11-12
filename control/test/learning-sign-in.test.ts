@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ControlDatabase } from '../server/persistence/database';
 import { LearningAccounts } from '../server/learning/accounts';
-import { SignIn, type SignInTabs } from '../server/learning/sign-in';
 import { AuthClient, type AccountSession } from '../server/learning/providers/changyan/auth';
 import { ZhixueAuthClient } from '../server/learning/providers/changyan/zhixue-auth';
 import { XinjiaoyuProvider } from '../server/learning/providers/xinjiaoyu/resources';
-import { RemoteKitError } from '../shared/errors';
+import { SignIn, type SignInTabs } from '../server/learning/sign-in';
+import { ControlDatabase } from '../server/persistence/database';
 import { emptyWorkspace } from '../server/persistence/workspaces';
-import { openSignInTab, closeSignInTab } from '../server/workspace/sign-in';
+import { closeSignInTab, openSignInTab } from '../server/workspace/sign-in';
+import { RemoteKitError } from '../shared/errors';
 
 const session = (): AccountSession => ({
   sso: { tgt: 'private-tgt', at: 'private-at', userId: 'id' },
@@ -173,7 +173,9 @@ test('Changyan no-captcha policy finishes without opening a tab and preserves pr
       password: 'private-password',
     });
     await until(() => f.accounts.state('tenant', 'changyan').status === 'failed');
-    assert.deepEqual(f.accounts.state('tenant', 'changyan'), { status: 'failed', message: '密码错误' });
+    const failed = f.accounts.state('tenant', 'changyan');
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.status === 'failed' && failed.error.message, '密码错误');
     assert.equal(f.workspace.tabs.length, 0);
   } finally {
     await f.close();
@@ -279,4 +281,27 @@ test('internal tab command rejects the wrong app and closes only sign-in tabs', 
   const state = emptyWorkspace('tenant');
   state.windows = [{ id: 'window', appId: 'browser', activeTabId: null, lastActiveAt: 0 }];
   assert.throws(() => openSignInTab(state, 'changyan', 'window', 'about:blank', '1'));
+});
+
+test('transient sign-in requests keep the flow and continue with retained credentials', async () => {
+  const f = fixture();
+  f.policy(false);
+  let attempts = 0;
+  f.accounts.auth.captchaPolicy = async () => {
+    if (attempts++ < 5) throw new RemoteKitError('unavailable', 'provider offline', { retryAfterMs: 1 });
+    return { required: false, captchaId: 'captcha', captchaType: 'v4', apiServers: [], staticServers: [] };
+  };
+  try {
+    f.signIn.start('tenant', {
+      provider: 'changyan',
+      windowId: 'study',
+      username: 'user',
+      password: 'private-password',
+    });
+    await until(() => f.accounts.state('tenant', 'changyan').status === 'signed_in');
+    assert.equal(attempts, 6);
+    assert.equal(f.logins, 1);
+  } finally {
+    await f.close();
+  }
 });

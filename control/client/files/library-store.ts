@@ -1,12 +1,15 @@
+import { operationFailure } from '../failures/operations';
 import { errorHandling } from '../../shared/error-policy';
-import { diagnostics } from '../media/diagnostics';
-import { Store } from '../util/store';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type { LibraryMethods, LibrarySnapshot, SelectionState } from '../../shared/file-library';
 import type { SocketMethods } from '../../shared/product';
 import { operationId } from '../control/product-operations';
-import { FileThumbnails } from './file-thumbnails';
+import { recover } from '../failures/recovery';
+import { diagnostics } from '../media/diagnostics';
+import { Store } from '../util/store';
 import type { FileChannel } from './file-channel';
+import { FileThumbnails } from './file-thumbnails';
+import { ImportQueue } from './import-queue';
 import { PhotoJobStore } from './photo-job-store';
 
 type ClientMethods = LibraryMethods & Pick<SocketMethods, 'usage.record'>;
@@ -21,11 +24,13 @@ interface Checkout {
   state: SelectionState;
   active: boolean;
   nextCheck: number;
-  followUntil: number;
+  attempts: number;
+  error?: RemoteKitError;
 }
 
 export interface LibraryState {
   snapshot?: LibrarySnapshot;
+  error?: RemoteKitError;
   checkouts: Readonly<Record<string, Readonly<Checkout>>>;
   online: boolean;
   scope?: string;
@@ -38,6 +43,7 @@ type FilePort = Pick<
 export class LibraryStore extends Store<LibraryState> {
   readonly thumbnails: FileThumbnails;
   readonly photos: PhotoJobStore;
+  private loadError?: RemoteKitError;
   private librarySnapshot?: LibrarySnapshot;
   private checkouts = new Map<string, Checkout>();
   private cancellations = new Map<string, SelectionState>();
@@ -55,6 +61,22 @@ export class LibraryStore extends Store<LibraryState> {
     this.thumbnails = new FileThumbnails((id, signal) => rpc.photoThumbnail(id, signal));
     this.photos = new PhotoJobStore({ mutate: this.mutate, rpc, latestSnapshot: () => this.librarySnapshot });
   }
+  private imports = new Map<string, ImportQueue>();
+  private taskAbort = new AbortController();
+  private loadAbort?: AbortController;
+  importQueue = (destination: 'library' | 'basket', windowId?: string) => {
+    const key = destination + ':' + (windowId ?? '');
+    let queue = this.imports.get(key);
+    if (!queue) {
+      queue = new ImportQueue(
+        { rpc: this.rpc, mutate: (method, params) => this.mutate(method, params, windowId) },
+        destination,
+      );
+      queue.configure(this.online && this.enabled, this.identity);
+      this.imports.set(key, queue);
+    }
+    return queue;
+  };
   configure(online: boolean, enabled: boolean, identity: string | undefined, requestIds: string[]) {
     this.requestIds = [...requestIds];
     let outcomesChanged = false;
@@ -64,9 +86,12 @@ export class LibraryStore extends Store<LibraryState> {
         outcomesChanged = true;
       }
     }
-    const scopeChanged = this.identity !== identity || this.enabled !== enabled;
-    const connectionChanged = this.online !== online;
+    const scopeChanged = this.identity !== identity;
+    const connectionChanged = this.online !== online || this.enabled !== enabled;
     if (scopeChanged) {
+      this.taskAbort.abort();
+      this.taskAbort = new AbortController();
+      this.loadError = undefined;
       this.epoch++;
       this.librarySnapshot = undefined;
       this.checkouts.clear();
@@ -74,8 +99,10 @@ export class LibraryStore extends Store<LibraryState> {
       this.thumbnails.clear();
     }
     this.online = online;
+    if (!enabled) this.librarySnapshot = undefined;
     this.enabled = enabled;
     this.identity = identity;
+    this.imports.forEach((queue) => queue.configure(online && enabled, identity));
     this.photos.configure(online && enabled && !!identity, identity);
     if (!scopeChanged && !connectionChanged) {
       if (outcomesChanged) this.emit();
@@ -85,11 +112,19 @@ export class LibraryStore extends Store<LibraryState> {
     this.timer = undefined;
     this.emit();
     if (online && enabled && identity) {
-      void this.refresh().catch((error) => diagnostics.record('library-refresh', error));
+      this.loadAbort?.abort();
+      this.loadAbort = new AbortController();
+      void recover(this.refresh, this.loadAbort.signal).catch((error) =>
+        diagnostics.record('library-refresh', error),
+      );
       this.timer = setInterval(this.reconcile, 1500);
     }
   }
   dispose = () => {
+    this.taskAbort.abort();
+    this.loadAbort?.abort();
+    this.imports.forEach((queue) => queue.dispose());
+    this.imports.clear();
     clearInterval(this.timer);
     this.timer = undefined;
     this.epoch++;
@@ -109,6 +144,7 @@ export class LibraryStore extends Store<LibraryState> {
     this.publish({
       cancellations: Object.fromEntries(this.cancellations),
       snapshot: this.librarySnapshot,
+      error: this.loadError,
       online: this.online && this.enabled,
       scope: this.enabled ? `${this.identity}:${this.epoch}` : undefined,
       checkouts: Object.fromEntries(
@@ -119,7 +155,12 @@ export class LibraryStore extends Store<LibraryState> {
   private accept(next: LibrarySnapshot, epoch: number) {
     if (!this.current(epoch)) return;
     if (!this.librarySnapshot || next.revision > this.librarySnapshot.revision) {
+      const released =
+        this.librarySnapshot &&
+        (next.entries.length < this.librarySnapshot.entries.length ||
+          next.basket.length < this.librarySnapshot.basket.length);
       this.librarySnapshot = next;
+      if (released) this.imports.forEach((queue) => queue.capacityChanged());
       this.emit();
     }
   }
@@ -146,7 +187,20 @@ export class LibraryStore extends Store<LibraryState> {
     const epoch = this.epoch;
     const before = new Set(this.librarySnapshot?.basket);
     try {
-      const next = await this.request(method, params);
+      const next =
+        method === 'library.import' || method === 'library.replace'
+          ? await this.request(method, params)
+          : await recover(
+              () => this.request(method, params),
+              this.taskAbort.signal,
+              (error) => {
+                if (this.current(epoch)) {
+                  this.loadError = operationFailure(error, method, params);
+                  this.emit();
+                }
+              },
+            );
+      this.loadError = undefined;
       this.accept(next, epoch);
       if (windowId && this.current(epoch) && (method === 'library.import' || method === 'library.basket')) {
         for (const id of next.basket.filter((id) => !before.has(id))) {
@@ -155,6 +209,8 @@ export class LibraryStore extends Store<LibraryState> {
       }
       return next;
     } catch (error) {
+      this.loadError = undefined;
+      this.emit();
       if (
         (method === 'library.basket' || method === 'library.replace') &&
         error instanceof RemoteKitError &&
@@ -176,15 +232,25 @@ export class LibraryStore extends Store<LibraryState> {
 
   refresh = async () => {
     const epoch = this.epoch;
-    const snapshot = await this.request('library.get', {});
-    this.accept(snapshot, epoch);
-    return snapshot;
+    try {
+      const snapshot = await this.request('library.get', {});
+      this.loadError = undefined;
+      this.accept(snapshot, epoch);
+      if (this.current(epoch)) this.emit();
+      return snapshot;
+    } catch (value) {
+      if (this.current(epoch)) {
+        this.loadError = toRemoteKitError(value);
+        this.emit();
+      }
+      throw value;
+    }
   };
   private async confirm(requestId: string, transaction: Checkout, submit: boolean) {
     if (transaction.active) return;
     const epoch = this.epoch;
     transaction.active = true;
-    if (submit) transaction.followUntil = Date.now() + 150_000;
+
     this.emit();
     try {
       if (!transaction.selectionId) {
@@ -217,10 +283,16 @@ export class LibraryStore extends Store<LibraryState> {
       const result = await this.request('library.finish', { selectionId: transaction.selectionId });
       if (!this.current(epoch)) return;
       transaction.state = result.state;
+      transaction.error = undefined;
+      transaction.attempts = 0;
       this.accept(result.snapshot, epoch);
+    } catch (value) {
+      transaction.error = toRemoteKitError(value);
+      transaction.attempts++;
+      throw value;
     } finally {
       transaction.active = false;
-      transaction.nextCheck = Date.now() + (transaction.state === 'unknown' ? 15_000 : 1500);
+      transaction.nextCheck = Date.now() + Math.min(60_000, 1500 * 2 ** Math.min(transaction.attempts, 6));
       if (this.current(epoch)) this.emit();
     }
   }
@@ -234,7 +306,7 @@ export class LibraryStore extends Store<LibraryState> {
         state: 'pending',
         active: false,
         nextCheck: 0,
-        followUntil: 0,
+        attempts: 0,
       };
       this.checkouts.set(requestId, transaction);
     }
@@ -251,7 +323,7 @@ export class LibraryStore extends Store<LibraryState> {
     const transaction = this.checkouts.get(requestId);
     if (transaction) {
       // Finish even a selected checkout to reconcile its library entries.
-      transaction.followUntil = Date.now() + 150_000;
+
       transaction.nextCheck = 0;
       if (transaction.selectionId)
         await this.confirm(requestId, transaction, false).catch((error) =>
@@ -266,11 +338,7 @@ export class LibraryStore extends Store<LibraryState> {
     for (const [id, checkout] of this.checkouts) {
       const live = this.requestIds.includes(id);
       const terminal = checkout.state === 'selected' || checkout.state === 'cancelled';
-      if (
-        !live &&
-        !checkout.active &&
-        (terminal || !checkout.selectionId || Date.now() >= checkout.followUntil)
-      ) {
+      if (!live && !checkout.active && (terminal || !checkout.selectionId)) {
         this.checkouts.delete(id);
         this.cancellations.delete(id);
         changed = true;

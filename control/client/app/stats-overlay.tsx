@@ -1,8 +1,8 @@
-import './stats-overlay.css';
 import { useEffect, useRef, useState } from 'react';
 import { physicalPlaneSize, statsViewModel } from '../media/stats-view-model';
 import type { Diagnostics } from '../media/types';
 import type { Surface } from '../presentation/types';
+import './stats-overlay.css';
 const measured = (value: unknown, suffix: string, digits = 1) =>
   typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(digits)} ${suffix}` : '—';
 const row = (label: string, value: unknown, suffix: string, digits = 1) =>
@@ -120,12 +120,6 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
         <dd>{diagnostics.rendering?.backend ?? '—'}</dd>
         <dt>页面可见状态</dt>
         <dd>{diagnostics.rendering?.visibility ?? '—'}</dd>
-        {diagnostics.rendering?.backendReason && (
-          <>
-            <dt>呈现错误</dt>
-            <dd>{diagnostics.rendering.backendReason}</dd>
-          </>
-        )}
         {row('Marker 抽样', diagnostics.markerSampleHz, 'Hz')}
         {diagnostics.marker && (
           <>

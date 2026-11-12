@@ -1,11 +1,13 @@
 import { errorHandling, retryDelay } from '../../shared/error-policy';
-import { RemoteKitError, parseWireError, toRemoteKitError } from '../../shared/errors';
+import { RemoteKitError, parseWireError, toRemoteKitError, wireError } from '../../shared/errors';
 import type { OperationReceipt, ProductAction, ProductOperation, ProductState } from '../../shared/product';
 import { recordedAction, type RecordedAction } from '../../shared/recorded-action';
+import { operationFailure } from '../failures/operations';
+import { waitForRecovery } from '../failures/recovery';
 import { diagnostics } from '../media/diagnostics';
 import type { Incoming, Outgoing } from '../rtc/protocol';
-import { RequestTracker } from '../util/request-tracker';
 import { canonicalJson } from '../util/canonical-json';
+import { RequestTracker } from '../util/request-tracker';
 import { Store } from '../util/store';
 import { operationId, projectOperations, snapshotNewer, type PendingOperation } from './product-operations';
 
@@ -29,6 +31,8 @@ export interface OperationsPort {
 export class OperationsStore extends Store<OperationsSnapshot> {
   private readonly requests = new RequestTracker<OperationReceipt>();
   private timer?: ReturnType<typeof setTimeout>;
+  private scopeAbort = new AbortController();
+  private pollingAttempts = 0;
   private scope = 0;
   private accepted: ProductState | null = null;
   private acceptedContent?: string;
@@ -90,10 +94,23 @@ export class OperationsStore extends Store<OperationsSnapshot> {
   }
 
   action = async (command: ProductAction): Promise<OperationReceipt> => {
-    const current = this.getSnapshot();
-    const source = current.authoritative;
-    if (!source?.operationGeneration || !this.port.ready())
-      throw new RemoteKitError('unavailable', '正在连接浏览器');
+    const scope = this.scope;
+    let current = this.getSnapshot();
+    let attempt = 0;
+    while (
+      !current.authoritative?.operationGeneration ||
+      !this.port.ready() ||
+      current.pending.length >= 64
+    ) {
+      const error = new RemoteKitError(
+        current.pending.length >= 64 ? 'busy' : 'unavailable',
+        '正在等待操作条件恢复',
+      );
+      this.publish({ ...current, error: operationFailure(error, command.type, command) });
+      await this.wait(Math.min(60000, 1000 * 2 ** Math.min(attempt++, 6)), scope);
+      current = this.getSnapshot();
+    }
+    const source = current.authoritative!;
     const targets = Object.entries(command)
       .filter(([key]) => key === 'id' || key.endsWith('Id'))
       .map(([, value]) => value);
@@ -101,10 +118,9 @@ export class OperationsStore extends Store<OperationsSnapshot> {
       targets.push(command.placement.besideWindowId);
     if (targets.some((value) => typeof value === 'string' && /^(web:)?pending-/.test(value)))
       throw new RemoteKitError('conflict', '操作正在等待确认');
-    if (current.pending.length >= 64) throw new RemoteKitError('busy', '待确认操作过多');
     const operation: OperationIntent = {
       operationId: operationId(),
-      operationGeneration: source.operationGeneration,
+      operationGeneration: source.operationGeneration!,
       action: recordedAction(command),
       phase: 'unsent',
     };
@@ -145,16 +161,17 @@ export class OperationsStore extends Store<OperationsSnapshot> {
           const failure = toRemoteKitError(error);
           diagnostics.record('product-action', failure);
           if (errorHandling(failure.code) === 'reconcile')
-            receipt = { ...operation, status: 'unknown', error: failure };
-          else receipt = { ...operation, status: 'failed', error: failure };
+            receipt = { ...operation, status: 'unknown', error: wireError(failure) };
+          else receipt = { ...operation, status: 'failed', error: wireError(failure) };
         }
         if (scope !== this.scope) throw new RemoteKitError('locked', '授权已改变');
         if (receipt.status === 'unknown' && !receipt.resolved) receipt = await this.query(operation);
         const failure = parseWireError(receipt.error);
         const delay = failure && retryDelay(failure, attempt);
-        if (receipt.status === 'failed' && delay !== undefined && attempt < 4) {
+        if (receipt.status === 'failed' && delay !== undefined) {
+          this.publish({ ...this.getSnapshot(), error: operationFailure(failure!, command.type, command) });
           this.retries.set(operation.operationId, attempt + 1);
-          await this.wait(delay, scope);
+          await this.wait(Math.min(60_000, delay), scope);
           this.update([
             ...this.getSnapshot().pending.filter((entry) => entry.operationId !== operation.operationId),
             { ...operation, phase: 'unsent' },
@@ -165,8 +182,8 @@ export class OperationsStore extends Store<OperationsSnapshot> {
         if (receipt.status === 'failed') {
           const error = failure ?? new RemoteKitError('internal', '操作收据缺少错误码');
           const handling = errorHandling(error.code);
-          if (handling === 'refresh' || handling === 'drop' || handling === 'canceled') return receipt;
-          throw error;
+          if (handling === 'canceled') return receipt;
+          throw operationFailure(error, command.type, command);
         }
         return receipt;
       }
@@ -181,7 +198,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     const delay = retryDelay(receipt.error, this.retries.get(entry.operationId) ?? 0);
     const command = this.commands.get(entry.operationId);
     const attempt = this.retries.get(entry.operationId) ?? 0;
-    if (delay === undefined || !command || attempt >= 4) return false;
+    if (delay === undefined || !command) return false;
     this.retries.set(entry.operationId, attempt + 1);
     void this.execute(entry, command, delay).catch((error: unknown) => {
       const failure = toRemoteKitError(error);
@@ -192,7 +209,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
   }
 
   private async wait(delay: number, scope: number) {
-    await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    await waitForRecovery(Math.min(60_000, delay), this.scopeAbort.signal);
     if (scope !== this.scope) throw new RemoteKitError('canceled', '');
   }
 
@@ -201,6 +218,9 @@ export class OperationsStore extends Store<OperationsSnapshot> {
   }
 
   reset(scope = this.scope + 1) {
+    this.scopeAbort.abort();
+    this.scopeAbort = new AbortController();
+    this.pollingAttempts = 0;
     this.scope = scope;
     this.accepted = null;
     this.acceptedContent = undefined;
@@ -216,6 +236,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
 
   private receipt(receipt: OperationReceipt) {
     const current = this.getSnapshot();
+    const command = this.commands.get(receipt.operationId);
     if (receipt.status === 'committed' || receipt.status === 'failed' || receipt.resolved) {
       this.commands.delete(receipt.operationId);
       this.retries.delete(receipt.operationId);
@@ -226,9 +247,10 @@ export class OperationsStore extends Store<OperationsSnapshot> {
         : entry,
     );
     const failure = parseWireError(receipt.error);
+    if (failure && command) operationFailure(failure, command.type, command);
     const handling = failure && errorHandling(failure.code);
     const error =
-      receipt.status === 'failed' && handling !== 'refresh' && handling !== 'drop' && handling !== 'canceled'
+      receipt.status === 'failed' && handling !== 'canceled'
         ? failure
         : receipt.status === 'unknown' && receipt.resolved
           ? failure
@@ -238,6 +260,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
       current.authoritative,
       error,
     );
+    this.publish({ ...this.getSnapshot(), error });
   }
 
   private update(
@@ -274,47 +297,51 @@ export class OperationsStore extends Store<OperationsSnapshot> {
         const failure = toRemoteKitError(error);
         diagnostics.record('operation-status', failure);
         const delay = retryDelay(failure, attempt);
-        if (delay !== undefined && attempt < 4) {
-          await this.wait(delay, scope);
+        if (delay !== undefined) {
+          await this.wait(Math.min(60_000, delay), scope);
           continue;
         }
         if (errorHandling(failure.code) === 'reconcile')
-          return { operationId, operationGeneration, status: 'unknown', error: failure };
-        return { operationId, operationGeneration, status: 'failed', error: failure };
+          return { operationId, operationGeneration, status: 'unknown', error: wireError(failure) };
+        return { operationId, operationGeneration, status: 'failed', error: wireError(failure) };
       }
     }
   }
 
   private schedule() {
     if (!this.getSnapshot().pending.length) {
+      this.pollingAttempts = 0;
       clearTimeout(this.timer);
       this.timer = undefined;
       return;
     }
     if (this.timer || this.pollingScope === this.scope) return;
     const scope = this.scope;
-    this.timer = setTimeout(async () => {
-      this.timer = undefined;
-      this.pollingScope = scope;
-      try {
-        const entries = this.getSnapshot().pending.filter(
-          (entry) =>
-            !entry.receipt ||
-            (['accepted', 'applying', 'unknown'].includes(entry.phase) && !entry.receipt.resolved),
-        );
-        const receipts = await Promise.all(
-          entries
-            .filter((entry) => !this.executing.has(entry.operationId))
-            .map(async (entry) => ({ entry, receipt: await this.query(entry) })),
-        );
-        if (scope === this.scope)
-          for (const { entry, receipt } of receipts) {
-            if (!this.retryReceipt(entry, receipt)) this.receipt(receipt);
-          }
-      } finally {
-        if (this.pollingScope === scope) this.pollingScope = undefined;
-        this.schedule();
-      }
-    }, 2000);
+    this.timer = setTimeout(
+      async () => {
+        this.timer = undefined;
+        this.pollingScope = scope;
+        try {
+          const entries = this.getSnapshot().pending.filter(
+            (entry) =>
+              !entry.receipt ||
+              (['accepted', 'applying', 'unknown'].includes(entry.phase) && !entry.receipt.resolved),
+          );
+          const receipts = await Promise.all(
+            entries
+              .filter((entry) => !this.executing.has(entry.operationId))
+              .map(async (entry) => ({ entry, receipt: await this.query(entry) })),
+          );
+          if (scope === this.scope)
+            for (const { entry, receipt } of receipts) {
+              if (!this.retryReceipt(entry, receipt)) this.receipt(receipt);
+            }
+        } finally {
+          if (this.pollingScope === scope) this.pollingScope = undefined;
+          this.schedule();
+        }
+      },
+      Math.min(60_000, 2000 * 2 ** Math.max(0, Math.min(5, this.pollingAttempts++ - 4))),
+    );
   }
 }

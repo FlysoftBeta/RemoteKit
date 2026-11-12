@@ -1,3 +1,5 @@
+import { LibraryStore } from '../client/files/library-store';
+import { notices } from '../client/failures';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { JSDOM } from 'jsdom';
@@ -75,6 +77,21 @@ async function mount() {
       return snapshot;
     },
   } as unknown as FileLibrary;
+  const owner = new LibraryStore(
+    (async (method: string, params: unknown) =>
+      method === 'library.import' ? library.mutate(method, params as never) : snapshot) as never,
+    library.rpc as never,
+  );
+  library.importQueue = owner.importQueue;
+  const queue = owner.importQueue('library', 'files');
+  let mounted = true;
+  const closeWindow = () =>
+    act(async () => {
+      if (mounted) {
+        root.unmount();
+        mounted = false;
+      }
+    });
   const state: FilesWindowState = {
     tabs: [
       { id: 'library1', kind: 'library', view: 'all', query: '' },
@@ -86,6 +103,7 @@ async function mount() {
   };
   const render = () =>
     act(async () => {
+      owner.configure(library.online, !!library.scope, library.scope, []);
       root.render(
         createElement(
           FileLibraryContext.Provider,
@@ -102,6 +120,8 @@ async function mount() {
   await render();
   return {
     calls,
+    queue,
+    closeWindow,
     pending,
     library,
     async select(id: string) {
@@ -117,9 +137,44 @@ async function mount() {
       });
       await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })));
     },
-    close: () => act(async () => root.unmount()),
+    close: async () => {
+      await closeWindow();
+      owner.dispose();
+      notices.clear();
+    },
   };
 }
+
+test('upload failures stay in queue items and collapse to one note below the toolbar', async () => {
+  const window = await mount();
+  try {
+    await window.add(2);
+    assert(document.querySelector('[data-upload-job] [role=progressbar]'));
+    await act(async () => {
+      window.pending[0].reject(new RemoteKitError('internal', 'upload failed'));
+      await flush();
+    });
+    const area = document.querySelector('[data-upload-queue-area]')!;
+    const queue = area.querySelector('[data-upload-queue]')!;
+    const note = queue.querySelector('.failure-C')!;
+    assert(note.closest('[data-upload-job]'));
+    assert.match(note.textContent!, /file-0.txt 未能导入/);
+    assert.match(note.textContent!, /错误 ID v-[0-9a-f]{10}/);
+    assert.equal(document.querySelector('.tab-bar .failure-note'), null);
+    assert(area.previousElementSibling);
+    assert.equal(area.parentElement?.classList.contains('library-tab'), true);
+    const toggle = [...queue.querySelectorAll('button')].find(
+      (button) => button.textContent === '收起上传队列',
+    )!;
+    await act(async () => toggle.click());
+    assert.equal(queue.querySelector('[data-upload-job]'), null);
+    assert.equal(queue.querySelectorAll('.failure-note').length, 1);
+    assert.equal(queue.querySelector('.failure-note')?.closest('[data-upload-job]'), null);
+    assert.match(queue.textContent!, /file-0.txt 未能导入/);
+  } finally {
+    await window.close();
+  }
+});
 
 test('Files window uploads survive document and library tab unmounts', async () => {
   const window = await mount();
@@ -150,53 +205,58 @@ test('Files window uploads survive document and library tab unmounts', async () 
   }
 });
 
-test('window closure and authorization revocation abort uploads even while a document tab is active', async () => {
+test('window closure keeps background uploads and authorization revocation aborts the task', async () => {
   for (const revoke of [false, true]) {
     const window = await mount();
-    await window.add(2);
-    const first = window.pending[0];
-    await window.select('document');
-    if (revoke) {
-      window.library.scope = undefined;
-      window.library.online = false;
-      await window.render();
-    } else await window.close();
-    assert.equal(first.signal.aborted, true);
-    await act(async () => {
-      first.resolve(asset);
-      await flush();
-    });
-    assert.equal(window.calls.length, 0);
-    assert.equal(window.pending.length, 1);
-    if (revoke) {
-      await window.select('library2');
-      assert.equal(document.querySelector('[role=progressbar]'), null);
+    try {
+      await window.add(2);
+      const first = window.pending[0];
+      await window.select('document');
+      if (revoke) {
+        window.library.scope = undefined;
+        window.library.online = false;
+        await window.render();
+      } else await window.closeWindow();
+      assert.equal(first.signal.aborted, revoke);
+      await act(async () => {
+        first.resolve(asset);
+        await flush();
+      });
+      assert.equal(window.calls.length, revoke ? 0 : 1);
+      assert.equal(window.pending.length, revoke ? 1 : 2);
+    } finally {
       await window.close();
     }
   }
 });
 
-test('upload warnings clear on acceptance and runtime failures remain visible across library tabs', async () => {
+test('capacity notes clear on acceptance and upload recovery survives library tabs automatically', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
   const window = await mount();
   try {
     await window.add(65);
-    assert.match(document.querySelector('[role=alert]')?.textContent ?? '', /最多可添加 64 个文件/);
+    assert.match(document.querySelector('.failure-B')?.textContent ?? '', /超出限制/);
     await window.add(1);
-    assert.equal(document.querySelector('[role=alert]'), null);
+    assert.equal(document.querySelector('.failure-B'), null);
     const first = window.pending[0];
     await act(async () => {
-      first.reject(new RemoteKitError('unavailable', 'connection lost'));
+      first.reject(new RemoteKitError('unavailable', 'connection lost', { retryAfterMs: 5000 }));
       await flush();
     });
-    const error = document.querySelector('[role=alert]')?.textContent;
-    assert(error);
+    await act(async () => {
+      t.mock.timers.tick(1500);
+      await flush();
+    });
+    assert.match(document.querySelector('.failure-A')?.textContent ?? '', /正在上传/);
+    assert.equal(document.querySelector('.failure-C'), null);
     await window.select('document');
     await window.select('library2');
-    assert.equal(document.querySelector('[role=alert]')?.textContent, error);
-    const retry = [...document.querySelectorAll('button')].find(
-      (button) => button.textContent === '继续上传',
-    )!;
-    await act(async () => retry.click());
+    assert.equal(window.queue.getSnapshot().error?.code, 'unavailable');
+    assert(![...document.querySelectorAll('button')].some((button) => button.textContent === '继续上传'));
+    await act(async () => {
+      t.mock.timers.tick(3500);
+      await flush();
+    });
     assert.equal(window.pending[1].id, first.id);
     await act(async () => {
       window.pending[1].resolve(asset);
@@ -204,7 +264,7 @@ test('upload warnings clear on acceptance and runtime failures remain visible ac
     });
     assert.equal(window.calls.length, 1);
     assert.equal(window.calls[0].operationId, first.id);
-    assert.equal(document.querySelector('[role=alert]'), null);
+    assert.equal(document.querySelector('.failure-A'), null);
   } finally {
     await window.close();
   }

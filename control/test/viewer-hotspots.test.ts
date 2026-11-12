@@ -20,10 +20,18 @@ test('duplicate authoritative content keeps store identity and advances its orde
   store.acceptSnapshot({ ...structuredClone(state), snapshotSequence: 4 });
   assert.strictEqual(store.getSnapshot(), published);
   assert.equal(notifications, 0);
-  store.acceptSnapshot({ ...state, snapshotSequence: 3, endpointError: 'old' });
+  store.acceptSnapshot({
+    ...state,
+    snapshotSequence: 3,
+    endpointError: { code: 'internal', message: 'old' },
+  });
   assert.strictEqual(store.getSnapshot(), published);
-  store.acceptSnapshot({ ...state, snapshotSequence: 5, endpointError: 'changed' });
-  assert.equal(store.getSnapshot().state?.endpointError, 'changed');
+  store.acceptSnapshot({
+    ...state,
+    snapshotSequence: 5,
+    endpointError: { code: 'internal', message: 'changed' },
+  });
+  assert.equal(store.getSnapshot().state?.endpointError?.message, 'changed');
   assert.equal(notifications, 1);
 });
 

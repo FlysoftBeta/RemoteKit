@@ -1,14 +1,15 @@
-import { log } from '../log';
 import { randomUUID } from 'node:crypto';
-import { RemoteKitError } from '../../shared/errors';
+import { retryDelay } from '../../shared/error-policy';
+import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import type { LearningProvider, LearningSocketMethods } from '../../shared/learning';
 import type { ProductWorkspace } from '../../shared/product';
+import { log, reportError } from '../log';
 import { windowClosing } from '../workspace/model';
 import { closeSignInTab } from '../workspace/sign-in';
 import { LearningAccounts } from './accounts';
 import type { CaptchaSeccode } from './providers/changyan/auth';
-import type { XinjiaoyuProvider } from './providers/xinjiaoyu/resources';
 import { decodeIdentity, type XinjiaoyuSession } from './providers/xinjiaoyu/client';
+import type { XinjiaoyuProvider } from './providers/xinjiaoyu/resources';
 
 type Flow = {
   tenant: string;
@@ -22,6 +23,7 @@ type Flow = {
   password?: string;
   timer: ReturnType<typeof setTimeout>;
   finishing: boolean;
+  abort: AbortController;
 };
 export interface SignInTabs {
   validate(tenant: string, provider: LearningProvider, windowId: string): void;
@@ -78,8 +80,9 @@ export class SignIn {
       username: params.provider === 'changyan' ? params.username : '',
       password: params.provider === 'changyan' ? params.password : undefined,
       finishing: false,
+      abort: new AbortController(),
       timer: setTimeout(
-        () => this.run(this.finish(flow, new RemoteKitError('unavailable', '登录超时，请重试'))),
+        () => this.run(this.finish(flow, new RemoteKitError('rejected', '登录验证已过期'), 'expired')),
         this.timeoutMs,
       ),
     };
@@ -92,10 +95,36 @@ export class SignIn {
     this.run(this.begin(flow).catch((error) => this.finish(flow, error)));
     return { started: true as const };
   }
+  private async step<T>(flow: Flow, work: () => Promise<T>): Promise<T> {
+    let attempt = 0;
+    while (this.active(flow)) {
+      try {
+        return await work();
+      } catch (value) {
+        const error = toRemoteKitError(value);
+        const delay = retryDelay(error, attempt++);
+        if (delay === undefined && error.code !== 'outcome_unknown') throw error;
+        const state = this.accounts.state(flow.tenant, flow.provider);
+        if (state.status === 'signing_in')
+          this.accounts.setState(flow.tenant, flow.provider, { ...state, error: wireError(error) });
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            clearTimeout(timer);
+            flow.abort.signal.removeEventListener('abort', done);
+            resolve();
+          };
+          const timer = setTimeout(done, Math.min(60000, delay ?? 1000 * 2 ** Math.min(attempt, 6)));
+          flow.abort.signal.addEventListener('abort', done, { once: true });
+          if (flow.abort.signal.aborted) done();
+        });
+      }
+    }
+    throw new RemoteKitError('canceled', '');
+  }
   private async begin(flow: Flow) {
     let url = 'https://www.xinjiaoyu.com/auth/login';
     if (flow.provider === 'changyan') {
-      const policy = await this.accounts.auth.captchaPolicy();
+      const policy = await this.step(flow, () => this.accounts.auth.captchaPolicy());
       if (!this.active(flow)) return;
       if (!policy.required) return this.loginChangyan(flow);
       const query = new URLSearchParams({
@@ -127,14 +156,16 @@ export class SignIn {
       tabId: flow.tabId,
     });
     const password = flow.password!;
-    const login = await this.accounts.auth.login({ username: flow.username, password, seccode });
+    const login = await this.step(flow, () =>
+      this.accounts.auth.login({ username: flow.username, password, seccode }),
+    );
     if ('challenge' in login) {
       flow.finishing = false;
       await this.begin(flow);
       return;
     }
     delete flow.password;
-    const session = await this.accounts.zhixueAuth.renew(login);
+    const session = await this.step(flow, () => this.accounts.zhixueAuth.renew(login));
     if (!this.active(flow)) return;
     this.accounts.save(flow.tenant, 'changyan', session, session.displayName || flow.username, flow.username);
     await this.finish(flow);
@@ -192,7 +223,7 @@ export class SignIn {
             secChUaMobile: field('sec-ch-ua-mobile'),
             secChUaPlatform: field('sec-ch-ua-platform'),
           };
-          const validated = await this.bank(tenant).subjects(session);
+          const validated = await this.step(flow, () => this.bank(tenant).subjects(session));
           if (!this.active(flow)) return;
           this.accounts.save(
             tenant,
@@ -207,10 +238,11 @@ export class SignIn {
     );
     return true;
   }
-  private async finish(flow: Flow, error?: unknown) {
+  private async finish(flow: Flow, error?: unknown, failureKind?: 'expired' | 'browser-replaced') {
     if (!this.active(flow)) return;
     this.flows.delete(this.key(flow.tenant, flow.provider));
     clearTimeout(flow.timer);
+    flow.abort.abort();
     delete flow.password;
     if (flow.tabId)
       await this.tabs
@@ -222,7 +254,13 @@ export class SignIn {
       flow.tenant,
       flow.provider,
       error
-        ? { status: 'failed', message: error instanceof RemoteKitError ? error.message : '登录失败，请重试' }
+        ? {
+            status: 'failed',
+            failureKind,
+            error: wireError(
+              reportError(toRemoteKitError(error), 'learning.sign_in_failed', { tenant: flow.tenant }),
+            ),
+          }
         : undefined,
     );
   }
@@ -247,8 +285,9 @@ export class SignIn {
           this.finish(
             flow,
             !running || (flow.browser && browser && flow.browser !== browser)
-              ? new RemoteKitError('unavailable', '会话已重启，请重新登录')
+              ? new RemoteKitError('rejected', '登录页面已随浏览器重启而结束')
               : undefined,
+            'browser-replaced',
           ),
         );
       } else if (flow && browser && flow.viewId) flow.browser = browser;

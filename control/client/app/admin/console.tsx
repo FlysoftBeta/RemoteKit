@@ -1,13 +1,15 @@
-import './console.css';
 import BugReportOutlined from '@mui/icons-material/BugReportOutlined';
 import CampaignOutlined from '@mui/icons-material/CampaignOutlined';
 import DashboardOutlined from '@mui/icons-material/DashboardOutlined';
 import DnsOutlined from '@mui/icons-material/DnsOutlined';
 import PeopleOutline from '@mui/icons-material/PeopleOutline';
 import StorageOutlined from '@mui/icons-material/StorageOutlined';
-import { Alert, Box, List, ListItemButton, ListItemIcon, ListItemText, Tab, Tabs } from '@mui/material';
+import { Box, List, ListItemButton, ListItemIcon, ListItemText, Tab, Tabs } from '@mui/material';
 import { useEffect, useRef, useState, type ReactElement } from 'react';
+import { RemoteKitError } from '../../../shared/errors';
+import { SurfaceState } from '../../failures';
 import { AdminAnnouncementsSection } from './announcements';
+import './console.css';
 import { AdminDiagnosticsSection } from './diagnostics';
 import { AdminNodesSection } from './nodes';
 import { AdminOverviewSection } from './overview';
@@ -87,7 +89,12 @@ export function AdminApp({
           </List>
         )}
         <Box className="admin-content">
-          {!online && <Alert severity="warning">连接恢复后可继续管理。</Alert>}
+          {!online && (
+            <SurfaceState
+              error={new RemoteKitError('unavailable', '')}
+              context={{ operation: '读取管理内容', scope: 'surface' }}
+            />
+          )}
           {content[section]}
         </Box>
       </Box>

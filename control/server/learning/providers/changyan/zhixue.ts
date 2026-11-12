@@ -4,13 +4,13 @@ import {
   HttpClient,
   type HttpOptions,
   list,
-  record,
-  text,
-  requiredText,
-  number,
   malformed,
+  number,
   positiveInteger,
+  record,
+  requiredText,
   serviceError,
+  text,
 } from '../http.js';
 import type {
   Attachment,
@@ -77,7 +77,8 @@ export class ZhixueClient {
     return this.read(session, async (reader) => {
       const page = positiveInteger(query.page ?? 1, '页码');
       const pageSize = positiveInteger(query.pageSize ?? 10, '每页数量');
-      if (pageSize > 100) throw new RemoteKitError('limit_exceeded', '每页数量不能超过 100');
+      if (pageSize > 100)
+        throw new RemoteKitError('limit_exceeded', '每页数量不能超过 100', { capacity: 'selection' });
       const bucket = query.bucket ?? 'active';
       const raw = record(
         await reader.post(

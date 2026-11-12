@@ -1,6 +1,7 @@
-import { log } from '../log';
+import { reportError } from '../log';
+import { RemoteKitError, wireError } from '../../shared/errors';
 import { canonicalJson } from '../config';
-import { RemoteKitError } from '../../shared/errors';
+import { log } from '../log';
 
 import type { ProductState } from '../../shared/product';
 import { isLocalTab } from '../../shared/product';
@@ -38,7 +39,12 @@ export class ViewerHub {
       fileRequests: (runtime.pageRequests.files ?? []).map(({ binding, ...request }) => request),
       quality: this.services.policy.qualityFor(tenant, workspace),
       endpointGeneration: this.context.tenants.mediaGeneration(tenant),
-      endpointError: runtime.lastError ?? null,
+      backgroundTasks: [...runtime.backgroundTasks.values()],
+      endpointError: runtime.lastError
+        ? wireError(reportError(runtime.lastError, 'viewer.endpoint_failed', { tenant }))
+        : null,
+      endpointActivity: runtime.lastErrorKey === 'hibernating' ? 'saving-session' : undefined,
+      endpointErrorKind: runtime.lastErrorKey === 'resource_limit' ? 'output-capacity' : 'runtime',
       browserRestart: runtime.browserRestart,
       viewer: {
         connected: runtime.viewer !== undefined,
@@ -219,7 +225,7 @@ export class ViewerHub {
       // Preflight cannot mutate live observations or replace a valid viewport.
       const feasibility = new QualityState().snapshot(state, body);
       if (feasibility.resourceLimitation)
-        throw new RemoteKitError('limit_exceeded', feasibility.resourceLimitation);
+        throw new RemoteKitError('limit_exceeded', feasibility.resourceLimitation, { capacity: 'windows' });
       const viewport = {
         devicePixelRatio: body.devicePixelRatio,
         refreshHz: body.refreshHz,

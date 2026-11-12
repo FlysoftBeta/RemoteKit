@@ -1,5 +1,3 @@
-import { useAutoFocus } from '../editing/local-autofocus';
-import { diagnostics } from '../media/diagnostics';
 import {
   ArrowDropDown,
   CheckBoxOutlined,
@@ -31,49 +29,38 @@ import {
   ListItemText,
   Menu,
   MenuItem,
+  Snackbar,
   TextField,
   Tooltip,
   Typography,
-  Snackbar,
 } from '@mui/material';
-import React, {
-  type JSX,
-  memo,
-  useMemo,
-  useLayoutEffect,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from 'react';
-import { canonicalJson } from '../util/canonical-json';
-import { VirtualScroller, type VirtualViewport } from '../ui/virtual-list';
-import { SizeIndex } from '../ui/virtual-scroll';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type JSX } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { LibraryEntry } from '../../shared/file-library';
 import { scaledAnchor } from '../app/ui-scale';
 import { operationId } from '../control/product-operations';
+import { useAutoFocus } from '../editing/local-autofocus';
+import { failureError, FailureNote } from '../failures';
+import { diagnostics } from '../media/diagnostics';
+import { VirtualScroller, type VirtualViewport } from '../ui/virtual-list';
+import { SizeIndex } from '../ui/virtual-scroll';
+import { canonicalJson } from '../util/canonical-json';
 import { photoStatus } from './basket-items';
 import { FileBasketDialog } from './file-chooser-dialog';
-import { dayLabel, formatFileSize, formatTime } from './file-format';
 import { FileEntryMenu } from './file-entry-menu';
-import './library-tab.css';
-import {
-  basketEntries,
-  fileError,
-  FileDropZone,
-  PartitionPicker,
-  useDeviceImport,
-} from './file-library-controls';
+import { dayLabel, formatFileSize, formatTime } from './file-format';
+import { basketEntries, FileDropZone, PartitionPicker, useDeviceImport } from './file-library-controls';
 import { useLibrary } from './file-library-state';
-import type { ImportControls } from './import-queue';
 import { FileRow, FileTile } from './file-tile';
 import { FileViewToggle } from './file-view';
-import { PhotoCapture } from './photo-library-capture';
-import type { PhotoJob } from './photo-job-store';
-import { PhotoOptions } from './photo-options';
 import { filesInView, sourceAppName, sourceChannelName, type FilesView } from './files-app-state';
 import { FilesOrganization } from './files-organization';
-import { SnippetView, snippetOriginLabel, snippetRelativeTime, snippetSearchText } from './snippet-view';
+import type { ImportControls } from './import-queue';
+import './library-tab.css';
+import type { PhotoJob } from './photo-job-store';
+import { PhotoCapture } from './photo-library-capture';
+import { PhotoOptions } from './photo-options';
+import { snippetOriginLabel, snippetRelativeTime, snippetSearchText, SnippetView } from './snippet-view';
 
 const MAX_BASKET = 64;
 
@@ -98,7 +85,17 @@ export function LibraryTab({
   onLayout(layout: 'grid' | 'list'): void;
   onOpen(entry: LibraryEntry): void;
 }): JSX.Element {
-  const { snapshot, online, refresh, mutate, photos, recordUsage, apps, copySnippet } = useLibrary();
+  const {
+    snapshot,
+    error: loadError,
+    online,
+    refresh,
+    mutate,
+    photos,
+    recordUsage,
+    apps,
+    copySnippet,
+  } = useLibrary();
   const [copied, setCopied] = useState(false);
   const pane = useRef<HTMLDivElement>(null);
   const [paneWidth, setPaneWidth] = useState(Infinity);
@@ -107,7 +104,7 @@ export function LibraryTab({
   const compact = paneWidth < 900;
   const setQuery = (query: string) => onQuery(query.slice(0, 256));
   const [searching, setSearching] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string[]>();
   const [menu, setMenu] = useState<{ anchor: HTMLElement; id: string }>();
@@ -161,7 +158,7 @@ export function LibraryTab({
   const menuEntry = catalog.find((entry) => entry.id === menu?.id);
   const photoEntry = catalog.find((entry) => entry.id === photo);
   const photoJob = photos.jobs.find((job) => job.id === photo || job.replace?.id === photo);
-  const reportError = useCallback((message: string) => setError(message), []);
+  const reportError = useCallback((error: RemoteKitError | undefined) => setError(error), []);
   const upload = useDeviceImport({
     uploads,
     disabled,
@@ -184,12 +181,12 @@ export function LibraryTab({
   });
 
   async function run(action: () => Promise<unknown>) {
-    setError('');
+    setError(undefined);
     setBusy(true);
     try {
       await action();
     } catch (failure) {
-      setError(fileError(failure));
+      setError(failureError(failure));
     } finally {
       setBusy(false);
     }
@@ -215,7 +212,12 @@ export function LibraryTab({
     const order = basket.map((entry) => entry.id);
     const fresh = ids.filter((id) => !inBasket.has(id));
     if (order.length + fresh.length > MAX_BASKET) {
-      setError(`文件篮最多放 ${MAX_BASKET} 项，还能再放 ${MAX_BASKET - order.length} 项`);
+      setError(
+        new RemoteKitError(
+          'invalid_request',
+          `文件篮最多放 ${MAX_BASKET} 项，还能再放 ${MAX_BASKET - order.length} 项`,
+        ),
+      );
       return;
     }
     if (fresh.length)
@@ -511,6 +513,9 @@ export function LibraryTab({
         )}
         {narrow && <FilesOrganization mode="chips" view={filter} onView={selectFilter} />}
       </Box>
+      <Box data-upload-queue-area sx={{ flex: 'none', px: narrow ? 1.5 : 3 }}>
+        {upload.view}
+      </Box>
       <Box sx={{ flex: 1, minHeight: 0, display: 'flex' }}>
         {!narrow && <FilesOrganization mode="nav" view={filter} onView={selectFilter} />}
         <FileDropZone
@@ -530,11 +535,12 @@ export function LibraryTab({
               pb: 3,
             }}
           >
-            {(busy || upload.busy) && <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />}
-            {error && (
-              <Alert severity="warning" onClose={() => setError('')} sx={{ mt: 1.5 }}>
-                {error}
-              </Alert>
+            {busy && <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />}
+            {(error ?? loadError) && (
+              <FailureNote
+                error={error ?? loadError}
+                context={{ operation: error ? '保存文件更改' : '读取我的文件', scope: 'surface' }}
+              />
             )}
             {!online && (
               <Alert severity="info" sx={{ mt: 1.5 }}>
@@ -548,7 +554,6 @@ export function LibraryTab({
                 </Button>
               </Box>
             )}
-            <Box sx={{ '&:not(:empty)': { pt: 1.5 } }}>{upload.view}</Box>
             {snapshot && filter !== 'settings' && (
               <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 1, pt: 1.5, pb: 0.5 }}>
                 <FilesOrganization mode="source" view={filter} onView={selectFilter} />
@@ -749,10 +754,11 @@ export function LibraryTab({
             <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
               将从我的文件和文件篮删除。页面已接收的副本会保留。
             </Typography>
-            {error && (
-              <Alert severity="warning" sx={{ mt: 1 }}>
-                {error}
-              </Alert>
+            {(error ?? loadError) && (
+              <FailureNote
+                error={error ?? loadError}
+                context={{ operation: error ? '保存文件更改' : '读取我的文件', scope: 'surface' }}
+              />
             )}
           </DialogContent>
           <DialogActions>
@@ -939,9 +945,6 @@ export function PhotoDialog({
         />
       </DialogContent>
       <DialogActions>
-        {job?.retryable && job.state === 'error' && (
-          <Button onClick={() => photos.retry(job.id)}>重试</Button>
-        )}
         {job && (
           <Button
             disabled={job.state === 'committing'}

@@ -1,3 +1,5 @@
+import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import { deviceClipboard } from '../clipboard/device-clipboard';
 import type { InputPipeline } from '../input/input-pipeline';
 import { keyIdentity, modifiers } from '../input/keys';
 import type { PresentationSession } from '../presentation/presentation-session';
@@ -6,7 +8,6 @@ import { EditingInput, EDITOR_SENTINEL } from './editing-input';
 import type { EditingSession } from './editing-session';
 import { KeyboardSession } from './keyboard-session';
 import { DeferredEditingInput, editableInputMode } from './mobile-editing-state';
-import { deviceClipboard } from '../clipboard/device-clipboard';
 const pointerMedia = new WeakMap<Window, { coarse: MediaQueryList; fine: MediaQueryList }>();
 function pointerQueries() {
   let queries = pointerMedia.get(window);
@@ -28,7 +29,7 @@ export interface ResizeObservation {
   blocksInput(): boolean;
 }
 export interface EditingViewSnapshot {
-  error?: string;
+  error?: RemoteKitError;
   keyboardShown: boolean;
   keyboardReady: boolean;
   keyboardEnabled: boolean;
@@ -55,7 +56,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
   private softInputFocused = false;
   private suppressBlur = false;
   private systemDismissalSeen = 0;
-  private error?: string;
+  private error?: RemoteKitError;
   private enabled = true;
   private configured = false;
   private autoOpen = false;
@@ -154,7 +155,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
   get frameReady() {
     return !!this.ports.presentation.canInput(this.viewId);
   }
-  private setError = (error?: string) => {
+  private setError = (error?: RemoteKitError) => {
     this.error = error;
     this.changed();
   };
@@ -221,7 +222,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
       clearTimeout(this.deferredEditingTimer);
       for (const event of this.deferredEditing.drain(this.remoteOwner))
         if (!this.send(event)) {
-          this.setError('键盘输入暂未送达，请重新输入。');
+          this.setError(new RemoteKitError('invalid_request', '键盘输入暂未送达，请重新输入。'));
           break;
         }
     }
@@ -393,11 +394,12 @@ export class EditingView extends Store<EditingViewSnapshot> {
               modifiers: 0,
             })
           ) {
-            this.setError('键盘输入暂未送达，请重新输入。');
+            this.setError(new RemoteKitError('invalid_request', '键盘输入暂未送达，请重新输入。'));
             break;
           }
         }
-      } else if (event.type === 'key' && !this.send(event)) this.setError('键盘输入暂未送达，请重新输入。');
+      } else if (event.type === 'key' && !this.send(event))
+        this.setError(new RemoteKitError('invalid_request', '键盘输入暂未送达，请重新输入。'));
       return;
     }
     const target = this.currentEditTarget();
@@ -418,13 +420,15 @@ export class EditingView extends Store<EditingViewSnapshot> {
         this.deferredEditingTimer = setTimeout(() => {
           if (!this.deferredEditing.pending) return;
           this.deferredEditing.clear();
-          this.setError('画面恢复超时，暂存键盘输入已取消，请重新输入。');
+          this.setError(
+            new RemoteKitError('invalid_request', '画面恢复超时，暂存键盘输入已取消，请重新输入。'),
+          );
         }, 3000);
       }
       return;
     }
     this.deferredEditing.clear();
-    this.setError('键盘输入暂未送达，请等待画面恢复后重新输入。');
+    this.setError(new RemoteKitError('invalid_request', '键盘输入暂未送达，请等待画面恢复后重新输入。'));
   };
   finishLocalEditing = () => {
     if (this.editing.matches(this.editorOwner)) {
@@ -585,7 +589,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
           repeat: false,
         });
       })
-      .catch(() => this.setError('剪贴板暂未同步，请重试粘贴。'));
+      .catch((error) => this.setError(toRemoteKitError(error)));
   };
   edit = (event: InputEvent, phase: 'before' | 'input') => {
     if (document.activeElement !== this.editor) return;
@@ -602,7 +606,12 @@ export class EditingView extends Store<EditingViewSnapshot> {
     if (phase === 'before' && event.cancelable && !deferredText) event.preventDefault();
     for (const value of operation.events) this.sendEdit(value);
     if (operation.unsupported)
-      this.setError(`当前键盘编辑操作尚不支持：${operation.unsupported}。请使用逐字输入或远端选区编辑。`);
+      this.setError(
+        new RemoteKitError(
+          'invalid_request',
+          `当前键盘编辑操作尚不支持：${operation.unsupported}。请使用逐字输入或远端选区编辑。`,
+        ),
+      );
     else if (operation.events.length) this.setError(undefined);
     if (phase === 'input' || event.defaultPrevented) this.resetEditor();
   };

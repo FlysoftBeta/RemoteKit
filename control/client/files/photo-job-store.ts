@@ -1,8 +1,4 @@
-import { errorHandling, retryDelay } from '../../shared/error-policy';
-import { diagnostics } from '../media/diagnostics';
-import { Store } from '../util/store';
-import { formatError } from '../util/format-error';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type {
   Asset,
   LibraryEntry,
@@ -10,8 +6,12 @@ import type {
   LibrarySnapshot,
   PhotoMetadata,
 } from '../../shared/file-library';
-import type { CapturedBurst } from './camera-capture';
 import { operationId } from '../control/product-operations';
+import { notices, presentFailure } from '../failures';
+import { recoveryDelay } from '../failures/recovery';
+import { diagnostics } from '../media/diagnostics';
+import { Store } from '../util/store';
+import type { CapturedBurst } from './camera-capture';
 import type { FileChannel, ProcessedPhoto } from './file-channel';
 
 export interface PhotoServices {
@@ -43,9 +43,8 @@ export interface PhotoJob extends PhotoDestination {
   preview?: Blob;
   candidates?: string[];
   originalId?: string;
-  error?: string;
-  warning?: string;
-  retryable?: boolean;
+  error?: RemoteKitError;
+  advisory?: 'low-quality';
   rotationTurns?: number;
 }
 
@@ -57,9 +56,17 @@ interface Task extends PhotoJob {
   rotationTimer?: ReturnType<typeof setTimeout>;
   resume?: () => Promise<void>;
   waiting?: () => Promise<void>;
+  recoveryTimer?: ReturnType<typeof setTimeout>;
+  attempts?: number;
 }
 
 export class PhotoJobStore extends Store<readonly PhotoJob[]> {
+  private visible = true;
+  setVisible(visible: boolean) {
+    if (visible === this.visible) return;
+    this.visible = visible;
+    this.emit();
+  }
   private tasks = new Map<string, Task>();
   private chain = Promise.resolve();
   private available = false;
@@ -69,21 +76,57 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
   }
   configure(available: boolean, identity?: string) {
     if (available === this.available && identity === this.identity) return;
-    this.dispose();
+    if (identity !== this.identity) this.dispose();
     this.available = available;
     this.identity = identity;
+    if (available)
+      for (const task of this.tasks.values()) {
+        if (task.state === 'error' && task.error && recoveryDelay(task.error, 0) !== undefined) {
+          clearTimeout(task.recoveryTimer);
+          void this.execute(task, () =>
+            task.resume ? this.commit(task) : task.process ? task.process() : this.upload(task),
+          );
+        }
+      }
   }
   dispose = () => {
-    this.tasks.forEach((task) => this.disposeTask(task));
+    this.tasks.forEach((task) => {
+      notices.resolve('task:photo:' + task.id);
+      this.disposeTask(task);
+    });
     this.tasks.clear();
     this.chain = Promise.resolve();
     this.available = false;
     this.emit();
   };
   private emit() {
+    for (const task of this.tasks.values()) {
+      const key = 'task:photo:' + task.id;
+      if (this.visible) notices.resolve(key);
+      else
+        notices.post(
+          key,
+          presentFailure(task.error ?? new RemoteKitError('unavailable', ''), {
+            operation: '处理照片',
+            scope: 'global',
+            targetId: task.id,
+          }),
+        );
+    }
     this.publish(
       [...this.tasks.values()].map(
-        ({ controller, burst, process, rotationTimer, resume, waiting, uploads, ...job }) => ({
+        ({
+          controller,
+          burst,
+          process,
+          rotationTimer,
+          recoveryTimer,
+          attempts,
+          resume,
+          waiting,
+          uploads,
+          ...job
+        }) => ({
           ...job,
           origin: { ...job.origin },
           insertion: job.insertion && { ...job.insertion },
@@ -93,7 +136,9 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     );
   }
   private disposeTask(task: Task) {
+    notices.resolve('task:photo:' + task.id);
     clearTimeout(task.rotationTimer);
+    clearTimeout(task.recoveryTimer);
     task.process = undefined;
     task.burst = undefined;
     task.resume = undefined;
@@ -141,7 +186,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
   };
 
   private valid(task: Task) {
-    return !task.controller.signal.aborted && this.available && this.tasks.get(task.id) === task;
+    return !task.controller.signal.aborted && this.tasks.get(task.id) === task;
   }
 
   private async save(
@@ -204,6 +249,8 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     await task.resume();
     if (this.valid(task)) {
       this.tasks.delete(task.id);
+      notices.resolve('task:photo:' + task.id);
+      if (!this.visible) notices.post('task:photo:' + task.id, { class: 'B', text: '照片已保存到我的文件' });
       this.emit();
       this.advance(task.destination);
     }
@@ -220,19 +267,30 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     } catch (failure) {
       if (!this.valid(task)) return;
       if (task.mode !== 'scan' || task.rotationTurns !== undefined) throw failure;
-      const warning = formatError(failure);
+      if (recoveryDelay(failure, 0) !== undefined) throw failure;
+      const error = toRemoteKitError(failure);
+      presentFailure(error, { operation: '生成扫描件', scope: 'item', targetId: task.id });
       if (task.replace) {
         this.update(task.id, {
           state: 'scan-error',
           originalId,
           candidates: undefined,
-          error: warning,
+          error,
         });
       } else {
         await this.save(
           task,
           { assetId: originalId, type: 'image/jpeg' },
-          { mode: task.mode, pending: 'scan-error', warning },
+          {
+            mode: task.mode,
+            pending: 'scan-error',
+            processingFailure: {
+              code: error.code,
+              message: error.message,
+              reason: error.reason as import('../../shared/errors').NativeErrorReason,
+              errorId: error.errorId,
+            },
+          },
           originalId,
         );
       }
@@ -241,7 +299,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     if (!this.valid(task)) return;
     const photo: PhotoMetadata = {
       mode: task.mode,
-      warning: task.warning,
+      advisory: task.advisory,
       ...(asset.quarterTurns ? { quarterTurns: asset.quarterTurns } : {}),
     };
     await this.save(task, asset, photo, originalId);
@@ -252,17 +310,19 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     try {
       await action();
     } catch (failure) {
-      if (this.valid(task))
-        this.update(task.id, {
-          state: 'error',
-          retryable:
-            !!(task.resume || task.burst || task.process) &&
-            failure instanceof RemoteKitError &&
-            (retryDelay(failure, 0) !== undefined ||
-              failure.code === 'limit_exceeded' ||
-              (errorHandling(failure.code) === 'reconcile' && !!task.resume)),
-          error: formatError(failure),
-        });
+      if (!this.valid(task)) return;
+      const error = toRemoteKitError(failure);
+      this.update(task.id, { state: 'error', error });
+      const delay = recoveryDelay(error, task.attempts ?? 0);
+      if (delay !== undefined) {
+        task.attempts = (task.attempts ?? 0) + 1;
+        task.recoveryTimer = setTimeout(() => {
+          if (this.valid(task))
+            void this.execute(task, () =>
+              task.resume ? this.commit(task) : task.process ? task.process() : this.upload(task),
+            );
+        }, delay);
+      }
     }
   }
 
@@ -291,7 +351,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
         if (!this.valid(task)) return;
         const size = burst.frames.reduce((total, frame) => total + frame.blob.size, 0);
         if (size > maxEncodedBytesPerJob) {
-          failure = new RemoteKitError('limit_exceeded', '照片超出处理容量');
+          failure = new RemoteKitError('limit_exceeded', '照片超出处理容量', { capacity: 'file' });
           return;
         }
         task.burst = burst;
@@ -371,20 +431,10 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
       }
       return;
     }
-    if (reason === 'low-quality') this.update(task.id, { warning: lowQualityWarning });
+    if (reason === 'low-quality') this.update(task.id, { advisory: 'low-quality' });
     task.process = () => this.finish(task, originalId);
     await task.process();
   }
-
-  retry = (id: string) => {
-    const task = this.tasks.get(id);
-    if (!task?.retryable || task.state !== 'error') return;
-    this.update(id, { state: 'processing', error: undefined });
-    const action = () =>
-      task.resume ? this.commit(task) : task.process ? task.process() : this.upload(task);
-    if (task.rotationTurns !== undefined) void this.execute(task, action);
-    else this.enqueue(task, action);
-  };
 
   resolve = (
     entry: LibraryEntry,
@@ -412,7 +462,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
         replace: entry,
         mode: entry.photo.mode,
         state: 'processing',
-        warning: entry.photo.warning === lowQualityWarning ? lowQualityWarning : undefined,
+        advisory: entry.photo.advisory,
       };
     }
     this.tasks.set(task.id, task);
@@ -446,7 +496,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
       replace: target,
       mode: target.photo!.mode,
       state: 'processing',
-      warning: target.photo?.warning,
+      advisory: target.photo?.advisory,
       rotationTurns,
     };
     const source = target.originalAssetId ?? target.assetId!;

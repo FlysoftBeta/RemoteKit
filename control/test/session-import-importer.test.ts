@@ -414,8 +414,8 @@ test('invalid or old imports fail per event, and id conflicts never overwrite an
     const bad = h.event(4, { sites: [] });
     const valid = h.event(5);
     await h.receive([event, old, bad, valid]);
-    assert.equal(h.record(event.id).error, 'Cookie 超过 4096 条');
-    assert.equal(h.record(old.id).error, '导入已超过 30 天');
+    assert.equal(h.record(event.id).error?.message, 'Cookie 超过 4096 条');
+    assert.equal(h.record(old.id).error?.message, '导入已超过 30 天');
     assert.equal(h.record(bad.id).state, 'failed');
     assert.equal(h.record(valid.id).state, 'pending');
     assert.equal((h.replies().find((e) => e.type === 'importFailed') as any).retryable, false);
@@ -425,7 +425,7 @@ test('invalid or old imports fail per event, and id conflicts never overwrite an
     const otherKeyId = publicKeyId(x25519Public(another));
     const reply = h.state().timeline.find((e) => e.keyId === otherKeyId && e.request.type === 'import')!
       .replies[0] as any;
-    assert.equal(reply.reason, '导入 ID 冲突');
+    assert.equal(reply.error.message, '导入 ID 冲突');
     assert.equal(reply.retryable, false);
     assert.equal(h.record(valid.id).keyId, deviceKeyId);
   } finally {
@@ -542,7 +542,7 @@ test('outbox doubles retry backoff to one hour, retains errors and clears pendin
       await h.importer.outbox.flush();
       assert.equal(h.importer.outbox.status().lastErrorAt, h.clock.wallMs());
       assert.equal(h.importer.outbox.status().pending, 1);
-      assert.equal(h.importer.outbox.status().lastError, 'SMTP unavailable');
+      assert.equal(h.importer.outbox.status().error?.message, 'SMTP unavailable');
       const failedAt = h.clock.wallMs();
       const delay = Math.min(1000 * 2 ** (attempt - 1), 300000);
       h.clock.advance(delay - 1);
@@ -553,7 +553,7 @@ test('outbox doubles retry backoff to one hour, retains errors and clears pendin
     h.smtpFailure = false;
     await h.importer.outbox.flush();
     assert.equal(h.sent.length, 1);
-    assert.equal(h.importer.outbox.status().lastError, null);
+    assert.equal(h.importer.outbox.status().error, null);
   } finally {
     await h.close();
   }
@@ -597,7 +597,7 @@ test('outbox splits at real uncompressed limits and separates seq-zero rejection
     ref: 1,
     id: 'bf81f466-e992-48e5-a3d3-6b168556c471',
 
-    reason: 'x'.repeat(9 * 1024 * 1024),
+    error: { code: 'rejected', message: 'x'.repeat(9 * 1024 * 1024) },
     retryable: false,
   }));
   const envelopes = splitMessages(
@@ -655,11 +655,11 @@ test('mailbox batches attachments, sorts before applying, re-reads gaps and skip
     assert.equal(h.client.calls.filter((c) => c === 'download:4:2.1:true').length, 1);
     h.client.failure = new RemoteKitError('unavailable', 'IMAP closed');
     await h.importer.mailbox.poll();
-    assert.equal(h.importer.mailbox.status().lastError, 'IMAP closed');
+    assert.equal(h.importer.mailbox.status().error?.message, 'IMAP closed');
     h.client.failure = undefined;
     h.clock.advance(1000);
     await h.importer.mailbox.poll();
-    assert.equal(h.importer.mailbox.status().lastError, null);
+    assert.equal(h.importer.mailbox.status().error, null);
   } finally {
     await h.close();
   }
@@ -774,8 +774,8 @@ test('WS methods require the product lease, deployment is admin-only and overvie
     h.client.failure = new RemoteKitError('unavailable', 'IMAP failed');
     await h.importer.mailbox.poll();
     const overview = await call('admin.overview');
-    assert.equal(overview.sessionImport.lastError, 'IMAP failed');
-    assert.equal(overview.sessionImport.outbox.lastError, 'SMTP unavailable');
+    assert.equal(overview.sessionImport.error?.message, 'IMAP failed');
+    assert.equal(overview.sessionImport.outbox.error?.message, 'SMTP unavailable');
     assert.ok(overview.sessionImport.outbox.pending > 0);
     await assert.rejects(call('sessionImport.removeDevice', { keyId: deviceKeyId }, other), {
       code: 'not_found',

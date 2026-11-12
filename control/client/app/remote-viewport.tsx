@@ -1,18 +1,17 @@
-import './remote-viewport.css';
-import { Button } from '@mui/material';
 import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { formatError } from '../util/format-error';
-import { useFloatingAction } from './floating-actions';
-import { PageOverlay } from './page-overlay';
-import { ViewportInput } from '../input/viewport-input';
-import { StatsOverlay } from './stats-overlay';
-import { canonicalJson } from '../util/canonical-json';
-import { useViewerSessionSelector } from './use-viewer-session';
-import { useViewportTransition } from '../presentation/use-viewport-transition';
-import type { ViewerSession } from '../viewer-session';
+import { RemoteKitError } from '../../shared/errors';
 import { sameEditingDocument } from '../editing/mobile-editing-state';
+import { SurfaceState } from '../failures';
+import { ViewportInput } from '../input/viewport-input';
+import { useViewportTransition } from '../presentation/use-viewport-transition';
 import { RemoteSelection } from '../selection/remote-selection';
+import { canonicalJson } from '../util/canonical-json';
+import type { ViewerSession } from '../viewer-session';
 import { ContextMenu } from './context-menu';
+import { useFloatingAction } from './floating-actions';
+import './remote-viewport.css';
+import { StatsOverlay } from './stats-overlay';
+import { useViewerSessionSelector } from './use-viewer-session';
 import { useViewportGeometry } from './use-viewport-geometry';
 import { projectEditableCaret } from './viewport-geometry';
 
@@ -40,7 +39,6 @@ export function RemoteViewport({
     (snapshot) => ({
       surface: snapshot.presentation.layout?.views.find((view) => view.id === viewId),
       presentationError: snapshot.presentation.error,
-      canRetry: snapshot.presentation.canRetry,
       editingSurface: snapshot.editing.views.find((view) => view.id === viewId),
       attempt: snapshot.editing.attempt,
       current: snapshot.editing.current?.view?.id === viewId ? snapshot.editing.current : undefined,
@@ -60,6 +58,7 @@ export function RemoteViewport({
   const [frameReady, setFrameReady] = useState(false);
   useLayoutEffect(() => onFrameReady?.(frameReady), [frameReady, onFrameReady]);
   const [dismissedContextMenu, setDismissedContextMenu] = useState<string>();
+  const viewportFailure = useSyncExternalStore(transport.viewport.subscribe, transport.viewport.getSnapshot);
   const product = useSyncExternalStore(transport.operations.subscribe, transport.operations.getSnapshot);
   const geometry = useViewportGeometry(viewport, canvas);
   const surface = snapshot.surface;
@@ -194,40 +193,43 @@ export function RemoteViewport({
           onClosed={() => setDismissedContextMenu(`${owner}:${contextMenu.id}`)}
         />
       )}
-      {editing.error && (
-        <div role="status" className="input-notice">
-          {editing.error}
-        </div>
-      )}
-      {snapshot.presentationError ? (
-        <PageOverlay
-          kind="error"
-          action={
-            snapshot.canRetry && (
-              <Button variant="outlined" onClick={() => transport.presentation.retryPresentation()}>
-                重试视频
-              </Button>
-            )
-          }
-        >
-          {formatError(snapshot.presentationError)}
-        </PageOverlay>
-      ) : snapshot.rtcPhase === 'exhausted' ? (
-        <PageOverlay
-          kind="error"
-          action={
-            <Button variant="outlined" onClick={() => void transport.rtc.connect()}>
-              重新连接
-            </Button>
-          }
-        >
-          画面连接中断
-        </PageOverlay>
-      ) : (
-        showConnectingOverlay &&
-        snapshot.rtcPhase !== 'connected' &&
-        !resize.frozen && <PageOverlay kind="progress">正在连接浏览器…</PageOverlay>
-      )}
+      <SurfaceState
+        live
+        error={editing.error}
+        context={{
+          operation: '发送键盘输入',
+          scope: 'field',
+          input: true,
+          text: editing.error?.code === 'invalid_request' ? editing.error.message : undefined,
+          action: { label: '重新输入', run: () => editor.current?.focus() },
+        }}
+      />
+      <SurfaceState
+        live
+        error={
+          snapshot.presentationError ??
+          (viewportFailure?.code === 'limit_exceeded' ? undefined : viewportFailure) ??
+          (snapshot.rtcPhase === 'exhausted'
+            ? transport.rtc.getSnapshot().phase === 'exhausted'
+              ? (transport.rtc.getSnapshot() as { error?: RemoteKitError }).error
+              : undefined
+            : showConnectingOverlay && snapshot.rtcPhase !== 'connected'
+              ? new RemoteKitError('unavailable', '')
+              : ((product.state?.endpointErrorKind === 'output-capacity'
+                  ? undefined
+                  : product.state?.endpointError) ?? undefined))
+        }
+        context={{
+          operation: snapshot.presentationError
+            ? '显示远程视频'
+            : viewportFailure
+              ? '更新远程画面尺寸'
+              : '连接浏览器',
+          scope: 'surface',
+          connection: !snapshot.presentationError && !viewportFailure,
+          targetId: viewId,
+        }}
+      />
       {overlay && <ViewportStats transport={transport} surface={surface} />}
     </section>
   );

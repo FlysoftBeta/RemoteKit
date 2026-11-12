@@ -1,19 +1,22 @@
-import { useEffect, useRef, useState } from 'react';
 import { ArrowBack, MoreVert, ShoppingBasketOutlined } from '@mui/icons-material';
-import { Alert, Badge, Button } from '@mui/material';
+import { Badge, Button } from '@mui/material';
+import { useEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { LibraryEntry } from '../../shared/file-library';
-import type { LearningCall } from '../learning/queries';
 import { Tool } from '../app/window-tool';
 import { operationId } from '../control/product-operations';
-import { useLibrary } from './file-library-state';
-import { basketEntries, fileError } from './file-library-controls';
-import { FileTypeIcon } from './file-thumbnail';
-import { FilePreview } from './file-preview';
+import { failureError, FailureNote, SurfaceState } from '../failures';
+import { recover } from '../failures/recovery';
+import type { LearningCall } from '../learning/queries';
+import './document-tab.css';
 import { FileEntryMenu } from './file-entry-menu';
 import { formatFileSize } from './file-format';
+import { basketEntries } from './file-library-controls';
+import { useLibrary } from './file-library-state';
+import { FilePreview } from './file-preview';
+import { FileTypeIcon } from './file-thumbnail';
 import { sourceAppName, sourceChannelName, type FilesTab } from './files-app-state';
 import { snippetOriginLabel } from './snippet-view';
-import './document-tab.css';
 
 export function DocumentTab({
   tab,
@@ -40,13 +43,13 @@ export function DocumentTab({
   }, [!!entry]);
   const [menu, setMenu] = useState<HTMLElement>();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const basket = basketEntries(snapshot);
   const inBasket = basket.some((item) => item.id === tab.entryId);
   const toggleBasket = async (entry: LibraryEntry) => {
     if (!snapshot) return;
     setBusy(true);
-    setError('');
+    setError(undefined);
     try {
       await mutate(
         'library.basket',
@@ -60,7 +63,7 @@ export function DocumentTab({
         windowId,
       );
     } catch (failure) {
-      setError(fileError(failure));
+      setError(failureError(failure));
     } finally {
       setBusy(false);
     }
@@ -117,12 +120,8 @@ export function DocumentTab({
           <MoreVert fontSize="small" />
         </Tool>
       </div>
-      {error && (
-        <Alert severity="warning" onClose={() => setError('')}>
-          {error}
-        </Alert>
-      )}
       <div className="document-tab-content">
+        <SurfaceState live error={error} context={{ operation: '读取阅读位置', scope: 'surface' }} />
         {entry.kind === 'snippet' ? (
           <SnippetDocument id={entry.id} />
         ) : (
@@ -143,19 +142,21 @@ export function DocumentTab({
 function SnippetDocument({ id }: { id: string }) {
   const { snippet } = useLibrary();
   const [text, setText] = useState<string>();
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<RemoteKitError | undefined>();
   useEffect(() => {
     let active = true;
-    void snippet(id).then(
+    const abort = new AbortController();
+    void recover(() => snippet(id), abort.signal, setError).then(
       (value) => {
         if (active) setText(value.text);
       },
-      () => {
-        if (active) setError(true);
+      (error) => {
+        if (active) setError(failureError(error));
       },
     );
     return () => {
       active = false;
+      abort.abort();
     };
   }, [id, snippet]);
   return (
@@ -170,7 +171,14 @@ function SnippetDocument({ id }: { id: string }) {
         lineHeight: 1.7,
       }}
     >
-      {error ? '无法加载剪贴片段' : (text ?? '正在加载…')}
+      {error ? (
+        <FailureNote
+          error={error}
+          context={{ operation: '读取剪贴片段', scope: 'surface', consequence: '文件列表仍保留' }}
+        />
+      ) : (
+        (text ?? '正在加载…')
+      )}
     </div>
   );
 }

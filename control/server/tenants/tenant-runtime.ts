@@ -40,7 +40,8 @@ export class TenantRuntime {
   viewerAbsentSince: number;
   lastViewport?: ViewerViewport;
   snapshotSequence = 0;
-  lastError?: string;
+  backgroundTasks = new Map<string, import('../../shared/product').BackgroundTask>();
+  lastError?: RemoteKitError;
   lastErrorKey?: 'resource_limit' | 'endpoint' | 'hibernating';
   mediaGeneration?: number;
   pendingRtcCheck = false;

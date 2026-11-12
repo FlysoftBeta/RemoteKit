@@ -13,6 +13,7 @@ export class ChannelDocumentSource implements DocumentSource {
   ) {}
 
   async open(signal: AbortSignal, options?: DocumentOpenOptions): Promise<DocumentInfo> {
+    let attempt = 0;
     for (;;) {
       if (signal.aborted) throw new RemoteKitError('canceled', '');
       let result;
@@ -22,8 +23,15 @@ export class ChannelDocumentSource implements DocumentSource {
       } catch (error) {
         if (!(error instanceof RemoteKitError)) throw error;
         const handling = errorHandling(error.code);
-        if (handling !== 'retry-soon' && handling !== 'retry-after') throw error;
-        wait = retryDelay(error, 0)!;
+        if (
+          handling !== 'retry-soon' &&
+          handling !== 'retry-after' &&
+          handling !== 'backoff' &&
+          handling !== 'reconcile'
+        )
+          throw error;
+        wait = Math.min(60_000, retryDelay(error, attempt) ?? 1000 * 2 ** Math.min(attempt, 6));
+        attempt++;
       }
       if (signal.aborted) throw new RemoteKitError('canceled', '');
       if (result?.state === 'ready') {

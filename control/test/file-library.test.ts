@@ -381,7 +381,11 @@ test('photo choice and scan failure remain blocked until confirmed in place', as
   );
   const prepare = { operationId: 'prepare', requestId: 'chooser', entryIds: [entry.id] };
   await assert.rejects(f.run('prepare', prepare), { code: 'conflict' });
-  const scanError = { mode: 'scan', pending: 'scan-error', warning: '扫描失败' };
+  const scanError = {
+    mode: 'scan',
+    pending: 'scan-error',
+    processingFailure: { code: 'internal', message: '扫描未能完成', errorId: 'c-0123456789' },
+  };
   const choice = {
     operationId: 'choose',
     entryId: entry.id,
@@ -503,9 +507,14 @@ test('photo turns validate on import and replace and WebP replacement preserves 
 test('photo metadata validates candidate references and prunes them when an entry is removed', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  await assert.rejects(f.add(ASSETS.photo, 'basket', { photo: { mode: 'scan', warning: 'x'.repeat(257) } }), {
-    code: 'invalid_request',
-  });
+  await assert.rejects(
+    f.add(ASSETS.photo, 'basket', {
+      photo: { mode: 'scan', processingFailure: { code: 'invalid-code', message: 'invalid' } },
+    }),
+    {
+      code: 'invalid_request',
+    },
+  );
   await assert.rejects(
     f.add(ASSETS.photo, 'basket', {
       photo: { mode: 'photo', candidateAssetIds: [ASSETS.extra, ASSETS.extra] },

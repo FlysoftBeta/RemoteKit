@@ -1,10 +1,10 @@
 import type Database from 'better-sqlite3';
-import { isDocument } from '../learning/document-type';
-import { writeLibrary } from './relational-library';
 import type { LibrarySnapshot } from '../../shared/file-library';
 import { defaultAuthSettings, type AtRestKey } from '../auth/crypto';
+import { isDocument } from '../learning/document-type';
 import { decodeJson, encodeJson, jsonValue, object, string } from './codec';
-import { authSettings, selection, action, librarySnapshot } from './documents';
+import { action, authSettings, librarySnapshot, selection } from './documents';
+import { writeLibrary } from './relational-library';
 import { learningKeyInfo, openLearningDocument } from './sealed-documents';
 
 export interface MigrationContext {
@@ -316,6 +316,12 @@ export const migrations: {
         ) as LibrarySnapshot;
         // Materialize fields written optionally by historical library producers.
         for (const entry of value.entries) {
+          if (entry.kind === 'file' && (entry.photo as any)?.warning) {
+            const photo = entry.photo as any;
+            if (photo.warning.includes('清晰')) photo.advisory = 'low-quality';
+            else photo.processingFailure = { code: 'internal', message: photo.warning };
+            delete photo.warning;
+          }
           entry.kind ??= 'file';
           entry.partitionId ??= null;
           if (entry.kind === 'snippet' && !entry.id) throw new Error('Snippet without entry id');
@@ -331,6 +337,60 @@ export const migrations: {
       db.exec(
         'ALTER TABLE library_snippets DROP COLUMN origin; ALTER TABLE download_import_failures DROP COLUMN error; DROP TABLE schema_version; CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (16);',
       );
+    },
+  },
+  {
+    version: 18,
+    name: 'typed-viewer-failures',
+    up(db) {
+      db.exec(`ALTER TABLE learning_downloads ADD COLUMN failure TEXT;
+        UPDATE learning_downloads SET failure=json_object('code',coalesce(error_code,'internal'),'message',coalesce(error_message,'附件尚未保存')) WHERE state='failed';
+        ALTER TABLE learning_downloads DROP COLUMN error_code;
+        ALTER TABLE learning_downloads DROP COLUMN error_message;
+        UPDATE session_imports SET error=json_object('code',coalesce(error_code,'internal'),'message',error) WHERE error IS NOT NULL;
+        ALTER TABLE session_imports DROP COLUMN error_code;`);
+      for (const row of db
+        .prepare("SELECT rowid,body FROM session_import_events WHERE type='importFailed'")
+        .all() as { rowid: number; body: string }[]) {
+        const event = JSON.parse(row.body);
+        event.error = { code: 'rejected', message: event.reason };
+        delete event.reason;
+        db.prepare('UPDATE session_import_events SET body=? WHERE rowid=?').run(
+          JSON.stringify(event),
+          row.rowid,
+        );
+      }
+      for (const row of db.prepare('SELECT tenant,id,data FROM library_entries').all() as {
+        tenant: string;
+        id: string;
+        data: string;
+      }[]) {
+        const entry = JSON.parse(row.data);
+        if (!entry.photo?.warning) continue;
+        if (entry.photo.warning.includes('清晰')) entry.photo.advisory = 'low-quality';
+        else entry.photo.processingFailure = { code: 'internal', message: entry.photo.warning };
+        delete entry.photo.warning;
+        db.prepare('UPDATE library_entries SET data=? WHERE tenant=? AND id=?').run(
+          JSON.stringify(entry),
+          row.tenant,
+          row.id,
+        );
+      }
+      for (const row of db.prepare('SELECT tenant,id,data FROM workspace_tabs').all() as {
+        tenant: string;
+        id: string;
+        data: string;
+      }[]) {
+        const tab = JSON.parse(row.data);
+        if (tab.lifecycleRecoveryError)
+          tab.lifecycleRecoveryError = { code: 'internal', message: tab.lifecycleRecoveryError };
+        if (tab.popup?.error) tab.popup.error = { code: 'not_found', message: tab.popup.error };
+        db.prepare('UPDATE workspace_tabs SET data=? WHERE tenant=? AND id=?').run(
+          JSON.stringify(tab),
+          row.tenant,
+          row.id,
+        );
+      }
     },
   },
 ];

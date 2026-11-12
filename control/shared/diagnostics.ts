@@ -1,3 +1,4 @@
+import type { WireError } from './errors';
 export interface DiagnosticEnvironment {
   browserFamily: 'brave' | 'chrome' | 'chromium' | 'edge' | 'safari' | 'firefox' | 'other';
   browserMajorVersion?: number;
@@ -26,6 +27,7 @@ export interface DiagnosticReply {
   maxDurationMs?: number;
   bytes?: number;
   reason?: string;
+  error?: WireError;
 }
 
 export interface DiagnosticMethods {

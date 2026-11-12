@@ -1,7 +1,10 @@
-import './announcements.css';
 import { Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Typography } from '@mui/material';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { Announcement } from '../../shared/product';
+import { FailureNote, failureError } from '../failures';
+import { recover } from '../failures/recovery';
+import './announcements.css';
 
 export function formatAnnouncementTime(at: number) {
   return new Date(at).toLocaleString('zh-CN', {
@@ -18,26 +21,28 @@ export function formatAnnouncementTime(at: number) {
 export function AnnouncementDialog({
   announcements,
   read,
-  report,
 }: {
   announcements: Announcement[];
   read(id: string): Promise<unknown>;
-  report(error: unknown): void;
 }) {
+  const [failure, setFailure] = useState<RemoteKitError>();
+  const abort = useRef(new AbortController());
+  useEffect(() => () => abort.current.abort(), []);
   const [dismissing, setDismissing] = useState<string>();
   const unread = announcements.filter((item) => !item.read && item.id !== dismissing);
   const current = unread[unread.length - 1];
   if (!current) return null;
   const dismiss = () => {
     setDismissing(current.id);
-    void read(current.id)
-      .catch(report)
+    void recover(() => read(current.id), abort.current.signal, setFailure)
+      .catch((error) => setFailure(failureError(error)))
       .finally(() => setDismissing(undefined));
   };
   return (
     <Dialog open onClose={dismiss} fullWidth maxWidth="sm" aria-describedby="announcement-body">
       <DialogTitle sx={{ pb: 0.5 }}>{current.title}</DialogTitle>
       <DialogContent>
+        <FailureNote error={failure} context={{ operation: '保存公告已读状态', scope: 'surface' }} />
         <Typography variant="caption" color="text.secondary" component="p" sx={{ mb: 1.5 }}>
           公告 · {formatAnnouncementTime(current.publishedAt)}
         </Typography>

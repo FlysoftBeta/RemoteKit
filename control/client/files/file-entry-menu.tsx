@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import {
   CheckBoxOutlined,
   ContentCopyOutlined,
@@ -9,7 +8,6 @@ import {
   VisibilityOutlined,
 } from '@mui/icons-material';
 import {
-  Alert,
   Box,
   Button,
   Dialog,
@@ -21,17 +19,20 @@ import {
   ListItemText,
   Menu,
   MenuItem,
-  Typography,
   Snackbar,
+  Typography,
 } from '@mui/material';
+import { useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { LibraryEntry } from '../../shared/file-library';
 import { scaledAnchor } from '../app/ui-scale';
 import { operationId } from '../control/product-operations';
-import { useLibrary } from './file-library-state';
-import { basketEntries, fileError, PartitionPicker } from './file-library-controls';
+import { failureError, FailureNote } from '../failures';
+import './file-entry-menu.css';
 import { dayLabel, formatFileSize, formatTime } from './file-format';
 import { canPreviewFile } from './file-image-preview';
-import './file-entry-menu.css';
+import { basketEntries, PartitionPicker } from './file-library-controls';
+import { useLibrary } from './file-library-state';
 
 export function FileEntryMenu({
   entry,
@@ -55,17 +56,17 @@ export function FileEntryMenu({
   const [move, setMove] = useState<LibraryEntry>();
   const [deletion, setDeletion] = useState<{ entry: LibraryEntry; operationId: string }>();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const basket = basketEntries(snapshot);
   const inBasket = basket.some((item) => item.id === entry?.id);
   const disabled = !online || busy || !snapshot;
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
-    setError('');
+    setError(undefined);
     try {
       await action();
     } catch (failure) {
-      setError(fileError(failure));
+      setError(failureError(failure));
     } finally {
       setBusy(false);
     }
@@ -201,15 +202,22 @@ export function FileEntryMenu({
           <ListItemText>{entry?.kind === 'snippet' ? '删除' : '删除文件'}</ListItemText>
         </MenuItem>
       </Menu>
-      <Snackbar anchorOrigin={{ vertical: 'top', horizontal: 'center' }} sx={{ pointerEvents: 'none' }} open={copied} autoHideDuration={1600} onClose={() => setCopied(false)} message="已复制" />
+      <Snackbar
+        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+        sx={{ pointerEvents: 'none' }}
+        open={copied}
+        autoHideDuration={1600}
+        onClose={() => setCopied(false)}
+        message="已复制"
+      />
       {error && !deletion && (
-        <Dialog open onClose={() => setError('')}>
+        <Dialog open onClose={() => setError(undefined)}>
           <DialogTitle>操作失败</DialogTitle>
           <DialogContent>
-            <Alert severity="error">{error}</Alert>
+            <FailureNote error={error} context={{ operation: '完成文件操作', scope: 'surface' }} />
           </DialogContent>
           <DialogActions>
-            <Button onClick={() => setError('')}>关闭</Button>
+            <Button onClick={() => setError(undefined)}>关闭</Button>
           </DialogActions>
         </Dialog>
       )}
@@ -240,7 +248,7 @@ export function FileEntryMenu({
             <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
               将从我的文件和文件篮删除。页面已接收的副本会保留。
             </Typography>
-            {error && <Alert severity="warning">{error}</Alert>}
+            {error && <FailureNote error={error} context={{ operation: '完成文件操作', scope: 'surface' }} />}
           </DialogContent>
           <DialogActions>
             <Button disabled={busy} onClick={() => setDeletion(undefined)}>

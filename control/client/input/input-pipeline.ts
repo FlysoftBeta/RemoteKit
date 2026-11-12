@@ -1,13 +1,11 @@
-import { endpointError } from '../../shared/errors';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
-import { RemoteKitError } from '../../shared/errors';
-import { formatError } from '../util/format-error';
+import { endpointError } from '../../shared/errors';
+import { type Diagnostics } from '../media/types';
 import { samePlane } from '../presentation/plane-source';
 import type { InputAuthority } from '../presentation/presentation-session';
-import { type Diagnostics } from '../media/types';
 import { type Layout, type Surface } from '../presentation/types';
-import { mergeGestureMomentum, mergeTouchMoves } from './touch-input';
 import { KeyboardLayout } from './keyboard-layout';
+import { mergeGestureMomentum, mergeTouchMoves } from './touch-input';
 export interface InputPorts {
   canInput(viewId: string): InputAuthority | null;
   send(message: Outgoing): void;
@@ -277,8 +275,7 @@ export class InputPipeline {
         ok,
         error,
       });
-    if (!ok && error && errorHandling(error.code) !== 'canceled')
-      this.ports.report({ error: formatError(error) });
+    if (!ok && error && errorHandling(error.code) !== 'canceled') this.ports.report({ error: error.message });
   }
 
   sendInput(surface: Surface, event: Record<string, unknown>) {
@@ -554,7 +551,7 @@ export class InputPipeline {
             }, delay);
           } else {
             this.cancelPendingFocus(pending.requestId, 'focus-rejected');
-            if (errorHandling(error.code) !== 'canceled') this.ports.report({ error: formatError(error) });
+            if (errorHandling(error.code) !== 'canceled') this.ports.report({ error: error.message });
           }
         }
         if (

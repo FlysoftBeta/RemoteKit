@@ -1,6 +1,6 @@
-import { cleanUrl } from './url-clean';
 import { RemoteKitError } from '../shared/errors';
 import type { SearchEngine } from '../shared/product';
+import { cleanUrl } from './url-clean';
 
 const searchUrls: Record<SearchEngine, string> = {
   google: 'https://www.google.com/search?q=',
@@ -40,13 +40,16 @@ export function resolveSearch(value: unknown, engine: SearchEngine): string {
 
 function boundedUrl(url: string): string {
   if (Buffer.byteLength(url, 'utf8') > 8192)
-    throw new RemoteKitError('limit_exceeded', '网址或搜索内容编码后过长（最多 8192 字节）');
+    throw new RemoteKitError('limit_exceeded', '网址或搜索内容编码后过长（最多 8192 字节）', {
+      capacity: 'field',
+    });
   return url;
 }
 
 function inputText(value: unknown): string {
   if (typeof value !== 'string') throw new RemoteKitError('invalid_request', '无效网址或搜索内容');
-  if (value.length > 8192) throw new RemoteKitError('limit_exceeded', '网址或搜索内容超过 8192 字符');
+  if (value.length > 8192)
+    throw new RemoteKitError('limit_exceeded', '网址或搜索内容超过 8192 字符', { capacity: 'field' });
   const text = value.trim();
   if (!text) throw new RemoteKitError('invalid_request', '请输入网址或搜索内容');
   return text;

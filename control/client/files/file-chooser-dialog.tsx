@@ -1,4 +1,4 @@
-import { diagnostics } from '../media/diagnostics';
+import { recover } from '../failures/recovery';
 import {
   Add,
   Close,
@@ -11,7 +11,6 @@ import {
   ViewListOutlined,
 } from '@mui/icons-material';
 import {
-  Alert,
   Badge,
   Box,
   Button,
@@ -26,23 +25,26 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import React, { useCallback, useEffect, useLayoutEffect, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { LibraryEntry } from '../../shared/file-library';
 import type { FileRequest } from '../../shared/product';
 import { FloatingPanel } from '../app/floating-panel';
 import { scaledAnchor, uiScale } from '../app/ui-scale';
 import { operationId } from '../control/product-operations';
+import { failureError, FailureNote } from '../failures';
+import { diagnostics } from '../media/diagnostics';
 import type { ViewerSession } from '../viewer-session';
-import { FileLibraryPicker } from './file-library-picker';
 import { BasketItems, type BasketPanel } from './basket-items';
 import { placeFileChooser } from './file-chooser-anchor';
-import { basketEntries, fileError, FileDropZone, useDeviceImport } from './file-library-controls';
+import { basketEntries, FileDropZone, useDeviceImport } from './file-library-controls';
+import { FileLibraryPicker } from './file-library-picker';
 import { useLibrary } from './file-library-state';
-import { useImportQueue } from './import-state';
 import { fileChooserAccept, selectionViewModel, validateSelection } from './file-selection';
 import { useFileView } from './file-view';
-import { PhotoCapture } from './photo-library-capture';
+import { useImportQueue } from './import-state';
 import { BasketPartitionMenu } from './partition-menu';
+import { PhotoCapture } from './photo-library-capture';
 
 const MAX_BASKET = 64;
 
@@ -85,7 +87,9 @@ export function FileBasketDialog({
   } = useLibrary();
   const transaction = request && checkout(request.id);
   const [chosen, setChosen] = useState<string | null>(null);
-  const [error, setError] = useState('');
+  const taskAbort = useRef(new AbortController());
+  useEffect(() => () => taskAbort.current.abort(), []);
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const [busy, setBusy] = useState(false);
   const cancelOutcome = request && cancellations[request.id];
   const [dragging, setDragging] = useState(false);
@@ -116,7 +120,7 @@ export function FileBasketDialog({
   const final = outcome.terminal;
   const waiting = request?.state === 'validating' || !!transaction || cancelOutcome !== undefined;
   const capacity = MAX_BASKET - basket.length - pending.length;
-  const reportError = useCallback((message: string) => setError(message), []);
+  const reportError = useCallback((error: RemoteKitError | undefined) => setError(error), []);
   const clearInsertion = useCallback(() => setAfterId(undefined), []);
   const uploads = useImportQueue('basket', request?.windowId ?? windowId);
   const upload = useDeviceImport({
@@ -189,11 +193,12 @@ export function FileBasketDialog({
   async function run(operation: () => Promise<unknown>) {
     if (disabled) return;
     setBusy(true);
-    setError('');
+    setError(undefined);
     try {
-      await operation();
+      await recover(operation, taskAbort.current.signal, setError);
+      setError(undefined);
     } catch (failure) {
-      setError(fileError(failure));
+      setError(failureError(failure));
     } finally {
       setBusy(false);
     }
@@ -234,7 +239,7 @@ export function FileBasketDialog({
     }
     const problem = validateSelection(selection, request);
     if (problem) {
-      setError(problem);
+      setError(new RemoteKitError('invalid_request', problem));
       return;
     }
     submit();
@@ -247,7 +252,7 @@ export function FileBasketDialog({
     const order = basket.map((item) => item.id);
     const index = afterId ? order.indexOf(afterId) : -1;
     if (afterId && index < 0) {
-      setError('文件篮已更新，请重新选择插入位置');
+      setError(new RemoteKitError('invalid_request', '文件篮已更新，请重新选择插入位置'));
       return;
     }
     order.splice(index >= 0 ? index + 1 : order.length, 0, ...ids);
@@ -279,7 +284,7 @@ export function FileBasketDialog({
     },
   ];
   const sendLabel = transaction
-    ? '重试确认'
+    ? '正在确认结果…'
     : blocked
       ? `还有 ${blocked} 项处理中或待确认`
       : request?.multiple
@@ -288,7 +293,11 @@ export function FileBasketDialog({
           ? '发送选中的文件'
           : '先选择一个文件';
   const sendDisabled =
-    disabled || final || dragging || (!transaction && (waiting || !selection.length || blocked > 0));
+    disabled ||
+    final ||
+    !!transaction ||
+    dragging ||
+    (!transaction && (waiting || !selection.length || blocked > 0));
   const expanded = !!panel || !!step;
   const maxHeight = Math.min(expanded ? 600 : 380, position?.maxHeight ?? Math.max(0, viewportHeight - 16));
   const closeLabel = request ? '取消文件选择' : '关闭文件篮';
@@ -423,7 +432,7 @@ export function FileBasketDialog({
                     >
                       <span>
                         <IconButton
-                          aria-label={transaction ? '重试确认' : '发送'}
+                          aria-label={transaction ? '正在确认结果…' : '发送'}
                           disabled={sendDisabled}
                           onClick={beginSelection}
                           sx={{
@@ -481,12 +490,24 @@ export function FileBasketDialog({
             />
           )}
           {upload.view}
-          {error && (
-            <Alert severity="warning" onClose={() => setError('')}>
-              {error}
-            </Alert>
+          {(error ?? transaction?.error) && (
+            <FailureNote
+              error={error ?? transaction?.error}
+              context={{
+                operation: '发送文件',
+                scope: 'surface',
+                input: true,
+                capacity: 'selection',
+                action: { label: '调整所选内容', run: () => setError(undefined) },
+              }}
+            />
           )}
-          {!online && <Alert severity="info">等待连接恢复</Alert>}
+          {!online && (
+            <FailureNote
+              error={new RemoteKitError('unavailable', '')}
+              context={{ operation: '发送文件', scope: 'surface' }}
+            />
+          )}
           {(busy || upload.busy || transaction?.active) && <LinearProgress sx={{ borderRadius: 1 }} />}
           {statusText && (
             <Typography role="status" variant="caption" color="text.secondary" sx={{ px: 0.5 }}>

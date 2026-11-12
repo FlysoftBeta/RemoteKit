@@ -1,5 +1,3 @@
-import './permission-prompt.css';
-import React, { useEffect, useRef, useState } from 'react';
 import {
   AccessTimeOutlined,
   Close,
@@ -10,10 +8,13 @@ import {
   PianoOutlined,
   WebAssetOutlined,
 } from '@mui/icons-material';
-import { Alert, Box, Button, IconButton, Paper, Typography } from '@mui/material';
+import { Box, Button, IconButton, Paper, Typography } from '@mui/material';
+import { useEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { PageDialog, PageDialogReply, SitePermission } from '../../shared/product';
+import { failureError, FailureNote } from '../failures';
+import './permission-prompt.css';
 import type { Action } from './product-dialogs';
-import { formatError } from '../util/format-error';
 
 export const PERMISSION_LABELS: Record<
   SitePermission,
@@ -77,7 +78,7 @@ export function protocolName(protocol: string) {
 type BubbleDialog = Extract<PageDialog, { kind: 'permission' | 'protocol_handler' }>;
 export function PermissionPrompt({ dialog, action }: { dialog: BubbleDialog; action: Action }) {
   const [busy, setBusy] = useState(false),
-    [error, setError] = useState('');
+    [error, setError] = useState<RemoteKitError | undefined>();
   const card = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
   useEffect(() => {
@@ -92,11 +93,11 @@ export function PermissionPrompt({ dialog, action }: { dialog: BubbleDialog; act
   const reply = async (reply: PageDialogReply) => {
     if (busy) return;
     setBusy(true);
-    setError('');
+    setError(undefined);
     try {
       await action({ type: 'page.reply', dialogId: dialog.id, reply });
     } catch (error) {
-      setError(formatError(error));
+      setError(failureError(error));
       setBusy(false);
     }
   };
@@ -148,7 +149,7 @@ export function PermissionPrompt({ dialog, action }: { dialog: BubbleDialog; act
           <Typography variant="body2">打开 {protocolName(dialog.protocol)} 链接</Typography>
         </Box>
       )}
-      {error && <Alert severity="error">{error}</Alert>}
+      {error && <FailureNote error={error} context={{ operation: '保存网站选择', scope: 'surface' }} />}
       <Box className="permission-prompt-actions">
         {dialog.kind === 'permission'
           ? (

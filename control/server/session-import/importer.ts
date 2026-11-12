@@ -1,20 +1,20 @@
-import { log as structuredLog } from '../log';
-import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { generateKeyPairSync } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import type {
+  ControlEvent,
   ImportChunk,
   ImportDeployment,
   ImportStorage,
   SessionImportState,
-  ControlEvent,
 } from '../../shared/session-import';
+import type { AuthAttempts } from '../auth/crypto';
 import type { SessionImportConfig } from '../config';
 import type { EndpointGateway } from '../endpoint/gateway';
+import { reportError, log as structuredLog } from '../log';
 import type { ControlDatabase } from '../persistence/database';
 import type { DeviceRow, StoredImport } from '../persistence/session-imports';
-import type { AuthAttempts } from '../auth/crypto';
 import { systemClock, type Clock } from '../util/clock';
 import { openMessage, parseDeviceMessage, publicKeyId, type EventResult } from './envelope';
 import { ImportMailbox, type MailClientFactory, type MailDecision } from './mailbox';
@@ -29,14 +29,15 @@ export function* importChunks(payload: ImportChunk): Generator<ImportChunk> {
     const bytes = Buffer.byteLength(JSON.stringify(cookie)) + (chunk.cookies.length ? 1 : 0);
     if (size + bytes > MAX_CHUNK_BYTES) {
       if (!chunk.cookies.length && !chunk.localStorage.length)
-        throw new RemoteKitError('limit_exceeded', 'Cookie 超过分块大小');
+        throw new RemoteKitError('limit_exceeded', 'Cookie 超过分块大小', { capacity: 'selection' });
       yield chunk;
       chunk = { cookies: [], localStorage: [] };
       size = Buffer.byteLength(JSON.stringify(chunk));
     }
     chunk.cookies.push(cookie);
     size = Buffer.byteLength(JSON.stringify(chunk));
-    if (size > MAX_CHUNK_BYTES) throw new RemoteKitError('limit_exceeded', 'Cookie 超过分块大小');
+    if (size > MAX_CHUNK_BYTES)
+      throw new RemoteKitError('limit_exceeded', 'Cookie 超过分块大小', { capacity: 'selection' });
   }
   for (const storage of payload.localStorage) {
     for (const item of storage.items) {
@@ -49,7 +50,7 @@ export function* importChunks(payload: ImportChunk): Generator<ImportChunk> {
           (chunk.localStorage.length ? 1 : 0);
       if (size + added > MAX_CHUNK_BYTES) {
         if (!chunk.cookies.length && !chunk.localStorage.length)
-          throw new RemoteKitError('limit_exceeded', '来源超过分块大小');
+          throw new RemoteKitError('limit_exceeded', '来源超过分块大小', { capacity: 'selection' });
         yield chunk;
         chunk = { cookies: [], localStorage: [] };
         size = Buffer.byteLength(JSON.stringify(chunk));
@@ -62,7 +63,8 @@ export function* importChunks(payload: ImportChunk): Generator<ImportChunk> {
       }
       size += Buffer.byteLength(JSON.stringify(item)) + (group.items.length ? 1 : 0);
       group.items.push(item);
-      if (size > MAX_CHUNK_BYTES) throw new RemoteKitError('limit_exceeded', '来源超过分块大小');
+      if (size > MAX_CHUNK_BYTES)
+        throw new RemoteKitError('limit_exceeded', '来源超过分块大小', { capacity: 'selection' });
     }
   }
   if (chunk.cookies.length || chunk.localStorage.length) yield chunk;
@@ -347,7 +349,7 @@ export class SessionImporter {
     for (const tenant of tenants) void this.applyTenant(tenant);
     return decisions;
   }
-  private processEvent(device: DeviceRow, { event, error, errorCode }: EventResult) {
+  private processEvent(device: DeviceRow, { event, error }: EventResult) {
     if (event.type === 'pair') return;
     const id = event.id.toLowerCase();
     const existing = this.store.sessionImports.get(id);
@@ -361,7 +363,7 @@ export class SessionImporter {
           ref: event.seq,
           id,
 
-          reason: '导入 ID 冲突',
+          error: wireError(new RemoteKitError('conflict', '导入 ID 冲突')),
           retryable: false,
         },
         now,
@@ -376,19 +378,11 @@ export class SessionImporter {
       return;
     }
     if (event.at < now - 30 * 86400000) {
-      error = '导入已超过 30 天';
-      errorCode = 'rejected';
+      error = wireError(new RemoteKitError('rejected', '导入已超过 30 天'));
     }
     if (error) {
       if (!existing || existing.state === 'failed' || existing.state === 'discarded')
-        this.store.sessionImports.saveImport(
-          device.tenant,
-          device.keyId,
-          event,
-          now,
-          error,
-          errorCode ?? 'invalid_request',
-        );
+        this.store.sessionImports.saveImport(device.tenant, device.keyId, event, now, error);
       this.store.sessionImports.reply(
         device.tenant,
         device.keyId,
@@ -397,7 +391,7 @@ export class SessionImporter {
           ref: event.seq,
           id,
 
-          reason: error,
+          error,
           retryable: false,
         },
         now,
@@ -441,7 +435,7 @@ export class SessionImporter {
           id,
 
           retryable,
-          reason: record.error ?? '导入失败',
+          error: record.error!,
         },
         now,
       );
@@ -554,10 +548,11 @@ export class SessionImporter {
         const failure = toRemoteKitError(error);
         const wait = retryDelay(failure, 0);
         this.store.db
-          .prepare('UPDATE session_imports SET error_code=?,error=?,retry_at=? WHERE id=?')
+          .prepare('UPDATE session_imports SET error=?,retry_at=? WHERE id=?')
           .run(
-            failure.code,
-            failure.message,
+            JSON.stringify(
+              wireError(reportError(failure, 'session_import.apply_failed', { tenant, importId: record.id })),
+            ),
             wait === undefined ? null : this.clock.wallMs() + Math.max(15000, wait),
             record.id,
           );
@@ -569,7 +564,7 @@ export class SessionImporter {
                 record.id,
                 'failed',
                 0,
-                failure.message,
+                wireError(failure),
                 this.clock.wallMs(),
               );
               this.store.sessionImports.reply(
@@ -580,7 +575,7 @@ export class SessionImporter {
                   ref,
                   id: record.id,
 
-                  reason: failure.message,
+                  error: wireError(failure),
                   retryable: failure.code === 'limit_exceeded',
                 },
                 this.clock.wallMs(),

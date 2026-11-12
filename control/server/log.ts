@@ -98,13 +98,7 @@ const reported = new WeakSet<RemoteKitError>();
 // Errors that the caller cannot resolve by itself get an errorId the user can
 // quote; the record carrying the full cause chain is written once, here.
 export function reportError(error: RemoteKitError, event: string, fields?: LogFields) {
-  if (
-    error.code !== 'internal' &&
-    error.code !== 'outcome_unknown' &&
-    error.code !== 'unavailable' &&
-    error.errorId === undefined
-  )
-    return error;
+  if (['canceled', 'busy', 'rate_limited'].includes(error.code) && error.errorId === undefined) return error;
   if (error.errorId === undefined) error.errorId = newErrorId();
   if (reported.has(error)) return error;
   reported.add(error);

@@ -1,3 +1,4 @@
+import type { WireError } from './errors';
 export interface ImportCookie {
   name: string;
   value: string;
@@ -79,7 +80,7 @@ export type ControlEvent =
       ref: number;
       id: string;
       retryable: boolean;
-      reason: string;
+      error: WireError;
     }
   | { seq: number; at: number; type: 'importDiscarded'; ref: number; id: string }
   | { seq: number; at: number; type: 'revoked' };
@@ -96,7 +97,7 @@ export interface ImportRecord {
   cookies: number;
   origins: number;
   rejectedItems: number;
-  error: string | null;
+  error: WireError | null;
   receivedAt: number;
   finishedAt: number | null;
 }
@@ -139,13 +140,11 @@ export interface MailboxStatus {
   configured: boolean;
   lastSuccessAt: number | null;
   lastErrorAt: number | null;
-  lastError: string | null;
-  errorCode?: import('./errors').ErrorCode;
+  error: WireError | null;
   outbox: {
     pending: number;
     lastErrorAt: number | null;
-    lastError: string | null;
-    errorCode?: import('./errors').ErrorCode;
+    error: WireError | null;
   };
 }
 export interface SessionImportSocketMethods {

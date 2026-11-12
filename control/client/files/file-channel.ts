@@ -2,10 +2,9 @@ import { retryDelay } from '../../shared/error-policy';
 import { RemoteKitError, nativeError } from '../../shared/errors';
 import type { Asset, SelectionState } from '../../shared/file-library';
 import { operationId } from '../control/product-operations';
-import { diagnostics } from '../media/diagnostics';
-import type { FileMethod } from '../rtc/protocol';
-import type { Incoming } from '../rtc/protocol';
 import type { DocumentInfo } from '../documents/document-source';
+import { diagnostics } from '../media/diagnostics';
+import type { FileMethod, Incoming } from '../rtc/protocol';
 import { RequestTracker } from '../util/request-tracker';
 
 export interface ProcessedPhoto extends Asset {
@@ -109,7 +108,7 @@ export class FileChannel {
     });
     // Wire byte bound includes multibyte filenames and MIME strings.
     if (new TextEncoder().encode(encoded).byteLength > (method === 'photo.burst.sample' ? 61440 : 24576))
-      throw new RemoteKitError('limit_exceeded', '文件信息过长，请减少文件数量');
+      throw new RemoteKitError('limit_exceeded', '文件信息过长，请减少文件数量', { capacity: 'selection' });
     const signal = options.finishSentRequest ? undefined : options.signal;
     const response = this.pending.request(
       requestId,
@@ -251,7 +250,8 @@ export class FileChannel {
   async readPhoto(asset: Asset, signal: AbortSignal): Promise<Blob> {
     if (!Number.isSafeInteger(asset.size) || asset.size <= 0)
       throw new RemoteKitError('invalid_request', '照片大小无效');
-    if (asset.size > 64 * 1024 * 1024) throw new RemoteKitError('limit_exceeded', '照片预览大小超出限制');
+    if (asset.size > 64 * 1024 * 1024)
+      throw new RemoteKitError('limit_exceeded', '照片预览大小超出限制', { capacity: 'file' });
     return this.readAsset(asset, signal);
   }
   async readAsset(asset: Asset, signal: AbortSignal): Promise<Blob> {
@@ -259,7 +259,8 @@ export class FileChannel {
     const parts: Uint8Array<ArrayBuffer>[] = [];
     if (!Number.isSafeInteger(asset.size) || asset.size < 0)
       throw new RemoteKitError('invalid_request', '文件大小无效');
-    if (asset.size > 256 * 1024 * 1024) throw new RemoteKitError('limit_exceeded', '文件预览大小超出限制');
+    if (asset.size > 256 * 1024 * 1024)
+      throw new RemoteKitError('limit_exceeded', '文件预览大小超出限制', { capacity: 'file' });
     for (let offset = 0; offset < asset.size;) {
       const part = await this.call<{ data: string; offset: number; total: number }>(
         'asset.read',
@@ -356,7 +357,8 @@ export class FileChannel {
     this.checkBinding(binding, signal);
     if (blob.type !== 'image/jpeg' || !blob.size)
       throw new RemoteKitError('invalid_request', '拍照分析图格式无效');
-    if (blob.size > 44 * 1024) throw new RemoteKitError('limit_exceeded', '拍照分析图超出大小限制');
+    if (blob.size > 44 * 1024)
+      throw new RemoteKitError('limit_exceeded', '拍照分析图超出大小限制', { capacity: 'file' });
     const bytes = new Uint8Array(await blob.arrayBuffer());
     let binary = '';
     for (const byte of bytes) binary += String.fromCharCode(byte);

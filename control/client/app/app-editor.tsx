@@ -1,10 +1,8 @@
-import './app-editor.css';
 import { ExpandMore } from '@mui/icons-material';
 import {
   Accordion,
   AccordionDetails,
   AccordionSummary,
-  Alert,
   Avatar,
   Button,
   Dialog,
@@ -15,12 +13,15 @@ import {
   Typography,
 } from '@mui/material';
 import { useEffect, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { AppDefinition, AppInspectResult, ProductState } from '../../shared/product';
+import { failureError, FailureNote } from '../failures';
+import { recover } from '../failures/recovery';
+import './app-editor.css';
 import type { Action } from './product-dialogs';
-import type { WorkspaceCall } from './window-state';
-import { SiteSettingsBody } from './site-settings';
 import { ScaledSelect } from './scaled-select';
-import { formatError } from '../util/format-error';
+import { SiteSettingsBody } from './site-settings';
+import type { WorkspaceCall } from './window-state';
 
 export function AppFields({
   value,
@@ -85,19 +86,21 @@ export function InstallDialog({
   onClose(): void;
 }) {
   const [value, setValue] = useState<AppInspectResult>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let disposed = false;
-    void call('app.inspect', { tabId })
+    const abort = new AbortController();
+    void recover(() => call('app.inspect', { tabId }), abort.signal, setError)
       .then((value) => {
         if (!disposed) setValue(value);
       })
       .catch((error) => {
-        if (!disposed) setError(formatError(error));
+        if (!disposed) setError(failureError(error));
       });
     return () => {
       disposed = true;
+      abort.abort();
     };
   }, [tabId, call]);
   let origin = '';
@@ -111,7 +114,9 @@ export function InstallDialog({
     <Dialog open onClose={busy ? undefined : onClose} fullWidth maxWidth="sm">
       <DialogTitle>安装为 App</DialogTitle>
       <DialogContent className="install-content">
-        {error && <Alert severity="error">{error}</Alert>}
+        {error && (
+          <FailureNote error={error} context={{ operation: '安装应用', scope: 'surface', input: true }} />
+        )}
         {!value ? (
           <Typography>正在读取网页信息…</Typography>
         ) : (
@@ -161,7 +166,7 @@ export function InstallDialog({
             const { iconDataUrl, ...definition } = value;
             void action({ type: 'app.install', ...definition })
               .then(onClose)
-              .catch((error) => setError(formatError(error)))
+              .catch((error) => setError(failureError(error)))
               .finally(() => setBusy(false));
           }}
         >

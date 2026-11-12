@@ -1,17 +1,19 @@
-import { Alert, Button, LinearProgress } from '@mui/material';
-import { Suspense, lazy, memo, useEffect, useMemo, useRef, useState } from 'react';
-import { canonicalJson } from '../util/canonical-json';
-import { formatError } from '../util/format-error';
-import type { FileChannel } from './file-channel';
+import { Button, LinearProgress } from '@mui/material';
+import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { LibraryEntry, LibraryFileEntry } from '../../shared/file-library';
 import { ChannelDocumentSource } from '../documents/channel-source';
 import type { DocumentProgress } from '../documents/document-source';
+import { failureError, FailureNote, SurfaceState } from '../failures';
+import { recover } from '../failures/recovery';
 import type { LearningCall } from '../learning/queries';
+import { canonicalJson } from '../util/canonical-json';
+import type { FileChannel } from './file-channel';
+import { fileKind, formatFileSize } from './file-format';
 import { FileImagePreview } from './file-image-preview';
 import { useLibrary } from './file-library-state';
-import { FileTypeIcon } from './file-thumbnail';
-import { formatFileSize, fileKind } from './file-format';
 import './file-preview.css';
+import { FileTypeIcon } from './file-thumbnail';
 const DocumentViewer = lazy(() =>
   import('../documents/document-viewer').then((module) => ({ default: module.DocumentViewer })),
 );
@@ -25,42 +27,57 @@ export const isDocumentFile = (entry: Pick<LibraryEntry, 'name' | 'type'>) =>
 function MediaPreview({ entry }: { entry: LibraryFileEntry }) {
   const { rpc, online } = useLibrary();
   const [url, setUrl] = useState('');
-  const [error, setError] = useState('');
-  const [attempt, setAttempt] = useState(0);
+  const [error, setError] = useState<RemoteKitError | undefined>();
   useEffect(() => {
     if (!online) return;
     const controller = new AbortController();
     let objectUrl = '';
-    setError('');
+    setError(undefined);
     setUrl('');
-    void rpc.readAsset(entry, controller.signal).then(
+    void recover(() => rpc.readAsset(entry, controller.signal), controller.signal, setError).then(
       (blob) => {
         if (controller.signal.aborted) return;
+        setError(undefined);
         objectUrl = URL.createObjectURL(blob);
         setUrl(objectUrl);
       },
       (failure) => {
-        if (!controller.signal.aborted) setError(formatError(failure));
+        if (!controller.signal.aborted) setError(failureError(failure));
       },
     );
     return () => {
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [rpc, online, entry.assetId, attempt]);
+  }, [rpc, online, entry.assetId]);
   return (
     <div className="file-media-preview">
       {!online ? (
-        <Alert severity="info">连接已断开</Alert>
+        <FailureNote
+          error={new RemoteKitError('unavailable', '')}
+          context={{ operation: '读取媒体文件', scope: 'surface' }}
+        />
       ) : error ? (
-        <Alert severity="error" action={<Button onClick={() => setAttempt(attempt + 1)}>重试</Button>}>
-          {error}
-        </Alert>
+        <FailureNote error={error} context={{ operation: '读取媒体文件', scope: 'surface' }} />
       ) : url ? (
         fileKind(entry.type, entry.name) === 'video' ? (
-          <video src={url} controls aria-label={entry.name} onError={() => setError('无法播放此文件')} />
+          <video
+            src={url}
+            controls
+            aria-label={entry.name}
+            onError={() =>
+              setError(new RemoteKitError('rejected', '此文件无法播放', { reason: 'document_unsupported' }))
+            }
+          />
         ) : (
-          <audio src={url} controls aria-label={entry.name} onError={() => setError('无法播放此文件')} />
+          <audio
+            src={url}
+            controls
+            aria-label={entry.name}
+            onError={() =>
+              setError(new RemoteKitError('rejected', '此文件无法播放', { reason: 'document_unsupported' }))
+            }
+          />
         )
       ) : (
         <LinearProgress aria-label="正在读取文件" />
@@ -98,70 +115,82 @@ const PreviewContent = memo(
   }) {
     const source = useMemo(() => new ChannelDocumentSource(rpc, entry.assetId), [rpc, entry.assetId]);
     const [progress, setProgress] = useState<DocumentProgress | null | undefined>();
-    const [progressError, setProgressError] = useState('');
+    const [progressError, setProgressError] = useState<RemoteKitError | undefined>();
     const pendingProgress = useRef<DocumentProgress>(undefined);
-    const [attempt, setAttempt] = useState(0);
     const document = isDocumentFile(entry);
     useEffect(() => {
       setProgress(undefined);
-      setProgressError('');
+      setProgressError(undefined);
       pendingProgress.current = undefined;
       let active = true;
+      const abort = new AbortController();
       if (!document || !call || !online) return;
-      void call('document.progress.get', { assetId: entry.assetId }).then(
+      void recover(
+        () => call('document.progress.get', { assetId: entry.assetId }),
+        abort.signal,
+        setProgressError,
+      ).then(
         (value) => {
-          if (active) setProgress(value);
+          if (active) {
+            setProgress(value);
+            setProgressError(undefined);
+          }
         },
         (error) => {
-          if (active) setProgressError(formatError(error));
+          if (active) {
+            setProgressError(failureError(error));
+            setProgress(null);
+          }
         },
       );
       return () => {
         active = false;
+        abort.abort();
       };
-    }, [entry.assetId, call, document, online, attempt]);
+    }, [entry.assetId, call, document, online]);
+    const progressAbort = useRef<AbortController | undefined>(undefined);
+    useEffect(() => () => progressAbort.current?.abort(), []);
     const saveProgress = (value: DocumentProgress) => {
       if (!call) return;
       pendingProgress.current = value;
-      void call('document.progress.set', { assetId: entry.assetId, ...value }).then(
-        () => setProgressError(''),
-        (error) => setProgressError(formatError(error)),
+      progressAbort.current?.abort();
+      progressAbort.current = new AbortController();
+      void recover(
+        () => call('document.progress.set', { assetId: entry.assetId, ...pendingProgress.current! }),
+        progressAbort.current.signal,
+        setProgressError,
+      ).then(
+        () => setProgressError(undefined),
+        (error) => setProgressError(failureError(error)),
       );
     };
-    if (!online) return <Alert severity="info">连接已断开，恢复后继续预览</Alert>;
+    if (!online)
+      return (
+        <FailureNote
+          error={new RemoteKitError('unavailable', '')}
+          context={{ operation: '打开文档', scope: 'surface' }}
+        />
+      );
     if (document)
       return (
         <div className="file-document-preview">
           {progressError && (
-            <Alert
-              severity="error"
-              action={
-                <Button
-                  onClick={() =>
-                    pendingProgress.current ? saveProgress(pendingProgress.current) : setAttempt(attempt + 1)
-                  }
-                >
-                  重试
-                </Button>
-              }
-            >
-              {progressError}
-            </Alert>
+            <SurfaceState
+              live
+              error={progressError}
+              context={{ operation: '读取阅读位置', scope: 'surface' }}
+            />
           )}
-          {call && progress === undefined ? (
-            !progressError && <LinearProgress aria-label="正在读取阅读进度" />
-          ) : (
-            <Suspense fallback={<LinearProgress aria-label="正在打开文档" />}>
-              <DocumentViewer
-                source={source}
-                title={entry.name}
-                type={entry.type}
-                hideTitle
-                initialProgress={progress ?? undefined}
-                onProgress={saveProgress}
-              />
-            </Suspense>
-          )}
+          <Suspense fallback={<LinearProgress aria-label="正在打开文档" />}>
+            <DocumentViewer
+              source={source}
+              title={entry.name}
+              type={entry.type}
+              hideTitle
+              initialProgress={progress ?? undefined}
+              onProgress={saveProgress}
+            />
+          </Suspense>
         </div>
       );
     if (entry.type.startsWith('image/'))

@@ -34,6 +34,8 @@ import {
   type FilesWindowState,
 } from './files-app-state';
 import './files-window.css';
+import type { RemoteKitError } from '../../shared/errors';
+import { SurfaceState } from '../failures';
 
 const DocumentTab = lazy(() => import('./document-tab').then((module) => ({ default: module.DocumentTab })));
 
@@ -44,6 +46,8 @@ export function FilesWindow({
   call,
   handle,
   launch,
+  failure,
+  failureOperation,
 }: {
   windowId: string;
   state: unknown;
@@ -51,6 +55,8 @@ export function FilesWindow({
   call?: LearningCall;
   handle: ReactNode;
   launch?: unknown;
+  failure?: RemoteKitError;
+  failureOperation?: string;
 }) {
   const restored = useMemo(() => readFilesWindowState(state), [state]);
   const { snapshot, online, refresh, recordUsage, apps, photos } = useLibrary();
@@ -149,6 +155,10 @@ export function FilesWindow({
         <span className="tab-bar-spacer" />
       </div>
       <div className="files-window-content">
+        <SurfaceState
+          error={failure}
+          context={{ operation: failureOperation ?? '完成文件操作', scope: 'surface' }}
+        />
         {active.kind === 'library' ? (
           <LibraryTab
             key={active.id}

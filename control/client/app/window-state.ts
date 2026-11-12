@@ -1,7 +1,8 @@
-import { canonicalJson } from '../util/canonical-json';
-import type { ViewerSession } from '../viewer-session';
 import { useEffect, useRef, useState } from 'react';
 import type { ProductWindow, SocketMethods } from '../../shared/product';
+import { recover } from '../failures/recovery';
+import { canonicalJson } from '../util/canonical-json';
+import type { ViewerSession } from '../viewer-session';
 
 export type WorkspaceCall = <K extends keyof SocketMethods>(
   method: K,
@@ -26,6 +27,7 @@ export function useWindowState(win: ProductWindow, call: WorkspaceCall, report: 
   }, [win.state]);
   useEffect(() => {
     if (!dirty.current || win.id.startsWith('pending-')) return;
+    const abort = new AbortController();
     const timer = setTimeout(() => {
       const state = latest.current;
       const serialized = canonicalJson(state);
@@ -33,14 +35,18 @@ export function useWindowState(win: ProductWindow, call: WorkspaceCall, report: 
         dirty.current = false;
         return;
       }
-      void call('window.state', { windowId: win.id, state })
+      void recover(() => call('window.state', { windowId: win.id, state }), abort.signal, report)
         .then(() => {
+          report(undefined);
           saved.current = serialized;
           if (latest.current === state) dirty.current = false;
         })
         .catch(report);
     }, 500);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      abort.abort();
+    };
   }, [value, win.id, call, report]);
   return [
     value,
@@ -57,6 +63,7 @@ export async function waitForWorkspaceRevision(media: ViewerSession, revision: n
   const current = media.operations.getSnapshot().authoritative!.workspace;
   if (current.revision >= revision) return current;
   return new Promise<typeof current>((resolve, reject) => {
+    const abort = new AbortController();
     const timer = setTimeout(() => {
       remove();
       reject(new Error('工作区同步超时'));

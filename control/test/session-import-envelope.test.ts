@@ -141,7 +141,7 @@ test('invalid import fields and limits return per-event errors while retaining a
     assert.equal(results[0].error, null);
     assert.ok(results[1].error, reason);
     assert.equal(
-      results[1].errorCode,
+      results[1].error?.code,
       patches.findIndex((entry) => entry[0] === patch) < 8 ? 'invalid_request' : 'limit_exceeded',
       reason,
     );

@@ -1,15 +1,14 @@
-import { formatError } from '../../util/format-error';
+import { onFailureAction } from '../../failures';
 import {
   Close,
+  ExpandMore,
   FilterListOutlined,
   MoreHoriz,
   SearchOutlined,
-  ExpandMore,
-  VisibilityOutlined,
   VisibilityOffOutlined,
+  VisibilityOutlined,
 } from '@mui/icons-material';
 import {
-  Alert,
   Button,
   Checkbox,
   Chip,
@@ -31,11 +30,13 @@ import {
   Tooltip,
 } from '@mui/material';
 import { useEffect, useMemo, useState } from 'react';
-import { scaledAnchor } from '../../app/ui-scale';
+import { RemoteKitError } from '../../../shared/errors';
 import type { BankCatalogNode, BankQuestionType } from '../../../shared/learning';
+import { scaledAnchor } from '../../app/ui-scale';
+import { failureError, SurfaceState } from '../../failures';
 import { VirtualList } from '../../ui/virtual-list';
+import { LoadingRows, SubjectDot, useContentWidth } from '../common';
 import type { LearningAppProps } from '../learning-app';
-import { InlineError, LoadingRows, SubjectDot, useContentWidth } from '../common';
 import { LearningQueries, usePaged, useQuery } from '../queries';
 import { QuestionCard } from '../question-card';
 import { SignInCard } from '../sign-in-card';
@@ -99,6 +100,13 @@ export function QuestionsApp({ state, call, windowId, tab, online }: LearningApp
   const { ref, size } = useContentWidth();
   const account = state.learning.accounts.xinjiaoyu;
   const [login, setLogin] = useState(false);
+  useEffect(
+    () =>
+      onFailureAction((kind, context) => {
+        if (kind === 'provider-login' && context.credential === 'xinjiaoyu') setLogin(true);
+      }),
+    [],
+  );
   const signed = account.status === 'signed_in' || account.status === 'expired' || login;
   const [subject, setSubject] = useState('');
   const [textbook, setTextbook] = useState('');
@@ -114,7 +122,7 @@ export function QuestionsApp({ state, call, windowId, tab, online }: LearningApp
   const [difficultyMenu, setDifficultyMenu] = useState<HTMLElement>();
   const [sortMenu, setSortMenu] = useState<HTMLElement>();
   const [menu, setMenu] = useState<HTMLElement>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const queries = useMemo(() => new LearningQueries(call), [call, signed]);
   const subjects = useQuery(
     `bank-subjects:${signed}`,
@@ -177,7 +185,10 @@ export function QuestionsApp({ state, call, windowId, tab, online }: LearningApp
         )}
       </div>
       {subjects.error ? (
-        <InlineError error={subjects.error} retry={subjects.retry} />
+        <SurfaceState
+          error={subjects.error}
+          context={{ operation: '读取题目', scope: 'surface', credential: 'xinjiaoyu' }}
+        />
       ) : !subjects.value ? (
         <LoadingRows />
       ) : !subjects.value.subjects.length ? (
@@ -197,7 +208,12 @@ export function QuestionsApp({ state, call, windowId, tab, online }: LearningApp
           ))}
         </List>
       )}
-      {metadata.error && <InlineError error={metadata.error} retry={metadata.retry} />}
+      {metadata.error && (
+        <SurfaceState
+          error={metadata.error}
+          context={{ operation: '读取题目', scope: 'surface', credential: 'xinjiaoyu' }}
+        />
+      )}
       {metadata.value && (
         <>
           <TextField
@@ -226,7 +242,10 @@ export function QuestionsApp({ state, call, windowId, tab, online }: LearningApp
               全部章节
             </Button>
             {catalogs.error ? (
-              <InlineError error={catalogs.error} retry={catalogs.retry} />
+              <SurfaceState
+                error={catalogs.error}
+                context={{ operation: '读取题目', scope: 'surface', credential: 'xinjiaoyu' }}
+              />
             ) : !textbook ? (
               <p className="learning-muted">选择教材后查看章节</p>
             ) : !catalogs.value ? (
@@ -345,21 +364,27 @@ export function QuestionsApp({ state, call, windowId, tab, online }: LearningApp
           </IconButton>
         </div>
       </div>
-      {!online && <Alert severity="info">连接已断开，恢复后可继续浏览</Alert>}
+      {!online && (
+        <SurfaceState
+          error={new RemoteKitError('unavailable', '')}
+          context={{ operation: '读取题目', scope: 'surface' }}
+        />
+      )}
       {account.status === 'expired' && (
-        <Alert severity="warning" action={<Button onClick={() => setLogin(true)}>重新登录</Button>}>
-          新教育登录已过期
-        </Alert>
+        <SurfaceState
+          error={new RemoteKitError('unauthenticated', '')}
+          context={{
+            operation: '读取题目',
+            scope: 'surface',
+            credential: 'xinjiaoyu',
+            action: { label: '登录新教育', run: () => setLogin(true) },
+          }}
+        />
       )}
       {error && (
-        <InlineError
+        <SurfaceState
           error={error}
-          retry={() => {
-            setError('');
-            void call('learning.signOut', { provider: 'xinjiaoyu' }).catch((failure) =>
-              setError(formatError(failure)),
-            );
-          }}
+          context={{ operation: '读取题目', scope: 'surface', credential: 'xinjiaoyu' }}
         />
       )}
       {!signed ? (
@@ -446,11 +471,24 @@ export function QuestionsApp({ state, call, windowId, tab, online }: LearningApp
                 {questions.value.accessibleTotal.toLocaleString('zh-CN')} 题
               </div>
             )}
-            {metadata.error && <InlineError error={metadata.error} retry={metadata.retry} />}
-            {size !== 'wide' && subjects.error && (
-              <InlineError error={subjects.error} retry={subjects.retry} />
+            {metadata.error && (
+              <SurfaceState
+                error={metadata.error}
+                context={{ operation: '读取题目', scope: 'surface', credential: 'xinjiaoyu' }}
+              />
             )}
-            {questions.error && <InlineError error={questions.error} retry={questions.retry} />}
+            {size !== 'wide' && subjects.error && (
+              <SurfaceState
+                error={subjects.error}
+                context={{ operation: '读取题目', scope: 'surface', credential: 'xinjiaoyu' }}
+              />
+            )}
+            {questions.error && (
+              <SurfaceState
+                error={questions.error}
+                context={{ operation: '读取题目', scope: 'surface', credential: 'xinjiaoyu' }}
+              />
+            )}
             {(questions.loading || (online && !subjects.value && !subjects.error)) &&
             !questions.items.length ? (
               <LoadingRows />
@@ -561,7 +599,7 @@ export function QuestionsApp({ state, call, windowId, tab, online }: LearningApp
           onClick={() => {
             setMenu(undefined);
             void call('learning.signOut', { provider: 'xinjiaoyu' }).catch((failure) =>
-              setError(formatError(failure)),
+              setError(failureError(failure)),
             );
           }}
         >
@@ -575,7 +613,7 @@ export function QuestionsApp({ state, call, windowId, tab, online }: LearningApp
           if (account.status === 'signing_in')
             void call('learning.signInCancel', { provider: 'xinjiaoyu' })
               .then(() => setLogin(false))
-              .catch((failure) => setError(formatError(failure)));
+              .catch((failure) => setError(failureError(failure)));
           else setLogin(false);
         }}
         fullWidth

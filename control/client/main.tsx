@@ -1,19 +1,20 @@
 /// <reference types="vite/client" />
-import './theme/tokens.css';
-import './theme/mui.css';
-import { WorkspaceView } from './app/workspace-view';
-import { formatError } from './util/format-error';
-import { CssBaseline, ThemeProvider, createTheme } from '@mui/material';
-import { useCallback, useEffect, useState } from 'react';
+import { createTheme, CssBaseline, ThemeProvider } from '@mui/material';
+import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { ProductUser } from '../shared/product';
-import { BlankScreen, RevealScreen } from './auth/lock-screen';
-import { selectProductReceiveProfile } from './media/receive-profile';
-import { AuthView, ConnectionError } from './app/product-dialogs';
 import { RemoteKitError } from '../shared/errors';
-import './style.css';
-import { LocalSelection } from './selection/local-selection';
+import type { ProductUser } from '../shared/product';
+import { AuthView } from './app/product-dialogs';
+import { WorkspaceView } from './app/workspace-view';
+import { BlankScreen, RevealScreen } from './auth/lock-screen';
 import { request } from './control/http-request';
+import { failureError, SurfaceState } from './failures';
+import { recover } from './failures/recovery';
+import { selectProductReceiveProfile } from './media/receive-profile';
+import { LocalSelection } from './selection/local-selection';
+import './style.css';
+import './theme/mui.css';
+import './theme/tokens.css';
 // Automation hooks exist only in dev builds; Vite drops this branch from production.
 if (import.meta.env.DEV) void import('./test-hooks');
 const tokens = getComputedStyle(document.documentElement);
@@ -38,26 +39,34 @@ const theme = createTheme({
 });
 function App() {
   const [user, setUser] = useState<ProductUser | null | undefined>(undefined),
-    [notice, setNotice] = useState(''),
-    [connectionError, setConnectionError] = useState('');
-  const loadIdentity = useCallback(async () => {
-    setConnectionError('');
-    try {
-      const result = await request<{ user: ProductUser }>('/api/auth/me');
-      setUser(result.user);
-    } catch (error) {
-      if (error instanceof RemoteKitError && error.code === 'unauthenticated') setUser(null);
-      else setConnectionError(formatError(error));
-    }
-  }, []);
+    [notice, setNotice] = useState<RemoteKitError>(),
+    [connectionError, setConnectionError] = useState<RemoteKitError | undefined>();
+  const lifetime = useRef(new AbortController());
+  useEffect(() => () => lifetime.current.abort(), []);
   useEffect(() => {
     void selectProductReceiveProfile(RTCRtpReceiver.getCapabilities?.('video')?.codecs);
 
-    void loadIdentity();
-  }, [loadIdentity]);
+    const abort = new AbortController();
+    void recover(() => request<{ user: ProductUser }>('/api/auth/me'), abort.signal, setConnectionError).then(
+      (result) => {
+        setConnectionError(undefined);
+        setUser(result.user);
+      },
+      (error) => {
+        if (error.code === 'unauthenticated') {
+          setConnectionError(undefined);
+          setUser(null);
+        }
+      },
+    );
+    return () => abort.abort();
+  }, []);
   const logout = () => {
     setUser(null);
-    void request('/api/auth/logout', {}).catch((e) => setNotice(formatError(e)));
+    void recover(() => request('/api/auth/logout', {}), lifetime.current.signal, setNotice).then(
+      () => setNotice(undefined),
+      (error) => setNotice(failureError(error)),
+    );
   };
   return (
     <ThemeProvider theme={theme}>
@@ -66,7 +75,10 @@ function App() {
       {connectionError ? (
         <main className="auth-page">
           <div className="auth-form">
-            <ConnectionError error={connectionError} retry={() => void loadIdentity()} />
+            <SurfaceState
+              error={connectionError}
+              context={{ operation: '连接服务', scope: 'full-screen', connection: true }}
+            />
           </div>
         </main>
       ) : user === undefined ? (
@@ -77,7 +89,7 @@ function App() {
           logout={logout}
           expired={() => {
             setUser(null);
-            setNotice('登录已过期，请重新登录');
+            setNotice(new RemoteKitError('unauthenticated', '登录已过期'));
           }}
         />
       ) : (
@@ -87,7 +99,7 @@ function App() {
               close={close}
               notice={notice}
               onLogin={(next) => {
-                setNotice('');
+                setNotice(undefined);
                 setUser(next);
               }}
             />

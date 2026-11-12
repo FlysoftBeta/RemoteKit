@@ -164,7 +164,7 @@ test('stopping an establishing peer closes a late answer and prevents retries', 
   assert.deepEqual(closed, [{ connectionId: 'connection' }]);
 });
 
-test('RTC retries bounded attempts and manual connect starts a fresh attempt', async (t) => {
+test('RTC continues automatically at a capped cadence and disconnect stops recovery', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { rtc } = environment(t);
   let offers = 0;
@@ -175,15 +175,17 @@ test('RTC retries bounded attempts and manual connect starts a fresh attempt', a
   rtc.setControlRpc(rpc);
   await rtc.connect();
   assert.equal(rtc.getSnapshot().phase, 'retryWait');
-  for (const delay of [1000, 2000, 4000]) {
+  for (const delay of [1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000]) {
     t.mock.timers.tick(delay);
     await flush();
   }
-  assert.equal(rtc.getSnapshot().phase, 'exhausted');
-  assert.equal(offers, 4);
-  await rtc.connect();
   assert.equal(rtc.getSnapshot().phase, 'retryWait');
-  assert.equal(offers, 5);
+  assert.equal(offers, 9);
+  rtc.disconnect();
+  t.mock.timers.tick(60000);
+  await flush();
+  assert.equal(offers, 9);
+  assert.equal(rtc.getSnapshot().phase, 'stopped');
 });
 
 test('connected peers reset the outage budget and stopped sessions ignore delayed recovery', async (t) => {

@@ -1,8 +1,7 @@
-import { useAutoFocus } from '../editing/local-autofocus';
 import {
   Add,
-  ContentPasteOutlined,
   AppsOutlined,
+  ContentPasteOutlined,
   DeleteOutline,
   DownloadOutlined,
   EditOutlined,
@@ -14,7 +13,6 @@ import {
   SettingsOutlined,
 } from '@mui/icons-material';
 import {
-  Alert,
   Box,
   Button,
   Chip,
@@ -34,10 +32,13 @@ import {
   Typography,
 } from '@mui/material';
 import { useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { LibraryPartition, LibrarySource } from '../../shared/file-library';
+import { OverflowText } from '../app/overflow-text';
 import { scaledAnchor } from '../app/ui-scale';
 import { operationId } from '../control/product-operations';
-import { fileError } from './file-library-controls';
+import { useAutoFocus } from '../editing/local-autofocus';
+import { failureError, FailureNote } from '../failures';
 import { useLibrary } from './file-library-state';
 import {
   filesInView,
@@ -47,7 +48,6 @@ import {
   sourceKey,
   type FilesView,
 } from './files-app-state';
-import { OverflowText } from '../app/overflow-text';
 
 export function FilesOrganization({
   mode,
@@ -66,7 +66,7 @@ export function FilesOrganization({
   >();
   const [anchor, setAnchor] = useState<HTMLElement>();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   if (!snapshot) return null;
   const disabled = !online || busy;
   const activeSource =
@@ -81,11 +81,11 @@ export function FilesOrganization({
     [sourceAppName(source.app, apps), sourceChannelName(source)].filter(Boolean).join(' › ');
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
-    setError('');
+    setError(undefined);
     try {
       await action();
     } catch (failure) {
-      setError(fileError(failure));
+      setError(failureError(failure));
     } finally {
       setBusy(false);
     }
@@ -378,11 +378,7 @@ export function FilesOrganization({
           ))}
         </Box>
       )}
-      {error && (
-        <Alert severity="warning" onClose={() => setError('')}>
-          {error}
-        </Alert>
-      )}
+      {error && <FailureNote error={error} context={{ operation: '保存分区', scope: 'surface' }} />}
       {edit && (
         <Dialog open fullWidth maxWidth="xs" onClose={busy ? undefined : () => setEdit(undefined)}>
           <Box
@@ -409,11 +405,7 @@ export function FilesOrganization({
                 slotProps={{ htmlInput: { maxLength: 120 } }}
                 sx={{ mt: 1 }}
               />
-              {error && (
-                <Alert severity="warning" sx={{ mt: 1 }}>
-                  {error}
-                </Alert>
-              )}
+              {error && <FailureNote error={error} context={{ operation: '保存分区', scope: 'surface' }} />}
             </DialogContent>
             <DialogActions>
               <Button disabled={busy} onClick={() => setEdit(undefined)}>
@@ -441,11 +433,7 @@ export function FilesOrganization({
             <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
               文件篮中的文件会保留。未决选择持有的文件会阻止此操作。
             </Typography>
-            {error && (
-              <Alert severity="warning" sx={{ mt: 1 }}>
-                {error}
-              </Alert>
-            )}
+            {error && <FailureNote error={error} context={{ operation: '保存分区', scope: 'surface' }} />}
           </DialogContent>
           <DialogActions>
             <Button disabled={busy} onClick={() => setRemove(undefined)}>

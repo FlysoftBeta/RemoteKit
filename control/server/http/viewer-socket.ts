@@ -1,15 +1,16 @@
-import { log, reportError } from '../log';
-import { findError } from '../diagnostics/error-search';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { RemoteKitError, httpStatus, toRemoteKitError, wireError } from '../../shared/errors';
 import type { ProductState } from '../../shared/product';
 import type { DomainServices } from '../application';
-import { DiagnosticSessions, diagnosticMessageLimit } from '../diagnostics/sessions';
 import type { NodeRegistry } from '../cluster/node-link';
-import type { ViewerAuthority } from '../viewers/viewer-hub';
+import { findError } from '../diagnostics/error-search';
+import { DiagnosticSessions, diagnosticMessageLimit } from '../diagnostics/sessions';
+import { viewerErrorReports } from '../diagnostics/viewer-errors';
 import { learningMethods } from '../learning/service';
+import { log, reportError } from '../log';
+import type { ViewerAuthority } from '../viewers/viewer-hub';
 
 type DiagnosticAuthority = { sessions?: DiagnosticSessions; identity: string; allowed: () => boolean };
 type RequestContext = {
@@ -415,6 +416,11 @@ export function attachViewerSocket(
           try {
             if (binary) throw new RemoteKitError('invalid_request', '无效的 WebSocket 请求');
             request = JSON.parse(raw);
+            if (request?.type === 'client.error') {
+              if (control.accounts.identity(token)?.tenantId === peer.tenant)
+                viewerErrorReports.receive(request.report, peer.tenant, lease);
+              return;
+            }
             if (
               !request ||
               typeof request.id !== 'string' ||

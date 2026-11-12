@@ -1,35 +1,19 @@
-import { formatError } from '../../util/format-error';
-import { retryDelay } from '../../../shared/error-policy';
-import { ErrorOutline } from '@mui/icons-material';
-import { ButtonBase, CircularProgress, Tooltip } from '@mui/material';
-import { useState } from 'react';
-import type { ClassMaterial, StudyAttachment } from '../../../shared/learning';
+import { ButtonBase, CircularProgress } from '@mui/material';
+import { useEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../../shared/errors';
 import type { LibraryEntry } from '../../../shared/file-library';
-import { useLibrary } from '../../files/file-library-state';
-import { FileTypeIcon, fileTypeColor } from '../../files/file-thumbnail';
+import type { ClassMaterial, StudyAttachment } from '../../../shared/learning';
+import { failureError, FailureNote } from '../../failures';
+import { recover } from '../../failures/recovery';
 import { formatFileSize } from '../../files/file-format';
-import type { LearningCall } from '../queries';
+import { useLibrary } from '../../files/file-library-state';
+import { fileTypeColor, FileTypeIcon } from '../../files/file-thumbnail';
 import { time } from '../common';
+import type { LearningCall } from '../queries';
 
-function SaveIcon({
-  attachment,
-  busy,
-  error,
-}: {
-  attachment: StudyAttachment;
-  busy?: boolean;
-  error?: string;
-}) {
+function SaveIcon({ attachment, busy }: { attachment: StudyAttachment; busy?: boolean }) {
   if (busy || attachment.save.state === 'downloading')
     return <CircularProgress size={16} aria-label="正在保存" />;
-  if (error || attachment.save.state === 'failed')
-    return (
-      <Tooltip
-        title={`${error || (attachment.save.state === 'failed' ? attachment.save.message : '保存失败')} · 请查看错误提示`}
-      >
-        <ErrorOutline className="learning-error" fontSize="small" />
-      </Tooltip>
-    );
   return null;
 }
 
@@ -48,28 +32,34 @@ function FileRow({
   deadline?: number;
   selected?: boolean;
   busy?: boolean;
-  error?: string;
+  error?: RemoteKitError;
   onClick: () => void;
   disabled?: boolean;
 }) {
   return (
-    <ButtonBase
-      className={`material-row${selected ? ' selected-card' : ''}`}
-      onClick={onClick}
-      disabled={disabled}
-    >
-      <span className="attachment-icon" style={{ color: fileTypeColor('', attachment.name) }}>
-        <FileTypeIcon type="" name={attachment.name} />
-      </span>
-      <span className="attachment-name">
-        <strong>{attachment.name}</strong>
-        <small>{secondary}</small>
-      </span>
-      <span className="attachment-trailing">
-        {deadline && <small className="learning-attention">截止 {time(deadline)}</small>}
-        <SaveIcon attachment={attachment} busy={busy} error={error} />
-      </span>
-    </ButtonBase>
+    <div>
+      <ButtonBase
+        className={`material-row${selected ? ' selected-card' : ''}`}
+        onClick={onClick}
+        disabled={disabled}
+      >
+        <span className="attachment-icon" style={{ color: fileTypeColor('', attachment.name) }}>
+          <FileTypeIcon type="" name={attachment.name} />
+        </span>
+        <span className="attachment-name">
+          <strong>{attachment.name}</strong>
+          <small>{secondary}</small>
+        </span>
+        <span className="attachment-trailing">
+          {deadline && <small className="learning-attention">截止 {time(deadline)}</small>}
+          <SaveIcon attachment={attachment} busy={busy && !error} />
+        </span>
+      </ButtonBase>
+      <FailureNote
+        error={error ?? (attachment.save.state === 'failed' ? attachment.save.error : undefined)}
+        context={{ operation: '保存附件', scope: 'item', credential: 'changyan', targetId: attachment.key }}
+      />
+    </div>
   );
 }
 
@@ -108,25 +98,39 @@ export function AttachmentRow({
 }) {
   const library = useLibrary();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const abort = useRef(new AbortController());
+  useEffect(() => () => abort.current.abort(), []);
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const [saved, setSaved] = useState<string>();
   const entryId = saved ?? (attachment.save.state === 'saved' ? attachment.save.entryId : undefined);
-  const retryable =
-    attachment.save.state !== 'failed' ||
-    retryDelay({ code: attachment.save.code }, 0) !== undefined ||
-    attachment.save.code === 'limit_exceeded';
+
   const show = async () => {
     setBusy(true);
-    setError('');
+    setError(undefined);
     try {
-      const id = entryId ?? (await call('study.attachment.save', { key: attachment.key })).entryId;
+      const id =
+        entryId ??
+        (
+          await recover(
+            () => call('study.attachment.save', { key: attachment.key }),
+            abort.current.signal,
+            setError,
+          )
+        ).entryId;
       setSaved(id);
-      const snapshot = await library.refresh();
-      const entry = snapshot?.entries.find((item) => item.id === id);
-      if (!entry) throw new Error('文件尚未就绪');
+      const entry = await recover(
+        async () => {
+          const snapshot = await library.refresh();
+          const entry = snapshot.entries.find((item) => item.id === id);
+          if (!entry) throw new RemoteKitError('unavailable', '文件尚未就绪');
+          return entry;
+        },
+        abort.current.signal,
+        setError,
+      );
       open(entry);
     } catch (failure) {
-      setError(formatError(failure));
+      setError(failureError(failure));
     } finally {
       setBusy(false);
     }
@@ -137,7 +141,7 @@ export function AttachmentRow({
       secondary={formatFileSize(attachment.sizeBytes ?? 0)}
       busy={busy}
       error={error}
-      disabled={!library.online || busy || !retryable}
+      disabled={!library.online || busy}
       onClick={() => void show()}
     />
   );

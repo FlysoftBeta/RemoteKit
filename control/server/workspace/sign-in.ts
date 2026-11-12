@@ -16,7 +16,7 @@ export function openSignInTab(
   if (window.appId !== (provider === 'changyan' ? 'study' : 'questions'))
     throw new RemoteKitError('invalid_request', '请在对应的学习窗口中登录');
   if (state.tabs.length >= WORKSPACE_LIMITS.tabs)
-    throw new RemoteKitError('limit_exceeded', '标签页已达上限');
+    throw new RemoteKitError('limit_exceeded', '标签页已达上限', { capacity: 'tabs' });
   if (state.tabs.some((tab) => tab.windowId === windowId))
     throw new RemoteKitError('conflict', '窗口正在登录');
   const tab = {

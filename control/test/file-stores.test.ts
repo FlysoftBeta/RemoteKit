@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { RemoteKitError } from '../shared/errors';
-import type { Asset, LibraryMethods, LibrarySnapshot, SelectionState } from '../shared/file-library';
 import type { CapturedBurst } from '../client/files/camera-capture';
+import type { ProcessedPhoto } from '../client/files/file-channel';
 import { ImportQueue } from '../client/files/import-queue';
 import { LibraryStore, type LibraryRequest } from '../client/files/library-store';
-import type { ProcessedPhoto } from '../client/files/file-channel';
 import { PhotoJobStore } from '../client/files/photo-job-store';
+import { RemoteKitError } from '../shared/errors';
+import type { Asset, LibraryMethods, LibrarySnapshot, SelectionState } from '../shared/file-library';
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 const snapshot = (revision: number): LibrarySnapshot => ({
@@ -412,7 +412,8 @@ const burst: CapturedBurst = {
   stats: { samplingMs: 1, frameCount: 1, stopReason: 'quality', sourceWidth: 1, sourceHeight: 1 },
 };
 
-test('photo retry commits the same mutation without reuploading captured frames', async () => {
+test('photo retry commits the same mutation without reuploading captured frames', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   let uploads = 0;
   const operations: string[] = [];
   const store = new PhotoJobStore({
@@ -438,7 +439,7 @@ test('photo retry commits the same mutation without reuploading captured frames'
   store.capture(job.id, Promise.resolve(burst));
   await flush();
   assert.equal(store.getSnapshot()[0].state, 'error');
-  store.retry(job.id);
+  t.mock.timers.tick(1000);
   await flush();
   assert.deepEqual(operations, [job.id, job.id]);
   assert.equal(uploads, 1);

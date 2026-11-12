@@ -57,14 +57,17 @@ test('reportError assigns once, keeps Endpoint IDs and serializes the diagnosis 
   reportError(endpoint, 'endpoint.failed');
   assert.equal(records[1].errorId, 'e-1234567890');
   assert.equal(wireError(endpoint).errorId, 'e-1234567890');
-  assert.equal(reportError(new RemoteKitError('invalid_request', ''), 'fixture.failed').errorId, undefined);
+  assert.match(
+    reportError(new RemoteKitError('invalid_request', ''), 'fixture.failed').errorId!,
+    /^c-[0-9a-f]{10}$/,
+  );
   log.debug('fixture.debug', { count: 1n });
-  assert.equal(records[2].count, '1');
+  assert.equal(records[3].count, '1');
   log.error('fixture.native_failed', {
     err: { code: 'internal', message: 'native diagnosis', reason: 'corrupt_state' },
   });
-  assert.equal(records[3].err.message, 'native diagnosis');
-  assert.equal(records[3].err.reason, 'corrupt_state');
+  assert.equal(records[4].err.message, 'native diagnosis');
+  assert.equal(records[4].err.reason, 'corrupt_state');
 });
 
 test('Endpoint stderr write failures log once per streak and recover after a successful write', async (t) => {
@@ -202,8 +205,8 @@ test('admin.findError validates IDs, confirms JSON matches and caps rotated Cont
   const result = await call(errorId);
   assert.equal(result.records.length, 50);
   assert.deepEqual(result.records[0], { source: 'control', line: current });
-  assert.deepEqual(result.unreachable, []);
-  assert.deepEqual(await call('c-0000000000'), { records: [], unreachable: [] });
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(await call('c-0000000000'), { records: [], failures: [] });
   await assert.rejects(call('../../secret'), { code: 'invalid_request' });
 });
 
@@ -259,5 +262,10 @@ test('admin.findError queries every ready node in parallel using the management 
     { source: 'one', line: '{"ts":"first"}' },
     { source: 'one', line: '{"ts":"second"}' },
   ]);
-  assert.deepEqual(result.unreachable, ['two']);
+  assert.deepEqual(
+    result.failures.map((failure: { nodeId: string }) => failure.nodeId),
+    ['two'],
+  );
+  assert.equal(result.failures[0].error.code, 'internal');
+  assert.match(result.failures[0].error.errorId, /^c-[0-9a-f]{10}$/);
 });

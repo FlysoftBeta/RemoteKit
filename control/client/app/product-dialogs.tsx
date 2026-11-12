@@ -1,5 +1,3 @@
-import { useAutoFocus } from '../editing/local-autofocus';
-import './product-dialogs.css';
 import { Close } from '@mui/icons-material';
 import {
   Alert,
@@ -12,7 +10,8 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type {
   PageDialog,
   PageDialogReply,
@@ -20,25 +19,13 @@ import type {
   ProductUser,
   SetupStatus,
 } from '../../shared/product';
-import type { ProductActionHandler as Action } from '../control/product-operations';
-import { formatError } from '../util/format-error';
 import { request } from '../control/http-request';
+import type { ProductActionHandler as Action } from '../control/product-operations';
+import { useAutoFocus } from '../editing/local-autofocus';
+import { failureError, FailureNote } from '../failures';
+import { recover } from '../failures/recovery';
+import './product-dialogs.css';
 export type { ProductActionHandler as Action } from '../control/product-operations';
-
-export function ConnectionError({ error, retry }: { error: string; retry: () => void }) {
-  return (
-    <Alert
-      severity="error"
-      action={
-        <Button color="inherit" onClick={retry}>
-          重试
-        </Button>
-      }
-    >
-      无法连接服务器：{error}
-    </Alert>
-  );
-}
 
 export function AuthView({
   onLogin,
@@ -47,15 +34,15 @@ export function AuthView({
 }: {
   onLogin: (user: ProductUser) => void;
   close: () => void;
-  notice: string;
+  notice: RemoteKitError | undefined;
 }) {
   const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const [username, setUsername] = useState(''),
     [password, setPassword] = useState(''),
     [setup, setSetup] = useState<SetupStatus | null>(null),
-    [setupError, setSetupError] = useState(''),
+    [setupError, setSetupError] = useState<RemoteKitError | undefined>(),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState('');
+    [error, setError] = useState<RemoteKitError | undefined>();
   const submitting = useRef(false);
   useEffect(() => {
     const escape = (event: KeyboardEvent) => {
@@ -64,12 +51,21 @@ export function AuthView({
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
   }, [close]);
+  const setupAbort = useRef(new AbortController());
+  useEffect(() => () => setupAbort.current.abort(), []);
   const refreshSetup = useCallback(async () => {
-    setSetupError('');
+    setSetupError(undefined);
     try {
-      setSetup(await request<SetupStatus>('/api/auth/setup'));
+      setSetup(
+        await recover(
+          () => request<SetupStatus>('/api/auth/setup'),
+          setupAbort.current.signal,
+          setSetupError,
+        ),
+      );
+      setSetupError(undefined);
     } catch (e) {
-      setSetupError(formatError(e));
+      setSetupError(failureError(e));
     }
   }, []);
   useEffect(() => {
@@ -86,15 +82,20 @@ export function AuthView({
           if (submitting.current || !setup) return;
           submitting.current = true;
           setBusy(true);
-          setError('');
+          setError(undefined);
           try {
-            const result = await request<{ user: ProductUser }>(`/api/auth/${creating ? 'setup' : 'login'}`, {
-              username,
-              password,
-            });
+            const result = await recover(
+              () =>
+                request<{ user: ProductUser }>(`/api/auth/${creating ? 'setup' : 'login'}`, {
+                  username,
+                  password,
+                }),
+              setupAbort.current.signal,
+              setError,
+            );
             onLogin(result.user);
           } catch (e) {
-            setError(formatError(e));
+            setError(failureError(e));
             if (creating) void refreshSetup();
           } finally {
             submitting.current = false;
@@ -107,7 +108,18 @@ export function AuthView({
             <Close />
           </IconButton>
         </Box>
-        {notice && <Alert severity="warning">{notice}</Alert>}
+        <FailureNote
+          error={notice}
+          context={{
+            operation: notice?.code === 'unauthenticated' ? '登录' : '退出登录',
+            scope: 'full-screen',
+            consequence: '此页面已退出，服务端登录状态尚未确认',
+            action: {
+              label: '输入登录信息',
+              run: () => document.querySelector<HTMLInputElement>('.auth-form input')?.focus(),
+            },
+          }}
+        />
         <Typography variant="h5" component="h1">
           {creating ? '创建管理员账户' : '登录 RemoteKit'}
         </Typography>
@@ -116,8 +128,20 @@ export function AuthView({
             ? '这是服务器上的第一个账户，之后的账户由管理员在管理员面板中创建。'
             : '继续你的浏览器工作空间'}
         </Typography>
-        {error && <Alert severity="error">{error}</Alert>}
-        {setupError && <ConnectionError error={setupError} retry={() => void refreshSetup()} />}
+        {error && (
+          <FailureNote
+            error={error}
+            context={{
+              operation: creating ? '创建管理员账户' : '登录',
+              scope: 'field',
+              credential: 'control',
+              issue: 'credentials',
+              input: true,
+              field: '.auth-form input',
+            }}
+          />
+        )}
+        <FailureNote error={setupError} context={{ operation: '读取账户设置', scope: 'full-screen' }} />
         <TextField
           required
           inputRef={autoFocusRef}
@@ -176,11 +200,11 @@ function PageDialogForm({
     [password, setPassword] = useState('');
   useEffect(() => () => setPassword(''), []);
   const [busy, setBusy] = useState(false),
-    [error, setError] = useState('');
+    [error, setError] = useState<RemoteKitError | undefined>();
   const reply = async (accept: boolean) => {
     if (busy) return;
     setBusy(true);
-    setError('');
+    setError(undefined);
     try {
       const reply: PageDialogReply =
         dialog.kind === 'http_auth'
@@ -197,7 +221,7 @@ function PageDialogForm({
       });
       setPassword('');
     } catch (e) {
-      setError(formatError(e));
+      setError(failureError(e));
       setBusy(false);
     }
   };
@@ -253,7 +277,17 @@ function PageDialogForm({
               您所查找的网页使用了您输入的信息。返回此页可能需要重复您已进行的所有操作。是否要继续？
             </Typography>
           )}
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && (
+            <FailureNote
+              error={error}
+              context={{
+                operation: '提交网站回复',
+                scope: 'field',
+                input: true,
+                field: '[role=dialog] input',
+              }}
+            />
+          )}
           <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, mt: 2 }}>
             <Button disabled={busy} onClick={() => void reply(false)}>
               取消
@@ -287,7 +321,17 @@ function PageDialogForm({
             sx={{ mt: 2 }}
           />
         )}
-        {error && <Alert severity="error">{error}</Alert>}
+        {error && (
+          <FailureNote
+            error={error}
+            context={{
+              operation: '提交网站回复',
+              scope: 'field',
+              input: true,
+              field: '[role=dialog] input',
+            }}
+          />
+        )}
         <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 2, '& > * + *': { ml: 1 } }}>
           {dialog.kind !== 'alert' && (
             <Button disabled={busy} onClick={() => void reply(false)}>

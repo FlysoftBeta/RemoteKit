@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { once } from 'node:events';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { RemoteKitError } from '../../shared/errors';
 import type { LearningProvider } from '../../shared/learning';
 import { AUTH_CONFIG } from './providers/changyan/config';
@@ -130,7 +130,7 @@ export class MediaProxy {
       }
       if (Number(upstream.headers.get('content-length')) > MAX_BYTES) {
         await upstream.body.cancel();
-        throw new RemoteKitError('limit_exceeded', '媒体超过 32 MiB');
+        throw new RemoteKitError('limit_exceeded', '媒体超过 32 MiB', { capacity: 'file' });
       }
       const type = upstream.headers.get('content-type') ?? 'application/octet-stream';
       res.writeHead(upstream.status === 206 ? 206 : 200, {
@@ -147,7 +147,8 @@ export class MediaProxy {
           const chunk = await reader.read();
           if (chunk.done) break;
           received += chunk.value.byteLength;
-          if (received > MAX_BYTES) throw new RemoteKitError('limit_exceeded', '媒体超过 32 MiB');
+          if (received > MAX_BYTES)
+            throw new RemoteKitError('limit_exceeded', '媒体超过 32 MiB', { capacity: 'file' });
           if (received <= MAX_ITEM) chunks.push(Buffer.from(chunk.value));
           else chunks.length = 0;
           if (!res.write(chunk.value)) await once(res, 'drain', { signal: abort.signal });

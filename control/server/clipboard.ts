@@ -1,5 +1,5 @@
-import type { SnippetOrigin } from '../shared/file-library';
 import { RemoteKitError } from '../shared/errors';
+import type { SnippetOrigin } from '../shared/file-library';
 import type { DomainContext, DomainServices } from './application';
 import type { ClipboardChangedEvent } from './endpoint/types';
 import { clipboardLimits, warnClipboardOversize } from './persistence/clipboards';
@@ -51,7 +51,7 @@ export class ClipboardService {
       this.services.viewers.assertProductViewer(authority.tenantId, authority.leaseId, authority.epoch);
       if (typeof params.text !== 'string') throw new RemoteKitError('invalid_request', '无效的剪贴板文本');
       if (Buffer.byteLength(params.text, 'utf8') > clipboardLimits.text)
-        throw new RemoteKitError('limit_exceeded', '剪贴板文本超过大小限制');
+        throw new RemoteKitError('limit_exceeded', '剪贴板文本超过大小限制', { capacity: 'field' });
       const value = await this.accept(authority.tenantId, params.text, '', { kind: 'device' }, false);
       if (!value) throw new RemoteKitError('not_found', '账号不存在');
       await this.context.endpoint.writeClipboard(authority.tenantId, value);

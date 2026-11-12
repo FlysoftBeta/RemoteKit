@@ -1,11 +1,12 @@
-import { log as structuredLog } from '../log';
-import { mailError } from './mail-error';
-import { retryDelay } from '../../shared/error-policy';
 import { ImapFlow } from 'imapflow';
 import type { Readable } from 'node:stream';
-import type { SessionImportConfig } from '../config';
+import { retryDelay } from '../../shared/error-policy';
+import { wireError } from '../../shared/errors';
 import type { MailboxStatus } from '../../shared/session-import';
+import type { SessionImportConfig } from '../config';
+import { reportError, log as structuredLog } from '../log';
 import { MAX_ENVELOPE_BYTES, envelopeKeyId } from './envelope';
+import { mailError } from './mail-error';
 
 export interface MailPart {
   part?: string;
@@ -89,11 +90,11 @@ export class ImportMailbox {
     private readonly outboxStatus: () => MailboxStatus['outbox'] = () => ({
       pending: 0,
       lastErrorAt: null,
-      lastError: null,
+      error: null,
     }),
     private readonly now: () => number = Date.now,
   ) {
-    this.snapshot = { configured: !!config, lastSuccessAt: null, lastErrorAt: null, lastError: null };
+    this.snapshot = { configured: !!config, lastSuccessAt: null, lastErrorAt: null, error: null };
   }
   status(): MailboxStatus {
     return { ...this.snapshot, outbox: this.outboxStatus() };
@@ -222,17 +223,16 @@ export class ImportMailbox {
         uid: kept.size ? Math.min(...kept.keys()) - 1 : highest,
       });
       this.snapshot.lastSuccessAt = this.now();
-      this.snapshot.lastError = null;
+      this.snapshot.error = null;
     } catch (error) {
       if (!this.stopped) {
         const failure = mailError(error, false);
         const delay = retryDelay(failure, 0);
         this.blocked = delay === undefined;
         this.retryAt = delay === undefined ? Infinity : this.now() + delay;
-        this.snapshot.errorCode = failure.code;
         const message = failure.message;
         this.snapshot.lastErrorAt = this.now();
-        this.snapshot.lastError = message;
+        this.snapshot.error = wireError(reportError(failure, 'session_import.mailbox_failed'));
         this.log(`Session import mailbox: ${message}`);
       }
     } finally {

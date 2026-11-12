@@ -1,10 +1,10 @@
-import { log, reportError } from '../log';
 import { createHash } from 'node:crypto';
-import { RemoteKitError, toRemoteKitError, wireError, parseWireError } from '../../shared/errors';
+import { parseWireError, RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import { SITE_PERMISSIONS, type FileRequest, type PageDialogReply } from '../../shared/product';
 import type { DownloadEvent, FileBinding, PageIdentity, PageReplyFields } from '../endpoint/types';
-import { settle } from './operations';
+import { log, reportError } from '../log';
 import { removeWindow } from './model';
+import { settle } from './operations';
 import { ensureSite, pruneSite, validProtocolHandler, validSiteOrigin } from './site-policy';
 export type FileLimits = FileRequest['limits'];
 export interface InternalFileRequest extends FileRequest {
@@ -607,7 +607,35 @@ export class PageRequests {
           throw new RemoteKitError('internal', '节点下载事件格式错误', {
             detail: 'Invalid Endpoint download event',
           });
-        await this.services.library.consumeDownload(state.tenantId, event as DownloadEvent);
+        const runtime = this.context.tenants.get(state.tenantId);
+        try {
+          await this.services.library.consumeDownload(state.tenantId, event as DownloadEvent);
+          runtime.backgroundTasks.set(event.eventId, {
+            id: event.eventId,
+            kind: 'download',
+            name: event.name,
+            state: event.type === 'download.failed' ? 'failed' : 'complete',
+            error: event.type === 'download.failed' ? event.error : undefined,
+          });
+        } catch (error) {
+          runtime.backgroundTasks.set(event.eventId, {
+            id: event.eventId,
+            kind: 'download',
+            name: event.name,
+            state: 'failed',
+            error: wireError(
+              reportError(toRemoteKitError(error), 'download.import_failed', {
+                tenant: state.tenantId,
+                downloadId: event.eventId,
+              }),
+            ),
+          });
+          this.services.viewers.push(state.tenantId);
+          throw error;
+        }
+        while (runtime.backgroundTasks.size > 50)
+          runtime.backgroundTasks.delete(runtime.backgroundTasks.keys().next().value!);
+        this.services.viewers.push(state.tenantId);
         eventIds.push(event.eventId);
         continue;
       }
@@ -664,7 +692,8 @@ export class PageRequests {
       const handlers = (site.protocolHandlers ?? []).filter(
         (handler) => handler.protocol !== dialog.protocol,
       );
-      if (handlers.length >= 32) throw new RemoteKitError('limit_exceeded', '协议处理程序已达上限');
+      if (handlers.length >= 32)
+        throw new RemoteKitError('limit_exceeded', '协议处理程序已达上限', { capacity: 'site-settings' });
       if (reply.accept)
         for (const [origin, other] of Object.entries(state.sites)) {
           if (origin === dialog.origin) continue;

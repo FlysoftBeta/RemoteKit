@@ -1,13 +1,12 @@
 import type { ProductState } from '../../shared/product';
-import type { SocketMethods } from './socket-methods';
 import type { AuthState } from '../../shared/security';
 import type { AuthorizationScope } from '../auth/authorization-scope';
-import { formatError } from '../util/format-error';
 import { diagnostics } from '../media/diagnostics';
 import type { RtcSession } from '../rtc/rtc-session';
 import { Store } from '../util/store';
 import type { ConnectionStatus, ControlSession } from './control-session';
 import type { OperationsStore } from './operations-store';
+import type { SocketMethods } from './socket-methods';
 import type { ViewportRequests } from './viewport-requests';
 
 export interface WorkspaceSnapshot {
@@ -15,7 +14,6 @@ export interface WorkspaceSnapshot {
   localLock: string | null;
   manualLock: boolean;
   status: ConnectionStatus;
-  error: string;
   idleRearmed: boolean;
 }
 export class WorkspaceSession extends Store<WorkspaceSnapshot> {
@@ -42,7 +40,6 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
       localLock: null,
       manualLock: false,
       status: 'connecting',
-      error: '',
       idleRearmed: true,
     });
   }
@@ -58,7 +55,7 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
     if (status !== 'online' && previous.status === 'online') {
       this.ports.authorization.setProductLocked(true);
       this.ports.viewport.reset();
-      this.publish({ ...this.getSnapshot(), auth: null, error: '' });
+      this.publish({ ...this.getSnapshot(), auth: null });
       this.started = false;
       this.ports.rtc.disconnect();
     }
@@ -73,7 +70,6 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
     this.publish({
       ...current,
       auth,
-      error: auth.locked || auth.epoch !== previous?.epoch ? '' : current.error,
       localLock: auth.locked ? null : current.localLock,
       manualLock: auth.locked ? current.manualLock : false,
       idleRearmed: auth.locked ? current.idleRearmed : true,
@@ -96,7 +92,6 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
       ...current,
       localLock: reason,
       manualLock: reason === 'manual' || current.manualLock,
-      error: '',
       idleRearmed: reason === 'idle' || reason === 'system' ? false : current.idleRearmed,
     });
     this.ports.authorization.setProductLocked(true);
@@ -109,13 +104,6 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
   departureObserved = () => {
     this.publish({ ...this.getSnapshot(), manualLock: false });
   };
-  report = (error: unknown) => {
-    const current = this.getSnapshot();
-    diagnostics.record('workspace-action', error);
-    if (current.auth?.locked === false && !current.localLock)
-      this.publish({ ...current, error: formatError(error) });
-  };
-  dismissError = () => this.publish({ ...this.getSnapshot(), error: '' });
   request = <K extends keyof SocketMethods>(method: K, params: SocketMethods[K]['params']) =>
     this.ports.control.request(method, params);
   private activity = () => {

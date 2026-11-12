@@ -1,15 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { ViewerSession } from '../viewer-session';
-import type { WorkspaceSnapshot } from '../control/workspace-session';
-import type { OperationsSnapshot } from '../control/operations-store';
-import { useViewerSessionSelector, shallowEqual } from './use-viewer-session';
+import { RemoteKitError } from '../../shared/errors';
 import { useAuthCamera, type AuthRequest } from '../auth/auth-camera';
 import { useAutoLock } from '../auth/auth-idle';
+import type { OperationsSnapshot } from '../control/operations-store';
+import type { WorkspaceSnapshot } from '../control/workspace-session';
+import { failureError } from '../failures';
 import type { AudioChannels } from '../media/audio-output';
 import { DiagnosticCollection, type DiagnosticState } from '../media/diagnostic-collection';
+import type { ViewerSession } from '../viewer-session';
 import { useFloatingAction, type FloatingActions } from './floating-actions';
 import type { Action } from './product-dialogs';
 import { toggleFullscreen, useAutoFullscreen } from './use-auto-fullscreen';
+import { shallowEqual, useViewerSessionSelector } from './use-viewer-session';
 import { fullscreenWindowId } from './visibility';
 import { exitWindowFullscreen, useWindowFullscreen } from './window-fullscreen';
 const FULLSCREEN_EXIT_ANCHORS = ['top-left', 'top', 'top-right'] as const;
@@ -46,9 +48,10 @@ export function useSystemControls({
     return () => document.removeEventListener('fullscreenchange', change);
   }, []);
   const [audioSaving, setAudioSaving] = useState(false);
-  const [audioError, setAudioError] = useState('');
+  const [audioError, setAudioError] = useState<RemoteKitError>();
   const audioPending = useRef(false);
-  const report = media.workspace.report;
+  const [controlFailure, setControlFailure] = useState<RemoteKitError>();
+  const report = (error: unknown) => setControlFailure(failureError(error));
   const authRequest: AuthRequest = media.workspace.request;
   const lock = media.workspace.lock;
   const idle = useAutoLock(auth, lock);
@@ -79,10 +82,10 @@ export function useSystemControls({
     if (audioPending.current || status !== 'online' || !ready) return;
     audioPending.current = true;
     setAudioSaving(true);
-    setAudioError('');
+    setAudioError(undefined);
     void action({ type: 'settings.update', settings: { workspace: { audioChannels: channels } } })
-      .catch(() => {
-        setAudioError('声音设置未保存，请重试');
+      .catch((error) => {
+        setAudioError(failureError(error));
       })
       .finally(() => {
         audioPending.current = false;
@@ -176,23 +179,18 @@ export function useSystemControls({
       : null,
     floatingActions,
   );
-  const collecting =
-    diagnosticState.phase === 'collecting' ||
-    diagnosticState.phase === 'finalizing' ||
-    diagnosticState.phase === 'retry';
+  const collecting = diagnosticState.phase === 'collecting' || diagnosticState.phase === 'finalizing';
   useFloatingAction(
     'diagnostics',
     collecting
       ? {
           order: 30,
           anchor: 'bottom',
-          label: diagnosticState.phase === 'retry' ? '重试确认' : '停止数据收集',
+          label: '停止数据收集',
           detail:
-            diagnosticState.phase === 'retry'
-              ? '诊断保存尚未确认'
-              : diagnosticState.phase === 'finalizing'
-                ? '正在保存诊断…'
-                : `已收集 ${diagnosticState.samples} 个样本`,
+            diagnosticState.phase === 'finalizing'
+              ? '正在保存诊断…'
+              : `已收集 ${diagnosticState.samples} 个样本`,
           icon: 'stop',
           attention: 'recording',
           disabled: diagnosticState.phase === 'finalizing' || status !== 'online',
@@ -202,6 +200,7 @@ export function useSystemControls({
     floatingActions,
   );
   return {
+    controlFailure,
     authRequest,
     lock: () => lock('manual'),
     idle,

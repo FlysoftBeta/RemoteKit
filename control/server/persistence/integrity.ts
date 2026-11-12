@@ -1,8 +1,8 @@
 import type Database from 'better-sqlite3';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, wireError, type WireError } from '../../shared/errors';
 import type { LearningProvider } from '../../shared/learning';
 import { FaceVault, type AtRestKey } from '../auth/crypto';
-import { log } from '../log';
+import { reportError } from '../log';
 import { corruptRecord, decodeJson, type Codec } from './codec';
 import * as codecs from './documents';
 import { learningKeyInfo, openLearningSession } from './sealed-documents';
@@ -12,6 +12,7 @@ export interface IntegrityProblem {
   table: string;
   key: string;
   detail: string;
+  error: WireError;
 }
 export interface IntegrityResult {
   checkedAt: number;
@@ -45,8 +46,18 @@ export function checkIntegrity(
   checkedAt = Date.now(),
 ): IntegrityResult {
   const problems: IntegrityProblem[] = [];
-  const add = (problem: IntegrityProblem) => {
-    if (problems.length < 200) problems.push(problem);
+  const add = (problem: Omit<IntegrityProblem, 'error'>) => {
+    if (problems.length < 200)
+      problems.push({
+        ...problem,
+        error: wireError(
+          reportError(
+            new RemoteKitError('internal', '持久化记录未能通过校验', { detail: problem.detail }),
+            'store.integrity_problem',
+            { table: problem.table, key: problem.key },
+          ),
+        ),
+      });
   };
   const quick = db.pragma('quick_check') as Record<string, unknown>[];
   for (const row of quick) {
@@ -138,6 +149,5 @@ export function checkIntegrity(
         row.sealed,
       );
     });
-  for (const problem of problems) log.error('store.integrity_problem', { ...problem });
   return { checkedAt, problems };
 }

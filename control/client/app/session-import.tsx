@@ -1,4 +1,3 @@
-import './session-import.css';
 import Close from '@mui/icons-material/Close';
 import ContentCopy from '@mui/icons-material/ContentCopy';
 import DeleteOutline from '@mui/icons-material/DeleteOutline';
@@ -28,18 +27,21 @@ import {
   Typography,
 } from '@mui/material';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type {
   ControlEvent,
   ImportDevice,
   PairingState,
-  SessionImportState,
   SessionImportSocketMethods,
+  SessionImportState,
   TimelineEntry,
 } from '../../shared/session-import';
-import type { Action } from './product-dialogs';
-import { formatError } from '../util/format-error';
-import { SettingRow, SettingSection } from './setting-layout';
+import { failureError, FailureNote } from '../failures';
+import { recover } from '../failures/recovery';
 import { formatTime } from './admin/shared';
+import type { Action } from './product-dialogs';
+import './session-import.css';
+import { SettingRow, SettingSection } from './setting-layout';
 import { useLayoutNarrow } from './ui-scale';
 
 export type SessionImportCall = <K extends keyof SessionImportSocketMethods>(
@@ -128,7 +130,7 @@ function replyText(event: ControlEvent): { text: string; tone: Tone } {
       };
     }
     case 'importFailed':
-      return { text: event.reason + (event.retryable ? '（可在手机上重试）' : ''), tone: 'error' };
+      return { text: event.error.message, tone: 'error' };
     case 'importDiscarded':
       return { text: '已放弃，不会写入', tone: 'default' };
     case 'revoked':
@@ -196,19 +198,24 @@ function ImportDialog({
 }) {
   const compact = useLayoutNarrow();
   const [state, setState] = useState<SessionImportState>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState<ImportDevice>();
   const mounted = useRef(true);
   const refreshing = useRef(false);
+  const lifetime = useRef(new AbortController());
+  useEffect(() => () => lifetime.current.abort(), []);
   const refresh = async () => {
     if (refreshing.current) return;
     refreshing.current = true;
     try {
       const value = await call('sessionImport.state', {});
-      if (mounted.current) setState(value);
+      if (mounted.current) {
+        setState(value);
+        setError(undefined);
+      }
     } catch (e) {
-      if (mounted.current) setError(formatError(e));
+      if (mounted.current) setError(failureError(e));
     } finally {
       refreshing.current = false;
     }
@@ -229,12 +236,12 @@ function ImportDialog({
   const run = async (work: () => Promise<void>) => {
     if (busy) return;
     setBusy(true);
-    setError('');
+    setError(undefined);
     try {
-      await work();
+      await recover(work, lifetime.current.signal, setError);
       if (mounted.current) await refresh();
     } catch (e) {
-      if (mounted.current) setError(formatError(e));
+      if (mounted.current) setError(failureError(e));
     } finally {
       if (mounted.current) setBusy(false);
     }
@@ -255,6 +262,7 @@ function ImportDialog({
   };
   return (
     <Dialog
+      data-session-import
       open
       onClose={busy ? undefined : close}
       fullScreen={compact}
@@ -269,11 +277,7 @@ function ImportDialog({
         </IconButton>
       </DialogTitle>
       <DialogContent dividers>
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
-            {error}
-          </Alert>
-        )}
+        {error && <FailureNote error={error} context={{ operation: '读取会话导入状态', scope: 'surface' }} />}
         {!state ? (
           <LinearProgress sx={{ my: 1 }} />
         ) : (
@@ -564,7 +568,12 @@ function TimelineCard({
               {entry.record?.error && (
                 <>
                   <dt>原因</dt>
-                  <dd>{entry.record.error}</dd>
+                  <dd>
+                    <FailureNote
+                      error={entry.record.error}
+                      context={{ operation: '导入手机会话', scope: 'item' }}
+                    />
+                  </dd>
                 </>
               )}
             </>

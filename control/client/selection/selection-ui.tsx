@@ -1,13 +1,15 @@
-import { useLayoutEffect, useRef, useState } from 'react';
-import { formatError } from '../util/format-error';
-import { createPortal } from 'react-dom';
-import { ButtonBase, Paper } from '@mui/material';
 import { MoreHoriz } from '@mui/icons-material';
+import { ButtonBase, Paper } from '@mui/material';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { RemoteKitError } from '../../shared/errors';
 import { unscaledLayer } from '../app/ui-scale';
 import { placeViewportSelectionMenu } from '../app/viewport-geometry';
+import { failureError, FailureNote } from '../failures';
+import { recover } from '../failures/recovery';
 import type { SelectionAction } from '../rtc/protocol';
-import type { HandleKind, SelectionTarget } from './target';
 import './selection.css';
+import type { HandleKind, SelectionTarget } from './target';
 
 const labels: Record<SelectionAction, string> = {
   cut: '剪切',
@@ -32,7 +34,9 @@ export function SelectionUI({
   const menu = useRef<HTMLDivElement>(null);
   const [revision, update] = useState(0);
   const [dragging, setDragging] = useState(false);
-  const [error, setError] = useState('');
+  const lifetime = useRef(new AbortController());
+  useEffect(() => () => lifetime.current.abort(), []);
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const drag = useRef<{ which: HandleKind; pointer: number; dx: number; dy: number } | undefined>(undefined);
   const handles = target.handles();
   useLayoutEffect(() => {
@@ -142,7 +146,13 @@ export function SelectionUI({
           ),
       )}
       {!dragging && target.commands().length > 0 && (
-        <Paper ref={menu} className="selection-menu" elevation={0} role="toolbar" aria-label="文本选择">
+        <Paper
+          ref={menu}
+          className={`selection-menu${error ? ' selection-menu-failure' : ''}`}
+          elevation={0}
+          role="toolbar"
+          aria-label="文本选择"
+        >
           {target.commands().map((command) => (
             <ButtonBase
               key={command}
@@ -151,23 +161,19 @@ export function SelectionUI({
               aria-label={labels[command]}
               onPointerDown={(event) => event.preventDefault()}
               onClick={() => {
-                void Promise.resolve(target.run(command))
+                void recover(() => Promise.resolve(target.run(command)), lifetime.current.signal, setError)
                   .then(() => {
                     if (command === 'selectAll') update((value) => value + 1);
                     else close();
                   })
-                  .catch((failure: unknown) => setError(formatError(failure)));
+                  .catch((failure: unknown) => setError(failureError(failure)));
               }}
             >
               {command === 'contextMenu' ? <MoreHoriz fontSize="small" /> : labels[command]}
             </ButtonBase>
           ))}
+          {error && <FailureNote error={error} context={{ operation: '复制选区', scope: 'item' }} />}
         </Paper>
-      )}
-      {error && (
-        <div className="selection-error" role="alert">
-          {error}
-        </div>
       )}
     </div>,
     unscaledLayer(),

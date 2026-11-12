@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import { gzipSync, gunzipSync } from 'node:zlib';
 import { TextDecoder } from 'node:util';
-import { RemoteKitError, type ErrorCode } from '../../shared/errors';
-import type { DeviceEvent, ControlEvent, ImportMessage } from '../../shared/session-import';
+import { gunzipSync, gzipSync } from 'node:zlib';
+import { RemoteKitError, wireError, type WireError } from '../../shared/errors';
+import type { ControlEvent, DeviceEvent, ImportMessage } from '../../shared/session-import';
 import { hpkeOpen, hpkeSeal } from './hpke';
 
 export const MAX_ENVELOPE_BYTES = 16 * 1024 ** 2;
@@ -16,8 +16,7 @@ const invalid = (field: string): never => {
 export type ImportEvent = Extract<DeviceEvent, { type: 'import' }>;
 export interface EventResult {
   event: DeviceEvent;
-  error: string | null;
-  errorCode?: ErrorCode;
+  error: WireError | null;
 }
 class ImportLimitError extends RemoteKitError {
   constructor(reason: string) {
@@ -143,8 +142,7 @@ export function parseDeviceMessage(json: unknown): {
     timestamp(e.at, 'at');
     if (e.at < 0) invalid('at');
     previous = e.seq;
-    let error: string | null = null;
-    let errorCode: ErrorCode | undefined;
+    let error: WireError | null = null;
     if (e.type === 'pair') {
       object(e, ['seq', 'at', 'type', 'username', 'password', 'code', 'device'], 'pair');
       for (const [field, max] of [
@@ -176,13 +174,12 @@ export function parseDeviceMessage(json: unknown): {
         } catch (failure) {
           if (failure instanceof UnknownKeysError) throw failure;
           if (failure instanceof RemoteKitError) {
-            error = failure.message;
-            errorCode = failure.code;
+            error = wireError(failure);
           } else throw failure;
         }
       }
     } else invalid('type');
-    results.push({ event: e as DeviceEvent, error, ...(errorCode ? { errorCode } : {}) });
+    results.push({ event: e as DeviceEvent, error });
   }
   return { message: m as ImportMessage<DeviceEvent>, results };
 }

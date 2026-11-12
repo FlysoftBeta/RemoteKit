@@ -1,4 +1,3 @@
-import './workspace-preferences.css';
 import { Add, Remove } from '@mui/icons-material';
 import {
   Button,
@@ -12,14 +11,16 @@ import {
   ToggleButtonGroup,
   Typography,
 } from '@mui/material';
-import React, { useState } from 'react';
-import type { WorkspaceSettings, ProductState } from '../../shared/product';
+import { useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
+import type { ProductState, WorkspaceSettings } from '../../shared/product';
 import { DEAD_ZONE_MAX } from '../../shared/product';
+import { failureError, FailureNote } from '../failures';
 import type { Action } from './product-dialogs';
-import { formatError } from '../util/format-error';
-import { SettingNote, SettingRow, SettingSection, SettingSwitch } from './setting-layout';
+import { SettingRow, SettingSection, SettingSwitch } from './setting-layout';
 import { deadZoneHeight, useTopInsetProbe } from './top-inset';
 import { UI_SCALE_STEPS } from './ui-scale';
+import './workspace-preferences.css';
 function deadZoneDescription(height: number, safeArea: number) {
   const base = '在界面上方留出不响应操作的区域';
   if (height === 0) return base;
@@ -44,25 +45,30 @@ export function WorkspacePreferences({
   const [deadZone, setDeadZone] = useState(
       typeof settings.topDeadZone === 'number' ? String(settings.topDeadZone) : '24',
     ),
-    [result, setResult] = useState<Record<string, string>>({}),
+    [result, setResult] = useState<Record<string, import('../../shared/errors').RemoteKitError | undefined>>(
+      {},
+    ),
     [busy, setBusy] = useState<Record<string, boolean>>({});
   const save = async (key: string, value: Partial<WorkspaceSettings>) => {
     if (!online) return;
     setBusy((p) => ({ ...p, [key]: true }));
-    setResult((p) => ({ ...p, [key]: '' }));
+    setResult((p) => ({ ...p, [key]: undefined }));
     try {
       const receipt = await action({ type: 'settings.update', settings: { workspace: value } });
       // Progress lives in the Start sync indicator; a setting only reports what needs attention.
-      setResult((p) => ({ ...p, [key]: receipt.status === 'unknown' ? '结果未知，请核对' : '' }));
+      setResult((p) => ({
+        ...p,
+        [key]: receipt.status === 'unknown' ? new RemoteKitError('outcome_unknown', '') : undefined,
+      }));
     } catch (e) {
-      setResult((p) => ({ ...p, [key]: `未保存，请重试：${formatError(e)}` }));
+      setResult((p) => ({ ...p, [key]: failureError(e) }));
     } finally {
       setBusy((p) => ({ ...p, [key]: false }));
     }
   };
   const note = (key: string) => {
-    const text = busy[key] ? '' : (result[key] ?? '');
-    return <SettingNote text={text} error={!!text} />;
+    const error = result[key];
+    return <FailureNote error={error} context={{ operation: '保存此设置', scope: 'field', input: true }} />;
   };
   const scaleIndex = UI_SCALE_STEPS.findIndex((step) => step >= settings.uiScale - 0.001);
   const stepScale = (direction: 1 | -1) => {

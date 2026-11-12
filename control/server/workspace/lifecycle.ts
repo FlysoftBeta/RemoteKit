@@ -1,15 +1,15 @@
-import { log } from '../log';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { RemoteKitError, toRemoteKitError, wireError, type WireError } from '../../shared/errors';
 import { endpointError } from '../endpoint/gateway';
 import type { EndpointSnapshot } from '../endpoint/types';
-import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import { log } from '../log';
 import { settle } from './operations';
 
 import type { ProductTab, ProductWorkspace } from '../../shared/product';
 import { isLocalTab } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
-import { systemClock, type Clock } from '../util/clock';
 import type { NodeLink } from '../cluster/node-link';
+import { systemClock, type Clock } from '../util/clock';
 
 type HibernationReason = 'idle' | 'relief' | 'rebalance';
 type ReliefState = { waitingAfter?: number; inflight?: Promise<void> };
@@ -296,8 +296,8 @@ export class UncertainRecovery {
       transitionRecovery(tab, undefined);
       return false;
     } else if (state?.phase !== 'failed') {
-      let reason: string | undefined;
-      if (!current) reason = '无法确认原页面实例，请关闭此标签页后重新打开';
+      let reason: WireError | undefined;
+      if (!current) reason = wireError(new RemoteKitError('internal', '原页面实例已结束'));
       else if (
         !(attempt.phase === 'unloading' && attempt.evidence === 'unloaded') &&
         browserIncarnation === attempt.browserIncarnation &&
@@ -313,7 +313,7 @@ export class UncertainRecovery {
             : new RemoteKitError('internal', '页面生命周期结果缺少错误码'),
         );
       else if (attempt.phase === 'unloading' && attempt.evidence === 'unloaded')
-        reason = '无法确认页面恢复结果，请关闭此标签页后重新打开';
+        reason = wireError(new RemoteKitError('internal', '页面恢复结果未确认'));
       if (reason) transitionRecovery(tab, { phase: 'failed', reason, attempt });
     }
     const next = readRecovery(tab);
@@ -344,10 +344,7 @@ export class UncertainRecovery {
     this.context.store.operations.saveOperation(state, saved.receipt);
   }
   lifecycleError(error: unknown) {
-    const detail = toRemoteKitError(error).message;
-    return detail
-      ? `页面恢复未确认（${detail.slice(0, 240)}），请关闭此标签页后重新打开`
-      : '页面恢复未确认，请关闭此标签页后重新打开';
+    return wireError(toRemoteKitError(error));
   }
   async advanceLifecycleRecovery(
     workspace: ProductWorkspace,
@@ -389,7 +386,10 @@ export class UncertainRecovery {
       typeof generation !== 'string' ||
       !/^\d{1,20}$/.test(generation)
     ) {
-      transitionRecovery(tab, { phase: 'failed', reason: '页面恢复缺少实例标识，请关闭此标签页后重新打开' });
+      transitionRecovery(tab, {
+        phase: 'failed',
+        reason: wireError(new RemoteKitError('internal', '页面恢复缺少实例标识')),
+      });
       tab.restoring = false;
       this.services.operations.saveWorkspace(workspace);
       return;
@@ -605,7 +605,7 @@ export type RecoveryAttempt =
   | (RecoveryIdentity & { phase: 'unloading'; evidence: 'pending' | 'unloaded' })
   | (RecoveryIdentity & { phase: 'restoring' });
 export type UncertainRecoveryState =
-  RecoveryAttempt | { phase: 'failed'; reason: string; attempt?: RecoveryAttempt };
+  RecoveryAttempt | { phase: 'failed'; reason: WireError; attempt?: RecoveryAttempt };
 function readRecovery(tab: ProductTab): UncertainRecoveryState | undefined {
   const saved = tab.lifecycleRecovery;
   const attempt: RecoveryAttempt | undefined = saved

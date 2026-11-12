@@ -12,8 +12,11 @@ import {
 } from '@mui/icons-material';
 import { Box, Skeleton, Typography, type SxProps, type Theme } from '@mui/material';
 import React, { useEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
+import { FailureNote } from '../failures';
 import { fileExtension, fileKind, type FileKind } from './file-format';
 import { useLibrary } from './file-library-state';
+import type { Preview } from './file-thumbnails';
 import { RotatedImage } from './rotated-image';
 
 const KINDS: Record<FileKind, { icon: React.ElementType; color: string; background: string }> = {
@@ -73,6 +76,7 @@ export function FileThumbnail({
   const [visible, setVisible] = useState(false);
   const [imageUrl, setImageUrl] = useState<{ assetId: string; value: string }>();
   const url = imageUrl?.assetId === assetId ? imageUrl.value : undefined;
+  const [failure, setFailure] = useState<RemoteKitError>();
   const [loading, setLoading] = useState(false);
   useEffect(() => {
     if (!host.current || typeof IntersectionObserver === 'undefined') {
@@ -85,19 +89,21 @@ export function FileThumbnail({
   }, []);
   useEffect(() => {
     let objectUrl: string | undefined;
-    const display = (value: Blob | undefined) => {
+    const display = (preview: Preview) => {
+      const value = preview.blob;
+      setFailure(preview.error?.code === 'not_found' ? undefined : preview.error);
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       objectUrl = value && URL.createObjectURL(value);
       setImageUrl(objectUrl ? { assetId, value: objectUrl } : undefined);
       setLoading(false);
     };
     let release: (() => void) | undefined;
-    if (!visible) display(undefined);
-    else if (blob) display(blob);
+    if (!visible) display({});
+    else if (blob) display({ blob });
     else if (!localOnly && online && decodable) {
       setLoading(true);
       release = thumbnails.subscribe(assetId, display);
-    } else display(thumbnails.get(assetId));
+    } else display({ blob: thumbnails.get(assetId) });
     return () => {
       release?.();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
@@ -108,7 +114,6 @@ export function FileThumbnail({
   return (
     <Box
       ref={host}
-      aria-hidden="true"
       sx={[
         {
           position: 'relative',
@@ -125,13 +130,20 @@ export function FileThumbnail({
         ...(Array.isArray(sx) ? sx : [sx ?? {}]),
       ]}
     >
+      <FailureNote
+        error={failure}
+        context={{ operation: '读取缩略图', scope: 'item', targetId: assetId, consequence: '文件仍可打开' }}
+      />
       {shown ? (
         <RotatedImage
           src={url}
           alt=""
           turns={rotationTurns}
           fit={fit}
-          onError={() => setImageUrl(undefined)}
+          onError={() => {
+            setImageUrl(undefined);
+            setFailure(new RemoteKitError('internal', '缩略图解码失败'));
+          }}
         />
       ) : visible && loading ? (
         <Skeleton variant="rectangular" sx={{ position: 'absolute', inset: 0, height: '100%' }} />

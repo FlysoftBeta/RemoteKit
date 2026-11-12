@@ -1,8 +1,5 @@
-import { useAutoFocus } from '../editing/local-autofocus';
-import { formatError } from '../util/format-error';
 import Close from '@mui/icons-material/Close';
 import {
-  Alert,
   Box,
   Button,
   IconButton,
@@ -12,8 +9,12 @@ import {
   ToggleButtonGroup,
   Typography,
 } from '@mui/material';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { AuthState } from '../../shared/security';
+import { useAutoFocus } from '../editing/local-autofocus';
+import { failureError, FailureNote } from '../failures';
+import { recover } from '../failures/recovery';
 import type { AuthCamera, AuthRequest } from './auth-camera';
 
 export function UnlockView({
@@ -21,18 +22,21 @@ export function UnlockView({
   request,
   camera,
   close,
-  retry,
+  connectionError,
+  revoked,
 }: {
   auth: AuthState | null;
   request: AuthRequest;
   camera: AuthCamera;
   close: () => void;
-  retry: () => void;
+  connectionError?: RemoteKitError;
+  revoked?: boolean;
 }) {
   const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const [method, setMethod] = useState<'password' | 'pin' | 'face'>('password');
   const [secret, setSecret] = useState('');
-  const [error, setError] = useState('');
+  const [faceUnavailable] = useState(() => new RemoteKitError('rejected', '人脸验证服务不可用'));
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const [busy, setBusy] = useState(false);
   const closePanel = () => {
     if (camera.explicit === 'verify') camera.cancel();
@@ -45,16 +49,18 @@ export function UnlockView({
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
   }, [camera, close]);
+  const lifetime = useRef(new AbortController());
+  useEffect(() => () => lifetime.current.abort(), []);
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!auth || busy) return;
     setBusy(true);
-    setError('');
+    setError(undefined);
     try {
       if (method === 'face') await camera.start('verify');
-      else await request('auth.verify', { method, secret });
+      else await recover(() => request('auth.verify', { method, secret }), lifetime.current.signal, setError);
     } catch (failure) {
-      setError(formatError(failure));
+      setError(failureError(failure));
     } finally {
       setSecret('');
       setBusy(false);
@@ -73,8 +79,16 @@ export function UnlockView({
         </Stack>
         {!auth ? (
           <>
-            <Typography color="text.secondary">正在连接验证服务…</Typography>
-            <Button onClick={retry}>重试连接</Button>
+            <FailureNote
+              error={connectionError ?? new RemoteKitError('unavailable', '')}
+              context={{
+                operation: '连接验证服务',
+                scope: 'full-screen',
+                connection: true,
+                issue: revoked ? 'lease' : undefined,
+                action: revoked ? { label: '重新加载', run: () => location.reload() } : undefined,
+              }}
+            />
           </>
         ) : (
           <>
@@ -90,7 +104,7 @@ export function UnlockView({
                   if (camera.explicit === 'verify') camera.cancel();
                   setMethod(value);
                   setSecret('');
-                  setError('');
+                  setError(undefined);
                 }}
               >
                 <ToggleButton value="password">密码</ToggleButton>
@@ -120,13 +134,52 @@ export function UnlockView({
                   : auth.face.purpose === 'verify' && auth.face.status === 'pending'
                     ? '请正对摄像头。'
                     : auth.face.purpose === 'verify' && auth.face.status === 'expired'
-                      ? '验证已超时，请重试。'
+                      ? '验证已超时，工作区仍锁定。'
                       : auth.face.purpose === 'verify' && auth.face.status === 'failed'
-                        ? '人脸验证失败，请重试。'
+                        ? '未能完成人脸验证，工作区仍锁定。'
                         : '开启摄像头后，按提示完成人脸验证。'}
               </Typography>
             )}
-            {error && <Alert severity="error">{error}</Alert>}
+            {method === 'face' && !auth.face.available && (
+              <FailureNote
+                error={faceUnavailable}
+                context={{
+                  operation: '完成人脸验证',
+                  scope: 'full-screen',
+                  consequence: '工作区仍锁定，请使用密码或 PIN',
+                }}
+              />
+            )}
+            {method === 'face' && auth.face.error && (
+              <FailureNote
+                error={auth.face.error}
+                context={{
+                  operation: '完成人脸验证',
+                  scope: 'full-screen',
+                  action: {
+                    label: '开启摄像头',
+                    run: () => {
+                      void camera.start('verify').catch((error) => setError(failureError(error)));
+                    },
+                  },
+                }}
+              />
+            )}
+            {error && (
+              <FailureNote
+                error={error}
+                context={{
+                  operation: '解锁',
+                  scope: 'full-screen',
+                  input: true,
+                  issue: method === 'face' ? undefined : 'credentials',
+                  action: {
+                    label: method === 'pin' ? '输入 PIN' : '输入密码',
+                    run: () => document.querySelector<HTMLInputElement>('.auth-form input')?.focus(),
+                  },
+                }}
+              />
+            )}
             <Button
               type="submit"
               variant="contained"

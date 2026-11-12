@@ -1,24 +1,36 @@
-import './window-frame.css';
-import { useDropTarget, useWindowDragging } from './window-drag';
-import { useViewerSessionSelector } from './use-viewer-session';
-import { diagnostics } from '../media/diagnostics';
 import { Typography } from '@mui/material';
-import React, { Suspense, lazy, useEffect, useMemo, useRef } from 'react';
+import React, {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { ProductState, ProductWindow } from '../../shared/product';
 import { BUILTIN_APP_TITLES, SEARCH_ENGINES, isBuiltinApp, isLocalApp } from '../../shared/product';
+import { SurfaceState, failureError } from '../failures';
+import { failureContext, ownOperation } from '../failures/operations';
 import { FilesWindow } from '../files/files-window';
-import { WindowHandle } from './window-handle';
-import { useWindowState, type WorkspaceCall } from './window-state';
+import { SignInHost } from '../learning/sign-in-host';
+import { diagnostics } from '../media/diagnostics';
+import type { ViewerSession } from '../viewer-session';
+import { AppChrome } from './app-chrome';
+import { BrowserChrome, useBrowserNavigation } from './browser-chrome';
 import { PageOverlay } from './page-overlay';
+import { PermissionPrompt } from './permission-prompt';
 import type { Action } from './product-dialogs';
 import { RemoteViewport } from './remote-viewport';
 import { StartPage } from './start-page';
-import type { ViewerSession } from '../viewer-session';
-import { BrowserChrome, useBrowserNavigation } from './browser-chrome';
-import { AppChrome } from './app-chrome';
+import { useViewerSessionSelector } from './use-viewer-session';
+import { useDropTarget, useWindowDragging } from './window-drag';
+import './window-frame.css';
+import { WindowHandle } from './window-handle';
 import { WindowMenus, useWindowMenus } from './window-menus';
-import { PermissionPrompt } from './permission-prompt';
-import { SignInHost } from '../learning/sign-in-host';
+import { useWindowState, type WorkspaceCall } from './window-state';
 const LearningApp = lazy(() =>
   import('../learning/learning-app').then((module) => ({ default: module.LearningApp })),
 );
@@ -26,16 +38,16 @@ export function WindowFrame({
   win,
   state,
   transport,
-  action,
+  action: dispatchAction,
   online,
   appContent,
   fileChooser,
   call,
   weight,
-  report,
   onGeometry,
   visible,
   fullscreen,
+  surfaceFailure,
 }: {
   win: ProductWindow;
   state: ProductState;
@@ -50,11 +62,33 @@ export function WindowFrame({
   ) => React.ReactNode;
   call: WorkspaceCall;
   weight: number;
-  report: (error: unknown) => void;
   onGeometry: (id: string, width: number, height: number) => void;
   visible: boolean;
   fullscreen: boolean;
+  surfaceFailure?: { error: RemoteKitError; operation: string };
 }) {
+  const [windowFailure, setWindowFailure] = useState<RemoteKitError>();
+  const report = useCallback(
+    (error: unknown) => setWindowFailure(error === undefined ? undefined : failureError(error)),
+    [],
+  );
+  const action = useCallback(
+    (command: Parameters<Action>[0]) => {
+      setWindowFailure(undefined);
+      return dispatchAction(ownOperation(command, win.id));
+    },
+    [dispatchAction, win.id],
+  );
+  const operationFailure = useSyncExternalStore(
+    transport.operations.subscribe,
+    transport.operations.getSnapshot,
+    transport.operations.getSnapshot,
+  ).error;
+  const receiptFailure =
+    operationFailure && failureContext(operationFailure)?.ownerKey === win.id ? operationFailure : undefined;
+  const failure = windowFailure ?? receiptFailure ?? surfaceFailure?.error;
+  const failureOperation =
+    windowFailure || receiptFailure ? '完成页面操作' : (surfaceFailure?.operation ?? '完成页面操作');
   const presentationError = useViewerSessionSelector(transport, (snapshot) => snapshot.presentation.error);
   const drop = useDropTarget('window', win.id);
   const dragging = useWindowDragging();
@@ -91,9 +125,6 @@ export function WindowFrame({
       transport,
       keyboardActive: online && (focused || fullscreen) && visible,
       measure: (width: number, height: number) => onGeometry(win.id, width, height),
-      retry: (tabId: string) => {
-        void action({ type: 'tab.command', tabId, command: 'reload' }).catch(report);
-      },
     }),
     [transport, online, focused, fullscreen, visible, onGeometry, win.id, action, report],
   );
@@ -142,6 +173,8 @@ export function WindowFrame({
           onState={onState}
           handle={handle}
           launch={win.state?.launch}
+          failure={failure}
+          failureOperation={failureOperation}
         />
       ) : local ? (
         <>
@@ -150,6 +183,10 @@ export function WindowFrame({
             <Typography variant="subtitle2">{title}</Typography>
           </div>
           <div className="local-app-content">
+            <SurfaceState
+              error={failure}
+              context={{ operation: failureOperation, scope: 'surface', targetId: win.id }}
+            />
             {win.appId === 'study' || win.appId === 'questions' ? (
               <SignInHost.Provider value={signInHost}>
                 <Suspense fallback={<div role="status">正在打开…</div>}>
@@ -201,6 +238,11 @@ export function WindowFrame({
             />
           )}
           <div className="window-content" ref={content}>
+            <SurfaceState
+              live
+              error={failure}
+              context={{ operation: failureOperation, scope: 'surface', targetId: win.id }}
+            />
             {online && prompt && (prompt.kind === 'permission' || prompt.kind === 'protocol_handler') && (
               <PermissionPrompt key={prompt.id} dialog={prompt} action={action} />
             )}
@@ -233,9 +275,26 @@ export function WindowFrame({
                 {active.popup?.status === 'pending' ? (
                   <PageOverlay kind="progress">正在创建页面…</PageOverlay>
                 ) : active.popup?.status === 'failed' ? (
-                  <PageOverlay kind="error">{active.popup.error || '未能打开此页面'}</PageOverlay>
+                  <SurfaceState
+                    live
+                    error={active.popup.error}
+                    context={{
+                      operation: '打开新页面',
+                      scope: 'surface',
+                      action: {
+                        label: '关闭标签页',
+                        run: () => {
+                          void action({ type: 'tab.close', tabId: active.id }).catch(report);
+                        },
+                      },
+                    }}
+                  />
                 ) : active.lifecycleRecoveryError ? (
-                  <PageOverlay kind="error">{active.lifecycleRecoveryError}</PageOverlay>
+                  <SurfaceState
+                    live
+                    error={active.lifecycleRecoveryError}
+                    context={{ operation: '恢复页面', scope: 'surface', consequence: '原页面实例已不可用' }}
+                  />
                 ) : (
                   !presentationError &&
                   (active.restoring || (active.residency && active.residency !== 'live')) && (

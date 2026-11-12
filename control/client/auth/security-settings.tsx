@@ -1,10 +1,5 @@
-import { useAutoFocus } from '../editing/local-autofocus';
-import './security-settings.css';
 import { LockOutlined } from '@mui/icons-material';
-import { formatError } from '../util/format-error';
-import { diagnostics } from '../media/diagnostics';
 import {
-  Alert,
   Button,
   Dialog,
   DialogActions,
@@ -15,10 +10,16 @@ import {
   Typography,
 } from '@mui/material';
 import React, { useEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { AuthSettings, AuthState } from '../../shared/security';
+import { SettingRow, SettingSection, SettingSwitch } from '../app/setting-layout';
+import { useAutoFocus } from '../editing/local-autofocus';
+import { failureError, FailureNote } from '../failures';
+import { recover } from '../failures/recovery';
+import { diagnostics } from '../media/diagnostics';
 import type { AuthCamera, AuthRequest } from './auth-camera';
 import type { useAutoLock } from './auth-idle';
-import { SettingRow, SettingSection, SettingSwitch } from '../app/setting-layout';
+import './security-settings.css';
 
 type Change = 'password' | 'pin' | 'removePin' | 'enroll' | 'removeFace' | 'policy';
 const titles: Record<Change, string> = {
@@ -75,8 +76,10 @@ export function SecuritySettings({
   const [replacement, setReplacement] = useState('');
   const [confirmation, setConfirmation] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [faceUnavailable] = useState(() => new RemoteKitError('rejected', '人脸验证服务不可用'));
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const [notice, setNotice] = useState('');
+  const [permissionError, setPermissionError] = useState<RemoteKitError>();
   const [policy, setPolicy] = useState<Partial<AuthSettings>>({});
   const [seconds, setSeconds] = useState(String(auth.settings.idleSeconds));
   const [enrollmentStarted, setEnrollmentStarted] = useState(false);
@@ -91,7 +94,7 @@ export function SecuritySettings({
     setCurrentPassword('');
     setReplacement('');
     setConfirmation('');
-    setError('');
+    setError(undefined);
     setBusy(false);
     setEnrollmentStarted(false);
   };
@@ -116,33 +119,55 @@ export function SecuritySettings({
     if (policy.idleSeconds === undefined) setSeconds(String(auth.settings.idleSeconds));
   }, [auth.settings.idleSeconds, policy.idleSeconds]);
 
+  const securityAbort = useRef(new AbortController());
+  useEffect(() => () => securityAbort.current.abort(), []);
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!online || !change || busy) return;
     if ((change === 'pin' || change === 'password') && replacement !== confirmation) {
-      setError('两次输入不一致。');
+      setError(new RemoteKitError('invalid_request', '两次输入不一致。'));
       return;
     }
     setBusy(true);
-    setError('');
+    setError(undefined);
     setNotice('');
     try {
       switch (change) {
         case 'password':
-          await request('auth.password', { currentPassword, newPassword: replacement });
+          await recover(
+            () => request('auth.password', { currentPassword, newPassword: replacement }),
+            securityAbort.current.signal,
+            setError,
+          );
           break;
         case 'pin':
-          await request('auth.settings', { currentPassword, pin: replacement });
+          await recover(
+            () => request('auth.settings', { currentPassword, pin: replacement }),
+            securityAbort.current.signal,
+            setError,
+          );
           break;
         case 'removePin':
-          await request('auth.settings', { currentPassword, pin: null });
+          await recover(
+            () => request('auth.settings', { currentPassword, pin: null }),
+            securityAbort.current.signal,
+            setError,
+          );
           break;
         case 'policy':
-          await request('auth.settings', { currentPassword, settings: policy });
+          await recover(
+            () => request('auth.settings', { currentPassword, settings: policy }),
+            securityAbort.current.signal,
+            setError,
+          );
           setPolicy({});
           break;
         case 'removeFace':
-          await request('auth.face.remove', { currentPassword });
+          await recover(
+            () => request('auth.face.remove', { currentPassword }),
+            securityAbort.current.signal,
+            setError,
+          );
           break;
         case 'enroll':
           await camera.start('enroll', currentPassword);
@@ -153,7 +178,7 @@ export function SecuritySettings({
       close();
       setNotice('已保存。');
     } catch (failure) {
-      setError(formatError(failure));
+      setError(failureError(failure));
       setEnrollmentStarted(false);
     } finally {
       setBusy(false);
@@ -195,6 +220,12 @@ export function SecuritySettings({
             </Button>
           )}
         </SettingRow>
+        {!auth.face.available && (
+          <FailureNote
+            error={faceUnavailable}
+            context={{ operation: '使用人脸验证', scope: 'surface', consequence: '密码和 PIN 仍可使用' }}
+          />
+        )}
         <SettingRow
           title="人脸"
           description={auth.face.available ? (enrolled ? '已录入' : '未录入') : '当前服务无法进行人脸验证'}
@@ -246,7 +277,7 @@ export function SecuritySettings({
               size="small"
               disabled={!online}
               onClick={() => {
-                void idle.requestSystem().catch(() => setNotice('无法启用系统锁定检测。'));
+                void idle.requestSystem().catch((error) => setPermissionError(failureError(error)));
               }}
             >
               授权系统锁定检测
@@ -267,6 +298,23 @@ export function SecuritySettings({
           onChange={(checked) => setSwitch('lockOnDeparture', checked)}
         />
         <div className="setting-actions">
+          <FailureNote
+            error={permissionError}
+            context={{
+              operation: '授权系统锁定检测',
+              scope: 'field',
+              issue: 'permission',
+              action: {
+                label: '授权系统锁定检测',
+                run: () => {
+                  void idle.requestSystem().then(
+                    () => setPermissionError(undefined),
+                    (error) => setPermissionError(failureError(error)),
+                  );
+                },
+              },
+            }}
+          />
           {notice && (
             <Typography variant="body2" color="text.secondary" role="status">
               {notice}
@@ -298,9 +346,9 @@ export function SecuritySettings({
                         {enrollmentStatus === 'pending'
                           ? '正在录入，请正对摄像头。'
                           : enrollmentStatus === 'expired'
-                            ? '录入已超时，请重试。'
+                            ? '录入已超时，原有设置仍有效。'
                             : enrollmentStatus === 'failed' || enrollmentStatus === 'absent'
-                              ? '录入失败，请重试。'
+                              ? '未能完成录入，原有设置仍有效。'
                               : '录入已完成。'}
                       </Typography>
                     )}
@@ -344,7 +392,23 @@ export function SecuritySettings({
                     />
                   </>
                 )}
-                {error && <Alert severity="error">{error}</Alert>}
+                {auth.face.purpose === 'enroll' && auth.face.error && (
+                  <FailureNote
+                    error={auth.face.error}
+                    context={{ operation: '录入人脸', scope: 'surface', consequence: '原有设置仍有效' }}
+                  />
+                )}
+                {error && (
+                  <FailureNote
+                    error={error}
+                    context={{
+                      operation: '保存安全设置',
+                      scope: 'surface',
+                      input: true,
+                      issue: error.code === 'forbidden' ? 'credentials' : undefined,
+                    }}
+                  />
+                )}
               </Stack>
             </DialogContent>
             <DialogActions>

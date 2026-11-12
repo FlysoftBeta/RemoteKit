@@ -1,6 +1,7 @@
-import { diagnostics } from './diagnostics';
-import { formatError } from '../util/format-error';
 import type { DiagnosticEnvironment, DiagnosticMethods, DiagnosticReply } from '../../shared/diagnostics';
+import { toRemoteKitError, type RemoteKitError, type WireError } from '../../shared/errors';
+import { recover, recoveryDelay } from '../failures/recovery';
+import { diagnostics } from './diagnostics';
 
 export function diagnosticEnvironment(): DiagnosticEnvironment {
   const ua = navigator.userAgent;
@@ -82,16 +83,20 @@ export type DiagnosticRequest = <K extends keyof DiagnosticMethods>(
 
 export type DiagnosticState =
   | { phase: 'idle' | 'starting' }
-  | { phase: 'start-error'; error: string }
+  | { phase: 'start-error'; error: RemoteKitError }
   | {
-      phase: 'collecting' | 'finalizing' | 'complete' | 'retry' | 'failed';
+      phase: 'collecting' | 'finalizing' | 'complete' | 'failed';
       id: string;
       samples: number;
       missingSamples: number;
       reason?: string;
+      error?: RemoteKitError | WireError;
+      sampleFailures?: { sequence: number; error: RemoteKitError }[];
     };
 
 export class DiagnosticCollection {
+  private readonly abort = new AbortController();
+  private attempts = 0;
   private state: DiagnosticState = { phase: 'idle' };
   private available = false;
   private disposed = false;
@@ -121,8 +126,7 @@ export class DiagnosticCollection {
     if (!available) {
       this.generation++;
       clearTimeout(this.timer);
-      if (this.state.phase === 'collecting' || this.state.phase === 'retry')
-        this.update({ ...this.state, phase: 'finalizing' });
+      if (this.state.phase === 'collecting') this.update({ ...this.state, phase: 'finalizing' });
     } else if (this.state.phase === 'finalizing') {
       void this.finish(true);
     }
@@ -130,6 +134,7 @@ export class DiagnosticCollection {
 
   dispose() {
     this.disposed = true;
+    this.abort.abort();
     this.available = false;
     clearTimeout(this.timer);
   }
@@ -144,7 +149,11 @@ export class DiagnosticCollection {
     const generation = this.generation;
     this.since = performance.now();
     try {
-      const reply = await this.request('diagnostics.start', { environment });
+      const reply = await recover(
+        () => this.request('diagnostics.start', { environment }),
+        this.abort.signal,
+        (error) => this.update({ phase: 'start-error', error }),
+      );
       if (this.disposed) return false;
       this.deadline = performance.now() + (reply.maxDurationMs ?? 600_000);
       this.sequence = 0;
@@ -154,7 +163,7 @@ export class DiagnosticCollection {
       else if (phase === 'finalizing') void this.finish(true);
       return this.available && generation === this.generation;
     } catch (error) {
-      this.update({ phase: 'start-error', error: formatError(error) });
+      this.update({ phase: 'start-error', error: toRemoteKitError(error) });
       return false;
     }
   }
@@ -170,7 +179,7 @@ export class DiagnosticCollection {
       reply.reason === 'user' && current.reason === 'duration-limit'
         ? current.reason
         : (reply.reason ?? current.reason);
-    this.update({ ...current, phase: reply.status, reason });
+    this.update({ ...current, phase: reply.status, reason, error: reply.error });
     return true;
   }
 
@@ -182,13 +191,21 @@ export class DiagnosticCollection {
       return;
     }
     let data: object | undefined;
+    let captureFailure: RemoteKitError | undefined;
     try {
       data = this.capture(this.since);
     } catch (error) {
+      captureFailure = toRemoteKitError(error);
       diagnostics.record('diagnostic-collection', error);
     }
     if (!data) {
-      this.update({ ...current, missingSamples: current.missingSamples + 1 });
+      this.update({
+        ...current,
+        missingSamples: current.missingSamples + 1,
+        sampleFailures: captureFailure
+          ? [...(current.sampleFailures ?? []), { sequence: this.sequence + 1, error: captureFailure }]
+          : current.sampleFailures,
+      });
       this.schedule(() => this.sample());
       return;
     }
@@ -206,10 +223,15 @@ export class DiagnosticCollection {
       } else if (reply.status === 'finalizing') {
         this.schedule(() => void this.finish(true));
       }
-    } catch {
+    } catch (error) {
       const current = this.state;
       if (current.phase === 'collecting' || current.phase === 'finalizing') {
-        this.update({ ...current, phase: 'finalizing', missingSamples: current.missingSamples + 1 });
+        this.update({
+          ...current,
+          phase: 'finalizing',
+          missingSamples: current.missingSamples + 1,
+          sampleFailures: [...(current.sampleFailures ?? []), { sequence, error: toRemoteKitError(error) }],
+        });
         this.schedule(() => void this.finish(false));
       }
     } finally {
@@ -219,10 +241,10 @@ export class DiagnosticCollection {
 
   stop(reason?: 'duration-limit') {
     const current = this.state;
-    if (!this.available || (current.phase !== 'collecting' && current.phase !== 'retry')) return;
+    if (!this.available || current.phase !== 'collecting') return;
     clearTimeout(this.timer);
     this.update({ ...current, phase: 'finalizing', reason: reason ?? current.reason });
-    void this.finish(current.phase === 'retry');
+    void this.finish(false);
   }
 
   private async finish(checkStatus: boolean) {
@@ -244,9 +266,13 @@ export class DiagnosticCollection {
       if (generation !== this.generation) return;
       if (!this.apply(reply, current) || reply.status === 'finalizing')
         this.schedule(() => void this.finish(true));
-    } catch {
-      if (this.available && generation === this.generation && this.state.phase === 'finalizing')
-        this.update({ ...this.state, phase: 'retry' });
+    } catch (error) {
+      if (this.available && generation === this.generation && this.state.phase === 'finalizing') {
+        const failure = toRemoteKitError(error);
+        const delay = recoveryDelay(failure, this.attempts++);
+        this.update({ ...this.state, error: failure, phase: delay === undefined ? 'failed' : 'finalizing' });
+        if (delay !== undefined) this.timer = setTimeout(() => void this.finish(true), delay);
+      }
     } finally {
       this.finalizing = false;
       if (generation !== this.generation && this.state.phase === 'finalizing')

@@ -1,3 +1,5 @@
+import { presentFailure } from '../failures';
+import { RemoteKitError } from '../../shared/errors';
 import {
   AddCircleOutline,
   CheckCircle,
@@ -24,17 +26,17 @@ import {
 } from '@mui/material';
 import React, { useState } from 'react';
 import type { LibraryEntry } from '../../shared/file-library';
+import { OverflowText } from '../app/overflow-text';
 import { scaledAnchor } from '../app/ui-scale';
 import { formatFileSize } from './file-format';
 import { canPreviewFile, FileImagePreview } from './file-image-preview';
 import { useLibrary } from './file-library-state';
 import { FileRow, FileTile, type FileStatus } from './file-tile';
+import { BasketPartitionMenu } from './partition-menu';
 import type { PhotoJob } from './photo-job-store';
 import { PhotoOptions } from './photo-options';
 import { PhotoRotateButton } from './photo-rotate-button';
-import { BasketPartitionMenu } from './partition-menu';
 import { SortableFileItems, type FileView } from './sortable-file-items';
-import { OverflowText } from '../app/overflow-text';
 
 export type BasketPanel = { id: string; view: 'photo' | 'image' };
 
@@ -48,14 +50,23 @@ interface BasketItem {
 export function photoStatus(entry?: LibraryEntry, job?: PhotoJob): FileStatus | undefined {
   const state = job?.state ?? entry?.photo?.pending;
   if (state === 'choice') return { label: '待选片', tone: 'warning' };
-  if (state === 'scan-error') return { label: '扫描未完成', tone: 'warning' };
-  if (state === 'error') return { label: '处理失败', tone: 'warning' };
+  if (state === 'scan-error' || state === 'error')
+    return {
+      label: '',
+      tone: 'progress',
+      failure: presentFailure(
+        job?.error ??
+          entry?.photo?.processingFailure ??
+          new RemoteKitError('internal', '照片任务缺少失败记录'),
+        { operation: '处理照片', scope: 'item', targetId: job?.id ?? entry?.id },
+      ),
+    };
   if (state)
     return {
       label: job?.replace && job.rotationTurns === undefined ? '重拍处理中' : '处理中',
       tone: 'progress',
     };
-  if (entry?.photo?.warning) return { label: '可能不清晰', tone: 'warning' };
+  if (entry?.photo?.advisory) return { label: '可能不清晰', tone: 'warning' };
 }
 
 const isPhoto = (entry: LibraryEntry) => !!entry.photo || entry.name.startsWith('photo-');
@@ -309,7 +320,7 @@ export function BasketItems({
                 <ListItemText>向右旋转</ListItemText>
               </MenuItem>
             ),
-          (menuItem.entry.photo?.warning || menuItem.entry.originalAssetId) && (
+          (menuItem.entry.photo?.advisory || menuItem.entry.originalAssetId) && (
             <MenuItem
               key="photo"
               onClick={() => {
@@ -441,11 +452,6 @@ function PhotoPanel({
         />
       )}
       <Box sx={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 0.5, mt: 1 }}>
-        {job?.state === 'error' && job.retryable && (
-          <Button disabled={locked} onClick={() => photos.retry(job.id)}>
-            重试
-          </Button>
-        )}
         {job && job.state !== 'committing' && (
           <Button
             disabled={locked}

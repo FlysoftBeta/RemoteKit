@@ -1,5 +1,4 @@
 import {
-  Alert,
   Box,
   Button,
   Dialog,
@@ -12,19 +11,17 @@ import {
 } from '@mui/material';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AdminSocketMethods } from '../../../shared/admin';
+import { RemoteKitError } from '../../../shared/errors';
 import type { ErrorSearchMethods } from '../../control/socket-methods';
+import { failureError, FailureNote } from '../../failures';
+import { recover } from '../../failures/recovery';
 export type { ErrorSearchResult } from '../../control/socket-methods';
-import { formatError } from '../../util/format-error';
 
 type AdminMethods = AdminSocketMethods & ErrorSearchMethods;
 export type AdminCall = <K extends keyof AdminMethods>(
   method: K,
   params: AdminMethods[K]['params'],
 ) => Promise<AdminMethods[K]['result']>;
-
-export function adminError(error: unknown) {
-  return formatError(error);
-}
 
 export function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -67,15 +64,15 @@ export function randomPassword() {
 /** Loads one admin resource while its section is visible and refreshes it periodically. */
 export function useAdminResource<T>(online: boolean, load: () => Promise<T>, intervalMs = 5000) {
   const [data, setData] = useState<T | null>(null),
-    [error, setError] = useState('');
+    [error, setError] = useState<RemoteKitError | undefined>();
   const loader = useRef(load);
   loader.current = load;
   const refresh = useCallback(async () => {
     try {
       setData(await loader.current());
-      setError('');
+      setError(undefined);
     } catch (e) {
-      setError(adminError(e));
+      setError(failureError(e));
     }
   }, []);
   useEffect(() => {
@@ -120,8 +117,8 @@ export function SectionHeader({
   );
 }
 
-export function LoadState({ error, loading }: { error: string; loading: boolean }) {
-  if (error) return <Alert severity="error">{error}</Alert>;
+export function LoadState({ error, loading }: { error: RemoteKitError | undefined; loading: boolean }) {
+  if (error) return <FailureNote error={error} context={{ operation: '完成管理操作', scope: 'surface' }} />;
   if (loading) return <LinearProgress sx={{ my: 2 }} />;
   return null;
 }
@@ -186,16 +183,21 @@ export function ConfirmDialog({
   onConfirm: () => Promise<void>;
   onClose: () => void;
 }) {
+  const abort = useRef(new AbortController());
+  useEffect(() => () => abort.current.abort(), []);
   const [busy, setBusy] = useState(false),
-    [error, setError] = useState('');
+    [error, setError] = useState<RemoteKitError | undefined>();
   useEffect(() => {
-    if (open) setError('');
+    if (open) setError(undefined);
   }, [open]);
   return (
     <Dialog open={open} onClose={() => !busy && onClose()} fullWidth maxWidth="xs">
       <DialogTitle>{title}</DialogTitle>
-      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {error && <Alert severity="error">{error}</Alert>}
+      <DialogContent
+        onChangeCapture={() => setError(undefined)}
+        sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}
+      >
+        {error && <FailureNote error={error} context={{ operation: '完成管理操作', scope: 'surface' }} />}
         {children}
       </DialogContent>
       <DialogActions>
@@ -205,15 +207,15 @@ export function ConfirmDialog({
         <Button
           variant="contained"
           color={danger ? 'error' : 'primary'}
-          disabled={busy || disabled}
+          disabled={busy || disabled || !!error}
           onClick={async () => {
             setBusy(true);
-            setError('');
+            setError(undefined);
             try {
-              await onConfirm();
+              await recover(onConfirm, abort.current.signal, setError);
               onClose();
             } catch (e) {
-              setError(adminError(e));
+              setError(failureError(e));
             } finally {
               setBusy(false);
             }

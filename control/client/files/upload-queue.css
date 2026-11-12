@@ -1,0 +1,28 @@
+.upload-queue {
+  flex: none;
+  min-width: 0;
+}
+.upload-queue-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.upload-queue-toolbar > span {
+  margin-right: auto;
+}
+.upload-jobs {
+  max-height: 168px;
+  overflow-y: auto;
+}
+[data-upload-job] {
+  padding: 4px 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+[data-upload-job] .MuiLinearProgress-root {
+  margin-top: 4px;
+}

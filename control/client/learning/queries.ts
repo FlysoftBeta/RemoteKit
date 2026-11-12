@@ -1,8 +1,7 @@
-import { formatError } from '../util/format-error';
-import { RemoteKitError } from '../../shared/errors';
-import { retryDelay, errorHandling } from '../../shared/error-policy';
-import type { LearningPage, LearningSocketMethods } from '../../shared/learning';
 import { useEffect, useRef, useState } from 'react';
+import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import type { LearningPage, LearningSocketMethods } from '../../shared/learning';
+import { recover } from '../failures/recovery';
 
 export type LearningCall = <K extends keyof LearningSocketMethods>(
   method: K,
@@ -19,18 +18,7 @@ export class LearningQueries {
     const key = JSON.stringify([method, params]);
     let result = this.cache.get(key);
     if (!result) {
-      const read = async () => {
-        for (let attempt = 0; ; attempt++) {
-          try {
-            return await this.call(method, params);
-          } catch (error) {
-            const delay = error instanceof RemoteKitError ? retryDelay(error, attempt) : undefined;
-            if (delay === undefined || attempt >= 3) throw error;
-            await new Promise((resolve) => setTimeout(resolve, delay));
-          }
-        }
-      };
-      result = read().catch((error) => {
+      result = this.call(method, params).catch((error) => {
         this.cache.delete(key);
         throw error;
       });
@@ -46,35 +34,36 @@ export class LearningQueries {
 export function useQuery<T>(key: string, load: () => Promise<T>, enabled = true) {
   const latest = useRef(load);
   latest.current = load;
-  const [attempt, setAttempt] = useState(0);
-  const [state, setState] = useState<{ key: string; value?: T; error?: string; retryable?: boolean }>({
+  const [state, setState] = useState<{ key: string; value?: T; error?: RemoteKitError }>({
     key,
   });
   useEffect(() => {
     if (!enabled) return;
     let active = true;
+    const abort = new AbortController();
     setState({ key });
-    void latest.current().then(
+    void recover(
+      () => latest.current(),
+      abort.signal,
+      (error) => {
+        if (active) setState({ key, error });
+      },
+    ).then(
       (value) => active && setState({ key, value }),
       (error) =>
         active &&
         setState({
           key,
-          error: formatError(error),
-          retryable:
-            error instanceof RemoteKitError &&
-            (retryDelay(error, 0) !== undefined || errorHandling(error.code) === 'reconcile'),
+          error: toRemoteKitError(error),
         }),
     );
     return () => {
       active = false;
+      abort.abort();
     };
-  }, [key, enabled, attempt]);
+  }, [key, enabled]);
   return {
     ...(state.key === key ? state : { key }),
-    retry: () => {
-      if (state.retryable) setAttempt((value) => value + 1);
-    },
   };
 }
 

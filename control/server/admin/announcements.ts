@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { RemoteKitError } from '../../shared/errors';
 import type { AdminAnnouncement } from '../../shared/admin';
+import { RemoteKitError } from '../../shared/errors';
 import { ANNOUNCEMENT_LIMITS } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 
 function text(value: unknown, limit: number, name: string) {
   const trimmed = typeof value === 'string' ? value.trim() : '';
   if (!trimmed) throw new RemoteKitError('invalid_request', `请填写${name}`);
-  if (trimmed.length > limit) throw new RemoteKitError('limit_exceeded', `${name}不能超过 ${limit} 个字`);
+  if (trimmed.length > limit)
+    throw new RemoteKitError('limit_exceeded', `${name}不能超过 ${limit} 个字`, { capacity: 'field' });
   return trimmed;
 }
 

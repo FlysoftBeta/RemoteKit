@@ -1,10 +1,10 @@
+import type { AdminSocketMethods } from './admin';
+import type { DiagnosticMethods } from './diagnostics';
 import type { WireError } from './errors';
 import type { LibraryMethods } from './file-library';
-import type { AuthMessage, AuthSocketMethods } from './security';
-import type { DiagnosticMethods } from './diagnostics';
-import type { AdminSocketMethods } from './admin';
-import type { SessionImportSocketMethods } from './session-import';
 import type { LearningProvider, LearningSocketMethods, LearningState } from './learning';
+import type { AuthMessage, AuthSocketMethods } from './security';
+import type { SessionImportSocketMethods } from './session-import';
 /** Persistent product state belongs to Control; clients keep only an HttpOnly token. */
 export interface ProductUser {
   id: string;
@@ -129,9 +129,9 @@ export interface ProductTab {
   residency?: 'live' | 'frozen' | 'discarded' | 'unloaded';
   restoring?: boolean;
   lifecycleRecovery?: LifecycleRecovery;
-  lifecycleRecoveryError?: string;
+  lifecycleRecoveryError?: WireError;
   pendingUaReloadOrigin?: string;
-  popup?: { provisionalId: string; status: 'pending' | 'adopted' | 'failed'; error?: string };
+  popup?: { provisionalId: string; status: 'pending' | 'adopted' | 'failed'; error?: WireError };
 }
 export interface ProductWindow {
   id: string;
@@ -339,6 +339,14 @@ export interface PageFullscreen {
   windowId: string;
   target: string;
 }
+export interface BackgroundTask {
+  id: string;
+  kind: 'download';
+  state: 'complete' | 'failed';
+  name: string;
+  entryId?: string;
+  error?: WireError;
+}
 export interface ProductState {
   learning: LearningState;
   operationReceipts?: OperationReceipt[];
@@ -352,7 +360,10 @@ export interface ProductState {
   fileRequests: FileRequest[];
   quality: ProductQuality;
   endpointGeneration: number;
-  endpointError: string | null;
+  backgroundTasks?: BackgroundTask[];
+  endpointError: WireError | null;
+  endpointActivity?: 'saving-session';
+  endpointErrorKind?: 'runtime' | 'output-capacity';
   browserRestart?: 'ready' | 'waiting' | 'exhausted';
   viewer: { connected: boolean };
   /** Newest first. */

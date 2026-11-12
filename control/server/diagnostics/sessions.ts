@@ -1,13 +1,13 @@
-import { log } from '../log';
-import { controlLogTail } from './control-log';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import type { AdminDiagnostic } from '../../shared/admin';
-import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
-import { writeDiagnosticArchive, type ArchiveEntry } from './archive';
+import { RemoteKitError, toRemoteKitError, wireError, type WireError } from '../../shared/errors';
 import type { EndpointLogName, LogWindow, LogWindowRequest } from '../endpoint/types';
+import { log, reportError } from '../log';
+import { writeDiagnosticArchive, type ArchiveEntry } from './archive';
+import { controlLogTail } from './control-log';
 import { diagnosticClientSample, diagnosticEndpointSnapshot, diagnosticEnvironment } from './projection';
 
 const intervalMs = 2000;
@@ -41,7 +41,7 @@ type StopReason = (typeof stopReasons)[number];
 type Status =
   | { id: string; status: 'collecting' | 'finalizing' }
   | { id: string; status: 'complete'; reason: StopReason; bytes: number }
-  | { id: string; status: 'failed'; reason: 'archive-write-failed' };
+  | { id: string; status: 'failed'; reason: 'archive-write-failed'; error: WireError };
 type Source = 'client' | 'control' | 'endpoint' | 'events';
 interface CollectedLogs {
   files: Map<ArchiveEntry, Buffer[]>;
@@ -363,7 +363,17 @@ export class DiagnosticSessions {
       reason,
     ).then<Status, Status>(
       (bytes) => ({ id, status: 'complete', bytes, reason }),
-      () => ({ id, status: 'failed', reason: 'archive-write-failed' }),
+      (error) => ({
+        id,
+        status: 'failed',
+        reason: 'archive-write-failed',
+        error: wireError(
+          reportError(toRemoteKitError(error), 'diagnostics.archive_failed', {
+            tenant: session.viewer.tenant,
+            diagnosticId: id,
+          }),
+        ),
+      }),
     );
   }
 

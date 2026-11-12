@@ -1,15 +1,17 @@
-import './context-menu.css';
 import { Divider, Menu, MenuItem } from '@mui/material';
 import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { ProductTab, SearchEngine } from '../../shared/product';
+import { clipboardCommand } from '../clipboard/device-clipboard';
 import { sameEditingDocument } from '../editing/mobile-editing-state';
+import { failureError, FailureNote } from '../failures';
 import type { Surface } from '../presentation/types';
 import type { ContextMenu as RemoteMenu } from '../rtc/protocol';
 import type { ViewerSession } from '../viewer-session';
 import { ContextMenuInteraction, contextMenuItems } from './context-menu-items';
+import './context-menu.css';
 import { scaledAnchor, useUiScale } from './ui-scale';
 import { projectRootRect, type ViewportGeometry } from './viewport-geometry';
-import { clipboardCommand } from '../clipboard/device-clipboard';
 
 export function ContextMenu({
   menu,
@@ -32,6 +34,7 @@ export function ContextMenu({
   engine: SearchEngine;
   onClosed(): void;
 }) {
+  const [failure, setFailure] = useState<RemoteKitError>();
   const scale = useUiScale();
   const latest = useRef({ onClosed });
   latest.current = { onClosed };
@@ -41,15 +44,16 @@ export function ContextMenu({
       new ContextMenuInteraction({
         command: (command) =>
           clipboardCommand(command, () => {
-            const current = command === 'dismiss' ? surface : transport.presentation.layout?.views.find((view) =>
-              sameEditingDocument(view, surface),
-            );
+            const current =
+              command === 'dismiss'
+                ? surface
+                : transport.presentation.layout?.views.find((view) => sameEditingDocument(view, surface));
             if (!current) return;
             if (command !== 'dismiss') transport.input.ensureInputFocus(current);
             transport.input.sendInput(current, { type: 'context_command', menu: menu.id, command });
           }),
         product: (action) => {
-          void transport.operations.action(action).catch(transport.workspace.report);
+          void transport.operations.action(action).catch((error) => setFailure(failureError(error)));
         },
         closed: () => latest.current.onClosed(),
       }),
@@ -91,6 +95,7 @@ export function ContextMenu({
         list: { dense: true, 'aria-label': '页面菜单' },
       }}
     >
+      <FailureNote error={failure} context={{ operation: '打开所选内容', scope: 'item' }} />
       {contextMenuItems(menu, tab, engine).flatMap((group, index) => [
         ...(index > 0 ? [<Divider key={`divider:${index}`} />] : []),
         ...group.map((item) => (

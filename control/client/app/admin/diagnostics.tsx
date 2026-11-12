@@ -1,7 +1,6 @@
 import DeleteOutline from '@mui/icons-material/DeleteOutline';
 import Download from '@mui/icons-material/Download';
 import {
-  Alert,
   Box,
   Button,
   Chip,
@@ -18,8 +17,9 @@ import {
 } from '@mui/material';
 import { Fragment, useState } from 'react';
 import type { AdminDiagnostic } from '../../../shared/admin';
+import { RemoteKitError } from '../../../shared/errors';
+import { failureError, FailureNote } from '../../failures';
 import {
-  adminError,
   ConfirmDialog,
   formatBytes,
   formatDateTime,
@@ -94,7 +94,7 @@ function ErrorRecord({ source, line }: { source: string; line: string }) {
 function ErrorLookup({ online, call }: { online: boolean; call: AdminCall }) {
   const [errorId, setErrorId] = useState('');
   const [result, setResult] = useState<ErrorSearchResult | null>(null);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const [busy, setBusy] = useState(false);
   return (
     <Box sx={{ mb: 3 }}>
@@ -106,12 +106,12 @@ function ErrorLookup({ online, call }: { online: boolean; call: AdminCall }) {
           event.preventDefault();
           if (busy || !online) return;
           setBusy(true);
-          setError('');
+          setError(undefined);
           setResult(null);
           try {
             setResult(await call('admin.findError', { errorId: errorId.trim() }));
           } catch (error) {
-            setError(adminError(error));
+            setError(failureError(error));
           } finally {
             setBusy(false);
           }
@@ -120,7 +120,7 @@ function ErrorLookup({ online, call }: { online: boolean; call: AdminCall }) {
         <TextField
           size="small"
           label="错误 ID"
-          placeholder="c-… 或 e-…"
+          placeholder="c-…、e-… 或 v-…"
           value={errorId}
           onChange={(event) => setErrorId(event.target.value)}
           slotProps={{ htmlInput: { style: { fontFamily: 'monospace' } } }}
@@ -153,11 +153,18 @@ function ErrorLookup({ online, call }: { online: boolean; call: AdminCall }) {
           </Table>
         </Box>
       )}
-      {!!result?.unreachable.length && (
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          未能查询：{result.unreachable.join('、')}
-        </Typography>
-      )}
+      {result?.failures.map((failure) => (
+        <FailureNote
+          key={failure.nodeId}
+          error={failure.error}
+          context={{
+            operation: '查询节点日志',
+            scope: 'item',
+            targetId: failure.nodeId,
+            consequence: '其他节点结果仍可查看',
+          }}
+        />
+      ))}
     </Box>
   );
 }
@@ -174,9 +181,9 @@ const reasons: Record<string, string> = {
 export function AdminDiagnosticsSection({ online, call }: { online: boolean; call: AdminCall }) {
   const { data, setData, error } = useAdminResource(online, () => call('admin.diagnostics', {}), 15000);
   const [deleting, setDeleting] = useState<AdminDiagnostic | null>(null),
-    [downloadError, setDownloadError] = useState('');
+    [downloadError, setDownloadError] = useState<RemoteKitError | undefined>();
   const download = async (item: AdminDiagnostic) => {
-    setDownloadError('');
+    setDownloadError(undefined);
     try {
       const { url } = await call('admin.downloadDiagnostic', { id: item.id });
       const link = document.createElement('a');
@@ -186,7 +193,7 @@ export function AdminDiagnosticsSection({ online, call }: { online: boolean; cal
       link.click();
       link.remove();
     } catch (e) {
-      setDownloadError(adminError(e));
+      setDownloadError(failureError(e));
     }
   };
   return (
@@ -194,7 +201,9 @@ export function AdminDiagnosticsSection({ online, call }: { online: boolean; cal
       <ErrorLookup online={online} call={call} />
       <SectionHeader title="诊断" detail="用户在设置中收集的诊断包，按诊断 ID 对应" />
       <LoadState error={error} loading={!data} />
-      {downloadError && <Alert severity="error">{downloadError}</Alert>}
+      {downloadError && (
+        <FailureNote error={downloadError} context={{ operation: '读取诊断记录', scope: 'surface' }} />
+      )}
       {data && data.length === 0 && (
         <Typography color="text.secondary" sx={{ py: 4, textAlign: 'center' }}>
           暂无诊断包

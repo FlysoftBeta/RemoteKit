@@ -1,4 +1,3 @@
-import './browser-settings.css';
 import { Close, DeleteOutline, StarBorder } from '@mui/icons-material';
 import {
   Button,
@@ -14,14 +13,15 @@ import {
 } from '@mui/material';
 import { useState } from 'react';
 import { SEARCH_ENGINES, SITE_PERMISSIONS, type ProductState, type SearchEngine } from '../../shared/product';
-import type { Action } from './product-dialogs';
-import type { WorkspaceCall } from './window-state';
-import { SettingNote, SettingRow, SettingSection, SettingSwitch } from './setting-layout';
-import { ScaledSelect } from './scaled-select';
-import { formatError } from '../util/format-error';
+import { failureError, FailureNote } from '../failures';
+import './browser-settings.css';
 import { OverflowText } from './overflow-text';
-import { SiteSettings } from './site-settings';
 import { siteHost } from './permission-prompt';
+import type { Action } from './product-dialogs';
+import { ScaledSelect } from './scaled-select';
+import { SettingNote, SettingRow, SettingSection, SettingSwitch } from './setting-layout';
+import { SiteSettings } from './site-settings';
+import type { WorkspaceCall } from './window-state';
 
 const SITE_OPTIONS = [['tabletUa', '平板版网站']] as const;
 
@@ -40,11 +40,12 @@ export function BrowserSettingsSheet({
   currentSite?: { origin: string; tabId: string };
   onClose(): void;
 }) {
-  const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
+  const [note, setNote] = useState('');
+  const [failure, setFailure] = useState<import('../../shared/errors').RemoteKitError>();
   const [clearing, setClearing] = useState(false);
   const [siteOrigin, setSiteOrigin] = useState<string>();
   const run = (command: Parameters<Action>[0]) =>
-    void action(command).catch((error) => setNote({ text: formatError(error), error: true }));
+    void action(command).catch((error) => setFailure(failureError(error)));
   const { browser } = state.workspace.settings;
   const sites = Object.entries(state.workspace.sites)
     .map(([origin, preference]) => ({
@@ -152,7 +153,8 @@ export function BrowserSettingsSheet({
             </Button>
           </SettingRow>
         </SettingSection>
-        {note && <SettingNote text={note.text} error={note.error} />}
+        <FailureNote error={failure} context={{ operation: '保存浏览器设置', scope: 'field' }} />
+        {note && <SettingNote text={note} error={false} />}
       </DialogContent>
       {siteOrigin && (
         <SiteSettings
@@ -173,8 +175,8 @@ export function BrowserSettingsSheet({
             onClick={() => {
               setClearing(false);
               void call('usage.clear', { scope: 'pages' })
-                .then(() => setNote({ text: '已清除浏览记录', error: false }))
-                .catch((error) => setNote({ text: formatError(error), error: true }));
+                .then(() => setNote('已清除浏览记录'))
+                .catch((error) => setFailure(failureError(error)));
             }}
           >
             清除

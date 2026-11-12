@@ -1,7 +1,5 @@
-import { useAutoFocus } from '../editing/local-autofocus';
 import { ChevronRight, FolderOutlined } from '@mui/icons-material';
 import {
-  Alert,
   Button,
   Dialog,
   DialogActions,
@@ -14,9 +12,11 @@ import {
   TextField,
 } from '@mui/material';
 import { useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import { scaledAnchor } from '../app/ui-scale';
 import { operationId } from '../control/product-operations';
-import { fileError } from './file-library-controls';
+import { useAutoFocus } from '../editing/local-autofocus';
+import { failureError, FailureNote } from '../failures';
 import { useLibrary } from './file-library-state';
 
 export function BasketPartitionMenu({ disabled, ids }: { disabled: boolean; ids?: string[] }) {
@@ -26,7 +26,7 @@ export function BasketPartitionMenu({ disabled, ids }: { disabled: boolean; ids?
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const creation = useRef<
     { operationId: string; name: string; before: Set<string>; partitionId?: string } | undefined
   >(undefined);
@@ -37,11 +37,11 @@ export function BasketPartitionMenu({ disabled, ids }: { disabled: boolean; ids?
   }
   async function run(action: () => Promise<void>) {
     setBusy(true);
-    setError('');
+    setError(undefined);
     try {
       await action();
     } catch (failure) {
-      setError(fileError(failure));
+      setError(failureError(failure));
     } finally {
       setBusy(false);
     }
@@ -89,12 +89,12 @@ export function BasketPartitionMenu({ disabled, ids }: { disabled: boolean; ids?
             setCreating(true);
             creation.current = undefined;
             setName('');
-            setError('');
+            setError(undefined);
           }}
         >
           新建分区
         </MenuItem>
-        {error && <Alert severity="warning">{error}</Alert>}
+        {error && <FailureNote error={error} context={{ operation: '选择分区', scope: 'surface' }} />}
       </Menu>
       {creating && (
         <Dialog open fullWidth maxWidth="xs" onClose={busy ? undefined : () => setCreating(false)}>
@@ -134,11 +134,7 @@ export function BasketPartitionMenu({ disabled, ids }: { disabled: boolean; ids?
                 slotProps={{ htmlInput: { maxLength: 120 } }}
                 sx={{ mt: 1 }}
               />
-              {error && (
-                <Alert severity="warning" sx={{ mt: 1 }}>
-                  {error}
-                </Alert>
-              )}
+              {error && <FailureNote error={error} context={{ operation: '选择分区', scope: 'surface' }} />}
             </DialogContent>
             <DialogActions>
               <Button disabled={busy} onClick={() => setCreating(false)}>

@@ -1,4 +1,3 @@
-import { diagnostics } from '../media/diagnostics';
 import {
   ArrowBack,
   CameraAltOutlined,
@@ -6,24 +5,17 @@ import {
   CollectionsOutlined,
   PhotoCameraOutlined,
 } from '@mui/icons-material';
-import {
-  Alert,
-  Badge,
-  Box,
-  Button,
-  Dialog,
-  IconButton,
-  ToggleButton,
-  ToggleButtonGroup,
-  Typography,
-} from '@mui/material';
+import { Badge, Box, Dialog, IconButton, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material';
 import { useEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { LibraryEntry, PhotoMetadata } from '../../shared/file-library';
+import { uiScale } from '../app/ui-scale';
+import { failureError, FailureNote } from '../failures';
+import { recover } from '../failures/recovery';
+import { diagnostics } from '../media/diagnostics';
 import { capturePhotoBurst } from './camera-capture';
-import { fileError } from './file-library-controls';
 import { useLibrary } from './file-library-state';
 import { FileThumbnail } from './file-thumbnail';
-import { uiScale } from '../app/ui-scale';
 
 const inset = (side: string, px: number) =>
   `calc(var(--remotekit-safe-area-${side}, env(safe-area-inset-${side}, 0px)) + ${px}px)`;
@@ -72,7 +64,7 @@ export function PhotoCapture({
   const [attempt, setAttempt] = useState(0);
   const [ready, setReady] = useState(false);
   const [sampling, setSampling] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const [view, setView] = useState(viewport);
   const [video, setVideo] = useState<HTMLVideoElement | null>(null);
   const stream = useRef<MediaStream | undefined>(undefined);
@@ -102,7 +94,7 @@ export function PhotoCapture({
         active.current.cancel();
         active.current = undefined;
         setSampling(false);
-        setError('取景尺寸已改变，请重新拍摄');
+        setError(new RemoteKitError('invalid_request', '取景尺寸已改变，请重新拍摄'));
       }
       setView(next);
     };
@@ -134,25 +126,41 @@ export function PhotoCapture({
   useEffect(() => {
     if (!online || !video) return;
     let stopped = false;
+    const abort = new AbortController();
     let acquired: MediaStream | undefined;
     const node = video;
     const media = navigator.mediaDevices;
     setReady(false);
-    setError('');
+    setError(undefined);
     if (!media?.getUserMedia) {
-      setError('无法打开摄像头，请使用 HTTPS');
+      setError(new RemoteKitError('internal', '当前页面无法使用拍照功能'));
       return;
     }
-    void media
-      .getUserMedia({
-        audio: false,
-        video: {
-          ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } }),
-          width: { ideal: 3840, max: 3840 },
-          height: { ideal: 2160, max: 2160 },
-          frameRate: { ideal: 30, max: 30 },
-        },
-      })
+    void recover(
+      () =>
+        media
+          .getUserMedia({
+            audio: false,
+            video: {
+              ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } }),
+              width: { ideal: 3840, max: 3840 },
+              height: { ideal: 2160, max: 2160 },
+              frameRate: { ideal: 30, max: 30 },
+            },
+          })
+          .catch((error: unknown) => {
+            if (error instanceof DOMException && ['NotAllowedError', 'SecurityError'].includes(error.name))
+              throw new RemoteKitError('forbidden', '摄像头尚未获准使用', {
+                reason: 'camera_permission',
+                cause: error,
+              });
+            if (error instanceof DOMException && ['NotReadableError', 'AbortError'].includes(error.name))
+              throw new RemoteKitError('unavailable', '摄像头暂不可用', { cause: error });
+            throw error;
+          }),
+      abort.signal,
+      setError,
+    )
       .then(async (next) => {
         acquired = next;
         if (stopped) {
@@ -164,6 +172,7 @@ export function PhotoCapture({
         await node.play();
         if (stopped) return;
         setReady(true);
+        setError(undefined);
         const listed = await media.enumerateDevices().catch((error) => {
           diagnostics.record('camera-devices', error);
           return [];
@@ -175,13 +184,14 @@ export function PhotoCapture({
               .map((device) => device.deviceId),
           );
       })
-      .catch(() => {
+      .catch((error) => {
         if (stopped) return;
         acquired?.getTracks().forEach((track) => track.stop());
-        setError('无法使用摄像头，请检查摄像头权限');
+        setError(failureError(error));
       });
     return () => {
       stopped = true;
+      abort.abort();
       acquired?.getTracks().forEach((track) => track.stop());
       if (stream.current === acquired) stream.current = undefined;
       node.srcObject = null;
@@ -207,7 +217,7 @@ export function PhotoCapture({
     const { id, signal } = shot;
     active.current = { id, cancel: () => photos.cancel(id) };
     setSampling(true);
-    setError('');
+    setError(undefined);
     const result = capturePhotoBurst(node, signal, rpc, {
       viewportWidth: view.width,
       viewportHeight: view.height,
@@ -216,9 +226,10 @@ export function PhotoCapture({
         if (active.current?.id !== id) return;
         active.current = undefined;
         setSampling(false);
-        if (stats.stopReason === 'error' || stats.stopReason === 'aborted' || !stats.frameCount) {
+        if (stats.stopReason === 'aborted') return;
+        if (stats.stopReason === 'error' || !stats.frameCount) {
           photos.cancel(id);
-          setError('没有捕获可用照片，请重试');
+          setError(new RemoteKitError('invalid_request', '本次没有取得可用照片，文件篮未增加照片'));
           return;
         }
         photos.update(id, { state: 'processing' });
@@ -231,7 +242,7 @@ export function PhotoCapture({
         active.current = undefined;
         photos.cancel(id);
         setSampling(false);
-        setError(fileError(failure));
+        setError(failureError(failure));
       }
     });
   }
@@ -317,24 +328,21 @@ export function PhotoCapture({
         </IconButton>
       )}
       {error && (
-        <Alert
-          severity="warning"
-          sx={{
-            position: 'absolute',
-            top: inset('top', 58),
-            left: inset('left', 8),
-            maxWidth: landscape ? '65%' : '90%',
+        <FailureNote
+          error={error}
+          context={{
+            operation: '拍摄照片',
+            scope: 'surface',
+            input: error.code === 'invalid_request',
+            issue: error.reason === 'camera_permission' ? 'permission' : undefined,
+            action:
+              error.reason === 'camera_permission'
+                ? { label: '开启摄像头', run: () => setAttempt((value) => value + 1) }
+                : error.code === 'invalid_request'
+                  ? { label: '重新拍摄', run: () => setError(undefined) }
+                  : undefined,
           }}
-          action={
-            !ready && (
-              <Button color="inherit" onClick={() => setAttempt((value) => value + 1)}>
-                重试
-              </Button>
-            )
-          }
-        >
-          {error}
-        </Alert>
+        />
       )}
       {!error && (full || basketFull || !ready) && (
         <Typography

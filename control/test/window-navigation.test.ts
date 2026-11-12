@@ -69,6 +69,7 @@ function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
 function Frame({ state, online }: { state: ProductState; online: boolean }) {
   const unexpected = (): never => assert.fail('Rendering must not dispatch any operation');
   const transport = {
+    operations: { subscribe: () => () => {}, getSnapshot: () => ({ error: undefined }) },
     presentation: { getSnapshot: () => ({ error: undefined }) },
     observations: { audio: new ViewerAudioOutput(unexpected) },
     files: new FileChannel(() => null),
@@ -88,7 +89,6 @@ function Frame({ state, online }: { state: ProductState; online: boolean }) {
       transport: transport as unknown as ViewerSession,
       online,
       action: unexpected,
-      report: unexpected,
       appContent: () => null,
       call: unexpected,
       weight: 1,

@@ -1,8 +1,8 @@
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { isErrorId, RemoteKitError } from '../../shared/errors';
+import { isErrorId, RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import type { NodeRegistry } from '../cluster/node-link';
-import { log, logFiles } from '../log';
+import { log, logFiles, reportError } from '../log';
 
 export async function findError(
   errorId: unknown,
@@ -11,8 +11,8 @@ export async function findError(
 ) {
   if (!isErrorId(errorId)) throw new RemoteKitError('invalid_request', '无效的错误 ID');
   const records: { source: string; line: string }[] = [];
-  const unreachable: string[] = [];
-  if (errorId.startsWith('c-')) {
+  const failures: import('../../shared/admin').ErrorSearchResult['failures'] = [];
+  if (!errorId.startsWith('e-')) {
     if (!directory) throw new RemoteKitError('unavailable', '日志目录未配置');
     for (const path of logFiles(directory)) {
       const input = createReadStream(path, { encoding: 'utf8' });
@@ -25,7 +25,7 @@ export async function findError(
           } catch {
             // Rotation or a crash can leave an incomplete line.
           }
-          if (records.length === 50) return { records, unreachable };
+          if (records.length === 50) return { records, failures };
         }
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -55,7 +55,15 @@ export async function findError(
               throw new RemoteKitError('internal', '节点日志查询结果无效');
             records.push(...result.lines.slice(0, 50).map((line) => ({ source: node.nodeId, line })));
           } catch (err) {
-            unreachable.push(node.nodeId);
+            failures.push({
+              nodeId: node.nodeId,
+              error: wireError(
+                reportError(toRemoteKitError(err), 'diagnostics.node_search_failed', {
+                  nodeId: node.nodeId,
+                  searchedErrorId: errorId,
+                }),
+              ),
+            });
             log.warn('diagnostics.node_search_failed', { nodeId: node.nodeId, errorId, err });
           } finally {
             clearTimeout(timer);
@@ -63,5 +71,5 @@ export async function findError(
         }),
     );
   }
-  return { records, unreachable };
+  return { records, failures };
 }

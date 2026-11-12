@@ -1,9 +1,10 @@
-import { formatError } from '../util/format-error';
 import { QuizOutlined, SchoolOutlined, VisibilityOffOutlined, VisibilityOutlined } from '@mui/icons-material';
 import { Button, IconButton, InputAdornment, LinearProgress, TextField } from '@mui/material';
 import { useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { LearningAccount, LearningProvider } from '../../shared/learning';
 import type { ProductTab } from '../../shared/product';
+import { failureError, FailureNote } from '../failures';
 import type { LearningCall } from './queries';
 import { SignInView } from './sign-in-view';
 
@@ -27,14 +28,15 @@ export function SignInCard({
   const [password, setPassword] = useState('');
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
+  const failedFlow = account.status === 'failed' && !!account.failureKind;
   const signing = account.status === 'signing_in';
   const remote = signing && (account.step === 'verification' || account.step === 'site');
   const finishing = signing && account.step === 'finishing';
   const signIn = async () => {
     if (!online || busy || signing || (study && (!username.trim() || !password))) return;
     setBusy(true);
-    setError('');
+    setError(undefined);
     const secret = password;
     setPassword('');
     try {
@@ -45,7 +47,7 @@ export function SignInCard({
           : { provider: 'xinjiaoyu', windowId },
       );
     } catch (failure) {
-      setError(formatError(failure));
+      setError(failureError(failure));
     } finally {
       setBusy(false);
     }
@@ -54,7 +56,7 @@ export function SignInCard({
     try {
       await call('learning.signInCancel', { provider });
     } catch (failure) {
-      setError(formatError(failure));
+      setError(failureError(failure));
     }
   };
   return (
@@ -138,11 +140,33 @@ export function SignInCard({
             )}
           </>
         )}
-        {(error || account.status === 'failed') && (
-          <p className="learning-error" role="alert">
-            {error || (account.status === 'failed' ? account.message : '')}
-          </p>
-        )}
+        <FailureNote
+          error={
+            error ??
+            (account.status === 'failed' || account.status === 'signing_in' ? account.error : undefined)
+          }
+          context={{
+            operation: '登录学习账户',
+            scope: 'surface',
+            credential: provider,
+            input: true,
+            issue: failedFlow ? 'content' : 'credentials',
+            text: failedFlow
+              ? account.failureKind === 'expired'
+                ? '登录验证已过期，账户尚未登录'
+                : '登录页面已结束，账户尚未登录'
+              : undefined,
+            action: failedFlow
+              ? {
+                  label: '开始登录',
+                  run: () => {
+                    if (study) document.querySelector<HTMLInputElement>('.learning-auth-card input')?.focus();
+                    else void signIn();
+                  },
+                }
+              : undefined,
+          }}
+        />
       </form>
     </div>
   );

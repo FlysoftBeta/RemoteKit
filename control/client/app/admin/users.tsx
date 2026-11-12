@@ -1,9 +1,6 @@
-import { useAutoFocus } from '../../editing/local-autofocus';
 import Add from '@mui/icons-material/Add';
 import MoreVert from '@mui/icons-material/MoreVert';
-import { scaledAnchor } from '../ui-scale';
 import {
-  Alert,
   Box,
   Button,
   Chip,
@@ -29,8 +26,11 @@ import {
 } from '@mui/material';
 import { useState } from 'react';
 import type { AdminSocketMethods, AdminUser } from '../../../shared/admin';
+import { RemoteKitError } from '../../../shared/errors';
+import { useAutoFocus } from '../../editing/local-autofocus';
+import { failureError, FailureNote } from '../../failures';
+import { scaledAnchor } from '../ui-scale';
 import {
-  adminError,
   ConfirmDialog,
   formatBytes,
   formatTime,
@@ -96,12 +96,12 @@ function CreateUserDialog({
   const [username, setUsername] = useState(''),
     [password, setPassword] = useState(''),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState('');
+    [error, setError] = useState<RemoteKitError | undefined>();
   const close = () => {
     if (busy) return;
     setUsername('');
     setPassword('');
-    setError('');
+    setError(undefined);
     onClose();
   };
   return (
@@ -111,7 +111,7 @@ function CreateUserDialog({
         onSubmit={async (event) => {
           event.preventDefault();
           setBusy(true);
-          setError('');
+          setError(undefined);
           try {
             await create(username, password);
             setBusy(false);
@@ -119,14 +119,16 @@ function CreateUserDialog({
             setPassword('');
             onClose();
           } catch (e) {
-            setError(adminError(e));
+            setError(failureError(e));
             setBusy(false);
           }
         }}
       >
         <DialogTitle>新建用户</DialogTitle>
         <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: '8px !important' }}>
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && (
+            <FailureNote error={error} context={{ operation: '更新用户', scope: 'surface', input: true }} />
+          )}
           <TextField
             inputRef={autoFocusRef}
             required

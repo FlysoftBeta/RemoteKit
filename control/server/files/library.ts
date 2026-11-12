@@ -1,7 +1,5 @@
-import { log } from '../log';
-import type { ObjectIndex } from '../cluster/objects';
 import { createHash, randomUUID } from 'node:crypto';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, parseWireError } from '../../shared/errors';
 import type {
   Asset,
   LibraryAssetFields,
@@ -13,8 +11,10 @@ import type {
   SelectionState,
   SnippetOrigin,
 } from '../../shared/file-library';
+import type { ObjectIndex } from '../cluster/objects';
 import type { EndpointGateway } from '../endpoint/gateway';
 import type { DownloadEvent } from '../endpoint/types';
+import { log } from '../log';
 import { LibraryRepository, sameSource, sourceExcluded, type Selection } from '../persistence/library';
 import { KeyedSerialQueue } from '../util/serial-queue';
 import { type FileLimits, type InternalFileRequest } from '../workspace/page-requests';
@@ -36,7 +36,8 @@ function id(value: unknown): string {
 function ids(value: unknown, max: number, min = 0): string[] {
   if (!Array.isArray(value) || value.length < min || new Set(value).size !== value.length)
     throw invalid('无效的文件数量或重复文件');
-  if (value.length > max) throw new RemoteKitError('limit_exceeded', '文件数量超过限制');
+  if (value.length > max)
+    throw new RemoteKitError('limit_exceeded', '文件数量超过限制', { capacity: 'selection' });
   return value.map(id);
 }
 
@@ -83,19 +84,22 @@ function importOrigin(value: unknown): Params<'library.import'>['origin'] {
 function photoMetadata(value: unknown): PhotoMetadata | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== 'object') throw invalid('无效的照片信息');
-  const { mode, pending, warning, candidateAssetIds, quarterTurns } = value as Partial<PhotoMetadata>;
+  const { mode, pending, advisory, processingFailure, candidateAssetIds, quarterTurns } =
+    value as Partial<PhotoMetadata>;
   if (mode !== 'photo' && mode !== 'scan') throw invalid('无效的拍摄模式');
   if (quarterTurns !== undefined && ![1, 2, 3].includes(quarterTurns)) throw invalid('无效的照片旋转角度');
   if (pending !== undefined && pending !== 'choice' && pending !== 'scan-error')
     throw invalid('无效的照片状态');
-  if (warning !== undefined && (typeof warning !== 'string' || warning.length > 256))
-    throw invalid('无效的照片警告');
+  if (advisory !== undefined && advisory !== 'low-quality') throw invalid('无效的照片提示');
+  if (processingFailure !== undefined && !parseWireError(processingFailure))
+    throw invalid('无效的照片处理状态');
   return {
     mode,
     ...(quarterTurns !== undefined ? { quarterTurns } : {}),
     ...(candidateAssetIds !== undefined ? { candidateAssetIds: ids(candidateAssetIds, 2) } : {}),
     ...(pending !== undefined ? { pending } : {}),
-    ...(warning !== undefined ? { warning } : {}),
+    ...(advisory !== undefined ? { advisory } : {}),
+    ...(processingFailure !== undefined ? { processingFailure } : {}),
   };
 }
 function assetIds({ assetId, originalAssetId, photo }: LibraryAssetFields): string[] {
@@ -105,7 +109,7 @@ function assetIds({ assetId, originalAssetId, photo }: LibraryAssetFields): stri
 }
 function fileName(value: unknown): string {
   if (typeof value === 'string' && value.length > 255)
-    throw new RemoteKitError('limit_exceeded', '文件名超过 255 字符');
+    throw new RemoteKitError('limit_exceeded', '文件名超过 255 字符', { capacity: 'field' });
   if (
     typeof value !== 'string' ||
     !value ||
@@ -118,7 +122,7 @@ function fileName(value: unknown): string {
 }
 function partitionName(value: unknown): string {
   if (typeof value === 'string' && value.length > 120)
-    throw new RemoteKitError('limit_exceeded', '分区名称超过 120 字符');
+    throw new RemoteKitError('limit_exceeded', '分区名称超过 120 字符', { capacity: 'field' });
   if (typeof value !== 'string' || !value.trim() || /[\x00-\x1f\x7f]/.test(value))
     throw invalid('无效的分区名');
   return value.trim();
@@ -192,12 +196,13 @@ export class FileLibrary {
       )
         throw invalid('无效的导入文件');
       if (input.size > 256 * 1024 * 1024 || input.type.length > 255 || input.detail.length > 512)
-        throw new RemoteKitError('limit_exceeded', '导入文件大小或信息长度超过限制');
+        throw new RemoteKitError('limit_exceeded', '导入文件大小或信息长度超过限制', { capacity: 'file' });
       const payload = operationHash('control-import', input);
       const snapshot = this.repository.change(tenant, operationId, payload, (snapshot) => {
         authorize();
         if (sourceExcluded(snapshot, source)) throw new RemoteKitError('forbidden', '已排除此文件来源');
-        if (snapshot.entries.length >= MAX_CATALOG) throw new RemoteKitError('limit_exceeded', '文件库已满');
+        if (snapshot.entries.length >= MAX_CATALOG)
+          throw new RemoteKitError('limit_exceeded', '文件库已满', { capacity: 'catalog' });
         if (snapshot.entries.some((entry) => entry.id === entryId))
           throw new RemoteKitError('conflict', '文件已存在');
         this.objects.require(tenant, assetId);
@@ -278,9 +283,10 @@ export class FileLibrary {
         !Number.isSafeInteger(size)
       )
         throw invalid('下载大小无效');
-      if (size > this.limits.maxFileBytes) throw new RemoteKitError('limit_exceeded', '下载文件超过大小限制');
+      if (size > this.limits.maxFileBytes)
+        throw new RemoteKitError('limit_exceeded', '下载文件超过大小限制', { capacity: 'file' });
       if (typeof event.mimeType === 'string' && Buffer.byteLength(event.mimeType) > 255)
-        throw new RemoteKitError('limit_exceeded', '下载类型超过长度限制');
+        throw new RemoteKitError('limit_exceeded', '下载类型超过长度限制', { capacity: 'file' });
       if (typeof event.mimeType !== 'string' || /[\x00-\x1f\x7f]/.test(event.mimeType))
         throw invalid('下载类型无效');
       let channel = '';
@@ -295,8 +301,7 @@ export class FileLibrary {
       this.repository.change(tenant, operationId, payload, (snapshot) => {
         if (sourceExcluded(snapshot, source)) return;
         if (snapshot.entries.length >= MAX_CATALOG) {
-          log.warn('library.download_omitted_catalog_full', { tenant, assetId, name });
-          return;
+          throw new RemoteKitError('limit_exceeded', '文件库已满', { capacity: 'catalog' });
         }
         this.objects.require(tenant, assetId);
         this.objects.checkQuota(tenant);
@@ -398,9 +403,9 @@ export class FileLibrary {
         });
       const partitionId = partition(snapshot, requestedPartition);
       if (snapshot.entries.length >= MAX_CATALOG)
-        throw new RemoteKitError('limit_exceeded', '文件库已达上限');
+        throw new RemoteKitError('limit_exceeded', '文件库已达上限', { capacity: 'catalog' });
       if (destination === 'basket' && snapshot.basket.length >= MAX_BASKET)
-        throw new RemoteKitError('limit_exceeded', '文件篮已满');
+        throw new RemoteKitError('limit_exceeded', '文件篮已满', { capacity: 'basket' });
       if (afterId !== undefined && !snapshot.basket.includes(afterId))
         throw new RemoteKitError('conflict', '插入位置已改变');
       return partitionId;
@@ -491,7 +496,7 @@ export class FileLibrary {
       const request = resolve(requestId);
       if (!request || request.state !== 'pending') throw new RemoteKitError('conflict', '文件选择请求已失效');
       if ((!request.multiple && entryIds.length !== 1) || entryIds.length > request.limits.maxFiles)
-        throw new RemoteKitError('limit_exceeded', '文件数量超出页面限制');
+        throw new RemoteKitError('limit_exceeded', '文件数量超出页面限制', { capacity: 'selection' });
       const snapshot = this.repository.snapshot(tenant),
         selected = entries(snapshot, entryIds).map((entry) => {
           if (entry.kind !== 'file') throw invalid('剪贴片段不能用于文件选择');
@@ -503,7 +508,7 @@ export class FileLibrary {
         selected.some((entry) => entry.size > request.limits.maxFileBytes) ||
         selected.reduce((sum, entry) => sum + entry.size, 0) > request.limits.maxBatchBytes
       )
-        throw new RemoteKitError('limit_exceeded', '文件大小超过限制');
+        throw new RemoteKitError('limit_exceeded', '文件大小超过限制', { capacity: 'selection' });
       manifest = {
         selectionId: randomUUID().replace(/-/g, ''),
         requestId,
@@ -622,7 +627,7 @@ export class FileLibrary {
           (snapshot) => {
             if (partitionId === undefined) {
               if (snapshot.partitions.length >= MAX_PARTITIONS)
-                throw new RemoteKitError('limit_exceeded', '分区已达上限');
+                throw new RemoteKitError('limit_exceeded', '分区已达上限', { capacity: 'catalog' });
               snapshot.partitions.push({ id: randomUUID(), name });
             } else {
               const item = snapshot.partitions.find((entry) => entry.id === partitionId);

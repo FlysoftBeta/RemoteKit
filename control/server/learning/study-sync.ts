@@ -1,13 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { AttachmentSave, StudySync as SyncState } from '../../shared/learning';
-import { RemoteKitError, toRemoteKitError, type ErrorCode } from '../../shared/errors';
-import type { ControlDatabase } from '../persistence/database';
-import type { FileLibrary } from '../files/library';
-import type { ObjectIndex } from '../cluster/objects';
-import type { LearningAccounts } from './accounts';
-import type { DownloadItem, StudyService } from './study-service';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
+import {
+  parseWireError,
+  RemoteKitError,
+  toRemoteKitError,
+  wireError,
+  type WireError,
+} from '../../shared/errors';
+import type { AttachmentSave, StudySync as SyncState } from '../../shared/learning';
+import type { ObjectIndex } from '../cluster/objects';
+import type { FileLibrary } from '../files/library';
+import { reportError } from '../log';
+import type { ControlDatabase } from '../persistence/database';
+import type { LearningAccounts } from './accounts';
 import { isDocument } from './document-type';
+import type { DownloadItem, StudyService } from './study-service';
 
 class Slots {
   private active = 0;
@@ -33,8 +40,7 @@ interface DownloadRow {
   object_id: string | null;
   state: string;
   document: bigint;
-  error_code: ErrorCode | null;
-  error_message: string | null;
+  failure: string | null;
   retry_at: bigint | null;
   failed_usage: bigint | null;
 }
@@ -50,7 +56,7 @@ export class StudySync {
       progress: Map<string, AttachmentSave>;
       abort: AbortController;
       syncing?: Promise<void>;
-      error?: string;
+      error?: WireError;
       due: number;
       diagnostic?: { startedAt: number; durationMs?: number; errorCode?: string };
     }
@@ -86,6 +92,13 @@ export class StudySync {
       { retention_days: bigint; last_sync_at: bigint | null } | undefined;
     const runtime = this.tenants.get(tenant);
     return {
+      attachmentFailures: (
+        this.store.db
+          .prepare(
+            "SELECT key,failure FROM learning_downloads WHERE tenant=? AND state='failed' AND failure IS NOT NULL",
+          )
+          .all(tenant) as { key: string; failure: string }[]
+      ).map((item) => ({ key: item.key, error: wireError(parseWireError(JSON.parse(item.failure))!) })),
       retentionDays: Number(row?.retention_days ?? 7),
       syncing: !!runtime?.syncing,
       ...(row?.last_sync_at ? { lastSyncAt: Number(row.last_sync_at) } : {}),
@@ -106,7 +119,7 @@ export class StudySync {
       if (row.state === 'saved') this.dismiss(tenant, [row.entry_id]);
     }
     return row?.state === 'failed'
-      ? { state: 'failed', message: row.error_message ?? '下载失败', code: row.error_code ?? 'internal' }
+      ? { state: 'failed', error: wireError(parseWireError(JSON.parse(row.failure!))!) }
       : { state: 'not_saved' };
   }
   dismiss(tenant: string, ids: string[]) {
@@ -169,13 +182,13 @@ export class StudySync {
         throw new RemoteKitError('not_found', '文件已删除');
       const previous = this.row(tenant, key);
       if (automatic && previous?.state === 'failed' && !this.retryDue(tenant, previous))
-        throw new RemoteKitError(previous.error_code ?? 'internal', previous.error_message ?? '下载失败');
-      if (previous?.error_code === 'outcome_unknown') {
+        throw parseWireError(JSON.parse(previous.failure!))!;
+      if (previous?.failure && parseWireError(JSON.parse(previous.failure))?.code === 'outcome_unknown') {
         const entry = previous.entry_id && this.library.entryExists(tenant, previous.entry_id);
         if (entry) {
           this.store.db
             .prepare(
-              "UPDATE learning_downloads SET state='saved',error_code=NULL,error_message=NULL,retry_at=NULL WHERE tenant=? AND key=?",
+              "UPDATE learning_downloads SET state='saved',failure=NULL,retry_at=NULL WHERE tenant=? AND key=?",
             )
             .run(tenant, key);
           return { entryId: previous.entry_id! };
@@ -200,11 +213,25 @@ export class StudySync {
     return Number(row?.bytes ?? 0);
   }
   private retryDue(tenant: string, row: DownloadRow) {
-    if (!row.error_code) return false;
-    if (row.error_code === 'limit_exceeded')
+    if (!(row.failure ? (parseWireError(JSON.parse(row.failure))?.code ?? 'internal') : 'internal'))
+      return false;
+    if (
+      (row.failure ? (parseWireError(JSON.parse(row.failure))?.code ?? 'internal') : 'internal') ===
+      'limit_exceeded'
+    )
       return row.failed_usage !== null && this.usage(tenant) < Number(row.failed_usage);
-    if (errorHandling(row.error_code) === 'reconcile') return true;
-    return retryDelay({ code: row.error_code }, 0) !== undefined && Number(row.retry_at ?? 0) <= this.now();
+    if (
+      errorHandling(
+        row.failure ? (parseWireError(JSON.parse(row.failure))?.code ?? 'internal') : 'internal',
+      ) === 'reconcile'
+    )
+      return true;
+    return (
+      retryDelay(
+        { code: row.failure ? (parseWireError(JSON.parse(row.failure))?.code ?? 'internal') : 'internal' },
+        0,
+      ) !== undefined && Number(row.retry_at ?? 0) <= this.now()
+    );
   }
   private async download(tenant: string, item: DownloadItem, runtime: ReturnType<StudySync['runtime']>) {
     const generation = this.accounts.generation(tenant, 'changyan');
@@ -217,7 +244,9 @@ export class StudySync {
       authorize();
       const previous = this.row(tenant, item.key);
       const recovered =
-        previous?.error_code === 'outcome_unknown' && previous.object_id
+        previous?.failure &&
+        parseWireError(JSON.parse(previous.failure))?.code === 'outcome_unknown' &&
+        previous.object_id
           ? (this.store.db.prepare('SELECT id,size FROM objects WHERE id=?').get(previous.object_id) as
               { id: string; size: bigint } | undefined)
           : undefined;
@@ -257,7 +286,7 @@ export class StudySync {
       const rememberObject = (id: string) => {
         this.store.db
           .prepare(
-            `INSERT INTO learning_downloads(tenant,key,published_at,saved_at,entry_id,object_id,state,error_code,error_message) VALUES (?,?,?,0,?,?,'failed','outcome_unknown','附件导入结果待对账') ON CONFLICT(tenant,key) DO UPDATE SET entry_id=excluded.entry_id,object_id=excluded.object_id,state=excluded.state,error_code=excluded.error_code,error_message=excluded.error_message`,
+            `INSERT INTO learning_downloads(tenant,key,published_at,saved_at,entry_id,object_id,state,failure) VALUES (?,?,?,0,?,?,'failed','{"code":"outcome_unknown","message":"附件导入结果待对账"}') ON CONFLICT(tenant,key) DO UPDATE SET entry_id=excluded.entry_id,object_id=excluded.object_id,state=excluded.state,failure=excluded.failure`,
           )
           .run(tenant, item.key, item.publishedAt, entryId, id);
       };
@@ -298,7 +327,7 @@ export class StudySync {
             .prepare(
               `INSERT INTO learning_downloads (tenant,key,published_at,saved_at,entry_id,object_id,state,document) VALUES (?,?,?,?,?,?,'saved',?)
           ON CONFLICT(tenant,key) DO UPDATE SET published_at=excluded.published_at,saved_at=excluded.saved_at,
-          entry_id=excluded.entry_id,object_id=excluded.object_id,state='saved',document=excluded.document,error_code=NULL,error_message=NULL,retry_at=NULL,failed_usage=NULL`,
+          entry_id=excluded.entry_id,object_id=excluded.object_id,state='saved',document=excluded.document,failure=NULL,retry_at=NULL,failed_usage=NULL`,
             )
             .run(tenant, item.key, item.publishedAt, this.now(), entryId, object.id, Number(document));
         },
@@ -319,17 +348,18 @@ export class StudySync {
         const delay = retryDelay(failure, 0);
         this.store.db
           .prepare(
-            'UPDATE learning_downloads SET error_code=?,error_message=?,retry_at=?,failed_usage=? WHERE tenant=? AND key=?',
+            'UPDATE learning_downloads SET failure=?,retry_at=?,failed_usage=? WHERE tenant=? AND key=?',
           )
           .run(
-            failure.code,
-            failure.message,
-            delay === undefined ? null : this.now() + Math.max(delay, 30 * 60_000),
+            JSON.stringify(
+              wireError(reportError(failure, 'learning.attachment_failed', { tenant, key: item.key })),
+            ),
+            delay === undefined ? null : this.now() + Math.min(delay, 60_000),
             failure.code === 'limit_exceeded' ? this.usage(tenant) : null,
             tenant,
             item.key,
           );
-        runtime.progress.set(item.key, { state: 'failed', code: failure.code, message: failure.message });
+        runtime.progress.set(item.key, { state: 'failed', error: wireError(failure) });
         this.changed(tenant);
       }
       throw error;
@@ -366,14 +396,23 @@ export class StudySync {
             'INSERT INTO learning_settings(tenant,last_sync_at) VALUES (?,?) ON CONFLICT(tenant) DO UPDATE SET last_sync_at=excluded.last_sync_at',
           )
           .run(tenant, this.now());
-        runtime.error = errorCode ? '部分附件下载失败，请查看附件提示' : undefined;
+        runtime.error = undefined;
         runtime.diagnostic.errorCode = errorCode;
       } catch (error) {
-        runtime.error = toRemoteKitError(error).message;
+        runtime.error = wireError(reportError(toRemoteKitError(error), 'learning.sync_failed', { tenant }));
         runtime.diagnostic.errorCode = toRemoteKitError(error).code;
       } finally {
         runtime.diagnostic.durationMs = this.now() - started;
-        runtime.due = this.now() + 30 * 60_000 + (this.random() - 0.5) * 180_000;
+        runtime.due =
+          this.now() +
+          (runtime.error &&
+          ['busy', 'rate_limited', 'unavailable', 'outcome_unknown'].includes(runtime.error.code)
+            ? 60_000
+            : this.state(tenant).attachmentFailures?.some((item) =>
+                  ['busy', 'rate_limited', 'unavailable', 'outcome_unknown'].includes(item.error.code),
+                )
+              ? 60_000
+              : 30 * 60_000 + (this.random() - 0.5) * 180_000);
         delete runtime.syncing;
         if (!runtime.abort.signal.aborted) this.changed(tenant);
       }

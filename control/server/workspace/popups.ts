@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import type { ViewConfiguration } from '../endpoint/types';
 
 import type { ProductTab, ProductWorkspace } from '../../shared/product';
@@ -33,7 +33,12 @@ export class Popups {
           existing.popup = {
             provisionalId: popup.provisionalId,
             status: 'failed',
-            error: popup.status === 'timed_out' ? '新页面创建已过期' : '新页面已关闭',
+            error: wireError(
+              new RemoteKitError(
+                'not_found',
+                popup.status === 'timed_out' ? '新页面创建已过期' : '新页面已关闭',
+              ),
+            ),
           };
           this.services.operations.saveWorkspace(state);
         }
@@ -133,7 +138,7 @@ export class Popups {
       tab.popup = {
         provisionalId: popup.provisionalId,
         status: 'failed',
-        error: '新页面已关闭或过期，请关闭后重试',
+        error: wireError(toRemoteKitError(error)),
       };
       this.services.operations.saveWorkspace(state);
       return false;

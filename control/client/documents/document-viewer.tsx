@@ -1,19 +1,19 @@
-import { retryDelay } from '../../shared/error-policy';
-import { formatError } from '../util/format-error';
 import { useAutoFocus } from '../editing/local-autofocus';
+import { FailureNote, SurfaceState, failureError } from '../failures';
+import { recover } from '../failures/recovery';
 // Page layout and controls adapted from FlysoftBeta/talos-ng packages/client/src/features/reader/view/viewer.tsx.
-import { ErrorOutline, ZoomInOutlined, ZoomOutOutlined } from '@mui/icons-material';
-import { Button, Skeleton, IconButton, Tooltip, LinearProgress } from '@mui/material';
-import { RemoteKitError } from '../../shared/errors';
+import { ZoomInOutlined, ZoomOutOutlined } from '@mui/icons-material';
+import { Button, IconButton, LinearProgress, Skeleton, Tooltip } from '@mui/material';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
+import { FileTypeIcon, fileTypeColor } from '../files/file-thumbnail';
+import { VirtualScroller, type VirtualViewport } from '../ui/virtual-list';
+import { SizeIndex } from '../ui/virtual-scroll';
 import type { DocumentInfo, DocumentPage, DocumentProgress, DocumentSource } from './document-source';
+import './document-viewer.css';
 import { mountPage } from './page-content';
 import { ResourceCache, type ResourceLease } from './resource-cache';
 import { PAGE_GAP, normalizeProgress, progressAt, progressTop } from './virtual-scroll';
-import { SizeIndex } from '../ui/virtual-scroll';
-import { VirtualScroller, type VirtualViewport } from '../ui/virtual-list';
-import { FileTypeIcon, fileTypeColor } from '../files/file-thumbnail';
-import './document-viewer.css';
 
 export interface DocumentViewerProps {
   source: DocumentSource;
@@ -37,8 +37,7 @@ function Page({
 }) {
   const host = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
-  const [attempt, setAttempt] = useState(0);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<RemoteKitError | undefined>();
   useEffect(() => {
     const controller = new AbortController();
     const leases: ResourceLease[] = [];
@@ -70,12 +69,27 @@ function Page({
       dispose = mountPage(host.current!, html, css, refs);
       setStatus('ready');
     };
-    void load().catch((error) => {
+    void recover(
+      async () => {
+        try {
+          await load();
+        } catch (error) {
+          dispose?.();
+          leases.splice(0).forEach((lease) => lease.release());
+          throw error;
+        }
+      },
+      controller.signal,
+      (error) => {
+        setError(error);
+        setStatus('error');
+      },
+    ).catch((error) => {
       if (controller.signal.aborted) return;
       controller.abort();
       dispose?.();
       leases.forEach((lease) => lease.release());
-      setError(formatError(error));
+      setError(failureError(error));
       setStatus('error');
     });
     return () => {
@@ -83,7 +97,7 @@ function Page({
       dispose?.();
       leases.forEach((lease) => lease.release());
     };
-  }, [page, shared, cache, attempt]);
+  }, [page, shared, cache]);
   return (
     <div className="document-viewer-unit">
       <div
@@ -101,12 +115,7 @@ function Page({
         {status !== 'ready' && (
           <div className="document-viewer-page-state" role={status === 'error' ? 'alert' : 'status'}>
             {status === 'error' ? (
-              <>
-                <span>{error}</span>
-                <Button size="small" onClick={() => setAttempt((value) => value + 1)}>
-                  重试
-                </Button>
-              </>
+              <FailureNote error={error} context={{ operation: '加载此页', scope: 'item' }} />
             ) : (
               <>
                 <Skeleton width="50%" height={80} />
@@ -355,14 +364,11 @@ export function DocumentViewer({
   onProgress,
   hideTitle = false,
 }: DocumentViewerProps) {
-  const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<{
     source: DocumentSource;
     info?: DocumentInfo;
     cache?: ResourceCache;
-    error?: string;
-    rejected?: boolean;
-    retryable?: boolean;
+    error?: RemoteKitError;
   }>();
   const [status, setStatus] = useState<'converting' | 'ready'>();
   const [slow, setSlow] = useState(false);
@@ -377,35 +383,36 @@ export function DocumentViewer({
     const cache = new ResourceCache(source);
     setStatus(undefined);
     setState({ source });
-    void source
-      .open(controller.signal, {
-        onStatus: (status) => {
-          if (!controller.signal.aborted) setStatus(status);
-        },
-      })
-      .then(
-        (info) => {
-          if (controller.signal.aborted) return;
-          if (!info.pages.length || info.pages.some((page) => !(page.width > 0 && page.height > 0))) {
-            setState({ source, error: '文档页面格式错误' });
-          } else setState({ source, info, cache });
-        },
-        (error) => {
-          if (controller.signal.aborted) return;
-          setStatus(undefined);
-          setState({
-            source,
-            error: formatError(error),
-            rejected: error instanceof RemoteKitError && error.code === 'rejected',
-            retryable: error instanceof RemoteKitError && retryDelay(error, 0) !== undefined,
-          });
-        },
-      );
+    void recover(
+      () =>
+        source.open(controller.signal, {
+          onStatus: (status) => {
+            if (!controller.signal.aborted) setStatus(status);
+          },
+        }),
+      controller.signal,
+      (error) => setState({ source, error }),
+    ).then(
+      (info) => {
+        if (controller.signal.aborted) return;
+        if (!info.pages.length || info.pages.some((page) => !(page.width > 0 && page.height > 0))) {
+          setState({ source, error: new RemoteKitError('internal', '文档页面格式错误') });
+        } else setState({ source, info, cache });
+      },
+      (error) => {
+        if (controller.signal.aborted) return;
+        setStatus(undefined);
+        setState({
+          source,
+          error: failureError(error),
+        });
+      },
+    );
     return () => {
       controller.abort();
       cache.dispose();
     };
-  }, [source, attempt]);
+  }, [source]);
   const active = state?.source === source ? state : undefined;
   return (
     <section className="document-viewer" aria-label={title}>
@@ -425,12 +432,7 @@ export function DocumentViewer({
       ) : (
         <div className="document-viewer-state" role={active?.error ? 'alert' : 'status'}>
           {active?.error ? (
-            <>
-              <ErrorOutline className="document-viewer-error-icon" />
-              <strong>{active.rejected ? '无法转换此文档' : active.error}</strong>
-              {active.rejected && <span>{active.error}</span>}
-              {active.retryable && <Button onClick={() => setAttempt((value) => value + 1)}>重试</Button>}
-            </>
+            <SurfaceState error={active.error} context={{ operation: '打开文档', scope: 'surface' }} />
           ) : (
             <>
               <div

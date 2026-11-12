@@ -1,4 +1,4 @@
-import { Alert, Button, Chip, Skeleton, ToggleButton, ToggleButtonGroup } from '@mui/material';
+import { Chip, Skeleton, ToggleButton, ToggleButtonGroup } from '@mui/material';
 import { useLayoutEffect, useRef, useState } from 'react';
 
 const subjectColors: Record<string, string> = {
@@ -80,13 +80,7 @@ export function LoadingRows() {
     </div>
   );
 }
-export function InlineError({ error, retry }: { error: string; retry: () => void }) {
-  return (
-    <Alert severity="error" action={<Button onClick={retry}>重试</Button>}>
-      {error}
-    </Alert>
-  );
-}
+
 export function useContentWidth() {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);

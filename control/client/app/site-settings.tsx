@@ -1,8 +1,5 @@
-import './site-settings.css';
-import React, { useId, useState } from 'react';
 import { Close } from '@mui/icons-material';
 import {
-  Alert,
   Box,
   Button,
   Dialog,
@@ -13,11 +10,14 @@ import {
   Select,
   Typography,
 } from '@mui/material';
+import { useId, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import { SITE_PERMISSIONS, type ProductAction, type ProductState } from '../../shared/product';
+import { failureError, FailureNote } from '../failures';
 import { PERMISSION_LABELS, protocolName, siteHost } from './permission-prompt';
 import type { Action } from './product-dialogs';
-import { formatError } from '../util/format-error';
 import { SettingSection, SettingSwitch } from './setting-layout';
+import './site-settings.css';
 
 interface SiteSettingsProps {
   origin: string;
@@ -58,23 +58,23 @@ export function SiteSettingsBody({
   onClose,
 }: SiteSettingsProps & { onClose?(): void }) {
   const [busy, setBusy] = useState(false),
-    [error, setError] = useState('');
+    [error, setError] = useState<RemoteKitError | undefined>();
   const permissionId = useId();
   const site = state.workspace.sites[origin];
   const run = async (command: ProductAction) => {
     setBusy(true);
-    setError('');
+    setError(undefined);
     try {
       await action(command);
     } catch (error) {
-      setError(formatError(error));
+      setError(failureError(error));
     } finally {
       setBusy(false);
     }
   };
   return (
     <div className="site-settings-body">
-      {error && <Alert severity="error">{error}</Alert>}
+      {error && <FailureNote error={error} context={{ operation: '保存网站设置', scope: 'surface' }} />}
       <SettingSection title="兼容性">
         <SettingSwitch
           title="平板版网站"

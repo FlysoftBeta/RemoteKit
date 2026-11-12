@@ -1,8 +1,4 @@
 import { endpointError } from '../../shared/errors';
-import { errorHandling } from '../../shared/error-policy';
-import { RemoteKitError } from '../../shared/errors';
-import { formatError } from '../util/format-error';
-import { type Diagnostics } from './types';
 import { ViewerAudioOutput } from './audio-output';
 import { CaptureLatency } from './capture-latency';
 import { ClockDomain, ClockProbe } from './clock-domain';
@@ -19,6 +15,7 @@ import {
 } from './media-diagnostics';
 import { MediaFeedbackSampler } from './media-feedback';
 import { configureReceiverPlayout, negotiatedReceiverPlayout } from './receiver-playout';
+import { type Diagnostics } from './types';
 
 import { diagnostics } from '../media/diagnostics';
 import { type Incoming } from '../rtc/protocol';
@@ -476,7 +473,7 @@ export class MediaObservations {
       this.endpointStatsAtMs = performance.now();
       this.update({ endpoint: message });
     }
-    if (message.type === 'error') this.update({ error: formatError(endpointError(message.error)) });
+    if (message.type === 'error') this.update({ error: endpointError(message.error).message });
   }
 
   reset() {

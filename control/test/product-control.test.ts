@@ -1,22 +1,18 @@
-import { registerUser } from './server-fixture';
-import { accountsFor } from './server-fixture';
-import { requestViewer } from './server-fixture';
-import { RemoteKitError } from '../shared/errors';
-import { TestClock, testGateway } from './server-fixture';
-import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import Database from 'better-sqlite3';
+import test from 'node:test';
 import { WebSocket } from 'ws';
-import { ControlDatabase } from '../server/persistence/database';
-import { createApplication, type DomainServices } from '../server/application';
-import { createHttp } from '../server/http/server';
+import { createApplication } from '../server/application';
 import type { EndpointLink } from '../server/endpoint/link';
+import { createHttp } from '../server/http/server';
+import { ControlDatabase } from '../server/persistence/database';
+import { RemoteKitError } from '../shared/errors';
 import type { ProductAction } from '../shared/product';
+import { accountsFor, registerUser, requestViewer, TestClock, testGateway } from './server-fixture';
 
 class ProductEndpoint implements EndpointLink {
   readonly state = { state: 'ready' as const, incarnation: 'test', connectionEpoch: 'test' };
@@ -687,7 +683,7 @@ test('unsafe POST checkpoint leaves an explicit tab error and never repeats unlo
     );
     assert.equal(f.view.actual, 0);
     assert.equal(f.view.visible, false);
-    assert.match(f.tabState().lifecycleRecoveryError!, /POST requires repost confirmation/);
+    assert.match(f.tabState().lifecycleRecoveryError!.message, /POST requires repost confirmation/);
     await f.control.operations.productAction(f.tenant, { type: 'tab.close', tabId: f.tab.id }, 'lease');
     await f.control.operations.productAction(
       f.tenant,

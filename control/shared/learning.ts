@@ -1,4 +1,4 @@
-import type { ErrorCode } from './errors';
+import type { WireError } from './errors';
 // Learning Apps (学习, 题库): account state, browsing models and socket methods shared by the
 // Viewer and Control. Provider HTML is already media-proxied and formula-rendered by Control;
 // the Viewer still sanitizes it before insertion.
@@ -7,16 +7,22 @@ export type LearningProvider = 'changyan' | 'xinjiaoyu';
 
 export type LearningAccount =
   | { status: 'signed_out' }
-  | { status: 'signing_in'; step: 'credentials' | 'verification' | 'site' | 'finishing'; tabId?: string }
+  | {
+      status: 'signing_in';
+      step: 'credentials' | 'verification' | 'site' | 'finishing';
+      tabId?: string;
+      error?: WireError;
+    }
   | { status: 'signed_in'; displayName: string; since: number }
   | { status: 'expired'; displayName: string; username?: string }
-  | { status: 'failed'; message: string; username?: string };
+  | { status: 'failed'; error: WireError; failureKind?: 'expired' | 'browser-replaced'; username?: string };
 
 export interface StudySync {
+  attachmentFailures?: { key: string; error: WireError }[];
   retentionDays: number;
   syncing: boolean;
   lastSyncAt?: number;
-  error?: string;
+  error?: WireError;
 }
 
 /** Pushed as the `learning` field of ProductState; the Viewer never persists it. */
@@ -46,7 +52,7 @@ export interface LearningPage<T> {
 export type AttachmentSave =
   | { state: 'saved'; entryId: string }
   | { state: 'downloading'; received: number; total?: number }
-  | { state: 'failed'; message: string; code: ErrorCode }
+  | { state: 'failed'; error: WireError }
   | { state: 'not_saved' };
 
 export interface StudyAttachment {

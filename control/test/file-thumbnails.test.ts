@@ -1,5 +1,5 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
+import test from 'node:test';
 import { FileThumbnails } from '../client/files/file-thumbnails';
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -10,10 +10,10 @@ test('visible thumbnails share one request per asset and no more than one reques
     (id, signal) => new Promise((resolve) => calls.push({ id, signal, resolve })),
   );
   const visible: (Blob | undefined)[] = [];
-  store.subscribe('a', (blob) => visible.push(blob));
-  store.subscribe('a', (blob) => visible.push(blob));
-  const leave = store.subscribe('b', (blob) => visible.push(blob));
-  store.subscribe('c', (blob) => visible.push(blob));
+  store.subscribe('a', (blob) => visible.push(blob.blob));
+  store.subscribe('a', (blob) => visible.push(blob.blob));
+  const leave = store.subscribe('b', (blob) => visible.push(blob.blob));
+  store.subscribe('c', (blob) => visible.push(blob.blob));
   leave();
   assert.deepEqual(
     calls.map((call) => call.id),

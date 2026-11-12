@@ -1,29 +1,29 @@
-import { cleanUrl } from '../url-clean';
 import { RemoteKitError } from '../../shared/errors';
 import {
+  DEAD_ZONE_MAX,
   isBuiltinApp,
   isLocalTab,
   isSingletonApp,
   placeTab,
-  DEAD_ZONE_MAX,
   SEARCH_ENGINES,
+  SITE_PERMISSIONS,
   UI_SCALE_MAX,
   UI_SCALE_MIN,
+  type AppDefinition,
+  type InstalledApp,
+  type PageDialogReply,
   type ProductAction,
   type ProductActionResult,
   type ProductTab,
   type ProductWorkspace,
-  type InstalledApp,
-  type AppDefinition,
-  SITE_PERMISSIONS,
-  type PageDialogReply,
 } from '../../shared/product';
 import { resolveNavigation, resolveSearch } from '../navigation-url';
+import { cleanUrl } from '../url-clean';
 import {
   assertWindowMutable,
+  findSpace,
   findTab,
   findWindow,
-  findSpace,
   focusWindow,
   placeWindow,
   replaceWindow,
@@ -83,6 +83,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       });
     if (state.tabs.length >= WORKSPACE_LIMITS.tabs)
       throw new RemoteKitError('limit_exceeded', '工作区最多支持 32 个标签页', {
+        capacity: 'tabs',
         detail: 'The workspace supports up to 32 tabs',
       });
     const kind = address === undefined ? 'start' : 'remote';
@@ -111,7 +112,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
   const httpUrl = (value: unknown) => {
     if (typeof value !== 'string') throw new RemoteKitError('invalid_request', '网址格式无效');
     if (Buffer.byteLength(value, 'utf8') > 8192)
-      throw new RemoteKitError('limit_exceeded', '网址超过 8192 字节');
+      throw new RemoteKitError('limit_exceeded', '网址超过 8192 字节', { capacity: 'field' });
     let parsed: URL;
     try {
       parsed = new URL(value);
@@ -125,12 +126,12 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         detail: 'Enter an HTTP or HTTPS URL',
       });
     if (Buffer.byteLength(parsed.href, 'utf8') > 8192)
-      throw new RemoteKitError('limit_exceeded', '网址编码后超过 8192 字节');
+      throw new RemoteKitError('limit_exceeded', '网址编码后超过 8192 字节', { capacity: 'field' });
     return parsed.href;
   };
   const appDefinition = (value: AppDefinition): Omit<InstalledApp, 'id' | 'createdAt' | 'updatedAt'> => {
     if (typeof value.name === 'string' && value.name.length > 120)
-      throw new RemoteKitError('limit_exceeded', '应用名称超过 120 字符');
+      throw new RemoteKitError('limit_exceeded', '应用名称超过 120 字符', { capacity: 'field' });
     if (typeof value.name !== 'string' || !value.name.trim())
       throw new RemoteKitError('invalid_request', '应用名称应为 1 至 120 个字符', {
         detail: 'App names must contain 1 to 120 characters',
@@ -181,6 +182,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         throw new RemoteKitError('conflict', '应用正在卸载', { detail: 'The App is being uninstalled' });
       if (state.windows.length >= WORKSPACE_LIMITS.windows)
         throw new RemoteKitError('limit_exceeded', '工作区最多支持 16 个窗口', {
+          capacity: 'windows',
           detail: 'The workspace supports up to 16 windows',
         });
       if (action.url !== undefined && !installed && action.appId !== 'browser')
@@ -208,7 +210,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
           detail: 'Window state must be a JSON object of at most 8 KiB',
         });
       if (Buffer.byteLength(JSON.stringify(value), 'utf8') > 8192)
-        throw new RemoteKitError('limit_exceeded', '窗口状态超过 8 KiB');
+        throw new RemoteKitError('limit_exceeded', '窗口状态超过 8 KiB', { capacity: 'field' });
       window().state = structuredClone(value);
       break;
     }
@@ -329,7 +331,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       if (t.lifecycleRecovery || t.lifecycleRecoveryError)
         throw new RemoteKitError(
           t.lifecycleRecoveryError ? 'unavailable' : 'busy',
-          t.lifecycleRecoveryError ?? '页面正在恢复',
+          t.lifecycleRecoveryError?.message ?? '页面正在恢复',
         );
       if (ctx.execution) {
         t.navigation = {
@@ -356,7 +358,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       if (t.lifecycleRecovery || t.lifecycleRecoveryError)
         throw new RemoteKitError(
           t.lifecycleRecoveryError ? 'unavailable' : 'busy',
-          t.lifecycleRecoveryError ?? '页面正在恢复',
+          t.lifecycleRecoveryError?.message ?? '页面正在恢复',
         );
       if (ctx.execution && action.command !== 'stop')
         t.navigation = {
@@ -569,7 +571,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
           throw new RemoteKitError('invalid_request', '标签页不属于该站点');
       }
       if (!(origin in state.sites) && Object.keys(state.sites).length >= WORKSPACE_LIMITS.sites)
-        throw new RemoteKitError('limit_exceeded', '站点设置已达上限');
+        throw new RemoteKitError('limit_exceeded', '站点设置已达上限', { capacity: 'site-settings' });
       const previous = state.sites[origin] ?? { tabletUa: false };
       siteUaChanged = !!previous.tabletUa !== action.tabletUa;
       state.sites[origin] = {

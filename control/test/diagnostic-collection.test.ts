@@ -1,5 +1,5 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
+import test from 'node:test';
 import {
   DiagnosticCollection,
   type DiagnosticRequest,
@@ -32,7 +32,7 @@ test('start errors retain the original message and diagnosis ID', async () => {
   let state: DiagnosticState | undefined;
   const collector = new DiagnosticCollection(
     async () => {
-      throw new RemoteKitError('unavailable', '日志磁盘不可用', { errorId: 'c-1234567890' });
+      throw new RemoteKitError('internal', '日志磁盘不可用', { errorId: 'c-1234567890' });
     },
     () => ({}),
     (next) => {
@@ -41,7 +41,8 @@ test('start errors retain the original message and diagnosis ID', async () => {
   );
   collector.setAvailable(true);
   assert.equal(await collector.start(environment), false);
-  assert.deepEqual(state, { phase: 'start-error', error: '日志磁盘不可用（错误 ID c-1234567890）' });
+  assert.equal(state?.phase, 'start-error');
+  assert.equal((state as Extract<DiagnosticState, { phase: 'start-error' }>).error.errorId, 'c-1234567890');
   collector.dispose();
 });
 
@@ -86,6 +87,7 @@ test('stop freezes capture and waits for the one pending sample before finalizin
     samples: 1,
     missingSamples: 0,
     reason: 'user',
+    error: undefined,
   });
   collector.dispose();
 });
@@ -119,22 +121,31 @@ test('an unavailable sample is counted and authorization loss halts capture unti
   collector.setAvailable(true);
   await settle();
   assert.deepEqual(requests, ['diagnostics.start', 'diagnostics.status']);
-  assert.deepEqual(state, {
-    phase: 'complete',
-    id: 'test-id',
-    samples: 0,
-    missingSamples: 1,
-    reason: 'authorization-changed',
-  });
+  const completed = state as Extract<DiagnosticState, { id: string }>;
+  assert.equal(completed.sampleFailures?.[0].error.code, 'internal');
+  assert.match(String(completed.sampleFailures?.[0].error.cause), /capture unavailable/);
+  assert.deepEqual(
+    { ...completed, sampleFailures: undefined },
+    {
+      phase: 'complete',
+      id: 'test-id',
+      samples: 0,
+      missingSamples: 1,
+      sampleFailures: undefined,
+      reason: 'authorization-changed',
+      error: undefined,
+    },
+  );
   collector.dispose();
 });
 
-test('a lost stop reply keeps the ID and checks status on retry', async () => {
+test('a lost stop reply keeps the ID and checks status automatically', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const requests: string[] = [];
   let state: DiagnosticState | undefined;
   const request: DiagnosticRequest = async (method) => {
     requests.push(method);
-    if (method === 'diagnostics.stop') throw new Error('stop reply lost');
+    if (method === 'diagnostics.stop') throw new RemoteKitError('outcome_unknown', 'stop reply lost');
     return method === 'diagnostics.start' ? reply('collecting') : reply('complete', 'user');
   };
   const collector = new DiagnosticCollection(
@@ -148,14 +159,8 @@ test('a lost stop reply keeps the ID and checks status on retry', async () => {
   await collector.start(environment);
   collector.stop();
   await settle();
-  assert.deepEqual(state, {
-    phase: 'retry',
-    id: 'test-id',
-    samples: 0,
-    missingSamples: 0,
-    reason: undefined,
-  });
-  collector.stop();
+  assert.equal(state?.phase, 'finalizing');
+  t.mock.timers.tick(1000);
   await settle();
   assert.deepEqual(requests, ['diagnostics.start', 'diagnostics.stop', 'diagnostics.status']);
   assert.equal(state?.phase, 'complete');
@@ -193,6 +198,7 @@ test('server-initiated finalization stops capture and polls for the saved ID', a
     samples: 0,
     missingSamples: 0,
     reason: 'duration-limit',
+    error: undefined,
   });
   collector.dispose();
 });

@@ -76,9 +76,9 @@ function fixture() {
     },
     thumbnails: {
       get: () => undefined,
-      subscribe: (id: string, show: (blob: Blob) => void) => {
+      subscribe: (id: string, show: (preview: { blob?: Blob }) => void) => {
         thumbnailRequests.push(id);
-        show(new Blob(['thumbnail'], { type: 'image/jpeg' }));
+        show({ blob: new Blob(['thumbnail'], { type: 'image/jpeg' }) });
         return () => {};
       },
     },

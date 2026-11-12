@@ -1,5 +1,4 @@
 import {
-  Alert,
   Box,
   Button,
   Dialog,
@@ -9,12 +8,14 @@ import {
   LinearProgress,
 } from '@mui/material';
 import { useEffect, useRef, useState } from 'react';
+import { RemoteKitError } from '../../shared/errors';
 import type { LibraryEntry, LibraryFileEntry } from '../../shared/file-library';
-import { fileError } from './file-library-controls';
+import { failureError, FailureNote } from '../failures';
+import { recover } from '../failures/recovery';
 import { useLibrary } from './file-library-state';
-import { RotatedImage } from './rotated-image';
-import { PhotoRotateButton } from './photo-rotate-button';
 import type { PhotoDestination } from './photo-job-store';
+import { PhotoRotateButton } from './photo-rotate-button';
+import { RotatedImage } from './rotated-image';
 
 export function canPreviewFile(entry: Pick<LibraryEntry, 'type' | 'size'>) {
   return (
@@ -52,44 +53,42 @@ export function FileImagePreview({
       ?.rotationTurns ?? 0;
   const [dimensions, setDimensions] = useState({ width: 1, height: 1 });
   const [url, setUrl] = useState<string>();
-  const [error, setError] = useState('');
-  const [attempt, setAttempt] = useState(0);
+  const [error, setError] = useState<RemoteKitError | undefined>();
   const close = useRef(onClose);
   close.current = onClose;
   const { assetId, name, type, size } = entry;
   useEffect(() => {
     if (!online) {
-      close.current();
       return;
     }
     const abort = new AbortController();
-    setError('');
+    setError(undefined);
     setUrl(undefined);
     let objectUrl: string | undefined;
     const load = async () => {
       const asset = type && size ? { assetId, type, size } : await rpc.describeAsset(assetId, abort.signal);
-      if (!canPreviewFile(asset)) throw new Error('此图片无法预览');
+      if (!canPreviewFile(asset))
+        throw new RemoteKitError('rejected', '此图片无法预览', { reason: 'document_unsupported' });
       return rpc.readPhoto(asset, abort.signal);
     };
-    void load().then(
+    void recover(load, abort.signal, setError).then(
       (blob) => {
         if (abort.signal.aborted) return;
+        setError(undefined);
         objectUrl = URL.createObjectURL(blob);
         setUrl(objectUrl);
       },
       (failure) => {
-        if (!abort.signal.aborted) setError(fileError(failure));
+        if (!abort.signal.aborted) setError(failureError(failure));
       },
     );
     return () => {
       abort.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [assetId, type, size, online, rpc, attempt]);
+  }, [assetId, type, size, online, rpc]);
   const content = error ? (
-    <Alert severity="warning" action={<Button onClick={() => setAttempt(attempt + 1)}>重试</Button>}>
-      {error}
-    </Alert>
+    <FailureNote error={error} context={{ operation: '读取图片', scope: 'surface' }} />
   ) : url ? (
     <Box
       sx={{
@@ -113,7 +112,9 @@ export function FileImagePreview({
         alt={name}
         turns={rotationTurns}
         onLoad={(image) => setDimensions({ width: image.naturalWidth, height: image.naturalHeight })}
-        onError={() => setError('预览不可用')}
+        onError={() =>
+          setError(new RemoteKitError('rejected', '此图片无法显示', { reason: 'document_corrupt' }))
+        }
       />
     </Box>
   ) : (

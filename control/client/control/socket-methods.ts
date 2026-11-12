@@ -1,6 +1,7 @@
 import type { SocketMethods as ProductSocketMethods } from '../../shared/product';
 
-export type ErrorSearchResult = { records: { source: string; line: string }[]; unreachable: string[] };
+import type { ErrorSearchResult } from '../../shared/admin';
+export type { ErrorSearchResult } from '../../shared/admin';
 export interface ErrorSearchMethods {
   'admin.findError': { params: { errorId: string }; result: ErrorSearchResult };
 }

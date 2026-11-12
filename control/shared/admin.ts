@@ -76,6 +76,7 @@ export interface AdminOverview {
       table: string;
       key: string;
       detail: string;
+      error: import('./errors').WireError;
     }[];
   };
   buildId: string;
@@ -139,4 +140,9 @@ export interface AdminSocketMethods {
   };
   'admin.deleteAnnouncement': { params: { id: string }; result: AdminAnnouncement[] };
   'admin.downloadDiagnostic': { params: { id: string }; result: { url: string } };
+}
+
+export interface ErrorSearchResult {
+  records: { source: string; line: string }[];
+  failures: { nodeId: string; error: import('./errors').WireError }[];
 }

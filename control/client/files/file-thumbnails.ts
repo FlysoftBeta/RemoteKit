@@ -1,14 +1,15 @@
-import { toRemoteKitError, type ErrorCode } from '../../shared/errors';
 import { retryDelay } from '../../shared/error-policy';
-type Listener = (blob: Blob | undefined) => void;
-interface Preview {
+import { toRemoteKitError, type RemoteKitError } from '../../shared/errors';
+type Listener = (preview: Preview) => void;
+export interface Preview {
   blob?: Blob;
   retryAt?: number;
-  code?: ErrorCode;
+  error?: RemoteKitError;
 }
 interface PendingPreview {
   listeners: Set<Listener>;
   controller?: AbortController;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 const MAX_PREVIEWS = 96;
@@ -30,17 +31,18 @@ export class FileThumbnails {
   remember(assetId: string, blob: Blob) {
     if (blob.size > 128 * 1024) return;
     this.cache(assetId, { blob });
-    this.pending.get(assetId)?.listeners.forEach((listener) => listener(blob));
+    this.pending.get(assetId)?.listeners.forEach((listener) => listener({ blob }));
   }
 
   subscribe(assetId: string, listener: Listener) {
     const cached = this.previews.get(assetId);
-    if (cached && (!cached.retryAt || cached.retryAt > Date.now())) {
+    if (cached && (!cached.retryAt || cached.retryAt === Infinity)) {
       this.previews.delete(assetId);
       this.previews.set(assetId, cached);
-      listener(cached.blob);
+      listener(cached);
       return () => {};
     }
+    if (cached) listener(cached);
     let job = this.pending.get(assetId);
     if (!job) {
       if (this.pending.size >= MAX_PENDING) return () => {};
@@ -54,6 +56,7 @@ export class FileThumbnails {
       subscribed.listeners.delete(listener);
       if (!subscribed.listeners.size && this.pending.get(assetId) === subscribed) {
         subscribed.controller?.abort();
+        clearTimeout(subscribed.timer);
         this.pending.delete(assetId);
       }
     };
@@ -61,7 +64,10 @@ export class FileThumbnails {
 
   clear() {
     this.previews.clear();
-    for (const job of this.pending.values()) job.controller?.abort();
+    for (const job of this.pending.values()) {
+      job.controller?.abort();
+      clearTimeout(job.timer);
+    }
     this.pending.clear();
     this.bytes = 0;
   }
@@ -85,7 +91,15 @@ export class FileThumbnails {
   private pump() {
     for (const [id, job] of this.pending) {
       if (this.active >= 1) return;
-      if (job.controller) continue;
+      if (job.controller || job.timer) continue;
+      const due = this.previews.get(id)?.retryAt;
+      if (due && due > Date.now() && due !== Infinity) {
+        job.timer = setTimeout(() => {
+          job.timer = undefined;
+          this.pump();
+        }, due - Date.now());
+        continue;
+      }
       const controller = new AbortController();
       job.controller = controller;
       this.active++;
@@ -95,7 +109,7 @@ export class FileThumbnails {
             if (this.pending.get(id) !== job) return;
             const chosen = this.previews.get(id)?.blob ?? blob;
             this.cache(id, { blob: chosen });
-            job.listeners.forEach((listener) => listener(chosen));
+            job.listeners.forEach((listener) => listener({ blob: chosen }));
           },
           (error) => {
             if (this.pending.get(id) === job && !this.previews.get(id)?.blob) {
@@ -103,16 +117,20 @@ export class FileThumbnails {
               const delay = retryDelay(failure, 0);
               if (failure.code !== 'canceled')
                 this.cache(id, {
-                  code: failure.code,
-                  retryAt: delay === undefined ? Infinity : Date.now() + delay,
+                  error: failure,
+                  retryAt: delay === undefined ? Infinity : Date.now() + Math.min(60_000, delay),
                 });
-              job.listeners.forEach((listener) => listener(undefined));
+              job.listeners.forEach((listener) => listener(this.previews.get(id) ?? {}));
             }
           },
         )
         .finally(() => {
           this.active--;
-          if (this.pending.get(id) === job) this.pending.delete(id);
+          if (this.pending.get(id) === job) {
+            const retryAt = this.previews.get(id)?.retryAt;
+            if (retryAt && retryAt !== Infinity && job.listeners.size) job.controller = undefined;
+            else this.pending.delete(id);
+          }
           this.pump();
         });
     }

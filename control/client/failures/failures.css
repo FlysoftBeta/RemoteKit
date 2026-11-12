@@ -1,0 +1,136 @@
+.failure-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-neutral-subtle);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+  min-width: 0;
+}
+.failure-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  display: flex;
+  flex-direction: column;
+}
+.failure-A {
+  color: var(--text-secondary);
+}
+.failure-B {
+  color: var(--text-primary);
+  background: var(--primary-tab-drop);
+}
+.failure-C {
+  color: var(--error);
+  background: var(--surface-close);
+}
+.failure-action,
+.failure-id,
+.notice-dismiss {
+  font: inherit;
+  border: 0;
+  cursor: pointer;
+  background: transparent;
+  padding: 3px 5px;
+}
+.failure-action {
+  color: var(--primary);
+  flex-shrink: 0;
+}
+.failure-id {
+  color: inherit;
+  font-family: monospace;
+  text-align: left;
+  font-size: 12px;
+  padding-left: 0;
+  user-select: text;
+}
+.failure-spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--text-secondary);
+  border-radius: 50%;
+  animation: failure-spin 1s linear infinite;
+}
+.failure-surface {
+  position: relative;
+  max-width: 100%;
+}
+.failure-surface-live {
+  position: absolute;
+  z-index: var(--z-page-overlay);
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.failure-surface-live .failure-note {
+  width: max-content;
+  max-width: 480px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  box-shadow: 0 2px 8px var(--shadow-notice);
+  pointer-events: auto;
+  background: var(--surface);
+}
+.failure-surface-live .failure-B {
+  background: linear-gradient(var(--primary-tab-drop), var(--primary-tab-drop)), var(--surface);
+}
+.failure-surface-live .failure-C {
+  background: linear-gradient(var(--surface-close), var(--surface-close)), var(--surface);
+  border-radius: 12px;
+}
+.notice-center {
+  position: absolute;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px) / var(--ui-scale, 1));
+  right: calc(16px + env(safe-area-inset-right, 0px) / var(--ui-scale, 1));
+  width: calc(100% - 32px);
+  max-width: 360px;
+  max-height: calc(100% - 160px);
+  overflow-y: auto;
+  z-index: var(--z-page-overlay);
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  pointer-events: none;
+}
+.notice-entry {
+  position: relative;
+  pointer-events: auto;
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 3px 14px var(--shadow-notice);
+}
+.notice-entry .failure-note {
+  padding-right: 28px;
+}
+
+.notice-dismiss {
+  position: absolute;
+  top: 1px;
+  right: 2px;
+  color: var(--text-secondary);
+}
+@media (max-width: 599px) {
+  .notice-center {
+    /* Keep the full-width stack above the 36px Start button and its 24px bottom gap. */
+    bottom: calc(76px + env(safe-area-inset-bottom, 0px) / var(--ui-scale, 1));
+    left: calc(16px + env(safe-area-inset-left, 0px) / var(--ui-scale, 1));
+    right: calc(16px + env(safe-area-inset-right, 0px) / var(--ui-scale, 1));
+    width: auto;
+    max-width: none;
+    max-height: calc(100% - 220px);
+  }
+}
+@keyframes failure-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

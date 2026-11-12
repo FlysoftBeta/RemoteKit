@@ -1,17 +1,17 @@
 import type { FileRequestAnchor } from '../../shared/product';
-import { projectFileInput } from '../files/file-chooser-anchor';
 import { uiScale } from '../app/ui-scale';
+import { projectFileInput } from '../files/file-chooser-anchor';
 import { PresentationDiagnostics } from '../media/presentation-diagnostics';
-import { type Layout, type Surface, type VideoPresentation } from './types';
 import { canonicalJson } from '../util/canonical-json';
 import { freezeSnapshot } from '../util/store';
 import { FrameEpochGate } from './frame-epoch';
 import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneSource } from './plane-source';
+import { type Layout, type Surface, type VideoPresentation } from './types';
 import { VideoPlane } from './video-plane';
 import { barrierMatchesLayout, presentationBarrier, type PresentationBarrier } from './video-presentation';
 
-import { RemoteKitError, type ErrorCode } from '../../shared/errors';
 import { retryDelay } from '../../shared/error-policy';
+import { RemoteKitError, type ErrorCode } from '../../shared/errors';
 import { diagnostics } from '../media/diagnostics';
 import { type Incoming } from '../rtc/protocol';
 import { Events } from '../util/store';
@@ -66,7 +66,6 @@ export interface PresentationSnapshot {
   layout: Layout | null;
   pageHeights: Record<string, number>;
   error?: RemoteKitError;
-  canRetry: boolean;
 }
 
 export class PresentationSession {
@@ -122,26 +121,19 @@ export class PresentationSession {
     if (reason) this.backendState = { phase: 'unavailable', reason };
   }
 
+  private recoveryTimer?: ReturnType<typeof setTimeout>;
+  private recoveryAttempt = 0;
+  private currentFailure?: RemoteKitError;
   get presentationError() {
-    return this.presentationErrorCode
-      ? new RemoteKitError(
-          presentationCodes[this.presentationErrorCode],
-          presentationMessages[this.presentationErrorCode],
-          {
-            detail: this.presentationErrorCode,
-          },
-        )
-      : undefined;
-  }
-
-  get canRetryPresentation() {
-    const error = this.presentationError;
-    return !!error && retryDelay(error, 0) !== undefined;
-  }
-
-  retryPresentation() {
-    if (this.canRetryPresentation && this.ports.endpoint.channel?.readyState === 'open')
-      this.negotiatePresentation(this.ports.endpoint.channel, true);
+    if (!this.presentationErrorCode) {
+      this.currentFailure = undefined;
+      return;
+    }
+    return (this.currentFailure ??= new RemoteKitError(
+      presentationCodes[this.presentationErrorCode],
+      presentationMessages[this.presentationErrorCode],
+      { detail: this.presentationErrorCode },
+    ));
   }
 
   private presentationNegotiationTimer?: ReturnType<typeof setTimeout>;
@@ -433,6 +425,19 @@ export class PresentationSession {
     this.videoMetadataRefreshTimer = undefined;
     this.viewPresentations.clear();
     this.notify();
+    const error = this.presentationError;
+    const delay = error && retryDelay(error, this.recoveryAttempt++);
+    if (delay !== undefined)
+      this.recoveryTimer = setTimeout(
+        () => {
+          const channel = this.ports.endpoint.channel;
+          if (channel?.readyState === 'open' && !this.ports.authorization.productLocked) {
+            this.currentFailure = undefined;
+            this.negotiatePresentation(channel, true);
+          }
+        },
+        Math.min(60_000, delay),
+      );
   }
 
   private videoPlaneFor(viewId: string) {
@@ -898,6 +903,9 @@ export class PresentationSession {
   }
 
   reset() {
+    clearTimeout(this.recoveryTimer);
+    this.currentFailure = undefined;
+    this.recoveryAttempt = 0;
     clearTimeout(this.videoMetadataRefreshTimer);
     this.videoMetadataRefreshTimer = undefined;
     clearTimeout(this.presentationNegotiationTimer);
@@ -942,7 +950,6 @@ export class PresentationSession {
         }),
       ),
       error: this.presentationError,
-      canRetry: this.canRetryPresentation,
       backend: this.backendState,
       barrier: this.barrierState,
       layout: this.layout && { ...this.layout, views: this.layout.views.map((view) => ({ ...view })) },
@@ -970,7 +977,6 @@ export class PresentationSession {
     views: {},
     pageHeights: {},
     layout: null,
-    canRetry: false,
   };
 
   subscribe = (listener: () => void) => {

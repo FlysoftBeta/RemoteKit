@@ -1,21 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { formatError } from '../client/util/format-error';
+import { endpointError } from '../server/endpoint/gateway';
+import { HttpClient } from '../server/learning/providers/http';
+import { log } from '../server/log';
+import { mailError } from '../server/session-import/mail-error';
+import { errorHandling, retryDelay } from '../shared/error-policy';
 import {
   RemoteKitError,
+  errorCodeMessage,
   httpStatus,
+  nativeError,
+  nativeReasonMessage,
   parseWireError,
   toRemoteKitError,
   wireError,
-  nativeReasonMessage,
-  nativeError,
-  errorCodeMessage,
 } from '../shared/errors';
-import { errorHandling, retryDelay } from '../shared/error-policy';
-import { endpointError } from '../server/endpoint/gateway';
-import { formatError } from '../client/util/format-error';
-import { mailError } from '../server/session-import/mail-error';
-import { HttpClient } from '../server/learning/providers/http';
-import { log } from '../server/log';
 
 test('wire errors validate every code and restrict retry hints without leaking diagnosis', () => {
   for (const code of Object.keys(httpStatus) as (keyof typeof httpStatus)[]) {
@@ -104,7 +104,7 @@ test('shared native display messages recognize only the closed reason set', (t) 
     assert.equal(error.reason, reason);
     assert.equal(error.message, message);
     assert.equal(error.detail, 'English diagnosis');
-    assert.deepEqual(wireError(error), { code: 'rejected', message });
+    assert.deepEqual(wireError(error), { code: 'rejected', message, reason });
   }
   for (const reason of ['future_reason', 'toString', '', null, 1]) {
     assert.equal(nativeReasonMessage(reason), undefined);
