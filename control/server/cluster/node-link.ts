@@ -623,6 +623,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
 }
 
 export class NodeRegistry extends EventEmitter {
+  unknownIdentityRejection?: NonNullable<NodeHistory['rejected']>;
   isRemoved: (nodeId: string) => boolean = () => false;
   objectKeys?: { objectKey: string; objectIdKey: string };
   fencing: (
@@ -736,7 +737,15 @@ export class NodeRegistry extends EventEmitter {
             (!expectedNodeId && link.configured.local) ||
             !handshake.remotePublicKey.equals(Buffer.from(link.configured.publicKey, 'base64'))
           ) {
-            link?.rejected('identity_mismatch', hello.buildId);
+            if (expectedNodeId) this.links.get(expectedNodeId)?.rejected('identity_mismatch', hello.buildId);
+            else {
+              this.unknownIdentityRejection = {
+                code: 'identity_mismatch',
+                buildId: hello.buildId,
+                at: Date.now(),
+              };
+              log.warn('node.unknown_identity_rejected', this.unknownIdentityRejection);
+            }
             throw new Error('Node identity mismatch');
           }
           let reject: string | undefined;

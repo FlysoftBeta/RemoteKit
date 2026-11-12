@@ -100,6 +100,7 @@ test('encrypted handshake supplies config, rejects unknown/build mismatch, repla
 
 test('IK binds configured node identity and peer revocation to the configured public keys', async () => {
   const h = await harness();
+  const control = createApplication(h.store, h.gateway);
   const removed = new Set<string>();
   h.registry.isRemoved = (node) => removed.has(node);
   try {
@@ -120,7 +121,12 @@ test('IK binds configured node identity and peer revocation to the configured pu
     } finally {
       wrong.close();
     }
-    assert.equal(h.registry.get('alpha')!.history().rejected?.code, 'identity_mismatch');
+    assert.equal(h.registry.get('alpha')!.history().rejected, undefined);
+    assert.equal(h.registry.get('beta')!.history().rejected, undefined);
+    assert.equal(h.registry.unknownIdentityRejection?.code, 'identity_mismatch');
+    const unknown = control.nodeAdmin.list().find((node) => node.state === 'unknown');
+    assert.equal(unknown?.nodeId, null);
+    assert.equal(unknown?.rejected?.code, 'identity_mismatch');
     await assert.rejects(h.connect({ nodeId: 'unknown' }), /Handshake closed/);
     removed.add('beta');
     const pushed = once(alpha, 'frame');
@@ -133,6 +139,7 @@ test('IK binds configured node identity and peer revocation to the configured pu
     assert.equal((await h.connect({ nodeId: 'beta' })).helloReply.type, 'node.ready');
     assert.equal(h.registry.get('beta')!.configured.publicKey, identity);
   } finally {
+    await control.close();
     await h.close();
   }
 });

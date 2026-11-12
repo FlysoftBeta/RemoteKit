@@ -474,11 +474,7 @@ try {
       const other = source === 'alpha' ? 'beta' : 'alpha';
       await writeFile(
         join(nodes[source].local.root, 'node.json'),
-        JSON.stringify({
-          ...JSON.parse(correct),
-          privateKey: JSON.parse(await readFile(join(nodes[other].local.root, 'node.json'), 'utf8'))
-            .privateKey,
-        }),
+        await readFile(join(nodes[other].local.root, 'node.json')),
       );
       await killNode(source);
       await until(

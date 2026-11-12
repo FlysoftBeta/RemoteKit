@@ -1,6 +1,6 @@
 import { Alert, Box, Button, Chip, Paper, Typography } from '@mui/material';
 import { useState } from 'react';
-import type { AdminNode } from '../../../shared/admin';
+import type { ConfiguredAdminNode } from '../../../shared/admin';
 import {
   ConfirmDialog,
   formatBytes,
@@ -15,7 +15,7 @@ import {
 import { OverflowText } from '../overflow-text';
 
 const states: Record<
-  AdminNode['state'],
+  ConfiguredAdminNode['state'],
   { label: string; color: 'success' | 'warning' | 'default' | 'error' }
 > = {
   ready: { label: '在线', color: 'success' },
@@ -34,7 +34,7 @@ const exits: Record<number, string> = {
   4: '配置已变更，正在重启',
 };
 
-function problems(node: AdminNode) {
+function problems(node: ConfiguredAdminNode) {
   const list: { severity: 'warning' | 'error' | 'info'; text: string }[] = [];
   if (node.state !== 'ready' && node.rejected)
     list.push({
@@ -68,9 +68,9 @@ function NodeCard({
   online,
   change,
 }: {
-  node: AdminNode;
+  node: ConfiguredAdminNode;
   online: boolean;
-  change: (node: AdminNode) => void;
+  change: (node: ConfiguredAdminNode) => void;
 }) {
   const metrics = node.metrics;
   const state = states[node.state];
@@ -180,20 +180,27 @@ function NodeCard({
 
 export function AdminNodesSection({ online, call }: { online: boolean; call: AdminCall }) {
   const { data, setData, error } = useAdminResource(online, () => call('admin.nodes', {}));
-  const [selected, setSelected] = useState<AdminNode | null>(null);
+  const [selected, setSelected] = useState<ConfiguredAdminNode | null>(null);
   const ready = data?.filter((node) => node.state === 'ready').length ?? 0;
+  const total = data?.filter((node) => node.state !== 'unknown').length ?? 0;
   return (
     <Box className="admin-section">
       <SectionHeader
         title="节点"
-        detail={data ? `${ready} / ${data.length} 个在线 · 节点在 Control 配置文件中定义` : undefined}
+        detail={data ? `${ready} / ${total} 个在线 · 节点在 Control 配置文件中定义` : undefined}
       />
       <LoadState error={error} loading={!data} />
       {data && (
         <Box className="admin-node-grid">
-          {data.map((node) => (
-            <NodeCard key={node.nodeId} node={node} online={online} change={setSelected} />
-          ))}
+          {data.map((node) =>
+            node.state === 'unknown' ? (
+              <Alert key="unknown-identity" severity="error">
+                未知身份连接已被拒绝（{formatTime(node.rejected.at)}），请检查远程节点的 node.json。
+              </Alert>
+            ) : (
+              <NodeCard key={node.nodeId} node={node} online={online} change={setSelected} />
+            ),
+          )}
         </Box>
       )}
       <ConfirmDialog

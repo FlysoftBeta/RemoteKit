@@ -14,7 +14,7 @@ export interface AdminNodeMetrics {
   disk: { total: number; free: number };
   objectBytes: number;
 }
-export interface AdminNode {
+export interface ConfiguredAdminNode {
   nodeId: string;
   state: AdminNodeState;
   managed: boolean;
@@ -38,6 +38,12 @@ export interface AdminNode {
   rejected: { code: string; buildId: string; at: number } | null;
   exited: { code: number | null; at: number } | null;
 }
+export interface UnknownAdminNodeIdentity {
+  nodeId: null;
+  state: 'unknown';
+  rejected: { code: string; buildId: string; at: number };
+}
+export type AdminNode = ConfiguredAdminNode | UnknownAdminNodeIdentity;
 export type AdminSessionState =
   | { state: 'none' }
   | {

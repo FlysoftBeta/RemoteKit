@@ -21,6 +21,7 @@ import { FakeNode, fakeMetrics } from './fake-node';
 import { TestClock, requestViewer } from './server-fixture';
 import { RemoteKitError } from '../shared/errors';
 import { log } from '../server/log';
+import type { ConfiguredAdminNode } from '../shared/admin';
 
 const id = (n: number) => n.toString(16).padStart(64, '0');
 
@@ -277,9 +278,11 @@ test('node removal transfers every placement from the newest complete version', 
     const offline = once(h.nodes.get('alpha')!, 'offline');
     alpha.close();
     await offline;
-    assert.deepEqual(h.control.nodeAdmin.list().find((node) => node.nodeId === 'alpha')!.affectedUsers, [
-      { username: 'node-dirty-user', checkpointAt: 1234 },
-    ]);
+    assert.deepEqual(
+      h.control.nodeAdmin.list().find((node): node is ConfiguredAdminNode => node.nodeId === 'alpha')!
+        .affectedUsers,
+      [{ username: 'node-dirty-user', checkpointAt: 1234 }],
+    );
     h.control.nodeAdmin.remove('alpha');
     const moved = h.placement.peek(user.tenantId)!;
     assert.equal(moved.dataState, 'clean');
@@ -1237,6 +1240,7 @@ test('null limits reach nodes and automatic disk floors drain cold copies and re
     assert.ok(beta.objects.has(id(1)));
     assert.equal(alpha.objects.has(id(1)), false);
     const views = h.control.nodeAdmin.list();
+    assert(views[0].state !== 'unknown');
     assert.equal(views[0].maxSessions, null);
     assert.equal(views[0].headroom, 1 - h.nodes.get('alpha')!.metrics.predicted()!);
     alpha.metrics.disk.free = 9 * 1024 ** 3;

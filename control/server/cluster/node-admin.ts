@@ -21,7 +21,7 @@ export class NodeAdmin {
       !!store.db.prepare('SELECT 1 FROM removed_nodes WHERE node_id=?').get(nodeId);
   }
   list(): AdminNode[] {
-    return this.nodes.all().map((node) => {
+    const nodes: AdminNode[] = this.nodes.all().map((node) => {
       const sample = node.metrics.latest();
       const history = node.history();
       return {
@@ -70,6 +70,9 @@ export class NodeAdmin {
         exited: history.exited ?? null,
       };
     });
+    if (this.nodes.unknownIdentityRejection)
+      nodes.push({ nodeId: null, state: 'unknown', rejected: this.nodes.unknownIdentityRejection });
+    return nodes;
   }
   remove(nodeId: string) {
     const node = this.nodes.get(nodeId);

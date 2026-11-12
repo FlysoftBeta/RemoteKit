@@ -25,7 +25,7 @@ import {
   Typography,
 } from '@mui/material';
 import { useState } from 'react';
-import type { AdminSocketMethods, AdminUser, AdminNode } from '../../../shared/admin';
+import type { AdminSocketMethods, AdminUser, AdminNode, ConfiguredAdminNode } from '../../../shared/admin';
 import { RemoteKitError } from '../../../shared/errors';
 import { useAutoFocus } from '../../editing/local-autofocus';
 import { failureError, FailureNote } from '../../failures';
@@ -244,7 +244,7 @@ function ActionDialog({
             <MenuItem value="">自动选择</MenuItem>
             {nodes
               .filter(
-                (node) =>
+                (node): node is ConfiguredAdminNode =>
                   node.state === 'ready' &&
                   user.session.state !== 'none' &&
                   node.nodeId !== user.session.nodeId,

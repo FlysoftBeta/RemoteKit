@@ -16,6 +16,48 @@ import { decodeFrame, encodeJson, encodeStdio, StdioDecoder, jsonObject } from '
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 
+test('a swapped local bootstrap rejection belongs to the receiving stdio node', () => {
+  const key = Buffer.alloc(32, 17);
+  const registry = new NodeRegistry({
+    privateKey: key.toString('base64'),
+    buildId: 'dev',
+    nodes: { alpha: testNode('alpha'), beta: testNode('beta') },
+  });
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill() {
+      child.emit('exit', 1);
+    },
+  });
+  const carrier = new StdioCarrier(
+    child as unknown as ChildProcessWithoutNullStreams,
+    new EndpointLog(join(tmpdir(), 'rk-swapped-identity.log')),
+  );
+  registry.accept(carrier, 'alpha');
+  const handshake = new NoiseHandshake('initiator', nodePrivateKey('beta'), publicKey(key));
+  child.stdout.write(
+    encodeStdio(
+      handshake.writeMessage(
+        Buffer.from(
+          JSON.stringify({
+            type: 'node.hello',
+            role: 'endpoint',
+            nodeId: 'beta',
+            buildId: 'dev',
+            incarnation: 'a'.repeat(32),
+          }),
+        ),
+      ),
+    ),
+  );
+  assert.equal(registry.get('alpha')!.history().rejected?.code, 'identity_mismatch');
+  assert.equal(registry.get('beta')!.history().rejected, undefined);
+  assert.equal(registry.unknownIdentityRejection, undefined);
+  registry.stop();
+});
+
 for (const code of [1, 0, null, 99, 3, 4]) {
   test(`local Endpoint exit ${code} follows the restart policy`, (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
