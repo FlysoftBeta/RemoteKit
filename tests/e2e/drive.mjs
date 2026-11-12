@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { startStack } from './kit/stack.mjs';
-import { cliOptions, launch } from './kit/viewer.mjs';
+import { cliOptions, launch, remoteInputReady } from './kit/viewer.mjs';
 
 const options = cliOptions();
 options.port ??= '34000';
@@ -29,6 +29,10 @@ try {
   await viewer.openStart();
   await viewer.tile('浏览器').click({ timeout: 120000 });
   await viewer.until(() => viewer.state.workspace.windows.length === 1, 'browser');
+  await viewer.until(() => viewer.state.browser.state === 'available', 'Browser available');
+  await viewer.navigate(stack.fixture + '/notes/drive');
+  await page.locator('canvas[data-video-input]:not(.no-frame)').first().waitFor({ timeout: 90000 });
+  await page.waitForFunction(remoteInputReady);
   const commands = {
     shot: async (q) => {
       await viewer.shot(q.get('name') ?? 'shot');

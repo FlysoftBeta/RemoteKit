@@ -396,6 +396,9 @@ export function stageProductRuntime(endpoint, browser, destination) {
   const executable = stageRuntime(endpoint, browser, destination);
   const browserTarget = join(destination, 'remotekit_browser.exe');
   if (!existsSync(browserTarget)) linkSync(resolve(browser), browserTarget);
+  const snapshot = join(dirname(resolve(endpoint)), 'remotekit_snapshot.exe');
+  const snapshotTarget = join(destination, 'remotekit_snapshot.exe');
+  if (existsSync(snapshot) && !existsSync(snapshotTarget)) linkSync(snapshot, snapshotTarget);
   for (const name of ['face-models', 'models', 'documents']) {
     const source = join(dirname(resolve(endpoint)), name);
     const target = join(destination, name);
