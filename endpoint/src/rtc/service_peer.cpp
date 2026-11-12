@@ -152,7 +152,7 @@ void ServicePeer::Flush() {
   if (!peer_.DataOpen() || !authorization_.Current(token))
     return;
   files_.Flush(token.peer, [this, token](const std::string& encoded) {
-    auto admission = authorization_.LockAdmission();
+    // SDK sends wait for the signaling thread, which can be admitting incoming chunks.
     if (!authorization_.Current(token))
       return 1;
     auto message = Json::parse(encoded);

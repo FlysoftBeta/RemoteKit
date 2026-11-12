@@ -930,6 +930,22 @@ void ClipboardSynchronization() {
   contents["text"] = std::string(1024 * 1024, '\x01');
   CHECK(clipboard.Poll());
   CHECK(events.back()["oversize"] == true && events.back()["baseRevision"] == "9");
+  for (const auto& value : {Json{{"text", std::string(3 * 1024 * 1024, 'x')}, {"html", ""}},
+                            Json{{"text", ""}, {"html", std::string(2 * 1024 * 1024 + 1, 'x')}}}) {
+    ++sequence;
+    contents.update(value);
+    CHECK(clipboard.Poll());
+    const auto& event = events.back();
+    CHECK(event["oversize"] == true && !event.contains("text") && !event.contains("html"));
+    CHECK(event["textBytes"] == value["text"].get_ref<const std::string&>().size());
+    CHECK(event["htmlBytes"] == value["html"].get_ref<const std::string&>().size());
+  }
+  ++sequence;
+  contents.update(
+      {{"text", std::string(1024 * 1024, 'x')}, {"html", std::string(2 * 1024 * 1024, 'x')}});
+  CHECK(clipboard.Poll());
+  CHECK(!events.back().contains("oversize") && events.back()["text"] == contents["text"] &&
+        events.back()["html"] == contents["html"]);
   for (const auto* invalid : {"01", "-1", "18446744073709551616"})
     CHECK(!ClipboardController::Valid({{"revision", invalid}, {"text", ""}, {"html", ""}}));
 }

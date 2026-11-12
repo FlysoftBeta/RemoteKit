@@ -71,6 +71,43 @@ async function fixture() {
   return { store, endpoint, control, tenant, op };
 }
 
+test('WS navigation submitted while Browser starts prepares its view before native dispatch', async () => {
+  const f = await fixture();
+  try {
+    await observedProductAction(
+      f.control,
+      f.tenant,
+      {
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+      },
+      'lease',
+    );
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0];
+    f.control.tenants.get(f.tenant).browserIncarnation = undefined;
+    const observe = f.endpoint.observe.bind(f.endpoint);
+    const request = f.endpoint.request.bind(f.endpoint);
+    let starting = true;
+    f.endpoint.observe = () => ({ ...observe(), running: !starting });
+    f.endpoint.request = async (method, tenant, args) => {
+      if (method === 'session.desired' && args.views.some((view: any) => view.viewId === tab.webviewId))
+        starting = false;
+      return request(method, tenant, args);
+    };
+    const operation = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://starting.test/' });
+    const receipt = await requestViewer(f.control, f.tenant, 'lease', 'operation.submit', operation);
+    assert.equal(receipt.status, 'applying');
+    const navigate = f.endpoint.calls.find((call) => call.method === 'view.navigate');
+    assert.equal(navigate?.args.url, 'https://starting.test/');
+    assert.equal(navigate?.args.operationId, operation.operationId);
+    assert(f.endpoint.views.some((view) => view.viewId === tab.webviewId));
+  } finally {
+    await f.control.close();
+    f.store.db.close();
+  }
+});
+
 for (const initial of ['start', 'remote'] as const) {
   test(`stop retains the ${initial} pending navigation owner and settles both receipts without committing a document`, async () => {
     const f = await fixture();

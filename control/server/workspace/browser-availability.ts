@@ -19,9 +19,9 @@ export function browserAvailability(context: DomainContext, tenant: string): Bro
   return { state: context.endpoint.observation(tenant)?.browser === 'running' ? 'available' : 'starting' };
 }
 
-export function requireBrowser(context: DomainContext, tenant: string) {
+export function requireBrowser(context: DomainContext, tenant: string, allowStarting = false) {
   const browser = browserAvailability(context, tenant);
-  if (browser.state === 'available') return;
+  if (browser.state === 'available' || (allowStarting && browser.state === 'starting')) return;
   throw new RemoteKitError(
     'unavailable',
     browser.reason === 'session_data_on_offline_node'

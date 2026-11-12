@@ -135,7 +135,8 @@ class ClipboardController {
       if (value.contains("viewId") && value["viewId"].is_string() && value["viewId"] != "")
         event["viewId"] = value["viewId"];
       event["excludeFromHistory"] = value.value("excludeFromHistory", false);
-      if (text.size() + html.size() >= kMaxEventBytes || event.dump().size() >= kMaxEventBytes) {
+      if (text.size() > 1024 * 1024 || html.size() > 2 * 1024 * 1024 ||
+          event.dump().size() >= kMaxEventBytes) {
         event.erase("text");
         event.erase("html");
         event["oversize"] = true;

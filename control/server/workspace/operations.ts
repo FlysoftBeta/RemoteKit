@@ -245,7 +245,7 @@ export class OperationPipeline {
     this.services.viewers.push(tenant);
     for (const effect of plan.effects) {
       if (['navigate', 'command', 'replyClose', 'replyPage', 'exitFullscreen'].includes(effect.kind))
-        requireBrowser(this.context, tenant);
+        requireBrowser(this.context, tenant, effect.kind === 'navigate');
       switch (effect.kind) {
         case 'navigate':
           await this.services.navigation.navigate(state, effect);

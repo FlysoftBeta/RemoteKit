@@ -1,5 +1,6 @@
 .remote-viewport {
   position: absolute;
+  isolation: isolate;
   inset: 0;
   overflow: hidden;
   background: var(--surface);
