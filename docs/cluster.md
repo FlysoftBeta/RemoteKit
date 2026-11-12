@@ -4,50 +4,58 @@
 
 ## 配置
 
-**Control 配置文件**是唯一的配置来源：`REMOTEKIT_CONTROL_CONFIG` 指定路径（默认 `<control>/data/control.json`；发布包为 `config/control.json`），不存在时按默认值创建。严格校验，未知键或类型错误拒绝启动；所有相对路径相对配置文件所在目录，开发与打包用同一套默认值。按含义分组：
+**Control 配置文件**是唯一的配置来源：`REMOTEKIT_CONTROL_CONFIG` 指定路径（默认 `<control>/data/control.json`；发布包为 `config/control.json`），不存在时由 Control 写出一份完整的默认配置。格式定义在 `control/server/config-formats.ts`，与其他落盘格式同样严格（见[架构 · 持久化格式](architecture.md#持久化格式)）：带 `version`，文件是完整的——除 `http.tls`、`sessionImport`、节点内的 `media` 与本地节点的 `executable` 外每个键都必须写出，"不设"写 `null`；未知键、缺键或类型错误拒绝启动。读取处没有默认值，默认值只出现在 Control 第一次创建文件时。所有相对路径相对配置文件所在目录，开发与打包用同一套默认值。按含义分组：
 
 ```json
 {
+  "version": 1,
   "http": { "listen": "0.0.0.0:3001", "origins": ["https://example.org:3001"], "tls": { "key": "certs/privkey.pem", "cert": "certs/fullchain.pem" } },
   "storage": { "database": "../data/control.db", "diagnostics": "../data/diagnostics", "logs": "../logs" },
-  "media": { "encoder": "auto", "fps": 60, "bitrate": 36000000, "maxBitrate": 48000000 },
+  "media": {
+    "encoder": "auto", "fps": 60, "bitrate": 36000000, "maxBitrate": 48000000,
+    "asyncDepth": null, "gop": null, "targetUsage": null, "qsvLowPower": "auto",
+    "bufferMs": null, "rateControl": null, "idleIdrMs": 150,
+    "maxEncodeWidth": 4096, "maxEncodeHeight": 4096
+  },
+  "quotas": { "tenantObjectBytes": null },
   "nodes": {
     "local": {
       "local": { "root": "../data/node" },
-      "peer": { "listen": "0.0.0.0:3101", "address": "192.168.1.10:3101" }
+      "peer": { "listen": "0.0.0.0:3101", "address": "192.168.1.10:3101" },
+      "rtc": { "ports": null, "address": null },
+      "limits": { "maxSessions": null, "diskReserveBytes": null, "sessionMemoryBytes": null }
     },
     "gpu-1": {
       "remote": { "control": "ws://192.168.1.10:3001/api/node" },
       "peer": { "listen": "0.0.0.0:3101", "address": "192.168.1.20:3101" },
       "rtc": { "ports": "40000-40019", "address": "example.org" },
-      "limits": { "maxSessions": 4 },
+      "limits": { "maxSessions": 4, "diskReserveBytes": null, "sessionMemoryBytes": null },
       "media": { "encoder": "nvenc" }
     }
-  },
-  "quotas": { "tenantObjectBytes": null }
+  }
 }
 ```
 
 | 分组 | 含义 | 去向 |
 |---|---|---|
 | `local` / `remote` | 节点怎样启动与接入：本地节点由 Control 经 stdio 拉起（`root` 是节点根目录，开发构建另有 `executable`）；远端节点主动连接 `remote.control`（`ws(s)://host:port/api/node`） | 只有 Control 用 |
-| `peer` | 节点间对象传输：`listen` 在哪监听、`address` 别人从哪访问。每个节点各自写，不继承；集群只有一个节点时可省略（默认 `127.0.0.1:3101`），多于一个节点时每个节点都必须写，两个本地节点不能共用监听端口 | 下发给 Endpoint，变化需要重启节点 |
+| `peer` | 节点间对象传输：`listen` 在哪监听、`address` 别人从哪访问。每个节点各自写，两个本地节点不能共用监听端口 | 下发给 Endpoint，变化需要重启节点 |
 | `rtc` | Viewer 媒体：`ports` 为 UDP 端口段（`null` 由系统选择），`address` 是额外对外宣告的主机名/IP（要求 `ports`） | 下发给 Endpoint，变化需要重启节点 |
-| `limits` | 放置策略：`maxSessions`、`diskReserveBytes`、`sessionMemoryBytes`（正整数或 `null`）。默认不设：没有显式上限时按实测容量尽力服务（见[指标与放置](#指标与放置)）；设置后是硬上限 | 只有 Control 用，不下发、不进 configHash |
-| `media` | 编码与码控调优；顶层是集群默认值，节点内的 `media` 按键覆盖 | 下发给 Endpoint，不重启：之后启动的 Session 使用新值 |
+| `limits` | 放置策略：`maxSessions`、`diskReserveBytes`、`sessionMemoryBytes`（正整数或 `null`）。`null` 表示没有显式上限，按实测容量尽力服务（见[指标与放置](#指标与放置)）；设置后是硬上限 | 只有 Control 用，不下发、不进 configHash |
+| `media` | 编码与码控调优；顶层是完整的集群默认值，节点内可选的 `media` 只写要覆盖的键 | 下发给 Endpoint，不重启：之后启动的 Session 使用新值 |
 
-- `storage`：数据库、诊断归档与日志位置；`quotas.tenantObjectBytes`：每 Tenant 对象字节配额，默认不设。
+- `storage`：数据库、诊断归档与日志位置；`quotas.tenantObjectBytes`：每 Tenant 对象字节配额，`null` 为不设。
 - 节点数据目录固定为 `<节点根>/data`，Browser 固定在 `endpoint_service.exe` 旁边，不再可配置。
 - 节点生效配置 = `{nodeId, peer, rtc, media}`。`configHash` 只覆盖 `peer` 与 `rtc`（需要重新监听端口的部分）：重连时它变化，Endpoint 优雅退出（退出码 4），由监管者重启；`media` 变化在下一次握手时下发，Endpoint 记住它，之后创建的 Session 和编码器使用新值，不重启。
 - 加载配置只做三件"写"的事：缺少 `control.key` 时生成；为没有身份文件的节点生成身份并写出 `node.json`；删除已不在配置里的远端节点的 `node.json`。凭据恢复工具只解析配置，不做这些事。
-- 旧布局（顶层 `cluster`、`nodeDefaults`、节点内平铺的调优键）在启动时转换一次为上面的布局，原文件保留为 `control.json.v1`（`control/server/config-v1.ts`）。
 
 ### 节点身份
 
-每一方都有自己的 X25519 静态密钥：Control 在配置目录的 `control.key`；节点的密钥由 Control 在该节点 ID 第一次出现在配置里时生成，写入它的 `node.json`：
+每一方都有自己的 X25519 静态密钥：Control 在配置目录的 `control.key`（`{version, privateKey}`）；节点的密钥由 Control 在该节点 ID 第一次出现在配置里时生成，写入它的 `node.json`：
 
 | 键 | 内容 |
 |---|---|
+| `version` | 格式版本（1） |
 | `nodeId` | 节点 ID |
 | `privateKey` | 节点私钥（base64） |
 | `controlPublicKey` | Control 公钥（base64） |
@@ -55,7 +63,7 @@
 
 - 远端节点的文件在 `<配置目录>/nodes/<nodeId>/node.json`，运维把它复制到节点根目录；本地节点的文件由 Control 直接写到 `<local.root>/node.json`。Control 从自己写出的这个文件读取节点公钥——它就是该节点身份的唯一记录。
 - 节点从配置中删除：远端节点的 `node.json` 被删除；Control 不再知道它的公钥，它的握手会失败——这就是吊销。同一个 ID 重新加入会得到新密钥。
-- 文件与当前状态不符时 Control 不拒绝启动：`control.key` 被替换或 `nodeId` 不符时为该节点生成新身份并记 `config.identity_regenerated`（warn），该节点要拿到新的 `node.json` 才能接入；只有远端地址变化时只改写 `control` 字段、保留密钥（`config.bootstrap_updated`）。
+- 本地已有的 `node.json` 必须与当前状态一致：`nodeId` 与配置中的 ID 相同、`controlPublicKey` 与 `control.key` 对应，本地节点不带 `control`；不一致就拒绝启动，不自动换新身份。更换 Control 密钥时删除 `control.key` 与各节点的 `node.json`，重新启动生成新身份，再把新的 `node.json` 复制到远端节点。只有远端地址变化时，Control 改写 `control` 字段并保留密钥（`config.bootstrap_updated`）。
 - 管理 App → 节点显示每个节点公钥指纹（SHA-256 前 16 位十六进制）和远端节点 `node.json` 的路径；握手因身份不符被拒时显示"身份不匹配：请将新的 node.json 复制到该节点"。
 
 ## 集群通道
@@ -129,7 +137,7 @@ Control 与 Endpoint 之间只有三种交互，没有逐方法的恢复路径�
 
 ## Session 存储
 
-Endpoint 自己的 Session 状态在 Session 目录的 `session.db`（SQLite，WAL，`synchronous=FULL`，`user_version` = 1）里，随目录进 checkpoint、随 Profile 搬迁。它只保存 Control 重建不出来、而 Endpoint 执行或恢复需要的东西：
+Endpoint 自己的 Session 状态在 Session 目录的 `session.db`（SQLite，WAL，`synchronous=FULL`，版本记在 `user_version`，当前为 3）里，随目录进 checkpoint、随 Profile 搬迁。它只保存 Control 重建不出来、而 Endpoint 执行或恢复需要的东西：
 
 | 表 | 内容 |
 |---|---|
@@ -141,11 +149,9 @@ Endpoint 自己的 Session 状态在 Session 目录的 `session.db`（SQLite，W
 | `library_drafts` | 上传草稿（字节在 `file-library/incoming/`，先落盘再提交行）；提交前删除，从不进 checkpoint |
 | `library_selections` | 原生文件选择回执 |
 
-站点偏好不落盘：Control 在启动 Browser 前推送，Endpoint 只放内存。每个组件只通过自己的窄接口操作自己的表。一个逻辑变更是一个事务——关闭 view（删期望配置、记关闭事件、删恢复数据）、显式导航（改 URL、删旧恢复数据）、确认事件（删事件、更新下载交接）、批量取消选择——不再有跨文件的中间状态和启动时的修复重放。SQLite 结果码映射到错误模型：`BUSY`/`LOCKED` → `busy`，IO、打不开、磁盘满、权限 → `unavailable`，`CORRUPT`/`NOTADB` 和不支持的 `user_version` → `internal` + `corrupt_state`。
+站点偏好不落盘：Control 在启动 Browser 前推送，Endpoint 只放内存。每个组件只通过自己的窄接口操作自己的表。一个逻辑变更是一个事务——关闭 view（删期望配置、记关闭事件、删恢复数据）、显式导航（改 URL、删旧恢复数据）、确认事件（删事件、更新下载交接）、批量取消选择——不再有跨文件的中间状态和启动时的修复重放。各列的文档格式定义在 `persistence/session_documents.hpp` 与 `files/library_records.hpp`，读写都经同一份定义；库的格式变化只在 `persistence/session_migrations.cpp` 里按编号进行，迁移前与 Control 数据库一样先 `VACUUM INTO` 备份并校验，失败整体回滚。SQLite 结果码映射到错误模型：`BUSY`/`LOCKED` → `busy`，IO、打不开、磁盘满、权限 → `unavailable`，`CORRUPT`/`NOTADB` 和不支持的 `user_version` → `internal` + `corrupt_state`。
 
-**旧格式导入**：checkpoint 跨构建恢复，所以打开的 Session 目录可能是旧构建写的零散 JSON（`views.json`、`events.json`、`download-imports.json`、`site-preferences.json`、`recovery/*.json`、`file-library/{metadata,drafts,selections,derivatives}/*.json`，以及目录里的 `browser.log`、`crashes/`）。打开时没有 `session.db` 而有这些文件，就按旧规则校验后在一个事务里导入新库，提交之后才删除旧文件；某个文件打不开 → `unavailable`，内容非法 → `corrupt_state`，两种情况都不导入、不删除。导入器单独在 `persistence/legacy_session_import.*`，没有其他代码读旧格式；还有旧格式 checkpoint 的 Session 打开过一次后它就没有用处了。
-
-**节点级文件**：`<sessionId>.copy.json`（副本记录）、`.changes`（变更日志）、`.checkpoint-index.json`（增量索引）描述的是"这个节点上的这份副本"，不随 checkpoint 搬迁。副本记录与索引是单文件原子写（临时文件 + flush + 替换），变更日志只追加。读这些文件时"打不开"（IO 错误）与"不存在"严格区分：前者是 `unavailable`，从不当作不存在；副本记录内容非法是 `corrupt_state`，索引是缓存，内容非法时按不存在处理（整体重建）。冷副本清理也清除这些文件的 `.new` 残留，以及该 Session 在 `logs/browser/`、`logs/crashes/` 下的日志。
+**节点级文件**：`<sessionId>.copy.json`（副本记录）、`.changes`（变更日志）、`.checkpoint-index.json`（增量索引）描述的是"这个节点上的这份副本"，不随 checkpoint 搬迁。三者与 checkpoint manifest 的格式定义都在 `persistence/checkpoint_formats.hpp`，各带 `version`（变更日志每行一个），格式变化只在 `persistence/format_migrations.hpp` 里处理。副本记录与索引是单文件原子写（临时文件 + flush + 替换），变更日志只追加。读这些文件时"打不开"（IO 错误）与"不存在"严格区分：前者是 `unavailable`，从不当作不存在；副本记录或变更日志内容非法是 `corrupt_state`，索引是缓存，内容非法时按不存在处理（整体重建）。冷副本清理也清除这些文件的 `.new` 残留，以及该 Session 在 `logs/browser/`、`logs/crashes/` 下的日志。
 
 ## Session 副本与提交
 
