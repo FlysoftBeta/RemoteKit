@@ -486,7 +486,7 @@ export async function instrumentViewer(context, evidence, name) {
         () => clusterQA.service?.channel.readyState === 'open' && clusterQA.auth?.serviceEpoch > 0,
       ),
     async media() {
-      await page.bringToFront();
+      if (!(await page.evaluate(() => document.hasFocus()))) await page.bringToFront();
       await page.waitForFunction(() => document.hasFocus());
       return until(
         () =>
