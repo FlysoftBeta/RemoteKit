@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { RemoteKitError, parseWireError } from '../../shared/errors';
 import type {
   Asset,
+  AssetDescription,
   LibraryAssetFields,
   LibraryEntry,
   LibraryMethods,
@@ -377,18 +378,19 @@ export class FileLibrary {
         detail: 'Files are held by a pending selection',
       });
   }
-  private async describe(tenant: string, assetId: string): Promise<Asset> {
+  private async describe(tenant: string, assetId: string): Promise<AssetDescription> {
     this.objects.require(tenant, assetId);
-    const value: Asset = await this.endpoint.describeAsset(tenant, { assetId });
+    const value = await this.endpoint.describeAsset(tenant, { assetId });
     if (
       !value ||
       value.assetId !== assetId ||
       !Number.isSafeInteger(value.size) ||
       value.size < 0 ||
       value.size > this.limits.maxFileBytes ||
-      typeof value.type !== 'string' ||
-      Buffer.byteLength(value.type) > 255 ||
-      /[\x00-\x1f\x7f]/.test(value.type)
+      (value.type !== undefined &&
+        (typeof value.type !== 'string' ||
+          Buffer.byteLength(value.type) > 255 ||
+          /[\x00-\x1f\x7f]/.test(value.type)))
     )
       throw new RemoteKitError('outcome_unknown', 'Endpoint未返回有效文件信息');
     return value;
@@ -400,9 +402,11 @@ export class FileLibrary {
   ): Promise<Asset> {
     const references = assetIds(fields);
     const asset = await this.describe(tenant, fields.assetId);
+    if (asset.type === undefined)
+      throw new RemoteKitError('outcome_unknown', 'Asset media type is required to create a library entry');
     for (const reference of references.slice(1)) await this.describe(tenant, reference);
     authorize();
-    return asset;
+    return { ...asset, type: asset.type };
   }
   private async import(tenant: string, params: Params<'library.import'>, authorize: () => void) {
     const operationId = id(params.operationId),

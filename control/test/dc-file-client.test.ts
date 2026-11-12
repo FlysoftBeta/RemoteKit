@@ -231,6 +231,29 @@ test('original preview permits PNGs through 64 MiB while thumbnails remain limit
   assert.deepEqual(sent, ['asset.describe', 'asset.describe', 'asset.read', 'photo.thumbnail']);
 });
 
+test('hash-only asset descriptions omit media type and byte reads do not fabricate one', async () => {
+  const description = { assetId: 'b'.repeat(64), size: 3 };
+  const channel = {
+    readyState: 'open',
+    bufferedAmount: 0,
+    send(text: string) {
+      const request = JSON.parse(text);
+      const result =
+        request.method === 'asset.describe' ? description : { data: 'YWJj', offset: 3, total: 3 };
+      queueMicrotask(() =>
+        client.handle({ type: 'files.result', version: 1, requestId: request.requestId, ok: true, result }),
+      );
+    },
+  } as unknown as RTCDataChannel;
+  const client = new FileChannel(() => channel);
+  const signal = new AbortController().signal;
+  const asset = await client.describeAsset(description.assetId, signal);
+  assert.deepEqual(asset, description);
+  const blob = await client.readAsset(asset, signal);
+  assert.equal(blob.type, '');
+  assert.equal(await blob.text(), 'abc');
+});
+
 test('chooser cancellation uses the authenticated selection command without an upload batch', async () => {
   const messages: any[] = [];
   let state = 'cancelled';

@@ -1,6 +1,7 @@
 import { retryDelay } from '../../shared/error-policy';
+import { isDocumentOpenParams } from '../../../protocol/file_requests';
 import { RemoteKitError, nativeError } from '../../shared/errors';
-import type { Asset, SelectionState } from '../../shared/file-library';
+import type { Asset, AssetDescription, SelectionState } from '../../shared/file-library';
 import { operationId } from '../control/product-operations';
 import type { DocumentInfo } from '../documents/document-source';
 import { diagnostics } from '../media/diagnostics';
@@ -250,14 +251,14 @@ export class FileChannel {
       signal.removeEventListener('abort', abort);
     }
   }
-  async readPhoto(asset: Asset, signal: AbortSignal): Promise<Blob> {
+  async readPhoto(asset: AssetDescription, signal: AbortSignal): Promise<Blob> {
     if (!Number.isSafeInteger(asset.size) || asset.size <= 0)
       throw new RemoteKitError('invalid_request', '照片大小无效');
     if (asset.size > 64 * 1024 * 1024)
       throw new RemoteKitError('limit_exceeded', '照片预览大小超出限制', { capacity: 'file' });
     return this.readAsset(asset, signal);
   }
-  async readAsset(asset: Asset, signal: AbortSignal): Promise<Blob> {
+  async readAsset(asset: AssetDescription, signal: AbortSignal): Promise<Blob> {
     const binding = this.currentBinding();
     const parts: Uint8Array<ArrayBuffer>[] = [];
     if (!Number.isSafeInteger(asset.size) || asset.size < 0)
@@ -290,12 +291,13 @@ export class FileChannel {
     this.checkBinding(binding, signal);
     return new Blob(parts, { type: asset.type });
   }
-  documentOpen(assetId: string, signal: AbortSignal) {
-    return this.call<({ state: 'ready' } & DocumentInfo) | { state: 'converting' }>(
-      'document.open',
-      { ...libraryBinding, assetId },
-      { signal },
-    );
+  documentOpen(assetId: string, type: string, signal: AbortSignal) {
+    const params = { ...libraryBinding, assetId, type };
+    if (!isDocumentOpenParams(params))
+      throw new RemoteKitError('invalid_request', 'Invalid document open request');
+    return this.call<({ state: 'ready' } & DocumentInfo) | { state: 'converting' }>('document.open', params, {
+      signal,
+    });
   }
   documentResource(documentId: string, contentId: string, offset: number, signal: AbortSignal) {
     return this.call<{ data: string; offset: number; total: number; mime: string }>(
@@ -304,9 +306,9 @@ export class FileChannel {
       { signal },
     );
   }
-  async describeAsset(assetId: string, signal: AbortSignal): Promise<Asset> {
+  async describeAsset(assetId: string, signal: AbortSignal): Promise<AssetDescription> {
     const binding = this.currentBinding();
-    const asset = await this.call<Asset>(
+    const asset = await this.call<AssetDescription>(
       'asset.describe',
       { ...libraryBinding, assetId },
       { binding, signal },
@@ -315,7 +317,7 @@ export class FileChannel {
     if (
       !asset ||
       asset.assetId !== assetId ||
-      typeof asset.type !== 'string' ||
+      (asset.type !== undefined && typeof asset.type !== 'string') ||
       !Number.isSafeInteger(asset.size) ||
       asset.size < 0
     ) {

@@ -1,10 +1,13 @@
 import type { WireError } from './errors';
-export interface Asset {
+export interface AssetDescription {
   assetId: string;
   size: number;
-  type: string;
+  type?: string;
   width?: number;
   height?: number;
+}
+export interface Asset extends AssetDescription {
+  type: string;
 }
 
 export interface PhotoMetadata {

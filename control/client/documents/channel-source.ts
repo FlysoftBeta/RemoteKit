@@ -10,6 +10,7 @@ export class ChannelDocumentSource implements DocumentSource {
   constructor(
     private readonly channel: Pick<FileChannel, 'documentOpen' | 'documentResource'>,
     private readonly assetId: string,
+    private readonly type: string,
   ) {}
 
   async open(signal: AbortSignal, options?: DocumentOpenOptions): Promise<DocumentInfo> {
@@ -19,7 +20,7 @@ export class ChannelDocumentSource implements DocumentSource {
       let result;
       let wait = 1500;
       try {
-        result = await this.channel.documentOpen(this.assetId, signal);
+        result = await this.channel.documentOpen(this.assetId, this.type, signal);
       } catch (error) {
         if (!(error instanceof RemoteKitError)) throw error;
         const handling = errorHandling(error.code);

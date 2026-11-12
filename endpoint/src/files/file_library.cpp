@@ -1,6 +1,7 @@
 #include "util/log.hpp"
 #include "files/file_library.hpp"
 #include "files/library_records.hpp"
+#include "files/file_selection.hpp"
 #include "documents/object_documents.hpp"
 #include "files/dc_file_services.hpp"
 #include "persistence/durable_json.hpp"
@@ -92,7 +93,9 @@ bool Remove(const fs::path& path) {
 }  // namespace
 
 ServiceJson FileLibrary::Asset::Json() const {
-  ServiceJson result = {{"assetId", id}, {"size", size}, {"type", type}};
+  ServiceJson result = {{"assetId", id}, {"size", size}};
+  if (type)
+    result["type"] = *type;
   if (width && height) {
     result["width"] = width;
     result["height"] = height;
@@ -130,7 +133,10 @@ Result<void> FileLibrary::Initialize() {
     return CorruptState("library asset limit");
   for (const auto& [id, value] : assets) {
     entries_.emplace(
-        id, Entry{Asset{id, value.at("type").get<std::string>(), value.at("size").get<uint64_t>(),
+        id, Entry{Asset{id,
+                        value.contains("type") ? std::optional(value.at("type").get<std::string>())
+                                               : std::nullopt,
+                        value.at("size").get<uint64_t>(),
                         value.contains("width") ? value.at("width").get<unsigned>() : 0u,
                         value.contains("height") ? value.at("height").get<unsigned>() : 0u}});
   }
@@ -210,7 +216,7 @@ Result<const FileLibrary::Entry*> FileLibrary::RequireAsset(const std::string& i
   if (found == entries_.end()) {
     if (info.size > kFileBytes)
       return Error{ErrorCode::kLimitExceeded, "asset_too_large", ErrorReason::kFileTooLarge};
-    Entry entry{Asset{id, "application/octet-stream", info.size}};
+    Entry entry{Asset{id, std::nullopt, info.size}};
     RK_RETURN_IF_ERROR(SaveEntry(entry));
     found = entries_.emplace(id, std::move(entry)).first;
   }
@@ -508,17 +514,59 @@ Result<FileLibrary::Asset> FileLibrary::Describe(const std::string& id) const {
   RK_ASSIGN_OR_RETURN(entry, RequireAsset(id));
   return entry->asset;
 }
-Result<ServiceJson> FileLibrary::OpenDocument(const std::string& asset, const Check& check) {
+Result<std::vector<FileUploadStore::Source>> FileLibrary::SelectionSources(
+    const Selection& selection,
+    const Check& check) {
+  RK_RETURN_IF_ERROR(check());
+  std::vector<FileUploadStore::Source> sources;
+  for (const auto& file : selection.files) {
+    RK_ASSIGN_OR_RETURN(asset, Describe(file.asset_id));
+    std::string name = file.name;
+    std::string type = file.type;
+    if (type == "image/webp") {
+      const auto format = SelectionWebpTranscode(selection.accept);
+      if (format) {
+#ifdef RK_FILE_PHOTO
+        RK_ASSIGN_OR_RETURN(original, Path(file.asset_id));
+        const auto cancelled = [&] { return !check(); };
+        RK_ASSIGN_OR_RETURN(
+            transcoded, CachedDerivative(
+                            file.asset_id,
+                            *format == PhotoTranscode::kJpeg ? FileLibrary::DerivativeFormat::jpeg
+                                                             : FileLibrary::DerivativeFormat::png,
+                            [&](const fs::path& output) -> Result<FileLibrary::Derivative> {
+                              RK_ASSIGN_OR_RETURN(
+                                  dimensions, TranscodePhoto(original, output, *format, cancelled));
+                              return FileLibrary::Derivative{dimensions.width, dimensions.height};
+                            },
+                            check));
+        asset = std::move(transcoded);
+        type = *format == PhotoTranscode::kJpeg ? "image/jpeg" : "image/png";
+        auto filename = fs::u8path(name);
+        filename.replace_extension(*format == PhotoTranscode::kJpeg ? ".jpg" : ".png");
+        const auto encoded_name = filename.u8string();
+        name.assign(encoded_name.begin(), encoded_name.end());
+#else
+        return Error{ErrorCode::kUnavailable, "photo_processing_unavailable"};
+#endif
+      }
+    }
+    RK_ASSIGN_OR_RETURN(path, Path(asset.id));
+    sources.push_back({{name, type, asset.size}, path});
+  }
+  RK_RETURN_IF_ERROR(CheckSelectionSources(sources, selection.limits));
+  return sources;
+}
+Result<ServiceJson> FileLibrary::OpenDocument(const std::string& asset,
+                                              const std::string& type,
+                                              const Check& check) {
   RK_RETURN_IF_ERROR(check());
   RK_RETURN_IF_ERROR(objects_.Documents().Available());
-  std::string media_type;
   {
     std::lock_guard lock(mutex_);
-    RK_ASSIGN_OR_RETURN(entry, RequireAsset(asset));
-    media_type = entry->asset.type;
+    RK_RETURN_IF_ERROR(RequireAsset(asset));
   }
-  RK_ASSIGN_OR_RETURN(result,
-                      objects_.Documents().Open(asset, tenant_, root_ / "documents", media_type));
+  RK_ASSIGN_OR_RETURN(result, objects_.Documents().Open(asset, tenant_, root_ / "documents", type));
   RK_RETURN_IF_ERROR(check());
   if (result["state"] == "ready") {
     std::lock_guard lock(mutex_);

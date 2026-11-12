@@ -67,7 +67,7 @@ export function FileImagePreview({
     let objectUrl: string | undefined;
     const load = async () => {
       const asset = type && size ? { assetId, type, size } : await rpc.describeAsset(assetId, abort.signal);
-      if (!canPreviewFile(asset))
+      if (asset.type !== undefined && !canPreviewFile({ ...asset, type: asset.type }))
         throw new RemoteKitError('rejected', '此图片无法预览', { reason: 'document_unsupported' });
       return rpc.readPhoto(asset, abort.signal);
     };

@@ -403,7 +403,9 @@ Result<std::map<std::string, Json>> LibraryStore::Load(LibraryTable table) {
     Json value;
     switch (table) {
       case LibraryTable::kAssets:
-        value = {{"assetId", id}, {"size", statement.Int64(1)}, {"type", statement.Text(2)}};
+        value = {{"assetId", id}, {"size", statement.Int64(1)}};
+        if (!statement.IsNull(2))
+          value["type"] = statement.Text(2);
         if (!statement.IsNull(3))
           value["width"] = statement.Int64(3);
         if (!statement.IsNull(4))
@@ -451,7 +453,11 @@ Result<void> SessionDb::PutLibrary(LibraryTable table, const std::string& id, co
     RK_RETURN_IF_ERROR(statement.Bind(1, id));
     if (table == LibraryTable::kAssets) {
       RK_RETURN_IF_ERROR(statement.Bind(2, value.at("size").get<int64_t>()));
-      RK_RETURN_IF_ERROR(statement.Bind(3, value.at("type").get<std::string>()));
+      if (value.contains("type")) {
+        RK_RETURN_IF_ERROR(statement.Bind(3, value.at("type").get<std::string>()));
+      } else {
+        RK_RETURN_IF_ERROR(statement.BindNull(3));
+      }
       for (const auto [column, name] : {std::pair{4, "width"}, {5, "height"}}) {
         if (value.contains(name)) {
           RK_RETURN_IF_ERROR(statement.Bind(column, value.at(name).get<int64_t>()));
