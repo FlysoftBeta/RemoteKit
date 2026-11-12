@@ -521,7 +521,12 @@ export async function registerViewer({ click, fill, username, password }) {
 export async function startJourney(browserName = 'edge', pointer = 'mouse') {
   const run = runPath(`journey-${browserName}-${pointer}`);
   mkdirSync(run, { recursive: true });
-  const stack = await startStack({ run, scenario: 'files-user', learning: { captcha: false } });
+  const stack = await startStack({
+    run,
+    scenario: 'files-user',
+    learning: { captcha: false },
+    nodeLimits: { diskReserveBytes: 256 * 1024 ** 2 },
+  });
   const provider = stack.provider;
   const camera = (await cameraFixtures(run, [3])).get(3);
   const browser = await launchBrowser({

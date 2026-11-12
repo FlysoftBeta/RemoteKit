@@ -54,7 +54,9 @@ await writeFile(
     createControlConfig({
       http: { listen: '127.0.0.1:' + port, origins: [origin] },
       storage: { database: '../data/control.db', diagnostics: '../data/diagnostics', logs: '../logs' },
-      nodes: { local: { local: { root: '../data/node' } } },
+      nodes: {
+        local: { local: { root: '../data/node' }, limits: { diskReserveBytes: 256 * 1024 ** 2 } },
+      },
     }),
   ),
 );
