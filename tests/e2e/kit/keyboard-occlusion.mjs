@@ -45,7 +45,7 @@ export async function keyboardOcclusion(kind) {
       run,
       browser,
       endpoint,
-      nodeDefaults: { gop: 65535 },
+      media: { gop: 65535 },
     });
     session = await launch({
       browser: browserName,

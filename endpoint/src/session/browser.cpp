@@ -267,10 +267,15 @@ Result<void> BrowserRuntime::Launch(const RuntimeOptions& options,
   append(L"--crash-dir=" + crash_directory_.wstring());
   append(L"--atlas-width=1920");
   append(L"--atlas-height=1080");
-  if (!options.browser_trace_directory.empty()) {
-    RK_RETURN_IF_ERROR(CreateDirectories(options.browser_trace_directory));
-    const auto file = options.browser_trace_directory /
-                      ("session-" + id + "-" + std::to_string(QpcNow()) + ".json");
+#ifndef NDEBUG
+  const auto trace_directory = Utf8Path(Env("REMOTEKIT_BROWSER_TRACE_DIR"));
+  if (!trace_directory.empty()) {
+    if (!trace_directory.is_absolute())
+      return Error{ErrorCode::kInvalidRequest,
+                   "REMOTEKIT_BROWSER_TRACE_DIR must be an absolute directory"};
+    RK_RETURN_IF_ERROR(CreateDirectories(trace_directory));
+    const auto file =
+        trace_directory / ("session-" + id + "-" + std::to_string(QpcNow()) + ".json");
     append(
         L"--trace-startup=gpu.capture,viz,gpu,toplevel,toplevel.flow,disabled-by-default-gpu."
         L"service,disabled-by-default-gpu.device");
@@ -280,6 +285,7 @@ Result<void> BrowserRuntime::Launch(const RuntimeOptions& options,
     append(L"--trace-startup-record-mode=record-until-full");
     append(L"--default-trace-buffer-size-limit-in-kb=32768");
   }
+#endif
   LogEvent(LogLevel::kInfo, "browser.launched",
            {{"sessionId", id}, {"command", Utf8(fs::path(command))}});
   auto started = Start(options.browser, std::move(command), channel);

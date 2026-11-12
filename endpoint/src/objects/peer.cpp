@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <fstream>
 #include <algorithm>
+#include <set>
 namespace remotekit::objects {
 namespace {
 using namespace std::chrono_literals;
@@ -17,15 +18,52 @@ bool Number(const Json& value) {
   return value.is_number_unsigned() || (value.is_number_integer() && value.get<int64_t>() >= 0);
 }
 }  // namespace
-PeerServer::PeerServer(ObjectStore& store, const Key& key, std::string node, std::string build)
-    : store_(store), key_(key), node_(std::move(node)), build_(std::move(build)) {}
+Result<void> PeerSet::Update(const Json& peers) {
+  if (!peers.is_array())
+    return Error{ErrorCode::kInvalidRequest, "invalid peer set"};
+  std::map<std::string, PeerIdentity> next;
+  std::set<Key> keys;
+  for (const auto& peer : peers) {
+    if (!peer.is_object() || peer.size() != 3 || !peer.contains("nodeId") ||
+        !peer["nodeId"].is_string() || !peer.contains("address") || !peer["address"].is_string() ||
+        !peer.contains("publicKey") || !peer["publicKey"].is_string())
+      return Invalid();
+    const auto node = peer["nodeId"].get<std::string>();
+    auto key = cluster::DecodeKey(peer["publicKey"].get<std::string>());
+    if (!cluster::ValidNodeId(node) || !key || !keys.insert(key.value()).second ||
+        next.contains(node) || peer["address"].get_ref<const std::string&>().empty())
+      return Invalid();
+    next.emplace(node, PeerIdentity{node, peer["address"].get<std::string>(), key.value()});
+  }
+  std::lock_guard lock(mutex_);
+  peers_ = std::move(next);
+  return {};
+}
+std::optional<PeerIdentity> PeerSet::Find(const std::string& node) const {
+  std::lock_guard lock(mutex_);
+  const auto found = peers_.find(node);
+  return found == peers_.end() ? std::nullopt : std::optional(found->second);
+}
+std::optional<PeerIdentity> PeerSet::Find(const Key& key) const {
+  std::lock_guard lock(mutex_);
+  for (const auto& [node, peer] : peers_)
+    if (peer.public_key == key)
+      return peer;
+  return {};
+}
+PeerServer::PeerServer(ObjectStore& store,
+                       const Key& key,
+                       std::string node,
+                       std::string build,
+                       PeerSet& peers)
+    : store_(store), key_(key), peers_(peers), node_(std::move(node)), build_(std::move(build)) {}
 PeerServer::~PeerServer() {
   stopping_ = true;
   if (listener_)
     listener_->Close();
   {
     std::lock_guard lock(mutex_);
-    for (const auto& channel : channels_)
+    for (const auto& [channel, peer] : channels_)
       channel->Close();
   }
   for (auto& worker : workers_)
@@ -42,6 +80,14 @@ Result<void> PeerServer::Start(const std::string& address) {
 std::string PeerServer::Address() const {
   return listener_ ? listener_->Address() : std::string();
 }
+void PeerServer::Revoke() {
+  std::lock_guard lock(mutex_);
+  for (const auto& [channel, peer] : channels_) {
+    const auto current = peers_.Find(peer.node_id);
+    if (!current || current->public_key != peer.public_key)
+      channel->Close();
+  }
+}
 void PeerServer::Loop() {
   while (!stopping_) {
     std::shared_ptr<cluster::Channel> channel;
@@ -49,13 +95,14 @@ void PeerServer::Loop() {
       auto carrier = listener_->Accept(100ms);
       if (!carrier)
         continue;
+      std::optional<PeerIdentity> identity;
       auto established = cluster::AcceptCarrier(
-          std::move(carrier).value(), key_, [&](const Json& hello) -> Result<Json> {
-            if (hello.value("type", Json()) != "node.hello" ||
-                hello.value("role", Json()) != "peer" || !hello.contains("nodeId") ||
-                !hello["nodeId"].is_string() ||
-                !cluster::ValidNodeId(hello["nodeId"].get<std::string>()))
-              return Invalid();
+          std::move(carrier).value(), key_,
+          [&](const Json& hello, const Key& public_key) -> Result<Json> {
+            identity = peers_.Find(public_key);
+            if (!identity || hello.value("type", Json()) != "node.hello" ||
+                hello.value("role", Json()) != "peer")
+              return Error{ErrorCode::kUnauthenticated, "peer identity is not admitted"};
             if (hello.value("buildId", Json()) != build_)
               return Json{{"type", "node.reject"}, {"code", "build_mismatch"}, {"buildId", build_}};
             return Json{{"type", "node.ready"}, {"nodeId", node_}, {"buildId", build_}};
@@ -65,11 +112,12 @@ void PeerServer::Loop() {
       channel = std::move(established.value().channel);
       {
         std::lock_guard lock(mutex_);
-        if (stopping_) {
+        const auto current = peers_.Find(identity->node_id);
+        if (stopping_ || !current || current->public_key != identity->public_key) {
           channel->Close();
           continue;
         }
-        channels_.push_back(channel);
+        channels_.emplace(channel, *identity);
       }
       auto served = Serve(*channel);
       if (!served) {
@@ -94,7 +142,7 @@ void PeerServer::Loop() {
     if (channel) {
       channel->Close();
       std::lock_guard lock(mutex_);
-      std::erase(channels_, channel);
+      channels_.erase(channel);
     }
   }
 }
@@ -141,12 +189,16 @@ Result<void> PeerServer::Serve(cluster::Channel& channel) {
   return channel.Send(
       {{"type", "object.end"}, {"size", stored_size}, {"sha256", cluster::Hex(digest.Finish())}});
 }
-PeerClient::PeerClient(ObjectStore& store, const Key& key, std::string node, std::string build)
-    : store_(store), key_(key), node_(std::move(node)), build_(std::move(build)) {}
+PeerClient::PeerClient(ObjectStore& store,
+                       const Key& key,
+                       std::string node,
+                       std::string build,
+                       PeerSet& peers)
+    : store_(store), key_(key), peers_(peers), node_(std::move(node)), build_(std::move(build)) {}
 PeerClient::~PeerClient() {
   SecureZeroMemory(key_.data(), key_.size());
 }
-Result<ObjectInfo> PeerClient::Fetch(const std::string& id, const std::string& address) {
+Result<ObjectInfo> PeerClient::Fetch(const std::string& id, const std::string& node) {
   RK_ASSIGN_OR_RETURN(path, store_.StoredPath(id));
   auto lock = store_.Lock(id);
   fs::create_directories(path.parent_path());
@@ -156,9 +208,13 @@ Result<ObjectInfo> PeerClient::Fetch(const std::string& id, const std::string& a
   uint64_t offset = fs::exists(partial, error) ? fs::file_size(partial, error) : 0;
   if (error)
     return Error{ErrorCode::kUnavailable, "object partial unavailable"};
-  RK_ASSIGN_OR_RETURN(carrier, cluster::ConnectTcp(address));
-  RK_ASSIGN_OR_RETURN(
-      connection, cluster::ConnectCarrier(std::move(carrier), key_, {"peer", node_, build_, {}}));
+  const auto peer = peers_.Find(node);
+  if (!peer)
+    return Error{ErrorCode::kUnauthenticated, "unknown peer"};
+  RK_ASSIGN_OR_RETURN(carrier, cluster::ConnectTcp(peer->address));
+  RK_ASSIGN_OR_RETURN(connection,
+                      cluster::ConnectCarrier(std::move(carrier), key_, peer->public_key,
+                                              {"peer", node_, build_, {}}));
   if (connection.reply.value("type", Json()) == "node.reject")
     return Error{ErrorCode::kUnavailable, "Peer capability negotiation refused"};
   if (connection.reply.value("buildId", Json()) != build_)

@@ -335,7 +335,7 @@ test('diagnostics exclude clipboard and HTML subtrees even when values resemble 
   assert.match(json, /"sequence":"9"/);
 });
 
-test('clipboard frames carry maximum payloads and escaped seeds while other JSON retains its limit', () => {
+test('clipboard frames enforce the transport bound including JSON escaping', () => {
   const clipboard = {
     revision: '1',
     text: 'a'.repeat(clipboardLimits.text),
@@ -353,9 +353,11 @@ test('clipboard frames carry maximum payloads and escaped seeds while other JSON
       html: '\0'.repeat(clipboardLimits.html),
     },
   };
-  assert.deepEqual(decodeFrame(encodeJson(message)), { kind: 'json', message });
+  assert.throws(() => encodeJson(message), { code: 'limit_exceeded' });
   const live = { method: 'clipboard.write', ...message.clipboard };
-  assert.deepEqual(decodeFrame(encodeJson(live)), { kind: 'json', message: live });
+  assert.throws(() => encodeJson(live), { code: 'limit_exceeded' });
+  const bounded = { method: 'clipboard.write', text: '\0'.repeat(128 * 1024), html: '\0'.repeat(256 * 1024) };
+  assert.deepEqual(decodeFrame(encodeJson(bounded)), { kind: 'json', message: bounded });
   assert.throws(() => encodeJson({ method: 'other', clipboard }));
   assert.throws(() => encodeJson({ type: 'clipboard.changed', text: 'a'.repeat(4 * 1024 * 1024) }));
 });

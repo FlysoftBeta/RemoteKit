@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { CipherState, MAX_TRANSPORT, NoiseHandshake } from '../server/cluster/noise';
+import { CipherState, MAX_TRANSPORT, NoiseHandshake, publicKey } from '../server/cluster/noise';
 import { decodeFrame, encodeBinary, encodeJson, encodeStdio, StdioDecoder } from '../server/cluster/frames';
 
 test('Noise matches cacophony handshake hash and every handshake/transport ciphertext', () => {
@@ -11,13 +11,15 @@ test('Noise matches cacophony handshake hash and every handshake/transport ciphe
   const bytes = (value: string) => Buffer.from(value, 'hex');
   const initiator = new NoiseHandshake(
     'initiator',
-    bytes(vector.init_psks[0]),
+    bytes(vector.init_static),
+    bytes(vector.init_remote_static),
     bytes(vector.init_prologue),
     bytes(vector.init_ephemeral),
   );
   const responder = new NoiseHandshake(
     'responder',
-    bytes(vector.resp_psks[0]),
+    bytes(vector.resp_static),
+    undefined,
     bytes(vector.resp_prologue),
     bytes(vector.resp_ephemeral),
   );
@@ -56,7 +58,7 @@ test('Noise enforces transport bound, terminal authentication failure and nonce 
   (exhausted as any).nonce = 0xfffffffffffffffen;
   exhausted.encrypt(Buffer.alloc(0));
   assert.throws(() => exhausted.encrypt(Buffer.alloc(0)));
-  const first = new NoiseHandshake('initiator', key);
+  const first = new NoiseHandshake('initiator', key, publicKey(key));
   const wrong = new NoiseHandshake('responder', Buffer.alloc(32, 2));
   const message = first.writeMessage(Buffer.from('{}'));
   assert.throws(() => wrong.readMessage(message));

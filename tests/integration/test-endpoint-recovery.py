@@ -91,7 +91,7 @@ def main():
     state = run/'state'; service = Service(args,run,state); evidence=[]
     try:
         initial,_ = service.call('session.ensure'); session=initial['sessionId']
-        session_db=state/'sessions'/session/'session.db'
+        session_db=state/'data/sessions'/session/'session.db'
         for index in range(1,5):
             url=origin+('/post' if index==4 else '/state?view='+str(index))
             service.call('view.ensure',viewId=str(index),url=url,width=320,height=240,visible=True,
@@ -107,8 +107,8 @@ def main():
                     return report.get('hash')=='#three' and report.get('input')=='saved-form' and report.get('scroll')==650
             return False
         ready=service.wait(captured)
-        assert not (state/'sessions'/session/'browser.log').exists()
-        assert not (state/'sessions'/session/'crashes').exists()
+        assert not (state/'data/sessions'/session/'browser.log').exists()
+        assert not (state/'data/sessions'/session/'crashes').exists()
         assert (state/'logs/browser'/(session+'.log')).exists()
         browser_log,_=service.call('session.logs.read',log='browser',maxBytes=131072)
         assert browser_log['exists'] and base64.b64decode(browser_log['data'])

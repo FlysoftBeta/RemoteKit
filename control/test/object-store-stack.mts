@@ -1,11 +1,12 @@
+import { stageRuntime } from '../../tests/integration/stage-runtime.mjs';
 import type { LibrarySnapshot } from '../shared/file-library';
 import assert from 'node:assert/strict';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join, resolve } from 'node:path';
 import { createApplication } from '../server/application';
-import { canonicalJson, nodeDefaults } from '../server/config';
+import { mediaDefaults, runtimeConfig } from '../server/config';
 import { NodeRegistry } from '../server/cluster/node-link';
 import { Placement } from '../server/cluster/placement';
 import { EndpointGateway } from '../server/endpoint/gateway';
@@ -18,29 +19,37 @@ await new Promise<void>((done) => listener.listen(0, '127.0.0.1', done));
 const port = (listener.address() as { port: number }).port;
 await new Promise<void>((done) => listener.close(() => done()));
 const config = {
-  ...nodeDefaults,
+  media: mediaDefaults,
   nodeId: 'storage',
-  maxSessions: 8,
-  dataPath: join(run, 'data'),
-  browser: process.argv[3] ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe',
-  diskReserveBytes: 1024 * 1024,
-  sessionMemoryBytes: 1024 * 1024,
+  rtc: { ports: null, address: null },
   peer: { listen: `127.0.0.1:${port}`, address: `127.0.0.1:${port}` },
 };
 const store = new ControlDatabase(join(run, 'control.db'), { buildId: 'test' });
-const nodes = new NodeRegistry({
-  key: randomBytes(32).toString('base64'),
-  buildId: 'dev',
-  nodes: {
-    storage: {
-      config,
-      configHash: createHash('sha256').update(canonicalJson(config)).digest('hex'),
-      local: {
-        executable: resolve('build/endpoint/endpoint/endpoint_service.exe'),
-        root: join(run, 'node'),
+await writeFile(
+  join(run, 'control.json'),
+  JSON.stringify({
+    media: mediaDefaults,
+    nodes: {
+      storage: {
+        peer: config.peer,
+        local: {
+          executable: stageRuntime(
+            resolve('build/endpoint/endpoint/endpoint_service.exe'),
+            process.argv[3] ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe',
+            join(run, 'runtime/bin'),
+          ),
+          root: join(run, 'node'),
+        },
+        limits: { maxSessions: 8, diskReserveBytes: 1024 * 1024, sessionMemoryBytes: 1024 * 1024 },
       },
     },
-  },
+  }),
+);
+const runtime = runtimeConfig({ REMOTEKIT_CONTROL_CONFIG: join(run, 'control.json') }, []);
+const nodes = new NodeRegistry({
+  privateKey: runtime.identity.privateKey,
+  buildId: 'dev',
+  nodes: runtime.nodes,
 });
 const endpoint = new EndpointGateway(nodes, new Placement(store, nodes));
 const control = createApplication(store, endpoint);
@@ -91,10 +100,10 @@ try {
     assert.equal(control.objects.bytes(tenant), first.size);
     assert.ok(located.some((request) => request.tenantId === tenant && request.ids.includes(first.id)));
   }
-  const objects = await readdir(join(config.dataPath, 'objects', first.id.slice(0, 2)));
+  const objects = await readdir(join(join(run, 'node/data'), 'objects', first.id.slice(0, 2)));
   assert.deepEqual(objects, [first.id + '.rko']);
   assert.equal(
-    (await readFile(join(config.dataPath, 'objects', first.id.slice(0, 2), first.id + '.rko')))
+    (await readFile(join(join(run, 'node/data'), 'objects', first.id.slice(0, 2), first.id + '.rko')))
       .subarray(0, 4)
       .toString(),
     'RKO2',
@@ -119,8 +128,8 @@ try {
   await endpoint.hibernate('first');
   const firstPlacement = endpoint.placement.peek('first')!;
   const secondPlacement = endpoint.placement.peek('second')!;
-  const firstDirectory = join(config.dataPath, 'sessions', firstPlacement.sessionId);
-  const secondDirectory = join(config.dataPath, 'sessions', secondPlacement.sessionId);
+  const firstDirectory = join(join(run, 'node/data'), 'sessions', firstPlacement.sessionId);
+  const secondDirectory = join(join(run, 'node/data'), 'sessions', secondPlacement.sessionId);
   // A shared payload in two actual Session directories proves checkpoint block deduplication.
   const shared = Buffer.alloc(1024 * 1024, 17);
   await writeFile(join(firstDirectory, 'shared-checkpoint-block'), shared);

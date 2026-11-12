@@ -1,3 +1,4 @@
+import { stageRuntime } from './../integration/stage-runtime.mjs';
 /** Real Viewer/H264, two local nodes, checkpoint relocation and demand peer object read.
  * args: playwright module, Edge exe, Endpoint exe, Browser exe, new evidence directory, [port]
  */
@@ -49,9 +50,12 @@ const nodes = Object.fromEntries(
   ['alpha', 'beta'].map((id, index) => [
     id,
     {
-      dataPath: join(run, id, 'data'),
       peer: { listen: `127.0.0.1:${port + 2 + index}`, address: `127.0.0.1:${port + 2 + index}` },
-      local: { executable: resolve(endpoint), root: join(run, id, 'root') },
+      limits: { maxSessions: 1 },
+      local: {
+        executable: stageRuntime(endpoint, browser, join(run, 'node-runtime/bin')),
+        root: join(run, id, 'root'),
+      },
     },
   ]),
 );
@@ -61,7 +65,6 @@ await writeFile(
   JSON.stringify({
     http: { listen: `127.0.0.1:${port}`, origins: [origin] },
     storage: { database: join(run, 'control.db') },
-    nodeDefaults: { browser: resolve(browser), maxSessions: 1 },
     nodes,
   }),
 );
@@ -252,7 +255,7 @@ try {
       ),
   );
   const objectPath = join(
-    nodes[target.node_id].dataPath,
+    join(nodes[target.node_id].local.root, 'data'),
     'objects',
     asset.assetId.slice(0, 2),
     asset.assetId + '.rko',

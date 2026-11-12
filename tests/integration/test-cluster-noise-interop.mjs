@@ -5,14 +5,14 @@ import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
-const MAX = 20 * 1024 * 1024;
+const MAX = 4 * 1024 * 1024;
 const hash = (data) => crypto.createHash('sha256').update(data).digest();
 const hmac = (key, data) => crypto.createHmac('sha256', key).update(data).digest();
 function hkdf(key, input) {
   const temp = hmac(key, input);
   const out = [];
   let last = Buffer.alloc(0);
-  for (let i = 1; i <= 3; ++i) {
+  for (let i = 1; i <= 2; ++i) {
     last = hmac(temp, Buffer.concat([last, Buffer.from([i])]));
     out.push(last);
   }
@@ -47,74 +47,94 @@ export class Cipher {
     return this.crypt(data, ad, false);
   }
 }
+const privateObject = (key) =>
+  crypto.createPrivateKey({
+    key: Buffer.concat([Buffer.from('302e020100300506032b656e04220420', 'hex'), key]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+export const publicKey = (key) =>
+  crypto.createPublicKey(privateObject(key)).export({ format: 'der', type: 'spki' }).subarray(-32);
+const dh = (key, remote) =>
+  crypto.diffieHellman({
+    privateKey: privateObject(key),
+    publicKey: crypto.createPublicKey({
+      key: Buffer.concat([Buffer.from('302a300506032b656e032100', 'hex'), remote]),
+      format: 'der',
+      type: 'spki',
+    }),
+  });
 export class Noise {
-  constructor(initiator, key, prologue = Buffer.from('remotekit-cluster-1'), ephemeral) {
+  constructor(
+    initiator,
+    key,
+    responderPublicKey,
+    prologue = Buffer.from('remotekit-cluster-2'),
+    ephemeral = crypto.randomBytes(32),
+  ) {
     this.initiator = initiator;
     this.key = key;
+    this.ephemeral = ephemeral;
+    this.publicKey = publicKey(ephemeral);
+    this.remoteStatic = initiator ? responderPublicKey : undefined;
+    if (initiator) assert.equal(responderPublicKey.length, 32);
     this.h = Buffer.alloc(32);
-    this.h.write('Noise_NNpsk0_25519_AESGCM_SHA256');
+    this.h.write('Noise_IK_25519_AESGCM_SHA256');
     this.ck = this.h;
     this.mixHash(prologue);
-    this.privateKey = ephemeral
-      ? crypto.createPrivateKey({
-          key: Buffer.concat([Buffer.from('302e020100300506032b656e04220420', 'hex'), ephemeral]),
-          format: 'der',
-          type: 'pkcs8',
-        })
-      : crypto.generateKeyPairSync('x25519').privateKey;
-    this.publicKey = crypto
-      .createPublicKey(this.privateKey)
-      .export({ format: 'der', type: 'spki' })
-      .subarray(-32);
+    this.mixHash(initiator ? responderPublicKey : publicKey(key));
     this.step = 0;
   }
   mixHash(bytes) {
     this.h = hash(Buffer.concat([this.h, bytes]));
   }
   mixKey(bytes) {
-    const keys = hkdf(this.ck, bytes);
-    this.ck = keys[0];
-    this.cipher = new Cipher(keys[1]);
+    const [ck, key] = hkdf(this.ck, bytes);
+    this.ck = ck;
+    this.cipher = new Cipher(key);
   }
-  psk() {
-    const keys = hkdf(this.ck, this.key);
-    this.ck = keys[0];
-    this.mixHash(keys[1]);
-    this.cipher = new Cipher(keys[2]);
+  encrypt(bytes) {
+    const result = this.cipher.encrypt(bytes, this.h);
+    this.mixHash(result);
+    return result;
   }
-  e(bytes) {
+  decrypt(bytes) {
+    const result = this.cipher.decrypt(bytes, this.h);
     this.mixHash(bytes);
-    this.mixKey(bytes);
-  }
-  ee() {
-    const key = crypto.createPublicKey({
-      key: Buffer.concat([Buffer.from('302a300506032b656e032100', 'hex'), this.remote]),
-      format: 'der',
-      type: 'spki',
-    });
-    const shared = crypto.diffieHellman({ privateKey: this.privateKey, publicKey: key });
-    this.mixKey(shared);
-    shared.fill(0);
+    return result;
   }
   write(bytes) {
     assert.equal(this.step, this.initiator ? 0 : 1);
-    if (this.step === 0) this.psk();
-    this.e(this.publicKey);
-    if (this.step === 1) this.ee();
-    const encrypted = this.cipher.encrypt(bytes, this.h);
-    this.mixHash(encrypted);
+    this.mixHash(this.publicKey);
+    const parts = [this.publicKey];
+    if (this.step === 0) {
+      this.mixKey(dh(this.ephemeral, this.remoteStatic));
+      parts.push(this.encrypt(publicKey(this.key)));
+      this.mixKey(dh(this.key, this.remoteStatic));
+    } else {
+      this.mixKey(dh(this.ephemeral, this.remoteEphemeral));
+      this.mixKey(dh(this.ephemeral, this.remoteStatic));
+    }
+    parts.push(this.encrypt(bytes));
     ++this.step;
-    return Buffer.concat([this.publicKey, encrypted]);
+    return Buffer.concat(parts);
   }
   read(bytes) {
     assert.equal(this.step, this.initiator ? 1 : 0);
-    assert(bytes.length >= 48 && bytes.length <= 65535);
-    if (this.step === 0) this.psk();
-    this.remote = bytes.subarray(0, 32);
-    this.e(this.remote);
-    if (this.step === 1) this.ee();
-    const plain = this.cipher.decrypt(bytes.subarray(32), this.h);
-    this.mixHash(bytes.subarray(32));
+    assert(bytes.length >= (this.step === 0 ? 96 : 48) && bytes.length <= 65535);
+    this.remoteEphemeral = bytes.subarray(0, 32);
+    this.mixHash(this.remoteEphemeral);
+    let offset = 32;
+    if (this.step === 0) {
+      this.mixKey(dh(this.key, this.remoteEphemeral));
+      this.remoteStatic = this.decrypt(bytes.subarray(32, 80));
+      this.mixKey(dh(this.key, this.remoteStatic));
+      offset = 80;
+    } else {
+      this.mixKey(dh(this.ephemeral, this.remoteEphemeral));
+      this.mixKey(dh(this.key, this.remoteEphemeral));
+    }
+    const plain = this.decrypt(bytes.subarray(offset));
     ++this.step;
     return plain;
   }
@@ -208,18 +228,33 @@ export function decode(plain) {
 export async function accept(transport, key, reply) {
   const noise = new Noise(false, key);
   const hello = JSON.parse(noise.read(await transport.next(5000)));
+  if (typeof reply !== 'function') assert.deepEqual(noise.remoteStatic, publicKey(Buffer.alloc(32, 6)));
   transport.send(
-    noise.write(Buffer.from(JSON.stringify(typeof reply === 'function' ? reply(hello) : reply))),
+    noise.write(
+      Buffer.from(JSON.stringify(typeof reply === 'function' ? reply(hello, noise.remoteStatic) : reply)),
+    ),
   );
-  return { ...noise.split(), hello };
+  return { ...noise.split(), hello, publicKey: noise.remoteStatic };
 }
 async function vectorTest() {
   const {
     vectors: [v],
   } = JSON.parse(await readFile(new URL('../../protocol/cluster-noise-vectors.json', import.meta.url)));
   const unhex = (s) => Buffer.from(s, 'hex');
-  const a = new Noise(true, unhex(v.init_psks[0]), unhex(v.init_prologue), unhex(v.init_ephemeral));
-  const b = new Noise(false, unhex(v.resp_psks[0]), unhex(v.resp_prologue), unhex(v.resp_ephemeral));
+  const a = new Noise(
+    true,
+    unhex(v.init_static),
+    unhex(v.init_remote_static),
+    unhex(v.init_prologue),
+    unhex(v.init_ephemeral),
+  );
+  const b = new Noise(
+    false,
+    unhex(v.resp_static),
+    undefined,
+    unhex(v.resp_prologue),
+    unhex(v.resp_ephemeral),
+  );
   for (let i = 0; i < 2; ++i) {
     const payload = unhex(v.messages[i].payload);
     const wire = (i ? b : a).write(payload);
@@ -266,7 +301,7 @@ async function childTest(executable, mode) {
     let state;
     if (mode === 'initiator') state = await accept(transport, Buffer.alloc(32, 7), { type: 'node.ready' });
     else {
-      const noise = new Noise(true, Buffer.alloc(32, 7));
+      const noise = new Noise(true, Buffer.alloc(32, 6), publicKey(Buffer.alloc(32, 7)));
       transport.send(
         noise.write(
           Buffer.from(

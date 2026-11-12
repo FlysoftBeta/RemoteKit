@@ -14,8 +14,8 @@ ObjectService::ObjectService(std::filesystem::path data,
     : put_root_(data / "object-puts"),
       store_(std::move(data)),
       control_(control),
-      server_(store_, key, node, build),
-      client_(store_, key, std::move(node), std::move(build)) {
+      server_(store_, key, node, build, peers_),
+      client_(store_, key, std::move(node), std::move(build), peers_) {
   std::filesystem::remove_all(put_root_);
   std::filesystem::create_directories(put_root_);
   documents_ = std::make_unique<documents::ObjectDocuments>(*this, put_root_.parent_path());
@@ -34,6 +34,11 @@ Result<Json> ObjectService::Derivation(const std::string& id, const std::string&
                            !reply["id"].is_string() || !ValidId(reply["id"].get<std::string>())))
     return Error{ErrorCode::kOutcomeUnknown, "invalid object.derivation reply"};
   return reply;
+}
+Result<void> ObjectService::SetPeers(const Json& peers) {
+  RK_RETURN_IF_ERROR(peers_.Update(peers));
+  server_.Revoke();
+  return {};
 }
 Result<void> ObjectService::Start(const std::string& listen) {
   return server_.Start(listen);
@@ -122,11 +127,12 @@ Result<ObjectInfo> ObjectService::Fetch(const std::string& id, const Json& sourc
       std::shared_ptr<std::counting_semaphore<4>> limit;
       ~Permit() { limit->release(); }
     } permit{limit};
-    auto fetched = client_.Fetch(id, address);
+    auto fetched = client_.Fetch(id, source["nodeId"].get<std::string>());
     if (!fetched) {
       last = fetched.error();
-      if (last.code != ErrorCode::kUnavailable && last.code != ErrorCode::kNotFound &&
-          last.code != ErrorCode::kBusy && last.code != ErrorCode::kRateLimited)
+      if (last.code != ErrorCode::kUnauthenticated && last.code != ErrorCode::kUnavailable &&
+          last.code != ErrorCode::kNotFound && last.code != ErrorCode::kBusy &&
+          last.code != ErrorCode::kRateLimited)
         return last;
       continue;
     }

@@ -114,12 +114,8 @@ def main():
                         'database': str(run / 'control.db'),
                         'diagnostics': str(run / 'diagnostics'),
                     },
-                    'nodeDefaults': {
-                        'browser': str(binary / 'remotekit_browser.exe'),
-                        'dataPath': str(run / 'endpoint'),
-                        'peer': {'listen': '127.0.0.1:' + str(peer_port)},
-                    },
-                    'nodes': {'local': {'local': {'root': str(deployment / 'data/node')}}},
+                    'nodes': {'local': {'local': {'root': str(deployment / 'data/node')},
+                                        'peer': {'listen': '127.0.0.1:' + str(peer_port)}}},
                 }
             ),
             encoding='utf-8',

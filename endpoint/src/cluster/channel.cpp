@@ -412,11 +412,12 @@ class EncryptedChannel final : public Channel {
 };
 Result<Established> Handshake(std::unique_ptr<Carrier> carrier,
                               const Key& key,
+                              std::optional<Key> responder_public_key,
                               Role role,
                               const Hello& hello,
                               const HelloHandler& handler) {
   try {
-    Noise noise(role, key);
+    Noise noise(role, key, responder_public_key);
     auto deadline = Clock::now() + 5s;
     std::mutex deadline_mutex;
     std::condition_variable deadline_wake;
@@ -484,7 +485,7 @@ Result<Established> Handshake(std::unique_ptr<Carrier> carrier,
         carrier->Close();
         return Error{ErrorCode::kInvalidRequest, "invalid hello payload"};
       }
-      auto response = handler(parsed);
+      auto response = handler(parsed, noise.remote_public_key());
       if (!response) {
         carrier->Close();
         return response.error();
@@ -541,15 +542,18 @@ std::unique_ptr<Carrier> HandleCarrier(void* read, void* write) {
 }
 Result<Established> ConnectCarrier(std::unique_ptr<Carrier> carrier,
                                    const Key& key,
+                                   const Key& responder_public_key,
                                    const Hello& hello) {
-  return Handshake(std::move(carrier), key, Role::kInitiator, hello, {});
+  return Handshake(std::move(carrier), key, responder_public_key, Role::kInitiator, hello, {});
 }
 Result<Established> AcceptCarrier(std::unique_ptr<Carrier> carrier,
                                   const Key& key,
                                   const HelloHandler& handler) {
-  return Handshake(std::move(carrier), key, Role::kResponder, {}, handler);
+  return Handshake(std::move(carrier), key, {}, Role::kResponder, {}, handler);
 }
-Result<Established> ConnectStdio(const Key& key, const Hello& hello) {
+Result<Established> ConnectStdio(const Key& key,
+                                 const Key& responder_public_key,
+                                 const Hello& hello) {
   _setmode(_fileno(stdin), _O_BINARY);
   _setmode(_fileno(stdout), _O_BINARY);
   HANDLE read = nullptr, write = nullptr;
@@ -561,9 +565,12 @@ Result<Established> ConnectStdio(const Key& key, const Hello& hello) {
     CloseHandle(read);
     return Closed();
   }
-  return ConnectCarrier(HandleCarrier(read, write), key, hello);
+  return ConnectCarrier(HandleCarrier(read, write), key, responder_public_key, hello);
 }
-Result<Established> ConnectWebSocket(const std::string& url, const Key& key, const Hello& hello) {
+Result<Established> ConnectWebSocket(const std::string& url,
+                                     const Key& key,
+                                     const Key& responder_public_key,
+                                     const Hello& hello) {
   auto address = ParseControlUrl(url);
   if (!address)
     return address.error();
@@ -580,10 +587,10 @@ Result<Established> ConnectWebSocket(const std::string& url, const Key& key, con
   std::array<uint8_t, 16> nonce;
   if (!RandomBytes(nonce))
     return Closed();
-  std::string request = "GET /api/node HTTP/1.1\r\nHost: " + host + ":" +
-                        std::to_string(address.value().port) +
-                        "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " +
-                        Base64(nonce) + "\r\nSec-WebSocket-Version: 13\r\n\r\n";
+  std::string request =
+      "GET /api/node HTTP/1.1\r\nHost: " + host + ":" + std::to_string(address.value().port) +
+      "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " + Base64(nonce) +
+      "\r\nSec-WebSocket-Version: 13\r\n\r\n";
   if (!stream.value()->WriteAll({reinterpret_cast<const uint8_t*>(request.data()), request.size()}))
     return Error{ErrorCode::kUnavailable, "cluster connect failed sending the upgrade request"};
   std::string response;
@@ -608,11 +615,11 @@ Result<Established> ConnectWebSocket(const std::string& url, const Key& key, con
   stream.value()->SetReceiveTimeout(60s);
   ws->stream = std::move(stream).value();
   ws->Open();
-  auto established = ConnectCarrier(std::move(ws), key, hello);
+  auto established = ConnectCarrier(std::move(ws), key, responder_public_key, hello);
   if (!established && established.error().message == "cluster channel closed")
     return Error{ErrorCode::kUnavailable,
                  "Control closed the connection during the cluster handshake "
-                 "(cluster key mismatch with Control, or not a RemoteKit Control endpoint)"};
+                 "(node identity mismatch with Control, or not a RemoteKit Control endpoint)"};
   return established;
 }
 }  // namespace remotekit::cluster

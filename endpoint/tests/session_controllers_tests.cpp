@@ -358,10 +358,9 @@ void SessionManagementRequests() {
   auto parsed = RuntimeOptions::FromConfig(TestConfig(), directory, "dev", "test");
   CHECK(parsed);
   media::Sdk sdk;
-  media::FrameAdmission admission;
   objects::ObjectService objects(parsed.value().data, link, cluster::Key{}, "test", "dev");
   Session session(sdk, parsed.value(), "tenant", "0123456789abcdef0123456789abcdef", 1,
-                  cluster::Key{}, link, objects, admission);
+                  cluster::Key{}, link, objects);
   const auto session_directory = parsed.value().data / "sessions" / session.Id();
   fs::create_directories(session_directory);
   CHECK(session.Initialize());

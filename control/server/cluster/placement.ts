@@ -127,11 +127,11 @@ export class Placement {
           !node.diskDraining &&
           !this.nodes.isRemoved(node.nodeId) &&
           sample &&
-          (node.config.maxSessions === null ||
-            Math.max(this.activeSessions(node.nodeId), sample.value.sessions) < node.config.maxSessions) &&
+          (node.limits.maxSessions === null ||
+            Math.max(this.activeSessions(node.nodeId), sample.value.sessions) < node.limits.maxSessions) &&
           sample.value.disk.free >= diskFloor(node, sample) &&
-          (node.config.sessionMemoryBytes === null ||
-            sample.value.memory.available >= node.config.sessionMemoryBytes);
+          (node.limits.sessionMemoryBytes === null ||
+            sample.value.memory.available >= node.limits.sessionMemoryBytes);
         if (!eligible) return [];
         const predicted = node.metrics.predicted(now)!;
         const warm =

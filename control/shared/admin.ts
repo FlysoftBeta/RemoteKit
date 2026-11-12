@@ -18,6 +18,8 @@ export interface AdminNode {
   nodeId: string;
   state: AdminNodeState;
   managed: boolean;
+  publicKeyFingerprint: string;
+  bootstrapFile: string | null;
   peerAddress: string;
   buildId: string | null;
   pressure: number | null;

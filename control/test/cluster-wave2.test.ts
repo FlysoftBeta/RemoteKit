@@ -10,7 +10,8 @@ import { NodeRegistry } from '../server/cluster/node-link';
 import { Placement } from '../server/cluster/placement';
 import { MetricsHistory } from '../server/cluster/metrics';
 import { tenantKeys } from '../server/cluster/keys';
-import { nodeDefaults, type NodeConfig } from '../server/config';
+import type { NodeLimits } from '../server/config';
+import { endpointDefaults, testNode } from './node-fixture';
 import { EndpointGateway } from '../server/endpoint/gateway';
 import type { EndpointSnapshot } from '../server/endpoint/types';
 import { ControlDatabase } from '../server/persistence/database';
@@ -276,25 +277,22 @@ const clearSnapshot = (): EndpointSnapshot => ({
     lifecycleUncertain: false,
   },
 });
-async function harness(quota: number | null = 4096, nodeLimits: Partial<NodeConfig> = {}) {
+async function harness(quota: number | null = 4096, nodeLimits: Partial<NodeLimits> = {}) {
   const key = randomBytes(32);
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const nodes = new NodeRegistry({
-    key: key.toString('base64'),
+    privateKey: key.toString('base64'),
     buildId: 'dev',
     requestTimeoutMs: 1000,
     nodes: Object.fromEntries(
       ['alpha', 'beta'].map((nodeId) => [
         nodeId,
         {
-          configHash: nodeId,
+          ...testNode(nodeId),
+          limits: { maxSessions: 8, diskReserveBytes: 100, sessionMemoryBytes: 100, ...nodeLimits },
           config: {
-            ...nodeDefaults,
+            ...endpointDefaults,
             nodeId,
-            maxSessions: 8,
-            diskReserveBytes: 100,
-            sessionMemoryBytes: 100,
-            ...nodeLimits,
             peer: { listen: '0.0.0.0:3101', address: nodeId + ':3101' },
             rtc: { ports: null, address: null },
           },
@@ -566,7 +564,7 @@ test('two nodes place by pressure, checkpoint, wake at epoch+1, fence reconnects
     assert.equal(h.placement.peek('tenant')!.placementEpoch, 3);
     assert.equal(h.placement.peek('tenant')!.checkpoint, id(2));
     assert.equal(h.store.db.prepare('SELECT 1 FROM object_replicas WHERE node_id=?').get('beta'), undefined);
-    assert.equal((await h.connect('beta')).helloReply.code, 'unknown_node');
+    await assert.rejects(h.connect('beta'), /Handshake closed/);
     assert.throws(() => h.control.nodeAdmin.readd('missing'), { code: 'not_found' });
     h.control.nodeAdmin.readd('beta');
     assert.equal((await h.connect('beta')).helloReply.type, 'node.ready');
@@ -960,9 +958,9 @@ test('null limits reach nodes and automatic disk floors drain cold copies and re
     const alpha = await h.connect('alpha');
     const beta = await h.connect('beta');
     for (const client of [alpha, beta]) {
-      assert.equal(client.helloReply.config.maxSessions, null);
-      assert.equal(client.helloReply.config.diskReserveBytes, null);
-      assert.equal(client.helloReply.config.sessionMemoryBytes, null);
+      assert.ok(!('maxSessions' in client.helloReply.config));
+      assert.ok(!('diskReserveBytes' in client.helloReply.config));
+      assert.ok(!('sessionMemoryBytes' in client.helloReply.config));
       client.metrics = fakeMetrics();
       client.publishMetrics();
     }

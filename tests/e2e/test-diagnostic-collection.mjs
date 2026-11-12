@@ -100,7 +100,7 @@ function startControl() {
     port,
     endpoint,
     browser,
-    nodeDefaults: scenarioModule?.nodeDefaults ?? {},
+    media: scenarioModule?.media ?? {},
     configOverrides: {
       storage: { database: join(run, 'control.db'), diagnostics: archiveDirectory },
       ...scenarioModule?.controlConfig,

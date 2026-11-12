@@ -24,8 +24,8 @@ const states: Record<
   removed: { label: '已移除', color: 'error' },
 };
 const rejections: Record<string, string> = {
+  identity_mismatch: '身份不匹配：请将新的 node.json 复制到该节点',
   build_mismatch: '版本与 Control 不一致',
-  unknown_node: '节点未配置或已移除',
   no_release: 'Control 没有可下发的发布包',
 };
 const exits: Record<number, string> = {
@@ -156,6 +156,14 @@ function NodeCard({
         <dd>{node.headroom === null ? '—' : formatPercent(node.headroom)}</dd>
         <dt>对象副本</dt>
         <dd>{formatBytes(node.replicaBytes)}</dd>
+        <dt>公钥指纹</dt>
+        <dd className="admin-mono">{node.publicKeyFingerprint}</dd>
+        {node.bootstrapFile && (
+          <>
+            <dt>节点配置</dt>
+            <dd className="admin-mono">{node.bootstrapFile}</dd>
+          </>
+        )}
         <dt>版本</dt>
         <dd className="admin-mono">{node.buildId ?? '—'}</dd>
         <dt>{node.state === 'ready' ? '连接于' : '断开于'}</dt>

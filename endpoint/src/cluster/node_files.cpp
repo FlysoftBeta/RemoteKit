@@ -5,7 +5,7 @@
 #include <fstream>
 namespace remotekit::cluster {
 NodeFiles::~NodeFiles() {
-  SecureZeroMemory(key.data(), key.size());
+  SecureZeroMemory(private_key.data(), private_key.size());
 }
 bool ValidNodeId(std::string_view s) {
   auto alnum = [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); };
@@ -21,7 +21,7 @@ Result<Key> DecodeKey(std::string_view s) {
   Key key{};
   auto fail = [&]() -> Result<Key> {
     SecureZeroMemory(key.data(), key.size());
-    return Error{ErrorCode::kInvalidRequest, "cluster key must be base64 of 32 bytes"};
+    return Error{ErrorCode::kInvalidRequest, "X25519 key must be base64 of 32 bytes"};
   };
   if (s.size() != 44 || s.back() != '=')
     return fail();
@@ -87,23 +87,32 @@ Result<NodeFiles> LoadNodeFiles(const std::filesystem::path& root) {
     if (!json.is_object())
       return Error{ErrorCode::kInvalidRequest, "invalid node.json"};
     for (auto it = json.begin(); it != json.end(); ++it)
-      if (it.key() != "control" && it.key() != "key" && it.key() != "nodeId")
+      if (it.key() != "control" && it.key() != "privateKey" && it.key() != "controlPublicKey" &&
+          it.key() != "nodeId")
         return Error{ErrorCode::kInvalidRequest, "unknown node.json field"};
-    if (!json.contains("key") || !json["key"].is_string() || !json.contains("control") ||
-        !json["control"].is_string() || !json.contains("nodeId") || !json["nodeId"].is_string())
+    if (!json.contains("privateKey") || !json["privateKey"].is_string() ||
+        !json.contains("controlPublicKey") || !json["controlPublicKey"].is_string() ||
+        (json.contains("control") && !json["control"].is_string()) || !json.contains("nodeId") ||
+        !json["nodeId"].is_string())
       return Error{ErrorCode::kInvalidRequest, "invalid node.json fields"};
-    auto& encoded = json["key"].get_ref<std::string&>();
+    auto& encoded = json["privateKey"].get_ref<std::string&>();
     auto key = DecodeKey(encoded);
     SecureZeroMemory(encoded.data(), encoded.size());
     if (!key)
       return key.error();
+    auto control_key = DecodeKey(json["controlPublicKey"].get<std::string>());
+    if (!control_key)
+      return control_key.error();
     NodeFiles out;
-    out.key = key.value();
+    out.private_key = key.value();
     SecureZeroMemory(key.value().data(), 32);
-    out.control = json["control"].get<std::string>();
-    auto valid = ParseControlUrl(out.control);
-    if (!valid)
-      return valid.error();
+    out.control_public_key = control_key.value();
+    if (json.contains("control")) {
+      out.control = json["control"].get<std::string>();
+      auto valid = ParseControlUrl(out.control);
+      if (!valid)
+        return valid.error();
+    }
     out.node_id = json["nodeId"].get<std::string>();
     if (!ValidNodeId(out.node_id))
       return Error{ErrorCode::kInvalidRequest, "invalid nodeId"};

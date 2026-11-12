@@ -6,7 +6,7 @@ import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { zstdCompressSync } from 'node:zlib';
-import { accept, encode, decode, socketTransport } from './test-cluster-noise-interop.mjs';
+import { accept, encode, decode, socketTransport, publicKey } from './test-cluster-noise-interop.mjs';
 
 const [harness, dummy, updater, replacementProbe] = process.argv.slice(2);
 const require = createRequire(new URL('../../control/package.json', import.meta.url));
@@ -15,7 +15,8 @@ const repository = fileURLToPath(new URL('../../', import.meta.url));
 const scratch = path.join(repository, 'develop/tmp');
 await mkdir(scratch, { recursive: true });
 const temporary = await mkdtemp(path.join(scratch, 'node-updater-'));
-const key = Buffer.alloc(32, 7);
+const controlPrivateKey = Buffer.alloc(32, 7);
+const nodePrivateKey = Buffer.alloc(32, 6);
 const ids = ['a'.repeat(64), 'b'.repeat(64)];
 const archives = new Map();
 const children = new Set();
@@ -70,7 +71,8 @@ server.on('connection', (socket, request) => {
     assert.equal(request.headers.authorization, undefined);
     const transport = socketTransport(socket);
     let release;
-    const state = await accept(transport, key, (hello) => {
+    const state = await accept(transport, controlPrivateKey, (hello, remoteKey) => {
+      assert.deepEqual(remoteKey, publicKey(nodePrivateKey));
       assert.equal(hello.type, 'node.hello');
       assert.equal(hello.role, 'updater');
       assert.equal(hello.nodeId, 'test-node');
@@ -125,7 +127,8 @@ async function prepare(name, sequence, current) {
     path.join(root, 'node.json'),
     JSON.stringify({
       control: `ws://127.0.0.1:${server.address().port}/api/node`,
-      key: key.toString('base64'),
+      privateKey: nodePrivateKey.toString('base64'),
+      controlPublicKey: publicKey(controlPrivateKey).toString('base64'),
       nodeId: 'test-node',
     }),
   );
@@ -217,7 +220,8 @@ try {
       .map(JSON.parse)
       .some((record) => record.ev === 'runtime.activated' && record.buildId === ids[1]),
   );
-  assert(!log.includes(key.toString('base64')));
+  assert(!log.includes(controlPrivateKey.toString('base64')));
+  assert(!log.includes(nodePrivateKey.toString('base64')));
   assert((await readFile(path.join(root, 'logs/endpoint.log'), 'utf8')).includes('dummy endpoint step 4'));
   for (const mode of ['equal', 'no-release']) {
     phase = mode;

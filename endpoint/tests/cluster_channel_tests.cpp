@@ -27,8 +27,11 @@ Key TestKey() {
   key.fill(7);
   return key;
 }
-Json Ready(const Json& hello) {
+Json Ready(const Json& hello, const Key& public_key) {
   Check(hello.value("type", "") == "node.hello");
+  Key initiator;
+  initiator.fill(6);
+  Check(public_key == PublicKey(initiator));
   return {{"type", "node.ready"}};
 }
 std::pair<std::unique_ptr<Carrier>, std::unique_ptr<Carrier>> Pair() {
@@ -61,7 +64,13 @@ void NativeTests() {
   auto* raw = altered.get();
   auto responder =
       std::async(std::launch::async, [&] { return AcceptCarrier(std::move(b), TestKey(), Ready); });
-  auto init = Take(ConnectCarrier(std::move(altered), TestKey(),
+  auto init = Take(ConnectCarrier(std::move(altered),
+                                  [] {
+                                    Key key;
+                                    key.fill(6);
+                                    return key;
+                                  }(),
+                                  PublicKey(TestKey()),
                                   {"endpoint", "test-node", "dev", std::string(32, '1')}));
   auto resp = Take(responder.get());
   Take(init.channel->Send({{"value", 42}}));
@@ -93,8 +102,8 @@ void NativeTests() {
   const Json seed{{"method", "session.ensure"},
                   {"clipboard",
                    {{"revision", "1"},
-                    {"text", std::string(1024 * 1024, '\x01')},
-                    {"html", std::string(2 * 1024 * 1024, '\x01')}}}};
+                    {"text", std::string(128 * 1024, '\x01')},
+                    {"html", std::string(256 * 1024, '\x01')}}}};
   Take(resp.channel->Send(seed));
   Check(Take(init.channel->Receive(5s)).json == seed);
   auto oversized_clipboard = clipboard;
@@ -108,11 +117,12 @@ void NativeTests() {
   resp.channel->Close();
   auto [c, d] = Pair();
   auto rejected = std::async(std::launch::async, [&] {
-    return AcceptCarrier(std::move(d), TestKey(), [](const Json&) -> Result<Json> {
-      return Json{{"type", "node.reject"}, {"code", "unknown_node"}};
+    return AcceptCarrier(std::move(d), TestKey(), [](const Json&, const Key&) -> Result<Json> {
+      return Json{{"type", "node.reject"}, {"code", "no_release"}};
     });
   });
-  auto reject = Take(ConnectCarrier(std::move(c), TestKey(), {"updater", "test-node", "dev", {}}));
+  auto reject = Take(ConnectCarrier(std::move(c), TestKey(), PublicKey(TestKey()),
+                                    {"updater", "test-node", "dev", {}}));
   Check(reject.reply.value("type", "") == "node.reject");
   auto unavailable = reject.channel->Receive(0ms);
   Check(!unavailable && unavailable.error().code == ErrorCode::kUnavailable);
@@ -122,7 +132,8 @@ void NativeTests() {
     Key bad{};
     return AcceptCarrier(std::move(f), bad, Ready);
   });
-  Check(!ConnectCarrier(std::move(e), TestKey(), {"updater", "test-node", "dev", {}}));
+  Check(!ConnectCarrier(std::move(e), TestKey(), PublicKey(TestKey()),
+                        {"updater", "test-node", "dev", {}}));
   Check(!wrong.get());
   Check(!DecodeFrame(Bytes{3}));
   Check(!DecodeFrame(Bytes{2, 255, 255, 255, 255}));
@@ -162,10 +173,22 @@ int main(int argc, char** argv) {
                             GetCurrentProcess(), &write, 0, FALSE, DUPLICATE_SAME_ACCESS) != FALSE);
       connection = AcceptCarrier(HandleCarrier(read, write), TestKey(), Ready);
     } else if (argc == 3)
-      connection = ConnectWebSocket(argv[2], TestKey(),
+      connection = ConnectWebSocket(argv[2],
+                                    [] {
+                                      Key key;
+                                      key.fill(6);
+                                      return key;
+                                    }(),
+                                    PublicKey(TestKey()),
                                     {"endpoint", "test-node", "dev", std::string(32, '1')});
     else
-      connection = ConnectStdio(TestKey(), {"endpoint", "test-node", "dev", std::string(32, '1')});
+      connection = ConnectStdio(
+          [] {
+            Key key;
+            key.fill(6);
+            return key;
+          }(),
+          PublicKey(TestKey()), {"endpoint", "test-node", "dev", std::string(32, '1')});
     auto established = Take(std::move(connection));
     if (mode == "reject") {
       Check(established.reply.value("type", "") == "node.reject");

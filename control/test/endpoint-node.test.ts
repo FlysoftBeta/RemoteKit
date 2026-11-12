@@ -7,7 +7,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
-import { nodeDefaults } from '../server/config';
+import { endpointDefaults, testNode, nodePrivateKey } from './node-fixture';
 import { NodeRegistry, type RegistryOptions } from '../server/cluster/node-link';
 import { Placement } from '../server/cluster/placement';
 import { EndpointGateway } from '../server/endpoint/gateway';
@@ -23,10 +23,10 @@ async function harness(overrides: Partial<RegistryOptions> = {}) {
     nodes: Object.fromEntries(
       ['alpha', 'beta'].map((nodeId) => [
         nodeId,
-        { config: { ...nodeDefaults, nodeId, maxSessions: 2 }, configHash: nodeId },
+        { ...testNode(nodeId), limits: { ...testNode(nodeId).limits, maxSessions: 2 } },
       ]),
     ),
-    key: key.toString('base64'),
+    privateKey: key.toString('base64'),
     buildId: 'dev',
     ...overrides,
   });
@@ -84,15 +84,52 @@ test('encrypted handshake supplies config, rejects unknown/build mismatch, repla
     const changed = once(link, 'ready');
     await h.connect();
     assert.equal((await changed)[0].processChanged, true);
-    for (const [hello, code] of [
-      [{ nodeId: 'missing' }, 'unknown_node'],
-      [{ buildId: 'old' }, 'build_mismatch'],
-    ] as const) {
+    await assert.rejects(h.connect({ nodeId: 'missing' }));
+    for (const [hello, code] of [[{ buildId: 'old' }, 'build_mismatch']] as const) {
       const rejected = await h.connect(hello);
       assert.equal(rejected.helloReply.code, code);
       await once(rejected.socket, 'close');
       assert.equal(link.state.state, 'ready');
     }
+  } finally {
+    await h.close();
+  }
+});
+
+test('IK binds configured node identity and peer revocation to the configured public keys', async () => {
+  const h = await harness();
+  const removed = new Set<string>();
+  h.registry.isRemoved = (node) => removed.has(node);
+  try {
+    const alpha = await h.connect();
+    assert.deepEqual(alpha.helloReply.peers, [
+      {
+        nodeId: 'beta',
+        address: h.registry.get('beta')!.config.peer.address,
+        publicKey: h.registry.get('beta')!.configured.publicKey,
+      },
+    ]);
+    const wrong = new FakeNode();
+    try {
+      await assert.rejects(
+        wrong.connect(h.url, h.key, { nodeId: 'alpha' }, nodePrivateKey('beta')),
+        /Handshake closed/,
+      );
+    } finally {
+      wrong.close();
+    }
+    assert.equal(h.registry.get('alpha')!.history().rejected?.code, 'identity_mismatch');
+    await assert.rejects(h.connect({ nodeId: 'unknown' }), /Handshake closed/);
+    removed.add('beta');
+    const pushed = once(alpha, 'frame');
+    h.registry.publishPeers();
+    assert.deepEqual((await pushed)[0].message, { type: 'node.peers', peers: [] });
+    await assert.rejects(h.connect({ nodeId: 'beta' }), /Handshake closed/);
+    const identity = h.registry.get('beta')!.configured.publicKey;
+    removed.delete('beta');
+    h.registry.publishPeers();
+    assert.equal((await h.connect({ nodeId: 'beta' })).helloReply.type, 'node.ready');
+    assert.equal(h.registry.get('beta')!.configured.publicKey, identity);
   } finally {
     await h.close();
   }

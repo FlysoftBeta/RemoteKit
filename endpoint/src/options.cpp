@@ -20,8 +20,7 @@ const std::map<std::string, std::pair<uint32_t, uint32_t>> ranges{
     {"bufferMs", {50, 5000}},
     {"idleIdrMs", {0, UINT32_MAX}},
     {"maxEncodeWidth", {16, 4096}},
-    {"maxEncodeHeight", {16, 4096}},
-    {"maxSessions", {1, 64}}};
+    {"maxEncodeHeight", {16, 4096}}};
 }  // namespace
 Result<ProcessOptions> ProcessOptions::Parse(int argc, char** argv) {
   ProcessOptions value;
@@ -37,28 +36,23 @@ Result<ProcessOptions> ProcessOptions::Parse(int argc, char** argv) {
       value.stdio = true;
     else if (name == "--node-root" && !text.empty())
       value.node_root = Utf8Path(text);
-    else if (name == "--node-id" && !text.empty())
-      value.node_id = text;
     else
       return Invalid("argument " + argument);
   }
-  if (!value.node_root.is_absolute() ||
-      (value.stdio ? !cluster::ValidNodeId(value.node_id) : !value.node_id.empty()))
-    return Invalid("expected --node-root=<absolute path>, with --stdio --node-id=<id> locally");
+  if (!value.node_root.is_absolute())
+    return Invalid("expected --node-root=<absolute path>");
   value.node_root = value.node_root.lexically_normal();
   return value;
 }
 struct OptionValues {
   std::string node_id, build_id;
-  fs::path node_root, browser, data, browser_trace_directory;
+  fs::path node_root, browser, data;
   std::string encoder;
   std::string peer_listen, peer_address;
   uint16_t rtc_port_min = 0, rtc_port_max = 0;
   std::string rtc_address;
-  std::optional<uint64_t> disk_reserve_bytes, session_memory_bytes;
   media::EncoderSettings encoding;
   uint32_t idle_idr_ms, max_encode_width, max_encode_height;
-  std::optional<uint32_t> max_sessions;
 };
 RuntimeOptions::RuntimeOptions(OptionValues v)
     : node_id(std::move(v.node_id)),
@@ -66,33 +60,47 @@ RuntimeOptions::RuntimeOptions(OptionValues v)
       node_root(std::move(v.node_root)),
       browser(std::move(v.browser)),
       data(std::move(v.data)),
-      browser_trace_directory(std::move(v.browser_trace_directory)),
       encoder(std::move(v.encoder)),
       encoding(v.encoding),
       idle_idr_ms(v.idle_idr_ms),
       max_encode_width(v.max_encode_width),
       max_encode_height(v.max_encode_height),
-      max_sessions(v.max_sessions),
       peer_listen(std::move(v.peer_listen)),
       peer_address(std::move(v.peer_address)),
       rtc_port_min(v.rtc_port_min),
       rtc_port_max(v.rtc_port_max),
-      rtc_address(std::move(v.rtc_address)),
-      disk_reserve_bytes(v.disk_reserve_bytes),
-      session_memory_bytes(v.session_memory_bytes) {}
-Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& config,
+      rtc_address(std::move(v.rtc_address)) {}
+RuntimeOptions::RuntimeOptions(const RuntimeOptions& other)
+    : RuntimeOptions(
+          std::move(FromConfig(other.config_source_ ? other.config_source_() : other.source_,
+                               other.node_root,
+                               other.build_id,
+                               other.node_id))
+              .value()) {}
+void RuntimeOptions::SetConfigSource(std::function<Json()> source) {
+  config_source_ = std::move(source);
+}
+Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& source,
                                                   const fs::path& root,
                                                   std::string build_id,
                                                   const std::string& node_id) {
+  if (!source.is_object() || source.size() != 4 || !source.contains("nodeId") ||
+      !source.contains("peer") || !source.contains("rtc") || !source.contains("media") ||
+      !source["media"].is_object())
+    return Invalid("required fields");
+  Json config = source["media"];
+  for (const auto* name : {"nodeId", "peer", "rtc"}) {
+    if (config.contains(name))
+      return Invalid(name);
+    config[name] = source[name];
+  }
   const std::set<std::string> fields{
-      "nodeId",           "encoder",           "fps",         "bitrate",
-      "maxBitrate",       "asyncDepth",        "gop",         "targetUsage",
-      "qsvLowPower",      "bufferMs",          "rateControl", "idleIdrMs",
-      "maxEncodeWidth",   "maxEncodeHeight",   "dataPath",    "browser",
-      "browserTraceDir",  "maxSessions",       "peer",        "rtc",
-      "diskReserveBytes", "sessionMemoryBytes"};
-  const std::set<std::string> nullable{"asyncDepth",  "gop",     "targetUsage",    "bufferMs",
-                                       "rateControl", "browser", "browserTraceDir"};
+      "nodeId",         "encoder",         "fps",         "bitrate",
+      "maxBitrate",     "asyncDepth",      "gop",         "targetUsage",
+      "qsvLowPower",    "bufferMs",        "rateControl", "idleIdrMs",
+      "maxEncodeWidth", "maxEncodeHeight", "peer",        "rtc"};
+  const std::set<std::string> nullable{"asyncDepth", "gop", "targetUsage", "bufferMs",
+                                       "rateControl"};
   if (!config.is_object() || config.size() != fields.size())
     return Invalid("required fields");
   for (const auto& [name, value] : config.items()) {
@@ -124,16 +132,7 @@ Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& config,
         return Invalid(name);
       continue;
     }
-    if (name == "diskReserveBytes" || name == "sessionMemoryBytes") {
-      if (value.is_null())
-        continue;
-      if (!value.is_number_integer() || (!value.is_number_unsigned() && value.get<int64_t>() < 0) ||
-          value.get<uint64_t>() > 9007199254740991ULL ||
-          (name == "sessionMemoryBytes" && value == 0))
-        return Invalid(name);
-      continue;
-    }
-    if (value.is_null() && (nullable.contains(name) || name == "maxSessions"))
+    if (value.is_null() && nullable.contains(name))
       continue;
     if (auto range = ranges.find(name); range != ranges.end()) {
       if (!value.is_number_integer() ||
@@ -177,12 +176,6 @@ Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& config,
         }))
       return Invalid("rtc.address");
   }
-  if (!config["diskReserveBytes"].is_null())
-    v.disk_reserve_bytes = config["diskReserveBytes"].get<uint64_t>();
-  if (!config["sessionMemoryBytes"].is_null())
-    v.session_memory_bytes = config["sessionMemoryBytes"].get<uint64_t>();
-  if (!config["maxSessions"].is_null())
-    v.max_sessions = config["maxSessions"].get<uint32_t>();
   v.node_id = node_id;
   v.build_id = std::move(build_id);
   v.node_root = root;
@@ -220,17 +213,12 @@ Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& config,
     v.encoding.vbr = config["rateControl"] == "vbr";
     v.encoding.rate_control_explicit = true;
   }
-  auto path = [&](const char* name) {
-    return (root / Utf8Path(config[name].get<std::string>())).lexically_normal();
-  };
-  v.data = path("dataPath");
+  v.data = root / "data";
   wchar_t executable[32768]{};
   GetModuleFileNameW(nullptr, executable, 32768);
-  v.browser = config["browser"].is_null()
-                  ? fs::path(executable).parent_path() / "remotekit_browser.exe"
-                  : path("browser");
-  if (!config["browserTraceDir"].is_null())
-    v.browser_trace_directory = path("browserTraceDir");
-  return RuntimeOptions(std::move(v));
+  v.browser = fs::path(executable).parent_path() / "remotekit_browser.exe";
+  RuntimeOptions options(std::move(v));
+  options.source_ = source;
+  return options;
 }
 }  // namespace remotekit

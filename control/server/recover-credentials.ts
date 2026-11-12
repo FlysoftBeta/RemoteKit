@@ -2,7 +2,7 @@
 // the accounts and their credentials. See docs/auth.md#凭据恢复.
 import { existsSync, mkdirSync, renameSync, rmdirSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { runtimeConfig } from './config';
+import { parseConfig } from './config';
 import { open } from './persistence/database';
 import { applyRecovery, planRecovery, type RecoveryPlan } from './recovery/credentials';
 
@@ -96,7 +96,7 @@ function report(plan: RecoveryPlan, dryRun: boolean) {
 
 function main() {
   const options = parse(process.argv.slice(2));
-  const config = runtimeConfig(process.env, []);
+  const config = parseConfig(process.env, []);
   const database = config.dbPath;
   const now = new Date();
   let source = options.from ?? database;

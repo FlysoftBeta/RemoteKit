@@ -11,7 +11,7 @@ const config = runtimeConfig();
 const store = open(config.dbPath, { buildId: config.buildId });
 const nodes = new NodeRegistry({
   nodes: config.nodes,
-  key: config.cluster.key,
+  privateKey: config.identity.privateKey,
   buildId: config.buildId,
   release: loadRelease(config.root, config.buildId),
 });

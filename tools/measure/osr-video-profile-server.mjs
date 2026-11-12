@@ -1,3 +1,4 @@
+import { stageRuntime } from '../../tests/integration/stage-runtime.mjs';
 // Usage: node tools/measure/osr-video-profile-server.mjs --package <unpacked streaming runtime>
 //   --evidence develop/tmp/<new-directory> [--live-build] [--port 33623]
 //   [--viewer <chrome.exe>] [--state <previous evidence directory>]
@@ -171,16 +172,14 @@ await writeFile(
   JSON.stringify({
     http: { listen: `127.0.0.1:${port}`, origins: [`http://127.0.0.1:${port}`] },
     storage: { database: join(state, 'control.db'), diagnostics: join(evidence, 'diagnostics') },
-    nodeDefaults: {
-      browser,
-      dataPath: join(state, 'endpoint'),
-      browserTraceDir: join(evidence, 'browser-trace'),
-    },
     nodes: {
       // A packaged Control finds the runtime it installed for its own build.
       local: {
         local: options['live-build']
-          ? { executable: endpoint, root: join(state, 'node') }
+          ? {
+              executable: stageRuntime(endpoint, browser, join(state, 'node-runtime/bin')),
+              root: join(state, 'node'),
+            }
           : { root: join(state, 'node') },
       },
     },
@@ -192,6 +191,7 @@ const child = spawn(node, [control], {
   env: {
     ...process.env,
     REMOTEKIT_CONTROL_CONFIG: configPath,
+    ...(options['live-build'] ? { REMOTEKIT_BROWSER_TRACE_DIR: join(evidence, 'browser-trace') } : {}),
   },
 });
 child.stdout.pipe(createWriteStream(join(evidence, 'server.stdout.log')));
