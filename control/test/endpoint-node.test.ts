@@ -98,6 +98,30 @@ test('encrypted handshake supplies config, rejects unknown/build mismatch, repla
   }
 });
 
+test('managed local node repair shows the bootstrap path used by Control', async () => {
+  const root = join(tmpdir(), 'rk-local-repair');
+  const bootstrapFile = join(root, 'node.json');
+  const h = await harness({
+    nodes: {
+      local: {
+        ...testNode('local'),
+        bootstrapFile,
+        local: { root, executable: join(root, 'endpoint_service.exe') },
+      },
+    },
+  });
+  const control = createApplication(h.store, h.gateway);
+  try {
+    const node = control.nodeAdmin.list().find((node) => node.nodeId === 'local');
+    assert(node && node.state !== 'unknown');
+    assert.equal(node.managed, true);
+    assert.equal(node.bootstrapFile, bootstrapFile);
+  } finally {
+    await control.close();
+    await h.close();
+  }
+});
+
 test('IK binds configured node identity and peer revocation to the configured public keys', async () => {
   const h = await harness();
   const control = createApplication(h.store, h.gateway);

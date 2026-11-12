@@ -32,7 +32,7 @@ export class NodeAdmin {
           .update(Buffer.from(node.configured.publicKey, 'base64'))
           .digest('hex')
           .slice(0, 16),
-        bootstrapFile: node.configured.remote ? node.configured.bootstrapFile : null,
+        bootstrapFile: node.configured.bootstrapFile,
         peerAddress: node.config.peer.address,
         buildId: node.state.state === 'ready' ? (node.buildId ?? null) : null,
         pressure: sample?.pressure ?? null,
