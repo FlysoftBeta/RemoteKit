@@ -261,7 +261,18 @@ export class EndpointGateway {
   async transfer(tenant: string, nodeId?: string) {
     const source = this.placement.peek(tenant);
     if (!source) throw new RemoteKitError('not_found', '用户没有 Session');
-    if (this.nodes.get(source.nodeId)?.state.state === 'ready') await this.stop(tenant);
+    if (this.nodes.get(source.nodeId)?.state.state === 'ready') {
+      const target = this.nodes
+        .all()
+        .some(
+          (node) =>
+            node.nodeId !== source.nodeId &&
+            (nodeId === undefined || node.nodeId === nodeId) &&
+            node.state.state === 'ready',
+        );
+      if (!target) throw new RemoteKitError('unavailable', '没有可接收的在线节点');
+      await this.stop(tenant);
+    }
     const placed = this.placement.transfer(tenant, nodeId);
     this.forget(tenant);
     await Promise.all(

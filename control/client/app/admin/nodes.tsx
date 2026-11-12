@@ -53,7 +53,10 @@ function problems(node: AdminNode) {
       }`,
     });
   if (node.snapshot === 'unavailable' && node.state === 'ready')
-    list.push({ severity: 'warning', text: 'snapshot: unavailable · 运行版本暂不可用' });
+    list.push({
+      severity: 'warning',
+      text: '快照服务不可用：运行中的 Session 暂不生成版本，停止时仍会保存。',
+    });
   if (node.underPressure) list.push({ severity: 'warning', text: '持续高负载，新会话会优先放到其他节点。' });
   if (node.diskDraining)
     list.push({ severity: 'warning', text: '磁盘空间低于保留值，正在清理冷副本并停止接收新数据。' });
@@ -216,7 +219,10 @@ export function AdminNodesSection({ online, call }: { online: boolean; call: Adm
         {selected?.state !== 'removed' &&
           selected?.affectedUsers.map((user) => (
             <Typography key={user.username}>
-              {user.username} · 最新完整版本：{formatTime(user.checkpointAt)}
+              {user.username} ·{' '}
+              {user.checkpointAt === null
+                ? '没有完整版本，将从空白浏览器数据开始'
+                : `最新完整版本：${formatTime(user.checkpointAt)}`}
             </Typography>
           ))}
       </ConfirmDialog>

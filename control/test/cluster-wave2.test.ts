@@ -182,20 +182,33 @@ test('observed running versions commit through the assigned actor and retain dir
   }
 });
 
-test('offline transfer and removal fail atomically when no complete version exists', async () => {
+test('offline transfer without a complete version starts from blank browser data, and so does removal', async () => {
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
     await h.connect('beta', 0.6);
     await h.gateway.synchronize('tenant');
+    await h.gateway.synchronize('first');
+    h.store.db.prepare("UPDATE session_placements SET node_id='alpha'").run();
     const before = h.placement.peek('tenant')!;
     const offline = once(h.nodes.get('alpha')!, 'offline');
     alpha.close();
     await offline;
-    await assert.rejects(h.gateway.transfer('tenant', 'beta'), { code: 'unavailable' });
-    assert.throws(() => h.control.nodeAdmin.remove('alpha'), { code: 'unavailable' });
-    assert.deepEqual(h.placement.peek('tenant'), before);
-    assert.equal(h.nodes.isRemoved('alpha'), false);
+    await h.gateway.transfer('tenant', 'beta');
+    const moved = h.placement.peek('tenant')!;
+    assert.equal(moved.nodeId, 'beta');
+    assert.equal(moved.checkpointId, null);
+    assert.equal(moved.dataState, 'clean');
+    assert.equal(moved.runState, 'stopped');
+    assert.ok(moved.placementEpoch > before.placementEpoch);
+    const other = h.placement.peek('first')!;
+    h.control.nodeAdmin.remove('alpha');
+    assert.equal(h.nodes.isRemoved('alpha'), true);
+    const evacuated = h.placement.peek('first')!;
+    assert.equal(evacuated.checkpointId, null);
+    assert.equal(evacuated.dataState, 'clean');
+    assert.ok(evacuated.placementEpoch > other.placementEpoch);
+    assert.equal(h.placement.resolve('first').nodeId, 'beta');
   } finally {
     await h.close();
   }
@@ -269,9 +282,12 @@ test('node removal transfers every placement from the newest complete version', 
     ]);
     h.control.nodeAdmin.remove('alpha');
     const moved = h.placement.peek(user.tenantId)!;
-    assert.equal(moved.nodeId, 'beta');
     assert.equal(moved.dataState, 'clean');
+    assert.equal(moved.checkpoint, id(1));
     assert.equal(moved.placementEpoch, first.placementEpoch + 1);
+    const started = h.placement.resolve(user.tenantId);
+    assert.equal(started.nodeId, 'beta');
+    assert.equal(started.checkpoint, id(1));
   } finally {
     await h.close();
   }

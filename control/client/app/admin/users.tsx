@@ -225,14 +225,14 @@ function ActionDialog({
           {...common}
           title={`转移 ${username} 的 Session`}
           confirmLabel="转移"
-          disabled={
-            user.session.state === 'none' || (user.session.nodeOffline && user.session.checkpointAt === null)
-          }
+          disabled={user.session.state === 'none'}
           onConfirm={() => run('admin.transfer', { username, ...(nodeId ? { nodeId } : {}) })}
         >
           <Typography>
             {user.session.state !== 'none' && user.session.nodeOffline
-              ? `源节点离线。将恢复最新完整版本（${formatTime(user.session.checkpointAt)}），此后的更改将丢失。`
+              ? user.session.checkpointAt === null
+                ? '源节点离线，且没有可用的完整版本。将从空白浏览器数据开始，源节点上的数据将丢失。'
+                : `源节点离线。将恢复最新完整版本（${formatTime(user.session.checkpointAt)}），此后的更改将丢失。`
               : '将先停止并保存源节点上的 Session，再转移到目标节点。'}
           </Typography>
           <TextField
@@ -493,7 +493,7 @@ export function AdminUsersSection({
           <ListItemText primary="立即停止" secondary={target?.online ? '用户在线时不可用' : undefined} />
         </MenuItem>
         <MenuItem disabled={!target || target.session.state === 'none'} onClick={() => open('move')}>
-          转移
+          <ListItemText primary="转移" />
         </MenuItem>
         <MenuItem disabled={target?.session.state !== 'stopped'} onClick={() => open('resetSession')}>
           <ListItemText
