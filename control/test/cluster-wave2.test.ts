@@ -642,7 +642,11 @@ test('session events reach learning and acknowledge without interrupting the nod
       version: 1,
       webviewId: '1',
       provider: 'xinjiaoyu',
-      result: {},
+      result: {
+        authorization: 'fixture-authorization',
+        accesstoken: 'fixture-token',
+        clientsession: 'fixture-session',
+      },
     });
     assert.equal((await received)[0].eventId, 'event-1');
     await acknowledged;

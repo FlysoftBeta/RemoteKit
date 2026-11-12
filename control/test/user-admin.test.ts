@@ -171,7 +171,10 @@ test('clearing second factors removes PIN and face and disables face verificatio
     h.store.security.saveSecurity(id, {
       settings: { ...record.settings, faceEnabled: true },
       pin: { salt: 'salt', hash: 'hash' },
-      face: { sealed: 'sealed', modelVersion: 'model' },
+      face: {
+        sealed: h.store.security.faceVault.seal(id, [1, ...Array<number>(127).fill(0)], 'model'),
+        modelVersion: 'model',
+      },
     });
     assert.deepEqual((await h.call('admin.users'))[1].secondFactors, { pin: true, face: true });
     await h.call('admin.clearSecondFactors', { username: 'ordinary' });

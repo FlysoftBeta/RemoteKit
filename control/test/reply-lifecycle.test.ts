@@ -243,7 +243,7 @@ test('close replies bind full identity, reject stale UI tokens and require expli
         eventId: 'closed-1',
         browserIncarnation: 'browser-B',
         type: 'view.closed',
-        body: { viewId: tab.webviewId },
+        body: { viewId: tab.webviewId, reason: 'closed' },
       },
     });
     await new Promise((resolve) => setImmediate(resolve));
