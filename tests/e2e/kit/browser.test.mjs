@@ -52,6 +52,7 @@ test('persistent and raw launches receive the seeded Local State before starting
 
 test('a counter at six pauses launches until zero', async (t) => {
   if (process.platform !== 'win32') return;
+  t.mock.method(console, 'log', () => {});
   const counts = [6, 5, 0];
   t.mock.method(childProcess, 'execFileSync', () => String(counts.shift()));
   t.mock.timers.enable({ apis: ['setTimeout'] });

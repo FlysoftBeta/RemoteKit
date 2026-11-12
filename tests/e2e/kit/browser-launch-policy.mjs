@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 const repository = fileURLToPath(new URL('../../../', import.meta.url));
 const ts = createRequire(new URL('../../../control/package.json', import.meta.url))('typescript');
 const launcher = resolve(repository, 'tests/e2e/kit/browser.mjs');
-const extensions = /\.(?:[cm]?[jt]sx?|py|ps1|cmd|bat|sh)$/;
+const extensions = /\.(?:[cm]?[jt]sx?|py|ps1|cmd|bat|sh|c|cc|cpp|h|hpp)$/;
 
 export function browserLaunchViolations(source, file) {
   const errors = [];
@@ -27,7 +27,7 @@ export function browserLaunchViolations(source, file) {
       if (['launch', 'launchPersistentContext', 'launchServer'].includes(name))
         fail(node, 'Direct browser launch');
       if (
-        /^(?:spawn|execFile|execFileSync|exec|execSync)$/.test(expression.getText(tree)) &&
+        /^(?:spawn|spawnSync|execFile|execFileSync|exec|execSync)$/.test(name || expression.getText(tree)) &&
         /(?:chrome|chromium|msedge|viewer)(?:Exe|Path)?\b|(?:chrome|msedge)\.exe/i.test(
           node.arguments[0]?.getText(tree) ?? '',
         )
@@ -41,9 +41,9 @@ export function browserLaunchViolations(source, file) {
   if (source.includes(profileFlag))
     errors.push(`${file}: raw browser profile argument; use kit/browser.mjs launchTestBrowser`);
   if (
-    /\.(?:py|ps1|cmd|bat|sh)$/.test(file) &&
+    /\.(?:py|ps1|cmd|bat|sh|c|cc|cpp|h|hpp)$/.test(file) &&
     /(?:chrome|msedge)\.exe/i.test(source) &&
-    /(?:Popen|subprocess\.(?:run|call)|Start-Process|&\s)/.test(source)
+    /(?:Popen|subprocess\.(?:run|call)|Start-Process|CreateProcess|system\s*\(|&\s)/.test(source)
   )
     errors.push(`${file}: raw browser command; use kit/browser.mjs launchTestBrowser`);
   return errors;
@@ -55,6 +55,7 @@ export function checkBrowserLaunchPolicy() {
     assert.equal(browserLaunchViolations(`chromium['${method}']({})`, 'probe.mjs').length, 1);
   }
   assert.equal(browserLaunchViolations('spawn(chrome, args)', 'probe.mjs').length, 1);
+  assert.equal(browserLaunchViolations('process.spawn(viewerExe, args)', 'probe.mjs').length, 1);
   assert.equal(browserLaunchViolations('launchTestBrowser({ profile })', 'probe.mjs').length, 0);
   const errors = [];
   function scan(directory) {

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { startFixture } from './kit/fixtures.mjs';
 import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
 

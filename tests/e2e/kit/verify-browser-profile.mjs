@@ -45,7 +45,12 @@ for (const [name, options] of [
   } finally {
     await context?.close();
     result.after = failedLogonCount();
+    if (result.after > before) result.passed = false;
     result.preferences = JSON.parse(readFileSync(join(profile, 'Local State'), 'utf8')).password_manager;
     writeFileSync(join(out, 'verification.json'), JSON.stringify(results, null, 2));
   }
+  assert(
+    result.after < 6 && result.after <= before,
+    'Failed-logon counter increased during browser shutdown',
+  );
 }
