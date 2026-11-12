@@ -10,7 +10,8 @@ export async function makeNodeRelease(runtime, endpoint, generation, browser) {
   const files = new Map();
   for (const source of [
     endpoint,
-    ...['remotekit_node.exe', 'libvpl.dll', 'libvpld.dll'].map((name) => join(dirname(endpoint), name)),
+    join(dirname(endpoint), 'remotekit_node.exe'),
+    join(dirname(endpoint), 'remotekit_snapshot.exe'),
   ]) {
     const name = basename(source);
     await copyFile(source, join(binary, name));
@@ -39,6 +40,12 @@ export async function makeNodeRelease(runtime, endpoint, generation, browser) {
     await mkdir(dirname(target), { recursive: true });
     await copyFile(source, target);
     files.set('bin/' + name, await readFile(source));
+  }
+  for (const entry of await readdir(dirname(endpoint), { withFileTypes: true })) {
+    if (!entry.isFile() || extname(entry.name).toLowerCase() !== '.dll') continue;
+    const source = join(dirname(endpoint), entry.name);
+    await copyFile(source, join(binary, entry.name));
+    files.set('bin/' + entry.name, await readFile(source));
   }
   files.set('bin/release-generation', Buffer.from(generation));
   await writeFile(join(binary, 'release-generation'), generation);

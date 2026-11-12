@@ -3,7 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { startFixture } from './kit/fixtures.mjs';
 import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
 
-import { connect, createServer as createProxy } from 'node:net';
+import { createNetworkProxy } from './kit/network.mjs';
 import { join, resolve } from 'node:path';
 import { pause, requireControl, startStack, until } from './kit/stack.mjs';
 
@@ -15,31 +15,10 @@ const run = resolve(output),
   port = Number(portArg),
   origin = 'http://127.0.0.1:' + (port + 4);
 await mkdir(run, { recursive: true });
-let management = true,
-  closePage = false,
+let closePage = false,
   childLoads = 0,
   geometry;
-const sockets = new Set();
-const proxy = createProxy((socket) => {
-  if (!management) {
-    socket.destroy();
-    return;
-  }
-  const upstream = connect(port, '127.0.0.1');
-  sockets.add(socket);
-  sockets.add(upstream);
-  for (const peer of [socket, upstream]) {
-    peer.on('error', () => {});
-    peer.on('close', () => {
-      sockets.delete(peer);
-      socket.destroy();
-      upstream.destroy();
-    });
-  }
-  socket.pipe(upstream);
-  upstream.pipe(socket);
-});
-await new Promise((done) => proxy.listen(port + 2, '127.0.0.1', done));
+const network = await createNetworkProxy({ port: port + 2, upstreamPort: port });
 const fixture = await startFixture('test-coordination-reconnect', port + 1, {
   getClosePage: () => closePage,
   setGeometry: (value) => {
@@ -119,8 +98,7 @@ try {
   const placement = before.placements[0],
     actual = before.observations[placement.tenant],
     loads = childLoads;
-  management = false;
-  for (const socket of sockets) socket.destroy();
+  network.disconnect();
   await until(
     () => Promise.resolve(control.events.some((event) => event.event === 'node.offline')),
     'management disconnected',
@@ -144,7 +122,7 @@ try {
       db.close();
     }
   }, 'durable disconnected close');
-  management = true;
+  network.reconnect();
   await until(
     () => Promise.resolve(control.events.filter((event) => event.event === 'node.ready').length >= 2),
     'node reconnected',
@@ -299,8 +277,7 @@ try {
   console.error(error.stack);
   process.exitCode = 1;
 } finally {
-  management = false;
-  for (const socket of sockets) socket.destroy();
+  network.disconnect();
   await context?.close();
   await viewers?.close();
   if (native && native.exitCode === null) {
@@ -308,6 +285,6 @@ try {
     await new Promise((done) => native.once('exit', done));
   }
   await stack.stop();
-  await new Promise((done) => proxy.close(done));
+  await network.close();
   await new Promise((done) => fixture.close(done));
 }

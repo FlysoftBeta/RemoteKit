@@ -4,24 +4,21 @@ import { launchPersistentViewer } from './kit/viewer.mjs';
 import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { startStack } from './kit/stack.mjs';
 import { registerViewer } from './kit/viewer.mjs';
 /**
  * H264 mobile IME regression with a desktop Chromium renderer, CDP preedit,
  * and synthetic Android-style geometry. Chrome 89 uses DOM composition events;
  * newer Viewers use Input.imeSetComposition.
- * node tests/e2e/test-mobile-ime.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port] [Control server.mjs]
+ * node tests/e2e/test-mobile-ime.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port]
  */
 
-const [playwright, viewer, endpoint, browser, output, listenPort = '34120', controlServer] =
-  process.argv.slice(2);
+const [playwright, viewer, endpoint, browser, output, listenPort = '34120'] = process.argv.slice(2);
 if (![playwright, viewer, endpoint, browser, output].every(Boolean)) {
   throw Error(
     'Expected Playwright module, Viewer exe, Endpoint exe, RemoteKit Browser exe and an unused output directory',
   );
 }
-const root = fileURLToPath(new URL('../../', import.meta.url));
 const run = resolve(output);
 const port = Number(listenPort);
 const origin = 'http://127.0.0.1:' + port;
@@ -32,7 +29,6 @@ await mkdir(run, { recursive: true });
 const fixtureEvents = [];
 const fixture = await startFixture('test-mobile-ime', port + 1, { fixtureEvents, run });
 
-const server = resolve(controlServer || join(root, 'control/dist/server.mjs'));
 const stack = await startStack({
   seed: false,
   fixtures: false,
@@ -41,32 +37,7 @@ const stack = await startStack({
   port,
   endpoint,
   browser,
-  server,
 });
-const control = stack.control.child;
-control.stdout.on('data', (data) => void appendFile(join(run, 'control.stdout.log'), data));
-control.stderr.on('data', (data) => void appendFile(join(run, 'control.stderr.log'), data));
-const stopped = new Promise((accept, reject) => {
-  control.once('exit', accept);
-  control.once('error', reject);
-});
-void stopped.catch(() => {});
-await writeFile(
-  join(run, 'service.json'),
-  JSON.stringify(
-    {
-      controlPid: control.pid,
-      server,
-      viewer: resolve(viewer),
-      endpoint: resolve(endpoint),
-      browser: resolve(browser),
-      port,
-    },
-    null,
-    2,
-  ),
-);
-
 const log = async (stage, value) => {
   await appendFile(join(run, 'keyboard-results.jsonl'), JSON.stringify({ stage, value }) + '\n');
   console.log(stage);
@@ -79,14 +50,6 @@ const pause = (ms) => new Promise((accept) => setTimeout(accept, ms));
 let context, page;
 const deadline = setTimeout(() => void context?.close().catch(() => {}), 300000);
 try {
-  for (let attempt = 0; ; attempt++) {
-    const response = await fetch(origin + '/api/auth/setup', {
-      signal: AbortSignal.timeout(1000),
-    }).catch(() => undefined);
-    if (response?.ok && (await response.json()).setupRequired === true) break;
-    assert(attempt < 900 && control.exitCode === null, 'Fresh isolated Control did not start');
-    await pause(100);
-  }
   context = await launchPersistentViewer(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
     headless: true,
@@ -652,6 +615,5 @@ try {
     await stack.stop();
     fixture.closeAllConnections();
     await new Promise((accept) => fixture.close(accept));
-    await stopped;
   }
 }

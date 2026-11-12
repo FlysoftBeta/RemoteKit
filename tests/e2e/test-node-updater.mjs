@@ -23,17 +23,9 @@ await copyFile(join(dirname(endpoint), 'remotekit_node.exe'), installed);
 const releases = [];
 const servers = [];
 for (const generation of ['first', 'second']) {
-  const runtime = join(
-    process.env.REMOTEKIT_E2E_RELEASE_SOURCE ? resolve(process.env.REMOTEKIT_E2E_RELEASE_SOURCE) : run,
-    generation,
-  );
-  if (process.env.REMOTEKIT_E2E_RELEASE_SOURCE) {
-    servers.push(join(runtime, 'control/dist/server.mjs'));
-    releases.push(JSON.parse(await readFile(join(runtime, 'release/node.json'), 'utf8')));
-  } else {
-    servers.push(await stageControlRelease(runtime));
-    releases.push(await makeNodeRelease(runtime, endpoint, generation, browser));
-  }
+  const runtime = join(run, generation);
+  servers.push(await stageControlRelease(runtime));
+  releases.push(await makeNodeRelease(runtime, endpoint, generation, browser));
 }
 assert.notEqual(releases[0].buildId, releases[1].buildId);
 const launchControl = async (index) =>

@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { startStack, until } from './kit/stack.mjs';
-import { createViewerContext, launch } from './kit/viewer.mjs';
+import { createViewerContext, launch, remoteInputReady, launchBrowser } from './kit/viewer.mjs';
 
 // Real Viewer journeys. Test hooks only read authoritative state or reveal unlock.
 import assert from 'node:assert/strict';
@@ -213,7 +213,8 @@ async function prepare(browser, phone, first = false) {
     await page.keyboard.press('Enter');
     await waitState((s) => s.workspace.tabs.some((t) => t.url === url && !t.loading), 'navigate ' + url);
     await page.locator('canvas[data-video-input]:not(.no-frame)').first().waitFor();
-    await pause(1200);
+    const viewId = await (f ?? page).locator('.remote-viewport').first().getAttribute('data-view-id');
+    await page.waitForFunction(remoteInputReady, viewId);
   };
   const section = async (f, label) => {
     const tabs = f.getByRole('tab', { name: label, exact: true });
@@ -368,7 +369,7 @@ try {
     });
     if (i === 0) {
       await q.step('03-member-real-login', async () => {
-        normalBrowser = await q.browser.browserType().launch({
+        normalBrowser = await launchBrowser({
           executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
           headless: true,
         });
@@ -654,10 +655,18 @@ try {
     viewer = undefined;
   }
   if (memberAbsentAt) {
-    while (Date.now() - memberAbsentAt < 610000) {
-      console.log('Normal-tab absence: ' + Math.floor((Date.now() - memberAbsentAt) / 1000) + ' seconds');
-      await pause(Math.min(30000, 610000 - (Date.now() - memberAbsentAt)));
-    }
+    const advancedMs = Math.max(0, 610000 - (Date.now() - memberAbsentAt));
+    await stack.advance(advancedMs);
+    await until(
+      async () => {
+        const snapshot = await stack.call('inspect');
+        const member = snapshot.users.find((user) => user.username === 'shell-member');
+        const placement = snapshot.placements.find((entry) => entry.tenant === member.tenant);
+        return placement?.run_state === 'stopped' && placement.data_state === 'clean';
+      },
+      'member hibernated',
+      90000,
+    );
     const page = await normalContext.newPage();
     await page.goto(stack.origin);
     await page.locator('.viewer-lock-blank').waitFor();
@@ -683,7 +692,8 @@ try {
           before: memberTab,
           after: state,
           text: await page.locator('body').innerText(),
-          absentMs: Date.now() - memberAbsentAt,
+          absentMs: Date.now() - memberAbsentAt + advancedMs,
+          advancedMs,
         },
         null,
         2,

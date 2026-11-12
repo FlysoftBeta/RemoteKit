@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 await runScenario('shell-security-admin', async (v, stack) => {
   const { page } = v;
-  const phone = process.env.QA_PHONE === '1';
+  const phone = process.env.E2E_POINTER === 'touch';
   if (phone) await page.setViewportSize({ width: 390, height: 844 });
   const click = async (locator) => {
     if (v.touch) await locator.tap();

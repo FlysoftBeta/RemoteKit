@@ -9,8 +9,7 @@ import { startStack, until } from './kit/stack.mjs';
 /** Real H264, device upload, native FileList delivery and partition/library regression. */
 import assert from 'node:assert/strict';
 
-const [modulePath, viewerExe, endpoint, browser, output, listenPort = '34200', server] =
-  process.argv.slice(2);
+const [modulePath, viewerExe, endpoint, browser, output, listenPort = '34200'] = process.argv.slice(2);
 assert([modulePath, viewerExe, endpoint, browser, output].every(Boolean));
 const run = resolve(output),
   port = Number(listenPort);
@@ -30,12 +29,7 @@ const stack = await startStack({
   port,
   endpoint,
   browser,
-  ...(server ? { server: resolve(server) } : {}),
 });
-const control = stack.control.child;
-for (const stream of ['stdout', 'stderr'])
-  control[stream].on('data', (bytes) => void appendFile(join(run, 'control.' + stream + '.log'), bytes));
-const stopped = new Promise((done) => control.once('exit', done));
 
 let chrome, viewer;
 async function stage(name, work) {

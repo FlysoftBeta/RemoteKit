@@ -204,6 +204,11 @@ export async function keyboardOcclusion(kind) {
       );
     };
     await ready();
+    // Focus the remote view before measuring keyboard-only geometry changes.
+    const focusBox = await page.locator('.remote-viewport').first().boundingBox();
+    await session.pointer.move(focusBox.x + 400, focusBox.y + 180);
+    await session.pointer.down();
+    await session.pointer.up();
     await page.waitForTimeout(2000);
     const initial = await page.evaluate(() => {
       const layout = [...occlusionQA.wire]

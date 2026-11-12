@@ -5,7 +5,6 @@ import { startStack } from './kit/stack.mjs';
 import { launchPersistentViewer, registerViewer } from './kit/viewer.mjs';
 
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 /**
  * Real H.264 fullscreen regression on an isolated loopback instance.
  * node tests/e2e/test-fullscreen.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port]
@@ -19,7 +18,6 @@ assert(
   'Expected Playwright, Viewer, Endpoint, Browser and output paths',
 );
 
-const root = fileURLToPath(new URL('../../', import.meta.url));
 const run = resolve(output);
 const port = Number(listenPort);
 const origin = 'http://127.0.0.1:' + (port + 1);
@@ -65,7 +63,7 @@ try {
   }, 'Fresh isolated Control did not start');
   context = await launchPersistentViewer(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
-    headless: process.env.REMOTEKIT_QA_HEADLESS === '1',
+    headless: true,
     viewport: { width: 1152, height: 820 },
     deviceScaleFactor: 1,
     timeout: 15000,
@@ -322,10 +320,12 @@ try {
   );
   const codecs = await until(async () => {
     const values = await read(`(async () => {
-        const stats = await fullscreenQA.peers.at(-1).getStats();
-        return [...stats.values()].filter(stat => stat.type === 'inbound-rtp' &&
-          (stat.kind || stat.mediaType) === 'video' && stat.framesDecoded > 0)
-          .map(stat => stats.get(stat.codecId)?.mimeType);
+        const codecs=[];
+        for(const peer of fullscreenQA.peers) {
+          const stats=await peer.getStats();
+          codecs.push(...[...stats.values()].filter(stat=>stat.type==='inbound-rtp'&&(stat.kind||stat.mediaType)==='video'&&stat.framesDecoded>0).map(stat=>stats.get(stat.codecId)?.mimeType));
+        }
+        return codecs;
       })()`);
     return values.some((value) => value?.toLowerCase() === 'video/h264') && values;
   }, 'No decoded H.264 inbound RTP');
@@ -435,79 +435,58 @@ try {
   assert.equal(hit.fullscreen, 'MAIN');
   await page.screenshot({ path: join(run, 'web-fullscreen.png') });
   await log('web-fullscreen-enter-and-hit', { inner, hit });
-  if (process.env.REMOTEKIT_QA_FULLSCREEN_NARROW === '1') {
-    const exitAt = fixtureEvents.length;
-    await page.keyboard.press('Escape');
-    await until(
-      () =>
-        fixtureEvents
-          .slice(exitAt)
-          .find(
-            (event) =>
-              event.type === 'fullscreenchange' &&
-              event.documentId === second.documentId &&
-              !event.fullscreen,
-          ),
-      'Escape did not exit fullscreen',
-    );
-    identity(baseline, await allReady(2));
-    await log('web-fullscreen-escape', { documentId: second.documentId });
-  } else {
-    const exitAt = fixtureEvents.length;
-    await target(second.documentId, 'exit', 0);
-    await until(
-      () =>
-        fixtureEvents
-          .slice(exitAt)
-          .find(
-            (event) =>
-              event.type === 'fullscreenchange' &&
-              event.documentId === second.documentId &&
-              !event.fullscreen,
-          ),
-      'Remote document did not exit fullscreen',
-    );
-    const restored = await allReady(2);
-    assert.equal(restored.toolbar, 2);
-    identity(baseline, restored);
-    const reenterAt = fixtureEvents.length;
-    await target(second.documentId, 'enter', 1);
-    await expectRemoteFullscreen(reenterAt);
-    await target(second.documentId, 'navigate', 0);
-    const navigated = await until(
-      () => fixtureEvents.find((event) => event.type === 'ready' && event.path === '/navigated'),
-      'In-page cross-document navigation did not commit',
-    );
-    assert.notEqual(navigated.documentId, second.documentId);
-    assert.equal(navigated.fullscreen, null);
-    const afterNavigation = await allReady(2);
-    assert.equal(afterNavigation.toolbar, 2);
-    assert.equal(afterNavigation.attempts.length, 0);
-    identity(baseline, afterNavigation);
-    const firstHit = await target(first.documentId, 'hit', 0);
-    await log('web-fullscreen-exit-and-navigation', { restored, navigated, afterNavigation, firstHit });
+  const exitAt = fixtureEvents.length;
+  await target(second.documentId, 'exit', 0);
+  await until(
+    () =>
+      fixtureEvents
+        .slice(exitAt)
+        .find(
+          (event) =>
+            event.type === 'fullscreenchange' && event.documentId === second.documentId && !event.fullscreen,
+        ),
+    'Remote document did not exit fullscreen',
+  );
+  const restored = await allReady(2);
+  assert.equal(restored.toolbar, 2);
+  identity(baseline, restored);
+  const reenterAt = fixtureEvents.length;
+  await target(second.documentId, 'enter', 1);
+  await expectRemoteFullscreen(reenterAt);
+  await target(second.documentId, 'navigate', 0);
+  const navigated = await until(
+    () => fixtureEvents.find((event) => event.type === 'ready' && event.path === '/navigated'),
+    'In-page cross-document navigation did not commit',
+  );
+  assert.notEqual(navigated.documentId, second.documentId);
+  assert.equal(navigated.fullscreen, null);
+  const afterNavigation = await allReady(2);
+  assert.equal(afterNavigation.toolbar, 2);
+  assert.equal(afterNavigation.attempts.length, 0);
+  identity(baseline, afterNavigation);
+  const firstHit = await target(first.documentId, 'hit', 0);
+  await log('web-fullscreen-exit-and-navigation', { restored, navigated, afterNavigation, firstHit });
 
-    const cleanupEnterAt = fixtureEvents.length;
-    await target(navigated.documentId, 'enter', 1);
-    // Use the overlay exit, which must address the currently fullscreen document
-    // even after the preceding navigation retired a fullscreen document.
-    await expectRemoteFullscreen(cleanupEnterAt, navigated.documentId);
-    await click('button', '退出网页全屏');
-    await until(
-      () =>
-        fixtureEvents
-          .slice(cleanupEnterAt)
-          .find(
-            (event) =>
-              event.type === 'fullscreenchange' &&
-              event.documentId === navigated.documentId &&
-              !event.fullscreen,
-          ),
-      'Viewer exit did not exit the current document fullscreen',
-    );
-    identity(baseline, await allReady(2));
-    await log('web-fullscreen-viewer-exit', { documentId: navigated.documentId });
-  }
+  const cleanupEnterAt = fixtureEvents.length;
+  await target(navigated.documentId, 'enter', 1);
+  // Use the overlay exit, which must address the currently fullscreen document
+  // even after the preceding navigation retired a fullscreen document.
+  await expectRemoteFullscreen(cleanupEnterAt, navigated.documentId);
+  await click('button', '退出网页全屏');
+  await until(
+    () =>
+      fixtureEvents
+        .slice(cleanupEnterAt)
+        .find(
+          (event) =>
+            event.type === 'fullscreenchange' &&
+            event.documentId === navigated.documentId &&
+            !event.fullscreen,
+        ),
+    'Viewer exit did not exit the current document fullscreen',
+  );
+  identity(baseline, await allReady(2));
+  await log('web-fullscreen-viewer-exit', { documentId: navigated.documentId });
 
   const openSettings = async () => {
     await click('button', '开始');

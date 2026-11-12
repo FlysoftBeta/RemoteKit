@@ -152,17 +152,11 @@ async function run(item, slot) {
     case 'positional':
       args = [playwright, viewer, endpoint, embedder, evidence, String(port)];
       break;
-    case 'files-ui':
-      args = [`--device=${browser}`];
-      break;
     case 'local':
       args = [browser, '', evidence];
       break;
     case 'learning':
       args = [embedder];
-      break;
-    case 'input-journey':
-      args = [`journey-${browser}-${pointer}`];
       break;
     case 'cluster':
       args = [browser, pointer, String(port), evidence];
@@ -205,10 +199,7 @@ async function run(item, slot) {
     E2E_BROWSER_BUILD: values['browser-build'],
     E2E_CONTROL: values.control,
     E2E_RELEASE: values.release ?? '',
-    QA_BROWSER: browser,
-    QA_PHONE: pointer === 'touch' ? '1' : '0',
     REMOTEKIT_E2E_PORT: String(port),
-    REMOTEKIT_QA_HEADLESS: '1',
   };
   if (viewport !== 'default') env.E2E_VIEWPORT = viewport;
   if (values.dpr) env.E2E_DPR = values.dpr;
@@ -237,7 +228,7 @@ async function run(item, slot) {
             const origin = 'http://127.0.0.1:' + port;
             await until(async () => (await fetch(origin + '/tabs')).ok, 'driver ready', 90000);
             const shot = await fetch(origin + '/shot?name=runner-smoke');
-            if (!shot.ok()) throw Error(await shot.text());
+            if (!shot.ok) throw Error(await shot.text());
             await fetch(origin + '/quit');
           } catch (error) {
             driverFailure = String(error);

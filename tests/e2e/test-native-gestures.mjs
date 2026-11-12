@@ -42,10 +42,9 @@ try {
   await prepareRetirement(host);
   const qa = host._clientGestureQA;
   await qa.openViewer({
-    ready: true,
-    gpuGranted: true,
     version: values.browser === 'chrome89' ? 89 : 157,
     port: Number(values.port),
+    fixturePort: stack.ports.fixture,
     run,
     password: 'native-gesture-fixture-password',
   });
@@ -112,9 +111,7 @@ try {
 
 async function prepareGestures(host) {
   const base = host._robustViewerQA;
-  if (!base) throw Error('Load robust-viewer-qa-browser.js first');
-  const inspect = base.gestureInspectOriginal ?? base.inspect.bind(base);
-  base.gestureInspectOriginal = inspect;
+  const inspect = base.inspect.bind(base);
   base.inspect = async () => {
     const value = await inspect(),
       telemetry = qa.case
@@ -127,11 +124,7 @@ async function prepareGestures(host) {
     if (!value) throw Error(message);
   };
   qa.openViewer = async (options) => {
-    assert(
-      options?.ready === true && options?.gpuGranted === true,
-      'Explicit root READY and GPU grant required',
-    );
-    const result = await base.openViewer({ port: 33581, ...options });
+    const result = await base.openViewer(options);
     await base.ready();
     await base.context.addInitScript(() => {
       const q = (window.clientGestureQA = {
@@ -185,7 +178,7 @@ async function prepareGestures(host) {
             } catch {
               return send(data);
             }
-            const e = m.event ?? m.input ?? m,
+            const e = m.event ?? m,
               isTouch = e.type === 'touch' || e.type === 'gesture';
             if (e.type === 'touch' && e.action === 'start' && q.staleStartEpoch) {
               m.layoutEpoch = q.staleStartEpoch;
@@ -435,7 +428,7 @@ async function prepareGestures(host) {
         };
       }, qa.markStart);
     const packets = data.sent
-      .map((r) => ({ record: r, event: r.message.event ?? r.message.input ?? r.message }))
+      .map((r) => ({ record: r, event: r.message.event ?? r.message }))
       .filter((r) => ['touch', 'gesture'].includes(r.event.type));
     const inputResults = data.received.filter((r) => r.message.type === 'input.result');
     const terminalRequests = packets
@@ -795,7 +788,7 @@ async function prepareGestures(host) {
     }));
   };
   qa.lifecycleCases = async () => {
-    const unwrap = (r) => r.message.event ?? r.message.input ?? r.message,
+    const unwrap = (r) => r.message.event ?? r.message,
       output = [];
     await qa.navigate({ id: `v${base.version}-terminal-held` });
     await qa.holdInputResults(true);
@@ -878,13 +871,6 @@ async function prepareGestures(host) {
     return output;
   };
   qa.close = () => base.close();
-  return {
-    prepared: true,
-    started: false,
-    launch:
-      'host._clientGestureQA.launch({ready:true,gpuGranted:true,version:89|157,run:absolutePath,password:disposablePassword})',
-    methods: Object.keys(qa),
-  };
 }
 
 async function prepareRetirement(host) {
@@ -1087,5 +1073,4 @@ async function prepareRetirement(host) {
     await qa.touch('touchEnd', []);
     return recover(id, 1);
   };
-  return { prepared: true, cases: Object.keys(cases) };
 }

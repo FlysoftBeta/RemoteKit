@@ -39,10 +39,6 @@ const stack = await startStack({
   endpoint,
   browser,
 });
-const control = stack.control.child;
-control.stdout.on('data', (data) => void appendFile(join(run, 'control.log'), data));
-control.stderr.on('data', (data) => void appendFile(join(run, 'control.log'), data));
-const stopped = new Promise((done) => control.once('exit', done));
 let context, page;
 const deadline = setTimeout(() => void context?.close(), 420000);
 const result = (scenario, detail) => {
@@ -723,7 +719,6 @@ try {
   await writeFile(join(run, 'trace.json'), JSON.stringify({ results, remote, wire }, null, 2));
   await context?.close();
   await stack.stop();
-  await Promise.race([stopped, pause(10000)]);
   fixture.closeAllConnections();
   fixture.close();
   console.log('Evidence:', run);

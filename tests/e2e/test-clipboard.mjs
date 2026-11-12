@@ -1,5 +1,5 @@
 import { startFixture } from './kit/fixtures.mjs';
-import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
+import { createViewerContext, instrumentViewer, launchBrowser, remoteInputReady } from './kit/viewer.mjs';
 
 import { randomUUID } from 'node:crypto';
 import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
@@ -45,10 +45,6 @@ const stack = await startStack({
   endpoint,
   browser,
 });
-const control = stack.control.child;
-control.stdout.on('data', (data) => void appendFile(join(run, 'control.log'), data));
-control.stderr.on('data', (data) => void appendFile(join(run, 'control.log'), data));
-const stopped = new Promise((done) => control.once('exit', done));
 const password = randomUUID();
 const deadline = setTimeout(() => void chrome?.close(), 420000);
 const latest = () => remote.at(-1);
@@ -133,7 +129,7 @@ const ready = async () => {
       section.querySelector('video')?.videoWidth > 0
     );
   });
-  await pause(400);
+  await user.page.waitForFunction(remoteInputReady);
 };
 const project = async (id) => {
   const canvas = await user.page.locator('canvas[data-video-input]').boundingBox();
@@ -434,7 +430,6 @@ try {
   );
   await chrome?.close();
   await stack.stop();
-  await Promise.race([stopped, pause(10000)]);
   fixture.closeAllConnections();
   fixture.close();
   console.log('Evidence:', run);

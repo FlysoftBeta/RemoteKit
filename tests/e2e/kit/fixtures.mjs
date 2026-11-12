@@ -89,6 +89,31 @@ export async function startFixture(kind, port, context = {}) {
   return server;
 }
 const fixtureHandlers = {
+  'test-files-ui':
+    ({ events, output }) =>
+    async (request, response) => {
+      if (request.method === 'POST') {
+        let body = '';
+        for await (const chunk of request) body += chunk;
+        events.push(JSON.parse(body));
+        await writeFile(join(output, 'fixture-events.json'), JSON.stringify(events, null, 2));
+        return response.end('ok');
+      }
+      response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(`<!doctype html>
+    <title>Files UI fixture</title><style>body{font:20px system-ui;background:#eef3fb}
+    input{position:fixed;top:42%;left:32px;width:300px;height:44px}</style>
+    <h1>Files UI fixture</h1><input type="file" multiple id="upload">
+    <script>
+      const input = document.querySelector('input');
+      const report = () => fetch('/event', {method:'POST',body:JSON.stringify({
+        width:innerWidth,height:innerHeight,box:input.getBoundingClientRect().toJSON()
+      })});
+      addEventListener('resize', report); report();
+      input.onchange = () => fetch('/event', {method:'POST',body:JSON.stringify({
+        files:[...input.files].map(file => file.name)
+      })});
+    </script>`);
+    },
   'test-context-menu': async ({ remote }) => {
     const html = await readFile(new URL('../fixtures/context-menu.html', import.meta.url));
     const image = Buffer.from(
@@ -470,13 +495,13 @@ const fixtureHandlers = {
     },
 };
 
-export async function cameraFixtures(run) {
+export async function cameraFixtures(run, samples = [3, 4]) {
   const { launchBrowser } = await import('./viewer.mjs');
   const browser = await launchBrowser({ channel: 'msedge' });
   const cameras = new Map();
   try {
     const page = await browser.newPage();
-    for (const sample of [3, 4]) {
+    for (const sample of samples) {
       const bytes = await readFile(new URL(`../fixtures/camera-scan-${sample}.jpg`, import.meta.url));
       const encoded = await page.evaluate(
         async (source) => {

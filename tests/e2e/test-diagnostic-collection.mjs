@@ -5,7 +5,6 @@ import { startStack } from './kit/stack.mjs';
 import { launchPersistentViewer, registerViewer } from './kit/viewer.mjs';
 
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { zstdDecompressSync } from 'node:zlib';
 /**
  * Real H.264 diagnostic-collection regression on an isolated loopback instance.
@@ -20,7 +19,6 @@ assert(
   'Expected Playwright, Viewer, Endpoint, Browser and output paths',
 );
 
-const root = fileURLToPath(new URL('../../', import.meta.url));
 const run = resolve(output);
 const port = Number(listenPort);
 const origin = 'http://127.0.0.1:' + port;
@@ -72,33 +70,20 @@ function readArchive(compressed) {
   }
   throw Error('Missing tar terminator');
 }
-async function startControl() {
-  const stack = await startStack({
-    seed: false,
-    fixtures: false,
-    ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
-    run,
-    dev: true,
-    port,
-    endpoint,
-    browser,
-    configOverrides: {
-      storage: { database: join(run, 'control.db'), diagnostics: archiveDirectory },
-    },
-  });
-  const control = stack.control.child;
-  control.stdout.on('data', (data) => void appendFile(join(run, 'control.stdout.log'), data));
-  control.stderr.on('data', (data) => void appendFile(join(run, 'control.stderr.log'), data));
-  const stopped = new Promise((accept, reject) => {
-    control.once('exit', accept);
-    control.once('error', reject);
-  });
-  void stopped.catch(() => {});
-  return async () => {
-    await stack.stop();
-  };
-}
-let stopControl = await startControl();
+const stackOptions = {
+  seed: false,
+  fixtures: false,
+  ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
+  run,
+  dev: true,
+  port,
+  endpoint,
+  browser,
+  configOverrides: {
+    storage: { database: join(run, 'control.db'), diagnostics: archiveDirectory },
+  },
+};
+let stack = await startStack(stackOptions);
 
 const sleep = (ms) => new Promise((accept) => setTimeout(accept, ms));
 async function until(check, message, timeout = 12000) {
@@ -121,7 +106,7 @@ try {
   }, 'Fresh isolated Control did not start');
   context = await launchPersistentViewer(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
-    headless: process.env.REMOTEKIT_QA_HEADLESS === '1',
+    headless: true,
     viewport: { width: 1152, height: 820 },
     deviceScaleFactor: 1,
     timeout: 15000,
@@ -522,47 +507,45 @@ try {
   assert(outputStats, 'No Browser output and Endpoint encode stats');
 
   assert.deepEqual(downloads, []);
-  if (process.env.REMOTEKIT_QA_DIAGNOSTICS_RESTART === '1') {
-    await page.goto('about:blank');
-    await stopControl();
-    stopControl = await startControl();
-    await until(async () => {
-      const response = await fetch(origin + '/api/auth/setup', {
-        signal: AbortSignal.timeout(1000),
-      }).catch(() => undefined);
-      return response?.ok && (await response.json()).setupRequired === false;
-    }, 'Control did not restart with the original account');
-    await page.goto(origin, { timeout: 12000 });
-    await until(
-      () =>
-        read(`Boolean(document.querySelector('.viewer-shell') ||
-          (document.querySelector('.viewer-lock-blank') &&
-            diagnosticQA.controlSocket?.readyState === WebSocket.OPEN &&
-            diagnosticQA.channels.filter(channel => channel.readyState === 'open').length === 1))`),
-      'Viewer did not reattach',
-    );
-    if (await read('Boolean(document.querySelector(".viewer-lock-blank"))')) {
-      await unlock();
-      await fill('input[autocomplete="current-password"]', accountPassword);
-      await page.keyboard.press('Enter');
-    }
-    await until(
-      () =>
-        read(
-          'diagnosticQA.controlSocket?.readyState === WebSocket.OPEN && !!document.querySelector(".viewer-shell")',
-        ),
-      'Viewer did not unlock after restart',
-    );
-    await read(`diagnosticQA.controlSocket.send(JSON.stringify({
-      id:'qa-after-restart', method:'diagnostics.status', params:{id:${JSON.stringify(complete.id)}}
-    }))`);
-    const reply = await until(
-      () => read("diagnosticQA.replies.find(reply => reply.method === 'diagnostics.status')"),
-      'No durable diagnostics.status reply after restart',
-    );
-    assert.deepEqual(reply.result, complete);
-    await log('restart', reply.result);
+  await page.goto('about:blank');
+  await stack.stop();
+  stack = await startStack(stackOptions);
+  await until(async () => {
+    const response = await fetch(origin + '/api/auth/setup', {
+      signal: AbortSignal.timeout(1000),
+    }).catch(() => undefined);
+    return response?.ok && (await response.json()).setupRequired === false;
+  }, 'Control did not restart with the original account');
+  await page.goto(origin, { timeout: 12000 });
+  await until(
+    () =>
+      read(`Boolean(document.querySelector('.viewer-shell') ||
+        (document.querySelector('.viewer-lock-blank') &&
+          diagnosticQA.controlSocket?.readyState === WebSocket.OPEN &&
+          diagnosticQA.channels.filter(channel => channel.readyState === 'open').length === 1))`),
+    'Viewer did not reattach',
+  );
+  if (await read('Boolean(document.querySelector(".viewer-lock-blank"))')) {
+    await unlock();
+    await fill('input[autocomplete="current-password"]', accountPassword);
+    await page.keyboard.press('Enter');
   }
+  await until(
+    () =>
+      read(
+        'diagnosticQA.controlSocket?.readyState === WebSocket.OPEN && !!document.querySelector(".viewer-shell")',
+      ),
+    'Viewer did not unlock after restart',
+  );
+  await read(`diagnosticQA.controlSocket.send(JSON.stringify({
+    id:'qa-after-restart', method:'diagnostics.status', params:{id:${JSON.stringify(complete.id)}}
+  }))`);
+  const reply = await until(
+    () => read("diagnosticQA.replies.find(reply => reply.method === 'diagnostics.status')"),
+    'No durable diagnostics.status reply after restart',
+  );
+  assert.deepEqual(reply.result, complete);
+  await log('restart', reply.result);
   await log('success', { sameRtcPeerTrackAndChannels: true, downloads, idExposedOnlyAfterComplete: true });
 } catch (error) {
   await log('failure', { message: error.message, stack: error.stack });
@@ -577,6 +560,6 @@ try {
   } finally {
     fixture.closeAllConnections();
     await new Promise((accept) => fixture.close(accept));
-    await stopControl();
+    await stack.stop();
   }
 }

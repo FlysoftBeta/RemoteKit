@@ -1,4 +1,5 @@
 import { launchTestBrowser } from './browser.mjs';
+import { cameraFixtures } from './fixtures.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -485,6 +486,8 @@ export async function instrumentViewer(context, evidence, name) {
         () => clusterQA.service?.channel.readyState === 'open' && clusterQA.auth?.serviceEpoch > 0,
       ),
     async media() {
+      await page.bringToFront();
+      await page.waitForFunction(() => document.hasFocus());
       return until(
         () =>
           page.evaluate(async () => {
@@ -520,6 +523,7 @@ export async function startJourney(browserName = 'edge', pointer = 'mouse') {
   mkdirSync(run, { recursive: true });
   const stack = await startStack({ run, scenario: 'files-user', learning: { captcha: false } });
   const provider = stack.provider;
+  const camera = (await cameraFixtures(run, [3])).get(3);
   const browser = await launchBrowser({
     executablePath:
       browserName === 'edge'
@@ -529,9 +533,7 @@ export async function startJourney(browserName = 'edge', pointer = 'mouse') {
     args: [
       '--use-fake-device-for-media-stream',
       '--use-fake-ui-for-media-stream',
-      ...(process.env.REMOTEKIT_CAMERA_FIXTURE
-        ? [`--use-file-for-fake-video-capture=${resolve(process.env.REMOTEKIT_CAMERA_FIXTURE)}`]
-        : []),
+      `--use-file-for-fake-video-capture=${camera}`,
     ],
   });
   const touch = pointer === 'touch';
@@ -862,7 +864,8 @@ export async function prepareNativeViewer(host) {
   qa.openViewer = async ({
     version = 157,
     run,
-    port = 33471,
+    port,
+    fixturePort,
     viewport = { width: 1440, height: 900 },
     dpr = 1,
     username = 'robust-' + version,
@@ -872,7 +875,7 @@ export async function prepareNativeViewer(host) {
     if (!run || !password) throw Error('Explicit isolated run path and disposable password required');
     qa.run = run;
     qa.port = port;
-    qa.fixturePort = port + 1;
+    qa.fixturePort = fixturePort;
     const context = await launchPersistentViewer(run + '/client-' + version + '-' + Date.now(), {
       executablePath: host.viewerExe,
       headless: true,
@@ -1192,7 +1195,7 @@ export async function prepareNativeViewer(host) {
       saved.retention.presentationRaw = 'omitted; cumulative diagnostics retained';
       delete saved.presentation.raw;
     }
-    const response = await qa.page.request.post('http://127.0.0.1:' + (qa.port + 1) + '/record', {
+    const response = await qa.page.request.post('http://127.0.0.1:' + qa.fixturePort + '/record', {
       headers: { Origin: 'http://127.0.0.1:' + qa.port },
       data: { kind: 'robust-viewer-qa', ...saved },
     });
@@ -1233,11 +1236,6 @@ export async function prepareNativeViewer(host) {
   qa.close = async () => {
     for (const context of qa.contexts) await context.close();
     qa.contexts = [];
-  };
-  return {
-    prepared: true,
-    started: false,
-    invoke: 'host._robustViewerQA.launch({version:157|89,run:absoluteRunPath,password:disposablePassword})',
   };
 }
 
