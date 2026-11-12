@@ -236,7 +236,7 @@ export function startApplication(
   const reconciliationTimer = setInterval(() => {
     if (!closing) {
       run(control.reconciler.tick());
-      run(control.objects.tick().then(() => {}));
+      run(control.objects.tick());
       run(control.servicePeers.tick());
     }
   }, 1500);

@@ -774,7 +774,12 @@ test('new mutations freeze payloads and reject mismatched operation IDs before s
 test('object GC follows live entry assets, originals, candidates, and pending selections through purge', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  const nodes = { handlers: new Map(), on() {} } as unknown as NodeRegistry;
+  const nodes = {
+    handlers: new Map(),
+    on() {},
+    all: () => [],
+    isRemoved: () => false,
+  } as unknown as NodeRegistry;
   const store = {
     db: f.db,
     atRestKey: new AtRestKey(null),
