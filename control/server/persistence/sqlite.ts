@@ -1,5 +1,17 @@
 import type Sqlite from 'better-sqlite3';
 import { corruptRecord } from './codec';
+import { decodeSealedRecord } from './sealed-documents';
+
+const sealedColumns = new Set([
+  'cluster_object_secret.ciphertext',
+  'session_placements.key_ciphertext',
+  'user_security.face_ciphertext',
+  'session_import_keys.private_key',
+  'learning_accounts.sealed',
+  'session_import_pairing.code',
+  'session_imports.payload',
+  'session_event_inbox.payload',
+]);
 
 const enumerations: Record<string, readonly (string | bigint)[]> = {
   'users.is_admin': [0n, 1n],
@@ -62,6 +74,13 @@ export function strictSqlite(db: Sqlite.Database): void {
         const choices = enumerations[where];
         if (!valid || (choices && !choices.includes(value as string | bigint)))
           throw corruptRecord(where, new Error(`expected ${choices ? choices.map(String).join('|') : type}`));
+        if (sealedColumns.has(where)) {
+          try {
+            decodeSealedRecord(value);
+          } catch (error) {
+            throw corruptRecord(where, error);
+          }
+        }
       }
       return row;
     };
