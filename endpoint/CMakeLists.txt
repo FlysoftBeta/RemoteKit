@@ -342,6 +342,7 @@ if(WIN32)
     src/files/file_upload.cpp
     src/auth/raw_camera.cpp
     src/session/session.cpp
+    src/session/coordinator.cpp
     src/session/views.cpp
     src/media/output.cpp
     src/media/pipeline.cpp
@@ -372,6 +373,10 @@ if(WIN32)
   target_link_libraries(endpoint_service PRIVATE remotekit_runtime)
   target_compile_options(endpoint_service PRIVATE /W4 /utf-8)
   if(BUILD_TESTING)
+    add_executable(endpoint_convergence_tests tests/convergence_tests.cpp)
+    target_link_libraries(endpoint_convergence_tests PRIVATE remotekit_runtime)
+    target_compile_options(endpoint_convergence_tests PRIVATE /W4 /utf-8)
+    add_test(NAME endpoint_convergence COMMAND endpoint_convergence_tests ${PROJECT_SOURCE_DIR}/protocol/coordination.fixture.json)
     add_executable(endpoint_composition_tests tests/composition_tests.cpp)
     add_executable(endpoint_checkpoint_tests tests/checkpoint_tests.cpp)
     target_compile_options(endpoint_checkpoint_tests PRIVATE /W4 /utf-8)
