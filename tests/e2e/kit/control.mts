@@ -135,6 +135,7 @@ process.on('message', (message: any) => {
           )
           .all(),
         checkpoints: store.db.prepare('SELECT * FROM checkpoints').all(),
+        checkpointObjects: store.db.prepare('SELECT tenant,manifest_id,id FROM checkpoint_objects').all(),
         replicas: store.db.prepare('SELECT * FROM object_replicas').all(),
         runtimes: control.tenants.values().map((runtime) => ({
           tenant: runtime.tenantId,

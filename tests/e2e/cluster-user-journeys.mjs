@@ -378,6 +378,26 @@ try {
     assert(placement(result, 'cluster-first').checkpoint_id);
     await report('automatic-commit', result);
     await commit(second, 'cluster-second');
+    await until(
+      async () => {
+        const snapshot = await control.call('inspect');
+        const session = placement(snapshot, 'cluster-first');
+        const checkpoint = snapshot.checkpoints.find(
+          (entry) => entry.tenant === session.tenant && entry.id === session.checkpoint_id,
+        );
+        const objects = snapshot.checkpointObjects.filter(
+          (entry) => entry.tenant === session.tenant && entry.manifest_id === checkpoint?.manifest_id,
+        );
+        return (
+          objects.length > 0 &&
+          objects.every((object) =>
+            snapshot.replicas.some((replica) => replica.id === object.id && replica.node_id !== source),
+          )
+        );
+      },
+      'complete checkpoint replicated before taking its source offline',
+      120000,
+    );
   });
   let correct;
   await step('wrong-node-json', async () => {
