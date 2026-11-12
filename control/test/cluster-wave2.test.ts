@@ -643,7 +643,7 @@ test('session events reach learning and acknowledge without interrupting the nod
       version: 1,
       webviewId: '1',
       provider: 'xinjiaoyu',
-      result: {},
+      result: { authorization: 'JBY test-token', accesstoken: 'test-access', clientsession: 'test-client' },
     });
     assert.equal((await received)[0].eventId, 'event-1');
     await acknowledged;

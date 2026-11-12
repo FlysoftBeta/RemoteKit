@@ -49,6 +49,10 @@ function fixture() {
       tenants: { get: () => runtime },
       endpoint: {
         nodes,
+        sessionFault: () => undefined,
+        faultSession: (_tenant: string, error: unknown) => {
+          throw error;
+        },
         placement: { peek: () => ({ nodeId: 'node', sessionId: 'session', placementEpoch: 1 }) },
         acknowledge: async (ack: { streamId: string; upTo: string }) => {
           assert.ok(db.prepare('SELECT 1 FROM file_library_operations WHERE tenant=?').get('tenant'));

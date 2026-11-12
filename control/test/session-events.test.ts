@@ -23,6 +23,7 @@ function fixture() {
   store.workspaces.writeWorkspace(emptyWorkspace('tenant'));
   const nodes = new EventEmitter();
   const acknowledgments: EventsAck[] = [];
+  const faults = new Map<string, unknown>();
   const context = {
     store,
     clock: systemClock,
@@ -30,6 +31,8 @@ function fixture() {
     tenants: new TenantRegistry(systemClock),
     closed: false,
     endpoint: {
+      sessionFault: (tenant: string) => faults.get(tenant),
+      faultSession: (tenant: string, error: unknown) => faults.set(tenant, error),
       nodes: Object.assign(nodes, {
         get: () => ({ state: { state: 'ready', connectionEpoch: 'connection' } }),
       }),

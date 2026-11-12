@@ -131,6 +131,12 @@ export function testGateway(
       link.observe?.(tenant),
     );
     value.seq = String(++sequence);
+    const appliedRevision = applied.get(tenant)?.revision ?? '0';
+    value.applied.sitePreferencesRevision = appliedRevision;
+    value.applied.viewsRevision = appliedRevision;
+    value.applied.mediaPolicyRevision = appliedRevision;
+    value.applied.clipboardRevision = applied.get(tenant)?.clipboard.revision ?? '0';
+    value.converged = appliedRevision === (desired?.revision ?? '0');
     if (applied.has(tenant)) {
       const actual = applied.get(tenant)!;
       value.authorization = {
@@ -143,10 +149,6 @@ export function testGateway(
     if (failures.has(tenant)) {
       value.lastError = failures.get(tenant);
       value.converged = false;
-      const revision = applied.get(tenant)?.revision ?? '0';
-      value.applied.sitePreferencesRevision = revision;
-      value.applied.viewsRevision = revision;
-      value.applied.mediaPolicyRevision = revision;
     }
     return value;
   };
