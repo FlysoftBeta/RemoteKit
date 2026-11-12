@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,23 @@ const evidence = fileURLToPath(new URL('../../../develop/tmp/e2e/', import.meta.
 mkdirSync(evidence, { recursive: true });
 
 test('all test and tool browser launch sites use the seeded launcher', checkBrowserLaunchPolicy);
+
+test('fresh profile directories are seeded before browser startup', async (t) => {
+  t.mock.method(childProcess, 'execFileSync', () => '0');
+  const profile = join(mkdtempSync(join(evidence, 'profile-fresh-unit-')), 'viewer');
+  assert.equal(existsSync(profile), false);
+  const context = {};
+  const browserType = {
+    launchPersistentContext(path) {
+      assert.equal(path, profile);
+      const state = JSON.parse(readFileSync(join(profile, 'Local State'), 'utf8'));
+      assert.equal(state.password_manager.os_password_blank, false);
+      assert.equal(state.password_manager.os_password_last_changed, passwordLastChanged);
+      return context;
+    },
+  };
+  assert.equal(await launchTestBrowser({ profile, browserType }), context);
+});
 
 test('persistent and raw launches receive the seeded Local State before starting', async (t) => {
   t.mock.method(childProcess, 'execFileSync', () => '0');
