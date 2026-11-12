@@ -33,8 +33,15 @@ export function strictSqlite(db: Sqlite.Database): void {
         const value = input[column.name];
         if (value === null || column.type === null) continue;
         const type = column.type.toUpperCase();
-        const valid =
-          type === 'TEXT'
+        const where = `${column.table}.${column.column}`;
+        const dwellDuration = where === 'page_dwell.visible_ms';
+        const valid = dwellDuration
+          ? (typeof value === 'bigint' && value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER)) ||
+            (typeof value === 'number' &&
+              Number.isFinite(value) &&
+              value >= 0 &&
+              value <= Number.MAX_SAFE_INTEGER)
+          : type === 'TEXT'
             ? typeof value === 'string'
             : type === 'INTEGER'
               ? typeof value === 'bigint' || (typeof value === 'number' && Number.isSafeInteger(value))
@@ -52,7 +59,6 @@ export function strictSqlite(db: Sqlite.Database): void {
             `${column.table}.${column.column}`,
             new Error('integer outside safe nonnegative bounds'),
           );
-        const where = `${column.table}.${column.column}`;
         const choices = enumerations[where];
         if (!valid || (choices && !choices.includes(value as string | bigint)))
           throw corruptRecord(where, new Error(`expected ${choices ? choices.map(String).join('|') : type}`));

@@ -38,6 +38,8 @@ const s = string;
 const b = boolean;
 const n = () => number({ min: 0, max: Number.MAX_SAFE_INTEGER });
 const i = () => integer({ min: 0 });
+const counter = string({ pattern: /^(0|[1-9][0-9]{0,19})$/ });
+const positiveCounter = string({ pattern: /^[1-9][0-9]{0,19}$/ });
 export const errorCode = literal(
   'invalid_request',
   'unauthenticated',
@@ -453,3 +455,84 @@ export const xinjiaoyuSession = object(
     secChUaPlatform: s(),
   },
 ) satisfies Codec<XinjiaoyuSession>;
+
+const eventIncarnation = nullable(s({ max: 128 }));
+const eventDownload = { name: s({ max: 4096 }), origin: s({ max: 2048 }) };
+const clipboardEvent = {
+  browserSequence: counter,
+  baseRevision: counter,
+  excludeFromHistory: b(),
+};
+export const sessionEventPayload = union(
+  object({
+    type: literal('view.closed'),
+    browserIncarnation: eventIncarnation,
+    body: object(
+      { viewId: positiveCounter, reason: s({ min: 1, max: 128 }) },
+      { instance: positiveCounter, document: positiveCounter },
+    ),
+  }),
+  object({
+    type: literal('download.imported'),
+    browserIncarnation: eventIncarnation,
+    body: object({
+      ...eventDownload,
+      assetId: s({ pattern: /^[0-9a-f]{64}$/ }),
+      mimeType: s({ max: 255 }),
+      size: counter,
+    }),
+  }),
+  object({
+    type: literal('download.failed'),
+    browserIncarnation: eventIncarnation,
+    body: object({ ...eventDownload, error: wireError }),
+  }),
+  object({
+    type: literal('clipboard.changed'),
+    browserIncarnation: eventIncarnation,
+    body: union(
+      object(
+        { ...clipboardEvent, text: s({ max: 1024 * 1024 }), html: s({ max: 2 * 1024 * 1024 }) },
+        { viewId: positiveCounter, oversize: literal(false) },
+      ),
+      object(
+        { ...clipboardEvent, oversize: literal(true), textBytes: i(), htmlBytes: i() },
+        { viewId: positiveCounter },
+      ),
+    ),
+  }),
+  object({
+    type: literal('view.signIn'),
+    browserIncarnation: eventIncarnation,
+    body: union(
+      object({
+        version: literal(1),
+        webviewId: positiveCounter,
+        provider: literal('changyan'),
+        result: object({
+          lot_number: s({ max: 8192 }),
+          captcha_output: s({ max: 8192 }),
+          pass_token: s({ max: 8192 }),
+          gen_time: s({ max: 8192 }),
+        }),
+      }),
+      object({
+        version: literal(1),
+        webviewId: positiveCounter,
+        provider: literal('xinjiaoyu'),
+        result: object(
+          { authorization: s({ max: 8192 }), accesstoken: s({ max: 8192 }), clientsession: s({ max: 8192 }) },
+          {
+            device: s({ max: 8192 }),
+            devicetype: s({ max: 8192 }),
+            'user-agent': s({ max: 8192 }),
+            'accept-language': s({ max: 8192 }),
+            'sec-ch-ua': s({ max: 8192 }),
+            'sec-ch-ua-mobile': s({ max: 8192 }),
+            'sec-ch-ua-platform': s({ max: 8192 }),
+          },
+        ),
+      }),
+    ),
+  }),
+);

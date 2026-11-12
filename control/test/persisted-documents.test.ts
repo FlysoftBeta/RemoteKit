@@ -30,6 +30,11 @@ const entry = {
   assetId: 'object',
 };
 const samples: Record<string, unknown> = {
+  sessionEventPayload: {
+    type: 'view.closed',
+    browserIncarnation: null,
+    body: { viewId: '1', reason: 'closed' },
+  },
   errorCode: 'internal',
   wireError: { code: 'internal', message: 'failure' },
   windowState: { section: 'apps' },

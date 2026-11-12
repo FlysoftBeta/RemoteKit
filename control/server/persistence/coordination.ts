@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type { AtRestKey } from '../auth/crypto';
 import { canonical, type SessionDesired, type SessionEvent } from '../endpoint/coordination';
+import { encodeJson } from './codec';
+import { sessionEventPayload } from './documents';
 
 export class CoordinationRepository {
   constructor(
@@ -42,12 +44,18 @@ export class CoordinationRepository {
     return row?.up_to ?? '0';
   }
   receive(event: SessionEvent): string | null {
-    const payload = canonical({
-      type: event.type,
-      browserIncarnation: event.browserIncarnation,
-      body: event.body,
-    });
-    const fingerprint = createHash('sha256').update(payload).digest('hex');
+    const payload = encodeJson<unknown>(
+      {
+        type: event.type,
+        browserIncarnation: event.browserIncarnation,
+        body: event.body,
+      },
+      sessionEventPayload,
+      'session_event_inbox.payload',
+    );
+    const fingerprint = createHash('sha256')
+      .update(canonical(JSON.parse(payload)))
+      .digest('hex');
     const previous = this.db
       .prepare(
         'SELECT fingerprint,disposition FROM session_event_inbox WHERE tenant=? AND session_id=? AND event_id=?',

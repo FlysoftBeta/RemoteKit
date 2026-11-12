@@ -6,6 +6,7 @@ import { reportError } from '../log';
 import { corruptRecord, decodeJson, type Codec } from './codec';
 import * as codecs from './documents';
 import { learningKeyInfo, openLearningSession } from './sealed-documents';
+import { canonical } from '../endpoint/coordination';
 
 export interface IntegrityProblem {
   kind: 'integrity' | 'foreign_key' | 'corrupt_record';
@@ -109,6 +110,18 @@ export function checkIntegrity(
       inspect(table, rowKey, () => decodeJson(row[column], codec, `${table}.${column} ${rowKey}`));
     }
   }
+  for (const row of db
+    .prepare('SELECT tenant,session_id,event_id,payload FROM session_event_inbox')
+    .iterate() as Iterable<any>)
+    inspect('session_event_inbox', `${row.tenant}/${row.event_id}`, () =>
+      decodeJson(
+        key
+          .open(canonical(['session-event', row.tenant, row.session_id, row.event_id]), row.payload)
+          .toString('utf8'),
+        codecs.sessionEventPayload,
+        `session_event_inbox.payload ${row.tenant}/${row.event_id}`,
+      ),
+    );
   for (const row of db
     .prepare('SELECT * FROM user_security WHERE face_ciphertext IS NOT NULL')
     .iterate() as Iterable<any>)
