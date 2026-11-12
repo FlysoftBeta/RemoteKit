@@ -5,7 +5,7 @@ import { resolve, join } from 'node:path';
 import { startStack, until } from './input-stack.mjs';
 import { launch } from './input-viewer.mjs';
 
-const root = resolve('develop/tmp/e2e-input');
+const root = resolve(process.env.INPUT_JOURNEY_OUT ?? 'develop/tmp/e2e-input');
 const telemetry = new Map();
 const pendingImages = new Set();
 const fixture = createServer(async (req, res) => {
@@ -59,6 +59,35 @@ try {
         stack = await startStack({ scenario: id, run });
         session = await launch({ browser: engine, pointer, stack, out: join(run, 'shots') });
         const { page, context } = session;
+        await page.evaluate(() => {
+          window.journeyInput = [];
+          for (const element of document.querySelectorAll('*')) {
+            const key = Object.keys(element).find((name) => name.startsWith('__reactFiber$'));
+            for (let fiber = key && element[key]; fiber; fiber = fiber.return) {
+              for (let hook = fiber.memoizedState; hook; hook = hook.next) {
+                const current = hook.memoizedState;
+                if (current?.presentation && current?.rtc && current?.endpoint)
+                  window.journeyTransport = current;
+              }
+            }
+          }
+          if (!window.journeyTransport) throw Error('Viewer transport not mounted');
+          for (const type of ['pointerdown', 'pointerup', 'focusin', 'focusout', 'keydown', 'beforeinput'])
+            document.addEventListener(
+              type,
+              (event) =>
+                window.journeyInput.push({
+                  type,
+                  target: event.target.className,
+                  key: event.key,
+                  data: event.data,
+                  x: event.clientX,
+                  y: event.clientY,
+                  at: performance.now(),
+                }),
+              true,
+            );
+        });
         page.on(
           'pageerror',
           (error) =>
@@ -93,6 +122,7 @@ try {
             const detail = await action();
             results.push({ name, status: 'pass', detail });
           } catch (error) {
+            process.exitCode = 1;
             results.push({ name, status: 'fail', error: error.stack });
             await shot(name + '-failure').catch(() => {});
             await writeFile(
@@ -103,6 +133,7 @@ try {
                   text: document.body.innerText,
                   html: document.querySelector('#root')?.innerHTML,
                   state: window.__remotekitTest?.state(),
+                  input: window.journeyInput,
                 })),
                 null,
                 2,
@@ -140,7 +171,7 @@ try {
           assert(canvas && r);
           return {
             x: canvas.x + ((r.x + r.width / 2) * canvas.width) / value.width,
-            y: canvas.y + ((r.y + r.height / 2) * canvas.height) / value.height,
+            y: canvas.y + ((r.y + r.height / 2) * canvas.width) / value.width,
           };
         }
         async function remoteClick(key, options) {
@@ -212,6 +243,28 @@ try {
           return { platform: await cdp.send('Browser.getVersion'), viewport: page.viewportSize() };
         });
         if (!latest()) throw Error('Fixture did not open; see 01-open-form-dom.json');
+        await step('02a-type-immediately-after-tap', async () => {
+          await click(page.locator('.address-form input').first());
+          const point = await project('name');
+          await session.pointer.move(point.x, point.y);
+          await session.pointer.down();
+          await session.pointer.up();
+          assert(
+            await page.evaluate(() => document.activeElement?.matches('.remote-input')),
+            'Page activation retained local address focus',
+          );
+          await page.keyboard.type('Tapped quickly', { delay: 5 });
+          await until(
+            () => latest().values.name === 'Tapped quickly',
+            'first characters after page activation',
+            30000,
+          );
+          await shot('02a-immediate-typing');
+          await page.keyboard.press('Control+A');
+          await page.keyboard.press('Backspace');
+          await until(() => latest().values.name === '', 'clear immediate typing fixture');
+          return { delivered: 'Tapped quickly' };
+        });
         await step('02-compose-name', async () => {
           await remoteClick('name');
           await page.waitForFunction(() => document.activeElement?.matches('.remote-input'), undefined, {
@@ -526,6 +579,21 @@ try {
           await page.keyboard.type(`http://127.0.0.1:34148/loading?case=${id}`, { delay: 20 });
           await page.keyboard.press('Enter');
           await until(() => latest()?.path === '/loading', 'loading form document', 45000);
+          await page.waitForFunction(
+            () => {
+              const transport = window.journeyTransport;
+              const state = window.__remotekitTest.state();
+              const tab = state.workspace.tabs.find((tab) => tab.url.includes('/loading'));
+              if (!tab?.usageDocument) return false;
+              const view = transport.presentation.layout?.views.find((view) => view.id === tab.webviewId);
+              return (
+                view?.document === JSON.parse(tab.usageDocument)[2] &&
+                !!transport.presentation.canInput(view.id)
+              );
+            },
+            undefined,
+            { timeout: 45000 },
+          );
           await page
             .locator('canvas[data-video-input]:not(.no-frame)')
             .first()
@@ -533,6 +601,7 @@ try {
           const loading = (await state()).workspace.tabs.some(
             (tab) => tab.url.includes('/loading') && tab.loading,
           );
+          assert(loading, 'Page finished loading before the input regression');
           assert(pendingImages.size > 0, 'Fixture image request is still loading');
           await remoteClick('name');
           await page.keyboard.type('Fast loading input', { delay: 5 });
@@ -579,6 +648,7 @@ try {
           ),
         );
       } catch (error) {
+        process.exitCode = 1;
         await writeFile(join(run, 'fatal.txt'), error.stack);
         console.error(id, error.stack);
       } finally {

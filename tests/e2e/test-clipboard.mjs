@@ -92,7 +92,16 @@ const connect = async (username, setup = false) => {
         this.addEventListener('message', ({ data }) => {
           try {
             const message = JSON.parse(data);
-            if (['input.result', 'input.editable', 'focus', 'layout'].includes(message.type))
+            if (
+              [
+                'input.result',
+                'input.editable',
+                'input.selection',
+                'input.contextMenu',
+                'focus',
+                'layout',
+              ].includes(message.type)
+            )
               q.wire.push({ at: performance.now(), direction: 'in', message });
           } catch {}
         });
@@ -220,9 +229,10 @@ try {
   await ready();
   const layoutIdentity = () =>
     user.page.evaluate(() => {
-      const layout = inputClipboardQA.wire.findLast(
-        (entry) => entry.direction === 'in' && entry.message.type === 'layout',
-      )?.message;
+      const layout = inputClipboardQA.wire
+        .slice()
+        .reverse()
+        .find((entry) => entry.direction === 'in' && entry.message.type === 'layout')?.message;
       return layout && { generation: layout.generation, epoch: layout.epoch };
     });
   const unchangedLayout = await layoutIdentity();
@@ -346,7 +356,14 @@ try {
   const retained = row();
   await click('large');
   await until(
-    async () => (await readFile(join(run, 'control.log'), 'utf8')).includes('Clipboard write exceeds limits'),
+    async () =>
+      (await readFile(join(run, 'logs/control.jsonl'), 'utf8')).split('\n').some((line) => {
+        try {
+          return JSON.parse(line).ev === 'clipboard.write_exceeds_limits';
+        } catch {
+          return false;
+        }
+      }),
     'oversize warning',
   );
   assert.deepEqual(row(), retained);
@@ -412,7 +429,7 @@ try {
     JSON.stringify({ results, marker, oversizeMarker, remote }, null, 2),
   );
   await chrome?.close();
-  if (control.connected) control.disconnect();
+  control.kill('SIGTERM');
   await Promise.race([stopped, pause(10000)]);
   fixture.closeAllConnections();
   fixture.close();

@@ -22,6 +22,7 @@ async (host) => {
       'Explicit root READY and GPU grant required',
     );
     const result = await base.launch({ port: 33581, ...options });
+    await base.ready();
     await base.context.addInitScript(() => {
       const q = (window.clientGestureQA = {
         pointers: [],
@@ -158,8 +159,12 @@ async (host) => {
     await base.uiFill({ css: 'input[autocomplete="current-password"]' }, options.password);
     await base.page.keyboard.press('Enter');
     await base.page.waitForFunction(() => robustQA.state);
-    if (!(await base.page.evaluate(() => robustQA.state.workspace.windows.length)))
-      await base.uiClick({ css: 'button', text: '新建窗口' });
+    if (!(await base.page.evaluate(() => robustQA.state.workspace.windows.length))) {
+      if (!(await base.page.locator('.launcher-search input').isVisible()))
+        await base.uiClick({ css: 'button', text: '开始' });
+      await base.uiClick({ css: '[data-tile-key="app:browser"]' });
+      await base.page.waitForFunction(() => robustQA.state.workspace.windows.length > 0);
+    }
     await base.ready();
     qa.cdp = await base.context.newCDPSession(base.page);
     await qa.cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
@@ -332,8 +337,10 @@ async (host) => {
       }));
     const terminalResults = terminalRequests.map((request) => ({
       ...request,
-      result: inputResults.findLast((a) => String(a.message.clientSequence) === String(request.sequence))
-        ?.message,
+      result: inputResults
+        .slice()
+        .reverse()
+        .find((a) => String(a.message.clientSequence) === String(request.sequence))?.message,
     }));
     const cumulative = packets
       .filter((r) => r.event.type === 'gesture')

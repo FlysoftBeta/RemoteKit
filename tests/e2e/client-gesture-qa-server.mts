@@ -25,7 +25,13 @@ const artifacts = await Promise.all(
 const port = Number(process.env.CLIENT_GESTURE_QA_PORT ?? 33581),
   fixturePort = port + 1;
 await mkdir(run, { recursive: true });
-const { store, endpoint, control } = await createClusterControl({ run, executable, browser, port });
+const { store, endpoint, control } = await createClusterControl({
+  run,
+  executable,
+  browser,
+  port,
+  peerPort: Number(process.env.CLIENT_GESTURE_QA_PEER_PORT ?? port + 2),
+});
 const latest = new Map<string, unknown>(),
   commands = new Map<string, unknown[]>(),
   fixtureHtml = await readFile(join(root, 'tests/e2e/client-gesture-qa-page.html'));

@@ -13,9 +13,10 @@ export async function createClusterControl(options: {
   executable: string;
   browser: string;
   port: number;
+  peerPort?: number;
   remote?: boolean;
 }) {
-  const { run, executable, browser, port, remote } = options;
+  const { run, executable, browser, port, peerPort = port + 2, remote } = options;
   const nodeId = remote ? 'robust-qa' : 'local';
   const configPath = join(run, 'control.json');
   await writeFile(
@@ -29,12 +30,16 @@ export async function createClusterControl(options: {
       },
       nodes: {
         [nodeId]: remote
-          ? { remote: { control: `ws://127.0.0.1:${port}/api/node` } }
+          ? {
+              remote: { control: `ws://127.0.0.1:${port}/api/node` },
+              peer: { listen: `127.0.0.1:${peerPort}`, address: `127.0.0.1:${peerPort}` },
+            }
           : {
               local: {
                 executable: stageRuntime(executable, browser, join(run, 'node-runtime/bin')),
                 root: join(run, 'node'),
               },
+              peer: { listen: `127.0.0.1:${peerPort}`, address: `127.0.0.1:${peerPort}` },
             },
       },
     }),

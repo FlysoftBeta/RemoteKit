@@ -13,6 +13,7 @@ const { store, endpoint, control } = await createClusterControl({
   executable: `${root}/build/endpoint/endpoint/endpoint_service.exe`,
   browser: 'C:/src/chromium/src/out/rel/remotekit_browser.exe',
   port,
+  peerPort: Number(process.argv[3] ?? port + 2),
 });
 const latest = new Map<string, any>();
 const server = createHttp(control, {

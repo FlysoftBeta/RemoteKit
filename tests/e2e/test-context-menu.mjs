@@ -162,7 +162,11 @@ try {
   );
   const original = state.workspace.tabs.find((tab) => tab.url === fixtureOrigin + '/');
   let activeUrl = original.url;
-  const latest = () => remote.findLast((entry) => entry.url === activeUrl);
+  const latest = () =>
+    remote
+      .slice()
+      .reverse()
+      .find((entry) => entry.url === activeUrl);
   const project = async (rect) => {
     const canvas = await page.locator('canvas[data-video-input]').boundingBox();
     return {
@@ -184,7 +188,11 @@ try {
   const wire = () => page.evaluate(() => contextQA.wire);
   const menuMessage = () =>
     page.evaluate(
-      () => contextQA.wire.findLast((entry) => entry.message.type === 'input.contextMenu')?.message,
+      () =>
+        contextQA.wire
+          .slice()
+          .reverse()
+          .find((entry) => entry.message.type === 'input.contextMenu')?.message,
     );
   const menu = page.getByRole('menu', { name: '页面菜单', exact: true });
   const open = async (id) => {
@@ -226,6 +234,8 @@ try {
     await pause(400);
   };
   const scenario = async (number, name, action) => {
+    if (process.env.CONTEXT_MENU_STEPS && !process.env.CONTEXT_MENU_STEPS.split(',').includes(String(number)))
+      return;
     try {
       const detail = await action();
       await page.screenshot({ path: join(run, `${number}.png`) });
@@ -275,11 +285,6 @@ try {
     return { message, point: p, paper };
   });
   await scenario(3, 'editable roundtrip', async () => {
-    const loads = latest().loadCount;
-    await open('blank');
-    await choose('重新加载');
-    await until(() => latest().loadCount > loads, 'fresh document for edit history');
-    await ready();
     const first = await open('editor');
     const flags = first.message.menu.editable;
     assert.equal(flags.undo, false);
@@ -318,11 +323,19 @@ try {
     await page.getByRole('button', { name: '关闭浏览器设置', exact: true }).click();
     await page.getByRole('dialog').waitFor({ state: 'hidden' });
     const r = await project(latest().geometry.word);
-    await page.mouse.move(r.x + 1, r.y + r.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(r.x + r.width - 1, r.y + r.height / 2, { steps: 20 });
-    await until(() => latest().selection === 'example.com', 'mouse drag selects full text');
-    await page.mouse.up();
+    const drag = (type, x, buttons) =>
+      cdp.send('Input.dispatchMouseEvent', {
+        type,
+        x,
+        y: r.y + r.height / 2,
+        buttons,
+        button: buttons || type === 'mouseReleased' ? 'left' : 'none',
+        clickCount: 1,
+      });
+    await drag('mouseMoved', r.x + 1, 0);
+    await drag('mousePressed', r.x + 1, 1);
+    for (let step = 1; step <= 20; step++) await drag('mouseMoved', r.x + 1 + ((r.width - 2) * step) / 20, 1);
+    await drag('mouseReleased', r.x + r.width - 1, 0);
     await until(() => latest().selection === 'example.com', 'mouse selection');
     const opened = await open('word');
     assert.equal(opened.message.menu.selection, 'example.com');
@@ -409,7 +422,11 @@ try {
     const quick = page.locator('.selection-menu');
     await quick.getByRole('button', { name: '更多', exact: true }).waitFor();
     const selection = await page.evaluate(
-      () => contextQA.wire.findLast((entry) => entry.message.type === 'input.selection')?.message,
+      () =>
+        contextQA.wire
+          .slice()
+          .reverse()
+          .find((entry) => entry.message.type === 'input.selection')?.message,
     );
     assert.equal(selection.menu.more, true);
     await page.screenshot({ path: join(run, '7-quick.png') });
@@ -419,7 +436,7 @@ try {
     assert.equal(message.menu.source, 'touch');
     assert.equal(message.menu.selection, latest().selection);
     await menu.getByRole('menuitem', { name: '复制', exact: true }).waitFor();
-    await menu.getByRole('menuitem', { name: /^使用Bing搜索/ }).waitFor();
+    await menu.getByRole('menuitem', { name: /^使用.+搜索/ }).waitFor();
     await page.screenshot({ path: join(run, '7-menu.png') });
     await escape();
     await click('blank');

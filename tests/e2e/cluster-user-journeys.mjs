@@ -312,6 +312,8 @@ async function dialog(v, title, confirm, name) {
   await d.waitFor({ state: 'hidden' });
 }
 async function step(name, fn) {
+  if (process.env.REMOTEKIT_CLUSTER_STEPS && !process.env.REMOTEKIT_CLUSTER_STEPS.split(',').includes(name))
+    return;
   try {
     await fn();
     await report('pass:' + name);
@@ -461,6 +463,40 @@ try {
       before = (await first.state()).workspace.tabs.map((t) => ({ id: t.id, url: t.url }));
       await shot(first, 'simultaneous');
       await shot(second, 'simultaneous');
+    });
+    await step('swapped-bootstrap-attribution', async () => {
+      await commit(second, 'cluster-second');
+      const other = placement(initial, 'cluster-second').node_id;
+      const bootstrap = join(nodes[other].local.root, 'node.json');
+      const original = await readFile(bootstrap);
+      try {
+        await writeFile(bootstrap, await readFile(join(nodes[source].local.root, 'node.json')));
+        await killNode(other);
+        await until(
+          'swapped bootstrap rejected on receiving link',
+          async () => {
+            const snapshot = await control.call('inspect');
+            assert(!snapshot.nodes.find((node) => node.nodeId === source).rejected);
+            return (
+              snapshot.nodes.find((node) => node.nodeId === other)?.rejected?.code === 'identity_mismatch'
+            );
+          },
+          90000,
+        );
+        await focusApp(first, 'admin');
+        await section(first, '节点');
+        const card = first.page.locator('.admin-node').filter({ hasText: other });
+        await card.getByText(bootstrap, { exact: true }).waitFor();
+        await shot(first, 'swapped-bootstrap-local-repair-path');
+      } finally {
+        await writeFile(bootstrap, original);
+      }
+      await until(
+        'repaired node restarts',
+        async () =>
+          (await control.call('inspect')).nodes.find((node) => node.nodeId === other)?.state === 'ready',
+        90000,
+      );
     });
     await step('automatic-stop-commit', async () => {
       const result = await commit(first, 'cluster-first');
@@ -669,45 +705,18 @@ try {
       );
       await shot(first, 'admin-stopped-session');
     });
+  await step('resume-after-admin-stop', async () => {
+    const before = placement(await control.call('inspect'), 'cluster-second');
+    second = await makeViewer('second-resumed');
+    await login(second, 'cluster-second');
+    await second.media();
+    const after = placement(await control.call('inspect'), 'cluster-second');
+    assert.equal(after.node_id, before.node_id);
+    await report('admin-stop-placement', { before, after });
+    assert((await second.state()).workspace.tabs.some((tab) => tab.url === fixtureOrigin + '/uncommitted'));
+    await shot(second, 'admin-stop-resumed');
+  });
   await step('admin-discard-offline-session', async () => {
-    second = await makeViewer('second-dirty');
-    try {
-      await login(second, 'cluster-second');
-    } catch (error) {
-      process.exitCode = 1;
-      await report('fail:resume-after-admin-stop', {
-        error: error.stack,
-        snapshot: await control.call('inspect'),
-      });
-      await shot(second, 'resume-after-admin-stop-stuck');
-      // Record the failure, then restart this fixture so the remaining independent admin journey can run.
-      await control.stop();
-      control = startControl(resolve('tests/e2e/cluster-journey-harness.mts'), config, run);
-      await appendFile(
-        join(run, 'pids.jsonl'),
-        JSON.stringify({
-          control: control.child.pid,
-          reason: 'recovery after recorded stop/resume failure',
-        }) + '\n',
-      );
-      await until(
-        'fixture nodes restarted',
-        async () => {
-          try {
-            const s = await control.call('inspect');
-            return s.nodes.length === 2 && s.nodes.every((n) => n.state === 'ready');
-          } catch {
-            return false;
-          }
-        },
-        90000,
-      );
-      await first.page.reload();
-      await second.page.reload();
-      await pause(1000);
-      await reveal(second);
-      await second.ready(90000);
-    }
     await navigate(second, '/discard-mutated');
     await remoteClick(second, '/discard-mutated', 'store');
     await until('dirty persistent data', () =>
