@@ -1,5 +1,6 @@
 #pragma once
 #include "persistence/sqlite.hpp"
+#include "persistence/strict_json.hpp"
 #include "util/common.hpp"
 #include <functional>
 #include <map>
@@ -7,15 +8,11 @@
 #include <set>
 
 namespace remotekit {
-inline Error CorruptState(std::string message) {
-  return {ErrorCode::kInternal, std::move(message), ErrorReason::kCorruptState};
-}
 class SessionDb;
 class EventStore {
  public:
   explicit EventStore(SessionDb& db) : db_(db) {}
   Result<Json> State();
-  Result<bool> Present();
   Result<Json> Load(uint64_t after = 0, size_t limit = 256);
   Result<Json> Append(const std::string& type,
                       const Json& body,
@@ -86,7 +83,8 @@ class LibraryStore {
 };
 class SessionDb {
  public:
-  explicit SessionDb(fs::path directory) : directory_(std::move(directory)) {}
+  explicit SessionDb(fs::path directory, std::string build = "dev")
+      : directory_(std::move(directory)), build_(std::move(build)) {}
   Result<void> Open();
   Result<void> OpenReadOnly(bool immutable);
   Result<void> Close();
@@ -107,6 +105,7 @@ class SessionDb {
   Result<void> Delete(const char* sql, const std::string& id);
   Result<void> PutLibrary(LibraryTable table, const std::string& id, const Json& document);
   const fs::path directory_;
+  const std::string build_;
   sqlite::Database db_;
   std::recursive_mutex mutex_;
   bool closed_ = false;

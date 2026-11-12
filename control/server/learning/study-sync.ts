@@ -1,12 +1,8 @@
+import { corruptRecord, decodeJson, encodeJson } from '../persistence/codec';
+import { wireError as wireErrorCodec } from '../persistence/documents';
 import { createHash, randomUUID } from 'node:crypto';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
-import {
-  parseWireError,
-  RemoteKitError,
-  toRemoteKitError,
-  wireError,
-  type WireError,
-} from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError, wireError, type WireError } from '../../shared/errors';
 import type { AttachmentSave, StudySync as SyncState } from '../../shared/learning';
 import type { ObjectIndex } from '../cluster/objects';
 import type { FileLibrary } from '../files/library';
@@ -15,6 +11,11 @@ import type { ControlDatabase } from '../persistence/database';
 import type { LearningAccounts } from './accounts';
 import { isDocument } from './document-type';
 import type { DownloadItem, StudyService } from './study-service';
+
+function storedFailure(text: string | null, tenant: string, key: string): RemoteKitError {
+  const value = decodeJson(text as string, wireErrorCodec, `learning_downloads.failure ${tenant}/${key}`);
+  return new RemoteKitError(value.code, value.message, value);
+}
 
 class Slots {
   private active = 0;
@@ -90,6 +91,7 @@ export class StudySync {
   state(tenant: string): SyncState {
     const row = this.store.db.prepare('SELECT * FROM learning_settings WHERE tenant=?').get(tenant) as
       { retention_days: bigint; last_sync_at: bigint | null } | undefined;
+    if (!row) throw corruptRecord(`learning_settings ${tenant}`, new Error('missing required record'));
     const runtime = this.tenants.get(tenant);
     return {
       attachmentFailures: (
@@ -98,8 +100,8 @@ export class StudySync {
             "SELECT key,failure FROM learning_downloads WHERE tenant=? AND state='failed' AND failure IS NOT NULL",
           )
           .all(tenant) as { key: string; failure: string }[]
-      ).map((item) => ({ key: item.key, error: wireError(parseWireError(JSON.parse(item.failure))!) })),
-      retentionDays: Number(row?.retention_days ?? 7),
+      ).map((item) => ({ key: item.key, error: wireError(storedFailure(item.failure, tenant, item.key)) })),
+      retentionDays: Number(row.retention_days),
       syncing: !!runtime?.syncing,
       ...(row?.last_sync_at ? { lastSyncAt: Number(row.last_sync_at) } : {}),
       ...(runtime?.error ? { error: runtime.error } : {}),
@@ -119,7 +121,7 @@ export class StudySync {
       if (row.state === 'saved') this.dismiss(tenant, [row.entry_id]);
     }
     return row?.state === 'failed'
-      ? { state: 'failed', error: wireError(parseWireError(JSON.parse(row.failure!))!) }
+      ? { state: 'failed', error: wireError(storedFailure(row.failure, tenant, row.key)) }
       : { state: 'not_saved' };
   }
   dismiss(tenant: string, ids: string[]) {
@@ -182,8 +184,11 @@ export class StudySync {
         throw new RemoteKitError('not_found', '文件已删除');
       const previous = this.row(tenant, key);
       if (automatic && previous?.state === 'failed' && !this.retryDue(tenant, previous))
-        throw parseWireError(JSON.parse(previous.failure!))!;
-      if (previous?.failure && parseWireError(JSON.parse(previous.failure))?.code === 'outcome_unknown') {
+        throw storedFailure(previous.failure, tenant, previous.key);
+      if (
+        previous?.failure &&
+        storedFailure(previous.failure, tenant, previous.key).code === 'outcome_unknown'
+      ) {
         const entry = previous.entry_id && this.library.entryExists(tenant, previous.entry_id);
         if (entry) {
           this.store.db
@@ -213,24 +218,12 @@ export class StudySync {
     return Number(row?.bytes ?? 0);
   }
   private retryDue(tenant: string, row: DownloadRow) {
-    if (!(row.failure ? (parseWireError(JSON.parse(row.failure))?.code ?? 'internal') : 'internal'))
-      return false;
-    if (
-      (row.failure ? (parseWireError(JSON.parse(row.failure))?.code ?? 'internal') : 'internal') ===
-      'limit_exceeded'
-    )
+    if (storedFailure(row.failure, tenant, row.key).code === 'limit_exceeded')
       return row.failed_usage !== null && this.usage(tenant) < Number(row.failed_usage);
-    if (
-      errorHandling(
-        row.failure ? (parseWireError(JSON.parse(row.failure))?.code ?? 'internal') : 'internal',
-      ) === 'reconcile'
-    )
-      return true;
+    if (errorHandling(storedFailure(row.failure, tenant, row.key).code) === 'reconcile') return true;
     return (
-      retryDelay(
-        { code: row.failure ? (parseWireError(JSON.parse(row.failure))?.code ?? 'internal') : 'internal' },
-        0,
-      ) !== undefined && Number(row.retry_at ?? 0) <= this.now()
+      retryDelay({ code: storedFailure(row.failure, tenant, row.key).code }, 0) !== undefined &&
+      Number(row.retry_at ?? 0) <= this.now()
     );
   }
   private async download(tenant: string, item: DownloadItem, runtime: ReturnType<StudySync['runtime']>) {
@@ -245,7 +238,7 @@ export class StudySync {
       const previous = this.row(tenant, item.key);
       const recovered =
         previous?.failure &&
-        parseWireError(JSON.parse(previous.failure))?.code === 'outcome_unknown' &&
+        storedFailure(previous.failure, tenant, previous.key).code === 'outcome_unknown' &&
         previous.object_id
           ? (this.store.db.prepare('SELECT id,size FROM objects WHERE id=?').get(previous.object_id) as
               { id: string; size: bigint } | undefined)
@@ -351,8 +344,10 @@ export class StudySync {
             'UPDATE learning_downloads SET failure=?,retry_at=?,failed_usage=? WHERE tenant=? AND key=?',
           )
           .run(
-            JSON.stringify(
+            encodeJson(
               wireError(reportError(failure, 'learning.attachment_failed', { tenant, key: item.key })),
+              wireErrorCodec,
+              `learning_downloads.failure ${tenant}/${item.key}`,
             ),
             delay === undefined ? null : this.now() + Math.min(delay, 60_000),
             failure.code === 'limit_exceeded' ? this.usage(tenant) : null,

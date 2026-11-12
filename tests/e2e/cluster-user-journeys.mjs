@@ -1,16 +1,13 @@
-import { homedir } from 'node:os';
-/** Real Viewer actions, isolated two-node cluster. args: edge|chrome89 mouse|touch port output.
- * REMOTEKIT_CLUSTER_RESUME=crash rechecks an existing run's crash/admin flows;
- * =after-stop continues the independent offline-discard/admin flows after a recorded stop/resume failure.
- */
-import assert from 'node:assert/strict';
-import { spawn, execFileSync } from 'node:child_process';
-import { mkdir, writeFile, readFile, appendFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
+import { execFileSync } from 'node:child_process';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createViewerContext, instrumentViewer, launchBrowser, remoteInputReady } from './kit/viewer.mjs';
+
 import { join, resolve } from 'node:path';
-import { stageRuntime } from '../integration/stage-runtime.mjs';
-import { instrumentViewer, startControl, until, pause } from './cluster-test-support.mjs';
+import { pause, startStack, until } from './kit/stack.mjs';
+
+/** Real Viewer actions in an isolated two-node cluster. */
+import assert from 'node:assert/strict';
+
 const [browserName = 'edge', pointer = 'mouse', portArg = '34360', output] = process.argv.slice(2);
 const port = Number(portArg),
   run = resolve(output),
@@ -25,74 +22,28 @@ const report = async (stage, value) => {
     JSON.stringify({ at: new Date().toISOString(), stage, value }) + '\n',
   );
 };
-const fixture = createServer(async (req, res) => {
-  if (req.method === 'POST') {
-    let raw = '';
-    for await (const part of req) raw += part;
-    const value = JSON.parse(raw);
-    events.push(value);
-    await appendFile(join(run, 'fixture.jsonl'), JSON.stringify(value) + '\n');
-    return res.end('ok');
-  }
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.end(`<!doctype html><meta name="viewport" content="width=device-width"><title>Cluster ${req.url}</title>
-  <style>body{margin:20px;background:#e3effa;font:18px Arial}input,button,a{display:block;margin:20px 0;padding:10px}input{width:200px}</style>
-  <h1>Cluster ${req.url}</h1><input id="value" value="${req.url.includes('mutated') ? 'isolated-new-value' : 'before-crash'}"><button id="store">Persist state</button><p id="state"></p><a href="/history">Visit history</a><input id="file" type="file"><canvas width="24" height="24"></canvas>
-  <script>const report=(type)=>fetch('/event',{method:'POST',body:JSON.stringify({type,path:location.pathname,cookie:document.cookie,storage:localStorage.getItem('cluster'),width:innerWidth,height:innerHeight,boxes:Object.fromEntries([...document.querySelectorAll('input,button,a')].map(e=>[e.id||'link',e.getBoundingClientRect().toJSON()]))})});
-  store.onclick=()=>{document.cookie='cluster='+value.value+'; Max-Age=86400; SameSite=Lax';localStorage.setItem('cluster',value.value);report('stored')};
-  const show=()=>state.textContent='Cookie: '+document.cookie+' | localStorage: '+localStorage.getItem('cluster');show();store.addEventListener('click',show);
-  report('ready');addEventListener('resize',()=>report('ready'));let i=0;setInterval(()=>{const c=document.querySelector('canvas').getContext('2d');c.fillStyle=i++%2?'red':'blue';c.fillRect(0,0,24,24)},150);</script>`);
+
+const endpoint = resolve(process.env.REMOTEKIT_ENDPOINT ?? 'build/endpoint/endpoint/endpoint_service.exe'),
+  remote = process.env.REMOTEKIT_BROWSER ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe';
+const stack = await startStack({
+  scenario: 'cluster-user-journeys',
+  run,
+  port,
+  endpoint,
+  browser: remote,
+  seed: false,
+  fixtures: { kind: 'cluster-user-journeys', context: { events } },
+  nodes: ['alpha', 'beta'],
+  nodeLimits: { maxSessions: 1 },
 });
-await new Promise((done) => fixture.listen(port + 2, '127.0.0.1', done));
-const endpoint = resolve('build/endpoint/endpoint/endpoint_service.exe'),
-  remote = 'C:/src/chromium/src/out/rel/remotekit_browser.exe';
-const nodes = Object.fromEntries(
-  ['alpha', 'beta'].map((id, i) => [
-    id,
-    {
-      local: {
-        executable: stageRuntime(endpoint, remote, join(run, id, 'bin')),
-        root: join(run, id, 'root'),
-      },
-      peer: { listen: `127.0.0.1:${port + 3 + i}`, address: `127.0.0.1:${port + 3 + i}` },
-      limits: { maxSessions: 1 },
-    },
-  ]),
-);
-const config = join(run, 'control.json');
-await writeFile(
-  config,
-  JSON.stringify({
-    http: { listen: `127.0.0.1:${port}`, origins: [origin] },
-    storage: {
-      database: join(run, 'control.db'),
-      diagnostics: join(run, 'diagnostics'),
-      logs: join(run, 'logs'),
-    },
-    nodes,
-  }),
-);
-let control = startControl(resolve('tests/e2e/cluster-journey-harness.mts'), config, run);
-const vite = spawn(process.execPath, ['tests/e2e/kit/vite.mjs', String(port + 1), join(run, 'vite-cache')], {
-  windowsHide: true,
-  env: { ...process.env, REMOTEKIT_VITE_CONTROL: `http://127.0.0.1:${port}` },
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
-for (const stream of ['stdout', 'stderr'])
-  vite[stream].on('data', (bytes) => void appendFile(join(run, 'vite.log'), bytes));
-await writeFile(join(run, 'pids.json'), JSON.stringify({ control: control.child.pid, vite: vite.pid }));
-const { chromium } = createRequire(import.meta.url)(
-  process.env.REMOTEKIT_PLAYWRIGHT ??
-    join(
-      homedir(),
-      '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js',
-    ),
-);
+const control = stack.control;
+const nodes = stack.nodes;
+
 let browser;
 const viewers = [];
 const password = 'cluster-user-password';
 async function makeViewer(name) {
-  const context = await browser.newContext({
+  const context = await createViewerContext(browser, {
     viewport: pointer === 'touch' ? { width: 390, height: 844 } : { width: 1600, height: 1000 },
     hasTouch: pointer === 'touch',
   });
@@ -163,13 +114,13 @@ async function login(v, name, setup = false) {
   await pause(800);
   await v.page.evaluate(() => window.__remotekitTest.unlock());
   await until(
-    'login reveal',
     async () => {
       if (await v.page.locator('input[autocomplete="username"]').isVisible()) return true;
       if (await v.page.locator('.viewer-lock-blank').isVisible())
         await v.page.evaluate(() => window.__remotekitTest.unlock());
       return false;
     },
+    'login reveal',
     15000,
   );
   await shot(v, 'auth-revealed');
@@ -229,8 +180,8 @@ async function navigate(v, path) {
   await type(v, v.page.locator('.address-form input:visible').first(), fixtureOrigin + path);
   await v.page.keyboard.press('Enter');
   await until(
-    'fixture ' + path,
     async () => (await v.state())?.workspace.tabs.some((t) => t.url === fixtureOrigin + path && !t.loading),
+    'fixture ' + path,
     90000,
   );
   await v.media();
@@ -239,10 +190,11 @@ async function navigate(v, path) {
 async function remoteClick(v, path, id) {
   const viewport = v.page.locator('.remote-viewport:visible').first();
   await viewport.waitFor();
+  await v.page.waitForFunction(remoteInputReady, await viewport.getAttribute('data-view-id'));
   const b = await viewport.boundingBox();
   const e = await until(
-    'geometry ' + path,
     () => events.findLast((e) => e.type === 'ready' && e.path === path && Math.abs(e.width - b.width) < 3),
+    'geometry ' + path,
     90000,
   );
   const t = e.boxes[id];
@@ -258,18 +210,18 @@ const placement = (snap, name) =>
   snap.placements.find((p) => p.tenant === snap.users.find((u) => u.username === name)?.tenant);
 async function commit(v, name) {
   await v.page.close();
-  await until('detached', async () => {
+  await until(async () => {
     const s = await control.call('inspect');
     return !s.runtimes.find((r) => r.tenant === placement(s, name)?.tenant)?.viewer;
-  });
+  }, 'detached');
   await control.call('advance', { ms: 600001 });
   return until(
-    'committed ' + name,
     async () => {
       const s = await control.call('inspect');
       const p = placement(s, name);
       return p?.run_state === 'stopped' && p?.data_state === 'clean' && s;
     },
+    'committed ' + name,
     120000,
   );
 }
@@ -312,8 +264,6 @@ async function dialog(v, title, confirm, name) {
   await d.waitFor({ state: 'hidden' });
 }
 async function step(name, fn) {
-  if (process.env.REMOTEKIT_CLUSTER_STEPS && !process.env.REMOTEKIT_CLUSTER_STEPS.split(',').includes(name))
-    return;
   try {
     await fn();
     await report('pass:' + name);
@@ -328,7 +278,6 @@ async function step(name, fn) {
 }
 try {
   await until(
-    'ready',
     async () => {
       try {
         return (
@@ -338,9 +287,10 @@ try {
         return false;
       }
     },
+    'ready',
     90000,
   );
-  browser = await chromium.launch({
+  browser = await launchBrowser({
     executablePath:
       browserName === 'edge'
         ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
@@ -350,276 +300,224 @@ try {
   });
   let first = await makeViewer('first'),
     second;
-  if (process.env.REMOTEKIT_CLUSTER_RESUME) {
-    await login(first, 'cluster-first');
-    if (process.env.REMOTEKIT_CLUSTER_RESUME === 'crash') {
-      if (pointer === 'touch')
-        try {
-          await step('restored-history-forward-back', async () => {
-            await focusApp(first, 'browser');
-            await click(first, first.page.getByRole('tab', { name: /Cluster \/first/ }).first());
-            const state = await first.state();
-            const tab = state.workspace.tabs.find((t) => t.url === fixtureOrigin + '/first');
-            assert(tab?.canGoForward, 'Restored forward history must remain available');
-            if (pointer === 'touch') {
-              await click(first, button(first, '更多'));
-              await click(first, first.page.getByRole('menuitem', { name: '前进', exact: true }));
-            } else await click(first, button(first, '前进'));
-            await until('restored forward history', async () =>
-              (await first.state()).workspace.tabs.some(
-                (t) => t.id === tab.id && t.url === fixtureOrigin + '/history' && !t.loading,
-              ),
-            );
-            await click(first, button(first, '后退'));
-            await until('restored back history', async () =>
-              (await first.state()).workspace.tabs.some(
-                (t) => t.id === tab.id && t.url === fixtureOrigin + '/first' && !t.loading,
-              ),
-            );
-            await shot(first, 'restored-history-verified');
-          });
-        } catch {
-          process.exitCode = 1;
-        }
-      try {
-        await step('isolated-crash-recheck', async () => {
-          await focusApp(first, 'browser');
-          await navigate(first, '/crash-mutated');
-          await remoteClick(first, '/crash-mutated', 'store');
-          const stored = await until('new persistent value', () =>
-            events.findLast((e) => e.type === 'stored' && e.storage === 'isolated-new-value'),
-          );
-          await pause(2000);
-          await shot(first, 'isolated-before-crash');
-          const s = await control.call('inspect');
-          const node = placement(s, 'cluster-first').node_id;
-          const offset = events.length;
-          await killNode(node);
-          await pause(800);
-          await shot(first, 'isolated-endpoint-down');
-          await until(
-            'node restart',
-            async () =>
-              (await control.call('inspect')).nodes.find((n) => n.nodeId === node)?.state === 'ready',
-            120000,
-          );
-          await reveal(first);
-          await first.ready(120000);
-          await focusApp(first, 'browser');
-          await navigate(first, '/crash-mutated');
-          const restored = await until(
-            'post-crash fixture',
-            () => events.slice(offset).findLast((e) => e.type === 'ready' && e.path === '/crash-mutated'),
-            90000,
-          );
-          await report('crash-observation', { stored, restored });
-          await shot(first, 'isolated-after-crash');
-          assert.equal(restored.storage, 'isolated-new-value');
-          assert(
-            restored.cookie.includes('cluster=isolated-new-value'),
-            'Cookie rolled back: ' + restored.cookie,
-          );
-        });
-      } catch {
-        process.exitCode = 1;
-      }
-    }
-  } else {
-    await step('setup-admin', async () => {
-      await login(first, 'cluster-first', true);
-      await openApp(first, '管理');
-      await section(first, '用户');
-      await click(first, button(first, '新建用户'));
-      const d = first.page.getByRole('dialog', { name: '新建用户' });
-      await type(first, d.getByLabel(/^用户名/), 'cluster-second');
-      await type(first, d.getByLabel('密码', { exact: true }), password);
-      await click(first, d.getByRole('button', { name: '创建', exact: true }));
-      await d.waitFor({ state: 'hidden' });
-      await shot(first, 'users-created');
-    });
-    await step('browse-persist-history', async () => {
-      await openApp(first, '浏览器');
-      await navigate(first, '/first');
-      await remoteClick(first, '/first', 'store');
-      await until('stored', () => events.some((e) => e.type === 'stored' && e.storage === 'before-crash'));
-      await navigate(first, '/history');
-      await click(first, button(first, '后退'));
-      await until('back', async () =>
+
+  await step('setup-admin', async () => {
+    await login(first, 'cluster-first', true);
+    await openApp(first, '管理');
+    await section(first, '用户');
+    await click(first, button(first, '新建用户'));
+    const d = first.page.getByRole('dialog', { name: '新建用户' });
+    await type(first, d.getByLabel(/^用户名/), 'cluster-second');
+    await type(first, d.getByLabel('密码', { exact: true }), password);
+    await click(first, d.getByRole('button', { name: '创建', exact: true }));
+    await d.waitFor({ state: 'hidden' });
+    await shot(first, 'users-created');
+  });
+  await step('browse-persist-history', async () => {
+    await openApp(first, '浏览器');
+    await navigate(first, '/first');
+    await remoteClick(first, '/first', 'store');
+    await until(() => events.some((e) => e.type === 'stored' && e.storage === 'before-crash'), 'stored');
+    await navigate(first, '/history');
+    await click(first, button(first, '后退'));
+    await until(
+      async () =>
         (await first.state()).workspace.tabs.some((t) => t.url === fixtureOrigin + '/first' && !t.loading),
-      );
-      await click(first, button(first, '新建标签页'));
-      await navigate(first, '/second-tab');
-      await shot(first, 'two-tabs');
-    });
-    let initial, source, before;
-    await step('two-users', async () => {
-      second = await makeViewer('second');
-      await login(second, 'cluster-second');
-      await openApp(second, '浏览器');
-      await navigate(second, '/other');
-      initial = await control.call('inspect');
-      source = placement(initial, 'cluster-first').node_id;
-      assert.notEqual(source, placement(initial, 'cluster-second').node_id);
-      before = (await first.state()).workspace.tabs.map((t) => ({ id: t.id, url: t.url }));
-      await shot(first, 'simultaneous');
-      await shot(second, 'simultaneous');
-    });
-    await step('swapped-bootstrap-attribution', async () => {
-      await commit(second, 'cluster-second');
-      const other = placement(initial, 'cluster-second').node_id;
-      const bootstrap = join(nodes[other].local.root, 'node.json');
-      const original = await readFile(bootstrap);
-      try {
-        await writeFile(bootstrap, await readFile(join(nodes[source].local.root, 'node.json')));
-        await killNode(other);
-        await until(
-          'swapped bootstrap rejected on receiving link',
-          async () => {
-            const snapshot = await control.call('inspect');
-            assert(!snapshot.nodes.find((node) => node.nodeId === source).rejected);
-            return (
-              snapshot.nodes.find((node) => node.nodeId === other)?.rejected?.code === 'identity_mismatch'
-            );
-          },
-          90000,
-        );
-        await focusApp(first, 'admin');
-        await section(first, '节点');
-        const card = first.page.locator('.admin-node').filter({ hasText: other });
-        await card.getByText(bootstrap, { exact: true }).waitFor();
-        await shot(first, 'swapped-bootstrap-local-repair-path');
-      } finally {
-        await writeFile(bootstrap, original);
-      }
+      'back',
+    );
+    await click(first, button(first, '新建标签页'));
+    await navigate(first, '/second-tab');
+    await shot(first, 'two-tabs');
+  });
+  let initial, source, before;
+  await step('two-users', async () => {
+    second = await makeViewer('second');
+    await login(second, 'cluster-second');
+    await openApp(second, '浏览器');
+    await navigate(second, '/other');
+    initial = await control.call('inspect');
+    source = placement(initial, 'cluster-first').node_id;
+    assert.notEqual(source, placement(initial, 'cluster-second').node_id);
+    before = (await first.state()).workspace.tabs.map((t) => ({ id: t.id, url: t.url }));
+    await shot(first, 'simultaneous');
+    await shot(second, 'simultaneous');
+  });
+  await step('swapped-bootstrap-attribution', async () => {
+    await commit(second, 'cluster-second');
+    const other = placement(initial, 'cluster-second').node_id;
+    const bootstrap = join(nodes[other].local.root, 'node.json');
+    const original = await readFile(bootstrap);
+    try {
+      await writeFile(bootstrap, await readFile(join(nodes[source].local.root, 'node.json')));
+      await killNode(other);
       await until(
-        'repaired node restarts',
-        async () =>
-          (await control.call('inspect')).nodes.find((node) => node.nodeId === other)?.state === 'ready',
-        90000,
-      );
-    });
-    await step('automatic-stop-commit', async () => {
-      const result = await commit(first, 'cluster-first');
-      assert(placement(result, 'cluster-first').checkpoint_id);
-      await report('automatic-commit', result);
-      await commit(second, 'cluster-second');
-    });
-    let correct;
-    await step('wrong-node-json', async () => {
-      correct = await readFile(join(nodes[source].local.root, 'node.json'));
-      const other = source === 'alpha' ? 'beta' : 'alpha';
-      await writeFile(
-        join(nodes[source].local.root, 'node.json'),
-        await readFile(join(nodes[other].local.root, 'node.json')),
-      );
-      await killNode(source);
-      await until(
-        'identity rejection',
         async () => {
-          const n = (await control.call('inspect')).nodes.find((n) => n.nodeId === source);
-          return n?.rejected?.code === 'identity_mismatch';
+          const snapshot = await control.call('inspect');
+          assert(!snapshot.nodes.find((node) => node.nodeId === source).rejected);
+          return snapshot.nodes.find((node) => node.nodeId === other)?.rejected?.code === 'identity_mismatch';
         },
+        'swapped bootstrap rejected on receiving link',
         90000,
       );
-    });
-    await step('restore-other-node', async () => {
-      first = await makeViewer('restored');
-      await login(first, 'cluster-first');
-      await first.media();
-      const s = await control.call('inspect');
-      assert.notEqual(placement(s, 'cluster-first').node_id, source);
-      assert.deepEqual(
-        (await first.state()).workspace.tabs.map((t) => ({ id: t.id, url: t.url })),
-        before,
+      await focusApp(first, 'admin');
+      await section(first, '节点');
+      const card = first.page.locator('.admin-node').filter({ hasText: other });
+      await card.getByText(bootstrap, { exact: true }).waitFor();
+      await shot(first, 'swapped-bootstrap-local-repair-path');
+    } finally {
+      await writeFile(bootstrap, original);
+    }
+    await until(
+      async () =>
+        (await control.call('inspect')).nodes.find((node) => node.nodeId === other)?.state === 'ready',
+      'repaired node restarts',
+      90000,
+    );
+  });
+  await step('automatic-stop-commit', async () => {
+    const result = await commit(first, 'cluster-first');
+    assert(placement(result, 'cluster-first').checkpoint_id);
+    await report('automatic-commit', result);
+    await commit(second, 'cluster-second');
+    await until(
+      async () => {
+        const snapshot = await control.call('inspect');
+        const session = placement(snapshot, 'cluster-first');
+        const checkpoint = snapshot.checkpoints.find(
+          (entry) => entry.tenant === session.tenant && entry.id === session.checkpoint_id,
+        );
+        const objects = snapshot.checkpointObjects.filter(
+          (entry) => entry.tenant === session.tenant && entry.manifest_id === checkpoint?.manifest_id,
+        );
+        return (
+          objects.length > 0 &&
+          objects.every((object) =>
+            snapshot.replicas.some((replica) => replica.id === object.id && replica.node_id !== source),
+          )
+        );
+      },
+      'complete checkpoint replicated before taking its source offline',
+      120000,
+    );
+  });
+  let correct;
+  await step('wrong-node-json', async () => {
+    correct = await readFile(join(nodes[source].local.root, 'node.json'));
+    const other = source === 'alpha' ? 'beta' : 'alpha';
+    await writeFile(
+      join(nodes[source].local.root, 'node.json'),
+      await readFile(join(nodes[other].local.root, 'node.json')),
+    );
+    await killNode(source);
+    await until(
+      async () => {
+        const n = (await control.call('inspect')).nodes.find((n) => n.nodeId === source);
+        return n?.rejected?.code === 'identity_mismatch';
+      },
+      'identity rejection',
+      90000,
+    );
+  });
+  await step('restore-other-node', async () => {
+    first = await makeViewer('restored');
+    await login(first, 'cluster-first');
+    await focusApp(first, 'browser');
+    await first.media();
+    const s = await control.call('inspect');
+    assert.notEqual(placement(s, 'cluster-first').node_id, source);
+    assert.deepEqual(
+      (await first.state()).workspace.tabs.map((t) => ({ id: t.id, url: t.url })),
+      before,
+    );
+    await click(first, first.page.getByRole('tab', { name: /Cluster \/first/ }).first());
+    await until(
+      () =>
+        events.findLast(
+          (e) =>
+            e.type === 'ready' &&
+            e.path === '/first' &&
+            e.storage === 'before-crash' &&
+            e.cookie.includes('cluster=before-crash'),
+        ),
+      'storage restored',
+      90000,
+    );
+    await shot(first, 'restored-other-node');
+  });
+  await step('node-remove-readd', async () => {
+    await openApp(first, '管理');
+    await section(first, '节点');
+    const card = first.page
+      .locator('.admin-node')
+      .filter({ has: first.page.getByText(source, { exact: true }) });
+    await card.getByText('身份不匹配：请将新的 node.json 复制到该节点', { exact: false }).waitFor();
+    assert.match(await card.innerText(), /[0-9a-f]{16}/);
+    await shot(first, 'identity-mismatch');
+    await click(first, card.getByRole('button', { name: '移除节点', exact: true }));
+    await dialog(first, '移除节点', '移除', 'remove-node-dialog');
+    await writeFile(join(nodes[source].local.root, 'node.json'), correct);
+    await click(first, card.getByRole('button', { name: '重新添加', exact: true }));
+    await dialog(first, '重新添加节点', '重新添加', 'readd-node-dialog');
+    await until(
+      async () => (await control.call('inspect')).nodes.find((n) => n.nodeId === source)?.state === 'ready',
+      'source ready',
+      90000,
+    );
+    await shot(first, 'nodes-recovered');
+  });
+  try {
+    await step('diagnostics-and-endpoint-crash', async () => {
+      await openApp(first, '设置');
+      await click(
+        first,
+        first.page.locator('.settings-app:visible').getByRole('button', { name: '诊断', exact: true }),
       );
-      await click(first, first.page.getByRole('tab', { name: /Cluster \/first/ }).first());
+      await click(first, button(first, '开始诊断'));
+      await button(first, '停止数据收集').waitFor();
+      await shot(first, 'diagnostic-started');
+      await focusApp(first, 'browser');
+      await remoteClick(first, '/first', 'value');
+      await first.page.waitForFunction(() => document.activeElement?.matches('.remote-input'));
+      await first.page.keyboard.press('Control+A');
+      await first.page.keyboard.insertText('after-checkpoint-before-kill');
+      await remoteClick(first, '/first', 'store');
       await until(
-        'storage restored',
+        () => events.some((e) => e.type === 'stored' && e.storage === 'after-checkpoint-before-kill'),
+        'new stored value',
+      );
+      const s = await control.call('inspect');
+      await killNode(placement(s, 'cluster-first').node_id);
+      await pause(900);
+      await shot(first, 'endpoint-down');
+      await until(
+        async () => {
+          const s = await control.call('inspect');
+          return s.nodes.find((n) => n.nodeId === placement(s, 'cluster-first').node_id)?.state === 'ready';
+        },
+        'endpoint reconnected',
+        120000,
+      );
+      await reveal(first);
+      await first.ready(120000);
+      await first.media();
+      await navigate(first, '/first');
+      await until(
         () =>
           events.findLast(
             (e) =>
               e.type === 'ready' &&
-              e.path === '/first' &&
-              e.storage === 'before-crash' &&
-              e.cookie.includes('cluster=before-crash'),
+              e.storage === 'after-checkpoint-before-kill' &&
+              e.cookie.includes('cluster=after-checkpoint-before-kill'),
           ),
+        'no rollback',
         90000,
       );
-      await shot(first, 'restored-other-node');
+      await shot(first, 'endpoint-recovered');
     });
-    await step('node-remove-readd', async () => {
-      await openApp(first, '管理');
-      await section(first, '节点');
-      const card = first.page
-        .locator('.admin-node')
-        .filter({ has: first.page.getByText(source, { exact: true }) });
-      await card.getByText('身份不匹配：请将新的 node.json 复制到该节点', { exact: false }).waitFor();
-      assert.match(await card.innerText(), /[0-9a-f]{16}/);
-      await shot(first, 'identity-mismatch');
-      await click(first, card.getByRole('button', { name: '移除节点', exact: true }));
-      await dialog(first, '移除节点', '移除', 'remove-node-dialog');
-      await writeFile(join(nodes[source].local.root, 'node.json'), correct);
-      await click(first, card.getByRole('button', { name: '重新添加', exact: true }));
-      await dialog(first, '重新添加节点', '重新添加', 'readd-node-dialog');
-      await until(
-        'source ready',
-        async () => (await control.call('inspect')).nodes.find((n) => n.nodeId === source)?.state === 'ready',
-        90000,
-      );
-      await shot(first, 'nodes-recovered');
-    });
-    try {
-      await step('diagnostics-and-endpoint-crash', async () => {
-        await openApp(first, '设置');
-        await click(
-          first,
-          first.page.locator('.settings-app:visible').getByRole('button', { name: '诊断', exact: true }),
-        );
-        await click(first, button(first, '开始诊断'));
-        await button(first, '停止数据收集').waitFor();
-        await shot(first, 'diagnostic-started');
-        await focusApp(first, 'browser');
-        await remoteClick(first, '/first', 'value');
-        await first.page.waitForFunction(() => document.activeElement?.matches('.remote-input'));
-        await first.page.keyboard.press('Control+A');
-        await first.page.keyboard.insertText('after-checkpoint-before-kill');
-        await remoteClick(first, '/first', 'store');
-        await until('new stored value', () =>
-          events.some((e) => e.type === 'stored' && e.storage === 'after-checkpoint-before-kill'),
-        );
-        const s = await control.call('inspect');
-        await killNode(placement(s, 'cluster-first').node_id);
-        await pause(900);
-        await shot(first, 'endpoint-down');
-        await until(
-          'endpoint reconnected',
-          async () => {
-            const s = await control.call('inspect');
-            return s.nodes.find((n) => n.nodeId === placement(s, 'cluster-first').node_id)?.state === 'ready';
-          },
-          120000,
-        );
-        await reveal(first);
-        await first.ready(120000);
-        await first.media();
-        await navigate(first, '/first');
-        await until(
-          'no rollback',
-          () =>
-            events.findLast(
-              (e) =>
-                e.type === 'ready' &&
-                e.storage === 'after-checkpoint-before-kill' &&
-                e.cookie.includes('cluster=after-checkpoint-before-kill'),
-            ),
-          90000,
-        );
-        await shot(first, 'endpoint-recovered');
-      });
-    } catch {
-      process.exitCode = 1;
-    }
+  } catch {
+    process.exitCode = 1;
   }
+
   let diagnosticId, errorId;
   await step('start-fresh-diagnostic', async () => {
     const state = await first.state();
@@ -679,32 +577,31 @@ try {
     await shot(first, 'diagnostic-error-lookup');
     await report('diagnostic-ids', { diagnosticId, errorId });
   });
-  if (process.env.REMOTEKIT_CLUSTER_RESUME !== 'after-stop')
-    await step('admin-stop-session', async () => {
-      second = await makeViewer('second-returned');
-      await login(second, 'cluster-second');
-      await navigate(second, '/uncommitted');
-      await focusApp(first, 'admin');
-      await section(first, '用户');
-      await second.page.close();
-      await until('second detached', async () => {
-        const s = await control.call('inspect');
-        return !s.runtimes.find((r) => r.tenant === placement(s, 'cluster-second').tenant)?.viewer;
-      });
-      await pause(5500);
-      await userMenu(first, 'cluster-second');
-      await click(first, first.page.getByRole('menuitem', { name: '立即停止', exact: true }));
-      await dialog(first, '立即停止', '停止', 'stop-session-dialog');
-      await until(
-        'admin stopped',
-        async () => {
-          const p = placement(await control.call('inspect'), 'cluster-second');
-          return p.run_state === 'stopped' && p.data_state === 'clean';
-        },
-        120000,
-      );
-      await shot(first, 'admin-stopped-session');
-    });
+  await step('admin-stop-session', async () => {
+    second = await makeViewer('second-returned');
+    await login(second, 'cluster-second');
+    await navigate(second, '/uncommitted');
+    await focusApp(first, 'admin');
+    await section(first, '用户');
+    await second.page.close();
+    await until(async () => {
+      const s = await control.call('inspect');
+      return !s.runtimes.find((r) => r.tenant === placement(s, 'cluster-second').tenant)?.viewer;
+    }, 'second detached');
+    await pause(5500);
+    await userMenu(first, 'cluster-second');
+    await click(first, first.page.getByRole('menuitem', { name: '立即停止', exact: true }));
+    await dialog(first, '立即停止', '停止', 'stop-session-dialog');
+    await until(
+      async () => {
+        const p = placement(await control.call('inspect'), 'cluster-second');
+        return p.run_state === 'stopped' && p.data_state === 'clean';
+      },
+      'admin stopped',
+      120000,
+    );
+    await shot(first, 'admin-stopped-session');
+  });
   await step('resume-after-admin-stop', async () => {
     const before = placement(await control.call('inspect'), 'cluster-second');
     second = await makeViewer('second-resumed');
@@ -716,54 +613,62 @@ try {
     assert((await second.state()).workspace.tabs.some((tab) => tab.url === fixtureOrigin + '/uncommitted'));
     await shot(second, 'admin-stop-resumed');
   });
-  await step('admin-discard-offline-session', async () => {
-    await navigate(second, '/discard-mutated');
-    await remoteClick(second, '/discard-mutated', 'store');
-    await until('dirty persistent data', () =>
-      events.findLast(
-        (e) => e.type === 'stored' && e.path === '/discard-mutated' && e.storage === 'isolated-new-value',
-      ),
+  await step('admin-transfer-offline-session', async () => {
+    await navigate(second, '/transfer-mutated');
+    await remoteClick(second, '/transfer-mutated', 'store');
+    await until(
+      () =>
+        events.findLast(
+          (e) => e.type === 'stored' && e.path === '/transfer-mutated' && e.storage === 'isolated-new-value',
+        ),
+      'dirty persistent data',
     );
     const s = await control.call('inspect');
     const node = placement(s, 'cluster-second').node_id;
     assert.notEqual(node, placement(s, 'cluster-first').node_id);
-    await killNode(node, 1);
-    await pause(1800);
+    await control.call('down', { nodeId: node, tenant: placement(s, 'cluster-second').tenant });
+    await until(
+      async () =>
+        (await control.call('inspect')).nodes.find((entry) => entry.nodeId === node)?.state === 'offline',
+      'node remains offline for transfer',
+    );
     await shot(second, 'offline-dirty-session');
     await second.page.close();
     await focusApp(first, 'admin');
     await section(first, '用户');
     await pause(5500);
     await userMenu(first, 'cluster-second');
-    await click(first, first.page.getByRole('menuitem', { name: '放弃未提交的更改', exact: true }));
-    await dialog(first, '放弃未提交的更改', '放弃更改', 'discard-session-dialog');
+    await click(first, first.page.getByRole('menuitem', { name: '转移', exact: true }));
+    await dialog(first, '转移 cluster-second 的 Session', '转移', 'offline-transfer-dialog');
     const p = placement(await control.call('inspect'), 'cluster-second');
     assert.equal(p.run_state, 'stopped');
     assert.equal(p.data_state, 'clean');
-    await shot(first, 'discarded-offline-session');
+    await shot(first, 'transferred-offline-session');
     await section(first, '节点');
     const card = first.page
       .locator('.admin-node')
       .filter({ has: first.page.getByText(node, { exact: true }) });
     await click(first, card.getByRole('button', { name: '移除节点', exact: true }));
     await dialog(first, '移除节点', '移除', 'offline-node-remove');
+    await control.call('up', { nodeId: node });
     await click(first, card.getByRole('button', { name: '重新添加', exact: true }));
     await dialog(first, '重新添加节点', '重新添加', 'offline-node-readd');
     await until(
-      'offline node ready',
       async () => (await control.call('inspect')).nodes.find((n) => n.nodeId === node)?.state === 'ready',
+      'offline node ready',
       90000,
     );
-    second = await makeViewer('second-after-discard');
+    second = await makeViewer('second-after-transfer');
     await login(second, 'cluster-second');
-    await navigate(second, '/discard-verified');
-    const restored = await until('discard data restored', () =>
-      events.findLast((e) => e.type === 'ready' && e.path === '/discard-verified'),
+    await navigate(second, '/transfer-verified');
+    const restored = await until(
+      () => events.findLast((e) => e.type === 'ready' && e.path === '/transfer-verified'),
+      'checkpoint data restored after offline transfer',
     );
-    await report('discard-observation', restored);
+    await report('transfer-observation', restored);
     assert.equal(restored.storage, null);
     assert(!restored.cookie.includes('cluster='));
-    await shot(second, 'discard-data-verified');
+    await shot(second, 'transfer-data-verified');
     await second.page.close();
   });
   await step('network-reconnect-and-lock', async () => {
@@ -802,9 +707,5 @@ try {
   await report('failure', error.stack);
 } finally {
   await browser?.close();
-  await control.stop();
-  if (vite.exitCode === null)
-    execFileSync('taskkill', ['/PID', String(vite.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-  fixture.closeAllConnections();
-  await new Promise((done) => fixture.close(done));
+  await stack.stop();
 }

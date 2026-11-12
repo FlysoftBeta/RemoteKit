@@ -232,6 +232,8 @@ try {
   assert.equal(await readFile(path.join(root, 'current'), 'utf8'), ids[0]);
   assert.deepEqual(await readdir(path.join(root, 'versions')), [ids[0]]);
   assert.deepEqual(JSON.parse(await readFile(path.join(root, 'config/manager.json'), 'utf8')), {
+    version: 1,
+    checkIntervalMinutes: 60,
     manifest: prefix + '0/control.manifest',
   });
   await run(manager, ['install', '--root=' + root, '--payload=' + path.join(temporary, '1.tar')]);

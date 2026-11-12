@@ -1,4 +1,5 @@
 #include "persistence/sqlite.hpp"
+#include "persistence/strict_json.hpp"
 #include "util/result_macros.hpp"
 #include <sqlite3.h>
 #include <utility>
@@ -20,13 +21,16 @@ Error Database::Failure(const char* operation, int code) const {
     kind = ErrorCode::kUnavailable;
   else if (primary == SQLITE_CORRUPT || primary == SQLITE_NOTADB)
     reason = ErrorReason::kCorruptState;
-  return Error{kind,
+  Error result{kind,
                std::string("session store ") + operation + ": " +
                    (handle_ ? sqlite3_errmsg(handle_) : "database is closed") + " (sqlite " +
                    std::to_string(extended) + ")",
                reason,
                {},
                OsError{OsError::Kind::kSqlite, extended}};
+  if (reason)
+    result.error_id = NewErrorId();
+  return result;
 }
 Result<void> Database::Open(const std::filesystem::path& path) {
   if (handle_)
@@ -124,8 +128,22 @@ Result<void> Statement::BindNull(int index) {
 }
 Result<bool> Statement::Step() {
   int code = sqlite3_step(statement_);
-  if (code == SQLITE_ROW)
+  if (code == SQLITE_ROW) {
+    for (int column = 0; column < sqlite3_column_count(statement_); ++column) {
+      const auto* declared = sqlite3_column_decltype(statement_, column);
+      const auto type = sqlite3_column_type(statement_, column);
+      if (!declared || type == SQLITE_NULL)
+        continue;
+      const std::string_view name(declared);
+      if ((name == "TEXT" && type != SQLITE_TEXT) ||
+          (name == "INTEGER" && type != SQLITE_INTEGER) ||
+          (name == "BLOB" && type != SQLITE_BLOB) ||
+          (name == "REAL" && type != SQLITE_FLOAT && type != SQLITE_INTEGER))
+        return CorruptRecord(std::string("invalid SQLite type for ") +
+                             sqlite3_column_name(statement_, column));
+    }
     return true;
+  }
   if (code == SQLITE_DONE)
     return false;
   return db_->Failure("step", code);

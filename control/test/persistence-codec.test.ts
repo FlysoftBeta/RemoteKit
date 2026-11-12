@@ -100,11 +100,11 @@ test('recorded action encoding preserves canonical receipt payloads and rejects 
   const value = {
     type: 'window.state' as const,
     windowId: 'window',
-    state: { z: 1, A: 2, a: 3, nested: { b: 1, B: 2 } },
+    state: { section: 'apps' },
   };
   assert.equal(
     operationPayload(value, 'operation_receipts.payload tenant/operation'),
-    '{"state":{"A":2,"a":3,"nested":{"B":2,"b":1},"z":1},"type":"window.state","windowId":"window"}',
+    '{"state":{"section":"apps"},"type":"window.state","windowId":"window"}',
   );
   assert.throws(
     () =>

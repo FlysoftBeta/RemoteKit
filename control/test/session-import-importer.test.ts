@@ -15,7 +15,7 @@ import { RemoteKitError, type ErrorCode } from '../shared/errors';
 import type { ControlEvent, DeviceEvent, ImportMessage } from '../shared/session-import';
 import { createApplication } from '../server/application';
 import { dispatchViewerRequest } from '../server/http/viewer-socket';
-import { runtimeConfig } from '../server/config';
+import { defaultConfig, runtimeConfig } from '../server/config';
 import {
   browserIdentity,
   FakeMailClient,
@@ -829,15 +829,22 @@ test('session import config is optional, strict, requires SMTP/app mailbox and v
   const configPath = resolve(directory, 'control.json');
   const load = () => runtimeConfig({ REMOTEKIT_CONTROL_CONFIG: configPath }, []);
   try {
+    await writeFile(configPath, JSON.stringify({ ...defaultConfig('dev'), nodes: {} }));
     assert.equal(load().sessionImport, undefined);
     assert.equal('sessionImport' in JSON.parse(await readFile(configPath, 'utf8')), false);
     const minimal = {
+      folder: 'INBOX',
+      pollSeconds: 60,
+      replyWindowSeconds: 30,
       mailbox: 'import@example.com',
       appMailbox: 'app@example.com',
-      imap: { host: 'imap.example.com', user: 'u', password: 'p' },
+      imap: { host: 'imap.example.com', port: 993, user: 'u', password: 'p' },
       smtp: { host: 'smtp.example.com', port: 465, user: 'u', password: 'p' },
     };
-    await writeFile(configPath, JSON.stringify({ nodes: {}, sessionImport: minimal }));
+    await writeFile(
+      configPath,
+      JSON.stringify({ ...defaultConfig('dev'), nodes: {}, sessionImport: minimal }),
+    );
     assert.deepEqual(load().sessionImport, {
       ...minimal,
       imap: { ...minimal.imap, port: 993 },
@@ -863,14 +870,18 @@ test('session import config is optional, strict, requires SMTP/app mailbox and v
       { ...minimal, folder: '' },
       { ...minimal, mailbox: 'bad' },
     ]) {
-      await writeFile(configPath, JSON.stringify({ nodes: {}, sessionImport: invalid }));
-      assert.throws(load, { code: 'invalid_request' });
+      await writeFile(
+        configPath,
+        JSON.stringify({ ...defaultConfig('dev'), nodes: {}, sessionImport: invalid }),
+      );
+      assert.throws(load, { reason: 'corrupt_state' });
     }
     for (const port of [465, 587])
       for (const replyWindowSeconds of [0, 600]) {
         await writeFile(
           configPath,
           JSON.stringify({
+            ...defaultConfig('dev'),
             nodes: {},
             sessionImport: { ...minimal, smtp: { ...minimal.smtp, port }, replyWindowSeconds },
           }),

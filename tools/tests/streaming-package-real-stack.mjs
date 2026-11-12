@@ -1,3 +1,4 @@
+import { launchTestBrowser } from '../../tests/e2e/kit/browser.mjs';
 // node streaming-package-real-stack.mjs <deployment root> <playwright module> <viewer exe> <new evidence dir>
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
@@ -6,7 +7,7 @@ import { mkdir, appendFile, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
-import { registerViewer } from '../../tests/e2e/product-stack.mjs';
+import { registerViewer } from '../../tests/e2e/kit/viewer.mjs';
 
 const [packagePath, playwright, viewer, evidence] = process.argv.slice(2);
 assert(
@@ -88,7 +89,9 @@ try {
         .catch(() => false),
     'Control did not start',
   );
-  context = await chromium.launchPersistentContext(join(run, 'viewer'), {
+  context = await launchTestBrowser({
+    profile: join(run, 'viewer'),
+    browserType: chromium,
     executablePath: resolve(viewer),
     headless: true,
     viewport: { width: 1280, height: 900 },

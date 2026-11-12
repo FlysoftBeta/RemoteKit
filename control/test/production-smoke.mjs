@@ -1,3 +1,4 @@
+import { createControlConfig } from '../../tests/config-fixture.mjs';
 // Proves the bundled server runs in an isolated deployment with only native runtime dependencies.
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -41,20 +42,22 @@ imap.listen(0, '127.0.0.1');
 await once(imap, 'listening');
 await writeFile(
   configPath,
-  JSON.stringify({
-    http: { listen: '127.0.0.1:0', origins: ['http://production.test'] },
-    storage: {
-      database: resolve(deployment, 'data/control.db'),
-      logs: resolve(scratch, 'logs'),
-    },
-    nodes: { production: { remote: { control: 'ws://127.0.0.1:1/api/node' } } },
-    sessionImport: {
-      mailbox: 'production@example.test',
-      appMailbox: 'app@example.test',
-      smtp: { host: '127.0.0.1', port: 465, user: 'test', password: 'test' },
-      imap: { host: '127.0.0.1', port: imap.address().port, user: 'test', password: 'test' },
-    },
-  }),
+  JSON.stringify(
+    createControlConfig({
+      http: { listen: '127.0.0.1:0', origins: ['http://production.test'] },
+      storage: {
+        database: resolve(deployment, 'data/control.db'),
+        logs: resolve(scratch, 'logs'),
+      },
+      nodes: { production: { remote: { control: 'ws://127.0.0.1:1/api/node' } } },
+      sessionImport: {
+        mailbox: 'production@example.test',
+        appMailbox: 'app@example.test',
+        smtp: { host: '127.0.0.1', port: 465, user: 'test', password: 'test' },
+        imap: { host: '127.0.0.1', port: imap.address().port, user: 'test', password: 'test' },
+      },
+    }),
+  ),
 );
 const child = spawn(process.execPath, [resolve(deployment, 'dist/server.mjs')], {
   cwd: scratch,

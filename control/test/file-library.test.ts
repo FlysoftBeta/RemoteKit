@@ -4,7 +4,7 @@ import { LibraryRepository } from '../server/persistence/library';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { migrate } from '../server/persistence/schema';
+import { migrate } from '../server/persistence/migrations';
 import { ObjectIndex } from '../server/cluster/objects';
 import type { NodeRegistry } from '../server/cluster/node-link';
 import type { ControlDatabase } from '../server/persistence/database';
@@ -42,6 +42,8 @@ function fixture(assetType = 'image/jpeg') {
   const db = new Database(':memory:');
   db.defaultSafeIntegers(true);
   migrate(db, { backupDirectory: '', buildId: 'test', atRestKey: new AtRestKey(null) });
+  for (const tenant of ['tenant', 'other'])
+    db.prepare('INSERT INTO library_state VALUES (?,0,NULL)').run(tenant);
   const calls: { method: string; tenant: string; args: any }[] = [];
   const states = new Map<string, SelectionState>();
   const assets = new Map([

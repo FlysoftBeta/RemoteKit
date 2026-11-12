@@ -1,15 +1,16 @@
-﻿/**
+import { launchPersistentViewer } from './kit/viewer.mjs';
+
+import assert from 'node:assert/strict';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { startStack, until } from './kit/stack.mjs';
+
+/**
  * Isolated Control and native H264 selection regression on Edge and Chrome 89.
  * node tests/e2e/test-touch-selection.mjs <playwright module> <viewer exe>
  *   <endpoint exe> <browser exe> <unused evidence directory> [port=34120]
  */
-import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
-import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
-import { randomBytes, randomUUID } from 'node:crypto';
-import { startProductStack, until } from './input-product-stack.mjs';
 
 const [modulePath, viewer, endpoint, browser, output, portArg = '34120'] = process.argv.slice(2);
 assert(
@@ -19,34 +20,23 @@ assert(
 const run = resolve(output);
 const port = Number(portArg);
 const origin = `http://127.0.0.1:${port}`;
-const { chromium } = createRequire(import.meta.url)(resolve(modulePath));
-await mkdir(run);
-const html = (await readFile(new URL('./fixtures/touch-selection.html', import.meta.url), 'utf8'))
-  .replace(
-    'let serial = 0;',
-    "let serial = 0; let clicks = 0; document.querySelector('#blank').onclick = () => ++clicks;",
-  )
-  .replace('scrollY,', 'scrollY, clicks,');
+
+await mkdir(run, { recursive: true });
+
 const remote = [];
 const results = [];
 const password = randomBytes(18).toString('hex');
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
-const fixture = createServer(async (request, response) => {
-  if (request.method === 'POST' && request.url === '/event') {
-    let body = '';
-    for await (const chunk of request) body += chunk;
-    remote.push(JSON.parse(body));
-    response.end();
-  } else response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
+
+const stack = await startStack({
+  seed: false,
+  fixtures: { kind: 'test-touch-selection', context: { remote } },
+  ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
+  run,
+  port,
+  endpoint,
+  browser,
 });
-await new Promise((done, reject) => {
-  fixture.once('error', reject);
-  fixture.listen(port + 1, '127.0.0.1', done);
-});
-const control = startProductStack({ run, port, endpoint, browser });
-control.stdout.on('data', (data) => void appendFile(join(run, 'control.log'), data));
-control.stderr.on('data', (data) => void appendFile(join(run, 'control.log'), data));
-const stopped = new Promise((done) => control.once('exit', done));
 let context, page;
 const deadline = setTimeout(() => void context?.close(), 420000);
 const result = (scenario, detail) => {
@@ -55,7 +45,7 @@ const result = (scenario, detail) => {
 };
 try {
   await until(async () => (await fetch(origin + '/api/auth/setup')).ok, 'Control startup');
-  context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
+  context = await launchPersistentViewer(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
     headless: true,
     viewport: { width: 1100, height: 1000 },
@@ -726,9 +716,7 @@ try {
   const wire = page && !page.isClosed() ? await page.evaluate(() => selectionQA.wire).catch(() => []) : [];
   await writeFile(join(run, 'trace.json'), JSON.stringify({ results, remote, wire }, null, 2));
   await context?.close();
-  if (control.connected) control.disconnect();
-  await Promise.race([stopped, pause(10000)]);
-  fixture.closeAllConnections();
-  fixture.close();
+  await stack.stop();
+
   console.log('Evidence:', run);
 }

@@ -215,21 +215,19 @@ void InputController::ReleasePointer(bool deliver) {
 }
 const ui::mojom::TextInputState* InputController::UpdateEditableTarget(
     content::TextInputManager* manager) {
-  if (focus_observer_.contents() != owner_.contents()) {
-    focus_observer_.Attach(owner_.contents());
-    focused_document_ = {};
-    focused_node_id_ = 0;
-    focus_source_ = 0;
-  }
   const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
   auto* active = manager ? manager->GetActiveWidget() : nullptr;
   auto* focused = owner_.contents() ? owner_.contents()->GetFocusedFrame() : nullptr;
   const auto* state = active ? manager->GetTextInputState() : nullptr;
+  // TextInputManager can retain the old editable after the page moved focus.
+  // Only the observed focused node may own an editable target.
   if (!owner_.execution_->visible_ || !model || !model->focused ||
       model->actual != Residency::live || model->pending || !input_commit_navigations_.empty() ||
       owner_.lifecycle_->lifecycle_uncertain_ || !active || !active->GetView() ||
       !InputFrameReady(focused) || active != focused->GetRenderWidgetHost() || !state ||
-      !state->node_id || state->type == ui::TEXT_INPUT_TYPE_NONE) {
+      !state->node_id || state->type == ui::TEXT_INPUT_TYPE_NONE ||
+      focused_document_.AsRenderFrameHostIfValid() != focused ||
+      focused_node_id_ != state->node_id) {
     editable_target_.reset();
     return nullptr;
   }

@@ -6,7 +6,7 @@ import type { DownloadEvent } from '../server/endpoint/types';
 import { FileLibrary } from '../server/files/library';
 import { log } from '../server/log';
 import { LibraryRepository } from '../server/persistence/library';
-import { migrate } from '../server/persistence/schema';
+import { migrate } from '../server/persistence/migrations';
 import { SessionEvents } from '../server/workspace/session-events';
 import { CoordinationRepository } from '../server/persistence/coordination';
 import { EventEmitter } from 'node:events';
@@ -25,6 +25,8 @@ const imported: DownloadEvent = {
 function fixture() {
   const db = new Database(':memory:');
   migrate(db, { backupDirectory: '', buildId: 'test', atRestKey: new AtRestKey(null) });
+  for (const tenant of ['tenant', 'other'])
+    db.prepare('INSERT INTO library_state VALUES (?,0,NULL)').run(tenant);
   const repository = new LibraryRepository(db);
   const manager = () =>
     new FileLibrary(

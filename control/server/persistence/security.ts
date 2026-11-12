@@ -1,4 +1,4 @@
-import { decodeJson, encodeJson } from './codec';
+import { corruptRecord, decodeJson, encodeJson } from './codec';
 import { authSettings } from './documents';
 import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
@@ -7,7 +7,6 @@ import {
   AuthAttempts,
   AtRestKey,
   FaceVault,
-  defaultAuthSettings,
   hashSecret,
   verifySecret,
   type SecretHash,
@@ -64,18 +63,23 @@ export class SecurityRepository {
           face_model: string | null;
         }
       | undefined;
-    const settings: AuthSettings = row
-      ? decodeJson(row.settings, authSettings, `user_security.settings ${user}`)
-      : defaultAuthSettings();
+    if (!row) throw corruptRecord(`user_security ${user}`, new Error('missing required record'));
+    if (
+      (row.pin_hash === null) !== (row.pin_salt === null) ||
+      (row.face_ciphertext === null) !== (row.face_model === null)
+    )
+      throw corruptRecord(`user_security ${user}`, new Error('incomplete credential pair'));
+    const settings: AuthSettings = decodeJson(row.settings, authSettings, `user_security.settings ${user}`);
     return {
       settings,
-      pin: row?.pin_hash && row.pin_salt ? { salt: row.pin_salt, hash: row.pin_hash } : undefined,
+      pin: row.pin_hash === null ? undefined : { salt: row.pin_salt!, hash: row.pin_hash },
       face:
-        row?.face_ciphertext && row.face_model
-          ? { sealed: row.face_ciphertext, modelVersion: row.face_model }
-          : undefined,
+        row.face_ciphertext === null
+          ? undefined
+          : { sealed: row.face_ciphertext, modelVersion: row.face_model! },
     };
   }
+
   saveSecurity(user: string, record: ReturnType<SecurityRepository['security']>) {
     this.db
       .prepare('INSERT OR REPLACE INTO user_security VALUES (?,?,?,?,?,?)')
@@ -103,8 +107,5 @@ export class SecurityRepository {
       pin: undefined,
       face: undefined,
     });
-  }
-  deleteUser(user: string) {
-    this.db.prepare('DELETE FROM user_security WHERE user_id=?').run(user);
   }
 }

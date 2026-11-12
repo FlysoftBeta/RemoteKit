@@ -1,22 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { runPath, startStack } from './kit/stack.mjs';
 import { cliOptions, launch } from './kit/viewer.mjs';
-import { startStack, runPath } from './files-stack.mjs';
-import { fakeLearningProvider } from './files-learning-provider.mjs';
 
 const options = cliOptions();
-process.env.FILES_PORT ??=
-  Number(options.port) >= 34200 && Number(options.port) < 34300 ? options.port : '34200';
-const run = process.env.FILES_RUN ?? runPath('learning-sign-in');
-mkdirSync(run, { recursive: true });
-process.env.FILES_CAPTCHA = '1';
-const providerFixture = await fakeLearningProvider(
+const run = options.out ?? runPath('learning-sign-in');
+const stack = await startStack({
+  scenario: 'learning-sign-in',
   run,
-  options['browser-path'] ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe',
-);
-Object.assign(process.env, providerFixture.env);
-const stack = await startStack({ scenario: 'learning-sign-in', browser: providerFixture.launcher, run });
+  browser: options['browser-path'],
+  learning: { captcha: true },
+  port: options.port,
+});
+const providerFixture = stack.provider;
 console.log('RUN ' + stack.run);
 let viewer;
 const results = [];
@@ -143,5 +140,4 @@ try {
   writeFileSync(join(stack.run, 'results.json'), JSON.stringify(results, null, 2));
   await viewer?.close();
   await stack.stop();
-  await providerFixture.close();
 }

@@ -19,7 +19,8 @@ int wmain(int argc, wchar_t** argv) {
   auto root = fs::path(argv[1]) / (L"node-files-" + std::to_wstring(GetCurrentProcessId()));
   try {
     fs::create_directories(root);
-    Json config = {{"control", "ws://example.test/api/node"},
+    Json config = {{"version", 1},
+                   {"control", "ws://example.test/api/node"},
                    {"privateKey", std::string(43, 'A') + "="},
                    {"controlPublicKey", std::string(43, 'A') + "="},
                    {"nodeId", "node-1"}};

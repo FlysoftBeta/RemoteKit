@@ -1,133 +1,59 @@
-import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFile, copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { connect, createServer as createProxy } from 'node:net';
-import { createRequire } from 'node:module';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
+
+import { createNetworkProxy } from './kit/network.mjs';
 import { join, resolve } from 'node:path';
-import { stageProductRuntime as stageRuntime } from './kit/stack.mjs';
-import { instrumentViewer, pause, requireControl, startControl, until } from './cluster-test-support.mjs';
+import { pause, requireControl, startStack, until } from './kit/stack.mjs';
+
+import assert from 'node:assert/strict';
 
 const [modulePath, edge, endpoint, browser, output, portArg = '34050'] = process.argv.slice(2);
 assert([modulePath, edge, endpoint, browser, output].every(Boolean));
 const run = resolve(output),
   port = Number(portArg),
   origin = 'http://127.0.0.1:' + (port + 4);
-await mkdir(run);
-let management = true,
-  closePage = false,
+await mkdir(run, { recursive: true });
+let closePage = false,
   childLoads = 0,
   geometry;
-const sockets = new Set();
-const proxy = createProxy((socket) => {
-  if (!management) {
-    socket.destroy();
-    return;
-  }
-  const upstream = connect(port, '127.0.0.1');
-  sockets.add(socket);
-  sockets.add(upstream);
-  for (const peer of [socket, upstream]) {
-    peer.on('error', () => {});
-    peer.on('close', () => {
-      sockets.delete(peer);
-      socket.destroy();
-      upstream.destroy();
-    });
-  }
-  socket.pipe(upstream);
-  upstream.pipe(socket);
-});
-await new Promise((done) => proxy.listen(port + 2, '127.0.0.1', done));
-const fixture = createServer(async (request, response) => {
-  response.setHeader('Cache-Control', 'no-store');
-  if (request.url === '/close') {
-    response.end(JSON.stringify(closePage));
-    return;
-  }
-  if (request.method === 'POST') {
-    let text = '';
-    for await (const bytes of request) text += bytes;
-    geometry = JSON.parse(text);
-    response.end();
-    return;
-  }
-  response.setHeader('Content-Type', 'text/html');
-  if (request.url === '/child') {
-    childLoads++;
-    response.end(
-      '<title>Self closing child</title><script>setInterval(async()=>{if(await(await fetch("/close")).json()) window.close()},100)</script>',
-    );
-    return;
-  }
-  response.end(
-    '<title>Parent</title><button style="position:fixed;inset:0;width:100vw;height:100vh" onclick="window.open(\'/child\')">Open child</button><canvas width="24" height="24"></canvas><script>const report=()=>fetch("/geometry",{method:"POST",body:JSON.stringify({width:innerWidth,height:innerHeight})});report();addEventListener("resize",report);let tick=0;setInterval(()=>{const c=document.querySelector("canvas").getContext("2d");c.fillStyle=++tick%2?"red":"blue";c.fillRect(0,0,24,24)},100)</script>',
-  );
-});
-await new Promise((done) => fixture.listen(port + 1, '127.0.0.1', done));
-await mkdir(join(run, 'runtime'));
-const server = resolve('tests/e2e/shell-cluster-harness.mts');
-const configPath = join(run, 'control.json'),
-  nodeRoot = join(run, 'node');
-await mkdir(nodeRoot);
-await writeFile(
-  configPath,
-  JSON.stringify({
-    http: { listen: '127.0.0.1:' + port, origins: [origin] },
-    storage: { database: join(run, 'control.db'), logs: join(run, 'logs') },
-    nodes: {
-      alpha: {
-        limits: { diskReserveBytes: 256 * 1024 * 1024 },
-        remote: { control: 'ws://127.0.0.1:' + (port + 2) + '/api/node' },
-        peer: { listen: '127.0.0.1:' + (port + 3), address: '127.0.0.1:' + (port + 3) },
+const network = await createNetworkProxy({ port: port + 2, upstreamPort: port });
+
+const nodeRoot = join(run, 'node');
+const stack = await startStack({
+  scenario: 'coordination-reconnect',
+  run,
+  endpoint,
+  browser,
+  seed: false,
+  fixtures: {
+    kind: 'test-coordination-reconnect',
+    context: {
+      getClosePage: () => closePage,
+      setGeometry: (value) => {
+        geometry = value;
       },
+      onChildLoad: () => childLoads++,
     },
-  }),
-);
-const control = startControl(server, configPath, run);
-const vite = spawn(
-  process.execPath,
-  [resolve('tests/e2e/kit/vite.mjs'), String(port + 4), join(run, 'vite-cache')],
-  {
-    cwd: resolve('control'),
-    windowsHide: true,
-    stdio: 'ignore',
-    env: { ...process.env, REMOTEKIT_VITE_CONTROL: 'http://127.0.0.1:' + port },
   },
-);
-await writeFile(
-  join(run, 'pids.jsonl'),
-  JSON.stringify({ control: control.child.pid, vite: vite.pid }) + '\n',
-);
+  ports: { control: port, viewer: port + 4, fixture: port + 1, peer: port + 3 },
+  nodes: { alpha: { remote: { control: 'ws://127.0.0.1:' + (port + 2) + '/api/node' } } },
+});
+const control = stack.control;
 let native, viewers, context;
 try {
-  await until('remote bootstrap', async () =>
-    readFile(join(run, 'nodes/alpha/node.json')).catch(() => false),
+  native = await stack.startRemote('alpha', nodeRoot);
+  await until(
+    () => Promise.resolve(control.events.some((event) => event.event === 'node.ready')),
+    'remote node ready',
   );
-  await copyFile(join(run, 'nodes/alpha/node.json'), join(nodeRoot, 'node.json'));
-  const executable = stageRuntime(endpoint, browser, join(run, 'bin'));
-  native = spawn(executable, ['--node-root=' + nodeRoot], {
-    windowsHide: true,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  await appendFile(join(run, 'pids.jsonl'), JSON.stringify({ native: native.pid }) + '\n');
-  await mkdir(join(nodeRoot, 'logs'), { recursive: true });
-  for (const stream of ['stdout', 'stderr'])
-    native[stream].on('data', (bytes) => {
-      void appendFile(join(run, 'endpoint.' + stream + '.log'), bytes);
-      if (stream === 'stderr') void appendFile(join(nodeRoot, 'logs/endpoint.log'), bytes);
-    });
-  await until('remote node ready', () =>
-    Promise.resolve(control.events.some((event) => event.event === 'node.ready')),
-  );
-  const { chromium } = createRequire(import.meta.url)(resolve(modulePath));
-  viewers = await chromium.launch({
+
+  viewers = await launchBrowser({
     executablePath: edge,
     headless: true,
     args: ['--autoplay-policy=no-user-gesture-required'],
   });
-  context = await viewers.newContext({ viewport: { width: 1100, height: 800 } });
+  context = await createViewerContext(viewers, { viewport: { width: 1100, height: 800 } });
   const password = randomUUID();
   const setup = await context.request.post(origin + '/api/auth/setup', {
     headers: { Origin: origin },
@@ -148,7 +74,7 @@ try {
     url: 'http://127.0.0.1:' + (port + 1) + '/parent',
   });
   await viewer.media();
-  await until('parent geometry', () => geometry);
+  await until(() => geometry, 'parent geometry');
   const viewport = viewer.page.locator('.remote-viewport').first();
   await viewer.page.waitForFunction(() => {
     const viewport = document.querySelector('.remote-viewport');
@@ -162,23 +88,25 @@ try {
   });
   const box = await viewport.boundingBox();
   await viewer.page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-  const child = await until('adopted child tab', async () =>
-    (await viewer.state()).workspace.tabs.find(
-      (tab) => tab.url.endsWith('/child') && tab.popup?.status === 'adopted',
-    ),
+  const child = await until(
+    async () =>
+      (await viewer.state()).workspace.tabs.find(
+        (tab) => tab.url.endsWith('/child') && tab.popup?.status === 'adopted',
+      ),
+    'adopted child tab',
   );
   const before = await control.call('inspect');
   const placement = before.placements[0],
     actual = before.observations[placement.tenant],
     loads = childLoads;
-  management = false;
-  for (const socket of sockets) socket.destroy();
-  await until('management disconnected', () =>
-    Promise.resolve(control.events.some((event) => event.event === 'node.offline')),
+  network.disconnect();
+  await until(
+    () => Promise.resolve(control.events.some((event) => event.event === 'node.offline')),
+    'management disconnected',
   );
   closePage = true;
   const Database = requireControl('better-sqlite3');
-  await until('durable disconnected close', () => {
+  await until(() => {
     const db = new Database(join(nodeRoot, 'data/sessions', placement.session_id, 'session.db'), {
       readonly: true,
     });
@@ -194,17 +122,17 @@ try {
     } finally {
       db.close();
     }
-  });
-  management = true;
+  }, 'durable disconnected close');
+  network.reconnect();
   await until(
-    'node reconnected',
     () => Promise.resolve(control.events.filter((event) => event.event === 'node.ready').length >= 2),
+    'node reconnected',
     60000,
   );
   await viewer.call('auth.verify', { method: 'password', secret: password });
   await until(
-    'product removed closed tab',
     async () => !(await viewer.state()).workspace.tabs.some((tab) => tab.id === child.id),
+    'product removed closed tab',
     60000,
   );
   await pause(1500);
@@ -226,8 +154,9 @@ try {
     .locator('[data-tile-key]')
     .filter({ has: viewer.page.getByText('管理', { exact: true }) })
     .click();
-  const adminWindow = await until('admin window', async () =>
-    (await viewer.state()).workspace.windows.find((win) => win.appId === 'admin'),
+  const adminWindow = await until(
+    async () => (await viewer.state()).workspace.windows.find((win) => win.appId === 'admin'),
+    'admin window',
   );
   const admin = viewer.page.locator(`[data-window-id="${adminWindow.id}"]`);
   await admin
@@ -243,7 +172,6 @@ try {
   const beforeAbsence = await viewer.state();
   await viewer.page.close();
   await until(
-    'detached viewer and settled native session',
     async () => {
       const snapshot = await control.call('inspect');
       const observed = snapshot.observations[placement.tenant];
@@ -253,6 +181,7 @@ try {
         !observed.rtc?.active
       );
     },
+    'detached viewer and settled native session',
     90000,
   );
   await control.call('advance', { ms: 11 * 60 * 1000 });
@@ -279,13 +208,12 @@ try {
   );
   await returning.page.close();
   await until(
-    'viewer detached before stop',
     async () =>
       !(await control.call('inspect')).runtimes.find((runtime) => runtime.tenant === placement.tenant)
         ?.viewer,
+    'viewer detached before stop',
   );
   await until(
-    'stopped Session',
     async () => {
       try {
         const users = await control.call('stop', { username: 'coordination' });
@@ -295,6 +223,7 @@ try {
         throw error;
       }
     },
+    'stopped Session',
     120000,
   );
   const stoppedState = await control.call('inspect');
@@ -349,16 +278,13 @@ try {
   console.error(error.stack);
   process.exitCode = 1;
 } finally {
-  management = false;
-  for (const socket of sockets) socket.destroy();
+  network.disconnect();
   await context?.close();
   await viewers?.close();
   if (native && native.exitCode === null) {
     native.stdin.end();
     await new Promise((done) => native.once('exit', done));
   }
-  vite.kill();
-  await control.stop();
-  await new Promise((done) => proxy.close(done));
-  await new Promise((done) => fixture.close(done));
+  await stack.stop();
+  await network.close();
 }

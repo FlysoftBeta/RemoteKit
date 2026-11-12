@@ -1,4 +1,10 @@
 #include "persistence/session_db.hpp"
+#include "persistence/session_documents.hpp"
+#include "persistence/session_migrations.hpp"
+#include "persistence/checkpoint_formats.hpp"
+#include "persistence/config_formats.hpp"
+#include "runtime_config_fixture.hpp"
+#include "files/library_records.hpp"
 #include "persistence/checkpoint.hpp"
 #include "util/file_io.hpp"
 #include "util/result_macros.hpp"
@@ -42,8 +48,8 @@ Json Download() {
                                       {"eventId", "download-event"},
                                       {"name", "a"},
                                       {"origin", ""},
-                                      {"mimeType", "text/plain"},
                                       {"assetId", std::string(64, 'a')},
+                                      {"mimeType", "text/plain"},
                                       {"size", "3"}}}}})}};
 }
 Json Selection(const std::string& state = "pending") {
@@ -61,12 +67,124 @@ Json Selection(const std::string& state = "pending") {
       {"files",
        Json::array({{{"assetId", std::string(64, 'a')}, {"name", "a"}, {"type", "text/plain"}}})}};
 }
+void Formats() {
+  using Validator = void (*)(const Json&);
+  struct Sample {
+    Validator validate;
+    Json value;
+    const char* required;
+  };
+  const std::string id(64, 'a');
+  const std::vector<Sample> samples = {
+      {checkpoint_formats::ValidateCopy,
+       {{"version", 1},
+        {"sessionId", "session"},
+        {"placementEpoch", 1},
+        {"base", nullptr},
+        {"state", "clean"},
+        {"stoppedCleanly", true},
+        {"changesAt", 0},
+        {"lastCommit", nullptr}},
+       "state"},
+      {checkpoint_formats::ValidateChanges,
+       {{"version", 1},
+        {"at", 1},
+        {"paths", Json::array()},
+        {"removed", Json::array()},
+        {"subtrees", Json::array()},
+        {"continuous", true}},
+       "continuous"},
+      {checkpoint_formats::ValidateManifest,
+       {{"version", 2},
+        {"buildId", "dev"},
+        {"files", Json::array({{{"path", "file"}, {"size", 1}, {"chunks", Json::array({id})}}})},
+        {"directories", Json::array()}},
+       "files"},
+      {config_formats::Node,
+       {{"version", 1},
+        {"nodeId", "node"},
+        {"privateKey", std::string(43, 'A') + "="},
+        {"controlPublicKey", std::string(43, 'A') + "="}},
+       "privateKey"},
+      {config_formats::Manager,
+       {{"version", 1},
+        {"manifest", "https://example.test/control.manifest"},
+        {"checkIntervalMinutes", 60}},
+       "manifest"},
+      {config_formats::Owner,
+       {{"version", 1}, {"snapshotId", "{01234567-0123-4567-89ab-0123456789ab}"}},
+       "snapshotId"},
+      {session_documents::View, TestView(), "url"},
+      {session_documents::Downloads, Download(), "records"},
+      {session_documents::WireError, {{"code", "internal"}, {"message", "failed"}}, "message"},
+  };
+  for (const auto& sample : samples) {
+    const auto encoded = Take(checkpoint_formats::Encode(sample.value, sample.validate));
+    Check(Take(checkpoint_formats::Decode(encoded, sample.validate, persisted::Store::kManifest)) ==
+              sample.value,
+          "format round trip");
+    auto missing = sample.value;
+    missing.erase(sample.required);
+    auto unknown = sample.value;
+    unknown["unknown"] = true;
+    auto wrong = sample.value;
+    wrong[sample.required] = 7;
+    for (const auto& bad : {missing, unknown, wrong}) {
+      const auto decoded =
+          checkpoint_formats::Decode(bad.dump(), sample.validate, persisted::Store::kManifest);
+      Check(!decoded && decoded.error().reason == ErrorReason::kCorruptState &&
+                ValidErrorId(decoded.error().error_id),
+            "strict format rejection");
+      Check(!checkpoint_formats::Encode(bad, sample.validate), "strict encoder rejection");
+    }
+  }
+  const auto entries =
+      Json{{"file", {{"size", 1}, {"mtime", 1}, {"fileId", "1:2"}, {"chunks", Json::array({id})}}}};
+  const auto index = Take(checkpoint_formats::EncodeIndex(entries));
+  Check(checkpoint_formats::DecodeIndex(index.dump()) == entries, "index round trip");
+  auto missing_index = index;
+  missing_index.erase("entries");
+  auto unknown_index = index;
+  unknown_index["unknown"] = true;
+  auto wrong_index = index;
+  wrong_index["entries"] = 7;
+  for (const auto& bad : {missing_index, unknown_index, wrong_index}) {
+    Check(checkpoint_formats::DecodeIndex(bad.dump()).is_null(), "invalid index rebuilds");
+  }
+}
+void MigrationRunner(const fs::path& path) {
+  SessionDb initial(path);
+  Take(initial.Open());
+  Take(initial.Close());
+  sqlite::Database db;
+  Take(db.Open(path / "session.db"));
+  const std::array<SessionMigration, 1> steps{
+      {{4, "future-test", [](sqlite::Database& store) -> Result<void> {
+          RK_RETURN_IF_ERROR(store.Execute("CREATE TABLE future_step(value TEXT)"));
+          return CorruptState("injected migration failure");
+        }}}};
+  Check(!MigrateSessionDb(db, path, "dev", steps), "future step fails");
+  {
+    auto query = Take(db.Prepare("PRAGMA user_version"));
+    Take(query.Step());
+    Check(query.Int64(0) == 3, "migration rollback preserves schema version");
+  }
+  Check(std::distance(fs::directory_iterator(path / "backups"), fs::directory_iterator()) == 1,
+        "verified pre-migration backup retained");
+  const std::array<SessionMigration, 1> success{
+      {{4, "future-test", [](sqlite::Database& store) -> Result<void> {
+          return store.Execute("CREATE TABLE future_step(value TEXT)");
+        }}}};
+  Take(MigrateSessionDb(db, path, "dev", success));
+  Take(CheckSessionDb(db, 4));
+  Take(db.Close());
+}
 void Transactions(const fs::path& path) {
   SessionDb store(path);
   Take(store.Open());
   auto views = store.Views();
   auto recovery = store.Recovery();
-  const auto config = Json{{"viewId", "1"}, {"url", "old"}};
+  const auto config = TestView("1", "old");
   Take(views.Save(Json::array({config})));
   auto invalid_recovery = Recovery();
   invalid_recovery["chunks"][0]["data"] = "%%%";
@@ -169,46 +287,6 @@ void Reads(const fs::path& path) {
   const auto unavailable = Checkpoints::Copy(path / "session");
   CloseHandle(held_journal);
   Check(!unavailable && unavailable.error().code == ErrorCode::kUnavailable, "copy I/O error");
-  sqlite::Database db;
-  Take(db.Open(path / "unsupported.db"));
-  Take(db.Execute("PRAGMA user_version=4"));
-  Take(db.Close());
-  fs::create_directory(path / "unsupported");
-  fs::rename(path / "unsupported.db", path / "unsupported/session.db");
-  SessionDb unsupported(path / "unsupported");
-  auto result = unsupported.Open();
-  Check(!result && result.error().reason == ErrorReason::kCorruptState &&
-            result.error().message == "unsupported session store version",
-        "unsupported schema classification");
-}
-void StableMigration(const fs::path& root) {
-  const auto first = root / "one" / std::string(32, 'a');
-  const auto second = root / "two" / std::string(32, 'a');
-  fs::create_directories(first);
-  fs::create_directories(second);
-  sqlite::Database seed;
-  Take(seed.Open(first / "session.db"));
-  Take(seed.Execute(R"sql(
-CREATE TABLE views(view_id TEXT PRIMARY KEY,config TEXT NOT NULL);
-CREATE TABLE closed_events(event_id INTEGER PRIMARY KEY,view_id TEXT NOT NULL,reason TEXT NOT NULL);
-INSERT INTO closed_events VALUES(1,'9','script');
-CREATE TABLE download_imports(event_id TEXT PRIMARY KEY,incarnation TEXT NOT NULL,download TEXT NOT NULL,result TEXT,browser_ack INTEGER NOT NULL,attempt INTEGER,error TEXT,retry_at INTEGER);
-PRAGMA user_version=1;
-)sql"));
-  Take(seed.Close());
-  fs::copy_file(first / "session.db", second / "session.db");
-  SessionDb migrated(first), restored(second);
-  Take(migrated.Open());
-  Take(restored.Open());
-  const auto original = Take(migrated.Events().Load()).at(0);
-  const auto replayed = Take(restored.Events().Load()).at(0);
-  Check(original.at("eventId") == replayed.at("eventId"),
-        "checkpoint migration preserves source event identity");
-  Check(Take(migrated.Events().State()).at("streamId") !=
-            Take(restored.Events().State()).at("streamId"),
-        "restored migrations get separate streams");
-  Check(Take(restored.Views().Retired()) == Json::array({"9"}),
-        "migration retains close retirement");
 }
 void EventTransactions(const fs::path& path) {
   SessionDb store(path);
@@ -223,12 +301,15 @@ void EventTransactions(const fs::path& path) {
   Check(Take(events.Append("view.closed", {{"viewId", "1"}, {"reason", "script"}}, "first",
                            "browser")) == first,
         "event insertion deduplicates source identity");
-  Check(!events.Append("view.closed", {{"viewId", "2"}, {"reason", "script"}}, "first", "browser"),
+  Check(!events.Append("view.closed", {{"viewId", "2"}}, "first", "browser"),
         "event identity conflict");
-  Take(events.Append(
-      "clipboard.changed",
-      {{"baseRevision", "9"}, {"browserSequence", "3"}, {"text", "native"}, {"html", ""}}, "second",
-      "browser"));
+  Take(events.Append("clipboard.changed",
+                     {{"baseRevision", "9"},
+                      {"browserSequence", "3"},
+                      {"excludeFromHistory", false},
+                      {"text", "native"},
+                      {"html", ""}},
+                     "second", "browser"));
   sqlite::Database inject;
   Take(inject.Open(path / "session.db"));
   Take(
@@ -265,8 +346,9 @@ void EventTransactions(const fs::path& path) {
         "durable stream sequence advances across Endpoint and Browser restart");
   const auto before_drop = Take(reopened.Events().State());
   const auto dropped = Take(reopened.Events().Append(
-      "clipboard.changed", {{"text", std::string(1024 * 1024 + 1, 'x')}, {"html", ""}}, "oversize",
-      "new-browser"));
+      "clipboard.changed",
+      {{"text", std::string(1024 * 1024 + 1, 'x')}, {"html", ""}, {"excludeFromHistory", false}},
+      "oversize", "new-browser"));
   Check(dropped.value("dropped", false) && Take(reopened.Events().State()) == before_drop,
         "oversize event is dropped without consuming a durable sequence");
   Check(Take(reopened.Events().State()).at("streamId") == rotated.at("streamId"),
@@ -279,9 +361,10 @@ int wmain(int argc, wchar_t** argv) {
   const auto root = fs::path(argv[1]) / (L"session-db-" + std::to_wstring(GetCurrentProcessId()));
   try {
     fs::remove_all(root);
+    Formats();
+    MigrationRunner(root / "runner");
     Transactions(root / "transactions");
     EventTransactions(root / "events");
-    StableMigration(root / "migration");
     Reads(root / "reads");
     fs::remove_all(root);
     return 0;

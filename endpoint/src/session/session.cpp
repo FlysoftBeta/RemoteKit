@@ -26,7 +26,7 @@ Session::Session(media::Sdk& api,
       sdk(api),
       management(link),
       browser(api, config.profile_key),
-      store(config.directory),
+      store(config.directory, options.build_id),
       trace(media::ServerTrace::Create(config.tenant, config.id)),
       context{sdk,   config.options, config.tenant, config.id, config.directory,    browser,
               store, management,     trace,         objects,   config.object_access},
@@ -92,7 +92,9 @@ Session::Session(media::Sdk& api,
               .send = [this](const Json& message, uint64_t stamp) { channel.Send(message, stamp); },
               .failed = [this] { authorization.SetInput(0); },
               .trace = [this] { return trace; },
-              .log_fields = {{"tenantId", config.tenant}, {"sessionId", config.id}}}),
+              .log_fields = {{"tenantId", config.tenant},
+                             {"version", 1},
+                             {"sessionId", config.id}}}),
       presentation(PresentationController::Hooks{
           .peer = [this] { return peer_controller.Handle(); },
           .scope =
@@ -144,7 +146,9 @@ Session::Session(media::Sdk& api,
                   [this](uint64_t encoder) { EncoderRegistry::Keyframe(&registry, encoder); },
               .destroy_encoder =
                   [this](uint64_t encoder) { EncoderRegistry::DestroyEncoder(&registry, encoder); },
-              .log_fields = {{"tenantId", config.tenant}, {"sessionId", config.id}}}),
+              .log_fields = {{"tenantId", config.tenant},
+                             {"version", 1},
+                             {"sessionId", config.id}}}),
       output(context, peer_controller, authorization, presentation, registry, pipeline, timing),
       pipeline(context,
                peer_controller,
@@ -270,12 +274,12 @@ Json Session::LockSnapshot() const {
 Result<void> Session::Initialize() {
   RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(config.directory));
   if (copy.is_null())
-    copy = {{"sessionId", config.id}, {"placementEpoch", config.placement_epoch},
-            {"base", nullptr},        {"state", "clean"},
-            {"stoppedCleanly", true}, {"changesAt", 0},
-            {"lastCommit", nullptr}};
+    copy = {{"version", 1},    {"sessionId", config.id}, {"placementEpoch", config.placement_epoch},
+            {"base", nullptr}, {"state", "clean"},       {"stoppedCleanly", true},
+            {"changesAt", 0},  {"lastCommit", nullptr}};
   RK_RETURN_IF_ERROR(checkpoint_cache.Start(config.directory));
-  version_at_ = copy.value("lastVersion", Json::object()).value("takenAt", VersionNow());
+  version_at_ = copy.contains("lastVersion") ? copy.at("lastVersion").at("takenAt").get<int64_t>()
+                                             : VersionNow();
   copy["placementEpoch"] = config.placement_epoch;
   copy["state"] = "dirty";
   copy["stoppedCleanly"] = false;

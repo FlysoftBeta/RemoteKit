@@ -23,7 +23,6 @@ import {
   array,
   boolean,
   integer,
-  jsonValue,
   literal,
   nullable,
   number,
@@ -37,8 +36,10 @@ import type { Selection } from './library';
 
 const s = string;
 const b = boolean;
-const n = number;
-const i = integer;
+const n = () => number({ min: 0, max: Number.MAX_SAFE_INTEGER });
+const i = () => integer({ min: 0 });
+const counter = string({ pattern: /^(0|[1-9][0-9]{0,19})$/ });
+const positiveCounter = string({ pattern: /^[1-9][0-9]{0,19}$/ });
 export const errorCode = literal(
   'invalid_request',
   'unauthenticated',
@@ -82,15 +83,17 @@ export const wireError = object(
       'browser_state_too_large',
       'no_document_contour',
       'corrupt_state',
+      'corrupt_record',
       'session_data_on_offline_node',
       'no_eligible_node',
     ),
-    retryAfterMs: i(),
+    retryAfterMs: integer({ min: 0, max: 86400000 }),
     errorId: s({ pattern: /^[cev]-[0-9a-f]{10}$/ }),
   },
 );
 
-export const windowState = record(jsonValue);
+import { windowState } from '../../shared/persisted-window-state';
+export { windowState };
 const tabKind = literal('start', 'remote');
 export const tab = object(
   { id: s(), windowId: s(), webviewId: s(), title: s(), url: s(), idleKeepAlive: b() },
@@ -143,15 +146,15 @@ export const tab = object(
 ) satisfies Codec<ProductTab>;
 export const space = object({
   id: s(),
-  windowIds: array(s()),
-  weights: array(n()),
+  windowIds: array(s({ min: 1, max: 128 }), { min: 1, max: 3 }),
+  weights: array(number({ min: Number.MIN_VALUE, max: Number.MAX_SAFE_INTEGER }), { min: 1, max: 3 }),
   focusedWindowId: s(),
   lastActiveAt: n(),
 }) satisfies Codec<ProductSpace>;
 const workspaceFields = {
   qualityPreference: literal('quality', 'auto', 'smooth'),
-  uiScale: n(),
-  topDeadZone: union(literal('off', 'auto'), n()),
+  uiScale: number({ min: 0.5, max: 2 }),
+  topDeadZone: union(literal('off', 'auto'), integer({ min: 1, max: 200 })),
   showStats: b(),
   autoFullscreen: b(),
   autoKeyboard: b(),
@@ -222,7 +225,7 @@ export const pending = object(
 export const authSettings = object({
   lockOnHidden: b(),
   lockOnIdle: b(),
-  idleSeconds: n(),
+  idleSeconds: integer({ min: 15, max: 3600 }),
   lockOnDeparture: b(),
   faceEnabled: b(),
 }) satisfies Codec<AuthSettings>;
@@ -322,7 +325,7 @@ const entryFields = {
   id: s(),
   name: s(),
   type: s(),
-  size: n(),
+  size: integer({ min: 0 }),
   createdAt: n(),
   source: nullable(librarySource),
   partitionId: nullable(s()),
@@ -363,14 +366,18 @@ export const selection = object({
   binding: object({ browserIncarnation: s(), view: s(), instance: s(), document: s(), request: s() }),
   entryIds: array(s()),
   files: array(object({ assetId: s(), name: s(), type: s() })),
-  limits: object({ maxFileBytes: n(), maxBatchBytes: n(), maxFiles: i() }),
+  limits: object({
+    maxFileBytes: integer({ min: 1, max: 268435456 }),
+    maxBatchBytes: integer({ min: 1, max: 536870912 }),
+    maxFiles: integer({ min: 1, max: 64 }),
+  }),
   prepared: b(),
 }) satisfies Codec<Selection>;
 export const sites = array(object({ name: s(), url: s() })) satisfies Codec<ImportSite[]>;
 export const counts = object({ applied: i(), rejected: i() });
 export const applyCounts = object({ cookies: counts, localStorage: counts });
 export const storageJob = object({ importId: s() });
-export const pairingCode = array(s());
+export const pairingCode = array(s({ min: 1, max: 64 }), { min: 5, max: 5 });
 const cookie = object({
   name: s(),
   value: s(),
@@ -448,3 +455,84 @@ export const xinjiaoyuSession = object(
     secChUaPlatform: s(),
   },
 ) satisfies Codec<XinjiaoyuSession>;
+
+const eventIncarnation = nullable(s({ max: 128 }));
+const eventDownload = { name: s({ max: 4096 }), origin: s({ max: 2048 }) };
+const clipboardEvent = {
+  browserSequence: counter,
+  baseRevision: counter,
+  excludeFromHistory: b(),
+};
+export const sessionEventPayload = union(
+  object({
+    type: literal('view.closed'),
+    browserIncarnation: eventIncarnation,
+    body: object(
+      { viewId: positiveCounter, reason: s({ min: 1, max: 128 }) },
+      { instance: positiveCounter, document: positiveCounter },
+    ),
+  }),
+  object({
+    type: literal('download.imported'),
+    browserIncarnation: eventIncarnation,
+    body: object({
+      ...eventDownload,
+      assetId: s({ pattern: /^[0-9a-f]{64}$/ }),
+      mimeType: s({ max: 255 }),
+      size: counter,
+    }),
+  }),
+  object({
+    type: literal('download.failed'),
+    browserIncarnation: eventIncarnation,
+    body: object({ ...eventDownload, error: wireError }),
+  }),
+  object({
+    type: literal('clipboard.changed'),
+    browserIncarnation: eventIncarnation,
+    body: union(
+      object(
+        { ...clipboardEvent, text: s({ max: 1024 * 1024 }), html: s({ max: 2 * 1024 * 1024 }) },
+        { viewId: positiveCounter, oversize: literal(false) },
+      ),
+      object(
+        { ...clipboardEvent, oversize: literal(true), textBytes: i(), htmlBytes: i() },
+        { viewId: positiveCounter },
+      ),
+    ),
+  }),
+  object({
+    type: literal('view.signIn'),
+    browserIncarnation: eventIncarnation,
+    body: union(
+      object({
+        version: literal(1),
+        webviewId: positiveCounter,
+        provider: literal('changyan'),
+        result: object({
+          lot_number: s({ max: 8192 }),
+          captcha_output: s({ max: 8192 }),
+          pass_token: s({ max: 8192 }),
+          gen_time: s({ max: 8192 }),
+        }),
+      }),
+      object({
+        version: literal(1),
+        webviewId: positiveCounter,
+        provider: literal('xinjiaoyu'),
+        result: object(
+          { authorization: s({ max: 8192 }), accesstoken: s({ max: 8192 }), clientsession: s({ max: 8192 }) },
+          {
+            device: s({ max: 8192 }),
+            devicetype: s({ max: 8192 }),
+            'user-agent': s({ max: 8192 }),
+            'accept-language': s({ max: 8192 }),
+            'sec-ch-ua': s({ max: 8192 }),
+            'sec-ch-ua-mobile': s({ max: 8192 }),
+            'sec-ch-ua-platform': s({ max: 8192 }),
+          },
+        ),
+      }),
+    ),
+  }),
+);

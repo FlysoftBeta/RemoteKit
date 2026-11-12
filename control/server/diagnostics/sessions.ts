@@ -1,3 +1,5 @@
+import { decodeJson, encodeJson } from '../persistence/codec';
+import { archiveMetadata, diagnosticManifest } from './formats';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -350,7 +352,10 @@ export class DiagnosticSessions {
       },
     };
     const entries = new Map<ArchiveEntry, Buffer[]>([
-      ['manifest.json', [Buffer.from(JSON.stringify(manifest, null, 2) + '\n')]],
+      [
+        'manifest.json',
+        [Buffer.from(encodeJson<unknown>(manifest, diagnosticManifest, `diagnostics.manifest ${id}`) + '\n')],
+      ],
     ]);
     for (const source of ['client', 'control', 'endpoint', 'events'] as const)
       if (session.entries[source].length) entries.set(`${source}.jsonl`, session.entries[source]);
@@ -475,7 +480,11 @@ export class DiagnosticSessions {
       const directory = this.ownerDirectory(tenant);
       try {
         const archive = await stat(join(directory, `${id}.tar.zst`));
-        const reason = await readFile(join(directory, `${id}.reason`), 'utf8');
+        const { reason } = decodeJson(
+          await readFile(join(directory, `${id}.reason`), 'utf8'),
+          archiveMetadata,
+          `diagnostics.metadata ${id}`,
+        );
         if (!archive.isFile() || !stopReasons.includes(reason as StopReason))
           throw new RemoteKitError('internal', '诊断记录已损坏');
         return { id, status: 'complete', bytes: archive.size, reason: reason as StopReason };
@@ -520,12 +529,10 @@ export class DiagnosticSessions {
         throw err;
       });
       if (!info?.isFile()) continue;
-      const reason = await readFile(archive.path.slice(0, -'.tar.zst'.length) + '.reason', 'utf8').catch(
-        (err: NodeJS.ErrnoException) => {
-          if (err.code === 'ENOENT') return '';
-          log.warn('diagnostics.reason_failed', { path: archive.path, err });
-          throw err;
-        },
+      const { reason } = decodeJson(
+        await readFile(archive.path.slice(0, -'.tar.zst'.length) + '.reason', 'utf8'),
+        archiveMetadata,
+        `diagnostics.metadata ${archive.id}`,
       );
       list.push({
         id: archive.id,

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { startStack } from './stack.mjs';
 import { launch } from './viewer.mjs';
 
@@ -10,32 +9,9 @@ export async function keyboardOcclusion(kind) {
   if (playwright) process.env.REMOTEKIT_PLAYWRIGHT = resolve(playwright);
   const browserName = /chrome89/i.test(viewer ?? '') ? 'chrome89' : 'edge';
   const mode = geometry ?? (browserName === 'chrome89' ? 'content' : 'visual');
-  const run = resolve(output ?? `develop/tmp/occlusion/${kind}-${browserName}-${Date.now()}`);
+  const run = resolve(output ?? `develop/tmp/e2e/occlusion/${kind}-${browserName}-${Date.now()}`);
   await mkdir(run, { recursive: true });
   const events = [];
-  const fixture = createServer(async (request, response) => {
-    if (request.method === 'POST') {
-      let bytes = '';
-      for await (const part of request) bytes += part;
-      events.push(JSON.parse(bytes));
-      return response.end();
-    }
-    response.setHeader('Content-Type', 'text/html; charset=utf-8');
-    response.end(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
-      <title>Occlusion</title><style>html,body{margin:0;width:100%;height:100%;background:rgb(40,90,160);overflow:hidden}
-      input{position:absolute;left:24px;top:24px;width:260px;height:48px;font-size:20px}
-      #footer{position:fixed;bottom:0;height:12px;left:0;right:0;background:rgb(220,20,180)}
-      #motion{position:absolute;top:210px;width:8px;height:8px;background:#0f0}</style>
-      <input id="text"><div id="footer"></div><div id="motion"></div><script>
-      const report=type=>fetch('/event',{method:'POST',body:JSON.stringify({type,path:location.pathname,height:innerHeight,visualHeight:visualViewport.height,width:innerWidth,value:text.value,focused:document.activeElement===text,at:performance.now()})});
-      for(const type of ['focus','blur','input','compositionstart','compositionend'])text.addEventListener(type,()=>report(type));
-      document.addEventListener('pointerdown',e=>fetch('/event',{method:'POST',body:JSON.stringify({type:'pointer',x:e.clientX,y:e.clientY,path:location.pathname})}));
-      window.addEventListener('resize',()=>report('resize'));report('ready');
-      function animate(t){motion.style.left=(t/10%120)+'px';requestAnimationFrame(animate)}requestAnimationFrame(animate);
-      </script>`);
-  });
-  await new Promise((done) => fixture.listen(0, '127.0.0.1', done));
-  const url = `http://127.0.0.1:${fixture.address().port}/page`;
   let stack, session;
   const results = [];
   const normalChanges = [];
@@ -46,7 +22,9 @@ export async function keyboardOcclusion(kind) {
       browser,
       endpoint,
       media: { gop: 65535 },
+      fixtures: { kind: 'keyboard-occlusion', context: { events } },
     });
+    const url = stack.fixture + '/page';
     session = await launch({
       browser: browserName,
       dpr: 2,
@@ -204,6 +182,11 @@ export async function keyboardOcclusion(kind) {
       );
     };
     await ready();
+    // Focus the remote view before measuring keyboard-only geometry changes.
+    const focusBox = await page.locator('.remote-viewport').first().boundingBox();
+    await session.pointer.move(focusBox.x + 400, focusBox.y + 180);
+    await session.pointer.down();
+    await session.pointer.up();
     await page.waitForTimeout(2000);
     const initial = await page.evaluate(() => {
       const layout = [...occlusionQA.wire]
@@ -233,6 +216,21 @@ export async function keyboardOcclusion(kind) {
         { start: before.frames, height: pageHeight },
         { timeout: 15000 },
       );
+      await page.waitForFunction(
+        ({ start, height }) => {
+          const frame = occlusionQA.frames
+            .slice(start)
+            .find((entry) => entry.correct && Math.abs(entry.pageHeight - height) <= 1);
+          return (
+            frame &&
+            occlusionQA.wire.some(
+              (entry) => entry.message.type === 'frame' && entry.message.rtpTimestamp === frame.rtp,
+            )
+          );
+        },
+        { start: before.frames, height: pageHeight },
+        { timeout: 15000 },
+      );
       const sample = await page.evaluate(
         ({ before, pageHeight }) => {
           const frames = occlusionQA.frames.slice(before.frames);
@@ -247,7 +245,15 @@ export async function keyboardOcclusion(kind) {
               frame.at - (occlusionQA.geometries.find((event) => event.at >= before.at)?.at ?? before.at),
             layouts: wire.filter((e) => e.message.type === 'layout'),
             barriers: wire.filter((e) => e.message.type === 'presentation.prepare'),
-            keyframes: wire.filter((e) => e.message.type === 'frame' && e.message.keyframe),
+            // Data-channel metadata can arrive after a later occlusion has started.
+            keyframes: wire.filter(
+              (entry) =>
+                entry.message.type === 'frame' &&
+                entry.message.keyframe &&
+                entry.message.viewports?.some(
+                  (view) => view.viewId === frame.viewId && view.occlusionRevision === frame.revision,
+                ),
+            ),
             waiting: !!document.querySelector('.resize-waiting'),
             frozen: !!document.querySelector('.remote-resize-freeze'),
             box: document.querySelector('.remote-viewport').getBoundingClientRect().toJSON(),
@@ -425,6 +431,20 @@ export async function keyboardOcclusion(kind) {
       undefined,
       { timeout: 15000 },
     );
+    await page.waitForFunction(
+      (start) => {
+        const wire = occlusionQA.wire.slice(start);
+        const layout = wire.find(
+          (entry) => entry.message.type === 'layout' && entry.message.generation !== '0',
+        )?.message;
+        return (
+          layout &&
+          wire.some((entry) => entry.message.type === 'frame' && entry.message.layoutEpoch === layout.epoch)
+        );
+      },
+      beforeRotation.wire,
+      { timeout: 15000 },
+    );
     const rotation = await page.evaluate((start) => {
       const wire = occlusionQA.wire.slice(start);
       const layout = wire.find(
@@ -597,7 +617,5 @@ export async function keyboardOcclusion(kind) {
       );
     await session?.close();
     await stack?.stop();
-    fixture.closeAllConnections();
-    await new Promise((done) => fixture.close(done));
   }
 }

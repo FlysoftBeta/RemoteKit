@@ -73,6 +73,20 @@ void TestClientInputTiming() {
   ClientNativeInputClock<int64_t> future_origin(1100000, 1000000);
   CHECK_EQ(future_origin.Dispatch(1100000, 1000000), 1000000);
   CHECK_EQ(future_origin.Dispatch(1110000, 1010000), 1010000);
+
+  ClientGestureSourceTime timed_out;
+  CHECK(timed_out.Raw(0, false));
+  CHECK(timed_out.Raw(500000, false));  // Long press while the start ACK is pending.
+  CHECK(!timed_out.Raw(0, true));
+  timed_out.Cancel(0);
+  CHECK_EQ(timed_out.last(), 500000);
+  ClientNativeInputClock<int64_t> cleanup_native(1000000, 1000000);
+  CHECK_EQ(cleanup_native.Dispatch(1000000 + timed_out.last(), 3300000), 1500000);
+  CHECK(!timed_out.Raw(499999, false));
+  timed_out.Cancel(700000);
+  CHECK_EQ(timed_out.last(), 700000);
+  ClientGestureSourceTime recovery;
+  CHECK(recovery.Raw(0, false));
 }
 struct Sink : ui::TouchDispositionGestureFilterClient {
   std::vector<ui::GestureEventData> events;

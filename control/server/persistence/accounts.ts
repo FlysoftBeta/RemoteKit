@@ -136,6 +136,7 @@ export class AccountsRepository {
   }
   deleteUser(id: string) {
     this.revokeUser(id);
+    this.db.prepare('DELETE FROM user_security WHERE user_id=?').run(id);
     this.db.prepare('DELETE FROM users WHERE id=?').run(id);
   }
 }

@@ -5,7 +5,15 @@ import { fileURLToPath } from 'node:url';
 import { RemoteKitError } from '../shared/errors';
 import { readBuildId } from './cluster/build-id';
 import { publicKey } from './cluster/noise';
-import { convertV1, isV1, convertConfigFile } from './config-v1';
+import {
+  configDocument,
+  controlKey,
+  nodeBootstrap,
+  decodeConfigFile,
+  encodeConfigFile,
+  type NodeBootstrap,
+} from './config-formats';
+import { corruptState } from './persistence/codec';
 import { log } from './log';
 
 export interface MediaConfig {
@@ -102,11 +110,8 @@ export function canonicalJson(value: unknown): string {
     );
   return JSON.stringify(value);
 }
-function fallback<T>(value: T | undefined, defaultValue: T): T {
-  return value === undefined ? defaultValue : value;
-}
 function invalid(message: string): never {
-  throw new RemoteKitError('invalid_request', message);
+  throw corruptState('configuration', new Error(message));
 }
 function object(value: unknown, keys: readonly string[], name: string): Record<string, any> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(`${name} must be an object`);
@@ -209,13 +214,19 @@ export function parseConfig(
   const directory = dirname(configPath);
   let parsed: unknown;
   try {
-    parsed = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : defaultConfig(buildId);
-  } catch {
-    invalid('Invalid control configuration JSON');
+    parsed = existsSync(configPath)
+      ? decodeConfigFile(readFileSync(configPath, 'utf8'), configDocument, 'control')
+      : defaultConfig(buildId);
+  } catch (error) {
+    if (error instanceof RemoteKitError) throw error;
+    throw corruptState(configPath, error);
   }
-  if (isV1(parsed)) parsed = convertV1(parsed).config;
-  const source = object(parsed, ['http', 'storage', 'media', 'nodes', 'quotas', 'sessionImport'], 'config');
-  const http = object(fallback(source.http, {}), ['listen', 'origins', 'tls'], 'http');
+  const source = object(
+    parsed,
+    ['version', 'http', 'storage', 'media', 'nodes', 'quotas', 'sessionImport'],
+    'config',
+  );
+  const http = object(source.http, ['listen', 'origins', 'tls'], 'http');
   let sessionImport: SessionImportConfig | undefined;
   if (source.sessionImport !== undefined) {
     const value = object(
@@ -240,25 +251,20 @@ export function parseConfig(
         user: string(smtp.user, 'sessionImport.smtp.user'),
         password: string(smtp.password, 'sessionImport.smtp.password'),
       }),
-      replyWindowSeconds: integer(
-        fallback(value.replyWindowSeconds, 30),
-        0,
-        600,
-        'sessionImport.replyWindowSeconds',
-      ),
+      replyWindowSeconds: integer(value.replyWindowSeconds, 0, 600, 'sessionImport.replyWindowSeconds'),
       imap: Object.freeze({
         host: string(imap.host, 'sessionImport.imap.host'),
-        port: integer(fallback(imap.port, 993), 1, 65535, 'sessionImport.imap.port'),
+        port: integer(imap.port, 1, 65535, 'sessionImport.imap.port'),
         user: string(imap.user, 'sessionImport.imap.user'),
         password: string(imap.password, 'sessionImport.imap.password'),
       }),
-      folder: string(fallback(value.folder, 'INBOX'), 'sessionImport.folder'),
-      pollSeconds: integer(fallback(value.pollSeconds, 60), 15, 3600, 'sessionImport.pollSeconds'),
+      folder: string(value.folder, 'sessionImport.folder'),
+      pollSeconds: integer(value.pollSeconds, 15, 3600, 'sessionImport.pollSeconds'),
     });
   }
   // Port 0 lets the OS choose, which only tests use.
-  const listen = hostPort(fallback(http.listen, '127.0.0.1:3001'), 'http.listen', 0);
-  const origins = fallback<unknown>(http.origins, defaultOrigins);
+  const listen = hostPort(http.listen, 'http.listen', 0);
+  const origins = http.origins;
   if (!Array.isArray(origins) || !origins.every((value) => typeof value === 'string'))
     invalid('Invalid http.origins');
   let tls: RuntimeConfig['tls'];
@@ -268,13 +274,13 @@ export function parseConfig(
     const certPath = resolve(directory, string(value.cert, 'tls.cert'));
     tls = Object.freeze({ key: readFileSync(keyPath), cert: readFileSync(certPath) });
   }
-  const storage = object(fallback(source.storage, {}), ['database', 'diagnostics', 'logs'], 'storage');
-  const defaults = object(fallback(source.media, {}), Object.keys(mediaDefaults), 'media');
+  const storage = object(source.storage, ['database', 'diagnostics', 'logs'], 'storage');
+  const defaults = object(source.media, Object.keys(mediaDefaults), 'media');
   validateMedia(defaults, true);
-  const entries = object(source.nodes, Object.keys(source.nodes ?? {}), 'nodes');
-  const quotas = object(fallback(source.quotas, {}), ['tenantObjectBytes'], 'quotas');
+  const entries = object(source.nodes, Object.keys(source.nodes), 'nodes');
+  const quotas = object(source.quotas, ['tenantObjectBytes'], 'quotas');
   const tenantObjectBytes =
-    quotas.tenantObjectBytes == null
+    quotas.tenantObjectBytes === null
       ? null
       : integer(quotas.tenantObjectBytes, 1, Number.MAX_SAFE_INTEGER, 'quotas.tenantObjectBytes');
   const nodes: Record<string, ParsedNode> = Object.create(null);
@@ -285,24 +291,27 @@ export function parseConfig(
     const node = object(entry, ['local', 'remote', 'peer', 'rtc', 'limits', 'media'], `nodes.${nodeId}`);
     if ('local' in node === 'remote' in node)
       invalid(`nodes.${nodeId} requires exactly one of local or remote`);
-    const options = object(fallback(node.media, {}), Object.keys(mediaDefaults), `nodes.${nodeId}.media`);
-    validateMedia(options, true);
-    const media = Object.freeze(validateMedia({ ...mediaDefaults, ...defaults, ...options }));
-    const peerValue = object(fallback(node.peer, {}), ['listen', 'address'], `nodes.${nodeId}.peer`);
+    const options =
+      node.media === undefined
+        ? undefined
+        : object(node.media, Object.keys(mediaDefaults), `nodes.${nodeId}.media`);
+    if (options !== undefined) validateMedia(options, true);
+    const media = Object.freeze(validateMedia({ ...defaults, ...options }));
+    const peerValue = object(node.peer, ['listen', 'address'], `nodes.${nodeId}.peer`);
     if (
       Object.keys(entries).length > 1 &&
       (peerValue.listen === undefined || peerValue.address === undefined)
     )
       invalid(`nodes.${nodeId}.peer.listen and peer.address are required with multiple nodes`);
-    const listenAddress = fallback(peerValue.listen, '127.0.0.1:3101');
+    const listenAddress = peerValue.listen;
     const peerPort = hostPort(listenAddress, `nodes.${nodeId}.peer.listen`).port;
-    const address = fallback(peerValue.address, listenAddress);
+    const address = peerValue.address;
     hostPort(address, `nodes.${nodeId}.peer.address`);
     const peer = Object.freeze({ listen: listenAddress, address });
-    const rtcValue = object(fallback(node.rtc, {}), ['ports', 'address'], `nodes.${nodeId}.rtc`);
+    const rtcValue = object(node.rtc, ['ports', 'address'], `nodes.${nodeId}.rtc`);
     const rtc = Object.freeze({
-      ports: fallback(rtcValue.ports, null),
-      address: fallback(rtcValue.address, null),
+      ports: rtcValue.ports,
+      address: rtcValue.address,
     });
     if (rtc.ports !== null) portRange(rtc.ports, 'rtc.ports');
     if (
@@ -310,12 +319,8 @@ export function parseConfig(
       (!/^[A-Za-z0-9.-]+$/.test(string(rtc.address, 'rtc.address')) || rtc.ports === null)
     )
       invalid('rtc.address requires a valid host and rtc.ports');
-    const limitsValue = object(
-      fallback(node.limits, {}),
-      Object.keys(limitDefaults),
-      `nodes.${nodeId}.limits`,
-    );
-    const limits = { ...limitDefaults, ...limitsValue };
+    const limitsValue = object(node.limits, Object.keys(limitDefaults), `nodes.${nodeId}.limits`);
+    const limits = limitsValue as NodeLimits;
     for (const [key, min, max] of [
       ['maxSessions', 1, 64],
       ['diskReserveBytes', 0, Number.MAX_SAFE_INTEGER],
@@ -364,29 +369,27 @@ export function parseConfig(
     port: listen.port,
     tls,
     origins: Object.freeze([...origins]),
-    dbPath: resolve(directory, string(fallback(storage.database, '../data/control.db'), 'storage.database')),
-    diagnosticDir: resolve(
-      directory,
-      string(fallback(storage.diagnostics, '../data/diagnostics'), 'storage.diagnostics'),
-    ),
-    logDir: resolve(directory, string(fallback(storage.logs, '../logs'), 'storage.logs')),
+    dbPath: resolve(directory, string(storage.database, 'storage.database')),
+    diagnosticDir: resolve(directory, string(storage.diagnostics, 'storage.diagnostics')),
+    logDir: resolve(directory, string(storage.logs, 'storage.logs')),
     clientDir: resolve(root, 'dist/client'),
     nodes: Object.freeze(nodes),
     quotas: Object.freeze({ tenantObjectBytes }),
   });
 }
 
-function defaultConfig(buildId: string) {
+export function defaultConfig(buildId: string) {
   return {
-    http: { listen: '127.0.0.1:3001', origins: defaultOrigins },
+    version: 1 as const,
+    http: { listen: '127.0.0.1:3001', origins: [...defaultOrigins] },
     storage: { database: '../data/control.db', diagnostics: '../data/diagnostics', logs: '../logs' },
-    media: mediaDefaults,
+    media: { ...mediaDefaults },
     quotas: { tenantObjectBytes: null },
     nodes: {
       local: {
         peer: { listen: '127.0.0.1:3101', address: '127.0.0.1:3101' },
         rtc: { ports: null, address: null },
-        limits: limitDefaults,
+        limits: { ...limitDefaults },
         local: {
           root: '../data/node',
           ...(buildId === 'dev' ? { executable: '../../build/endpoint/endpoint/endpoint_service.exe' } : {}),
@@ -404,54 +407,43 @@ export function decodeIdentityKey(value: unknown, name: string): Buffer {
     invalid(`Invalid ${name}`);
   return Buffer.from(value, 'base64');
 }
-interface NodeBootstrap {
-  nodeId: string;
-  privateKey: string;
-  controlPublicKey: string;
-  control?: string;
-}
 function readBootstrap(
   node: ParsedNode,
   nodeId: string,
   controlPublicKey: string,
-): { file: NodeBootstrap; reason?: never } | { file?: never; reason: string } {
+): NodeBootstrap | undefined {
   let contents: string;
   try {
     contents = readFileSync(node.bootstrapFile, 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { reason: 'missing_bootstrap' };
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw error;
   }
-  try {
-    const file = object(
-      JSON.parse(contents),
-      node.remote
-        ? ['nodeId', 'privateKey', 'controlPublicKey', 'control']
-        : ['nodeId', 'privateKey', 'controlPublicKey'],
-      'node.json',
-    );
-    if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(string(file.nodeId, 'node.json.nodeId')))
-      invalid('Invalid node.json.nodeId');
-    decodeIdentityKey(file.privateKey, 'node.json.privateKey');
-    decodeIdentityKey(file.controlPublicKey, 'node.json.controlPublicKey');
-    if (node.remote) controlUrl(file.control, 'node.json.control');
-    if (file.nodeId !== nodeId) return { reason: 'node_id_changed' };
-    if (file.controlPublicKey !== controlPublicKey) return { reason: 'control_public_key_changed' };
-    return { file: file as unknown as NodeBootstrap };
-  } catch {
-    return { reason: 'invalid_bootstrap' };
-  }
+  const file = decodeConfigFile(contents, nodeBootstrap, 'node');
+  if (file.nodeId !== nodeId || file.controlPublicKey !== controlPublicKey)
+    invalid('Node bootstrap identity does not match configuration');
+  if (node.remote) controlUrl(file.control, 'node.json.control');
+  else if (file.control !== undefined) invalid('Local node bootstrap must omit control');
+  return file;
 }
 export function provisionConfig(config: ParsedConfig): RuntimeConfig {
   const directory = dirname(config.configPath);
   const keyFile = resolve(directory, 'control.key');
   mkdirSync(directory, { recursive: true });
   try {
-    writeFileSync(keyFile, randomBytes(32).toString('base64') + '\n', { flag: 'wx', mode: 0o600 });
+    writeFileSync(
+      keyFile,
+      encodeConfigFile(
+        { version: 1, privateKey: randomBytes(32).toString('base64') },
+        controlKey,
+        'control.key',
+      ),
+      { flag: 'wx', mode: 0o600 },
+    );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
   }
-  const privateKey = readFileSync(keyFile, 'utf8').trim();
+  const { privateKey } = decodeConfigFile(readFileSync(keyFile, 'utf8'), controlKey, 'key');
   const controlPublicKey = publicKey(decodeIdentityKey(privateKey, 'control.key')).toString('base64');
   const parent = resolve(directory, 'nodes');
   mkdirSync(parent, { recursive: true });
@@ -465,24 +457,26 @@ export function provisionConfig(config: ParsedConfig): RuntimeConfig {
     const loaded = readBootstrap(node, nodeId, controlPublicKey);
     let file: NodeBootstrap;
     let write = false;
-    if (loaded.reason !== undefined) {
+    if (loaded === undefined) {
       file = {
+        version: 1,
         nodeId,
         privateKey: randomBytes(32).toString('base64'),
         controlPublicKey,
         ...(node.remote ? { control: node.remote.control } : {}),
       };
       write = true;
-      log.warn('config.identity_regenerated', { nodeId, reason: loaded.reason });
+      log.info('config.identity_created', { nodeId });
     } else {
-      file = loaded.file;
+      file = loaded;
       if (node.remote && file.control !== node.remote.control) {
         file.control = node.remote.control;
         write = true;
         log.info('config.bootstrap_updated', { nodeId });
       }
     }
-    if (write) writeFileSync(node.bootstrapFile, JSON.stringify(file, null, 2) + '\n', { mode: 0o600 });
+    if (write)
+      writeFileSync(node.bootstrapFile, encodeConfigFile(file, nodeBootstrap, 'node.json'), { mode: 0o600 });
     const nodePublicKey = publicKey(decodeIdentityKey(file.privateKey, 'node.json.privateKey')).toString(
       'base64',
     );
@@ -503,15 +497,14 @@ export function runtimeConfig(
   const directory = dirname(config.configPath);
   mkdirSync(directory, { recursive: true });
   if (!existsSync(config.configPath))
-    writeFileSync(config.configPath, JSON.stringify(defaultConfig(config.buildId), null, 2) + '\n', {
-      flag: 'wx',
-      mode: 0o600,
-    });
-  const finishConversion = convertConfigFile(
-    config.configPath,
-    Object.values(config.nodes).map((node) => node.bootstrapFile),
-  );
+    writeFileSync(
+      config.configPath,
+      encodeConfigFile(defaultConfig(config.buildId), configDocument, 'control.json'),
+      {
+        flag: 'wx',
+        mode: 0o600,
+      },
+    );
   const runtime = provisionConfig(config);
-  finishConversion?.();
   return runtime;
 }

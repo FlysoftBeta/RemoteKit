@@ -1,46 +1,50 @@
-import { stageRuntime } from '../../integration/stage-runtime.mjs';
+import { launch } from '../kit/viewer.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { buildHarness, startControl, until } from '../cluster-test-support.mjs';
+import { startStack, until } from '../kit/stack.mjs';
 
 const [endpoint, browser, output, portArg = '33961'] = process.argv.slice(2);
 assert(endpoint && browser && output);
 const run = resolve(output);
 const port = Number(portArg);
 const origin = `http://127.0.0.1:${port}`;
-await mkdir(run);
-const server = await buildHarness(join(run, 'runtime'));
-const config = join(run, 'control.json');
-await writeFile(
-  config,
-  JSON.stringify({
-    http: { listen: `127.0.0.1:${port}`, origins: [origin] },
-    storage: { database: join(run, 'control.db') },
-    nodes: {
-      local: {
-        local: {
-          executable: stageRuntime(endpoint, browser, join(run, 'node-runtime/bin')),
-          root: join(run, 'node'),
-        },
-      },
-    },
-  }),
-);
-const control = startControl(server, config, run);
+await mkdir(run, { recursive: true });
+const stack = await startStack({
+  scenario: 'session-import',
+  run,
+  port,
+  endpoint,
+  browser,
+  seed: false,
+  fixtures: false,
+});
+const control = stack.control;
+let viewer;
 try {
-  await until('node ready', async () => {
+  await until(async () => {
     const state = await control.call('inspect');
     return state.nodes[0]?.state === 'ready' && state.nodes[0].metrics;
-  });
+  }, 'node ready');
+  const password = randomUUID();
   const response = await fetch(origin + '/api/auth/setup', {
     method: 'POST',
     headers: { Origin: origin, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'import-test', password: randomUUID() }),
+    body: JSON.stringify({ username: 'import-test', password }),
   });
   assert.equal(response.status, 200, await response.text());
+  stack.username = 'import-test';
+  stack.password = password;
+  viewer = await launch({ stack, browser: process.env.E2E_BROWSER ?? 'edge' });
+  await viewer.openStart();
+  await viewer.tile('浏览器').click();
+  await viewer.until(() => viewer.state.browser.state === 'available', 'Session Browser available');
   const tenant = (await control.call('inspect')).users[0].tenant;
+  await until(
+    async () => (await control.call('inspect')).observations[tenant]?.browser === 'running',
+    'Session Browser observed',
+  );
   const params = {
     importId: randomUUID() + ':0',
     cookies: [
@@ -62,16 +66,16 @@ try {
   const recovered = await control.call('storageImport', { tenant, params });
   assert.equal(recovered.importId, params.importId);
   assert(!Object.hasOwn(recovered, 'job'));
-  const done = await until('import complete', async () => {
+  const done = await until(async () => {
     const state = await control.call('storageImportStatus', {
       tenant,
       params: { importId: params.importId },
     });
     return state.state === 'done' && state;
-  });
+  }, 'import complete');
   assert.deepEqual(done.cookies, { applied: 1, rejected: 0 });
   assert.deepEqual(done.localStorage, { applied: 1, rejected: 0 });
-  assert.deepEqual(await control.call('storageImport', { tenant, params }), done);
+  assert.deepEqual(await control.call('storageImport', { tenant, params }), recovered);
   assert.deepEqual(
     await control.call('storageImportStatus', { tenant, params: { importId: params.importId } }),
     done,
@@ -89,5 +93,6 @@ try {
   );
   console.log('Session import recovered the forced lost begin reply and retained its result.');
 } finally {
-  await control.stop();
+  await viewer?.close();
+  await stack.stop();
 }

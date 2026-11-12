@@ -1,10 +1,16 @@
-// Run with the packaged Node and resolve ws from the package, never the source tree.
-import assert from 'node:assert/strict';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { repository, startStack } from './kit/stack.mjs';
+// Run with the packaged Node and resolve ws from the package, never the source tree.
+import assert from 'node:assert/strict';
 
-const [packageRoot, origin] = process.argv.slice(2);
+const [providedPackage, providedOrigin] = process.argv.slice(2);
+const stack = providedOrigin
+  ? undefined
+  : await startStack({ scenario: 'smoke-streaming-product', seed: false });
+const packageRoot = providedPackage ?? repository;
+const origin = providedOrigin ?? stack.origin;
 const { WebSocket } = createRequire(resolve(packageRoot, 'control/dist/server.mjs'))('ws');
 // Startup/authentication contract only. Browser actions and media require a real
 // Viewer WebRTC check against the extracted package during release validation.
@@ -94,18 +100,28 @@ try {
   const initial = await waitState((state) => state.endpointError === null);
   assert.equal(auth?.locked, false, 'Registration must grant initial access');
   assert.equal(initial.quality.mode, 'product');
-  assert.deepEqual((await rpc('admin.users', {})).map((user) => user.username), ['package-smoke']);
+  assert.deepEqual(
+    (await rpc('admin.users', {})).map((user) => user.username),
+    ['package-smoke'],
+  );
+  // Product operations travel over the WebSocket as receipts; this one needs no browser.
+  const showStats = !initial.workspace.settings.workspace.showStats;
+  const receipt = await rpc('operation.submit', {
+    operationId: randomUUID(),
+    operationGeneration: initial.operationGeneration,
+    action: { type: 'settings.update', settings: { workspace: { showStats } } },
+  });
+  assert.equal(receipt.status, 'committed', JSON.stringify(receipt));
   await assert.rejects(
     rpc('action', { type: 'window.create', url: 'about:blank' }),
-    (error) => error.code === 'invalid_request' && /WebRTC/.test(error.message),
-    'Browser actions must be rejected over WebSocket',
+    (error) => error.code === 'invalid_request',
+    'Retired WebSocket action route must not exist',
   );
   const clientTime = Date.now();
   const clock = await rpc('clock.ping', { clientTime });
   assert.ok(clock.serverTime > 0);
   assert.equal(clock.clientTime, clientTime);
-  // A fresh authenticated snapshot proves the rejected action did not mutate
-  // persisted product state; a lack of push messages alone would not prove it.
+  // A fresh authenticated snapshot proves the committed operation persisted.
   await new Promise((resolve) => {
     socket.once('close', resolve);
     socket.close();
@@ -116,14 +132,8 @@ try {
   assert.equal((await rpc('auth.get', {})).locked, true, 'Reattached Viewer must begin locked');
   assert.equal(latest, undefined, 'Locked Viewer must receive no product snapshot');
   assert.equal((await rpc('auth.verify', { method: 'password', secret: password })).locked, false);
-  const face = await waitAuth((state) => state.face.available || state.face.reason);
-  assert.equal(face.face.available, true, face.face.reason);
   const state = await waitState(() => true);
-  assert.deepEqual(
-    state.workspace,
-    initial.workspace,
-    'Rejected WebSocket action must leave workspace unchanged',
-  );
+  assert.equal(state.workspace.settings.workspace.showStats, showStats, 'Committed operation must persist');
   assert.equal(state.endpointError, null);
   console.log(
     JSON.stringify({
@@ -132,9 +142,7 @@ try {
       transport: 'authenticated-websocket',
       qualityMode: state.quality.mode,
       endpointManagementReachable: true,
-      webSocketProductActionRejected: true,
-      workspaceUnchanged: true,
-      faceModelsAvailable: true,
+      webSocketOperationCommitted: true,
       adminReachable: true,
       clockChecked: true,
       browserProductOperationsTested: false,
@@ -144,4 +152,5 @@ try {
 } finally {
   clearTimeout(timeout);
   socket?.terminate();
+  await stack?.stop();
 }

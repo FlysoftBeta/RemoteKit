@@ -68,7 +68,7 @@ Result<void> ViewController::ConvergeDesired() {
     if (!desired.contains(view) || existing.contains(view))
       continue;
     const auto config = desired.at(view);
-    if (config.value("presence", std::string("ensure")) == "ifPresent") {
+    if (config.at("presence") == "ifPresent") {
       desired.erase(view);
       continue;
     }
@@ -180,15 +180,15 @@ Result<ViewController::Geometry> ViewController::DesiredGeometry() {
   std::vector<protocol::PackItem> items;
   float scale = .5f;
   for (auto& [view, config] : desired) {
-    if (!config.value("visible", false))
+    if (!config.at("visible").get<bool>())
       continue;
-    const auto device = config.value("device", Json::object());
-    int w = config.value("width", device.value("width", 1440));
-    int h = config.value("height", device.value("height", 900));
+    const auto device = config.at("device");
+    int w = config.at("width").get<int>();
+    int h = config.at("height").get<int>();
     if (w < 1 || h < 1 || w > 8192 || h > 8192)
       return Error{ErrorCode::kInvalidRequest, "invalid viewport dimensions"};
     items.push_back({std::stoull(view), w, h, 1.0});
-    scale = std::max(scale, device.value("deviceScaleFactor", 1.0f));
+    scale = std::max(scale, device.at("deviceScaleFactor").get<float>());
   }
   const auto plan = protocol::PlanAtlas(items, items.empty() ? 1.f : scale,
                                         RuntimeOptions::kAtlasAllocationAlignment);
@@ -207,18 +207,18 @@ Result<void> ViewController::GeometryConfig(const Geometry& value) {
   Json configs = Json::array();
   bool visible_output = false;
   for (const auto& [view, config] : desired) {
-    const auto device = config.value("device", Json::object());
-    const bool visible = !navigation.Recovering(view) && config.value("visible", false);
+    const auto device = config.at("device");
+    const bool visible = !navigation.Recovering(view) && config.at("visible").get<bool>();
     visible_output |= visible;
     configs.push_back({{"session", id},
                        {"view", view},
-                       {"width", config.value("width", device.value("width", 1440))},
-                       {"height", config.value("height", device.value("height", 900))},
-                       {"device", device.value("mode", std::string("desktop"))},
-                       {"device_scale_factor", device.value("deviceScaleFactor", 1.0f)},
+                       {"width", config.at("width").get<int>()},
+                       {"height", config.at("height").get<int>()},
+                       {"device", device.at("mode").get<std::string>()},
+                       {"device_scale_factor", device.at("deviceScaleFactor").get<float>()},
                        {"visible", visible},
-                       {"occludedBottom", visible ? config.value("occludedBottom", 0) : 0},
-                       {"occlusionRevision", config.value("occlusionRevision", std::string("0"))}});
+                       {"occludedBottom", visible ? config.at("occludedBottom").get<int>() : 0},
+                       {"occlusionRevision", config.at("occlusionRevision")}});
   }
   {
     auto output_configure_result = output.Configure(value.width, value.height, value.scale,
@@ -275,18 +275,16 @@ void ViewController::NavigationOperation(Json& target, const Json& source) {
 Result<Json> ViewController::CreateView(const Json& config, bool recovering) {
   auto view = ViewId(config);
   RK_ASSIGN_OR_RETURN(has_recovery_file, recovery_store.Contains(view));
-  RK_ASSIGN_OR_RETURN(resume_url,
-                      view_store.ResumeUrl(view, config.value("url", std::string("about:blank"))));
-  auto device = config.value("device", Json::object());
-  std::string mode =
-      device.is_object() ? device.value("mode", std::string("desktop")) : std::string("desktop");
+  RK_ASSIGN_OR_RETURN(resume_url, view_store.ResumeUrl(view, config.at("url").get<std::string>()));
+  auto device = config.at("device");
+  const auto mode = device.at("mode").get<std::string>();
   Json request = {
       {"method", "view.create"},
       {"session", id},
       {"view", view},
       {"url", recovering && has_recovery_file ? std::string("about:blank") : resume_url},
-      {"width", config.value("width", device.value("width", 1440))},
-      {"height", config.value("height", device.value("height", 900))},
+      {"width", config.at("width").get<int>()},
+      {"height", config.at("height").get<int>()},
       {"device", mode},
       {"visible", false}};
   RK_RETURN_IF_ERROR(ValidateSignIn(config));

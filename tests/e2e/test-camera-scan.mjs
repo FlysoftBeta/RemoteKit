@@ -1,17 +1,15 @@
+import { randomUUID } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { cameraFixtures } from './kit/fixtures.mjs';
+import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
+
+import { join, resolve } from 'node:path';
+import { startStack, until } from './kit/stack.mjs';
+
 /** Real fake-camera capture, document processing, rotation and native FileList delivery. */
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { appendFile, mkdir, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { instrumentViewer } from './cluster-test-support.mjs';
-import { startProductStack, until } from './files-stack.mjs';
 
-const [modulePath, viewerExe, endpoint, browser, output, listenPort = '34200', server] =
-  process.argv.slice(2);
+const [modulePath, viewerExe, endpoint, browser, output, listenPort = '34200'] = process.argv.slice(2);
 assert([modulePath, viewerExe, endpoint, browser, output].every(Boolean));
 const run = resolve(output);
 const port = Number(listenPort);
@@ -19,110 +17,21 @@ const origin = `http://127.0.0.1:${port}`;
 const fixtureOrigin = `http://127.0.0.1:${port + 1}`;
 await mkdir(run, { recursive: true });
 
-function cameraFile(sample) {
-  const source = fileURLToPath(new URL(`./fixtures/camera-scan-${sample}.jpg`, import.meta.url));
-  const target = join(run, `camera-${sample}.y4m`);
-  const ffmpeg = process.env.REMOTEKIT_FFMPEG ?? 'ffmpeg';
-  if (spawnSync(ffmpeg, ['-version'], { windowsHide: true, stdio: 'ignore' }).status === 0) {
-    execFileSync(
-      ffmpeg,
-      [
-        '-y',
-        '-i',
-        source,
-        '-vf',
-        'scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080',
-        '-frames:v',
-        '1',
-        '-r',
-        '30',
-        '-pix_fmt',
-        'yuv420p',
-        target,
-      ],
-      { windowsHide: true, stdio: 'pipe' },
-    );
-  } else {
-    const python =
-      process.env.REMOTEKIT_CAMERA_PYTHON ??
-      fileURLToPath(new URL('../../develop/tmp/doc-scan/exp/venv/Scripts/python.exe', import.meta.url));
-    execFileSync(
-      python,
-      [
-        '-c',
-        `
-import cv2, pathlib, sys
-image = cv2.imread(sys.argv[1])
-height, width = image.shape[:2]
-scale = max(1920 / width, 1080 / height)
-image = cv2.resize(image, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_CUBIC)
-y, x = (image.shape[0] - 1080) // 2, (image.shape[1] - 1920) // 2
-frame = cv2.cvtColor(image[y:y + 1080, x:x + 1920], cv2.COLOR_BGR2YUV_I420)
-pathlib.Path(sys.argv[2]).write_bytes(b'YUV4MPEG2 W1920 H1080 F30:1 Ip A1:1 C420jpeg' + bytes([10]) + b'FRAME' + bytes([10]) + frame.tobytes())
-`,
-        source,
-        target,
-      ],
-      { windowsHide: true, stdio: 'pipe' },
-    );
-  }
-  return target;
-}
-const cameras = new Map([3, 4].map((sample) => [sample, cameraFile(sample)]));
+const cameras = await cameraFixtures(run);
 const events = [];
 const results = [];
 const rpcEvidence = [];
-const fixture = createServer(async (request, response) => {
-  if (request.method === 'POST') {
-    let body = '';
-    for await (const bytes of request) body += bytes;
-    events.push(JSON.parse(body));
-    return response.end('ok');
-  }
-  response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(`<!doctype html>
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Camera scan selection</title>
-    <style>body{font:18px system-ui;margin:24px;background:#eaf2fc}input{display:block;margin:24px 0;height:44px;width:320px}</style>
-    <h1>Camera scan selection</h1>
-    <input id="single" type="file" accept="image/png">
-    <input id="multiple" type="file" accept="image/*" multiple>
-    <script>
-      const report = event => fetch('/event', {method:'POST', body:JSON.stringify(event)});
-      const inputs = [...document.querySelectorAll('input')];
-      const geometry = () => report({type:'geometry', width:innerWidth, height:innerHeight,
-        boxes:Object.fromEntries(inputs.map(input => [input.id, input.getBoundingClientRect().toJSON()]))});
-      geometry(); addEventListener('resize', geometry);
-      for (const input of inputs) input.onchange = async event => {
-        const files = await Promise.all([...input.files].map(async file => {
-          try {
-            const bitmap = await createImageBitmap(file);
-            const canvas = document.createElement('canvas');
-            canvas.width = bitmap.width; canvas.height = bitmap.height;
-            const drawing = canvas.getContext('2d'); drawing.drawImage(bitmap, 0, 0);
-            const pixel = [...drawing.getImageData(0, 0, 1, 1).data];
-            bitmap.close();
-            return {name:file.name, type:file.type, size:file.size,
-              width:canvas.width, height:canvas.height, pixel};
-          } catch (error) { return {name:file.name, type:file.type, error:String(error)}; }
-        }));
-        await report({type:'selected', id:input.id, trusted:event.isTrusted, files});
-        input.value = '';
-      };
-    </script>`);
-});
-await new Promise((done) => fixture.listen(port + 1, '127.0.0.1', done));
-const control = startProductStack({
+
+const stack = await startStack({
+  seed: false,
+  fixtures: { kind: 'test-camera-scan', context: { events } },
+  ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
   run,
   port,
   endpoint,
   browser,
-  ...(server ? { server: resolve(server) } : {}),
 });
-for (const stream of ['stdout', 'stderr']) {
-  control[stream].on('data', (bytes) => void appendFile(join(run, `control.${stream}.log`), bytes));
-}
-const stopped = new Promise((done) => control.once('exit', done));
-const { chromium } = createRequire(import.meta.url)(resolve(modulePath));
+
 const password = randomUUID();
 let chrome;
 let viewer;
@@ -143,7 +52,7 @@ async function openViewer(sample) {
   if (viewer) await saveRPCs();
   await chrome?.close();
   viewer = undefined;
-  chrome = await chromium.launch({
+  chrome = await launchBrowser({
     executablePath: resolve(viewerExe),
     headless: true,
     args: [
@@ -152,9 +61,9 @@ async function openViewer(sample) {
       '--use-fake-ui-for-media-stream',
     ],
   });
-  const context = await chrome.newContext({
+  const context = await createViewerContext(chrome, {
     viewport: { width: 1280, height: 720 },
-    hasTouch: process.env.FILES_POINTER === 'touch',
+    hasTouch: process.env.E2E_POINTER === 'touch',
   });
   const response = await context.request.post(origin + `/api/auth/${registered ? 'login' : 'setup'}`, {
     headers: { Origin: origin },
@@ -247,7 +156,7 @@ async function chooser(id) {
   );
   const target = geometry.boxes[id];
   await (
-    process.env.FILES_POINTER === 'touch'
+    process.env.E2E_POINTER === 'touch'
       ? viewer.page.touchscreen.tap.bind(viewer.page.touchscreen)
       : viewer.page.mouse.click.bind(viewer.page.mouse)
   )(
@@ -494,16 +403,5 @@ try {
   await writeFile(join(run, 'photo-rpcs.json'), JSON.stringify(rpcEvidence, null, 2));
   await writeFile(join(run, 'fixture-events.json'), JSON.stringify(events, null, 2));
   await chrome?.close();
-  if (control.connected) control.disconnect();
-  const timeout = setTimeout(() => {
-    if (control.exitCode === null)
-      execFileSync('taskkill', ['/pid', String(control.pid), '/T', '/F'], {
-        windowsHide: true,
-        stdio: 'ignore',
-      });
-  }, 10000);
-  await stopped;
-  clearTimeout(timeout);
-  fixture.closeAllConnections();
-  await new Promise((done) => fixture.close(done));
+  await stack.stop();
 }

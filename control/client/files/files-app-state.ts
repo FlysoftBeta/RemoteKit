@@ -1,3 +1,4 @@
+import { filesLaunch, filesState, filesView, readWindowState } from '../../shared/persisted-window-state';
 import type { LibrarySnapshot, LibrarySource } from '../../shared/file-library';
 import { BUILTIN_APP_TITLES, isBuiltinApp } from '../../shared/product';
 
@@ -25,83 +26,35 @@ export const defaultFilesWindowState = (id = filesTabId()): FilesWindowState => 
   activeTabId: id,
   layout: 'grid',
 });
-const identifier = (value: unknown): value is string =>
-  typeof value === 'string' && /^[a-zA-Z0-9_:-]{1,132}$/.test(value);
-const object = (value: unknown): value is Record<string, unknown> =>
-  !!value && typeof value === 'object' && !Array.isArray(value);
-const keys = (value: object, allowed: string[]) => Object.keys(value).every((key) => allowed.includes(key));
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
-export function validFilesView(view: unknown): view is FilesView {
-  return (
-    view === 'all' ||
-    view === 'recent' ||
-    view === 'clipboard' ||
-    view === 'settings' ||
-    (object(view) &&
-      ((keys(view, ['partition']) && identifier(view.partition)) ||
-        (keys(view, ['source']) &&
-          object(view.source) &&
-          keys(view.source, ['app', 'channel']) &&
-          identifier(view.source.app) &&
-          typeof view.source.channel === 'string' &&
-          view.source.channel.length <= (view.source.app === 'download' ? 259 : 253))))
-  );
+export function validFilesView(value: unknown): value is FilesView {
+  try {
+    filesView.read(value, '$');
+    return true;
+  } catch {
+    return false;
+  }
 }
 export function readFilesLaunch(value: unknown): FilesLaunch | undefined {
-  if (
-    !object(value) ||
-    !keys(value, ['requestId', 'entryId', 'view']) ||
-    !identifier(value.requestId) ||
-    (value.entryId !== undefined && !identifier(value.entryId)) ||
-    (value.view !== undefined && !validFilesView(value.view)) ||
-    (value.entryId === undefined && value.view === undefined)
-  )
-    return;
-  return value as unknown as FilesLaunch;
+  if (value === undefined) return;
+  return filesLaunch.read(value, '$');
 }
 export function hasValidFilesTabs(value: unknown): value is FilesWindowState {
-  if (!object(value) || !keys(value, ['tabs', 'activeTabId', 'layout', 'launch'])) return false;
-  const { tabs, activeTabId, layout } = value;
-  if (
-    !Array.isArray(tabs) ||
-    !tabs.length ||
-    tabs.length > MAX_FILES_TABS ||
-    (layout !== 'grid' && layout !== 'list')
-  )
+  try {
+    filesState.read(value, '$');
+    return true;
+  } catch {
     return false;
-  const ids = new Set<string>();
-  for (const tab of tabs) {
-    if (!object(tab) || typeof tab.id !== 'string' || !/^[a-z0-9]{8}$/.test(tab.id) || ids.has(tab.id))
-      return false;
-    ids.add(tab.id);
-    if (tab.kind === 'library') {
-      if (
-        !keys(tab, ['id', 'kind', 'view', 'query']) ||
-        !validFilesView(tab.view) ||
-        typeof tab.query !== 'string' ||
-        tab.query.length > 256
-      )
-        return false;
-    } else if (tab.kind === 'document') {
-      if (
-        !keys(tab, ['id', 'kind', 'entryId', 'from']) ||
-        !identifier(tab.entryId) ||
-        (tab.from !== undefined && !validFilesView(tab.from))
-      )
-        return false;
-    } else return false;
   }
-  return (
-    typeof activeTabId === 'string' &&
-    ids.has(activeTabId) &&
-    (value.launch === undefined || !!readFilesLaunch(value.launch))
-  );
 }
 export function readFilesWindowState(value: unknown): FilesWindowState {
-  try {
-    if (hasValidFilesTabs(value) && bytes(value) <= MAX_STATE_BYTES) return JSON.parse(JSON.stringify(value));
-  } catch {}
-  return defaultFilesWindowState();
+  if (value === undefined) return defaultFilesWindowState();
+  const state = readWindowState(value);
+  if ('tabs' in state) return filesState.read(state, '$');
+  return {
+    ...defaultFilesWindowState(),
+    ...(state.launch === undefined ? {} : { launch: filesLaunch.read(state.launch, '$.launch') }),
+  };
 }
 
 // Keep tab identity and views when trimming search drafts to fit the wire budget.

@@ -23,8 +23,8 @@ Result<void> FlushFile(const fs::path& raw_path) {
     return error;
   return {};
 }
-Result<void> WriteDurableJson(const fs::path& raw_path,
-                              const Json& value,
+Result<void> WriteDurableText(const fs::path& raw_path,
+                              std::string_view bytes,
                               const std::function<Result<void>()>& before_commit) {
   const auto path = LongPath(raw_path);
   std::error_code directory_error;
@@ -41,7 +41,6 @@ Result<void> WriteDurableJson(const fs::path& raw_path,
       fs::remove(path, ignored);
     }
   } cleanup{temporary};
-  const auto bytes = value.dump(2);
   {
     const auto file = CreateFileW(temporary.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -71,5 +70,10 @@ Result<void> WriteDurableJson(const fs::path& raw_path,
                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     return IoError("state commit failed");
   return {};
+}
+Result<void> WriteDurableJson(const fs::path& path,
+                              const Json& value,
+                              const std::function<Result<void>()>& before_commit) {
+  return WriteDurableText(path, value.dump(2), before_commit);
 }
 }  // namespace remotekit

@@ -1,3 +1,5 @@
+import { encodeJson } from '../persistence/codec';
+import { wireError as wireErrorCodec } from '../persistence/documents';
 import { generateKeyPairSync } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
@@ -550,8 +552,10 @@ export class SessionImporter {
         this.store.db
           .prepare('UPDATE session_imports SET error=?,retry_at=? WHERE id=?')
           .run(
-            JSON.stringify(
+            encodeJson(
               wireError(reportError(failure, 'session_import.apply_failed', { tenant, importId: record.id })),
+              wireErrorCodec,
+              `session_imports.error ${record.id}`,
             ),
             wait === undefined ? null : this.clock.wallMs() + Math.max(15000, wait),
             record.id,

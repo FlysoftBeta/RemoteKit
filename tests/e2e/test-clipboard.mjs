@@ -1,35 +1,31 @@
+import { createViewerContext, instrumentViewer, launchBrowser, remoteInputReady } from './kit/viewer.mjs';
+
+import { randomUUID } from 'node:crypto';
+import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { zstdDecompressSync } from 'node:zlib';
+import { requireControl, startStack, until } from './kit/stack.mjs';
+
 /**
  * Edge / Chrome 89, isolated Control and native H264 clipboard verification.
  * node tests/e2e/test-clipboard.mjs <playwright module> <viewer exe>
- *   <endpoint exe> <browser exe> <unused evidence directory> [port=34120] [oversize]
+ *   <endpoint exe> <browser exe> <unused evidence directory> [port=34120]
  */
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
-import { mkdir, readFile, writeFile, appendFile, readdir } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { zstdDecompressSync } from 'node:zlib';
-import { startProductStack, stageProductRuntime, until } from './kit/stack.mjs';
-import { instrumentViewer, requireControl } from './cluster-test-support.mjs';
 
-const [modulePath, viewerExe, endpoint, browser, output, portArg = '34120', stage] = process.argv.slice(2);
-assert(stage === undefined || stage === 'oversize');
+const [modulePath, viewerExe, endpoint, browser, output, portArg = '34120'] = process.argv.slice(2);
 assert([modulePath, viewerExe, endpoint, browser, output].every(Boolean));
 const run = resolve(output);
 const port = Number(portArg);
-assert(Number.isInteger(port) && port >= 34100 && port + 3 <= 34199);
 const origin = `http://127.0.0.1:${port}`;
 const fixtureOrigin = `http://127.0.0.1:${port + 1}`;
 const marker = 'RKCLIP' + randomUUID().replaceAll('-', '');
 const oversizeMarker = 'RKLARGE' + randomUUID().replaceAll('-', '');
-const { chromium } = createRequire(import.meta.url)(resolve(modulePath));
+
 const Database = requireControl('better-sqlite3');
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
-await mkdir(run);
-const html = (await readFile(new URL('./fixtures/clipboard.html', import.meta.url), 'utf8'))
-  .replaceAll('CLIPBOARD_MARKER', marker)
-  .replaceAll('OVERSIZE_MARKER', oversizeMarker);
+await mkdir(run, { recursive: true });
+
 const remote = [];
 const results = [];
 let user, admin, chrome, db;
@@ -37,52 +33,16 @@ const result = (scenario, detail) => {
   results.push({ scenario, status: 'verified', at: new Date().toISOString(), detail });
   console.log(scenario, JSON.stringify(detail));
 };
-const fixture = createServer(async (request, response) => {
-  if (request.method === 'POST' && request.url === '/event') {
-    let body = '';
-    for await (const chunk of request) body += chunk;
-    remote.push(JSON.parse(body));
-    response.end();
-  } else
-    response
-      .writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
-      .end(html);
-});
-await new Promise((done, reject) => {
-  fixture.once('error', reject);
-  fixture.listen(port + 1, '127.0.0.1', done);
-});
-const backendOrigin = `http://127.0.0.1:${port + 3}`;
-const peer = { listen: `127.0.0.1:${port + 2}`, address: `127.0.0.1:${port + 2}` };
-const executable = stageProductRuntime(endpoint, browser, join(run, 'runtime/bin'));
-const control = startProductStack({
+
+const stack = await startStack({
+  seed: false,
+  fixtures: { kind: 'test-clipboard', context: { remote, marker, oversizeMarker } },
+  ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
   run,
-  port: port + 3,
+  port,
   endpoint,
   browser,
-  dev: true,
-  peer,
-  configOverrides: {
-    http: { listen: `127.0.0.1:${port + 3}`, origins: [origin, backendOrigin] },
-    nodes: {
-      local: {
-        local: { executable, root: join(run, 'node') },
-        peer,
-        limits: { diskReserveBytes: 256 * 1024 * 1024 },
-      },
-    },
-  },
 });
-process.env.REMOTEKIT_VITE_CONTROL = backendOrigin;
-const frontend = await requireControl('vite').createServer({
-  root: resolve('control'),
-  cacheDir: join(run, 'vite-cache'),
-  server: { host: '127.0.0.1', port, strictPort: true, watch: null, hmr: false },
-});
-await frontend.listen();
-control.stdout.on('data', (data) => void appendFile(join(run, 'control.log'), data));
-control.stderr.on('data', (data) => void appendFile(join(run, 'control.log'), data));
-const stopped = new Promise((done) => control.once('exit', done));
 const password = randomUUID();
 const deadline = setTimeout(() => void chrome?.close(), 420000);
 const latest = () => remote.at(-1);
@@ -94,7 +54,7 @@ const row = () =>
     .get('clipboard-user');
 const revision = () => row()?.revision ?? 0;
 const connect = async (username, setup = false) => {
-  const context = await chrome.newContext({
+  const context = await createViewerContext(chrome, {
     viewport: { width: 1100, height: 1000 },
     deviceScaleFactor: 1,
     isMobile: true,
@@ -120,7 +80,6 @@ const connect = async (username, setup = false) => {
         this.addEventListener('message', ({ data }) => {
           try {
             const message = JSON.parse(data);
-            if (message.type === 'frame') q.frame = message;
             if (
               [
                 'input.result',
@@ -162,18 +121,13 @@ const ready = async () => {
   await user.page.waitForFunction(() => {
     const section = document.querySelector('.remote-viewport');
     return (
-      clusterQA.state?.browser.state === 'available' &&
-      clusterQA.auth?.peerEpoch > 0 &&
-      window.inputClipboardQA.frame?.authEpoch === clusterQA.auth.peerEpoch &&
-      window.inputClipboardQA.frame?.layoutEpoch === clusterQA.layout?.epoch &&
-      !document.querySelector('.page-overlay') &&
       section &&
       !section.classList.contains('resize-waiting') &&
       section.querySelector('canvas[data-video-input]:not(.no-frame)') &&
       section.querySelector('video')?.videoWidth > 0
     );
   });
-  await pause(400);
+  await user.page.waitForFunction(remoteInputReady);
 };
 const project = async (id) => {
   const canvas = await user.page.locator('canvas[data-video-input]').boundingBox();
@@ -242,7 +196,7 @@ async function privacy() {
 }
 try {
   await until(async () => (await fetch(origin + '/api/auth/setup')).ok, 'Control startup');
-  chrome = await chromium.launch({
+  chrome = await launchBrowser({
     executablePath: resolve(viewerExe),
     headless: true,
     args: ['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required'],
@@ -275,123 +229,124 @@ try {
   await ready();
   assert.deepEqual(await layoutIdentity(), unchangedLayout, 'Clipboard convergence retains input layout');
   result('0 identical desired views retain layout', unchangedLayout);
-  if (stage !== 'oversize') {
-    const before = revision();
-    const rect = await project('copy');
-    const mouseCdp = await user.context.newCDPSession(user.page);
-    const dragMouse = (type, x, buttons) =>
-      mouseCdp.send('Input.dispatchMouseEvent', {
-        type,
-        x,
-        y: rect.y + rect.height / 2,
-        buttons,
-        button: buttons || type === 'mouseReleased' ? 'left' : 'none',
-        clickCount: 1,
-      });
-    await dragMouse('mouseMoved', rect.x + 1, 0);
-    await dragMouse('mousePressed', rect.x + 1, 1);
-    for (let step = 1; step <= 20; step++)
-      await dragMouse('mouseMoved', rect.x + 1 + ((rect.width - 2) * step) / 20, 1);
-    await dragMouse('mouseReleased', rect.x + rect.width - 1, 0);
-    await until(() => latest().selection === marker, 'mouse text selection');
-    await user.page.keyboard.press('Control+C');
-    await until(() => row()?.text === marker, 'Control clipboard record');
-    await pause(700);
-    assert.equal(revision(), before + 1);
-    assert(row().html.includes(marker), 'Copied HTML missing');
-    await until(
-      () => user.page.evaluate(() => navigator.clipboard.readText()).then((text) => text === marker),
-      'remote copy reaches device',
-    );
-    const library = await user.call('library.get');
-    const snippet = library.entries.find((entry) => entry.kind === 'snippet' && entry.preview === marker);
-    assert(snippet, 'Page copy missing from clipboard history');
-    assert.deepEqual(snippet.source, { app: 'clipboard', channel: '' });
-    assert.equal(snippet.origin.kind, 'page');
-    assert.equal(new URL(snippet.origin.url).host, new URL(fixtureOrigin).host);
-    const deviceText = 'DEVICE' + marker;
-    await user.page.evaluate((text) => navigator.clipboard.writeText(text), deviceText);
-    assert.equal(await paste(), deviceText);
-    await until(() => row()?.text === deviceText, 'device clipboard reaches Control');
-    const deviceEntry = (await user.call('library.get')).entries.find(
-      (entry) => entry.kind === 'snippet' && entry.preview === deviceText,
-    );
-    assert.deepEqual(deviceEntry?.origin, { kind: 'device' });
-    const browserSpace = (await user.state()).workspace.activeSpaceId;
-    await user.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
-    await user.page
-      .getByRole('navigation', { name: '文件导航' })
-      .getByText('剪贴板', { exact: true })
-      .click();
-    const snippetRow = user.page.locator(`[data-snippet="${snippet.id}"]`);
-    await snippetRow.getByText(new URL(fixtureOrigin).host, { exact: false }).waitFor();
-    await user.page.screenshot({ path: join(run, 'clipboard-history.png') });
-    await snippetRow.getByRole('button', { name: marker, exact: true }).click();
-    await user.page.getByText('已复制', { exact: true }).waitFor();
-    await until(() => row()?.text === marker, 'snippet copy reaches remote clipboard');
-    await until(
-      () => user.page.evaluate(() => navigator.clipboard.readText()).then((text) => text === marker),
-      'snippet copy reaches device clipboard',
-    );
-    const filesWindow = (await user.state()).workspace.windows.find((window) => window.appId === 'files');
-    await user.action({ type: 'window.close', windowId: filesWindow.id });
-    await user.action({ type: 'space.activate', spaceId: browserSpace });
-    await ready();
-    assert.equal(await paste(), marker);
-    result('clipboard history and two-way device sync', {
-      pageOrigin: new URL(snippet.origin.url).host,
-      deviceOrigin: deviceEntry.origin.kind,
+  const before = revision();
+  const rect = await project('copy');
+  const mouseCdp = await user.context.newCDPSession(user.page);
+  const dragMouse = (type, x, buttons) =>
+    mouseCdp.send('Input.dispatchMouseEvent', {
+      type,
+      x,
+      y: rect.y + rect.height / 2,
+      buttons,
+      button: buttons || type === 'mouseReleased' ? 'left' : 'none',
+      clickCount: 1,
     });
-    result('1 mouse copy and privacy', { revision: revision(), ...(await privacy()) });
-    await user.action({ type: 'settings.update', settings: { workspace: { clipboardSync: false } } });
-    const incarnation = latest().incarnation;
-    await user.context.close();
-    await until(
-      async () =>
-        !(await admin.call('admin.users')).find((entry) => entry.username === 'clipboard-user').online,
-      'viewer detached',
-    );
-    await until(
-      async () => {
-        const users = await admin.call('admin.stop', { username: 'clipboard-user' });
-        return users.find((entry) => entry.username === 'clipboard-user').session.state === 'stopped';
-      },
-      'Session hibernated',
-      90000,
-    );
-    user = await connect('clipboard-user');
-    await ready();
-    const seedRevision = revision();
-    await until(() => latest().incarnation !== incarnation, 'new Browser page incarnation');
-    assert.equal(await paste(), marker);
-    if (latest().startup?.value !== undefined) assert.equal(latest().startup.value, marker);
-    result('2 restart seed and paste', { incarnation: latest().incarnation, startup: latest().startup });
-    await pause(900);
-    assert.equal(revision(), seedRevision);
-    result('6 seed does not echo', { revision: revision() });
+  await dragMouse('mouseMoved', rect.x + 1, 0);
+  await dragMouse('mousePressed', rect.x + 1, 1);
+  for (let step = 1; step <= 20; step++)
+    await dragMouse('mouseMoved', rect.x + 1 + ((rect.width - 2) * step) / 20, 1);
+  await dragMouse('mouseReleased', rect.x + rect.width - 1, 0);
+  await until(() => latest().selection === marker, 'mouse text selection');
+  await user.page.keyboard.press('Control+C');
+  await until(() => row()?.text === marker, 'Control clipboard record');
+  await pause(700);
+  assert.equal(revision(), before + 1);
+  assert(row().html.includes(marker), 'Copied HTML missing');
+  await until(
+    () => user.page.evaluate(() => navigator.clipboard.readText()).then((text) => text === marker),
+    'remote copy reaches device',
+  );
+  const library = await user.call('library.get');
+  const snippet = library.entries.find((entry) => entry.kind === 'snippet' && entry.preview === marker);
+  assert(snippet, 'Page copy missing from clipboard history');
+  assert.deepEqual(snippet.source, { app: 'clipboard', channel: '' });
+  assert.equal(snippet.origin.kind, 'page');
+  assert.equal(new URL(snippet.origin.url).host, new URL(fixtureOrigin).host);
+  const deviceText = 'DEVICE' + marker;
+  await user.page.evaluate((text) => navigator.clipboard.writeText(text), deviceText);
+  assert.equal(await paste(), deviceText);
+  await until(() => row()?.text === deviceText, 'device clipboard reaches Control');
+  const deviceEntry = (await user.call('library.get')).entries.find(
+    (entry) => entry.kind === 'snippet' && entry.preview === deviceText,
+  );
+  assert.deepEqual(deviceEntry?.origin, { kind: 'device' });
+  const browserSpace = (await user.state()).workspace.activeSpaceId;
+  await user.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
+  await user.page.getByRole('navigation', { name: '文件导航' }).getByText('剪贴板', { exact: true }).click();
+  const snippetRow = user.page.locator(`[data-snippet="${snippet.id}"]`);
+  await snippetRow.getByText(new URL(fixtureOrigin).host, { exact: false }).waitFor();
+  await user.page.screenshot({ path: join(run, 'clipboard-history.png') });
+  await snippetRow.getByRole('button', { name: marker, exact: true }).click();
+  await user.page.getByText('已复制', { exact: true }).waitFor();
+  await until(() => row()?.text === marker, 'snippet copy reaches remote clipboard');
+  await until(
+    () => user.page.evaluate(() => navigator.clipboard.readText()).then((text) => text === marker),
+    'snippet copy reaches device clipboard',
+  );
+  const filesWindow = (await user.state()).workspace.windows.find((window) => window.appId === 'files');
+  await user.action({ type: 'window.close', windowId: filesWindow.id });
+  await user.action({ type: 'space.activate', spaceId: browserSpace });
+  await ready();
+  assert.equal(await paste(), marker);
+  result('clipboard history and two-way device sync', {
+    pageOrigin: new URL(snippet.origin.url).host,
+    deviceOrigin: deviceEntry.origin.kind,
+  });
+  result('1 mouse copy and privacy', { revision: revision(), ...(await privacy()) });
+  await user.action({ type: 'settings.update', settings: { workspace: { clipboardSync: false } } });
+  const incarnation = latest().incarnation;
+  await user.context.close();
+  await until(
+    async () =>
+      !(await admin.call('admin.users')).find((entry) => entry.username === 'clipboard-user').online,
+    'viewer detached',
+  );
+  await until(
+    async () => {
+      const users = await admin.call('admin.stop', { username: 'clipboard-user' });
+      return users.find((entry) => entry.username === 'clipboard-user').session.state === 'stopped';
+    },
+    'Session hibernated',
+    90000,
+  );
+  user = await connect('clipboard-user');
+  await ready();
+  const seedRevision = revision();
+  await until(() => latest().incarnation !== incarnation, 'new Browser page incarnation');
+  assert.equal(await paste(), marker);
+  if (latest().startup?.value !== undefined) assert.equal(latest().startup.value, marker);
+  result('2 restart seed and paste', { incarnation: latest().incarnation, startup: latest().startup });
+  await pause(900);
+  assert.equal(revision(), seedRevision);
+  result('6 seed does not echo', { revision: revision() });
 
-    const menu = user.page.getByRole('menu', { name: '页面菜单', exact: true });
-    await click('link', { button: 'right' });
-    await menu.getByRole('menuitem', { name: '复制链接地址', exact: true }).click();
-    await until(() => row()?.text === fixtureOrigin + '/linked', 'context link copy recorded');
-    const linkRevision = revision();
-    const word = await project('quick');
-    const cdp = await user.context.newCDPSession(user.page);
-    await cdp.send('Input.dispatchTouchEvent', {
-      type: 'touchStart',
-      touchPoints: [
-        { x: word.x + word.width / 2, y: word.y + word.height / 2, id: 1, radiusX: 2, radiusY: 2, force: 1 },
-      ],
-    });
-    await pause(700);
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    const quick = user.page.locator('.selection-menu');
-    await quick.getByRole('button', { name: '复制', exact: true }).tap();
-    await until(() => row()?.text === 'quickclipboardword', 'quick copy recorded');
-    assert.equal(revision(), linkRevision + 1);
-    result('3 context and quick menu copy', { linkRevision, quickRevision: revision() });
-  }
+  const menu = user.page.getByRole('menu', { name: '页面菜单', exact: true });
+  await click('link', { button: 'right' });
+  await menu.getByRole('menuitem', { name: '复制链接地址', exact: true }).click();
+  await until(() => row()?.text === fixtureOrigin + '/linked', 'context link copy recorded');
+  const linkRevision = revision();
+  const word = await project('quick');
+  const cdp = await user.context.newCDPSession(user.page);
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchStart',
+    touchPoints: [
+      { x: word.x + word.width / 2, y: word.y + word.height / 2, id: 1, radiusX: 2, radiusY: 2, force: 1 },
+    ],
+  });
+  await pause(700);
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  const quick = user.page.locator('.selection-menu');
+  await quick.getByRole('button', { name: '复制', exact: true }).tap();
+  await until(() => row()?.text === 'quickclipboardword', 'quick copy recorded');
+  assert.equal(revision(), linkRevision + 1);
+  result('3 context and quick menu copy', { linkRevision, quickRevision: revision() });
+
   const retained = row();
+  await until(async () => {
+    const snapshot = await stack.call('inspect');
+    const tenant = snapshot.users.find((entry) => entry.username === 'clipboard-user').tenant;
+    return snapshot.observations[tenant]?.applied.clipboardRevision === String(retained.revision);
+  }, 'quick copy applied before testing the local-only oversized clipboard');
   const nodesBeforeOversize = await admin.call('admin.nodes');
   await writeFile(join(run, 'nodes-before-oversize.json'), JSON.stringify(nodesBeforeOversize, null, 2));
   await click('large');
@@ -419,33 +374,31 @@ try {
     assert.equal(after.connectedAt, before.connectedAt);
   }
   result('4 oversize remains local', { bytes: Buffer.byteLength(large), revision: revision() });
-  if (stage !== 'oversize') {
-    await assert.rejects(admin.call('admin.resetSession', { username: 'clipboard-user' }), /需先停止/);
-    assert.deepEqual(row(), retained);
-    await user.context.close();
-    await until(
-      async () =>
-        !(await admin.call('admin.users')).find((entry) => entry.username === 'clipboard-user').online,
-      'viewer detached before reset',
-    );
-    await until(
-      async () => {
-        const users = await admin.call('admin.stop', { username: 'clipboard-user' });
-        return users.find((entry) => entry.username === 'clipboard-user').session.state === 'stopped';
-      },
-      'Session hibernated before reset',
-      90000,
-    );
-    await admin.call('admin.resetSession', { username: 'clipboard-user' });
-    assert.equal(row(), undefined);
-    user = await connect('clipboard-user');
-    await ready();
-    await until(() => latest().pasted === '', 'fresh reset page');
-    assert.equal(await paste(), '');
-    assert.equal(row(), undefined);
-    result('5 admin reset', { row: null, pasted: '', afterReconnect: true });
-  }
-  result('privacy after oversize', await privacy());
+  await assert.rejects(admin.call('admin.resetSession', { username: 'clipboard-user' }), /需先停止/);
+  assert.deepEqual(row(), retained);
+  await user.context.close();
+  await until(
+    async () =>
+      !(await admin.call('admin.users')).find((entry) => entry.username === 'clipboard-user').online,
+    'viewer detached before reset',
+  );
+  await until(
+    async () => {
+      const users = await admin.call('admin.stop', { username: 'clipboard-user' });
+      return users.find((entry) => entry.username === 'clipboard-user').session.state === 'stopped';
+    },
+    'Session hibernated before reset',
+    90000,
+  );
+  await admin.call('admin.resetSession', { username: 'clipboard-user' });
+  assert.equal(row(), undefined);
+  user = await connect('clipboard-user');
+  await ready();
+  await until(() => latest().pasted === '', 'fresh reset page');
+  assert.equal(await paste(), '');
+  assert.equal(row(), undefined);
+  result('5 admin reset', { row: null, pasted: '', afterReconnect: true });
+  result('privacy after oversize and reset', await privacy());
   const media = await user.media();
   result('platform and transport', {
     product: version.product,
@@ -479,10 +432,7 @@ try {
     JSON.stringify({ results, marker, oversizeMarker, remote }, null, 2),
   );
   await chrome?.close();
-  await frontend.close();
-  control.kill('SIGTERM');
-  await Promise.race([stopped, pause(10000)]);
-  fixture.closeAllConnections();
-  fixture.close();
+  await stack.stop();
+
   console.log('Evidence:', run);
 }

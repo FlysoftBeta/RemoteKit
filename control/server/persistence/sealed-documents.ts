@@ -8,6 +8,14 @@ import { changyanSession, xinjiaoyuSession } from './documents';
 
 export const learningKeyInfo = 'remotekit learning account key 1';
 
+export function decodeSealedRecord(value: unknown): Buffer {
+  if (typeof value !== 'string') throw new Error('expected sealed base64 string');
+  const bytes = Buffer.from(value, 'base64');
+  if (bytes.length < 28 || bytes.toString('base64') !== value)
+    throw new Error('expected canonical authenticated ciphertext');
+  return bytes;
+}
+
 export function learningKey(master: Buffer) {
   return Buffer.from(hkdfSync('sha256', master, Buffer.alloc(0), learningKeyInfo, 32));
 }
@@ -31,7 +39,7 @@ export function openLearningDocument<T>(
 ): T {
   const where = `learning_accounts.sealed ${tenant}/${provider}`;
   try {
-    const bytes = Buffer.from(sealed, 'base64');
+    const bytes = decodeSealedRecord(sealed);
     const decipher = createDecipheriv('aes-256-gcm', key, bytes.subarray(0, 12));
     decipher.setAAD(Buffer.from(JSON.stringify([tenant, provider])));
     decipher.setAuthTag(bytes.subarray(12, 28));

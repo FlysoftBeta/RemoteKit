@@ -129,21 +129,15 @@ Result<void> FileLibrary::Initialize() {
   if (assets.size() > kAssets)
     return CorruptState("library asset limit");
   for (const auto& [id, value] : assets) {
-    const auto valid = library_records::Validate(LibraryTable::kAssets, id, value);
-    if (!valid) {
-      LogError(LogLevel::kWarn, "library.asset_discarded", valid.error(), {{"assetId", id}});
-      RK_RETURN_IF_ERROR(store_.Erase(LibraryTable::kAssets, id));
-      continue;
-    }
     entries_.emplace(
         id, Entry{Asset{id, value.at("type").get<std::string>(), value.at("size").get<uint64_t>(),
-                        value.value("width", 0u), value.value("height", 0u)}});
+                        value.contains("width") ? value.at("width").get<unsigned>() : 0u,
+                        value.contains("height") ? value.at("height").get<unsigned>() : 0u}});
   }
   RK_ASSIGN_OR_RETURN(drafts, store_.Load(LibraryTable::kDrafts));
   if (drafts.size() > kDrafts)
     return CorruptState("library draft limit");
   for (const auto& [id, value] : drafts) {
-    RK_RETURN_IF_ERROR(library_records::Validate(LibraryTable::kDrafts, id, value));
     Draft draft{id,
                 value.at("operation").get<std::string>(),
                 value.at("sealed").get<std::string>(),
@@ -166,7 +160,6 @@ Result<void> FileLibrary::Initialize() {
   if (selections.size() > kSelections)
     return CorruptState("library selection limit");
   for (const auto& [id, value] : selections) {
-    RK_RETURN_IF_ERROR(library_records::Validate(LibraryTable::kSelections, id, value));
     RK_ASSIGN_OR_RETURN(selection, ParseSelection(id, value));
     selections_.emplace(id, std::move(selection));
   }
@@ -212,11 +205,7 @@ Result<const FileLibrary::Entry*> FileLibrary::RequireAsset(const std::string& i
   auto found = entries_.find(id);
   RK_ASSIGN_OR_RETURN(info, access_->Ensure(id));
   if (found != entries_.end() && found->second.asset.size != info.size) {
-    LogEvent(LogLevel::kWarn, "library.asset_discarded",
-             {{"assetId", id}, {"reason", "size_mismatch"}});
-    RK_RETURN_IF_ERROR(store_.Erase(LibraryTable::kAssets, id));
-    entries_.erase(found);
-    found = entries_.end();
+    return CorruptRecord("library asset size does not match its object");
   }
   if (found == entries_.end()) {
     if (info.size > kFileBytes)

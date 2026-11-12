@@ -107,10 +107,14 @@ Result<void> SessionExecution::Prepare(const Json& document) {
         return Error{ErrorCode::kConflict, "Session copy base differs from desired checkpoint"};
       RK_RETURN_IF_ERROR(Checkpoints(objects_, access, &phases)
                              .Restore(directory_, tenant_, document.at("checkpoint")));
-      copy = {
-          {"sessionId", id_},     {"placementEpoch", epoch_}, {"base", document.at("checkpoint")},
-          {"state", "clean"},     {"stoppedCleanly", true},   {"changesAt", 0},
-          {"lastCommit", nullptr}};
+      copy = {{"version", 1},
+              {"sessionId", id_},
+              {"placementEpoch", epoch_},
+              {"base", document.at("checkpoint")},
+              {"state", "clean"},
+              {"stoppedCleanly", true},
+              {"changesAt", 0},
+              {"lastCommit", nullptr}};
       RK_RETURN_IF_ERROR(Checkpoints::WriteCopy(directory_, copy));
       RK_RETURN_IF_ERROR(Checkpoints::TruncateChanges(directory_));
     } else {
@@ -256,9 +260,6 @@ Result<Json> SessionExecution::EventState() {
       RK_RETURN_IF_ERROR(
           reader_->OpenReadOnly(!copy.is_null() && copy.at("stoppedCleanly").get<bool>()));
     }
-    RK_ASSIGN_OR_RETURN(present, reader_->Events().Present());
-    if (!present)
-      return Json{{"streamId", nullptr}, {"ackedThrough", "0"}, {"lastSeq", "0"}, {"pending", 0}};
     RK_ASSIGN_OR_RETURN(current, reader_->Events().State());
     state = std::move(current);
   }
@@ -362,15 +363,15 @@ Result<Json> SessionExecution::Observe() {
             {"stoppedCleanly", copy.at("stoppedCleanly")},
             {"changesAt", copy.at("changesAt")},
             {"committed", copy.at("lastCommit")}};
-    data["lastVersion"] = copy.value("lastVersion", Json());
+    data["lastVersion"] = copy.contains("lastVersion") ? copy.at("lastVersion") : Json();
     if (!copy.at("base").is_null() &&
         (copy.at("state") == "clean" || copy.contains("lastVersion"))) {
       RK_ASSIGN_OR_RETURN(described, Checkpoints(objects_).Describe(copy.at("base")));
       checkpoint = std::move(described);
       checkpoint["manifestId"] = copy.at("base");
-      const auto version = copy.value("lastVersion", Json::object());
       checkpoint["kind"] = copy.at("state") == "clean" ? "stopped" : "running";
-      checkpoint["takenAt"] = version.value("takenAt", copy.at("changesAt").get<int64_t>());
+      checkpoint["takenAt"] = copy.contains("lastVersion") ? copy.at("lastVersion").at("takenAt")
+                                                           : copy.at("changesAt");
     }
   }
   return Json{{"browser", starting_ ? "starting"

@@ -42,7 +42,7 @@ def main():
     source = p.add_mutually_exclusive_group(required=True)
     source.add_argument('--root', type=Path, help='Installed deployment root (modified by smoke)')
     source.add_argument('--payload', type=Path, help='Install into a scratch deployment root')
-    p.add_argument('--work-dir', type=Path, default=ROOT / 'develop/tmp/package-smoke')
+    p.add_argument('--work-dir', type=Path, default=ROOT / 'develop/tmp/e2e/package-smoke')
     a = p.parse_args()
     deployment = a.root.resolve() if a.root else None
     package = None
@@ -52,7 +52,7 @@ def main():
         'passed': False,
         'package': str(package),
         'evidence': str(run),
-        'scope': 'startup: bundled Node + production UI assets + SQLite first-admin registration + authenticated WebSocket state + clock/admin + Endpoint management reconciliation and face model availability + Viewer reattachment lock and password recovery + rejected WS browser action with unchanged workspace; no RTC product operations or media',
+        'scope': 'startup: bundled Node + production UI assets + SQLite first-admin registration + authenticated WebSocket state + clock/admin + Endpoint management reconciliation + product operation committed over WS and persisted across reattachment + Viewer reattachment lock and password recovery; no RTC, service peer, face or media',
         'validationKind': 'startup',
         'browserProductOperationsTested': False,
         'rtcMediaTested': False,
@@ -104,27 +104,44 @@ def main():
             env.pop(name, None)
         config = deployment / 'config/control.json'
         config.parent.mkdir(parents=True, exist_ok=True)
-        (config.parent / 'manager.json').write_text(json.dumps({'manifest': origin + '/control.manifest'}), encoding='utf-8')
+        (config.parent / 'manager.json').write_text(json.dumps({'version': 1, 'manifest': origin + '/control.manifest', 'checkIntervalMinutes': 60}), encoding='utf-8')
         (config.parent / 'release.key').write_text(base64.b64encode(os.urandom(32)).decode('ascii'), encoding='ascii')
         config.write_text(
             json.dumps(
                 {
+                    'version': 1,
+                    'media': {
+                        'encoder': 'auto', 'fps': 60, 'bitrate': 36000000, 'maxBitrate': 48000000,
+                        'asyncDepth': None, 'gop': None, 'targetUsage': None, 'qsvLowPower': 'auto',
+                        'bufferMs': None, 'rateControl': None, 'idleIdrMs': 150,
+                        'maxEncodeWidth': 4096, 'maxEncodeHeight': 4096,
+                    },
+                    'quotas': {'tenantObjectBytes': None},
                     'http': {'listen': '127.0.0.1:' + str(port), 'origins': [origin]},
                     'storage': {
                         'database': str(run / 'control.db'),
                         'diagnostics': str(run / 'diagnostics'),
+                        'logs': str(run / 'logs'),
                     },
                     'nodes': {'local': {'local': {'root': str(deployment / 'data/node')},
-                                        'peer': {'listen': '127.0.0.1:' + str(peer_port)}}},
+                                        'peer': {'listen': '127.0.0.1:' + str(peer_port), 'address': '127.0.0.1:' + str(peer_port)},
+                                        'rtc': {'ports': None, 'address': None},
+                                        'limits': {'maxSessions': None, 'diskReserveBytes': 0, 'sessionMemoryBytes': None}}},
                 }
             ),
             encoding='utf-8',
         )
+        env['E2E_STACK_OPTIONS'] = json.dumps({
+            'scenario': 'package', 'run': str(run), 'control': 'release', 'release': str(package),
+            'deployment': str(deployment), 'seed': False, 'fixtures': False, 'nodes': [],
+            'ports': {'control': port, 'peer': peer_port},
+            'configOverrides': json.loads(config.read_text(encoding='utf-8')),
+        })
         with (run / 'stderr.log').open('wb') as errors, (run / 'stdout.log').open('wb') as output:
             child = subprocess.Popen(
-                [str(deployment / 'remotekit_control.exe'), 'run', '--root=' + str(deployment)],
+                [str(package / 'bin/node.exe'), str(ROOT / 'tests/e2e/kit/stack.mjs')],
                 cwd=deployment,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,
                 env=env,
                 stdout=output,
                 stderr=errors,

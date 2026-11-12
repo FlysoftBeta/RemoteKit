@@ -1,73 +1,33 @@
-import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
+
+import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { mkdir, symlink, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stageRuntime } from '../integration/stage-runtime.mjs';
-import { startControl, until } from './cluster-test-support.mjs';
-import { shellViewer } from './shell-avail-support.mjs';
+import { startStack, until } from './kit/stack.mjs';
+
+import assert from 'node:assert/strict';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
-const run = resolve(process.argv[2] ?? join(repository, 'develop/tmp/b2e-shots'));
+const run = resolve(process.argv[2] ?? join(repository, 'develop/tmp/e2e/shell-avail'));
 const port = Number(process.argv[3] ?? 33941);
 const origin = `http://127.0.0.1:${port}`;
 const requireControl = createRequire(join(repository, 'control/package.json'));
 await mkdir(run, { recursive: true });
-const runtime = join(run, 'runtime');
-await mkdir(join(runtime, 'control/dist'), { recursive: true });
-await symlink(join(repository, 'control/node_modules'), join(runtime, 'control/node_modules'), 'junction');
-await symlink(join(repository, 'control/dist/client'), join(runtime, 'control/dist/client'), 'junction');
-const serverPath = join(runtime, 'control/dist/server.mjs');
-await requireControl('esbuild').build({
-  entryPoints: [join(repository, 'tests/e2e/shell-avail-harness.mts')],
-  outfile: serverPath,
-  bundle: true,
-  platform: 'node',
-  format: 'esm',
-  packages: 'external',
+
+const stack = await startStack({
+  scenario: 'shell-avail-cluster',
+  run,
+  port,
+  seed: false,
+  fixtures: { kind: 'shell-avail-cluster' },
+  dev: false,
+  nodes: ['alpha', 'beta'],
+  ports: { control: port, viewer: port + 4, fixture: port + 1, peers: [port + 2, port + 3] },
 });
-const endpoint = resolve(
-  process.env.REMOTEKIT_ENDPOINT ?? join(repository, 'build/endpoint/endpoint/endpoint_service.exe'),
-);
-const browserPath = process.env.REMOTEKIT_BROWSER ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe';
-const bin = join(runtime, 'node/bin');
-const executable = stageRuntime(endpoint, browserPath, bin);
-for (const directory of ['models', 'documents'])
-  await symlink(join(dirname(endpoint), directory), join(bin, directory), 'junction');
-const nodes = Object.fromEntries(
-  ['alpha', 'beta'].map((id, i) => [
-    id,
-    {
-      peer: { listen: `127.0.0.1:${port + 2 + i}`, address: `127.0.0.1:${port + 2 + i}` },
-      limits: { diskReserveBytes: 256 * 1024 * 1024 },
-      local: { executable, root: join(run, id) },
-    },
-  ]),
-);
-const configPath = join(runtime, 'control.json');
-await writeFile(
-  configPath,
-  JSON.stringify({
-    http: { listen: `127.0.0.1:${port}`, origins: [origin] },
-    storage: { database: join(run, 'control.db') },
-    nodes,
-  }),
-);
-const fixture = createServer((_request, response) => {
-  response.setHeader('Content-Type', 'text/html; charset=utf-8');
-  response.end(
-    '<title>Unavailable browser fixture</title><h1>Browser restored</h1><input value="dirty session"><script>localStorage.setItem("shell-avail","dirty")</script>',
-  );
-});
-await new Promise((done) => fixture.listen(port + 1, '127.0.0.1', done));
-const control = startControl(serverPath, configPath, run);
-const { chromium } = createRequire(import.meta.url)(
-  process.env.REMOTEKIT_PLAYWRIGHT ??
-    join(homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'),
-);
+const control = stack.control;
+
 const contexts = [];
 let browser;
 let currentViewer;
@@ -78,7 +38,7 @@ const shot = async (viewer, name) => {
   console.log(name);
 };
 async function connect(name, setup = false) {
-  const context = await browser.newContext({
+  const context = await createViewerContext(browser, {
     viewport: { width: 1440, height: 1000 },
     permissions: ['camera'],
   });
@@ -88,7 +48,7 @@ async function connect(name, setup = false) {
     data: { username, password },
   });
   assert.equal(response.status(), 200, await response.text());
-  const viewer = await shellViewer(context, run, name);
+  const viewer = await instrumentViewer(context, run, name);
   currentViewer = viewer;
   await viewer.page.goto(origin);
   await viewer.ready();
@@ -122,18 +82,18 @@ async function upload(viewer, name, text) {
 }
 try {
   await until(
-    'two nodes ready',
     async () => {
       try {
         const value = await control.call('inspect');
-        return value.nodes.every((node) => node.state.state === 'ready' && node.metrics);
+        return value.nodes.every((node) => node.state === 'ready' && node.metrics);
       } catch {
         return false;
       }
     },
+    'two nodes ready',
     90000,
   );
-  browser = await chromium.launch({
+  browser = await launchBrowser({
     channel: 'msedge',
     headless: true,
     args: [
@@ -145,7 +105,7 @@ try {
   const initial = await connect('initial', true);
   await initial.service();
   await initial.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
-  await initial.page.waitForFunction(() => shellQA.state?.browser.state === 'available');
+  await initial.page.waitForFunction(() => clusterQA.state?.browser.state === 'available');
   const remote = (await initial.state()).workspace.windows.find((win) => win.appId === 'browser');
   await initial.action({
     type: 'tab.navigate',
@@ -159,17 +119,21 @@ try {
   const nodeA = placement.node_id,
     nodeB = state.nodes.find((entry) => entry.nodeId !== nodeA).nodeId;
   assert.equal(placement.data_state, 'dirty');
-  await until('service follows running Session node', async () =>
-    (await control.call('inspect')).services.some(
-      (entry) => entry.tenant === tenant && entry.nodeId === nodeA,
-    ),
+  await until(
+    async () =>
+      (await control.call('inspect')).services.some(
+        (entry) => entry.tenant === tenant && entry.nodeId === nodeA,
+      ),
+    'service follows running Session node',
   );
   const shared = await upload(initial, 'shared.txt', 'Readable from the surviving node.');
   const exclusive = await upload(initial, 'offline.txt', 'Only the offline node has these bytes.');
-  await until('shared replica on B', async () =>
-    (await control.call('inspect')).replicas.some(
-      (entry) => entry.id === shared.asset.assetId && entry.node_id === nodeB,
-    ),
+  await until(
+    async () =>
+      (await control.call('inspect')).replicas.some(
+        (entry) => entry.id === shared.asset.assetId && entry.node_id === nodeB,
+      ),
+    'shared replica on B',
   );
   await control.call('seedFace', { tenant });
   await shot(initial, '01-running-on-A');
@@ -194,16 +158,16 @@ try {
     await viewer.page.keyboard.press('Arrow' + key);
   await viewer.page.getByRole('button', { name: '人脸', exact: true }).click();
   await viewer.page.getByRole('button', { name: '开启摄像头', exact: true }).click();
-  await viewer.page.waitForFunction(() => shellQA.authFrames >= 2 && shellQA.authGrants >= 2);
+  await viewer.page.waitForFunction(() => clusterQA.authFrames >= 2 && clusterQA.authGrants >= 2);
   const face = await viewer.call('auth.get');
   assert(face.face.challengeId);
   await writeFile(
     join(run, 'face-service.json'),
     JSON.stringify(
       await viewer.page.evaluate(() => ({
-        auth: shellQA.auth,
-        frames: shellQA.authFrames,
-        grants: shellQA.authGrants,
+        auth: clusterQA.auth,
+        frames: clusterQA.authFrames,
+        grants: clusterQA.authGrants,
       })),
       null,
       2,
@@ -251,17 +215,17 @@ try {
   await viewer.call('admin.overview');
   await control.call('up', { nodeId: nodeA });
   await until(
-    'browser automatically available',
     async () => (await viewer.state()).browser.state === 'available',
+    'browser automatically available',
     120000,
   );
   await viewer.action({ type: 'window.focus', windowId: remote.id });
   await viewer.media();
   await shot(viewer, '09-browser-resumed');
   await until(
-    'exclusive object becomes available',
     async () =>
       (await viewer.call('library.get')).entries.find((entry) => entry.id === exclusive.entry.id).available,
+    'exclusive object becomes available',
     90000,
   );
   await viewer.action({ type: 'window.focus', windowId: files.id });
@@ -282,8 +246,8 @@ try {
       join(run, 'failure.json'),
       JSON.stringify(
         await currentViewer.page.evaluate(() => ({
-          auth: shellQA.auth,
-          state: shellQA.state,
+          auth: clusterQA.auth,
+          state: clusterQA.state,
           text: document.body.innerText,
         })),
         null,
@@ -293,6 +257,5 @@ try {
   throw error;
 } finally {
   await browser?.close();
-  await control.stop();
-  await new Promise((done) => fixture.close(done));
+  await stack.stop();
 }

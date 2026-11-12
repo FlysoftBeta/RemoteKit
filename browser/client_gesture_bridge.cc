@@ -75,8 +75,14 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
                               event.touches_length))
     return {ErrorCode::kInvalidRequest, "Invalid client gesture candidate order"};
   auto source_time = source_time_;
-  if (!source_time.Raw(source_elapsed_us, event.IsTouchSequenceEnd()))
+  if (event.GetType() == blink::WebInputEvent::Type::kTouchCancel) {
+    // Cleanup retains the last raw sample, but long press can advance the
+    // gesture clock while that raw touch is still awaiting its ACK.
+    source_time.Cancel(source_elapsed_us);
+    event.SetTimeStamp(origin_ + base::Microseconds(source_time.last()));
+  } else if (!source_time.Raw(source_elapsed_us, event.IsTouchSequenceEnd())) {
     return {ErrorCode::kInvalidRequest, "Invalid client raw source time"};
+  }
   event.moved_beyond_slop_region = candidate_state.moved();
   content::MotionEventWeb motion(event);
   auto packet = MakeClientGesturePacket(motion, candidates, first_id);

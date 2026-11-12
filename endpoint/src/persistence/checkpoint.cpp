@@ -1,4 +1,5 @@
 #include "persistence/checkpoint.hpp"
+#include "persistence/checkpoint_formats.hpp"
 #include "util/file_io.hpp"
 #include "persistence/session_db.hpp"
 #include "util/result_macros.hpp"
@@ -13,25 +14,13 @@
 namespace remotekit {
 namespace {
 constexpr size_t kChunk = 1024 * 1024;
-bool SafePath(const std::string& text) {
-  if (text.empty() || text.find('\\') != std::string::npos || text.find(':') != std::string::npos ||
-      text.find('\0') != std::string::npos)
-    return false;
-  const auto path = Utf8Path(text);
-  if (path.is_absolute() || path.has_root_path())
-    return false;
-  for (const auto& part : path)
-    if (part == "." || part == ".." || part.empty() || part.native().back() == L'.' ||
-        part.native().back() == L' ')
-      return false;
-  return true;
-}
+using checkpoint_formats::SafePath;
+using checkpoint_formats::ValidEntries;
 Result<Json> Load(const fs::path& path) {
   RK_ASSIGN_OR_RETURN(bytes, ReadFileIfExists(path));
   if (!bytes)
     return Json();
-  auto value = Json::parse(*bytes, nullptr, false);
-  return value.is_discarded() ? Json() : std::move(value);
+  return checkpoint_formats::DecodeIndex(*bytes);
 }
 bool ExcludedPath(const fs::path& path, bool directory) {
   fs::path prefix;
@@ -43,46 +32,9 @@ bool ExcludedPath(const fs::path& path, bool directory) {
   return false;
 }
 Json BareIdentity(const Json& entry) {
-  if (entry.value("directory", false))
+  if (entry.contains("directory"))
     return Json{{"directory", true}};
   return {{"size", entry.at("size")}, {"mtime", entry.at("mtime")}, {"fileId", entry.at("fileId")}};
-}
-bool ValidIndex(const Json& index) {
-  if (!index.is_object())
-    return false;
-  for (const auto& [name, entry] : index.items()) {
-    if (!SafePath(name) || !entry.is_object())
-      return false;
-    if (entry.contains("directory")) {
-      if (entry["directory"] != true)
-        return false;
-      continue;
-    }
-    if (!entry.contains("size") || !entry["size"].is_number_unsigned() ||
-        !entry.contains("mtime") || !entry["mtime"].is_number_unsigned() ||
-        !entry.contains("fileId") || !entry["fileId"].is_string())
-      return false;
-    if (entry.contains("chunks") &&
-        (!entry["chunks"].is_array() || std::ranges::any_of(entry["chunks"], [](const Json& id) {
-          return !id.is_string() || !objects::ValidId(id.get<std::string>());
-        })))
-      return false;
-    if (entry.contains("objects")) {
-      if (!entry["objects"].is_array() || !entry.contains("chunks") ||
-          entry["objects"].size() != entry["chunks"].size())
-        return false;
-      for (size_t i = 0; i < entry["objects"].size(); ++i) {
-        const auto& object = entry["objects"][i];
-        if (!object.is_object() || object.value("objectId", Json()) != entry["chunks"][i] ||
-            !object.contains("size") || !object["size"].is_number_unsigned() ||
-            !object.contains("storedSize") || !object["storedSize"].is_number_unsigned() ||
-            !object.contains("storedSha256") || !object["storedSha256"].is_string() ||
-            !objects::ValidId(object["storedSha256"].get<std::string>()))
-          return false;
-      }
-    }
-  }
-  return true;
 }
 objects::ObjectInfo ObjectMetadata(const Json& value) {
   return {value.at("objectId").get<std::string>(), value.at("size").get<uint64_t>(),
@@ -178,28 +130,17 @@ Result<Json> Checkpoints::Copy(const fs::path& directory) {
   RK_ASSIGN_OR_RETURN(bytes, ReadFileIfExists(LongPath(directory).wstring() + L".copy.json"));
   if (!bytes)
     return Json();
-  auto value = Json::parse(*bytes, nullptr, false);
-  if (!value.is_object() || value.value("sessionId", Json()) != directory.filename().string() ||
-      !value.contains("placementEpoch") || !value["placementEpoch"].is_number_unsigned() ||
-      value["placementEpoch"] == 0 || !value.contains("base") ||
-      (!value["base"].is_null() &&
-       (!value["base"].is_string() || !objects::ValidId(value["base"].get<std::string>()))) ||
-      (value.value("state", Json()) != "clean" && value.value("state", Json()) != "dirty") ||
-      !value.contains("stoppedCleanly") || !value["stoppedCleanly"].is_boolean() ||
-      !value.contains("changesAt") || !value["changesAt"].is_number_integer() ||
-      !value.contains("lastCommit"))
-    return CorruptState("invalid Session copy record");
-  const auto& commit = value["lastCommit"];
-  if (!commit.is_null() &&
-      (!commit.is_object() || !commit.contains("requestId") || !commit["requestId"].is_string() ||
-       commit["requestId"].get<std::string>().empty() || !commit.contains("manifestId") ||
-       !commit["manifestId"].is_string() ||
-       !objects::ValidId(commit["manifestId"].get<std::string>())))
-    return CorruptState("invalid Session copy commit");
+  RK_ASSIGN_OR_RETURN(value, checkpoint_formats::Decode(*bytes, checkpoint_formats::ValidateCopy,
+                                                        persisted::Store::kCopy));
+  if (value.at("sessionId") != directory.filename().string())
+    return CorruptState("Session copy identity mismatch");
   return value;
 }
 Result<void> Checkpoints::WriteCopy(const fs::path& directory, const Json& copy) {
-  return WriteDurableJson(LongPath(directory).wstring() + L".copy.json", copy);
+  RK_ASSIGN_OR_RETURN(bytes, checkpoint_formats::Encode(copy, checkpoint_formats::ValidateCopy));
+  if (copy.at("sessionId") != directory.filename().string())
+    return CorruptState("Session copy identity mismatch");
+  return WriteDurableText(LongPath(directory).wstring() + L".copy.json", bytes);
 }
 bool Checkpoints::ReuseCopy(const Json& copy, uint64_t epoch, const Json& checkpoint) {
   return copy.is_object() && copy.at("placementEpoch").get<uint64_t>() <= epoch &&
@@ -215,13 +156,15 @@ Result<void> Checkpoints::FlushChanges(const fs::path& directory, const Director
   Json paths = Json::array();
   for (const auto& [name, at] : changes.paths)
     paths.push_back(name);
-  const auto bytes = Json{{"at", now},
-                          {"paths", paths},
-                          {"removed", changes.removed},
-                          {"subtrees", changes.subtrees},
-                          {"continuous", changes.continuous}}
-                         .dump() +
-                     "\n";
+  const Json record{{"version", 1},
+                    {"at", now},
+                    {"paths", paths},
+                    {"removed", changes.removed},
+                    {"subtrees", changes.subtrees},
+                    {"continuous", changes.continuous}};
+  RK_ASSIGN_OR_RETURN(encoded,
+                      checkpoint_formats::Encode(record, checkpoint_formats::ValidateChanges));
+  const auto bytes = encoded + "\n";
   const auto path = LongPath(directory).wstring() + L".changes";
   HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -255,7 +198,7 @@ Result<DirectoryChanges> Checkpoints::RecoverChanges(const fs::path& raw_directo
   const auto directory = LongPath(raw_directory);
   RK_ASSIGN_OR_RETURN(previous, Load(directory.wstring() + L".checkpoint-index.json"));
   DirectoryChanges changes;
-  changes.continuous = ValidIndex(previous);
+  changes.continuous = ValidEntries(previous);
   if (!changes.continuous)
     previous = Json::object();
   RK_ASSIGN_OR_RETURN(journal, ReadFileIfExists(directory.wstring() + L".changes"));
@@ -263,19 +206,13 @@ Result<DirectoryChanges> Checkpoints::RecoverChanges(const fs::path& raw_directo
     std::istringstream lines(*journal);
     std::string line;
     while (std::getline(lines, line)) {
-      const auto record = Json::parse(line, nullptr, false);
-      if (!record.is_object()) {
-        metadata_walk = true;
-        continue;
-      }
-      if (!record.value("continuous", false))
+      RK_ASSIGN_OR_RETURN(record,
+                          checkpoint_formats::Decode(line, checkpoint_formats::ValidateChanges,
+                                                     persisted::Store::kChanges));
+      if (!record.at("continuous").get<bool>())
         metadata_walk = true;
       for (const auto* field : {"paths", "removed", "subtrees"}) {
-        if (!record.contains(field) || !record[field].is_array())
-          continue;
-        for (const auto& item : record[field]) {
-          if (!item.is_string() || !SafePath(item.get<std::string>()))
-            continue;
+        for (const auto& item : record.at(field)) {
           const auto name = item.get<std::string>();
           changes.paths[name] = PhaseClock::now();
           if (std::string_view(field) == "removed")
@@ -295,9 +232,9 @@ Result<DirectoryChanges> Checkpoints::RecoverChanges(const fs::path& raw_directo
   for (const auto& [name, entry] : current.items()) {
     changes.removed.erase(name);
     if (!previous.contains(name) || BareIdentity(previous[name]) != entry ||
-        (!entry.value("directory", false) && entry["mtime"].get<uint64_t>() >= threshold)) {
+        (!entry.contains("directory") && entry["mtime"].get<uint64_t>() >= threshold)) {
       changes.paths[name] = PhaseClock::now();
-      if (entry.value("directory", false))
+      if (entry.contains("directory"))
         changes.subtrees.insert(name);
     }
   }
@@ -311,10 +248,9 @@ Result<DirectoryChanges> Checkpoints::RecoverChanges(const fs::path& raw_directo
 Result<Json> Checkpoints::Describe(const std::string& manifest) {
   std::ostringstream bytes;
   RK_RETURN_IF_ERROR(objects_.Store().Read(objects_.ObjectKeys(), manifest, bytes));
-  const auto value = Json::parse(bytes.str(), nullptr, false);
-  if (!value.is_object() || value.value("version", Json()) != 2 || !value.contains("files") ||
-      !value["files"].is_array() || !value.contains("buildId") || !value["buildId"].is_string())
-    return CorruptState("invalid checkpoint manifest");
+  RK_ASSIGN_OR_RETURN(value,
+                      checkpoint_formats::Decode(bytes.str(), checkpoint_formats::ValidateManifest,
+                                                 persisted::Store::kManifest));
   std::set<std::string> ids{manifest};
   for (const auto& file : value["files"])
     for (const auto& chunk : file.at("chunks"))
@@ -375,7 +311,7 @@ Result<Json> Checkpoints::Scan(const fs::path& raw_directory,
   const auto directory = LongPath(raw_directory);
   const auto start = PhaseClock::now();
   Json entries = Json::object();
-  const bool incremental = changes.continuous && ValidIndex(previous);
+  const bool incremental = changes.continuous && ValidEntries(previous);
   if (incremental)
     for (const auto& [name, entry] : previous.items())
       entries[name] = BareIdentity(entry);
@@ -441,7 +377,7 @@ Result<Json> Checkpoints::Scan(const fs::path& raw_directory,
         erase(name);
         continue;
       }
-      if (is_directory && entries.contains(name) && entries[name].value("directory", false) &&
+      if (is_directory && entries.contains(name) && entries[name].contains("directory") &&
           !changes.subtrees.contains(name))
         continue;
       erase(name);
@@ -473,7 +409,7 @@ Result<Json> Checkpoints::Create(const fs::path& raw_directory,
   fs::create_directories(LongPath(raw_directory));
   RK_ASSIGN_OR_RETURN(plan,
                       Capture(raw_directory, cache_ ? cache_->Changes() : DirectoryChanges{}));
-  if (!source && cache_ && !plan.changes.continuous && ValidIndex(plan.previous)) {
+  if (!source && cache_ && !plan.changes.continuous && ValidEntries(plan.previous)) {
     RK_ASSIGN_OR_RETURN(copy, Copy(raw_directory));
     RK_ASSIGN_OR_RETURN(
         recovered,
@@ -490,12 +426,13 @@ Result<Json> Checkpoints::Create(const fs::path& raw_directory,
 }
 Result<CheckpointPlan> Checkpoints::Capture(const fs::path& directory, DirectoryChanges changes) {
   RK_ASSIGN_OR_RETURN(previous, Load(LongPath(directory).wstring() + L".checkpoint-index.json"));
-  if (!ValidIndex(previous))
+  if (!ValidEntries(previous))
     previous = Json();
   return CheckpointPlan{std::move(previous), std::move(changes)};
 }
 Result<void> Checkpoints::InstallIndex(const fs::path& directory, const BuiltCheckpoint& built) {
-  return WriteDurableJson(LongPath(directory).wstring() + L".checkpoint-index.json", built.index);
+  RK_ASSIGN_OR_RETURN(encoded_index, checkpoint_formats::EncodeIndex(built.index));
+  return WriteDurableJson(LongPath(directory).wstring() + L".checkpoint-index.json", encoded_index);
 }
 Result<BuiltCheckpoint> Checkpoints::Build(const fs::path& raw_directory,
                                            const std::string& tenant,
@@ -513,7 +450,7 @@ Result<BuiltCheckpoint> Checkpoints::Build(const fs::path& raw_directory,
   std::vector<std::string> names;
   Json directories = Json::array();
   for (const auto& [name, entry] : snapshot.items()) {
-    if (entry.value("directory", false))
+    if (entry.contains("directory"))
       directories.push_back(name);
     else
       names.push_back(name);
@@ -535,7 +472,7 @@ Result<BuiltCheckpoint> Checkpoints::Build(const fs::path& raw_directory,
                                                  }) ||
                              name == "session.db" || name == "session.db-wal";
         bool reuse = (!source || !changed) && previous.contains(name) &&
-                     !previous[name].value("directory", false) &&
+                     !previous[name].contains("directory") &&
                      BareIdentity(previous[name]) == identity && previous[name].contains("chunks");
         if (reuse) {
           if (changes.continuous && previous[name].contains("objects")) {
@@ -637,8 +574,10 @@ Result<BuiltCheckpoint> Checkpoints::Build(const fs::path& raw_directory,
   Json manifest{{"version", 2}, {"buildId", build}, {"files", files}, {"directories", directories}};
   if (PhaseClock::now() >= deadline)
     return Error{ErrorCode::kUnavailable, "shutdown commit budget exhausted"};
+  RK_ASSIGN_OR_RETURN(manifest_bytes,
+                      checkpoint_formats::Encode(manifest, checkpoint_formats::ValidateManifest));
   const auto manifest_start = PhaseClock::now();
-  RK_ASSIGN_OR_RETURN(info, objects_.Store().WriteChunk(objects_.ObjectKeys(), manifest.dump()));
+  RK_ASSIGN_OR_RETURN(info, objects_.Store().WriteChunk(objects_.ObjectKeys(), manifest_bytes));
   {
     std::lock_guard lock(stats);
     AddPhase(phases_, "store", "ms", PhaseMs(manifest_start));
@@ -659,13 +598,14 @@ Result<void> Checkpoints::Restore(const fs::path& raw_directory,
   const auto directory = LongPath(raw_directory);
   const fs::path index_path = directory.wstring() + L".checkpoint-index.json";
   RK_ASSIGN_OR_RETURN(saved_index, Load(index_path));
-  const bool warm = !checkpoint.is_null() && fs::is_directory(directory) && ValidIndex(saved_index);
+  const bool warm =
+      !checkpoint.is_null() && fs::is_directory(directory) && ValidEntries(saved_index);
   if (phases_)
     (*phases_)["mode"] = checkpoint.is_null() ? "new" : warm ? "warm" : "cold";
   RK_ASSIGN_OR_RETURN(previous, Load(index_path));
   if (!warm)
     previous = Json();
-  if (!ValidIndex(previous))
+  if (!ValidEntries(previous))
     previous = Json::object();
   Json index = Json::object();
   const fs::path restore = directory.wstring() + L".restore";
@@ -690,31 +630,15 @@ Result<void> Checkpoints::Restore(const fs::path& raw_directory,
     const auto start = PhaseClock::now();
     RK_ASSIGN_OR_RETURN(bytes, Get(tenant, checkpoint.get<std::string>()));
     AddPhase(phases_, "manifest", "ms", PhaseMs(start));
-    const auto manifest = Json::parse(bytes, nullptr, false);
-    // buildId records the producer; all builds use the same pinned Chromium Profile format.
-    if (!manifest.is_object() || manifest.value("version", Json()) != 2 ||
-        !manifest.contains("files") || !manifest["files"].is_array() ||
-        !manifest.contains("directories") || !manifest["directories"].is_array())
-      return Error{ErrorCode::kRejected, "invalid checkpoint manifest"};
+    RK_ASSIGN_OR_RETURN(manifest,
+                        checkpoint_formats::Decode(bytes, checkpoint_formats::ValidateManifest,
+                                                   persisted::Store::kManifest));
     for (const auto& item : manifest["directories"]) {
-      if (!item.is_string() || !SafePath(item.get<std::string>()) ||
-          !paths.insert(item.get<std::string>()).second)
-        return Error{ErrorCode::kRejected, "invalid checkpoint directory"};
       index[item.get<std::string>()] = {{"directory", true}};
     }
     for (const auto& item : manifest["files"]) {
-      if (!item.is_object() || !item.contains("path") || !item["path"].is_string() ||
-          !SafePath(item["path"].get<std::string>()) || !item.contains("size") ||
-          !item["size"].is_number_unsigned() || !item.contains("chunks") ||
-          !item["chunks"].is_array() || !paths.insert(item["path"].get<std::string>()).second)
-        return Error{ErrorCode::kRejected, "invalid checkpoint file"};
       File file{item["path"].get<std::string>(), item["size"].get<uint64_t>(), {}};
-      if (item["chunks"].size() !=
-          std::max<uint64_t>(1, file.size / kChunk + (file.size % kChunk != 0)))
-        return Error{ErrorCode::kRejected, "invalid checkpoint chunk count"};
       for (const auto& id : item["chunks"]) {
-        if (!id.is_string() || !objects::ValidId(id.get<std::string>()))
-          return Error{ErrorCode::kRejected, "invalid checkpoint chunk"};
         file.chunks.push_back(id.get<std::string>());
       }
       files.push_back(std::move(file));
@@ -728,9 +652,8 @@ Result<void> Checkpoints::Restore(const fs::path& raw_directory,
           auto identity = CheckpointIdentity(LongPath(directory / Utf8Path(file.name)));
           const auto& old = previous[file.name];
           if (identity && old.is_object() && old.contains("fileId") &&
-              BareIdentity(old) == identity.value() &&
-              old.value("chunks", Json()) == Json(file.chunks) &&
-              identity.value()["size"] == file.size) {
+              BareIdentity(old) == identity.value() && old.contains("chunks") &&
+              old.at("chunks") == Json(file.chunks) && identity.value()["size"] == file.size) {
             file.matched = true;
             file.identity = old;
           }
@@ -760,7 +683,7 @@ Result<void> Checkpoints::Restore(const fs::path& raw_directory,
   const auto materialize_start = PhaseClock::now();
   std::set<fs::path> unique_directories;
   for (const auto& [name, entry] : index.items())
-    if (entry.value("directory", false))
+    if (entry.contains("directory"))
       unique_directories.insert(LongPath(restore / Utf8Path(name)));
   for (const auto& file : files)
     if (!file.matched)
@@ -850,8 +773,7 @@ Result<void> Checkpoints::Restore(const fs::path& raw_directory,
   AddPhase(phases_, "replicaCommit", "objects", double(replicas.size()));
   AddPhase(phases_, "replicaCommit", "requests", double(replica_requests));
   if (!materialized)
-    return Error{ErrorCode::kUnavailable,
-                 "checkpoint object unavailable: " + materialized.error().message};
+    return materialized.error();
   RK_RETURN_IF_ERROR(CheckpointParallel(files.size(), 8, [&](size_t i) -> Result<void> {
     auto& file = files[i];
     if (file.matched)
@@ -915,7 +837,8 @@ Result<void> Checkpoints::Restore(const fs::path& raw_directory,
     }
     fs::remove_all(discard);
   }
-  RK_RETURN_IF_ERROR(WriteDurableJson(index_path, index));
+  RK_ASSIGN_OR_RETURN(encoded_index, checkpoint_formats::EncodeIndex(index));
+  RK_RETURN_IF_ERROR(WriteDurableJson(index_path, encoded_index));
   AddPhase(phases_, "swap", "ms", PhaseMs(swap_start));
   return {};
 }

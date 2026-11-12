@@ -40,7 +40,7 @@ class EndpointLayout(unittest.TestCase):
                 put(output / file)
             put(chromium / 'third_party/hyphenation-patterns/LICENSE')
             put(endpoint)
-            for name in ('remotekit_node.exe', 'remotekit_control.exe', 'libvpl.dll'):
+            for name in ('remotekit_node.exe', 'remotekit_control.exe', 'remotekit_snapshot.exe', 'libvpl.dll'):
                 put(endpoint.parent / name)
             put(node)
             put(node.parent / 'LICENSE')
@@ -67,8 +67,7 @@ class EndpointLayout(unittest.TestCase):
                                       destination=root / 'packages', smoke=True)
             validation = {
                 key: True for key in (
-                    'passed', 'endpointManagementReachable', 'webSocketProductActionRejected',
-                    'workspaceUnchanged', 'faceModelsAvailable',
+                    'passed', 'endpointManagementReachable', 'webSocketOperationCommitted',
                 )
             }
             validation.update(validationKind='startup', scope='fixture',

@@ -1,15 +1,14 @@
+import { randomBytes } from 'node:crypto';
+import { appendFile, mkdir } from 'node:fs/promises';
+import { startStack } from './kit/stack.mjs';
+import { launchPersistentViewer, registerViewer } from './kit/viewer.mjs';
+
+import { join, resolve } from 'node:path';
 /**
  * Real H.264 fullscreen regression on an isolated loopback instance.
  * node tests/e2e/test-fullscreen.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port]
  */
-import { startStack } from './kit/stack.mjs';
-import { registerViewer } from './product-stack.mjs';
-import { randomBytes } from 'node:crypto';
-import { appendFile, mkdir } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+
 import assert from 'node:assert/strict';
 
 const [playwright, viewer, endpoint, browser, output, listenPort = '34030'] = process.argv.slice(2);
@@ -17,87 +16,29 @@ assert(
   [playwright, viewer, endpoint, browser, output].every(Boolean),
   'Expected Playwright, Viewer, Endpoint, Browser and output paths',
 );
-const { chromium } = createRequire(import.meta.url)(resolve(playwright));
-const root = fileURLToPath(new URL('../../', import.meta.url));
+
 const run = resolve(output);
 const port = Number(listenPort);
 const origin = 'http://127.0.0.1:' + (port + 1);
 const fixtureOrigin = 'http://127.0.0.1:' + (port + 4);
-await mkdir(run);
+await mkdir(run, { recursive: true });
 const log = async (stage, value) => {
   await appendFile(join(run, 'fullscreen-results.jsonl'), JSON.stringify({ stage, value }) + '\n');
   console.log(stage);
 };
-const fixturePage = `<!doctype html><meta charset="utf-8"><title>Fullscreen fixture</title>
-<style>
-  body { margin:0; font:16px Arial; background:#d0e5fc; }
-  main { position:relative; width:100vw; height:100vh; background:#d0e5fc; }
-  main:fullscreen { background:#125267; color:white; }
-  button { font:inherit; padding:12px; margin:8px; }
-  #hit { position:absolute; bottom:8%; right:5%; }
-  canvas { position:absolute; bottom:8px; left:8px; }
-</style>
-<main><button id="enter">Enter fullscreen</button><button id="exit">Exit fullscreen</button>
-<button id="navigate">Navigate in fullscreen</button><button id="hit">Hit bottom right</button>
-<canvas width="24" height="24"></canvas></main>
-<script>
-  const main = document.querySelector('main');
-  const buttons = Array.from(main.querySelectorAll('button'));
-  const context = document.querySelector('canvas').getContext('2d');
-  let tick = 0;
-  setInterval(() => {
-    context.fillStyle = tick++ % 2 ? '#ef512a' : '#0463aa';
-    context.fillRect(0, 0, 24, 24);
-  }, 80);
-  const report = (type, details) => fetch('/event', {
-    method:'POST', keepalive:true, headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({type, documentId:performance.timeOrigin, path:location.pathname,
-      width:innerWidth, height:innerHeight, fullscreen:document.fullscreenElement?.id || document.fullscreenElement?.tagName || null,
-      geometry:Object.fromEntries(buttons.map(button => [button.id, button.getBoundingClientRect().toJSON()])), ...details}),
-  }).catch(() => {});
-  for (const button of buttons) button.addEventListener('click', async event => {
-    const details = {target:button.id, trusted:event.isTrusted, active:navigator.userActivation.isActive,
-      x:event.clientX, y:event.clientY};
-    void report('click', details);
-    try {
-      if (button.id === 'enter') await main.requestFullscreen();
-      if (button.id === 'exit') await document.exitFullscreen();
-      if (button.id === 'navigate') location.assign('/navigated');
-    } catch (error) { void report('fullscreen-error', {...details, error:String(error)}); }
-  });
-  document.addEventListener('fullscreenchange', event => void report('fullscreenchange', {trusted:event.isTrusted}));
-  addEventListener('resize', () => void report('resize'));
-  void report('ready');
-</script>`;
+
 const fixtureEvents = [];
-const fixture = createServer(async (request, response) => {
-  if (request.method === 'POST' && request.url === '/event') {
-    try {
-      let body = '';
-      for await (const chunk of request) {
-        body += chunk;
-        if (body.length > 16384) {
-          response.writeHead(413).end();
-          return;
-        }
-      }
-      const event = JSON.parse(body);
-      fixtureEvents.push(event);
-      await appendFile(join(run, 'fixture-events.jsonl'), JSON.stringify(event) + '\n');
-      response.end();
-    } catch {
-      response.writeHead(400).end();
-    }
-    return;
-  }
-  response.setHeader('Content-Type', 'text/html; charset=utf-8');
-  response.end(fixturePage);
+
+const stack = await startStack({
+  scenario: 'fullscreen',
+  run,
+  port,
+  endpoint,
+  browser,
+  seed: false,
+  fixtures: { kind: 'test-fullscreen', context: { fixtureEvents } },
+  ports: { control: port, viewer: port + 1, fixture: port + 4, peer: port + 3 },
 });
-await new Promise((accept, reject) => {
-  fixture.once('error', reject);
-  fixture.listen(port + 4, '127.0.0.1', accept);
-});
-const stack = await startStack({ scenario: 'fullscreen', run, port, endpoint, browser, seed: false });
 
 const sleep = (ms) => new Promise((accept) => setTimeout(accept, ms));
 async function until(check, message, timeout = 45000) {
@@ -118,9 +59,9 @@ try {
     }).catch(() => undefined);
     return response?.ok && (await response.json()).setupRequired === true;
   }, 'Fresh isolated Control did not start');
-  context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
+  context = await launchPersistentViewer(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
-    headless: process.env.REMOTEKIT_QA_HEADLESS === '1',
+    headless: true,
     viewport: { width: 1152, height: 820 },
     deviceScaleFactor: 1,
     timeout: 15000,
@@ -357,213 +298,193 @@ try {
   await registerViewer({ click, fill, username: 'fullscreen-qa', password: accountPassword });
   await click('button', '开始');
   await click('[data-tile-key]', '浏览器');
-  const outerOnly = process.env.REMOTEKIT_QA_FULLSCREEN_OUTER_ONLY === '1';
-  const outerWindowCount = outerOnly ? 1 : 2;
-  if (outerOnly) {
-    await navigate('/first', 0);
-    await allReady(1);
-  } else {
-    const first = await navigate('/first', 0);
-    await allReady(1);
-    await click('button', '开始');
-    await click('[data-tile-key]', '浏览器');
-    await until(() => read('!document.querySelector("[role=menu]")'), 'Window menu did not close');
-    const second = await navigate('/second', 1);
-    const baseline = await allReady(2);
-    assert.equal(baseline.toolbar, 2);
-    assert.equal(baseline.tabs, 2);
-    assert.equal(baseline.channels.filter((channel) => channel[2] === 'open').length, 2);
-    const codecs = await until(async () => {
-      const values = await read(`(async () => {
-        const stats = await fullscreenQA.peers.at(-1).getStats();
-        return [...stats.values()].filter(stat => stat.type === 'inbound-rtp' &&
-          (stat.kind || stat.mediaType) === 'video' && stat.framesDecoded > 0)
-          .map(stat => stats.get(stat.codecId)?.mimeType);
+  const outerWindowCount = 2;
+
+  const first = await navigate('/first', 0);
+  await allReady(1);
+  await click('button', '开始');
+  await click('[data-tile-key]', '浏览器');
+  await until(() => read('!document.querySelector("[role=menu]")'), 'Window menu did not close');
+  const second = await navigate('/second', 1);
+  const baseline = await allReady(2);
+  assert.equal(baseline.toolbar, 2);
+  assert.equal(baseline.tabs, 2);
+  assert.deepEqual(
+    baseline.channels
+      .filter((channel) => channel[2] === 'open')
+      .map((channel) => channel[1])
+      .sort(),
+    ['remotekit', 'remotekit', 'remotekit-auth'],
+  );
+  const codecs = await until(async () => {
+    const values = await read(`(async () => {
+        const codecs=[];
+        for(const peer of fullscreenQA.peers) {
+          const stats=await peer.getStats();
+          codecs.push(...[...stats.values()].filter(stat=>stat.type==='inbound-rtp'&&(stat.kind||stat.mediaType)==='video'&&stat.framesDecoded>0).map(stat=>stats.get(stat.codecId)?.mimeType));
+        }
+        return codecs;
       })()`);
-      return values.some((value) => value?.toLowerCase() === 'video/h264') && values;
-    }, 'No decoded H.264 inbound RTP');
-    await log('two-window-baseline', {
-      baseline,
-      first: first.documentId,
-      second: second.documentId,
-      codecs,
-    });
+    return values.some((value) => value?.toLowerCase() === 'video/h264') && values;
+  }, 'No decoded H.264 inbound RTP');
+  await log('two-window-baseline', {
+    baseline,
+    first: first.documentId,
+    second: second.documentId,
+    codecs,
+  });
 
-    const target = async (documentId, button, paneIndex) => {
-      const before = fixtureEvents.length;
-      const remote = fixtureEvents.findLast((event) => event.documentId === documentId);
-      const box = remote.geometry[button];
-      const { bounds } = (await sample()).panes[paneIndex];
-      await page.mouse.click(
-        bounds.x + ((box.x + box.width / 2) * bounds.width) / remote.width,
-        bounds.y + ((box.y + box.height / 2) * bounds.height) / remote.height,
-      );
-      const received = await until(
-        () =>
-          fixtureEvents
-            .slice(before)
-            .find(
-              (event) => event.type === 'click' && event.documentId === documentId && event.target === button,
-            ),
-        'Input did not hit remote button ' + button,
-      );
-      assert.equal(received.trusted, true);
-      if (button === 'hit') {
-        const sent = (await sample()).input.findLast(
-          (row) =>
-            row.direction === 'out' && row.message.type === 'input' && row.message.event.action === 'up',
-        ).message;
-        await until(async () => {
-          const state = await sample();
-          const layout = state.input.findLast(
-            (row) => row.direction === 'in' && row.message.type === 'layout',
-          )?.message;
-          return layout?.views.some(
-            (view) => view.id === sent.view && view.document === sent.document && view.focus === sent.focus,
-          );
-        }, 'Focus metadata did not settle before switching panes');
-      }
-      assert(
-        Math.abs(received.x - box.x - box.width / 2) <= 3 &&
-          Math.abs(received.y - box.y - box.height / 2) <= 3,
-        'Remote click coordinates differed from the selected target centre',
-      );
-      return received;
-    };
-    const expectRemoteFullscreen = async (start, documentId = second.documentId) => {
-      const remote = await until(
-        () =>
-          fixtureEvents
-            .slice(start)
-            .find(
-              (event) =>
-                event.type === 'fullscreenchange' &&
-                event.documentId === documentId &&
-                event.fullscreen === 'MAIN',
-            ),
-        'Remote document did not enter fullscreen',
-      );
-      assert.equal(remote.trusted, true);
-      const active = await until(async () => {
-        const state = await sample();
-        return (
-          state?.visibleWindows === 1 &&
-          state.panes.length === 1 &&
-          state.panes[0].ready &&
-          state.toolbar === 0 &&
-          state.tabs === 0 &&
-          ['x', 'y', 'width', 'height'].every(
-            (key) => Math.abs(state.panes[0].bounds[key] - state.viewport[key]) <= 1,
-          ) &&
-          state
-        );
-      }, 'Fullscreen viewport did not settle with decoded video');
-      assert.equal(active.toolbar, 0);
-      assert.equal(active.tabs, 0);
-      assert.equal(active.native, false);
-      assert.equal(active.attempts.length, 0);
-      for (const key of ['x', 'y', 'width', 'height']) {
-        assert(
-          Math.abs(active.panes[0].bounds[key] - active.viewport[key]) <= 1,
-          'Fullscreen bounds mismatch for ' + key,
-        );
-      }
-      await until(
-        () =>
-          fixtureEvents.findLast(
-            (event) =>
-              event.documentId === documentId &&
-              event.fullscreen === 'MAIN' &&
-              Math.abs(event.width - active.viewport.width) <= 2 &&
-              Math.abs(event.height - active.viewport.height) <= 2,
+  const target = async (documentId, button, paneIndex) => {
+    const before = fixtureEvents.length;
+    const remote = fixtureEvents.findLast((event) => event.documentId === documentId);
+    const box = remote.geometry[button];
+    const { bounds } = (await sample()).panes[paneIndex];
+    await page.mouse.click(
+      bounds.x + ((box.x + box.width / 2) * bounds.width) / remote.width,
+      bounds.y + ((box.y + box.height / 2) * bounds.height) / remote.height,
+    );
+    const received = await until(
+      () =>
+        fixtureEvents
+          .slice(before)
+          .find(
+            (event) => event.type === 'click' && event.documentId === documentId && event.target === button,
           ),
-        'Remote document did not receive fullscreen viewport dimensions',
-      );
-      identity(baseline, active);
-      return active;
-    };
-
-    const enteredAt = fixtureEvents.length;
-    assert.equal((await target(second.documentId, 'enter', 1)).active, true);
-    const inner = await expectRemoteFullscreen(enteredAt);
-    const hit = await target(second.documentId, 'hit', 0);
-    assert.equal(hit.fullscreen, 'MAIN');
-    await page.screenshot({ path: join(run, 'web-fullscreen.png') });
-    await log('web-fullscreen-enter-and-hit', { inner, hit });
-    if (process.env.REMOTEKIT_QA_FULLSCREEN_NARROW === '1') {
-      const exitAt = fixtureEvents.length;
-      await page.keyboard.press('Escape');
-      await until(
-        () =>
-          fixtureEvents
-            .slice(exitAt)
-            .find(
-              (event) =>
-                event.type === 'fullscreenchange' &&
-                event.documentId === second.documentId &&
-                !event.fullscreen,
-            ),
-        'Escape did not exit fullscreen',
-      );
-      identity(baseline, await allReady(2));
-      await log('web-fullscreen-escape', { documentId: second.documentId });
-    } else {
-      const exitAt = fixtureEvents.length;
-      await target(second.documentId, 'exit', 0);
-      await until(
-        () =>
-          fixtureEvents
-            .slice(exitAt)
-            .find(
-              (event) =>
-                event.type === 'fullscreenchange' &&
-                event.documentId === second.documentId &&
-                !event.fullscreen,
-            ),
-        'Remote document did not exit fullscreen',
-      );
-      const restored = await allReady(2);
-      assert.equal(restored.toolbar, 2);
-      identity(baseline, restored);
-      const reenterAt = fixtureEvents.length;
-      await target(second.documentId, 'enter', 1);
-      await expectRemoteFullscreen(reenterAt);
-      await target(second.documentId, 'navigate', 0);
-      const navigated = await until(
-        () => fixtureEvents.find((event) => event.type === 'ready' && event.path === '/navigated'),
-        'In-page cross-document navigation did not commit',
-      );
-      assert.notEqual(navigated.documentId, second.documentId);
-      assert.equal(navigated.fullscreen, null);
-      const afterNavigation = await allReady(2);
-      assert.equal(afterNavigation.toolbar, 2);
-      assert.equal(afterNavigation.attempts.length, 0);
-      identity(baseline, afterNavigation);
-      const firstHit = await target(first.documentId, 'hit', 0);
-      await log('web-fullscreen-exit-and-navigation', { restored, navigated, afterNavigation, firstHit });
-
-      const cleanupEnterAt = fixtureEvents.length;
-      await target(navigated.documentId, 'enter', 1);
-      // Use the overlay exit, which must address the currently fullscreen document
-      // even after the preceding navigation retired a fullscreen document.
-      await expectRemoteFullscreen(cleanupEnterAt, navigated.documentId);
-      await click('button', '退出网页全屏');
-      await until(
-        () =>
-          fixtureEvents
-            .slice(cleanupEnterAt)
-            .find(
-              (event) =>
-                event.type === 'fullscreenchange' &&
-                event.documentId === navigated.documentId &&
-                !event.fullscreen,
-            ),
-        'Viewer exit did not exit the current document fullscreen',
-      );
-      identity(baseline, await allReady(2));
-      await log('web-fullscreen-viewer-exit', { documentId: navigated.documentId });
+      'Input did not hit remote button ' + button,
+    );
+    assert.equal(received.trusted, true);
+    if (button === 'hit') {
+      const sent = (await sample()).input.findLast(
+        (row) => row.direction === 'out' && row.message.type === 'input' && row.message.event.action === 'up',
+      ).message;
+      await until(async () => {
+        const state = await sample();
+        const layout = state.input.findLast(
+          (row) => row.direction === 'in' && row.message.type === 'layout',
+        )?.message;
+        return layout?.views.some(
+          (view) => view.id === sent.view && view.document === sent.document && view.focus === sent.focus,
+        );
+      }, 'Focus metadata did not settle before switching panes');
     }
-  }
+    assert(
+      Math.abs(received.x - box.x - box.width / 2) <= 3 && Math.abs(received.y - box.y - box.height / 2) <= 3,
+      'Remote click coordinates differed from the selected target centre',
+    );
+    return received;
+  };
+  const expectRemoteFullscreen = async (start, documentId = second.documentId) => {
+    const remote = await until(
+      () =>
+        fixtureEvents
+          .slice(start)
+          .find(
+            (event) =>
+              event.type === 'fullscreenchange' &&
+              event.documentId === documentId &&
+              event.fullscreen === 'MAIN',
+          ),
+      'Remote document did not enter fullscreen',
+    );
+    assert.equal(remote.trusted, true);
+    const active = await until(async () => {
+      const state = await sample();
+      return (
+        state?.visibleWindows === 1 &&
+        state.panes.length === 1 &&
+        state.panes[0].ready &&
+        state.toolbar === 0 &&
+        state.tabs === 0 &&
+        ['x', 'y', 'width', 'height'].every(
+          (key) => Math.abs(state.panes[0].bounds[key] - state.viewport[key]) <= 1,
+        ) &&
+        state
+      );
+    }, 'Fullscreen viewport did not settle with decoded video');
+    assert.equal(active.toolbar, 0);
+    assert.equal(active.tabs, 0);
+    assert.equal(active.native, false);
+    assert.equal(active.attempts.length, 0);
+    for (const key of ['x', 'y', 'width', 'height']) {
+      assert(
+        Math.abs(active.panes[0].bounds[key] - active.viewport[key]) <= 1,
+        'Fullscreen bounds mismatch for ' + key,
+      );
+    }
+    await until(
+      () =>
+        fixtureEvents.findLast(
+          (event) =>
+            event.documentId === documentId &&
+            event.fullscreen === 'MAIN' &&
+            Math.abs(event.width - active.viewport.width) <= 2 &&
+            Math.abs(event.height - active.viewport.height) <= 2,
+        ),
+      'Remote document did not receive fullscreen viewport dimensions',
+    );
+    identity(baseline, active);
+    return active;
+  };
+
+  const enteredAt = fixtureEvents.length;
+  assert.equal((await target(second.documentId, 'enter', 1)).active, true);
+  const inner = await expectRemoteFullscreen(enteredAt);
+  const hit = await target(second.documentId, 'hit', 0);
+  assert.equal(hit.fullscreen, 'MAIN');
+  await page.screenshot({ path: join(run, 'web-fullscreen.png') });
+  await log('web-fullscreen-enter-and-hit', { inner, hit });
+  const exitAt = fixtureEvents.length;
+  await target(second.documentId, 'exit', 0);
+  await until(
+    () =>
+      fixtureEvents
+        .slice(exitAt)
+        .find(
+          (event) =>
+            event.type === 'fullscreenchange' && event.documentId === second.documentId && !event.fullscreen,
+        ),
+    'Remote document did not exit fullscreen',
+  );
+  const restored = await allReady(2);
+  assert.equal(restored.toolbar, 2);
+  identity(baseline, restored);
+  const reenterAt = fixtureEvents.length;
+  await target(second.documentId, 'enter', 1);
+  await expectRemoteFullscreen(reenterAt);
+  await target(second.documentId, 'navigate', 0);
+  const navigated = await until(
+    () => fixtureEvents.find((event) => event.type === 'ready' && event.path === '/navigated'),
+    'In-page cross-document navigation did not commit',
+  );
+  assert.notEqual(navigated.documentId, second.documentId);
+  assert.equal(navigated.fullscreen, null);
+  const afterNavigation = await allReady(2);
+  assert.equal(afterNavigation.toolbar, 2);
+  assert.equal(afterNavigation.attempts.length, 0);
+  identity(baseline, afterNavigation);
+  const firstHit = await target(first.documentId, 'hit', 0);
+  await log('web-fullscreen-exit-and-navigation', { restored, navigated, afterNavigation, firstHit });
+
+  const cleanupEnterAt = fixtureEvents.length;
+  await target(navigated.documentId, 'enter', 1);
+  // Use the overlay exit, which must address the currently fullscreen document
+  // even after the preceding navigation retired a fullscreen document.
+  await expectRemoteFullscreen(cleanupEnterAt, navigated.documentId);
+  await click('button', '退出网页全屏');
+  await until(
+    () =>
+      fixtureEvents
+        .slice(cleanupEnterAt)
+        .find(
+          (event) =>
+            event.type === 'fullscreenchange' &&
+            event.documentId === navigated.documentId &&
+            !event.fullscreen,
+        ),
+    'Viewer exit did not exit the current document fullscreen',
+  );
+  identity(baseline, await allReady(2));
+  await log('web-fullscreen-viewer-exit', { documentId: navigated.documentId });
 
   const openSettings = async () => {
     await click('button', '开始');
@@ -688,7 +609,5 @@ try {
     await context?.close();
   } finally {
     await stack.stop();
-    fixture.closeAllConnections();
-    await new Promise((accept) => fixture.close(accept));
   }
 }

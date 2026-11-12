@@ -6,6 +6,25 @@ import { TestClock } from './server-fixture';
 import { createApplication } from '../server/application';
 import { registerUser, testGateway } from './server-fixture';
 
+test('dwell duration preserves fractional milliseconds emitted by the clock', () => {
+  const clock = new TestClock();
+  const store = new ControlDatabase(':memory:', { buildId: 'test', clock });
+  try {
+    store.reclaim.observeWanted('tenant', new Map([['1', 'page']]));
+    clock.advance(10000);
+    clock.monotonicMs = () => 10000.25;
+    store.reclaim.observeWanted('tenant', new Map());
+    assert.deepEqual(store.reclaim.dwell('tenant'), [{ pageKey: 'page', visibleMs: 10000.25 }]);
+    store.db.prepare('UPDATE page_dwell SET visible_ms=?').run('invalid');
+    assert.throws(
+      () => store.reclaim.dwell('tenant'),
+      (error: any) => error.reason === 'corrupt_record',
+    );
+  } finally {
+    store.db.close();
+  }
+});
+
 test('presence records completed gaps, replacement connections and restart closure at the heartbeat', () => {
   const clock = new TestClock();
   const store = new ControlDatabase(':memory:', { buildId: 'test', clock });

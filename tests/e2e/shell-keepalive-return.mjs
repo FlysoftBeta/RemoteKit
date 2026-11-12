@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runScenario } from './kit/viewer.mjs';
+
 await runScenario('shell-keepalive-return', async (v, stack) => {
-  const phone = process.env.QA_PHONE === '1';
+  const phone = process.env.E2E_POINTER === 'touch';
   if (phone) await v.page.setViewportSize({ width: 390, height: 844 });
   await v.openStart();
   if (v.touch) await v.tile('浏览器').tap();

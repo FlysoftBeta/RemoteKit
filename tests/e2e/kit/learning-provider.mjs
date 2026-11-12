@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { createCipheriv, createHash, createPublicKey } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { createCipheriv, createHash, createPublicKey } from 'node:crypto';
+import { link, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
-import { link, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,7 +12,11 @@ const fixtures = join(root, 'control/test/fixtures/learning');
 const jwt = (payload) =>
   'header.' + Buffer.from(JSON.stringify(payload)).toString('base64url') + '.signature';
 
-export async function fakeLearningProvider(run, browser) {
+export async function fakeLearningProvider(
+  run,
+  browser,
+  { captcha = false, httpPort = 0, tlsPort = 0 } = {},
+) {
   const requests = [];
   const events = [];
   const files = new Map();
@@ -53,6 +57,7 @@ export async function fakeLearningProvider(run, browser) {
     sharePersonName: '老师',
   }));
   let signInCount = 0;
+  let expired = false;
   const tokens = new Map();
   const sessions = new Map();
   const md5 = (value) => createHash('md5').update(value).digest('hex');
@@ -81,6 +86,32 @@ export async function fakeLearningProvider(run, browser) {
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(data));
       const cy = (data) => json({ code: 200, data });
       const zx = (result) => json({ code: '000000', result });
+      if (url.pathname === '/fixture/expire') {
+        expired = true;
+        return json({ ok: true });
+      }
+      if (url.pathname === '/files-journey')
+        return res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(`<!doctype html>
+        <meta name="viewport" content="width=device-width,initial-scale=1"><title>Device upload journey</title>
+        <style>body{margin:16px;font:18px system-ui;background:#eaf2fc}input,button{display:block;width:280px;height:44px;margin:20px 0}</style>
+        <h2>Files journey</h2><input id="single" type="file" accept=".txt"><input id="multiple" type="file" multiple><input id="images" type="file" accept="image/*" multiple><button id="download">Download notes</button>
+        <script>
+        const report=e=>fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(e)});
+        const inputs=[...document.querySelectorAll('input,button')];
+        const geometry=()=>report({type:'file-geometry',width:innerWidth,height:innerHeight,boxes:Object.fromEntries(inputs.map(i=>[i.id,i.getBoundingClientRect().toJSON()]))});
+        addEventListener('resize',geometry);geometry();
+        for(const i of document.querySelectorAll('input'))i.onchange=async e=>{await report({type:'file-selected',id:i.id,trusted:e.isTrusted,files:await Promise.all([...i.files].map(async f=>({name:f.name,type:f.type,size:f.size})))});i.value='';};
+        document.querySelector('button').onclick=e=>{report({type:'download-click',trusted:e.isTrusted});const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['Downloaded notes'],{type:'text/plain'}));a.download='page-notes.txt';a.click();};
+        </script>`);
+      if (expired && url.pathname.startsWith('/api/v3/') && !url.pathname.includes('/auth/login'))
+        return json({ code: 416, msg: '登录已过期' });
+      if (url.pathname === '/v4/gt4.js')
+        return res.writeHead(200, { 'Content-Type': 'application/javascript' }).end(`
+window.initGeetest4 = (options, done) => {
+ const widget = {onReady(fn){setTimeout(fn, 0);}, onClose(){}, onError(){}, onSuccess(){}, showCaptcha(){
+  if (!document.getElementById('fixture-captcha')) { const button=document.createElement('button'); button.id='fixture-captcha'; button.textContent='Fixture verification'; document.querySelector('main').append(button); }
+ }}; done(widget);
+};`);
       if (url.pathname === '/event') {
         events.push(body);
         return json({ ok: true });
@@ -151,7 +182,7 @@ export async function fakeLearningProvider(run, browser) {
               captchaConf: JSON.stringify({
                 gt: 'test-captcha',
                 captchaType: 'third',
-                notCheckCaptcha: 'true',
+                notCheckCaptcha: captcha ? 'false' : 'true',
               }),
             },
           });
@@ -322,7 +353,7 @@ export async function fakeLearningProvider(run, browser) {
     }
   }
   const http = createServer(handler);
-  await new Promise((done) => http.listen(0, '127.0.0.1', done));
+  await new Promise((done) => http.listen(httpPort, '127.0.0.1', done));
   const origin = 'http://127.0.0.1:' + http.address().port;
   const keyPath = join(run, 'provider.key');
   const certPath = join(run, 'provider.crt');
@@ -351,7 +382,7 @@ export async function fakeLearningProvider(run, browser) {
     .update(createPublicKey(key).export({ type: 'spki', format: 'der' }))
     .digest('base64');
   const tls = createTlsServer({ key, cert }, handler);
-  await new Promise((done) => tls.listen(0, '127.0.0.1', done));
+  await new Promise((done) => tls.listen(tlsPort, '127.0.0.1', done));
   const bin = join(run, 'browser-launcher');
   await mkdir(bin);
   for (const name of await readdir(resolve(browser, '..')))
@@ -365,6 +396,7 @@ export async function fakeLearningProvider(run, browser) {
   );
   execFileSync('cmd.exe', ['/d', '/c', script], { windowsHide: true, stdio: 'pipe' });
   return {
+    origin,
     requests,
     events,
     sessions,

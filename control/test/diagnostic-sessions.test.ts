@@ -1,3 +1,5 @@
+import { decodeJson } from '../server/persistence/codec';
+import { diagnosticManifest, archiveMetadata } from '../server/diagnostics/formats';
 import { RemoteKitError } from '../shared/errors';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -265,6 +267,26 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
     ['browser', 'browser', 'endpoint', 'endpoint.1', 'crashes'],
   );
   const manifest = JSON.parse(files.get('manifest.json')!);
+  assert.deepEqual(decodeJson(files.get('manifest.json')!, diagnosticManifest, 'manifest'), manifest);
+  for (const value of [
+    { ...manifest, id: undefined },
+    { ...manifest, unknown: true },
+    { ...manifest, id: 7 },
+  ])
+    assert.throws(() => decodeJson(JSON.stringify(value), diagnosticManifest, 'manifest'), {
+      reason: 'corrupt_record',
+    });
+  const metadata = { version: 1, reason: 'user' };
+  assert.deepEqual(decodeJson(JSON.stringify(metadata), archiveMetadata, 'metadata'), metadata);
+  for (const value of [
+    { ...metadata, reason: undefined },
+    { ...metadata, unknown: true },
+    { ...metadata, reason: 7 },
+  ])
+    assert.throws(() => decodeJson(JSON.stringify(value), archiveMetadata, 'metadata'), {
+      reason: 'corrupt_record',
+    });
+
   assert.deepEqual(manifest.logs, {
     control: { bytes: Buffer.byteLength('older control record\nlatest control record\n'), droppedBefore: 0 },
     browser: { exists: true, size: browserLog.length, start: 0, bytes: browserLog.length },
@@ -426,6 +448,26 @@ test('crash diagnostics retain binary dumps, bound count and skip oversized or p
   assert(!files.has('crashes/' + names[2]));
   assert(!reads.includes('dump/' + names[3]));
   const manifest = JSON.parse(files.get('manifest.json')!);
+  assert.deepEqual(decodeJson(files.get('manifest.json')!, diagnosticManifest, 'manifest'), manifest);
+  for (const value of [
+    { ...manifest, id: undefined },
+    { ...manifest, unknown: true },
+    { ...manifest, id: 7 },
+  ])
+    assert.throws(() => decodeJson(JSON.stringify(value), diagnosticManifest, 'manifest'), {
+      reason: 'corrupt_record',
+    });
+  const metadata = { version: 1, reason: 'user' };
+  assert.deepEqual(decodeJson(JSON.stringify(metadata), archiveMetadata, 'metadata'), metadata);
+  for (const value of [
+    { ...metadata, reason: undefined },
+    { ...metadata, unknown: true },
+    { ...metadata, reason: 7 },
+  ])
+    assert.throws(() => decodeJson(JSON.stringify(value), archiveMetadata, 'metadata'), {
+      reason: 'corrupt_record',
+    });
+
   assert.equal(manifest.logs['dump/' + names[1]].error, 'dump size limit');
   assert.equal(manifest.logs['dump/' + names[2]].error, 'incomplete dump');
 });

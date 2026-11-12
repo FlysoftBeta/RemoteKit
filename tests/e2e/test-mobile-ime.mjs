@@ -1,87 +1,41 @@
+import { launchPersistentViewer } from './kit/viewer.mjs';
+
+import { randomBytes } from 'node:crypto';
+import { appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { startStack } from './kit/stack.mjs';
+import { registerViewer } from './kit/viewer.mjs';
 /**
  * H264 mobile IME regression with a desktop Chromium renderer, CDP preedit,
- * and synthetic Android-style geometry. Requires Input.imeSetComposition.
- * node tests/e2e/test-mobile-ime.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port] [Control server.mjs]
+ * and synthetic Android-style geometry. Chrome 89 uses DOM composition events;
+ * newer Viewers use Input.imeSetComposition.
+ * node tests/e2e/test-mobile-ime.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port]
  */
-import { createServer } from 'node:http';
-import { startProductStack } from './input-product-stack.mjs';
-import { registerViewer } from './product-stack.mjs';
-import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { resolve, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { randomBytes } from 'node:crypto';
 
-const [playwright, viewer, endpoint, browser, output, listenPort = '34120', controlServer] =
-  process.argv.slice(2);
+const [playwright, viewer, endpoint, browser, output, listenPort = '34120'] = process.argv.slice(2);
 if (![playwright, viewer, endpoint, browser, output].every(Boolean)) {
   throw Error(
     'Expected Playwright module, Viewer exe, Endpoint exe, RemoteKit Browser exe and an unused output directory',
   );
 }
-const root = fileURLToPath(new URL('../../', import.meta.url));
 const run = resolve(output);
 const port = Number(listenPort);
 const origin = 'http://127.0.0.1:' + port;
 const fixtureOrigin = 'http://127.0.0.1:' + (port + 1);
-const { chromium } = createRequire(import.meta.url)(resolve(playwright));
-await mkdir(run);
-const fixturePage = await readFile(new URL('test-keyboard-viewport.html', import.meta.url));
+
+await mkdir(run, { recursive: true });
+
 const fixtureEvents = [];
-const fixture = createServer(async (request, response) => {
-  if (request.url === '/event' && request.method === 'POST') {
-    try {
-      let body = '';
-      for await (const chunk of request) {
-        body += chunk;
-        if (body.length > 65536) {
-          response.writeHead(413).end();
-          return;
-        }
-      }
-      const event = JSON.parse(body);
-      fixtureEvents.push(event);
-      if (fixtureEvents.length > 2048) fixtureEvents.shift();
-      await appendFile(join(run, 'fixture-events.jsonl'), JSON.stringify(event) + '\n');
-      response.end();
-    } catch {
-      response.writeHead(400).end();
-    }
-    return;
-  }
-  response.setHeader('Content-Type', 'text/html; charset=utf-8');
-  response.end(fixturePage);
-});
-await new Promise((accept, reject) => {
-  fixture.once('error', reject);
-  fixture.listen(port + 1, '127.0.0.1', accept);
-});
 
-const server = resolve(controlServer || join(root, 'control/dist/server.mjs'));
-const control = startProductStack({ run, port, endpoint, browser, server });
-control.stdout.on('data', (data) => void appendFile(join(run, 'control.stdout.log'), data));
-control.stderr.on('data', (data) => void appendFile(join(run, 'control.stderr.log'), data));
-const stopped = new Promise((accept, reject) => {
-  control.once('exit', accept);
-  control.once('error', reject);
+const stack = await startStack({
+  seed: false,
+  fixtures: { kind: 'test-mobile-ime', context: { fixtureEvents } },
+  ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
+  run,
+  port,
+  endpoint,
+  browser,
 });
-void stopped.catch(() => {});
-await writeFile(
-  join(run, 'service.json'),
-  JSON.stringify(
-    {
-      controlPid: control.pid,
-      server,
-      viewer: resolve(viewer),
-      endpoint: resolve(endpoint),
-      browser: resolve(browser),
-      port,
-    },
-    null,
-    2,
-  ),
-);
-
 const log = async (stage, value) => {
   await appendFile(join(run, 'keyboard-results.jsonl'), JSON.stringify({ stage, value }) + '\n');
   console.log(stage);
@@ -94,15 +48,7 @@ const pause = (ms) => new Promise((accept) => setTimeout(accept, ms));
 let context, page;
 const deadline = setTimeout(() => void context?.close().catch(() => {}), 300000);
 try {
-  for (let attempt = 0; ; attempt++) {
-    const response = await fetch(origin + '/api/auth/setup', {
-      signal: AbortSignal.timeout(1000),
-    }).catch(() => undefined);
-    if (response?.ok && (await response.json()).setupRequired === true) break;
-    assert(attempt < 900 && control.exitCode === null, 'Fresh isolated Control did not start');
-    await pause(100);
-  }
-  context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
+  context = await launchPersistentViewer(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
     headless: true,
     viewport: { width: 820, height: 1040 },
@@ -362,7 +308,7 @@ try {
     });
   const identity = (first, latest) =>
     latest.connected === 'connected' &&
-    latest.peerCount === 1 &&
+    latest.peerCount === first.peerCount &&
     ['video', 'stream', 'peer', 'tracks', 'channels'].every(
       (key) => JSON.stringify(first[key]) === JSON.stringify(latest[key]),
     );
@@ -438,11 +384,44 @@ try {
       await cdp.send('Input.dispatchKeyEvent', { ...key, type: 'keyUp' });
     }
   };
-  const preedit = (text) =>
-    ime229(() =>
-      cdp.send('Input.imeSetComposition', { text, selectionStart: text.length, selectionEnd: text.length }),
-    );
-  const commit = (text) => ime229(() => cdp.send('Input.insertText', { text }));
+  const domComposition = /\/89\./.test(version.product);
+  await log('composition-driver', domComposition ? 'DOM composition events' : 'CDP IME');
+  let composing = false;
+  const compose = (text, commit) =>
+    ime229(async () => {
+      if (domComposition) {
+        await page.evaluate(
+          ({ text, commit, begin }) => {
+            const editor = document.activeElement;
+            if (!editor?.matches('.remote-input')) throw Error('Composition proxy is not focused');
+            const emit = (type, data) =>
+              editor.dispatchEvent(new CompositionEvent(type, { data, bubbles: true }));
+            if (begin) emit('compositionstart', '');
+            editor.value = text;
+            editor.setSelectionRange(text.length, text.length);
+            emit(commit ? 'compositionend' : 'compositionupdate', text);
+            editor.dispatchEvent(
+              new InputEvent('input', {
+                bubbles: true,
+                data: text,
+                inputType: commit ? 'insertFromComposition' : 'insertCompositionText',
+                isComposing: !commit,
+              }),
+            );
+          },
+          { text, commit, begin: !composing },
+        );
+      } else if (commit) await cdp.send('Input.insertText', { text });
+      else
+        await cdp.send('Input.imeSetComposition', {
+          text,
+          selectionStart: text.length,
+          selectionEnd: text.length,
+        });
+      composing = !commit;
+    });
+  const preedit = (text) => compose(text, false);
+  const commit = (text) => compose(text, true);
   const from = fixtureEvents.length;
   await preedit('ni');
   await observe(
@@ -489,7 +468,7 @@ try {
   const replacementTarget = remountWire.findLast(
     (event) => event.type === 'input.editable' && event.editable > 0,
   )?.target;
-  await log('mobile-ime-remount', { feedback, remount, remountWire });
+  await log('mobile-ime-remount', { first, replacementTarget, feedback, remount, remountWire });
   await screenshot('mobile-ime-remount');
   assert(
     remount.focus &&
@@ -582,7 +561,13 @@ try {
   );
   await ready();
   await log('mobile-ime-manual-reopen', await sample());
+  const blurStart = await page.evaluate(() => keyboardQA.wire.length);
   await tap('tl');
+  await wait(
+    (start) =>
+      keyboardQA.wire.slice(start).some((event) => event.type === 'input.editable' && event.editable === 0),
+    blurStart,
+  );
   await wait(
     () => !document.activeElement?.matches('.remote-input') || document.activeElement.inputMode === 'none',
   );
@@ -625,9 +610,6 @@ try {
   try {
     await context?.close();
   } finally {
-    control.kill('SIGTERM');
-    fixture.closeAllConnections();
-    await new Promise((accept) => fixture.close(accept));
-    await stopped;
+    await stack.stop();
   }
 }

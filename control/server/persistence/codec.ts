@@ -11,24 +11,37 @@ type OptionalFields<F extends Fields> = { [K in keyof F]?: Decoded<F[K]> };
 function fail(path: string, expected: string): never {
   throw new Error(`${path} expected ${expected}`);
 }
-export function string(options: { pattern?: RegExp } = {}): Codec<string> {
+export function string(options: { pattern?: RegExp; min?: number; max?: number } = {}): Codec<string> {
   return {
     read: (value, path) =>
-      typeof value === 'string' && (!options.pattern || options.pattern.test(value))
+      typeof value === 'string' &&
+      (options.min === undefined || value.length >= options.min) &&
+      (options.max === undefined || value.length <= options.max) &&
+      (!options.pattern || options.pattern.test(value))
         ? value
         : fail(path, options.pattern ? `string matching ${options.pattern}` : 'string'),
   };
 }
-export function number(): Codec<number> {
+export function number(options: { min?: number; max?: number } = {}): Codec<number> {
   return {
     read: (value, path) =>
-      typeof value === 'number' && Number.isFinite(value) ? value : fail(path, 'finite number'),
+      typeof value === 'number' &&
+      Number.isFinite(value) &&
+      (options.min === undefined || value >= options.min) &&
+      (options.max === undefined || value <= options.max)
+        ? value
+        : fail(path, 'bounded finite number'),
   };
 }
-export function integer(): Codec<number> {
+export function integer(options: { min?: number; max?: number } = {}): Codec<number> {
   return {
     read: (value, path) =>
-      typeof value === 'number' && Number.isSafeInteger(value) ? value : fail(path, 'safe integer'),
+      typeof value === 'number' &&
+      Number.isSafeInteger(value) &&
+      (options.min === undefined || value >= options.min) &&
+      (options.max === undefined || value <= options.max)
+        ? value
+        : fail(path, 'bounded safe integer'),
   };
 }
 export function boolean(): Codec<boolean> {
@@ -42,10 +55,14 @@ export function literal<const T extends readonly (string | number | boolean | nu
       values.includes(value as T[number]) ? (value as T[number]) : fail(path, values.map(String).join('|')),
   };
 }
-export function array<T>(of: Codec<T>, options: { max?: number } = {}): Codec<T[]> {
+export function array<T>(of: Codec<T>, options: { min?: number; max?: number } = {}): Codec<T[]> {
   return {
     read(value, path) {
-      if (!Array.isArray(value) || (options.max !== undefined && value.length > options.max))
+      if (
+        !Array.isArray(value) ||
+        (options.min !== undefined && value.length < options.min) ||
+        (options.max !== undefined && value.length > options.max)
+      )
         return fail(path, `array${options.max === undefined ? '' : ` of at most ${options.max}`}`);
       return value.map((item, index) => of.read(item, `${path}[${index}]`));
     },
@@ -65,25 +82,32 @@ export function object(required: Fields, optional: Fields = {}): Codec<Record<st
       for (const key of Object.keys(input)) {
         if (
           !Object.prototype.hasOwnProperty.call(required, key) &&
-          !Object.prototype.hasOwnProperty.call(optional ?? {}, key)
+          !Object.prototype.hasOwnProperty.call(optional, key)
         )
           fail(`${path}.${key}`, 'known key');
       }
       for (const [key, codec] of Object.entries(required))
         result[key] = codec.read(input[key], `${path}.${key}`);
-      for (const [key, codec] of Object.entries(optional ?? {})) {
+      for (const [key, codec] of Object.entries(optional)) {
         if (input[key] !== undefined) result[key] = codec.read(input[key], `${path}.${key}`);
       }
       return result;
     },
   };
 }
-export function record<T>(of: Codec<T>): Codec<Record<string, T>> {
+export function record<T>(
+  of: Codec<T>,
+  options: { key?: RegExp; max?: number } = {},
+): Codec<Record<string, T>> {
   return {
     read(value, path) {
       if (value === null || typeof value !== 'object' || Array.isArray(value)) return fail(path, 'record');
+      if (options.max !== undefined && Object.keys(value).length > options.max) fail(path, 'bounded record');
       return Object.fromEntries(
-        Object.entries(value).map(([key, item]) => [key, of.read(item, `${path}.${key}`)]),
+        Object.entries(value).map(([key, item]) => {
+          if (options.key && !options.key.test(key)) fail(`${path}.${key}`, 'known key');
+          return [key, of.read(item, `${path}.${key}`)];
+        }),
       );
     },
   };
@@ -118,9 +142,32 @@ export function corruptRecord(where: string, error: unknown): RemoteKitError {
   if (error instanceof RemoteKitError && error.reason === 'corrupt_record') return error;
   return new RemoteKitError('internal', '数据记录已损坏，请联系管理员', {
     reason: 'corrupt_record',
+    errorId: 'c-' + crypto.randomUUID().replace(/-/g, '').slice(0, 10),
     detail: `${where}: ${(error as Error).message}`,
     cause: error,
   });
+}
+export function corruptState(where: string, error: unknown): RemoteKitError {
+  return new RemoteKitError('internal', 'Invalid persisted state', {
+    reason: 'corrupt_state',
+    errorId: 'c-' + crypto.randomUUID().replace(/-/g, '').slice(0, 10),
+    detail: `${where}: ${(error as Error).message}`,
+    cause: error,
+  });
+}
+export function decodeState<T>(text: string, codec: Codec<T>, where: string): T {
+  try {
+    return codec.read(JSON.parse(text), '$');
+  } catch (error) {
+    throw corruptState(where, error);
+  }
+}
+export function encodeState<T>(value: NoInfer<T>, codec: Codec<T>, where: string): string {
+  try {
+    return JSON.stringify(codec.read(value, '$'));
+  } catch (error) {
+    throw corruptState(where, error);
+  }
 }
 export function decodeJson<T>(text: string, codec: Codec<T>, where: string): T {
   try {

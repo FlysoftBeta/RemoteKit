@@ -126,6 +126,7 @@ async function prepare(name, sequence, current) {
   await writeFile(
     path.join(root, 'node.json'),
     JSON.stringify({
+      version: 1,
       control: `ws://127.0.0.1:${server.address().port}/api/node`,
       privateKey: nodePrivateKey.toString('base64'),
       controlPublicKey: publicKey(controlPrivateKey).toString('base64'),

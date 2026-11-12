@@ -40,6 +40,10 @@ class ClientGestureSourceTime {
     last_ = elapsed;
     return true;
   }
+  void Cancel(std::int64_t elapsed) {
+    last_ = std::max(last_, elapsed);
+    up_ = last_;
+  }
   std::int64_t last() const { return last_; }
 
  private:

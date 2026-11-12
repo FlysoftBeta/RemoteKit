@@ -1,15 +1,15 @@
+import { launchPersistentViewer } from './kit/viewer.mjs';
+
+import { randomBytes } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { startStack, until } from './kit/stack.mjs';
 /**
  * Edge/Chrome 89, isolated Control and native H264 context-menu verification.
  * node tests/e2e/test-context-menu.mjs <playwright module> <viewer exe>
  *   <endpoint exe> <browser exe> <unused evidence directory> [port=34020]
  */
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
-import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
-import { randomBytes } from 'node:crypto';
-import { startStack, until } from './kit/stack.mjs';
 
 const [modulePath, viewer, endpoint, browser, output, portArg = '34020'] = process.argv.slice(2);
 assert(
@@ -18,39 +18,27 @@ assert(
 );
 const run = resolve(output);
 const port = Number(portArg);
-assert(Number.isInteger(port) && port >= 34000 && port + 4 <= 34099, 'Use isolated ports 34000-34099');
 const origin = `http://127.0.0.1:${port + 1}`;
 const fixtureOrigin = `http://127.0.0.1:${port + 4}`;
-const { chromium } = createRequire(import.meta.url)(resolve(modulePath));
-await mkdir(run);
-const html = await readFile(new URL('./fixtures/context-menu.html', import.meta.url));
-const image = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGNQT99AEmIY1TCqYfhqAACGij4QoSpHPwAAAABJRU5ErkJggg==',
-  'base64',
-);
+
+await mkdir(run, { recursive: true });
+
 const remote = [];
 const results = [];
 const product = [];
 let state;
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
-const fixture = createServer(async (request, response) => {
-  if (request.method === 'POST' && request.url === '/event') {
-    let body = '';
-    for await (const chunk of request) body += chunk;
-    remote.push(JSON.parse(body));
-    response.end();
-  } else if (request.url === '/image.png') {
-    response.writeHead(200, { 'Content-Type': 'image/png' }).end(image);
-  } else
-    response
-      .writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
-      .end(html);
+
+const stack = await startStack({
+  scenario: 'context-menu',
+  run,
+  port,
+  endpoint,
+  browser,
+  seed: false,
+  fixtures: { kind: 'test-context-menu', context: { remote } },
+  ports: { control: port, viewer: port + 1, fixture: port + 4, peer: port + 3 },
 });
-await new Promise((done, reject) => {
-  fixture.once('error', reject);
-  fixture.listen(port + 4, '127.0.0.1', done);
-});
-const stack = await startStack({ scenario: 'context-menu', run, port, endpoint, browser, seed: false });
 let context, page;
 const deadline = setTimeout(() => void context?.close(), 300000);
 const result = (scenario, status, detail) => {
@@ -59,7 +47,7 @@ const result = (scenario, status, detail) => {
 };
 try {
   await until(async () => (await fetch(origin + '/api/auth/setup')).ok, 'Control startup');
-  context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
+  context = await launchPersistentViewer(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
     headless: true,
     viewport: { width: 1100, height: 1000 },
@@ -502,7 +490,6 @@ try {
   await writeFile(join(run, 'trace.json'), JSON.stringify({ results, remote, wire, product }, null, 2));
   await context?.close();
   await stack.stop();
-  fixture.closeAllConnections();
-  fixture.close();
+
   console.log('Evidence:', run);
 }

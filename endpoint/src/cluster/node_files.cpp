@@ -1,4 +1,5 @@
 #include "cluster/node_files.hpp"
+#include "persistence/config_formats.hpp"
 #include <windows.h>
 #include <winhttp.h>
 #include <algorithm>
@@ -82,19 +83,11 @@ Result<NodeFiles> LoadNodeFiles(const std::filesystem::path& root) {
     if (!file)
       return Error{ErrorCode::kUnavailable, "cannot read node.json"};
     std::string raw((std::istreambuf_iterator<char>(file)), {});
-    auto json = Json::parse(raw, nullptr, false);
+    auto decoded = config_formats::Decode(raw, config_formats::Node, persisted::Store::kNode);
     SecureZeroMemory(raw.data(), raw.size());
-    if (!json.is_object())
-      return Error{ErrorCode::kInvalidRequest, "invalid node.json"};
-    for (auto it = json.begin(); it != json.end(); ++it)
-      if (it.key() != "control" && it.key() != "privateKey" && it.key() != "controlPublicKey" &&
-          it.key() != "nodeId")
-        return Error{ErrorCode::kInvalidRequest, "unknown node.json field"};
-    if (!json.contains("privateKey") || !json["privateKey"].is_string() ||
-        !json.contains("controlPublicKey") || !json["controlPublicKey"].is_string() ||
-        (json.contains("control") && !json["control"].is_string()) || !json.contains("nodeId") ||
-        !json["nodeId"].is_string())
-      return Error{ErrorCode::kInvalidRequest, "invalid node.json fields"};
+    if (!decoded)
+      return decoded.error();
+    auto json = std::move(decoded).value();
     auto& encoded = json["privateKey"].get_ref<std::string&>();
     auto key = DecodeKey(encoded);
     SecureZeroMemory(encoded.data(), encoded.size());
@@ -117,8 +110,8 @@ Result<NodeFiles> LoadNodeFiles(const std::filesystem::path& root) {
     if (!ValidNodeId(out.node_id))
       return Error{ErrorCode::kInvalidRequest, "invalid nodeId"};
     return out;
-  } catch (...) {
-    return Error{ErrorCode::kInvalidRequest, "invalid node.json"};
+  } catch (const std::exception& error) {
+    return CorruptState(std::string("node.json: ") + error.what());
   }
 }
 Result<std::string> ReadBuildId(const std::filesystem::path& root) {

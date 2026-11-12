@@ -1,35 +1,20 @@
-import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { fakeLearningProvider } from './files-learning-provider.mjs';
-import { startStack, seedUser, until } from './files-stack.mjs';
-import { instrumentViewer, requireControl } from './cluster-test-support.mjs';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { requireControl, seedUser, startStack, until } from './kit/stack.mjs';
+import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
+
+import assert from 'node:assert/strict';
 
 const browserPath = process.argv[2] ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe';
-const run = resolve(process.env.FILES_RUN ?? 'develop/tmp/e2e-files/learning-server-' + Date.now());
+const run = resolve(process.env.E2E_RUN ?? 'develop/tmp/e2e/learning-server-' + Date.now());
 await mkdir(run, { recursive: true });
-const provider = await fakeLearningProvider(run, browserPath);
-const savedEnv = { ...process.env };
-Object.assign(process.env, provider.env);
-let stack;
-try {
-  stack = await startStack({ scenario: 'learning-server', run, browser: provider.launcher });
-} finally {
-  for (const key of Object.keys(provider.env)) {
-    if (savedEnv[key] === undefined) delete process.env[key];
-    else process.env[key] = savedEnv[key];
-  }
-}
+const stack = await startStack({ scenario: 'learning-server', run, browser: browserPath, learning: true });
+const provider = stack.provider;
 console.log('RUN ' + run);
-const { chromium } = createRequire(import.meta.url)(
-  process.env.REMOTEKIT_PLAYWRIGHT ??
-    join(homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'),
-);
-const browser = await chromium.launch({
-  executablePath: process.env.FILES_VIEWER ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+
+const browser = await launchBrowser({
+  executablePath: process.env.E2E_VIEWER ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
   headless: true,
 });
 const Database = requireControl('better-sqlite3');
@@ -44,10 +29,10 @@ async function stage(name, action) {
   await writeFile(join(run, 'results.json'), JSON.stringify(results, null, 2));
 }
 async function connect(name) {
-  const context = await browser.newContext({
+  const context = await createViewerContext(browser, {
     viewport:
-      process.env.FILES_POINTER === 'touch' ? { width: 390, height: 844 } : { width: 1600, height: 1000 },
-    hasTouch: process.env.FILES_POINTER === 'touch',
+      process.env.E2E_POINTER === 'touch' ? { width: 390, height: 844 } : { width: 1600, height: 1000 },
+    hasTouch: process.env.E2E_POINTER === 'touch',
   });
   const response = await context.request.post(stack.origin + '/api/auth/login', {
     headers: { Origin: stack.origin },
@@ -145,7 +130,7 @@ try {
     const opened = await first.call('document.open', { requestId: 'library', assetId: docx.assetId }, true);
     assert.equal(opened.state, 'ready', JSON.stringify(opened));
     results.push({ name: 'pre-render-open', durationMs: Date.now() - start });
-    if (process.env.FILES_POINTER === 'touch')
+    if (process.env.E2E_POINTER === 'touch')
       await first.page.getByText('数学作业 1', { exact: true }).click();
     await first.page.getByRole('button').filter({ hasText: '共享数学讲义.docx' }).first().click();
     await first.page.getByRole('document', { name: '文档第 1 页' }).waitFor();
@@ -235,7 +220,7 @@ try {
     const x = box.x + ((geometry.username.x + geometry.username.width / 2) * box.width) / geometry.width;
     const y = box.y + ((geometry.username.y + geometry.username.height / 2) * box.height) / geometry.height;
     await (
-      process.env.FILES_POINTER === 'touch'
+      process.env.E2E_POINTER === 'touch'
         ? first.page.touchscreen.tap.bind(first.page.touchscreen)
         : first.page.mouse.click.bind(first.page.mouse)
     )(x, y);
@@ -250,7 +235,7 @@ try {
     );
     await first.page.screenshot({ path: join(run, 'bank-sign-in-typed.png') });
     await (
-      process.env.FILES_POINTER === 'touch'
+      process.env.E2E_POINTER === 'touch'
         ? first.page.touchscreen.tap.bind(first.page.touchscreen)
         : first.page.mouse.click.bind(first.page.mouse)
     )(
@@ -293,12 +278,12 @@ try {
     assert.equal(request.textBookId, 'book');
     assert.equal(request.isDesc, false);
     assert.equal(request.search, 'fixture');
-    if (process.env.FILES_POINTER === 'touch')
+    if (process.env.E2E_POINTER === 'touch')
       await first.page.getByRole('button', { name: '筛选', exact: true }).click();
     await first.page.getByRole('combobox', { name: '教材' }).click();
     await first.page.getByRole('option', { name: /数学必修第一册/ }).click();
     await first.page.getByRole('button', { name: '第一章 集合', exact: true }).click();
-    if (process.env.FILES_POINTER === 'touch') {
+    if (process.env.E2E_POINTER === 'touch') {
       await first.page.getByRole('combobox', { name: '题型', exact: true }).click();
       await first.page.getByRole('option', { name: '选择题', exact: true }).click();
       await first.page.keyboard.press('Escape');
@@ -365,5 +350,4 @@ try {
   await browser.close();
   db.close();
   await stack.stop();
-  await provider.close();
 }
