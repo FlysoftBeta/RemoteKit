@@ -120,6 +120,7 @@ const connect = async (username, setup = false) => {
         this.addEventListener('message', ({ data }) => {
           try {
             const message = JSON.parse(data);
+            if (message.type === 'frame') q.frame = message;
             if (
               [
                 'input.result',
@@ -161,6 +162,11 @@ const ready = async () => {
   await user.page.waitForFunction(() => {
     const section = document.querySelector('.remote-viewport');
     return (
+      clusterQA.state?.browser.state === 'available' &&
+      clusterQA.auth?.peerEpoch > 0 &&
+      window.inputClipboardQA.frame?.authEpoch === clusterQA.auth.peerEpoch &&
+      window.inputClipboardQA.frame?.layoutEpoch === clusterQA.layout?.epoch &&
+      !document.querySelector('.page-overlay') &&
       section &&
       !section.classList.contains('resize-waiting') &&
       section.querySelector('canvas[data-video-input]:not(.no-frame)') &&
