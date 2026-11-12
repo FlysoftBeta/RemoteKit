@@ -22,7 +22,7 @@ Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、�
 |---|---|
 | Control 配置文件与身份 | HTTP 监听、存储位置、每个节点的接入方式/网络/放置上限/媒体调优、配额；`control.key` 与各节点的 `node.json`（节点身份） |
 | Control SQLite | 账户（含最近登录、停用时间）、口令/PIN hash、token hash、人脸模板（加密）；workspace（Space、Window、Tab、active 关系、地址意图、恢复阶段、窗口视图状态）；已安装 App 与图标；收藏；使用记录；设置；站点偏好；操作收据；弹窗收养收据；文件目录、分组、篮子顺序、选择事务；剪贴板；会话放置与加密的 Tenant 密钥；对象索引与副本；checkpoint；被移除的节点；待各节点清理的已删除 Session |
-| Control 内存 | Viewer 租约、实际内容区尺寸、页面对话框/全屏/文件请求的临时投影、节点连接状态与指标、Memory Saver 计时 |
+| Control 内存 | Viewer 租约、实际内容区尺寸、页面对话框/全屏/文件请求的临时投影、节点连接状态与指标、自动回收计时 |
 | Endpoint Session | Browser 进程、Session 目录里的 `session.db`（期望 view 配置的执行副本、自然关闭事件、导航恢复数据、下载导入交接、文件库资产元数据/草稿/选择回执/派生映射，见[多节点 · Session 存储](cluster.md#session-存储)）、站点偏好（只在内存，由 Control 推送）与 UA、媒体策略的运行缓存、文件草稿与暂存、媒体/输入/GPU 资源、内存中的 Profile 密钥与集群对象密钥 |
 | Endpoint 节点 | 加密对象（文件库资产、缩略图、checkpoint 块）、Session 热/冷副本 |
 | Browser | Profile 存储（cookie、缓存）、WebContents、history/PageState、sessionStorage 关联、页面回调与各种代次 |
@@ -131,8 +131,8 @@ Control 约每 1.5 秒对每个活跃 Tenant 做一次维护（不同 Tenant 互
 
 | 分区 | 内容与操作 |
 |---|---|
-| 概览 | 节点在线数、用户与在线数、运行中/休眠的会话、对象总量；Control 与发布包版本；节点离线、版本不一致、副本不足、待清理会话等提示 |
-| 用户 | 在线状态、会话位置、存储用量（设置了配额时显示占比）、最近登录。新建；重置密码（撤销该用户所有 token 并断开 Viewer）；清除 PIN 与人脸；强制下线；立即休眠（用户离线且无阻塞项时，跳过 Memory Saver 与空闲时间条件）；重置浏览器数据（仅已休眠：删除放置与全部 checkpoint，下次从空白 Profile 按 URL 恢复标签页，"我的文件"与设置保留）；停用/启用（停用账户的 token 不再有效，登录返回"账户已停用"）；转让管理员；删除用户（输入用户名确认） |
+| 概览 | 节点在线数、用户与在线数、运行中/已停止的会话（其中有未提交更改的数量）、对象总量；Control 与发布包版本；节点离线、版本不一致、副本不足、待清理会话等提示 |
+| 用户 | 在线状态、会话位置、存储用量（设置了配额时显示占比）、最近登录。新建；重置密码（撤销该用户所有 token 并断开 Viewer）；清除 PIN 与人脸；强制下线；立即停止并提交（用户离线且无阻塞项时，跳过回收策略的时间条件）；重置浏览器数据（仅已停止：删除放置与全部 checkpoint，下次从空白 Profile 按 URL 恢复标签页，"我的文件"与设置保留）；停用/启用（停用账户的 token 不再有效，登录返回"账户已停用"）；转让管理员；删除用户（输入用户名确认） |
 | 公告 | 发布、编辑、删除；每条显示发布/修改时间与"已读/启用用户数"。编辑可选"重新提醒已读的用户" |
 | 节点 | 见[多节点 · 管理 App](cluster.md#管理-app) |
 | 存储 | 对象数、内容与单副本占用、副本不足、孤立副本与待清理会话；每个用户的存储用量（及配额）、文件数与最近 checkpoint |
@@ -146,7 +146,7 @@ Control 约每 1.5 秒对每个活跃 Tenant 做一次维护（不同 Tenant 互
 
 ## 剪贴板
 
-Control 保存每用户一份最新剪贴板，Browser 是本地粘贴缓存；历史片段也保存在 Control，不进入对象存储。Browser 重启、休眠或 Session 换节点后先回填再创建 view。
+Control 保存每用户一份最新剪贴板，Browser 是本地粘贴缓存；历史片段也保存在 Control，不进入对象存储。Browser 重启、Session 停止后重新打开或换节点后先回填再创建 view。
 
 - 最新值为纯文本（≤1 MiB UTF-8）与 HTML（≤2 MiB），有单调 revision。超限保留旧值，只报告大小；图片等无文本格式记录为空。正文不进入日志、追踪、诊断或错误消息。
 - `ClipboardBridge` 观察页面、脚本与 Browser 菜单写入，递增共享映射的 `clipboard_sequence`。Endpoint 按序号取 `clipboard.read`，发 `clipboard.changed {viewId?,excludeFromHistory,text,html,…}`；Control 按当前 Session/Tenant 串行接受，更新 revision 和片段，再向已授权 Viewer 推送 `{type:clipboard,revision,text}`。
@@ -155,10 +155,10 @@ Control 保存每用户一份最新剪贴板，Browser 是本地粘贴缓存；�
 - Viewer 用 `clipboard.get {}` 恢复应用缓存，返回 `{revision,text}`；本地选择操作不依赖设备同步开关。`clipboard.set` 接受设备或本地选择写入，返回 `{revision}`。`library.snippet {id}` 按 Tenant 读取全文；复制片段返回 `{revision,text}`，保留原始来源。
 - 片段只记录非空纯文本，按用户+SHA-256 去重，重复复制更新时间和来源。`library_snippets(entry_id,tenant,text,hash,origin,copied_at)` 保存正文；目录带 `kind:snippet`、字节大小和首个非空行的 ≤200 字符预览。未整理保留最新 200 条，移入分区的保留；排除 `clipboard/''` 来源停止收集，清除来源删除未整理片段，已整理的保留。
 - “与本机剪贴板同步”（`clipboardSync`）默认开启。远端新值写设备剪贴板，未聚焦时只保留最新待写值；设备粘贴事件先同步再投远端。回到前台仅在 clipboard-read 已 granted 时读取，不自动请求权限；显式远端粘贴可发起读取。本地选择粘贴只在已授权时刷新设备，其余用应用缓存。scope/revision/文本 hash 防止跨账号和回声。
-- “重置浏览器数据”要求 Session 已休眠，清除最新剪贴板；历史片段仍由文件库管理。删除用户同时删除最新值与片段。
+- “重置浏览器数据”要求 Session 已停止，清除最新剪贴板；历史片段仍由文件库管理。删除用户同时删除最新值与片段。
 - 集群帧按类型限制：`clipboard.changed` 4 MiB；带剪贴板的 `session.open/ensure` 20 MiB；在线 `clipboard.write` 20 MiB；其他 1 MiB。Viewer WS 普通请求仍为 1 MiB，`clipboard.set` 可容纳 1 MiB 文本最坏 JSON 转义，传输上限为 6 MiB+64 KiB。
 
 
 ## 设置
 
-设置统一在"更多 → 设置"，全部由 Control 保存：质量（优先高画质 / 自动 / 优先流畅）、界面缩放、顶部留空、Memory Saver、搜索引擎、左右声道（多选；"不播放"即清空）、音视频同步（默认关闭）、打开时全屏、锁定策略、统计叠层。当前站点的偏好与权限在"更多 → 网站设置"。Control 下发给 Endpoint 的媒体策略是 `{degradationPreference, maxFps, audio}`：maxFps 来自 Viewer 显式上报的刷新能力，未知时 60；audio 为左右声道至少选中一个。音视频同步不属于运行期策略，而是 peer 的创建参数：Control 在转发 offer 时读取当时的设置传给 Endpoint，Endpoint 在应答中回显该 peer 实际采用的值；Viewer 发现权威设置与当前 peer 不一致时立即重建 RTC 连接（不计入失败重试、不经过退避）。
+设置统一在"更多 → 设置"，全部由 Control 保存：质量（优先高画质 / 自动 / 优先流畅）、界面缩放、顶部留空、搜索引擎、左右声道（多选；"不播放"即清空）、音视频同步（默认关闭）、打开时全屏、锁定策略、统计叠层。当前站点的偏好与权限在"更多 → 网站设置"。Control 下发给 Endpoint 的媒体策略是 `{degradationPreference, maxFps, audio}`：maxFps 来自 Viewer 显式上报的刷新能力，未知时 60；audio 为左右声道至少选中一个。音视频同步不属于运行期策略，而是 peer 的创建参数：Control 在转发 offer 时读取当时的设置传给 Endpoint，Endpoint 在应答中回显该 peer 实际采用的值；Viewer 发现权威设置与当前 peer 不一致时立即重建 RTC 连接（不计入失败重试、不经过退避）。

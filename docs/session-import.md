@@ -191,7 +191,7 @@ Control → 设备（`ref` 是所回复的设备事件 seq）：
 
 ## Control 写入
 
-- `SessionImporter` 只在 Session 放置为 active 时写入，不为导入唤醒休眠的 Session、不新建放置；新导入到达时、以及每 15 秒检查一次。同一 Tenant 的导入按接收顺序串行执行。
+- `SessionImporter` 只在 Session 运行时写入，不为导入启动已停止的 Session、不新建放置；新导入到达时、以及每 15 秒检查一次。同一 Tenant 的导入按接收顺序串行执行。
 - 写入把载荷切成若干块，每块 JSON ≤ 512 KiB；每块调用 Endpoint `session.storage.import` 得到 job，再以 200 ms 间隔调用 `session.storage.importStatus` 直到完成。写入按[错误码](architecture.md#错误模型)处理：`busy`、`rate_limited`、`unavailable` 保持 `pending`，按共享策略的等待后重试；每块的身份由 Control 指定（`importId` = 导入记录 ID + 块序号，随记录持久化），Browser 按 `importId` 去重：同一 `importId` 重复提交返回已有作业，载荷不同则 `conflict`，最近 64 个完成结果可重复查询；`outcome_unknown` 用同一 `importId` 查询或重新提交，Browser 换代后查不到则重写这一块（写入本身幂等）；其余错误码 → `failed`，错误码与说明存进记录，发出 `importFailed`——只有 `limit_exceeded`（用户可以腾出空间）的 `retryable` 为 true；完成 → `applied` 并发出 `importApplied`。`importFailed` 对 App 仍是 `{reason, retryable}`：App 只按 `retryable` 决定是否提供重试，`reason` 是显示给用户的说明。
 - 已经打开的页面不会自动刷新；导入记录为每个站点提供一个入口，在新标签页打开对应的 `url`。
 

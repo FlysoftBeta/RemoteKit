@@ -1,6 +1,6 @@
 # 多节点：配置、通道、版本、放置与数据搬迁
 
-一个 Control 管理多个 Endpoint 节点。节点只是算力；产品状态、节点配置、会话放置、密钥和对象索引都在 Control。一个 Tenant 的 Session 在任一时刻只在一个节点上运行；Browser 关闭（休眠）后，Session 可以在任何节点上从 checkpoint 重新打开。没有热迁移：渲染进程、GPU 资源和 WebRTC 连接本来就搬不走，冷搬迁的代价与一次 Browser 重启相同。
+一个 Control 管理多个 Endpoint 节点。节点只是算力；产品状态、节点配置、会话放置、密钥和对象索引都在 Control。一个 Tenant 的 Session 在任一时刻只在一个节点上运行；Session 停止并把数据提交为 checkpoint 之后，可以在任何节点上重新打开；还有未提交更改的 Session 只在它所在的节点上运行（见[Session 副本与提交](#session-副本与提交)）。没有热迁移：渲染进程、GPU 资源和 WebRTC 连接本来就搬不走，冷搬迁的代价与一次 Browser 重启相同。
 
 ## 配置
 
@@ -89,11 +89,11 @@ Control 版本目录中的 `release/node.tar.zst` 与 `release/node.json` 不在
 
 ## 会话、放置与密钥
 
-`session_placements` 记录每个 Tenant 的 `session_id`（32 位十六进制，分配一次不复用）、节点、`placement_epoch`、状态（`active | hibernated`）、最新 checkpoint 与加密的 Tenant DEK。DEK 用 Control 的静态密钥文件 `<db>.key`（与人脸模板共用）以 AES-256-GCM 封装。
+`session_placements` 记录每个 Tenant 的 `session_id`（32 位十六进制，分配一次，重新放置时保留）、持有权威副本的节点、`placement_epoch`、`run_state`（`running | stopped`）、`data_state`（`clean | dirty`，见[Session 副本与提交](#session-副本与提交)）、未决提交 `pending_commit`、最新已提交 checkpoint 与加密的 Tenant DEK。DEK 用 Control 的静态密钥文件 `<db>.key`（与人脸模板共用）以 AES-256-GCM 封装。
 
 - Control 在每个节点连接代次内，向某个 Tenant 发出第一个请求之前先发 `session.open{sessionId, placementEpoch, checkpoint, profileKey}`；Profile 密钥由 DEK 经 HKDF-SHA256 派生，Endpoint 只放在内存里并在销毁时清零。Endpoint 只在 `session.open` 时创建 Session，目录 `<dataPath>/sessions/<sessionId>`；同参数幂等，同 Tenant 不同 sessionId 或 epoch 回退为 `conflict`，未打开的 Tenant 上的其他方法为 `not_found`。
 - Profile 密钥经 Endpoint 新建的匿名管道交给 Browser：只把读端放进 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 继承，参数 `--profile-key-handle=<句柄值>`；Browser 在创建任何 BrowserContext 之前读出恰好 32 字节，不足、多余或句柄无效都拒绝启动（见[页面生命周期 · Profile](page-lifecycle.md#profile-持久化)）。Browser 进程内的会话编号固定为 1，Profile 位于 `<sessionDir>/session-1/profile-1`。
-- **fencing**：每次重新放置都使 epoch 加一。`node.ready` 携带该节点上的活跃会话清单；Endpoint 在每次（重新）连接时终止并遗忘不在清单中或 epoch 过旧的 Session，它们的目录变成冷副本（7 天后或磁盘压力时删除，`session.cold.delete{}`）。
+- **fencing**：每次重新放置都使 epoch 加一。`node.ready` 携带放在该节点上的全部 Session（不论运行与否，带 epoch 与 `dataState`）；Endpoint 在每次（重新）连接时终止并遗忘不在清单中或 epoch 过旧的 Session，删除它们的副本记录，目录变成冷副本（7 天后或磁盘压力时删除，`session.cold.delete{}`）；epoch 更新而清单说是 `clean` 的旧副本直接删除（例如管理员放弃了它的未提交更改）。
 
 ## 对象存储
 
@@ -119,57 +119,62 @@ Endpoint 自己的 Session 状态在 Session 目录的 `session.db`（SQLite，W
 | 表 | 内容 |
 |---|---|
 | `views` | Control 下发的期望 view 配置的执行副本；checkpoint 恢复后据此以恢复模式重建 view 并导入导航历史。冲突时以 Control 对账为准 |
-| `closed_events` | 页面自行关闭、等 Control 确认的事件；没有它，Control 会把已关闭的标签当成丢失而重建。未确认事件阻塞休眠 |
+| `closed_events` | 页面自行关闭、等 Control 确认的事件；没有它，Control 会把已关闭的标签当成丢失而重建。未确认事件阻止停止 |
 | `navigation_recovery` | 每个 view 的导航历史与 PageState（Browser 导出的字节） |
 | `download_imports` | Browser 下载 → 对象 → 文件库之间的交接记录 |
 | `library_assets`、`library_derivatives` | 资产元数据与格式转换结果的缓存，可从对象重建 |
-| `library_drafts` | 上传草稿（字节在 `file-library/incoming/`，先落盘再提交行）；休眠前删除 |
+| `library_drafts` | 上传草稿（字节在 `file-library/incoming/`，先落盘再提交行）；提交前删除，从不进 checkpoint |
 | `library_selections` | 原生文件选择回执 |
 
 站点偏好不落盘：Control 在启动 Browser 前推送，Endpoint 只放内存。每个组件只通过自己的窄接口操作自己的表。一个逻辑变更是一个事务——关闭 view（删期望配置、记关闭事件、删恢复数据）、显式导航（改 URL、删旧恢复数据）、确认事件（删事件、更新下载交接）、批量取消选择——不再有跨文件的中间状态和启动时的修复重放。SQLite 结果码映射到错误模型：`BUSY`/`LOCKED` → `busy`，IO、打不开、磁盘满、权限 → `unavailable`，`CORRUPT`/`NOTADB` 和不支持的 `user_version` → `internal` + `corrupt_state`。
 
-**旧格式导入**：checkpoint 跨构建恢复，所以打开的 Session 目录可能是旧构建写的零散 JSON（`views.json`、`events.json`、`download-imports.json`、`site-preferences.json`、`recovery/*.json`、`file-library/{metadata,drafts,selections,derivatives}/*.json`，以及目录里的 `browser.log`、`crashes/`）。打开时没有 `session.db` 而有这些文件，就按旧规则校验后在一个事务里导入新库，提交之后才删除旧文件；某个文件打不开 → `unavailable`，内容非法 → `corrupt_state`，两种情况都不导入、不删除。导入器单独在 `persistence/legacy_session_import.*`，没有其他代码读旧格式；还有旧格式 checkpoint 的 Session 唤醒过一次后它就没有用处了。
+**旧格式导入**：checkpoint 跨构建恢复，所以打开的 Session 目录可能是旧构建写的零散 JSON（`views.json`、`events.json`、`download-imports.json`、`site-preferences.json`、`recovery/*.json`、`file-library/{metadata,drafts,selections,derivatives}/*.json`，以及目录里的 `browser.log`、`crashes/`）。打开时没有 `session.db` 而有这些文件，就按旧规则校验后在一个事务里导入新库，提交之后才删除旧文件；某个文件打不开 → `unavailable`，内容非法 → `corrupt_state`，两种情况都不导入、不删除。导入器单独在 `persistence/legacy_session_import.*`，没有其他代码读旧格式；还有旧格式 checkpoint 的 Session 打开过一次后它就没有用处了。
 
-**节点级文件**：`<sessionId>.hibernation.json`（休眠日志）、`.checkpoint`（标记）、`.checkpoint-index.json`（增量索引）描述的是"这个节点上的这份副本"，不随 checkpoint 搬迁，仍是单文件原子写（临时文件 + flush + 替换），写入顺序保证日志最后提交。读这些文件时"打不开"（IO 错误）与"不存在"严格区分：前者是 `unavailable`，从不当作不存在；休眠日志内容非法是 `corrupt_state`，标记与索引是缓存，内容非法时按不存在处理。冷副本清理也清除这些文件的 `.new` 残留，以及该 Session 在 `logs/browser/`、`logs/crashes/` 下的日志。
+**节点级文件**：`<sessionId>.copy.json`（副本记录）、`.changes`（变更日志）、`.checkpoint-index.json`（增量索引）描述的是"这个节点上的这份副本"，不随 checkpoint 搬迁。副本记录与索引是单文件原子写（临时文件 + flush + 替换），变更日志只追加。读这些文件时"打不开"（IO 错误）与"不存在"严格区分：前者是 `unavailable`，从不当作不存在；副本记录内容非法是 `corrupt_state`，索引是缓存，内容非法时按不存在处理（整体重建）。冷副本清理也清除这些文件的 `.new` 残留，以及该 Session 在 `logs/browser/`、`logs/crashes/` 下的日志。
 
-## Checkpoint 与休眠
+## Session 副本与提交
 
-**阶段计时**：Endpoint 为每次休眠与打开写一行结构化日志（阻塞检查、导航导出、Browser 关闭与进程退出、扫描、存储、登记、日志落盘；打开时的方式、manifest、校验、定位、拉取、物化、替换、Browser 启动与就绪），诊断包随 `endpoint.log` 收集。
+checkpoint 不是 Session 数据的唯一形态：节点上的 Session 目录可以比任何已提交的 checkpoint 更新。模型显式接受这一点——每份本地副本有一条副本记录 `<sessionId>.copy.json`：`{sessionId, placementEpoch, base, state, stoppedCleanly, changesAt, lastCommit}`。`state` 为 `clean` 表示目录与 `base`（manifest id）完全一致；为 `dirty` 表示可能含有任何 checkpoint 都没有的更改。Session 为运行而打开时（Browser 启动之前）副本即记为 `dirty`、`stoppedCleanly:false`，只有成功提交后才回到 `clean`。已经传输的块不等于可用：只有提交了 manifest 的 checkpoint 才能用来恢复。
 
-**Browser 优雅关闭**：`BrowserRuntime::Shutdown()` 先导出所有导航状态有变化的 view（总计最多 20 秒），再发 `browser.shutdown`，等 Browser 作业中的进程全部退出（最多 30 秒）；只有退出码 0 且作业为空才算干净。所有有意的停止（休眠、服务关闭、更新与配置重启）都走这条路径；强制终止只用于故障与 fencing。一次不干净的关闭之后，同一目录不再生成 checkpoint，直到 Browser 再次启动并干净关闭：重试休眠不能把不一致的数据库提交出去。
+**同节点打开沿用本地副本**。`session.open{sessionId, placementEpoch, checkpoint, profileKey}`：有该 Session 的副本记录、epoch 不比请求新、且（`dirty` 或 `base` 等于请求的 checkpoint）时，**原样使用目录**，不恢复、不回退——Endpoint 进程重启（更新、配置变化、崩溃）后同节点重新打开不会丢掉上次提交之后的更改，从未提交过的 Session 也照常打开。`stoppedCleanly:false`（Endpoint 或 Browser 意外退出）时，Chromium 自己恢复它的数据库，与桌面 Chrome 崩溃后相同。其他情况按请求的 checkpoint 恢复：本地索引对得上时逐文件校验修补（warm），否则物化到 `.restore` 再原子替换（cold），然后写 `clean` 副本记录。epoch 过旧仍按 fencing 拒绝。
 
-**`session.hibernate{placementEpoch}`**：
+**变更跟踪始终开启**。每个运行中的 Session 在 Browser 启动前就用 `ReadDirectoryChangesW` 递归监视自己的目录，变化与删除的路径每 5 秒追加到节点级变更日志 `<sessionId>.changes`（带写出时间），每次提交后截断。意外退出后，变更列表 = 日志内容 ∪ 一次只看元数据的遍历：大小、last write time、文件 ID 与索引不同的文件，last write time 不早于 `changesAt − 2 秒` 的文件，以及删除的文件——不读文件内容。只有索引缺失或非法时才完整重建。NTFS 的 last write time 是变化信号，不使用 USN。开发构建用 `REMOTEKIT_CHECKPOINT_VERIFY=1` 把增量结果与完整遍历比对。
 
-1. 有阻塞项则 `conflict`：未确认的自然关闭事件、未决原生选择、上传中、页面请求（对话框、文件选择）、下载中、RTC 连接存在、生命周期不确定。这些计数由各自的所有者组件报告在快照的 `hibernation` 字段里。
-2. 优雅关闭 Browser；不干净则 `unavailable`。
-3. 关闭 `session.db`（之后任何写入都是缺陷），删除上传草稿与暂存，然后遍历 Session 目录。排除 名为 `Cache`、`Code Cache`、`GPUCache`、`DawnWebGPUCache`、`DawnGraphiteCache`、`Shared Dictionary`、`VideoDecodeStats` 的目录、LevelDB 的 `LOCK`/`LOG`/`LOG.old`，以及上传与文件库暂存目录。Browser 日志和崩溃转储在节点的 `logs/` 下，本来就不在 Session 目录里。SQLite 的 `-journal`/`-wal` 保留：干净关闭才是一致性的前提，文件名是否存在不是。
-4. 不超过 1MiB 的文件是一个对象，更大的按 1MiB 固定切块（SQLite 原地改页、LevelDB 只追加或整文件新建，固定切块的增量效果最好）。Session 目录之外的本地索引记录每个文件的大小、mtime、文件 ID 与块列表，未变的文件直接复用块 id，不重新读取。
-   - **增量扫描**：每个运行中的 Session 在 Browser 启动前就用 `ReadDirectoryChangesW` 递归监视自己的目录，收集变化的路径；checkpoint 只 stat 这些路径（新建目录才遍历），在上次索引上增删改。监视缓冲溢出、出错、Endpoint 重启或任何不确定时退回完整遍历。开发构建用 `REMOTEKIT_CHECKPOINT_VERIFY=1` 同时做两种并要求结果一致。
-   - **流水线**：读取、hash、压缩、加密在有界工作池上并行，manifest 仍按路径排序；对象登记按批发出（`object.committed.batch`，每批 ≤1024 个、一个事务），与存储重叠。Control 往返次数与文件数无关。
-   - **空闲预存**：Session 没有 RTC peer 满 30 秒后，后台低优先级把静默 10 秒以上的变化文件预先存成块，读前读后各记一次文件身份，读期间变化的作废；休眠时身份不变的文件直接复用这些块。预存的块以该 Tenant 的认领提交，没被 checkpoint 引用的按认领过期回收。
-5. 生成 manifest 对象（相对路径、大小、块列表、目录、sessionId、epoch、buildId），把新对象逐个 `object.committed`。manifest 里的 buildId 只记录生成它的构建；恢复只校验 manifest 格式版本，不要求构建相同——Chromium 版本固定，旧构建写的 Profile 原样打开，升级不会让已休眠的 Session 失效。
-6. 原子写入休眠日志 `<sessionId>.hibernation.json`（epoch、manifest id、对象列表、buildId），然后回复 manifest id。Session 关闭，目录保留为热副本。
+**块持续产出**。运行中的 Session 后台低优先级把静默 10 秒以上的变化文件预先切块存为对象：读前读后各记一次文件身份，读期间变化的作废；全节点共享 16 MiB/s 的速率上限，每个 Session 同时一个文件。不超过 1MiB 的文件是一个对象，更大的按 1MiB 固定切块（SQLite 原地改页、LevelDB 只追加或整文件新建，固定切块的增量效果最好）；未变的文件复用索引里的块。预存的块以该 Tenant 的认领提交，Endpoint 每 30 分钟用 `object.claims.refresh{tenantId, ids}` 续期仍未提交的块，Control 只为该 Tenant 已认领的 id 续期。
 
-`session.hibernate` 对同一 epoch 幂等：有日志直接返回日志里的结果；同一 Session 的休眠正在进行时加入它、返回同一结果；Session 已不在内存、也没有日志时返回 `not_found`；epoch 不同返回 `conflict`。日志在 Control 以同一 manifest 打开该 Session 时删除；冷副本清理不删有日志的 Session。
+**提交需要一致点**。目前唯一的一致点是 Browser 干净停止。`session.stop{placementEpoch, commit: requestId | null}`：
 
-**Control 侧**：放置状态是 `active → hibernating → hibernated`。发请求前先在事务里把放置改为 `hibernating`（epoch 不变），请求超时 180 秒（导航导出 20 秒、进程退出 30 秒、再加 checkpoint）。成功则只在 `hibernating` 且 epoch 匹配时提交 checkpoint，改为 `hibernated`；错误码证明没有执行（阻塞项 `conflict`、送达前的 `unavailable`、`busy`）则回到 `active`；`outcome_unknown`（超时、断开、迟到或无效回复）保持 `hibernating`。处于 `hibernating` 的 Tenant 由对账与任何新需求（Viewer 连接、放置）用**同一 epoch** 重新提交 `session.hibernate` 收敛；收敛前放置返回 `unavailable`（"正在保存会话，请稍候"），绝不打开 Session。Endpoint 回答 `not_found`（休眠完成前崩溃）时，放置改为 `hibernated` 并保留上一个已提交的 checkpoint；节点被移除时按最新已提交的 checkpoint 撤离。
+1. 有阻塞项则 `conflict`（指明是哪一项）：未确认的自然关闭事件、未决原生选择、上传中、页面请求（对话框、文件选择）、下载中、RTC 连接存在、生命周期不确定、导航恢复未完成。计数由各自的所有者组件报告在快照的 `stopBlockers` 字段里。
+2. 优雅关闭 Browser：`BrowserRuntime::Shutdown()` 先导出所有导航状态有变化的 view（总计最多 20 秒），再发 `browser.shutdown`，等 Browser 作业中的进程全部退出（最多 30 秒）；只有退出码 0 且作业为空才算干净，不干净则 `unavailable`。强制终止只用于故障与 fencing。
+3. 不提交时到此为止：副本保持 `dirty`，`stoppedCleanly:true`。
+4. 提交时：删除上传草稿与暂存，关闭 `session.db`（之后任何写入都是缺陷），只扫描变更列表并把剩下的文件切块。排除名为 `Cache`、`Code Cache`、`GPUCache`、`DawnWebGPUCache`、`DawnGraphiteCache`、`Shared Dictionary`、`VideoDecodeStats`、`blob_storage` 的目录、LevelDB 的 `LOCK`/`LOG`/`LOG.old`、上传与文件库暂存目录；SQLite 的 `-journal`/`-wal` 保留——干净关闭才是一致性的前提。读取、hash、压缩、加密在有界工作池上并行；对象登记按批发出（`object.committed.batch`，每批 ≤1024 个、一个事务）。
+5. 生成 manifest 对象（版本 2：buildId、文件与块列表、目录），登记，然后写副本记录 `{state: clean, base: manifest, lastCommit: {requestId, manifestId}}` 并截断变更日志，回复 `{state, base, committed: {requestId, manifestId}}`。manifest 里的 buildId 只记录生成它的构建；恢复只校验格式版本，不要求构建相同。
 
-把超时当作失败会造成整个 Profile 丢失：Endpoint 已经生成 checkpoint 并卸载了 Session，Control 却按旧指针（首次休眠时为空）重新打开，Endpoint 用空目录替换了原目录。所以除了上面的对账，Endpoint 还守住两条不变量：Session 有休眠日志而 `session.open` 的 checkpoint 与日志不符时返回 `conflict`、不动目录；新放置总是新的 Session ID，因此以空 checkpoint 打开一个已有非空目录是不变量错误，返回 `conflict` 并记录。
+提交按 `requestId` 幂等：同一 id 直接从副本记录的 `lastCommit` 回答，即使 Session 已不在内存或 Endpoint 已重启；Session 不在内存而副本是 `clean` 时，不同的 id 直接回答当前 `{state: clean, base}`。路径超过 `MAX_PATH` 的文件同样能扫描、物化与恢复。
 
-**打开**：之后任何对该 Tenant 的需要（Viewer 连接、对账）都会重新放置并以该 checkpoint 打开。节点本地的热副本对应同一 manifest 时，先按本地索引（大小、mtime、文件 ID）逐个校验文件，缺失或不符的文件从对象重新物化，取不到则以 `unavailable` 失败、不动目录；没有对应热副本时拉取对象物化到 `.restore` 再原子替换：manifest 的块一次批量 `object.locate`（同时授予读取权），本地已有的块与网络拉取并行解码，缺失的块最多 8 个并发、每个来源最多 4 个传输，按偏移写入，新副本批量登记。Tab 保留产品状态，经现有的导航恢复流程回到原页面。
+**优雅关闭 Endpoint**（服务停止、退出码 3/4）：停止每个 Session，并在全节点 60 秒预算内用节点生成的 requestId 逐个提交；没来得及的保持 `dirty`、`stoppedCleanly:true`——同节点重新打开仍沿用它。重连后 Endpoint 发一条 `node.ready` 事件，列出本节点每个 Session 副本的 `copy:{state, base, lastCommit}`（`complete` 表示已全部列出）；Control 把它没有请求过的提交当作请求过的一样校验对象并提交指针；校验完成前不重新打开该 Session，避免按旧指针恢复。
 
-**休眠策略**（Control，只在该 Tenant 开启 Memory Saver 时；没有处于 applying 的操作、快照报告无阻塞项）：
+**Control 侧**：放置是 `run_state × data_state`。停止并提交前先在事务里写 `pending_commit`（epoch 不变），请求超时 180 秒（导航导出 20 秒、进程退出 30 秒、再加提交）。成功：校验对象、提交 checkpoint 指针（保留最新 2 个），改为 `stopped/clean`；错误码证明没有执行（阻塞项 `conflict`、送达前的 `unavailable`、`busy`）：回到 `running/dirty`；`outcome_unknown`：保留 `pending_commit`，对账用**同一个 requestId** 再问，直到得到结果。未决提交期间认领受保护，不会被 GC。
 
-- 空闲：没有 Viewer 连接满 10 分钟。
-- 缓解：节点持续有压力，或刚有放置以预测 ≥ 0.85 落在它上面时，按 Viewer 离开最久的顺序休眠该节点上离开 ≥ 60 秒的 Session，每节点同时只有一个休眠在途；每次休眠后等一个更新的指标采样再决定下一个，节点已缓解且没有待缓解的放置时停止。缓解进行中该节点不做普通的空闲休眠（由缓解按顺序处理）。
-- 再平衡（冷迁移）：节点持续有压力、而另一个就绪节点预测 < 0.7 时，同样的规则休眠压力节点上的空闲 Session；它们下次唤醒时按放置规则落到更轻的节点。没有热迁移，有 Viewer 连着的 Session 永远不搬。
-- 每次自动休眠记录一行日志：tenant、节点、原因（idle/relief/rebalance）、压力与预测。
+**放置规则**：`clean` 的 Session 可以放到任何合格节点（从 checkpoint 恢复，或沿用同一 manifest 的本地副本）。`dirty` 的 Session 只能在持有它的节点上运行；那个节点离线时 Session 是 `unavailable`，reason `session_data_on_offline_node`（Viewer："会话数据所在节点离线，恢复后自动继续"）。再平衡只移动 `clean` 的 Session。管理 App → 用户对这种 Session 提供"放弃未提交的更改"：确认框显示最后一次提交时间，确认后 epoch 加一、隔离旧副本、以最新已提交的 checkpoint 记为 `stopped/clean`。
+
+**打开（恢复时）**：manifest 的块一次批量 `object.locate`（同时授予读取权），本地已有的块与网络拉取并行解码，缺失的块最多 8 个并发、每个来源最多 4 个传输，按偏移写入，新副本批量登记。取不到则以 `unavailable` 失败、不动目录。Tab 保留产品状态，经现有的导航恢复流程回到原页面。
+
+**阶段计时**：Endpoint 为每次停止/提交与打开写一条结构化日志（阻塞检查、导航导出、Browser 关闭与进程退出、扫描、存储、登记；打开时的方式 reuse/warm/cold/new、manifest、校验、定位、拉取、物化、替换、Browser 启动与就绪）。
+
+**停止策略**（Control 自动决定，没有用户开关；没有处于 applying 的操作、快照报告无阻塞项时才停止，每次停止都请求提交）：
+
+- 空闲：Viewer 离开后，按该用户自己的离开时长分布决定（见[页面生命周期 · 自动回收](page-lifecycle.md#自动回收control)）。
+- 缓解：节点持续有压力，或刚有放置以预测 ≥ 0.85 落在它上面时，按 Viewer 离开最久的顺序停止该节点上离开 ≥ 60 秒、且按同一规则可以停止的 Session，每节点同时只有一个在途；每次停止后等一个更新的指标采样再决定下一个，节点已缓解且没有待缓解的放置时停止缓解。缓解进行中该节点不做普通的空闲停止（由缓解按顺序处理）。
+- 再平衡（冷迁移）：节点持续有压力、而另一个就绪节点预测 < 0.7 时，同样的规则停止并提交压力节点上的空闲 Session；它们下次打开时按放置规则落到更轻的节点。没有热迁移，有 Viewer 连着的 Session 永远不搬。
+- 挂机模式的标签所在的 Session 在 30 分钟资格期内不会被空闲、缓解或再平衡停止；只有节点资源硬耗尽可以越过它。
+- 每次自动停止记录一条日志：tenant、节点、原因（idle/relief/rebalance/exhaustion）、压力与预测。
 
 **可搬迁性**（Chromium 157 实测与源码核对）：
 
 - Cookie 用 Control 托管的 Profile 密钥加密（`rk1` 提供者），不再绑定 DPAPI。
 - 网络沙箱对 `Network` 目录的 ACL 在每次加载 NetworkContext 时重新授予，`NetworkDataMigrated` 标记只阻止重复迁移；恢复文件时用目标机正常继承的权限，不复制源 ACL。
-- 会话 Cookie 跨 Browser 重启保留（persist/restore 打开），否则每次休眠都会让依赖会话 Cookie 的网站掉登录。
+- 会话 Cookie 跨 Browser 重启保留（persist/restore 打开），否则每次停止都会让依赖会话 Cookie 的网站掉登录。
 - sessionStorage 通过持久化的 namespace 跨进程恢复（见[页面生命周期](page-lifecycle.md#导航状态导出与恢复)）。
 - DBSC 在 content embedder 中默认关闭（`NetworkContextParams.device_bound_sessions_enabled` 为 false），保持关闭：它的密钥在 TPM 里，无法搬迁。
 - 不可搬迁、也不尝试搬迁：页面持有的本机文件引用（File System Access 句柄、下载路径、PageState 中的文件字段）、平台验证器凭据、客户端证书。
@@ -180,7 +185,7 @@ Endpoint 每 5 秒发 `node.metrics`：系统 CPU 忙碌比例、内存总量/�
 
 - 利用率按资源分别计算：CPU、1 − 可用/总内存、最大 3D 利用率、最大编码利用率、1 − 剩余/磁盘，设置了 `maxSessions` 时再加 Session/maxSessions。压力 = 各项最大值；最近 30 秒持续 ≥ 0.85 视为有压力，最新一个采样 < 0.85 视为已缓解。
 - **预测**：每个节点在没有 Session 时按 EWMA（α = 0.2）学习各资源的空闲基线；有 Session 时单个 Session 的成本 = (利用率 − 基线) / Session 数（还没有基线时不减，偏保守）；没有 Session 的节点借用其他节点成本的平均值。预测压力 = 各资源"当前 + 一个 Session 的成本"的最大值。管理 App 显示余量 = 1 − 预测。
-- **放置**（新 Tenant 或休眠后唤醒）：候选为就绪、未移除、未在磁盘排空、已有指标、且满足所有**显式设置**的上限（Session 数、`diskReserveBytes`、`sessionMemoryBytes`）的节点。得分 = 预测压力；持有该 Tenant 最新 checkpoint 7 天内热副本、且预测 < 0.85 的节点减 0.15；最低者胜，同分按 nodeId。尽力而为：胜者预测 ≥ 0.85 也照样放置，同时请求该节点的 Memory Saver 腾出容量；没有候选才返回 `unavailable`。显式上限是硬的，满了不放。
+- **放置**（新 Tenant 或已停止且 `clean` 的 Session 再次打开；`dirty` 的 Session 不参与，只回到它所在的节点）：候选为就绪、未移除、未在磁盘排空、已有指标、且满足所有**显式设置**的上限（Session 数、`diskReserveBytes`、`sessionMemoryBytes`）的节点。得分 = 预测压力；持有该 Tenant 最新 checkpoint 对应本地副本（7 天内）、且预测 < 0.85 的节点减 0.15；最低者胜，同分按 nodeId。尽力而为：胜者预测 ≥ 0.85 也照样放置，同时请求该节点的回收策略腾出容量；没有候选才返回 `unavailable`。显式上限是硬的，满了不放。
 - **磁盘下限**：设置了 `diskReserveBytes` 用它，否则取 max(2 GiB, 卷容量的 5%)。剩余低于下限：停止向该节点放置，删除冷副本，仍不足 2 倍下限时把对象副本迁到别处。
 
 ## 管理 App
@@ -189,4 +194,4 @@ Endpoint 每 5 秒发 `node.metrics`：系统 CPU 忙碌比例、内存总量/�
 
 ## 节点移除
 
-只能移除未就绪的节点，需确认：记录到 `removed_nodes`，该节点上的 Tenant epoch 加一并以最新 checkpoint（没有则为空 Profile，按 Control 的有限产品信息重建工作区）变为 `hibernated`，它的副本从索引移除；被移除的节点握手时得到 `unknown_node`，直到管理员重新加入。`removed_nodes` 由 `NodeAdmin`（`control/server/cluster/node-admin.ts`）独占，它在一个事务里调用 Placement 的 `evacuate` 与对象索引的 `forgetNode`，各自只清理自己的表。节点列表只来自配置文件。节点失联本身不会自动触发重新放置：最近 checkpoint 之后的数据只在那台机器上。
+只能移除未就绪的节点，需确认：记录到 `removed_nodes`，该节点上的 Tenant epoch 加一并以最新已提交的 checkpoint（没有则为空 Profile，按 Control 的有限产品信息重建工作区）变为 `stopped/clean`，它的副本从索引移除。节点上还有未提交更改的 Session 时，确认框列出这些用户与各自最后一次提交时间，确认即放弃这些更改；被移除的节点握手时得到 `unknown_node`，直到管理员重新加入。`removed_nodes` 由 `NodeAdmin`（`control/server/cluster/node-admin.ts`）独占，它在一个事务里调用 Placement 的 `evacuate` 与对象索引的 `forgetNode`，各自只清理自己的表。节点列表只来自配置文件。节点失联本身不会自动触发重新放置：未提交的更改只在那台机器上，放弃它们只能由管理员明确决定。

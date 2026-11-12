@@ -1,4 +1,4 @@
-# 页面生命周期与 Memory Saver
+# 页面生命周期与自动回收
 
 WebView 是稳定的逻辑身份；WebContents 是可以冻结、丢弃、卸载和重建的执行实例。本文描述可见性、四种生命周期动作、Control 的回收策略、状态不确定时的恢复，以及导航状态的导出与恢复。
 
@@ -37,17 +37,18 @@ Browser 的 `CanDiscard` 暴露资格，并在执行点用 `CheckQuiescent` 再�
 
 普通表单编辑（没有 beforeunload）目前没有单独的"脏表单"保护，这比 Chrome 的完整策略窄。没有引入 Chrome 的 Performance Manager：content 层已经提供基本的后台行为，RemoteKit 自己负责远程服务的计时与保护策略；Chrome 的 2–6 小时等待/回访豁免不适用；没有可靠的逐页 CPU/RSS 计量，所以也不打分。
 
-## Memory Saver（Control）
+## 自动回收（Control）
 
-默认开启。`MemorySaver` 用 Control 本地单调时钟累计"安全隐藏"时长：
+回收没有用户开关，由 `workspace/reclaim-policy.ts`（纯函数）根据统计与节点压力决定；`lifecycle.ts` 用 Control 本地单调时钟累计每个标签"可回收"的时长：
 
-- 持续安全隐藏 30 秒 → freeze；累计 120 秒 → discard（冻结后继续计时）。所在节点持续有压力时缩短为 10 秒与 30 秒。
-- 在线页面和 Viewer 断线后的页面共用这套策略。
-- 安全资格使用 Browser 的 canDiscard。媒体、采集、页面请求、关闭或恢复、可见、canDiscard 失败会清空计时；策略自己发起的 freeze 处于 pending 期间暂停累计。
-- 计时绑定 Browser incarnation 与执行实例；对象缺失、重新显示、设置关闭、超过 15 秒的观察间断都清零——宿主休眠或长时间失联不能被当成持续的安全闲置。计时不持久化，也不以绝对时间跨机器传递。音频或导航结束后重新开始一个安全区间，而不是立即回收。
+- **标签**：后台、不可见、没有原生保护的标签在累计可回收 F 后 freeze、累计 D 后 discard（冻结后继续计时）。基准 F = 30 秒、D = 120 秒；该用户可见停留总时长排前 20%（且总计 ≥ 5 分钟）的页面 ×4；节点持续有压力时 ÷4；下限 10 秒与 30 秒。在线页面和 Viewer 断线后的页面共用这套策略。
+- **整个 Session**：Viewer 离开后，用该用户已完成的离开时长做经验生存函数 S(t)。离开了 a 时，若"接下来 5 分钟内回来"的条件概率 (S(a) − S(a+5 分钟)) / S(a) < 0.2 且 a ≥ 5 分钟，就停止并提交；节点持续有压力时阈值 0.5、a ≥ 2 分钟。离开超过历史上最长的一次时，按"不会马上回来"处理。已完成的离开少于 20 次时用固定的 10 分钟。
+- **统计**：`viewer_presence(tenant, connected_at, disconnected_at)` 每次 Viewer 连接一行（保留 90 天、每用户最多 2000 行；Control 每 10 秒记一次心跳，重启时用最后一次心跳关闭未结束的行）；`page_dwell(tenant, page_key, visible_ms, visits, last_visible_at)` 在标签真正可见（Viewer 在线且已解锁、窗口可见、是活动标签、在活动 Space）时累计，每用户最多每 10 秒写一次。`page_key` 与使用记录的 URL 规范化相同。
+- **挂机模式**（标签设置 `idleKeepAlive`，浏览器窗口"更多"菜单里的"挂机模式"，开启时标签上有图标）：该标签不会被 freeze/discard，所在 Session 在可回收满 30 分钟前不会被停止，不论统计结果与普通的节点压力；只有资源硬耗尽（节点可用内存 < 5%，或 Endpoint 报告分配失败）可以越过，并记录下来。每个挂机标签记录 `{开启时间, 可回收起点, 结果: 保持运行|冻结|丢弃|停止, 时间, 原因: 统计|压力|耗尽}`；用户回到这个标签时，窗口上显示一次说明（10 秒后自动消失，可关闭）：保持运行时显示离开期间运行了多久，被回收时显示时间与原因，并说明页面已重新打开、页面内未保存的状态可能丢失。普通标签被回收后照常静默恢复。
+- 安全资格使用 Browser 的 canDiscard。媒体、采集、页面请求、关闭或恢复、可见、canDiscard 失败会清空计时；策略自己发起的 freeze 处于 pending 期间暂停累计而不清零。
+- 计时绑定 Browser incarnation 与执行实例；对象缺失、重新显示、超过 15 秒的观察间断都清零——宿主睡眠或长时间失联不能被当成持续的安全闲置。计时不持久化，也不以绝对时间跨机器传递。
 - 维护周期约 1.5 秒；生命周期请求另有 12 秒的节流。
 - 重新可见时先恢复：等待 actual=live 且 pending=false 再显示。失败或不确定时保留原因显示在 Tab 上，不伪装成功。
-- 整个 Browser 的休眠：Viewer 断开满 10 分钟（节点有压力时按缓解规则，离开 60 秒起按离开时长依次休眠）且没有阻塞项时，Control 让 Endpoint 优雅关闭该 Tenant 的整个 Browser 并生成 checkpoint；Tab 保留产品状态并显示为已丢弃，下次需要时在负载最合适的节点上重新打开（见[多节点 · Checkpoint 与休眠](cluster.md#checkpoint-与休眠)）。
 
 曾经 Browser 实现了 freeze，但 Endpoint 的允许动作列表里漏了它，策略根本执行不了：辅助函数存在不代表端到端的方法被放行。
 
@@ -89,7 +90,7 @@ lifecycle_uncertain
 - `ProfileNetworkState` 拥有 OSCryptAsync、RemoteKit 的 `ProfileKeyProvider`、cookie 加密绑定和 StoragePartition 网络路径。只有 Profile 目录并不会有持久 cookie：NetworkContext 需要显式的 cookie 数据库路径。
 - 交给 renderer 的可写文件句柄（File System API 等）在 Windows 上要加禁止执行的 ACE，base 只允许在 TEMP 和嵌入方登记的一个数据根下这样做。Browser 启动时把 `--data-path` 登记为该数据根（PathService 键 16000 + `SetExtraNoExecuteAllowedPath`）；否则数据目录不在 TEMP 下时，任何用到这些 API 的页面（例如 Cloudflare 人机验证）都会让 Browser 因 CHECK 失败退出。
 - Cookie 密钥由 Control 从 Tenant DEK 派生，经只继承给 Browser 的匿名管道传入（`--profile-key-handle`），Browser 在创建 BrowserContext 之前读出恰好 32 字节，只保存在内存里（`ProfileKey`，销毁时清零）。提供者标签 `rk1`、AES-256-GCM、唯一一个提供者。磁盘上没有任何密钥文件，也不依赖 DPAPI，所以 Profile 目录可以搬到另一台机器的另一个路径；单独拿到目录无法解密 Cookie。密钥不对或缺失时启动失败，不退回明文或内存存储。
-- 会话 cookie 跨 Browser 重启保留（persist/restore_old 打开）：Browser 的关闭多半是休眠而不是用户关闭浏览器。
+- 会话 cookie 跨 Browser 重启保留（persist/restore_old 打开）：Browser 的关闭多半是回收停止而不是用户关闭浏览器。
 - 优雅关闭（`browser.shutdown`）：停止接受新命令（之后一律 `unavailable`），持久化 sessionStorage namespace，直接销毁 WebContents（不运行 beforeunload），在 10 秒内等 cookie 与各 StoragePartition 的 flush 回调，退出码 0；任一步失败以退出码 70 退出并记录失败的步骤。Endpoint 只把退出码 0 且作业为空视为干净关闭；强制终止会跳过这些 flush。
 - 剪贴板不用系统剪贴板（不同 Tenant 的 Browser 进程会共享同一个 Windows 剪贴板），而用 Chromium 的 headless 内存剪贴板（`ClipboardNonBacked`），UI 与 IO 线程各一个。它只是 Control 剪贴板的缓存，见 [Control · 剪贴板](control-plane.md#剪贴板)。
 - 关闭顺序：`PostMainMessageLoopRun` 先关闭生产者，解绑 delegate 并取消请求，销毁 pending 弹窗和正式 contents，排空延迟的宿主删除，最后销毁 Context 与 Screen。成员声明顺序不是关闭协议（曾经 BrowserContext 先于 pending 弹窗的 WebContents 被销毁）。
@@ -98,7 +99,7 @@ lifecycle_uncertain
 
 - `ProfilePermissions` 使用 Control 同步的站点规则和当前文档的临时许可。地理位置、剪贴板读取、本机字体、窗口管理、MIDI 和空闲检测可触发权限提示。活跃文档、Permissions-Policy 和 worker origin 检查仍然生效。宿主设备隔离独立于权限决定，见[兼容性 · 宿主设备隔离](compatibility.md)。
 - 权限、HTTP 与代理登录、POST 重提交、协议处理器注册都走文档绑定的页面请求。权限或协议规则同步时可结清已决定的请求。重提交操作在用户决定前保持待定，取消会结清原操作。
-- `ProfileDownloads` 在 `Profile/downloads` 分配唯一目标名和 `.crdownload` 中间文件。网络下载要求 HTTPS，由 HTTPS 页面生成的 `blob:`、`data:`、`filesystem:` 下载也允许。超过 256 MiB 会取消。完成事件保留至 Endpoint 确认，Endpoint 导入租户对象存储并清理 Browser 副本，Control 把条目放入「我的文件」。导入未结清期间阻止休眠。
+- `ProfileDownloads` 在 `Profile/downloads` 分配唯一目标名和 `.crdownload` 中间文件。网络下载要求 HTTPS，由 HTTPS 页面生成的 `blob:`、`data:`、`filesystem:` 下载也允许。超过 256 MiB 会取消。完成事件保留至 Endpoint 确认，Endpoint 导入租户对象存储并清理 Browser 副本，Control 把条目放入「我的文件」。导入未结清期间阻止停止。
 - `page.command`：back/forward/reload/stop（走导航操作账本）、find/stop_find、zoom/get_zoom、copy/paste/cut/select_all。find 在回调之前登记请求身份，因为回复可能同步；替换 find 会话会丢弃旧回复，最终回复不保证到达。
 
 ## 尚未实现

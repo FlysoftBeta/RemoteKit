@@ -27,7 +27,7 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 
 | 组件 | 语言/构建 | 职责 |
 |---|---|---|
-| **Control** | TypeScript，Node，better-sqlite3，Vite/React/MUI | 产品状态的唯一真相：账户、Window/Tab、地址意图、设置、站点偏好、文件目录、操作收据。节点配置、会话放置、Tenant 密钥、对象索引与 checkpoint。认证、Viewer 租约、信令转发、对账、Memory Saver 与休眠策略、更新包分发。提供 Viewer 前端。 |
+| **Control** | TypeScript，Node，better-sqlite3，Vite/React/MUI | 产品状态的唯一真相：账户、Window/Tab、地址意图、设置、站点偏好、文件目录、操作收据。节点配置、会话放置、Tenant 密钥、对象索引与 checkpoint。认证、Viewer 租约、信令转发、对账、回收策略（停止与提交）、更新包分发。提供 Viewer 前端。 |
 | **Endpoint** | C++20，独立 CMake/Ninja | 算力节点，可与 Control 分机部署，配置由 Control 下发。Tenant→Session；每个 Session 一个 Browser 进程。GPU atlas 消费、硬件编码（QSV/NVENC）、WebRTC、输入校验与路由、照片处理、人脸推理、加密对象存储与节点间传输、checkpoint。 |
 | **Updater** | C++20，同一 CMake 工程的独立可执行文件（静态 CRT） | 节点上的 `remotekit_node.exe`：监管 Endpoint 进程，从 Control 下载并安装与之相同版本的节点运行时。Control 主机上的 `remotekit_control.exe`：按加密的发布 manifest 从 GitHub Releases 下载增量或完整包，安装、切换并监管 Control，自更新。 |
 | **Browser** | C++，Chromium GN | 承载 WebContents 与 Profile；页面生命周期、输入派发、页面请求（对话框/文件选择/权限/下载）、导航状态；Rend 驱动离屏绘制并合成 atlas。 |
@@ -121,14 +121,14 @@ control/
     main.ts, application.ts, config.ts   组合根与配置
     http/          HTTP 路由与 WebSocket 分发表
     auth/          账户、Viewer 锁定与 peer 授权、人脸挑战、密码学
-    admin/         管理员的用户管理（创建、凭据重置、停用、转让、休眠、删除）
+    admin/         管理员的用户管理（创建、凭据重置、停用、转让、停止、放弃未提交更改、删除）
     persistence/   迁移（冻结基线 + 编号步骤）、存储文档解码器、完整性自检与各仓库（账户、安全、workspace、操作收据、关系化文件库）
     recovery/      损坏数据库的凭据恢复（入口 recover-credentials.ts，单独打包）
     cluster/       集群通道（Noise、帧、节点链路）、放置、密钥派生、对象索引、指标、更新包、节点管理、Session 清理队列
     endpoint/      类型化网关（按 Tenant 路由到所在节点）与管理消息类型
     tenants/       每租户运行时状态
     viewers/       Viewer 租约与 RTC 信令
-    workspace/     纯命令、操作管线、对账、导航、生命周期与 Memory Saver、页面请求、弹窗、站点策略
+    workspace/     纯命令、操作管线、对账、导航、生命周期与自动回收、页面请求、弹窗、站点策略
     session-import/  会话导入：HPKE 信封、IMAP 拉取、账密校验与写入
     learning/      学习与题库：服务客户端（providers/）、登录、同步与附件下载、题库查询、富文本与媒体代理
     files/ diagnostics/ quality.ts atlas-plan.ts navigation-url.ts
@@ -195,10 +195,10 @@ tests/             e2e/（真实栈产品场景）、integration/（原生 Endpo
 
 | 文档 | 内容 |
 |---|---|
-| [多节点](cluster.md) | 配置文件、集群通道与握手、版本锁定与更新、放置与密钥、对象存储、checkpoint 与休眠、指标、节点移除 |
+| [多节点](cluster.md) | 配置文件、集群通道与握手、版本锁定与更新、放置与密钥、对象存储、Session 副本与提交、指标、节点移除 |
 | [工作区](workspace.md) | App、Window 与 Space 多任务、开始屏幕与 frecency、安装网页为 App、设置拆分、我的文件的来源与分区 |
 | [Control](control-plane.md) | 数据归属、连接、操作与收据、导航、对账、对话框/关闭/弹窗、站点身份、全屏、设置 |
-| [页面生命周期](page-lifecycle.md) | 可见性、freeze/discard/unload/restore、Memory Saver、不确定恢复、导航导出、Profile |
+| [页面生命周期](page-lifecycle.md) | 可见性、freeze/discard/unload/restore、自动回收与挂机模式、不确定恢复、导航导出、Profile |
 | [渲染](rendering.md) | OSR 输出设备、plane、atlas、Slot/Fence、渲染管道协议、换代、几何 |
 | [节奏与补帧](pacing.md) | Comp 节拍、背压、Idle/Wake、尾 IDR、呈现刷新 |
 | [编码](encoding.md) | 适配器、EncoderWorker、QSV/NVENC 参数、H.264 level、WebRTC 适配、码控声明、发送 pacing |

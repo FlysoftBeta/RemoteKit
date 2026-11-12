@@ -20,7 +20,7 @@
 
 ### 登录页
 
-两种登录都要用户在真实网页里亲自完成一步，所以 App 窗口里嵌入一个远端 WebView：**登录 Tab**。它是 Control 拥有的 Tab（`ProductTab.signIn`），属于学习或题库窗口，是该窗口的 `activeTabId`；App 把它放在自己界面里的一个盒子中，远端视口尺寸取这个盒子而不是整个窗口。登录 Tab 不出现在标签栏，用户不能导航它，不参与常用项、预览、弹窗收养与 Memory Saver 丢弃；登录完成、取消、超时（5 分钟）或窗口关闭时 Control 关闭它。
+两种登录都要用户在真实网页里亲自完成一步，所以 App 窗口里嵌入一个远端 WebView：**登录 Tab**。它是 Control 拥有的 Tab（`ProductTab.signIn`），属于学习或题库窗口，是该窗口的 `activeTabId`；App 把它放在自己界面里的一个盒子中，远端视口尺寸取这个盒子而不是整个窗口。登录 Tab 不出现在标签栏，用户不能导航它，不参与常用项、预览、弹窗收养与自动回收；登录完成、取消、超时（5 分钟）或窗口关闭时 Control 关闭它。
 
 Browser 侧是**专用的登录视图**，而不是通用的脚本执行或 Cookie 读取：view 创建时带 `signIn: 'changyan' | 'xinjiaoyu'`，Browser 按用途用固定代码处理，只把约定的结果以 `view.signIn` 事件交给 Endpoint，再经 `session.events` 到 Control。结果不超过 8KiB，Browser 与 Endpoint 只记录"view N 登录完成"，不记录内容。登录视图不能打开弹窗。
 

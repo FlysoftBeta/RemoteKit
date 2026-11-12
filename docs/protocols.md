@@ -42,7 +42,7 @@ POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字
 | `feedback` | 诊断用媒体反馈 |
 | `auth.get/lock/verify/settings/password`、`auth.face.begin/cancel/remove` | 锁屏与凭据 |
 | `admin.overview/users/storage/nodes/diagnostics/announcements` | 管理员：各分区数据 |
-| `admin.createUser/resetPassword/clearSecondFactors/signOut/setDisabled/transferAdmin/hibernate/resetSession/deleteUser` | 管理员：按 `username` 操作用户，返回新的用户列表 |
+| `admin.createUser/resetPassword/clearSecondFactors/signOut/setDisabled/transferAdmin/stop/discardChanges/resetSession/deleteUser` | 管理员：按 `username` 操作用户，返回新的用户列表 |
 | `admin.removeNode/readdNode` | 管理员：按 `nodeId` |
 | `admin.deleteDiagnostic/downloadDiagnostic` | 管理员：按诊断 `id`；下载返回一次性 URL |
 | `admin.publishAnnouncement/updateAnnouncement/deleteAnnouncement` | 管理员：发布 `{title, body}`、按 `id` 编辑（`republish` 清空已读）或删除，返回新的公告列表 |
@@ -135,7 +135,7 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 |---|---|
 | `session.open` | 创建或确认 Session：sessionId、placementEpoch、checkpoint、profileKey、可选 clipboard {revision,text,html}（在任何 view 之前写入 Browser）；其他方法只对已打开的 Tenant 有效 |
 | `clipboard.write` | `{revision,text,html}`，在线更新 Browser 剪贴板；作用域抑制回传 |
-| `session.hibernate` | 优雅关闭 Browser 并生成 checkpoint，回复 manifest id；有阻塞项时 `conflict` |
+| `session.stop` | `{placementEpoch, commit: requestId \| null}`：优雅关闭 Browser；带 `commit` 时提交 checkpoint，按 requestId 幂等，回复 `{state, base, committed}`（见[多节点 · Session 副本与提交](cluster.md#session-副本与提交)）。 |
 | `session.ensure` | 启动/取得 Session，幂等；返回 browserIncarnation 与恢复状态，不等导航 |
 | `session.snapshot` | 只读：views、stats、pendingPopups、未确认事件、导航操作；不启动 Browser；`outputDiagnostics:true` 附输出状态 |
 | `session.logs.read` | 诊断用原始日志窗口：`{log: browser \| endpoint \| endpoint.1, end?, maxBytes ≤ 512 KiB}` → `{exists, size, start, end, data(base64)}`，读取 `[max(0, end−maxBytes), end)`，`end` 缺省为当前大小；`browser` 是节点 `logs/browser/<sessionId>.log`，`endpoint` 是节点的 `logs/endpoint.log`，`crashes`/`dump/<name>` 来自节点 `logs/crashes/<sessionId>/` |
@@ -161,7 +161,7 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 | `session.delete` | 节点级：`{sessionId}`；停止该 Session（不写 checkpoint）、从放置清单移除，并删除其目录、checkpoint 标记与索引；返回 `{stopped}` |
 | `shutdown` | 优雅关闭整个 Endpoint |
 
-快照中 view 的 `actual/desired`：0 live、1 frozen、2 discarded、3 unloaded。快照的 `hibernation` 字段报告休眠阻塞项（未确认关闭事件、未决原生选择、上传中、页面请求、下载中的计数，以及 RTC 是否连接、生命周期是否不确定）。
+快照中 view 的 `actual/desired`：0 live、1 frozen、2 discarded、3 unloaded。快照的 `stopBlockers` 字段报告停止阻塞项（未确认关闭事件、未决原生选择、上传中、页面请求、下载中的计数，以及 RTC 是否连接、生命周期是否不确定）。
 
 **Endpoint ↔ Endpoint**：TCP，u32le 长度帧，同一个 Noise 握手（role `peer`，buildId 必须相同）。`object.get{id, offset}` → BINARY `object.chunk{offset}`（≤1MiB 存储文件字节）… `object.end{size, sha256}`，或 `object.error{code, message, retryAfterMs?}`。
 
