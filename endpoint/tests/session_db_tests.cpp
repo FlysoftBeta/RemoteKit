@@ -235,16 +235,16 @@ void Reads(const fs::path& path) {
             read.error().message.find("Windows 32") != std::string::npos,
         "sharing violation is unavailable");
   Check(Take(ReadFileIfExists(name)).value() == "hello", "read file");
-  const auto journal = path / "journal.hibernation.json";
+  const auto journal = path / "session.copy.json";
   std::ofstream(journal) << "{";
-  const auto malformed = Checkpoints::Hibernation(path / "journal");
+  const auto malformed = Checkpoints::Copy(path / "session");
   Check(!malformed && malformed.error().reason == ErrorReason::kCorruptState,
-        "authoritative journal corruption");
+        "authoritative copy corruption");
   const auto held_journal = CreateFileW(journal.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
                                         FILE_ATTRIBUTE_NORMAL, nullptr);
-  const auto unavailable = Checkpoints::Hibernation(path / "journal");
+  const auto unavailable = Checkpoints::Copy(path / "session");
   CloseHandle(held_journal);
-  Check(!unavailable && unavailable.error().code == ErrorCode::kUnavailable, "journal I/O error");
+  Check(!unavailable && unavailable.error().code == ErrorCode::kUnavailable, "copy I/O error");
   sqlite::Database db;
   Take(db.Open(path / "unsupported.db"));
   Take(db.Execute("PRAGMA user_version=2"));

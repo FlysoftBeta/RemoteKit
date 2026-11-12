@@ -34,7 +34,9 @@ export function testGateway(
           nodeId: 'fixture',
           placementEpoch: 1,
           keyCiphertext: '',
-          state: 'active',
+          runState: 'running',
+          dataState: 'dirty',
+          pendingCommit: null,
           checkpointId: null,
           checkpoint: null,
         };
@@ -46,27 +48,38 @@ export function testGateway(
       profileKey: Buffer.alloc(32).toString('base64'),
     }),
     underPressure: () => false,
-    beginHibernation: (tenant) => {
+    beginStop: (tenant) => {
       const placement = placements.get(tenant);
-      if (!placement || placement.state === 'hibernated')
+      if (!placement || (placement.runState === 'stopped' && placement.dataState === 'clean'))
         throw new RemoteKitError('conflict', 'Session is not active');
-      placement.state = 'hibernating';
-      return { ...placement, state: 'hibernating' as const };
+      placement.runState = 'stopped';
+      placement.pendingCommit ??= 'fixture-commit';
+      return { ...placement, runState: 'stopped' as const, pendingCommit: placement.pendingCommit };
     },
-    settleHibernation: (placement, state) => {
+    cancelStop: (placement) => {
       const current = placements.get(placement.tenant);
       if (!current || current.placementEpoch !== placement.placementEpoch) return false;
-      current.state = state;
+      current.runState = 'running';
+      current.dataState = 'dirty';
+      current.pendingCommit = null;
       return true;
+    },
+    discard: (tenant) => {
+      const current = placements.get(tenant)!;
+      current.runState = 'stopped';
+      current.dataState = 'clean';
+      current.pendingCommit = null;
+      current.placementEpoch++;
+      return current;
     },
     commitCheckpoint: () => 1,
     markWarm: () => {},
     activeSessions: (nodeId) =>
-      [...placements.values()].filter((p) => p.nodeId === nodeId && p.state === 'active').length,
+      [...placements.values()].filter((p) => p.nodeId === nodeId && p.runState === 'running').length,
     evacuate: () => {},
     activeTenants: (nodeId) =>
       [...placements.values()]
-        .filter((p) => p.nodeId === nodeId && p.state === 'active')
+        .filter((p) => p.nodeId === nodeId && p.runState === 'running')
         .map((p) => p.tenant),
     forgetTenant: (tenant) => {
       const sessionId = placements.get(tenant)?.sessionId;

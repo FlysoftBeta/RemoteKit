@@ -26,6 +26,52 @@ import { learningKey } from '../server/persistence/sealed-documents';
 
 const fixture = (version: number) =>
   readFileSync(new URL(`./fixtures/control-v${version}.sql`, import.meta.url), 'utf8');
+
+test('v18 placements migrate run/data states and persist a fresh commit identity', () => {
+  const db = new Sqlite(':memory:');
+  try {
+    db.exec(fixture(18));
+    db.prepare('DELETE FROM session_placements').run();
+    for (const [index, state] of ['active', 'hibernating', 'hibernated'].entries())
+      db.prepare('INSERT INTO session_placements VALUES (?,?,?,?,?,?,?)').run(
+        `tenant-${index}`,
+        `${index}`.repeat(32),
+        'node',
+        4,
+        'key',
+        state,
+        null,
+      );
+    const store = new ControlDatabase(':memory:', { buildId: 'fixture' });
+    try {
+      migrate(db, { backupDirectory: '', buildId: 'fixture', atRestKey: store.atRestKey });
+      const rows = db
+        .prepare('SELECT run_state,data_state,pending_commit FROM session_placements ORDER BY tenant')
+        .all() as any[];
+      assert.deepEqual(
+        rows.map((row) => [row.run_state, row.data_state]),
+        [
+          ['running', 'dirty'],
+          ['stopped', 'dirty'],
+          ['stopped', 'clean'],
+        ],
+      );
+      assert.equal(rows[0].pending_commit, null);
+      assert.match(rows[1].pending_commit, /^[a-f0-9-]{36}$/);
+      assert.equal(rows[2].pending_commit, null);
+      migrate(db, { backupDirectory: '', buildId: 'fixture', atRestKey: store.atRestKey });
+      assert.equal(
+        (db.prepare("SELECT pending_commit FROM session_placements WHERE tenant='tenant-1'").get() as any)
+          .pending_commit,
+        rows[1].pending_commit,
+      );
+    } finally {
+      store.db.close();
+    }
+  } finally {
+    db.close();
+  }
+});
 function schema(db: Sqlite.Database) {
   return (
     db.prepare('SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name').all() as {
@@ -34,7 +80,7 @@ function schema(db: Sqlite.Database) {
     }[]
   ).map((row) => ({ name: row.name, sql: row.sql.replace(/\s+/g, ' ').trim() }));
 }
-for (const version of [12, 13, 14, 15, 16]) {
+for (const version of [12, 13, 14, 15, 16, 18]) {
   test(`historical v${version} migrates with a verified backup and the fresh schema`, () => {
     const directory = mkdtempSync(join(tmpdir(), 'rk-migration-'));
     const path = join(directory, 'control.db');
@@ -50,12 +96,12 @@ for (const version of [12, 13, 14, 15, 16]) {
     const store = new ControlDatabase(path, { buildId: 'fixture' });
     const fresh = new ControlDatabase(':memory:', { buildId: 'fixture' });
     try {
-      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 18n }]);
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 19n }]);
       assert.deepEqual(store.integrity.problems, []);
       assert.deepEqual(schema(store.db), schema(fresh.db));
       const backups = readdirSync(join(directory, 'backups'));
       assert.equal(backups.length, 1);
-      assert.match(backups[0], new RegExp(`^control-v${version}-to-v18-fixture-\\d{8}T\\d{6}Z\\.db$`));
+      assert.match(backups[0], new RegExp(`^control-v${version}-to-v19-fixture-\\d{8}T\\d{6}Z\\.db$`));
       const backup = new Sqlite(join(directory, 'backups', backups[0]), { readonly: true });
       try {
         assert.equal(backup.pragma('quick_check', { simple: true }), 'ok');
@@ -280,7 +326,7 @@ test('unsupported versions and nonempty unversioned databases are refused', () =
   try {
     for (const [index, ddl] of [
       'CREATE TABLE anything (id TEXT)',
-      ...[11, 19].map(
+      ...[11, 20].map(
         (version) =>
           `CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES (${version})`,
       ),

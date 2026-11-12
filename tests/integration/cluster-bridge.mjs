@@ -121,6 +121,13 @@ child.once('error', (error) => {
   process.stdin.destroy();
 });
 const transport = pipeTransport(child);
+await writeFile(resolve(root, 'endpoint.pid'), String(child.pid));
+let placements = [];
+try {
+  placements = JSON.parse(await readFile(resolve(root, 'bridge-sessions.json'), 'utf8'));
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
 const pending = new Map();
 const inFlight = new Map();
 const opened = new Set();
@@ -167,7 +174,7 @@ try {
       buildId,
       config,
       configHash,
-      sessions: [],
+      sessions: placements,
       objectKey: Buffer.alloc(32, 8).toString('base64'),
       objectIdKey: Buffer.alloc(32, 9).toString('base64'),
     };
@@ -245,6 +252,14 @@ try {
         });
         continue;
       }
+      if (json.request === 'object.claims.refresh') {
+        send({ id: json.id, ok: true, result: { ok: true } });
+        continue;
+      }
+      if (json.event === 'node.ready') {
+        if (json.sessions.length) await writeFile(resolve(root, 'copy-report.json'), JSON.stringify(json));
+        continue;
+      }
       if (json.event === 'node.metrics') {
         if (args['metrics-file']) await writeFile(args['metrics-file'], JSON.stringify(json));
         continue;
@@ -256,8 +271,18 @@ try {
         else waiter.reject(Error(JSON.stringify(json.error)));
       } else {
         const request = inFlight.get(json.id);
-        if (json.ok && request?.method === 'session.open') opened.add(request.tenantId);
-        if (json.ok && request?.method === 'session.hibernate') opened.delete(request.tenantId);
+        if (json.ok && request?.method === 'session.open') {
+          opened.add(request.tenantId);
+          placements = placements.filter((p) => p.tenantId !== request.tenantId);
+          placements.push({
+            tenantId: request.tenantId,
+            sessionId: request.sessionId,
+            placementEpoch: request.placementEpoch,
+            dataState: 'dirty',
+          });
+          await writeFile(resolve(root, 'bridge-sessions.json'), JSON.stringify(placements));
+        }
+        if (json.ok && request?.method === 'session.stop') opened.delete(request.tenantId);
         process.stdout.write(JSON.stringify(json) + '\n');
         inFlight.delete(json.id);
         if (!inFlight.size) drained?.();
@@ -274,6 +299,7 @@ try {
     if (
       request.tenantId &&
       request.method !== 'session.open' &&
+      request.method !== 'session.stop' &&
       request.method !== 'shutdown' &&
       !request.method.startsWith('object.') &&
       !opened.has(request.tenantId)

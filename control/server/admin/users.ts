@@ -37,9 +37,11 @@ export class UserAdmin {
   private session(tenant: string): AdminSessionState {
     const placement = this.context.endpoint.placement.peek(tenant);
     if (!placement) return { state: 'none' };
-    if (placement.state !== 'hibernated') return { state: 'active', nodeId: placement.nodeId };
     return {
-      state: 'hibernated',
+      state: placement.runState,
+      nodeId: placement.nodeId,
+      dataState: placement.dataState,
+      nodeOffline: this.context.endpoint.nodes.get(placement.nodeId)?.state.state !== 'ready',
       checkpointAt: this.context.endpoint.placement.checkpoints(tenant).latestAt,
     };
   }
@@ -137,31 +139,41 @@ export class UserAdmin {
     this.services.viewers.push(user.tenant);
     return this.list();
   }
-  async hibernate(username: unknown) {
+  async stop(username: unknown) {
     const user = this.find(username);
     await this.context.tenants.serial(user.tenant, async () => {
-      if (this.context.endpoint.placement.peek(user.tenant)?.state === 'hibernating') {
-        await this.context.endpoint.hibernate(user.tenant);
-        this.services.lifecycle.finishHibernation(user.tenant);
+      if (this.context.endpoint.placement.peek(user.tenant)?.pendingCommit) {
+        await this.context.endpoint.stop(user.tenant);
+        this.services.lifecycle.finishStop(user.tenant);
         return;
       }
-      if (this.context.endpoint.placement.peek(user.tenant)?.state !== 'active')
+      if (this.context.endpoint.placement.peek(user.tenant)?.runState !== 'running')
         throw new RemoteKitError('conflict', '会话未运行');
       if (this.context.tenants.get(user.tenant).viewer) throw new RemoteKitError('conflict', '用户在线');
       const snapshot = await this.context.endpoint.snapshot(user.tenant);
-      await this.services.lifecycle.hibernate(user.tenant, snapshot, true);
+      await this.services.lifecycle.stop(user.tenant, snapshot, true);
+    });
+    return this.list();
+  }
+  async discardChanges(username: unknown, confirmed: unknown) {
+    if (confirmed !== true) throw new RemoteKitError('conflict', '需要确认放弃未提交的更改');
+    const user = this.find(username);
+    await this.context.tenants.serial(user.tenant, async () => {
+      this.context.store.transaction(() => this.context.endpoint.placement.discard(user.tenant));
+      this.context.endpoint.forget(user.tenant);
+      this.services.lifecycle.finishStop(user.tenant);
     });
     return this.list();
   }
   async resetSession(username: unknown) {
     const user = this.find(username);
     const placement = this.context.endpoint.placement.peek(user.tenant);
-    if (!placement || placement.state === 'hibernated')
+    if (!placement || placement.runState === 'stopped')
       await this.services.learning.forgetTenant(user.tenant);
     await this.context.tenants.serial(user.tenant, async () => {
-      // A running Browser still owns live pages and RTC; reset only discards a hibernated Session.
+      // A running Browser still owns live pages and RTC; reset only discards a stopped Session.
       const placement = this.context.endpoint.placement.peek(user.tenant);
-      if (placement && placement.state !== 'hibernated') throw new RemoteKitError('conflict', '需先休眠');
+      if (placement && placement.runState !== 'stopped') throw new RemoteKitError('conflict', '需先停止');
       this.context.store.transaction(() => {
         this.context.store.clipboards.clear(user.id);
         const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);
@@ -189,7 +201,7 @@ export class UserAdmin {
     await this.disconnect(user.tenant);
     await this.services.learning.forgetTenant(user.tenant);
     await this.context.tenants.serial(user.tenant, async () => {
-      await this.context.endpoint.hibernating.get(user.tenant)?.catch(() => {});
+      await this.context.endpoint.stopping.get(user.tenant)?.catch(() => {});
       const store = this.context.store;
       const importMail = store.transaction(() => {
         const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);

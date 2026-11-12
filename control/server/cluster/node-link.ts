@@ -136,6 +136,8 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   buildId?: string;
   diskDraining = false;
   reliefRequestedAt?: number;
+  readyCopies: Promise<void> = Promise.resolve();
+  private copyGate?: { resolve: () => void; reject: (error: unknown) => void };
   private incoming = 0;
   private current?: Connection;
   private incarnation?: string;
@@ -251,6 +253,10 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     }
     const transition = readyTransition(this.incarnation, incarnation, connection.epoch);
     this.current = connection;
+    this.readyCopies = new Promise<void>((resolve, reject) => {
+      this.copyGate = { resolve, reject };
+    });
+    void this.readyCopies.catch(() => {});
     this.incarnation = incarnation;
     this.metrics.clear();
     this.healthySince = Date.now();
@@ -334,6 +340,20 @@ export class NodeLink extends EventEmitter implements EndpointLink {
           clearTimeout(timer);
           this.incoming--;
         });
+      return;
+    }
+    if (message.event === 'node.ready') {
+      if (
+        !Array.isArray(message.sessions) ||
+        message.sessions.length > 64 ||
+        typeof message.complete !== 'boolean'
+      )
+        throw new Error('Invalid node copy list');
+      this.registry.emit('copies', { nodeId: this.nodeId, sessions: message.sessions });
+      if (message.complete) {
+        this.copyGate?.resolve();
+        this.copyGate = undefined;
+      }
       return;
     }
     if (message.type === 'clipboard.changed') {
@@ -491,6 +511,8 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   disconnect(connection: Connection) {
     if (this.current !== connection) return;
     this.current = undefined;
+    this.copyGate?.reject(new RemoteKitError('unavailable', '节点副本报告未完成'));
+    this.copyGate = undefined;
     this.state = { state: 'offline' };
     if (this.healthySince !== undefined && Date.now() - this.healthySince >= 60_000) this.launchFailures = 0;
     this.healthySince = undefined;
@@ -535,7 +557,10 @@ export class NodeLink extends EventEmitter implements EndpointLink {
 export class NodeRegistry extends EventEmitter {
   isRemoved: (nodeId: string) => boolean = () => false;
   objectKeys?: { objectKey: string; objectIdKey: string };
-  fencing: (nodeId: string) => { tenantId: string; sessionId: string; placementEpoch: number }[] = () => [];
+  fencing: (
+    nodeId: string,
+  ) => { tenantId: string; sessionId: string; placementEpoch: number; dataState: 'clean' | 'dirty' }[] =
+    () => [];
   readonly handlers = new Map<string, (node: NodeLink, message: Record<string, any>) => unknown>();
   dispatch(node: NodeLink, message: Record<string, any>) {
     const handler = this.handlers.get(message.request);

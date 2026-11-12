@@ -43,7 +43,7 @@ export class ViewerHub {
       endpointError: runtime.lastError
         ? wireError(reportError(runtime.lastError, 'viewer.endpoint_failed', { tenant }))
         : null,
-      endpointActivity: runtime.lastErrorKey === 'hibernating' ? 'saving-session' : undefined,
+      endpointActivity: runtime.lastErrorKey === 'stopping' ? 'saving-session' : undefined,
       endpointErrorKind: runtime.lastErrorKey === 'resource_limit' ? 'output-capacity' : 'runtime',
       browserRestart: runtime.browserRestart,
       viewer: {

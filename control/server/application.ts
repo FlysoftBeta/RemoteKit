@@ -103,7 +103,7 @@ export function createApplication(
     endpoint.nodes,
     tenantObjectBytes,
     (tenant, node) => endpoint.isPlacedOn(tenant, node),
-    (tenant) => endpoint.hibernating.has(tenant),
+    (tenant) => Boolean(endpoint.placement.peek(tenant)?.pendingCommit),
   );
   services.nodeAdmin = new NodeAdmin(store, endpoint.nodes, endpoint.placement, services.objects);
   services.sessionPurge = new SessionPurge(store, endpoint.nodes);

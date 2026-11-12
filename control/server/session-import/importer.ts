@@ -486,7 +486,7 @@ export class SessionImporter {
       this.store.sessionImports.isPending(tenant, id) &&
       (ref === undefined ||
         this.store.sessionImports.latestRef(this.store.sessionImports.get(id)!.keyId, id) === ref) &&
-      this.gateway.placement.peek(tenant)?.state === 'active'
+      this.gateway.placement.peek(tenant)?.runState === 'running'
     );
   }
   private async applyRecords(tenant: string) {

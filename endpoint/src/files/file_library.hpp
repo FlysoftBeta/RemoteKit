@@ -78,7 +78,7 @@ class FileLibrary {
                                  const Render&,
                                  const Check&);
   Result<void> Sweep();
-  ServiceJson Hibernation(const std::function<bool(uint64_t)>& current) const;
+  ServiceJson StopBlockers(const std::function<bool(uint64_t)>& current) const;
 
   Result<void> Prepare(const Selection&);
   std::optional<Selection> FindSelection(const std::string& id) const;

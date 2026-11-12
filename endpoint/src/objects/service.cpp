@@ -78,11 +78,17 @@ Result<void> ObjectService::CommittedBatch(const std::vector<ObjectInfo>& object
       return {};
     if (requests)
       ++*requests;
-    auto result = control_.Request("object.committed.batch", fields);
+    auto result =
+        control_.RequestUntil("object.committed.batch", fields,
+                              std::chrono::steady_clock::time_point(
+                                  std::chrono::steady_clock::duration(commit_deadline_.load())));
     if (!result && result.error().code == ErrorCode::kOutcomeUnknown) {
       if (requests)
         ++*requests;
-      result = control_.Request("object.committed.batch", fields);
+      result =
+          control_.RequestUntil("object.committed.batch", fields,
+                                std::chrono::steady_clock::time_point(
+                                    std::chrono::steady_clock::duration(commit_deadline_.load())));
     }
     if (!result)
       return result.error();
@@ -278,6 +284,32 @@ Result<void> ObjectService::Configure(const Json& config) {
   }
   keys_ = incoming;
   configured_ = true;
+  return {};
+}
+bool ObjectService::StageBytes(size_t bytes, const std::atomic<bool>& cancel) {
+  std::chrono::steady_clock::time_point end;
+  {
+    std::lock_guard lock(staging_rate_mutex_);
+    const auto now = std::chrono::steady_clock::now();
+    staging_next_ = std::max(staging_next_, now) +
+                    std::chrono::nanoseconds(uint64_t(bytes) * 1000000000 / (16 * 1024 * 1024));
+    end = staging_next_;
+  }
+  while (std::chrono::steady_clock::now() < end) {
+    if (cancel)
+      return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return !cancel;
+}
+Result<void> ObjectService::RefreshClaims(const std::string& tenant,
+                                          const std::vector<std::string>& ids) {
+  for (size_t offset = 0; offset < ids.size(); offset += 1024) {
+    const auto count = std::min<size_t>(1024, ids.size() - offset);
+    std::vector<std::string> batch(ids.begin() + offset, ids.begin() + offset + count);
+    RK_ASSIGN_OR_RETURN(
+        reply, control_.Request("object.claims.refresh", {{"tenantId", tenant}, {"ids", batch}}));
+  }
   return {};
 }
 Result<Json> ObjectService::Dispatch(const Json& request) {

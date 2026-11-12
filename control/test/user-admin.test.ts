@@ -104,8 +104,8 @@ test('admin methods check the server role, reject scoped params and need the cur
     assert.deepEqual(
       users.map((entry: any) => [entry.username, entry.isAdmin, entry.online, entry.session.state]),
       [
-        ['administrator', true, true, 'active'],
-        ['ordinary', false, true, 'active'],
+        ['administrator', true, true, 'running'],
+        ['ordinary', false, true, 'running'],
       ],
     );
     const overview = await h.call('admin.overview');
@@ -203,7 +203,7 @@ test('transferring the administrator role demotes the current administrator', as
   }
 });
 
-test('reset browser data refuses a running Session, then clears clipboard and purges once hibernated', async () => {
+test('reset browser data refuses a running Session, then clears clipboard and purges once stopped', async () => {
   const h = await stack();
   try {
     await h.call('admin.createUser', { username: 'reset-user', password });
@@ -211,10 +211,11 @@ test('reset browser data refuses a running Session, then clears clipboard and pu
     const placement = h.control.endpoint.placement.resolve(user.tenant);
     h.store.clipboards.record(user.id, { text: 'private clipboard', html: '<p>private</p>' });
     h.store.clipboards.record(user.id, { text: 'latest clipboard', html: '' });
-    await assert.rejects(h.call('admin.resetSession', { username: user.username }), /需先休眠/);
+    await assert.rejects(h.call('admin.resetSession', { username: user.username }), /需先停止/);
     assert.equal(h.store.clipboards.latest(user.id)?.text, 'latest clipboard');
     assert.equal(h.control.endpoint.placement.peek(user.tenant)?.sessionId, placement.sessionId);
-    placement.state = 'hibernated';
+    placement.runState = 'stopped';
+    placement.dataState = 'clean';
     await h.call('admin.resetSession', { username: user.username });
     assert.equal(h.store.clipboards.latest(user.id), undefined);
     assert.equal(h.control.endpoint.placement.peek(user.tenant), undefined);
@@ -229,15 +230,14 @@ test('reset browser data refuses a running Session, then clears clipboard and pu
   }
 });
 
-test('reset browser data clears clipboard without starting an absent or hibernated Session', async () => {
+test('reset browser data clears clipboard without starting an absent or stopped Session', async () => {
   const h = await stack();
   try {
-    for (const username of ['absent-user', 'hibernated-user']) {
+    for (const username of ['absent-user', 'stopped-user']) {
       await h.call('admin.createUser', { username, password });
       const user = h.store.accounts.byUsername(username)!;
       h.store.clipboards.record(user.id, { text: 'private clipboard', html: '' });
-      if (username === 'hibernated-user')
-        h.control.endpoint.placement.resolve(user.tenant).state = 'hibernated';
+      if (username === 'stopped-user') h.control.endpoint.placement.resolve(user.tenant).runState = 'stopped';
       const before = h.requests.length;
       await h.call('admin.resetSession', { username });
       assert.equal(h.store.clipboards.latest(user.id), undefined);

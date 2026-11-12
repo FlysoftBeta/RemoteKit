@@ -48,7 +48,8 @@ type Action =
   | 'password'
   | 'factors'
   | 'signOut'
-  | 'hibernate'
+  | 'discardChanges'
+  | 'stop'
   | 'resetSession'
   | 'disable'
   | 'enable'
@@ -56,9 +57,9 @@ type Action =
   | 'delete';
 
 function sessionText(user: AdminUser) {
-  if (user.session.state === 'active') return `运行中 · ${user.session.nodeId}`;
-  if (user.session.state === 'hibernated')
-    return user.session.checkpointAt ? `已休眠 · ${formatTime(user.session.checkpointAt)}` : '已休眠';
+  if (user.session.state === 'running') return `运行中 · ${user.session.nodeId}`;
+  if (user.session.state === 'stopped')
+    return user.session.checkpointAt ? `已停止 · ${formatTime(user.session.checkpointAt)}` : '已停止';
   return '未启动';
 }
 
@@ -216,13 +217,32 @@ function ActionDialog({
           </Typography>
         </ConfirmDialog>
       );
-    case 'hibernate':
+    case 'discardChanges':
+      return (
+        <ConfirmDialog
+          open
+          danger
+          title="放弃未提交的更改"
+          confirmLabel="放弃更改"
+          onClose={close}
+          onConfirm={() => run('admin.discardChanges', { username, confirmed: true })}
+        >
+          <Typography>
+            上次提交：
+            {user.session.state === 'none' || user.session.checkpointAt === null
+              ? '从未提交'
+              : formatTime(user.session.checkpointAt)}
+            。未提交的更改将永久丢失。
+          </Typography>
+        </ConfirmDialog>
+      );
+    case 'stop':
       return (
         <ConfirmDialog
           {...common}
-          title="立即休眠"
-          confirmLabel="休眠"
-          onConfirm={() => run('admin.hibernate', { username })}
+          title="立即停止"
+          confirmLabel="停止"
+          onConfirm={() => run('admin.stop', { username })}
         >
           <Typography>
             关闭 {username} 的浏览器并保存检查点，释放节点资源。用户下次连接时会在合适的节点上恢复。
@@ -445,15 +465,26 @@ export function AdminUsersSection({
         </MenuItem>
         <Divider />
         <MenuItem
-          disabled={target?.session.state !== 'active' || target.online}
-          onClick={() => open('hibernate')}
+          disabled={target?.session.state !== 'running' || target.online}
+          onClick={() => open('stop')}
         >
-          <ListItemText primary="立即休眠" secondary={target?.online ? '用户在线时不可用' : undefined} />
+          <ListItemText primary="立即停止" secondary={target?.online ? '用户在线时不可用' : undefined} />
         </MenuItem>
-        <MenuItem disabled={target?.session.state !== 'hibernated'} onClick={() => open('resetSession')}>
+        <MenuItem
+          disabled={
+            target?.session.state === 'none' ||
+            !target ||
+            target.session.dataState !== 'dirty' ||
+            !target.session.nodeOffline
+          }
+          onClick={() => open('discardChanges')}
+        >
+          <ListItemText primary="放弃未提交的更改" />
+        </MenuItem>
+        <MenuItem disabled={target?.session.state !== 'stopped'} onClick={() => open('resetSession')}>
           <ListItemText
             primary="重置浏览器数据"
-            secondary={target?.session.state === 'active' ? '需先休眠' : undefined}
+            secondary={target?.session.state === 'running' ? '需先停止' : undefined}
           />
         </MenuItem>
         <Divider />

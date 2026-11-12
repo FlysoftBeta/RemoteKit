@@ -162,8 +162,8 @@ Object.assign(handlers, {
         disabled: users.filter((user) => user.disabled).length,
       },
       sessions: {
-        active: users.filter((user) => user.session.state === 'active').length,
-        hibernated: users.filter((user) => user.session.state === 'hibernated').length,
+        active: users.filter((user) => user.session.state === 'running').length,
+        stopped: users.filter((user) => user.session.state === 'stopped').length,
       },
       storage: {
         bytes: storage.bytes,
@@ -196,7 +196,10 @@ Object.assign(handlers, {
   'admin.transferAdmin': admin(({ services, authority }, params) =>
     services.userAdmin.transferAdmin(authority.tenantId, params.username),
   ),
-  'admin.hibernate': admin(({ services }, params) => services.userAdmin.hibernate(params.username)),
+  'admin.discardChanges': admin(({ services }, params) =>
+    services.userAdmin.discardChanges(params.username, params.confirmed),
+  ),
+  'admin.stop': admin(({ services }, params) => services.userAdmin.stop(params.username)),
   'admin.resetSession': admin(({ services }, params) => services.userAdmin.resetSession(params.username)),
   'admin.deleteUser': admin(async (ctx, params) => {
     const deleted = await ctx.services.userAdmin.delete(ctx.authority.tenantId, params.username);
@@ -205,7 +208,9 @@ Object.assign(handlers, {
   }),
   'admin.storage': admin(({ services }) => services.userAdmin.storage()),
   'admin.nodes': admin(({ services }) => services.nodeAdmin.list()),
-  'admin.removeNode': admin(({ services }, params) => services.nodeAdmin.remove(nodeId(params))),
+  'admin.removeNode': admin(({ services }, params) =>
+    services.nodeAdmin.remove(nodeId(params), params.discardDirty === true),
+  ),
   'admin.readdNode': admin(({ services }, params) => services.nodeAdmin.readd(nodeId(params))),
   'admin.findError': admin((ctx, params) =>
     findError(params.errorId, ctx.logs?.directory, ctx.logs?.nodes ?? { all: () => [] }),

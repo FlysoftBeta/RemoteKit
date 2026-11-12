@@ -398,8 +398,10 @@ void ReadySessions() {
     Check(!link.WaitReady(), "invalid ready session list rejected");
   }
   auto ready = Ready();
-  ready["sessions"] = Json::array(
-      {{{"tenantId", "tenant"}, {"sessionId", std::string(32, 'a')}, {"placementEpoch", 1}}});
+  ready["sessions"] = Json::array({{{"tenantId", "tenant"},
+                                    {"sessionId", std::string(32, 'a')},
+                                    {"placementEpoch", 1},
+                                    {"dataState", "dirty"}}});
   Responder responder({ready});
   ClusterLink link([&] { return responder.Connect(); }, true, "dev", Validate);
   Take(link.WaitReady());

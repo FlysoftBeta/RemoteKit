@@ -40,7 +40,7 @@ def main():
     parser.add_argument("--endpoint", type=Path,
                         default=ROOT / "build/endpoint/endpoint/endpoint_service.exe")
     parser.add_argument("--browser", type=Path,
-                        default=Path("C:/src/chromium/src/out/dev/remotekit_browser.exe"))
+                        default=Path("C:/src/chromium/src/out/rel/remotekit_browser.exe"))
     parser.add_argument("--work-dir", type=Path, default=ROOT / "develop/tmp/endpoint-checkpoint")
     args = parser.parse_args()
     run = args.work_dir.resolve() / uuid.uuid4().hex[:12]
@@ -61,7 +61,7 @@ def main():
                 self.send_error(404)
                 return
             if self.path == "/dialog":
-                script = "alert('hibernation blocker'); document.title='dialog-finished';"
+                script = "alert('stop blocker'); document.title='dialog-finished';"
             else:
                 script = ""
                 if writing:
@@ -165,21 +165,21 @@ def main():
         assert "persistent=" + seed in initial["cookie"] and "session=" + seed in initial["cookie"]
         source.call("view.ensure", viewId="2", url=origin + "/dialog", width=320, height=240,
                     visible=False, device={"deviceScaleFactor": 1})
-        wait_for(lambda: source.call("session.snapshot")["hibernation"]["pendingPageRequests"] > 0,
+        wait_for(lambda: source.call("session.snapshot")["stopBlockers"]["pendingPageRequests"] > 0,
                  "page request blocker")
-        assert source.call("session.hibernate", ok=False, placementEpoch=1)["code"] == "conflict"
+        assert source.call("session.stop", commit="checkpoint-stop", ok=False, placementEpoch=1)["code"] == "conflict"
         source.call("view.close", viewId="2", force=True)
         closed = wait_for(lambda: source.call("session.snapshot")["events"], "closed event")
-        assert source.call("session.hibernate", ok=False, placementEpoch=1)["code"] == "conflict"
+        assert source.call("session.stop", commit="checkpoint-stop", ok=False, placementEpoch=1)["code"] == "conflict"
         source.call("session.events.ack", eventIds=[event["eventId"] for event in closed])
         wait_for(lambda: source.state(), "settled view")
-        checkpoint = source.call("session.hibernate", placementEpoch=1)
+        checkpoint = source.call("session.stop", commit="checkpoint-stop", placementEpoch=1)
         writing = False
-        # Restoration must use peer objects; neither the profile nor its warm marker is copied.
+        # Restoration must use peer objects; neither the profile nor its copy record is copied.
         shutil.rmtree(source.root / "data/sessions" / session_id)
         target = Endpoint("different-absolute-target-root")
         endpoints.append(target)
-        target.open(2, checkpoint["manifestId"])
+        target.open(2, checkpoint["base"])
         target.call("session.ensure")
         restored, snapshot = wait_for(target.state, "restored storage and navigation", timeout=60)
         assert restored == initial, dict(initial=initial, restored=restored)
@@ -192,15 +192,15 @@ def main():
         subprocess.run(["taskkill", "/PID", str(snapshot["browserPid"]), "/T", "/F"],
                        check=True, capture_output=True)
         for _ in range(2):
-            blocked = target.call("session.snapshot")["hibernation"]
+            blocked = target.call("session.snapshot")["stopBlockers"]
             assert blocked["lifecycleUncertain"] is True, blocked
-            assert target.call("session.hibernate", ok=False, placementEpoch=2)["code"] == "conflict"
+            assert target.call("session.stop", commit="checkpoint-stop", ok=False, placementEpoch=2)["code"] == "conflict"
         time.sleep(1)
         target.call("session.ensure")
         wait_for(target.state, "Browser recovery after unclean exit", timeout=60)
-        final = target.call("session.hibernate", placementEpoch=2)
+        final = target.call("session.stop", commit="checkpoint-stop", placementEpoch=2)
         # Deleting a Tenant stops its running Browser without a checkpoint and removes every local copy.
-        target.open(3, final["manifestId"])
+        target.open(3, final["base"])
         target.call("session.ensure")
         running = wait_for(target.state, "warm reopen before deletion", timeout=60)[1]
         assert target.call("session.delete", tenant_id="", sessionId=session_id) == {"stopped": True}
@@ -214,7 +214,7 @@ def main():
         wait_for(lambda: (run / "source-node-metrics.json").exists(), "metrics event")
         target.stop()
         source.stop()
-        print(json.dumps(dict(restored=True, checkpoint=checkpoint["manifestId"], evidence=str(run))))
+        print(json.dumps(dict(restored=True, checkpoint=checkpoint["base"], evidence=str(run))))
     finally:
         (run / "evidence.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
         for endpoint in reversed(endpoints):

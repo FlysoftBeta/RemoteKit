@@ -542,13 +542,13 @@ void SessionManagementRequests() {
                                                          {"origin", ""}}},
                                                        {"browserAck", false}}})}}));
   CHECK(session.Views().Initialize());
-  CHECK(session.Snapshot().value().at("hibernation").at("pendingDownloadImports") == 1);
-  CHECK(session.Hibernate(objects).error().message ==
-        "hibernation blocked: pendingDownloadImports");
+  CHECK(session.Snapshot().value().at("stopBlockers").at("pendingDownloadImports") == 1);
+  CHECK(session.StopAndCommit("controller-test").error().message ==
+        "stop blocked: pendingDownloadImports");
   CHECK(session.Shutdown().error().code == ErrorCode::kConflict);
   CHECK(download_store.Save({{"records", Json::array()}}));
   CHECK(session.Views().Initialize());
-  CHECK(session.Snapshot().value().at("hibernation").at("pendingDownloadImports") == 0);
+  CHECK(session.Snapshot().value().at("stopBlockers").at("pendingDownloadImports") == 0);
   const Json imported = {{"type", "download.imported"},
                          {"eventId", "download-test"},
                          {"assetId", std::string(64, 'a')},

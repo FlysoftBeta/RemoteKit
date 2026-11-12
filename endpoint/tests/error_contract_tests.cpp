@@ -31,6 +31,8 @@ int main() {
   }
   CHECK(!ParseErrorCode("unsupported"));
   CHECK(!ParseErrorReason("arbitrary"));
+  CHECK(ParseErrorReason("session_data_on_offline_node") == ErrorReason::kSessionDataOnOfflineNode);
+  CHECK(ErrorReasonName(ErrorReason::kSessionDataOnOfflineNode) == "session_data_on_offline_node");
   for (auto reason : {ErrorReason::kDocumentEncrypted, ErrorReason::kDocumentCorrupt,
                       ErrorReason::kDocumentUnsupported, ErrorReason::kDocumentTooComplex}) {
     const Json reply{{"type", "files.result"},

@@ -3,6 +3,7 @@
 #include "management/link.hpp"
 #include "options.hpp"
 #include "persistence/durable_json.hpp"
+#include "persistence/checkpoint.hpp"
 #include "persistence/session_db.hpp"
 #include "util/file_io.hpp"
 #include "rtc/candidate_address.hpp"
@@ -337,6 +338,8 @@ class FixtureLink final : public ManagementLink {
   Result<Json> Request(const std::string& method, Json fields) override {
     if (fail_json)
       return Json::object().at("missing");
+    if (method == "object.committed.batch")
+      return Json{{"ok", true}};
     Check(method == "object.locate" && fields["tenantId"] == "tenant" &&
               fields["ids"] == Json::array({checkpoint}),
           "warm restore authorization");
@@ -352,10 +355,16 @@ void ManagementDispatch() {
   const auto object = objects.Write(objects::Keys{}, content);
   Check(bool(object), "warm manifest object");
   const auto checkpoint = object.value().id;
-  Check(bool(WriteDurableJson(
-            directory.path / "data/sessions/0123456789abcdef0123456789abcdef.checkpoint",
-            checkpoint)),
-        "warm copy fixture");
+  const auto session_directory = directory.path / "data/sessions/0123456789abcdef0123456789abcdef";
+  Check(bool(Checkpoints::WriteCopy(session_directory,
+                                    {{"sessionId", "0123456789abcdef0123456789abcdef"},
+                                     {"placementEpoch", uint64_t(2)},
+                                     {"base", checkpoint},
+                                     {"state", "dirty"},
+                                     {"stoppedCleanly", true},
+                                     {"changesAt", 0},
+                                     {"lastCommit", nullptr}})),
+        "dirty copy fixture");
   Check(bool(WriteDurableJson(
             directory.path / "data/sessions/0123456789abcdef0123456789abcdef/events.json",
             {{"next", 2},

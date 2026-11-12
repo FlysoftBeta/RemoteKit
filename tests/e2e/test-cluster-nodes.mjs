@@ -143,7 +143,7 @@ async function hibernate(viewer, name) {
       const tenant = placementFor(snapshot, name)?.tenant;
       const runtime = snapshot.runtimes.find((entry) => entry.tenant === tenant);
       assert(!runtime?.error?.includes('unclean Browser shutdown'), runtime?.error);
-      return placementFor(snapshot, name)?.state === 'hibernated' && snapshot;
+      return placementFor(snapshot, name)?.run_state === 'stopped' && snapshot;
     },
     90000,
   );

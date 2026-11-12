@@ -249,8 +249,8 @@ try {
   );
   await until(
     async () => {
-      const users = await admin.call('admin.hibernate', { username: 'clipboard-user' });
-      return users.find((entry) => entry.username === 'clipboard-user').session.state === 'hibernated';
+      const users = await admin.call('admin.stop', { username: 'clipboard-user' });
+      return users.find((entry) => entry.username === 'clipboard-user').session.state === 'stopped';
     },
     'Session hibernated',
     90000,
@@ -298,7 +298,7 @@ try {
   assert.equal(Buffer.byteLength(large), 3 * 1024 * 1024);
   assert(large.startsWith(oversizeMarker));
   result('4 oversize remains local', { bytes: Buffer.byteLength(large), revision: revision() });
-  await assert.rejects(admin.call('admin.resetSession', { username: 'clipboard-user' }), /需先休眠/);
+  await assert.rejects(admin.call('admin.resetSession', { username: 'clipboard-user' }), /需先停止/);
   assert.deepEqual(row(), retained);
   await user.context.close();
   await until(
@@ -308,8 +308,8 @@ try {
   );
   await until(
     async () => {
-      const users = await admin.call('admin.hibernate', { username: 'clipboard-user' });
-      return users.find((entry) => entry.username === 'clipboard-user').session.state === 'hibernated';
+      const users = await admin.call('admin.stop', { username: 'clipboard-user' });
+      return users.find((entry) => entry.username === 'clipboard-user').session.state === 'stopped';
     },
     'Session hibernated before reset',
     90000,

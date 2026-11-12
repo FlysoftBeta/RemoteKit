@@ -29,6 +29,7 @@ export interface AdminNode {
   sessions: number;
   maxSessions: number | null;
   users: string[];
+  dirtyUsers: string[];
   replicaBytes: number;
   metrics: AdminNodeMetrics | null;
   connectedAt: number | null;
@@ -38,8 +39,13 @@ export interface AdminNode {
 }
 export type AdminSessionState =
   | { state: 'none' }
-  | { state: 'active'; nodeId: string }
-  | { state: 'hibernated'; checkpointAt: number | null };
+  | {
+      state: 'running' | 'stopped';
+      nodeId: string;
+      dataState: 'clean' | 'dirty';
+      nodeOffline: boolean;
+      checkpointAt: number | null;
+    };
 export interface AdminUser {
   username: string;
   isAdmin: boolean;
@@ -85,7 +91,7 @@ export interface AdminOverview {
   release: { buildId: string; size: number } | null;
   nodes: { total: number; ready: number; mismatched: number };
   users: { total: number; online: number; disabled: number };
-  sessions: { active: number; hibernated: number };
+  sessions: { active: number; stopped: number };
   storage: {
     bytes: number;
     underReplicated: number;
@@ -123,12 +129,13 @@ export interface AdminSocketMethods {
   'admin.signOut': { params: User; result: AdminUser[] };
   'admin.setDisabled': { params: User & { disabled: boolean }; result: AdminUser[] };
   'admin.transferAdmin': { params: User; result: AdminUser[] };
-  'admin.hibernate': { params: User; result: AdminUser[] };
+  'admin.stop': { params: User; result: AdminUser[] };
+  'admin.discardChanges': { params: User & { confirmed: boolean }; result: AdminUser[] };
   'admin.resetSession': { params: User; result: AdminUser[] };
   'admin.deleteUser': { params: User; result: AdminUser[] };
   'admin.storage': { params: Record<string, never>; result: AdminStorage };
   'admin.nodes': { params: Record<string, never>; result: AdminNode[] };
-  'admin.removeNode': { params: { nodeId: string }; result: AdminNode[] };
+  'admin.removeNode': { params: { nodeId: string; discardDirty?: boolean }; result: AdminNode[] };
   'admin.readdNode': { params: { nodeId: string }; result: AdminNode[] };
   'admin.diagnostics': { params: Record<string, never>; result: AdminDiagnostic[] };
   'admin.deleteDiagnostic': { params: { id: string }; result: AdminDiagnostic[] };

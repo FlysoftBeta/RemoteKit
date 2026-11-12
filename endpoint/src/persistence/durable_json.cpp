@@ -10,7 +10,8 @@ Error IoError(const char* operation) {
                      OsError::Kind::kWin32, code);
 }
 }  // namespace
-Result<void> FlushFile(const fs::path& path) {
+Result<void> FlushFile(const fs::path& raw_path) {
+  const auto path = LongPath(raw_path);
   HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                             FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE)
@@ -22,9 +23,10 @@ Result<void> FlushFile(const fs::path& path) {
     return error;
   return {};
 }
-Result<void> WriteDurableJson(const fs::path& path,
+Result<void> WriteDurableJson(const fs::path& raw_path,
                               const Json& value,
                               const std::function<Result<void>()>& before_commit) {
+  const auto path = LongPath(raw_path);
   std::error_code directory_error;
   fs::create_directories(path.parent_path(), directory_error);
   if (directory_error)

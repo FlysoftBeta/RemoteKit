@@ -34,7 +34,11 @@ class Session {
   // Raw log windows for diagnostics: this Session's Browser log and the
   // node's Endpoint log (current and first rotated file).
   Result<Json> ReadLog(const Json& request) const;
-  Result<Json> Hibernate(objects::ObjectService& objects);
+  Result<Json> StopAndCommit(const Json& request_id,
+                             bool check_blockers = true,
+                             PhaseClock::time_point deadline = PhaseClock::time_point::max(),
+                             bool defer_commits = false);
+  Result<void> MarkStopped();
   uint64_t PlacementEpoch() const { return config.placement_epoch; }
   Result<Json> Open(const Json& request);
   Result<Json> Ensure(const Json& request);

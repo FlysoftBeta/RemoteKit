@@ -24,6 +24,9 @@ class ClusterLink final : public ManagementLink {
   void OnPeers(Peers callback) override;
   Result<Json> Request(const std::string& name, Json fields) override;
   std::optional<ReadyState> ReadySessions() override;
+  Result<Json> RequestUntil(const std::string& name,
+                            Json fields,
+                            std::chrono::steady_clock::time_point deadline) override;
 
  private:
   bool Queue(const Json& message, uint64_t generation, DeliveryFlag delivery = {});

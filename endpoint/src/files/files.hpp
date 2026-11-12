@@ -75,8 +75,8 @@ class LibraryController : private ControllerContext {
   Result<Json> LibraryCommand(const std::string& method, const Json& request);
   Result<void> BrowserStopped(const std::string& incarnation);
 
-  Json Hibernation(const std::function<bool(uint64_t)>& current) const {
-    return file_library.Hibernation(current);
+  Json StopBlockers(const std::function<bool(uint64_t)>& current) const {
+    return file_library.StopBlockers(current);
   }
 
  private:
@@ -124,8 +124,8 @@ class FileController : private ControllerContext {
   bool Current(const FileJob& job) const { return file_services.Current(job); }
   bool CurrentLibraryGrant(uint64_t grant) { return file_services.CurrentLibraryGrant(grant); }
   LibraryController& Library() { return library; }
-  Json Hibernation() {
-    return library.Hibernation(
+  Json StopBlockers() {
+    return library.StopBlockers(
         [this](uint64_t grant) { return file_services.CurrentLibraryGrant(grant); });
   }
   Result<void> BrowserStopped(const std::string& incarnation);

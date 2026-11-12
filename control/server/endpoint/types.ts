@@ -91,7 +91,7 @@ export interface LogWindow {
 export interface EndpointSnapshot {
   status?: NativeError | null;
   browserRestart?: 'ready' | 'waiting' | 'exhausted';
-  hibernation?: {
+  stopBlockers?: {
     unacknowledgedClosedEvents: number;
     pendingNativeSelections: number;
     inFlightUploads: number;

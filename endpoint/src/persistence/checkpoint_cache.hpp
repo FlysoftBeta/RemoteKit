@@ -12,9 +12,9 @@ struct StagedFile {
 class CheckpointCache {
  public:
   ~CheckpointCache();
-  void Start(const fs::path& directory);
+  Result<void> Start(const fs::path& directory);
+  Result<void> Flush();
   void Stop();
-  void PeerPresent(bool present);
   void MaybeStage(objects::ObjectService& objects, const std::string& tenant);
   std::optional<StagedFile> Find(const std::string& path, const Json& identity) const;
   DirectoryChanges Changes() const { return watcher_.Snapshot(); }
@@ -26,7 +26,10 @@ class CheckpointCache {
   DirectoryWatcher watcher_;
   std::atomic<bool> cancel_{false};
   std::atomic<uint64_t> generation_{0};
-  std::optional<PhaseClock::time_point> no_peer_;
+  PhaseClock::time_point next_refresh_, last_flush_{};
+  std::thread journal_thread_;
+  std::mutex journal_mutex_;
+  std::condition_variable journal_wake_;
   std::future<void> staging_;
   mutable std::mutex mutex_;
   std::map<std::string, StagedFile> staged_;

@@ -15,6 +15,18 @@ import { join } from 'node:path';
 
 const context = { operation: '导入文件', scope: 'item' as const };
 
+test('an offline dirty-copy owner is an A state with automatic continuation', () => {
+  const presentation = presentFailure(
+    new RemoteKitError('unavailable', '', {
+      reason: 'session_data_on_offline_node',
+    }),
+    { operation: '连接浏览器', scope: 'surface' },
+  );
+  assert.equal(presentation.class, 'A');
+  assert.equal(presentation.text, '会话数据所在节点离线，恢复后自动继续');
+  assert.equal(presentation.action, undefined);
+});
+
 test('failure wording names the affected file without inventing batch success', () => {
   const presentation = presentFailure(new RemoteKitError('internal', ''), {
     ...context,

@@ -133,7 +133,8 @@ struct ClusterLink::Impl {
           !session["tenantId"].is_string() || !session.contains("sessionId") ||
           !session["sessionId"].is_string() || !session.contains("placementEpoch") ||
           !session["placementEpoch"].is_number_integer() ||
-          session["placementEpoch"].get<int64_t>() <= 0) {
+          session["placementEpoch"].get<int64_t>() <= 0 || !session.contains("dataState") ||
+          (session["dataState"] != "clean" && session["dataState"] != "dirty")) {
         Finish(1);
         return false;
       }
@@ -462,6 +463,13 @@ void ClusterLink::OnPeers(Peers callback) {
     impl_->Finish(1);
 }
 Result<Json> ClusterLink::Request(const std::string& name, Json fields) {
+  return RequestUntil(name, std::move(fields), std::chrono::steady_clock::now() + 20s);
+}
+Result<Json> ClusterLink::RequestUntil(const std::string& name,
+                                       Json fields,
+                                       std::chrono::steady_clock::time_point deadline) {
+  if (std::chrono::steady_clock::now() >= deadline)
+    return Error{ErrorCode::kUnavailable, "Control request budget exhausted"};
   std::array<uint8_t, 16> random{};
   if (BCryptGenRandom(nullptr, random.data(), static_cast<ULONG>(random.size()),
                       BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
@@ -489,7 +497,7 @@ Result<Json> ClusterLink::Request(const std::string& name, Json fields) {
     return Error{ErrorCode::kUnavailable, "Control request not queued"};
   }
   std::unique_lock lock(impl_->mutex);
-  impl_->wake.wait_for(lock, 20s, [&] {
+  impl_->wake.wait_until(lock, std::min(deadline, std::chrono::steady_clock::now() + 20s), [&] {
     return impl_->stopping || impl_->active != generation ||
            impl_->pending.at(id).reply.has_value();
   });

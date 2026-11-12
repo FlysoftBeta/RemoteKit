@@ -148,8 +148,10 @@ export type NativeErrorReason =
   | 'storage_quota_exceeded'
   | 'browser_state_too_large'
   | 'no_document_contour'
-  | 'corrupt_state';
+  | 'corrupt_state'
+  | 'session_data_on_offline_node';
 const nativeMessages: Record<NativeErrorReason, string> = {
+  session_data_on_offline_node: '会话数据所在节点离线，恢复后自动继续',
   browser_crashed: '浏览器异常退出，正在恢复…',
   browser_restarting: '浏览器正在恢复，请稍候…',
   output_failed: '浏览器画面输出失败，请稍后重试',

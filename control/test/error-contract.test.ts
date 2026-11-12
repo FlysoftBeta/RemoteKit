@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { formatError } from '../client/util/format-error';
 import { endpointError } from '../server/endpoint/gateway';
 import { HttpClient } from '../server/learning/providers/http';
@@ -16,6 +17,22 @@ import {
   toRemoteKitError,
   wireError,
 } from '../shared/errors';
+
+test('native and Control reason sets stay in sync', () => {
+  const native = readFileSync(new URL('../../protocol/errors.h', import.meta.url), 'utf8');
+  const shared = readFileSync(new URL('../shared/errors.ts', import.meta.url), 'utf8');
+  const nativeReasons = [...native.split('ParseErrorReason')[1].matchAll(/name == "([a-z_]+)"/g)].map(
+    (match) => match[1],
+  );
+  const sharedReasons = [
+    ...shared
+      .split('export type NativeErrorReason =')[1]
+      .split(';')[0]
+      .matchAll(/'([a-z_]+)'/g),
+  ].map((match) => match[1]);
+  assert.deepEqual(nativeReasons.sort(), sharedReasons.sort());
+  for (const reason of nativeReasons) assert.ok(nativeReasonMessage(reason));
+});
 
 test('wire errors validate every code and restrict retry hints without leaking diagnosis', () => {
   for (const code of Object.keys(httpStatus) as (keyof typeof httpStatus)[]) {

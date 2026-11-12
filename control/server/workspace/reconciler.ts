@@ -30,24 +30,22 @@ export class Reconciler {
       | 'learning'
     >,
   ) {}
-  private reconcileHibernation(tenant: string) {
-    return this.context.endpoint.hibernate(tenant).then(() => {
-      if (this.context.endpoint.placement.peek(tenant)?.state === 'hibernated')
-        this.services.lifecycle.finishHibernation(tenant);
+  private reconcileStop(tenant: string) {
+    return this.context.endpoint.stop(tenant).then(() => {
+      if (this.context.endpoint.placement.peek(tenant)?.runState === 'stopped')
+        this.services.lifecycle.finishStop(tenant);
     });
   }
   async tick() {
-    const hibernating = this.context.store.db
-      .prepare("SELECT tenant FROM session_placements WHERE state='hibernating'")
+    const stopping = this.context.store.db
+      .prepare('SELECT tenant FROM session_placements WHERE pending_commit IS NOT NULL')
       .all() as { tenant: string }[];
-    const saving = hibernating.map(({ tenant }) =>
-      this.reconcileHibernation(tenant).catch((err) =>
-        log.warn('reconciler.hibernate_failed', { tenant, err }),
-      ),
+    const saving = stopping.map(({ tenant }) =>
+      this.reconcileStop(tenant).catch((err) => log.warn('reconciler.stop_failed', { tenant, err })),
     );
     const relief = this.services.lifecycle.relieve();
     const active = this.context.store.db
-      .prepare("SELECT tenant FROM session_placements WHERE state='active'")
+      .prepare("SELECT tenant FROM session_placements WHERE run_state='running'")
       .all() as { tenant: string }[];
     for (const { tenant } of active) this.context.tenants.get(tenant).started = true;
     const work = this.context.tenants.activeTenants().map((tenant) => {
@@ -125,11 +123,9 @@ export class Reconciler {
   }
   async reconcileProduct(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
-    if (this.context.endpoint.placement.peek(tenant)?.state === 'hibernating') {
-      void this.reconcileHibernation(tenant).catch((err) =>
-        log.warn('reconciler.hibernate_failed', { tenant, err }),
-      );
-      runtime.lastErrorKey = 'hibernating';
+    if (this.context.endpoint.placement.peek(tenant)?.pendingCommit) {
+      void this.reconcileStop(tenant).catch((err) => log.warn('reconciler.stop_failed', { tenant, err }));
+      runtime.lastErrorKey = 'stopping';
       runtime.lastError = undefined;
       this.services.viewers.push(tenant);
       return;
@@ -510,13 +506,11 @@ export class Reconciler {
   }
   async observeOffline(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
-    if (this.context.endpoint.placement.peek(tenant)?.state === 'hibernating') {
-      void this.reconcileHibernation(tenant).catch((err) =>
-        log.warn('reconciler.hibernate_failed', { tenant, err }),
-      );
+    if (this.context.endpoint.placement.peek(tenant)?.pendingCommit) {
+      void this.reconcileStop(tenant).catch((err) => log.warn('reconciler.stop_failed', { tenant, err }));
       return;
     }
-    if (this.context.endpoint.placement.peek(tenant)?.state === 'hibernated') {
+    if (this.context.endpoint.placement.peek(tenant)?.runState === 'stopped') {
       runtime.started = false;
       return;
     }
@@ -546,7 +540,7 @@ export class Reconciler {
       );
       this.services.operations.saveWorkspace(state);
     }
-    if (await this.services.lifecycle.hibernate(tenant, snapshot)) return;
+    if (await this.services.lifecycle.stop(tenant, snapshot)) return;
     if (snapshot.running === false) {
       runtime.started = false;
       this.services.policy.reset(tenant);

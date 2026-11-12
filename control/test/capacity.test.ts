@@ -175,7 +175,9 @@ test('warm bonus applies only below predicted pressure threshold and only to the
       .prepare('INSERT INTO checkpoints VALUES (?,?,?,?,?,?)')
       .run('tenant', 1, sleeping.placementEpoch, manifest, 'dev', 0);
     h.store.db
-      .prepare("UPDATE session_placements SET state='hibernated',checkpoint_id=1 WHERE tenant='tenant'")
+      .prepare(
+        "UPDATE session_placements SET run_state='stopped',data_state='clean',checkpoint_id=1 WHERE tenant='tenant'",
+      )
       .run();
     h.store.db
       .prepare('INSERT INTO warm_session_copies VALUES (?,?,?,?)')
@@ -183,7 +185,9 @@ test('warm bonus applies only below predicted pressure threshold and only to the
     const alpha = h.nodes.get('alpha')!;
     const beta = h.nodes.get('beta')!;
     const place = (a: number, b: number, warm = manifest) => {
-      h.store.db.prepare("UPDATE session_placements SET state='hibernated' WHERE tenant='tenant'").run();
+      h.store.db
+        .prepare("UPDATE session_placements SET run_state='stopped',data_state='clean' WHERE tenant='tenant'")
+        .run();
       h.store.db.prepare('UPDATE warm_session_copies SET manifest_id=?').run(warm);
       alpha.metrics.record(fakeMetrics({ cpu: a }));
       beta.metrics.record(fakeMetrics({ cpu: b }));
@@ -201,7 +205,7 @@ test('warm bonus applies only below predicted pressure threshold and only to the
 const snapshot = (): EndpointSnapshot => ({
   running: true,
   views: [],
-  hibernation: {
+  stopBlockers: {
     unacknowledgedClosedEvents: 0,
     pendingNativeSelections: 0,
     inFlightUploads: 0,
@@ -218,10 +222,12 @@ function reliefCluster() {
   const clock = new TestClock();
   const gateway = new EndpointGateway(h.nodes, h.placement);
   gateway.snapshot = async () => snapshot();
-  const hibernated: string[] = [];
-  gateway.hibernate = async (tenant) => {
-    hibernated.push(tenant);
-    h.store.db.prepare("UPDATE session_placements SET state='hibernated' WHERE tenant=?").run(tenant);
+  const stopped: string[] = [];
+  gateway.stop = async (tenant) => {
+    stopped.push(tenant);
+    h.store.db
+      .prepare("UPDATE session_placements SET run_state='stopped',data_state='clean' WHERE tenant=?")
+      .run(tenant);
     return 1;
   };
   const app = createApplication(h.store, gateway, undefined, clock);
@@ -244,7 +250,7 @@ function reliefCluster() {
     app,
     clock,
     gateway,
-    hibernated,
+    stopped,
     add,
     pressure,
     async close() {
@@ -271,31 +277,31 @@ test('relief selects longest eligible absence, allows one flight per node and wa
     h.store.workspaces.writeWorkspace(workspace);
     h.gateway.snapshot = async (tenant) => {
       const value = snapshot();
-      if (tenant === 'blocked') value.hibernation!.inFlightUploads = 1;
+      if (tenant === 'blocked') value.stopBlockers!.inFlightUploads = 1;
       return value;
     };
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const hibernate = h.gateway.hibernate.bind(h.gateway);
-    h.gateway.hibernate = async (tenant) => {
+    const stop = h.gateway.stop.bind(h.gateway);
+    h.gateway.stop = async (tenant) => {
       await gate;
-      return hibernate(tenant);
+      return stop(tenant);
     };
     h.pressure();
     const first = h.app.lifecycle.relieve();
     const concurrent = h.app.lifecycle.relieve();
     release();
     await Promise.all([first, concurrent]);
-    assert.deepEqual(h.hibernated, ['long']);
+    assert.deepEqual(h.stopped, ['long']);
     await h.app.lifecycle.relieve();
-    assert.deepEqual(h.hibernated, ['long']);
+    assert.deepEqual(h.stopped, ['long']);
     h.nodes.get('alpha')!.metrics.record(fakeMetrics({ cpu: 0.9, sessions: 3 }), Date.now() + 1);
     await h.app.lifecycle.relieve();
-    assert.deepEqual(h.hibernated, ['long', 'short']);
+    assert.deepEqual(h.stopped, ['long', 'short']);
     const decisions = logs
-      .filter((line) => line[0] === 'hibernate.auto')
+      .filter((line) => line[0] === 'stop.auto')
       .map((line) => line[1] as Record<string, unknown>);
     assert.equal(decisions[0].reason, 'rebalance');
     assert.equal(decisions[0].tenant, 'long');
@@ -305,10 +311,10 @@ test('relief selects longest eligible absence, allows one flight per node and wa
     assert.equal(h.placement.resolve('long').nodeId, 'beta');
     h.nodes.get('alpha')!.metrics.record(fakeMetrics(), Date.now() + 2);
     await h.app.lifecycle.relieve();
-    assert.deepEqual(h.hibernated, ['long', 'short']);
+    assert.deepEqual(h.stopped, ['long', 'short']);
     h.nodes.get('alpha')!.metrics.record(fakeMetrics({ cpu: 0.9, sessions: 2 }), Date.now() + 3);
     await h.app.lifecycle.relieve();
-    assert.deepEqual(h.hibernated, ['long', 'short']);
+    assert.deepEqual(h.stopped, ['long', 'short']);
   } finally {
     await h.close();
   }
@@ -325,30 +331,30 @@ test('placement requests relief without sustained pressure; a newer relieved sam
     assert.equal(alpha.metrics.underPressure(), false);
     assert.ok(alpha.reliefRequestedAt);
     await h.app.lifecycle.relieve();
-    assert.deepEqual(h.hibernated, ['idle']);
+    assert.deepEqual(h.stopped, ['idle']);
     h.add('later', 60000);
     alpha.metrics.record(fakeMetrics({ cpu: 0.1 }), Date.now() + 1);
     await h.app.lifecycle.relieve();
     assert.equal(alpha.reliefRequestedAt, undefined);
-    assert.deepEqual(h.hibernated, ['idle']);
+    assert.deepEqual(h.stopped, ['idle']);
   } finally {
     await h.close();
   }
 });
 
-test('sustained pressure triggers relief without a lighter node; idle hibernation keeps ten minutes', async (t) => {
+test('sustained pressure triggers relief without a lighter node; idle stop keeps ten minutes', async (t) => {
   const h = reliefCluster();
   const logs: unknown[][] = [];
   t.mock.method(log, 'info', (...args: unknown[]) => logs.push(args));
   try {
     h.add('idle', 120000);
-    assert.equal(await h.app.lifecycle.hibernate('idle', snapshot()), false);
-    assert.equal(h.app.lifecycle.hibernationBlocker('idle', snapshot(), false, true), undefined);
+    assert.equal(await h.app.lifecycle.stop('idle', snapshot()), false);
+    assert.equal(h.app.lifecycle.stopBlocker('idle', snapshot(), false, true), undefined);
     h.nodes.get('beta')!.metrics.record(fakeMetrics({ cpu: 0.7 }));
     h.pressure();
     await h.app.lifecycle.relieve();
-    assert.deepEqual(h.hibernated, ['idle']);
-    assert.equal(logs[0][0], 'hibernate.auto');
+    assert.deepEqual(h.stopped, ['idle']);
+    assert.equal(logs[0][0], 'stop.auto');
     assert.equal((logs[0][1] as { reason: string }).reason, 'relief');
   } finally {
     await h.close();
@@ -365,14 +371,14 @@ test('relief rechecks pressure and Viewer presence after awaiting the snapshot',
       return snapshot();
     };
     await h.app.lifecycle.relieve();
-    assert.deepEqual(h.hibernated, []);
+    assert.deepEqual(h.stopped, []);
     h.pressure();
     h.gateway.snapshot = async () => {
       runtime.viewer = {} as any;
       return snapshot();
     };
     await h.app.lifecycle.relieve();
-    assert.deepEqual(h.hibernated, []);
+    assert.deepEqual(h.stopped, []);
   } finally {
     await h.close();
   }

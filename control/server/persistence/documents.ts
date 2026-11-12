@@ -81,6 +81,7 @@ export const wireError = object(
       'browser_state_too_large',
       'no_document_contour',
       'corrupt_state',
+      'session_data_on_offline_node',
     ),
     retryAfterMs: i(),
     errorId: s({ pattern: /^[cev]-[0-9a-f]{10}$/ }),

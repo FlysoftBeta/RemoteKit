@@ -7,9 +7,10 @@
 
 namespace remotekit {
 Result<Json> CheckpointIdentity(const fs::path& path) {
-  HANDLE file = CreateFileW(
-      path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-      nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  HANDLE file =
+      CreateFileW(LongPath(path).c_str(), FILE_READ_ATTRIBUTES,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                  FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
   if (file == INVALID_HANDLE_VALUE)
     return Error{ErrorCode::kUnavailable, "checkpoint file attributes unavailable"};
   BY_HANDLE_FILE_INFORMATION info{};
@@ -29,27 +30,61 @@ Result<Json> CheckpointIdentity(const fs::path& path) {
 CheckpointCache::~CheckpointCache() {
   Stop();
 }
-void CheckpointCache::Start(const fs::path& directory) {
-  directory_ = directory;
+Result<void> CheckpointCache::Start(const fs::path& directory) {
+  directory_ = LongPath(directory);
   cancel_ = false;
-  no_peer_ = PhaseClock::now();
-  watcher_.Start(directory);
+  next_refresh_ = PhaseClock::now() + std::chrono::minutes(30);
+  watcher_.Start(directory_);
+  RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory_));
+  if (!copy.is_null()) {
+    RK_ASSIGN_OR_RETURN(recovered,
+                        Checkpoints::RecoverChanges(directory_, copy["changesAt"].get<int64_t>(),
+                                                    !copy["stoppedCleanly"].get<bool>()));
+    watcher_.Merge(recovered);
+  }
+  journal_thread_ = std::thread([this] {
+    std::unique_lock lock(journal_mutex_);
+    while (
+        !journal_wake_.wait_for(lock, std::chrono::seconds(5), [this] { return cancel_.load(); })) {
+      lock.unlock();
+      try {
+        auto flushed = Flush();
+        if (!flushed)
+          LogError(LogLevel::kWarn, "session.changes_flush_failed", flushed.error());
+      } catch (const std::exception& error) {
+        LogError(LogLevel::kWarn, "session.changes_flush_failed",
+                 Error{ErrorCode::kUnavailable, error.what()});
+      }
+      lock.lock();
+    }
+  });
+  return {};
+}
+Result<void> CheckpointCache::Flush() {
+  const auto now = PhaseClock::now();
+  auto changes = watcher_.Snapshot();
+  for (auto path = changes.paths.begin(); path != changes.paths.end();) {
+    if (path->second <= last_flush_) {
+      changes.removed.erase(path->first);
+      changes.subtrees.erase(path->first);
+      path = changes.paths.erase(path);
+    } else {
+      ++path;
+    }
+  }
+  RK_RETURN_IF_ERROR(Checkpoints::FlushChanges(directory_, changes));
+  last_flush_ = now;
+  return {};
 }
 void CheckpointCache::Stop() {
   cancel_ = true;
   ++generation_;
+  journal_wake_.notify_all();
+  if (journal_thread_.joinable())
+    journal_thread_.join();
   if (staging_.valid())
     staging_.get();
   watcher_.Stop();
-}
-void CheckpointCache::PeerPresent(bool present) {
-  cancel_ = present;
-  if (present)
-    ++generation_;
-  if (present)
-    no_peer_.reset();
-  else if (!no_peer_)
-    no_peer_ = PhaseClock::now();
 }
 std::optional<StagedFile> CheckpointCache::Find(const std::string& path,
                                                 const Json& identity) const {
@@ -60,8 +95,31 @@ std::optional<StagedFile> CheckpointCache::Find(const std::string& path,
   return found->second;
 }
 void CheckpointCache::MaybeStage(objects::ObjectService& objects, const std::string& tenant) {
-  if (cancel_ || !no_peer_ || PhaseClock::now() - *no_peer_ < std::chrono::seconds(30))
+  if (cancel_)
     return;
+  if (PhaseClock::now() >= next_refresh_) {
+    std::set<std::string> ids;
+    {
+      std::lock_guard lock(mutex_);
+      for (auto staged = staged_.begin(); staged != staged_.end();) {
+        const auto current = CheckpointIdentity(LongPath(directory_ / Utf8Path(staged->first)));
+        if (!current || current.value() != staged->second.identity) {
+          staged = staged_.erase(staged);
+          continue;
+        }
+        for (const auto& object : staged->second.objects)
+          ids.insert(object.id);
+        ++staged;
+      }
+    }
+    auto refreshed = objects.RefreshClaims(tenant, {ids.begin(), ids.end()});
+    if (refreshed)
+      next_refresh_ = PhaseClock::now() + std::chrono::minutes(30);
+    else {
+      next_refresh_ = PhaseClock::now() + std::chrono::seconds(5);
+      LogError(LogLevel::kWarn, "session.claims_refresh_failed", refreshed.error());
+    }
+  }
   if (staging_.valid()) {
     if (staging_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
       return;
@@ -81,7 +139,7 @@ void CheckpointCache::MaybeStage(objects::ObjectService& objects, const std::str
           return;
         if (PhaseClock::now() - changed < std::chrono::seconds(10))
           continue;
-        const auto path = directory_ / Utf8Path(name);
+        const auto path = LongPath(directory_ / Utf8Path(name));
         bool excluded = false;
         fs::path prefix;
         for (const auto& part : Utf8Path(name)) {
@@ -104,6 +162,10 @@ void CheckpointCache::MaybeStage(objects::ObjectService& objects, const std::str
           }
           std::string bytes(static_cast<size_t>(std::min<uint64_t>(remaining, 1024 * 1024)), '\0');
           if (!input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
+            complete = false;
+            break;
+          }
+          if (!objects.StageBytes(bytes.size(), cancel_)) {
             complete = false;
             break;
           }

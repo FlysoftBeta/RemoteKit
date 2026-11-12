@@ -20,6 +20,7 @@ class DirectoryWatcher {
   void Start(const fs::path& directory);
   void Stop();
   void Invalidate();
+  void Merge(const DirectoryChanges& changes);
   DirectoryChanges Snapshot() const;
 
  private:

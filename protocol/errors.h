@@ -96,7 +96,8 @@ enum class ErrorReason {
   kStorageQuotaExceeded,
   kBrowserStateTooLarge,
   kNoDocumentContour,
-  kCorruptState
+  kCorruptState,
+  kSessionDataOnOfflineNode
 };
 constexpr std::string_view ErrorReasonName(ErrorReason value) {
   switch (value) {
@@ -124,6 +125,8 @@ constexpr std::string_view ErrorReasonName(ErrorReason value) {
       return "no_document_contour";
     case ErrorReason::kCorruptState:
       return "corrupt_state";
+    case ErrorReason::kSessionDataOnOfflineNode:
+      return "session_data_on_offline_node";
   }
   return "";
 }
@@ -152,6 +155,8 @@ constexpr std::optional<ErrorReason> ParseErrorReason(std::string_view name) {
     return ErrorReason::kNoDocumentContour;
   if (name == "corrupt_state")
     return ErrorReason::kCorruptState;
+  if (name == "session_data_on_offline_node")
+    return ErrorReason::kSessionDataOnOfflineNode;
   return std::nullopt;
 }
 }  // namespace remotekit::protocol

@@ -1,6 +1,5 @@
-import { log } from '../log';
 import { diskFloor } from './disk';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type { ControlDatabase } from '../persistence/database';
 import { retiringObjects } from './objects';
@@ -14,12 +13,14 @@ export interface SessionPlacement {
   nodeId: string;
   placementEpoch: number;
   keyCiphertext: string;
-  state: 'active' | 'hibernating' | 'hibernated';
+  runState: 'running' | 'stopped';
+  dataState: 'clean' | 'dirty';
+  pendingCommit: string | null;
   checkpointId: number | null;
   checkpoint: string | null;
 }
 export class Placement {
-  reconcileHibernation?: (tenant: string) => Promise<number>;
+  reconcileStop?: (tenant: string) => Promise<number>;
   constructor(
     private readonly store: ControlDatabase,
     private readonly nodes: NodeRegistry,
@@ -29,16 +30,21 @@ export class Placement {
         store.db
           .prepare(
             `SELECT tenant AS tenantId, session_id AS sessionId,
-      placement_epoch AS placementEpoch FROM session_placements WHERE node_id=? AND state IN ('active','hibernating')`,
+      placement_epoch AS placementEpoch, data_state AS dataState FROM session_placements WHERE node_id=?`,
           )
-          .all(nodeId) as { tenantId: string; sessionId: string; placementEpoch: bigint }[]
+          .all(nodeId) as {
+          tenantId: string;
+          sessionId: string;
+          placementEpoch: bigint;
+          dataState: 'clean' | 'dirty';
+        }[]
       ).map((row) => ({ ...row, placementEpoch: Number(row.placementEpoch) }));
   }
   peek(tenant: string): SessionPlacement | undefined {
     const row = this.store.db
       .prepare(
         `SELECT p.tenant, p.session_id AS sessionId, p.node_id AS nodeId,
-      p.placement_epoch AS placementEpoch, p.key_ciphertext AS keyCiphertext, p.state,
+      p.placement_epoch AS placementEpoch, p.key_ciphertext AS keyCiphertext, p.run_state AS runState, p.data_state AS dataState, p.pending_commit AS pendingCommit,
       p.checkpoint_id AS checkpointId, c.manifest_id AS checkpoint
       FROM session_placements p LEFT JOIN checkpoints c ON c.tenant=p.tenant AND c.id=p.checkpoint_id
       WHERE p.tenant=?`,
@@ -55,15 +61,15 @@ export class Placement {
   activeTenants(nodeId: string) {
     return (
       this.store.db
-        .prepare("SELECT tenant FROM session_placements WHERE node_id=? AND state='active' ORDER BY tenant")
+        .prepare(
+          "SELECT tenant FROM session_placements WHERE node_id=? AND run_state='running' ORDER BY tenant",
+        )
         .all(nodeId) as { tenant: string }[]
     ).map((row) => row.tenant);
   }
   activeSessions(nodeId: string) {
     const row = this.store.db
-      .prepare(
-        "SELECT count(*) AS count FROM session_placements WHERE node_id=? AND state IN ('active','hibernating')",
-      )
+      .prepare('SELECT count(*) AS count FROM session_placements WHERE node_id=?')
       .get(nodeId) as { count: bigint };
     return Number(row.count);
   }
@@ -71,7 +77,7 @@ export class Placement {
   evacuate(nodeId: string) {
     this.store.db
       .prepare(
-        `UPDATE session_placements SET state='hibernated',placement_epoch=placement_epoch+1,
+        `UPDATE session_placements SET run_state='stopped',data_state='clean',pending_commit=NULL,placement_epoch=placement_epoch+1,
       checkpoint_id=(SELECT max(id) FROM checkpoints WHERE tenant=session_placements.tenant) WHERE node_id=?`,
       )
       .run(nodeId);
@@ -108,15 +114,21 @@ export class Placement {
   resolve(tenant: string): SessionPlacement {
     return this.store.transaction(() => {
       const existing = this.peek(tenant);
-      if (existing?.state === 'hibernating') {
-        void this.reconcileHibernation?.(tenant).catch((err) =>
-          log.warn('placement.hibernate_failed', { tenant, err }),
-        );
-        throw new RemoteKitError('unavailable', '正在保存会话，请稍候');
+      if (existing?.pendingCommit) {
+        void this.reconcileStop?.(tenant).catch(() => {});
+        throw new RemoteKitError('unavailable', '正在提交会话，请稍候');
       }
-      if (existing?.state === 'active') {
+      if (existing?.dataState === 'dirty') {
         if (this.nodes.get(existing.nodeId)?.state.state !== 'ready')
-          throw new RemoteKitError('unavailable', '会话节点离线', { detail: 'Placed node is offline' });
+          throw new RemoteKitError('unavailable', '会话数据所在节点离线，恢复后自动继续', {
+            reason: 'session_data_on_offline_node',
+          });
+        if (existing.runState === 'stopped') {
+          this.store.db
+            .prepare("UPDATE session_placements SET run_state='running' WHERE tenant=?")
+            .run(tenant);
+          return { ...existing, runState: 'running' };
+        }
         return existing;
       }
       const now = Date.now();
@@ -154,7 +166,9 @@ export class Placement {
         ? {
             ...existing,
             nodeId: node.nodeId,
-            state: 'active',
+            runState: 'running',
+            dataState: 'dirty',
+            pendingCommit: null,
             placementEpoch: existing.placementEpoch + 1,
           }
         : {
@@ -163,14 +177,16 @@ export class Placement {
             nodeId: node.nodeId,
             placementEpoch: 1,
             keyCiphertext: this.store.atRestKey.seal(tenant, randomBytes(32)),
-            state: 'active',
+            runState: 'running',
+            dataState: 'dirty',
+            pendingCommit: null,
             checkpointId: null,
             checkpoint: null,
           };
       this.store.db
         .prepare(
           `INSERT OR REPLACE INTO session_placements
-        (tenant,session_id,node_id,placement_epoch,key_ciphertext,state,checkpoint_id) VALUES (?,?,?,?,?,?,?)`,
+        (tenant,session_id,node_id,placement_epoch,key_ciphertext,run_state,data_state,pending_commit,checkpoint_id) VALUES (?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           tenant,
@@ -178,7 +194,9 @@ export class Placement {
           placement.nodeId,
           placement.placementEpoch,
           placement.keyCiphertext,
-          placement.state,
+          placement.runState,
+          placement.dataState,
+          placement.pendingCommit,
           placement.checkpointId,
         );
       return placement;
@@ -193,35 +211,60 @@ export class Placement {
   keys(placement: SessionPlacement) {
     return tenantKeys(this.store.atRestKey.open(placement.tenant, placement.keyCiphertext));
   }
-  beginHibernation(tenant: string) {
+  beginStop(tenant: string) {
     return this.store.transaction(() => {
       const placement = this.peek(tenant);
-      if (!placement || placement.state === 'hibernated')
-        throw new RemoteKitError('conflict', '会话当前未运行', { detail: 'Session is not active' });
-      this.store.db.prepare("UPDATE session_placements SET state='hibernating' WHERE tenant=?").run(tenant);
-      return { ...placement, state: 'hibernating' as const };
+      if (!placement || (placement.runState === 'stopped' && placement.dataState === 'clean'))
+        throw new RemoteKitError('conflict', '会话当前未运行');
+      const pendingCommit = placement.pendingCommit ?? randomUUID();
+      this.store.db
+        .prepare("UPDATE session_placements SET run_state='stopped',pending_commit=? WHERE tenant=?")
+        .run(pendingCommit, tenant);
+      return { ...placement, runState: 'stopped' as const, pendingCommit };
     });
   }
-  settleHibernation(placement: SessionPlacement, state: 'active' | 'hibernated') {
+  cancelStop(placement: SessionPlacement) {
     return (
       this.store.db
         .prepare(
-          `UPDATE session_placements SET state=?
-      WHERE tenant=? AND node_id=? AND placement_epoch=? AND state='hibernating'`,
+          `UPDATE session_placements SET run_state='running',data_state='dirty',pending_commit=NULL
+      WHERE tenant=? AND node_id=? AND placement_epoch=? AND pending_commit=?`,
         )
-        .run(state, placement.tenant, placement.nodeId, placement.placementEpoch).changes > 0
+        .run(placement.tenant, placement.nodeId, placement.placementEpoch, placement.pendingCommit).changes >
+      0
     );
+  }
+  discard(tenant: string) {
+    const placement = this.peek(tenant);
+    if (
+      !placement ||
+      placement.dataState !== 'dirty' ||
+      this.nodes.get(placement.nodeId)?.state.state === 'ready'
+    )
+      throw new RemoteKitError('conflict', '只能放弃离线节点上的未提交更改');
+    this.store.db
+      .prepare(
+        `UPDATE session_placements SET run_state='stopped',data_state='clean',pending_commit=NULL,
+      placement_epoch=placement_epoch+1,
+      checkpoint_id=(SELECT max(id) FROM checkpoints WHERE tenant=session_placements.tenant) WHERE tenant=?`,
+      )
+      .run(tenant);
+    this.store.db
+      .prepare('DELETE FROM warm_session_copies WHERE tenant=? AND node_id=?')
+      .run(tenant, placement.nodeId);
+    return this.peek(tenant)!;
   }
   commitCheckpoint(placement: SessionPlacement, manifestId: string, objects: string[], buildId: string) {
     return this.store.transaction(() => {
       const current = this.peek(placement.tenant);
       if (
-        current?.state !== 'hibernating' ||
+        !current ||
+        (placement.pendingCommit !== null && current.pendingCommit !== placement.pendingCommit) ||
         current.nodeId !== placement.nodeId ||
         current.placementEpoch !== placement.placementEpoch
       )
         throw new RemoteKitError('conflict', '会话位置在保存期间改变', {
-          detail: 'Placement changed during hibernation',
+          detail: 'Placement changed during stop',
         });
       if (
         !/^[a-f0-9]{64}$/.test(manifestId) ||
@@ -241,6 +284,7 @@ export class Placement {
             detail: 'Checkpoint object is not committed',
           });
       }
+      if (current.checkpoint === manifestId && current.dataState === 'clean') return current.checkpointId!;
       const row = this.store.db
         .prepare('SELECT coalesce(max(id),0)+1 AS id FROM checkpoints WHERE tenant=?')
         .get(placement.tenant) as { id: bigint };
@@ -265,7 +309,9 @@ export class Placement {
         )
         .run(placement.tenant, placement.tenant);
       this.store.db
-        .prepare("UPDATE session_placements SET state='hibernated',checkpoint_id=? WHERE tenant=?")
+        .prepare(
+          "UPDATE session_placements SET run_state='stopped',data_state='clean',pending_commit=NULL,checkpoint_id=? WHERE tenant=?",
+        )
         .run(id, placement.tenant);
       this.markWarm({ ...placement, checkpoint: manifestId });
       syncObjectReferences(this.store.db);

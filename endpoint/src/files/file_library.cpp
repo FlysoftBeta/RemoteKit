@@ -20,7 +20,7 @@
 #include "util/file_io.hpp"
 
 namespace remotekit {
-ServiceJson FileLibrary::Hibernation(const std::function<bool(uint64_t)>& current) const {
+ServiceJson FileLibrary::StopBlockers(const std::function<bool(uint64_t)>& current) const {
   std::lock_guard lock(mutex_);
   const auto selections =
       std::count_if(selections_.begin(), selections_.end(), [](const auto& item) {

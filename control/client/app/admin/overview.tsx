@@ -211,7 +211,7 @@ export function AdminOverviewSection({ online, call }: { online: boolean; call: 
             <StatTile
               label="浏览器会话"
               value={data.sessions.active}
-              detail={`运行中 · ${data.sessions.hibernated} 个已休眠`}
+              detail={`运行中 · ${data.sessions.stopped} 个已停止`}
             />
             <StatTile
               label="文件与检查点"

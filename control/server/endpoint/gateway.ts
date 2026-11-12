@@ -1,9 +1,5 @@
 import { log } from '../log';
-import {
-  RemoteKitError,
-  isRemoteKitError,
-  endpointError as convertEndpointError,
-} from '../../shared/errors';
+import { RemoteKitError, isRemoteKitError, endpointError as convertEndpointError } from '../../shared/errors';
 import type { Asset, SelectionState } from '../../shared/file-library';
 import type { MediaPolicy } from '../../shared/product';
 import type {
@@ -80,7 +76,7 @@ export class EndpointGateway {
   identity(tenant: string): Promise<BrowserIdentity> {
     return this.invoke('session.identity', tenant);
   }
-  readonly hibernating = new Map<string, Promise<number>>();
+  readonly stopping = new Map<string, Promise<number>>();
   private readonly opened = new Map<
     string,
     { epoch: string; placementEpoch: number; promise: Promise<void> }
@@ -100,16 +96,46 @@ export class EndpointGateway {
       | 'activeTenants'
       | 'forgetTenant'
       | 'checkpoints'
-      | 'beginHibernation'
-      | 'settleHibernation'
-      | 'reconcileHibernation'
+      | 'beginStop'
+      | 'cancelStop'
+      | 'discard'
+      | 'reconcileStop'
     >,
   ) {
-    placement.reconcileHibernation = (tenant) => this.hibernate(tenant);
+    placement.reconcileStop = (tenant) => this.stop(tenant);
+    nodes.on('copies', ({ nodeId, sessions }: { nodeId: string; sessions: any[] }) => {
+      for (const reported of sessions) {
+        const current = placement.peek(reported.tenantId);
+        if (
+          !current ||
+          current.nodeId !== nodeId ||
+          current.sessionId !== reported.sessionId ||
+          current.placementEpoch !== reported.placementEpoch ||
+          reported.copy?.state !== 'clean' ||
+          !reported.copy.lastCommit ||
+          typeof reported.copy.lastCommit.requestId !== 'string' ||
+          !reported.copy.lastCommit.requestId ||
+          reported.copy.lastCommit.manifestId !== reported.copy.base
+        )
+          continue;
+        try {
+          placement.commitCheckpoint(
+            { ...current, pendingCommit: null },
+            reported.copy.base,
+            reported.checkpoint?.objects,
+            reported.checkpoint?.buildId,
+          );
+          this.opened.delete(current.tenant);
+        } catch (err) {
+          log.warn('session.shutdown_commit_failed', { tenant: current.tenant, err });
+          throw err;
+        }
+      }
+    });
   }
   isReady(tenant: string) {
     const placed = this.placement.peek(tenant);
-    return placed?.state === 'active'
+    return placed?.dataState === 'dirty'
       ? this.nodes.get(placed.nodeId)?.state.state === 'ready'
       : this.nodes.all().some((node) => node.state.state === 'ready');
   }
@@ -118,7 +144,7 @@ export class EndpointGateway {
   }
   isPlacedOn(tenant: string, nodeId: string) {
     const placement = this.placement.peek(tenant);
-    return placement !== undefined && placement.state !== 'hibernated' && placement.nodeId === nodeId;
+    return placement !== undefined && placement.dataState === 'dirty' && placement.nodeId === nodeId;
   }
   onSignal(listener: (event: RtcSignal) => void) {
     const unsubscribe = this.nodes.all().map((node) =>
@@ -173,6 +199,11 @@ export class EndpointGateway {
   }
   private async invoke<T>(method: string, tenant: string, args?: object): Promise<T> {
     try {
+      const prior = this.placement.peek(tenant);
+      if (prior?.dataState === 'dirty') {
+        const owner = this.nodes.get(prior.nodeId);
+        if (owner?.state.state === 'ready') await owner.readyCopies;
+      }
       const placement = this.placement.resolve(tenant);
       const node = this.nodes.get(placement.nodeId)!;
       try {
@@ -201,80 +232,78 @@ export class EndpointGateway {
   writeClipboard(tenant: string, clipboard: ClipboardValue): Promise<Accepted> {
     return this.invoke('clipboard.write', tenant, clipboard);
   }
-  hibernate(tenant: string): Promise<number> {
-    const previous = this.hibernating.get(tenant);
+  stop(tenant: string): Promise<number> {
+    const previous = this.stopping.get(tenant);
     if (previous) return previous;
-    const pending = this.hibernateSession(tenant)
+    const pending = this.stopSession(tenant)
       .catch((error) => {
         throw endpointError(error);
       })
       .finally(() => {
-        this.hibernating.delete(tenant);
+        this.stopping.delete(tenant);
       });
-    this.hibernating.set(tenant, pending);
+    this.stopping.set(tenant, pending);
     return pending;
   }
-  private async hibernateSession(tenant: string) {
-    const reconciling = this.placement.peek(tenant)?.state === 'hibernating';
-    const placement = this.placement.beginHibernation(tenant);
-    const opening = this.opened.get(tenant)?.promise;
-    await opening;
+  private async stopSession(tenant: string) {
+    const previous = this.placement.peek(tenant);
+    const owner = previous && this.nodes.get(previous.nodeId);
+    if (owner?.state.state === 'ready') await owner.readyCopies;
+    const current = this.placement.peek(tenant);
+    if (current?.runState === 'stopped' && current.dataState === 'clean') return current.checkpointId ?? 0;
+    const reconciling = !!current?.pendingCommit;
+    const placement = this.placement.beginStop(tenant);
+    try {
+      await this.opened.get(tenant)?.promise;
+    } catch (error) {
+      if (!reconciling) this.placement.cancelStop(placement);
+      throw error;
+    }
     const node = this.nodes.get(placement.nodeId);
     if (node?.state.state !== 'ready') {
-      if (!reconciling) this.placement.settleHibernation(placement, 'active');
-      throw new RemoteKitError('unavailable', '会话节点离线', { detail: 'Placed node is offline' });
+      if (!reconciling) this.placement.cancelStop(placement);
+      throw new RemoteKitError('unavailable', '会话节点离线');
     }
     const state = node.state;
     let result;
     try {
       result = await node.request(
-        'session.hibernate',
+        'session.stop',
         tenant,
         {
           placementEpoch: placement.placementEpoch,
+          commit: placement.pendingCommit,
         },
         180000,
       );
     } catch (error) {
       const failure = endpointError(error);
-      if (failure.code === 'not_found') {
-        if (!this.placement.settleHibernation(placement, 'hibernated'))
-          throw new RemoteKitError('conflict', '会话位置在保存期间改变', {
-            detail: 'Placement changed during hibernation',
-          });
-        this.opened.delete(tenant);
-        log.warn('hibernate.checkpoint_retained', {
-          tenant,
-          placementEpoch: placement.placementEpoch,
-          checkpoint: placement.checkpoint,
-        });
-        return placement.checkpointId ?? 0;
-      }
       if (failure.code === 'conflict' || (!reconciling && ['unavailable', 'busy'].includes(failure.code))) {
-        this.placement.settleHibernation(placement, 'active');
+        this.placement.cancelStop(placement);
         throw failure;
       }
       throw new RemoteKitError('outcome_unknown', failure.message, {
         reason: failure.reason,
-        retryAfterMs: failure.retryAfterMs,
-        errorId: failure.errorId,
-        detail: failure.detail,
         cause: failure,
       });
     }
     this.opened.delete(tenant);
     if (node.state.state !== 'ready' || node.state.connectionEpoch !== state.connectionEpoch)
-      throw new RemoteKitError('outcome_unknown', '会话保存结果待确认', {
-        detail: 'Node changed during hibernation',
-      });
+      throw new RemoteKitError('outcome_unknown', '会话提交结果待确认');
     try {
-      return this.placement.commitCheckpoint(placement, result?.manifestId, result?.objects, result?.buildId);
+      if (
+        result?.state !== 'clean' ||
+        typeof result.base !== 'string' ||
+        (result.committed !== null &&
+          (result.committed?.requestId !== placement.pendingCommit ||
+            result.committed?.manifestId !== result.base))
+      )
+        throw new RemoteKitError('outcome_unknown', '节点未确认提交');
+      return this.placement.commitCheckpoint(placement, result.base, result.objects, result.buildId);
     } catch (error) {
       const failure = endpointError(error);
       throw new RemoteKitError('outcome_unknown', '会话检查点提交结果待确认', {
         detail: failure.detail ?? failure.message,
-        reason: failure.reason,
-        errorId: failure.errorId,
         cause: error,
       });
     }

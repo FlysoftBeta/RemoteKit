@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <chrono>
 namespace remotekit {
 class DeliveryState {
  public:
@@ -46,6 +47,11 @@ class ManagementLink {
   using Binary = std::function<void(const Json&, std::span<const uint8_t>)>;
   virtual void OnBinary(Binary) {}
   virtual Result<Json> Request(const std::string& name, Json fields) = 0;
+  virtual Result<Json> RequestUntil(const std::string& name,
+                                    Json fields,
+                                    std::chrono::steady_clock::time_point) {
+    return Request(name, std::move(fields));
+  }
   struct ReadyState {
     uint64_t generation;
     Json sessions;

@@ -202,6 +202,7 @@ export function AdminNodesSection({ online, call }: { online: boolean; call: Adm
           setData(
             await call(node.state === 'removed' ? 'admin.readdNode' : 'admin.removeNode', {
               nodeId: node.nodeId,
+              discardDirty: true,
             }),
           );
         }}
@@ -211,6 +212,11 @@ export function AdminNodesSection({ online, call }: { online: boolean; call: Adm
             ? `允许节点 ${selected.nodeId} 重新连接。`
             : `移除节点 ${selected?.nodeId}？其上的会话将从最新检查点在其他节点恢复，没有检查点的会话从空白浏览器数据开始；该节点上的副本不再计入。`}
         </Typography>
+        {selected?.state !== 'removed' && !!selected?.dirtyUsers.length && (
+          <Typography color="error">
+            以下用户的未提交更改将永久丢失：{selected.dirtyUsers.join('、')}
+          </Typography>
+        )}
       </ConfirmDialog>
     </Box>
   );

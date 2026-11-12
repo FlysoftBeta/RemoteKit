@@ -227,8 +227,18 @@ Result<Json> Session::WriteClipboard(const Json& request) {
   return Json{{"accepted", true}};
 }
 Result<void> Session::Initialize() {
+  RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(config.directory));
+  if (copy.is_null())
+    copy = {{"sessionId", config.id}, {"placementEpoch", config.placement_epoch},
+            {"base", nullptr},        {"state", "clean"},
+            {"stoppedCleanly", true}, {"changesAt", 0},
+            {"lastCommit", nullptr}};
+  RK_RETURN_IF_ERROR(checkpoint_cache.Start(config.directory));
+  copy["placementEpoch"] = config.placement_epoch;
+  copy["state"] = "dirty";
+  copy["stoppedCleanly"] = false;
+  RK_RETURN_IF_ERROR(Checkpoints::WriteCopy(config.directory, copy));
   RK_RETURN_IF_ERROR(store.Open());
-  checkpoint_cache.Start(config.directory);
   auto loaded = views.Initialize();
   if (!loaded)
     return loaded.error();
@@ -247,7 +257,6 @@ Session::~Session() {
   checkpoint_cache.Stop();
 }
 void Session::BindPeerResources(uint64_t handle) {
-  checkpoint_cache.PeerPresent(handle != 0);
   timing.Reset();
   authorization.Bind();
   pipeline.Reset();
@@ -266,7 +275,6 @@ Result<void> Session::StartPeerResources(uint64_t handle, const std::string& sdp
   return {};
 }
 void Session::StopPeerResources() {
-  checkpoint_cache.PeerPresent(false);
   authorization.Close();
   face.Stop();
   audio.Stop();
@@ -333,7 +341,7 @@ Result<void> Session::CloseRuntime(bool graceful) {
 Result<Json> Session::Snapshot(bool output_diagnostics) {
   RK_ASSIGN_OR_RETURN(snapshot, views.Snapshot(output_diagnostics));
   snapshot["browserRestart"] = browser.RestartState();
-  auto blockers = files.Hibernation();
+  auto blockers = files.StopBlockers();
   blockers["unacknowledgedClosedEvents"] = snapshot["events"].size();
   blockers["pendingPageRequests"] = 0;
   blockers["downloadsInProgress"] = snapshot["downloadsInProgress"];
@@ -350,7 +358,7 @@ Result<Json> Session::Snapshot(bool output_diagnostics) {
         view.value("close_state", std::string()) == "closing")
       blockers["lifecycleUncertain"] = true;
   }
-  snapshot["hibernation"] = std::move(blockers);
+  snapshot["stopBlockers"] = std::move(blockers);
   return snapshot;
 }
 Result<Json> Session::ReadLog(const Json& request) const {
@@ -392,42 +400,64 @@ Result<Json> Session::ReadLog(const Json& request) const {
   }
   return window;
 }
-Result<Json> Session::Hibernate(objects::ObjectService& objects) {
+Result<void> Session::MarkStopped() {
+  RK_RETURN_IF_ERROR(checkpoint_cache.Flush());
+  RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(config.directory));
+  copy["stoppedCleanly"] = true;
+  return Checkpoints::WriteCopy(config.directory, copy);
+}
+Result<Json> Session::StopAndCommit(const Json& request_id,
+                                    bool check_blockers,
+                                    PhaseClock::time_point deadline,
+                                    bool defer_commits) {
   OperationTiming timing{CheckpointPhases()};
-  timing.fields["event"] = "session.hibernate.timing";
+  timing.fields["event"] = "session.stop.timing";
   timing.fields["tenantId"] = config.tenant;
-  auto phase = PhaseClock::now();
-  RK_ASSIGN_OR_RETURN(snapshot, Snapshot());
-  timing.fields["blockers"] = PhaseMs(phase);
-  for (const auto& [name, value] : snapshot["hibernation"].items())
-    if ((value.is_boolean() && value.get<bool>()) ||
-        (value.is_number() && value.get<uint64_t>() != 0))
-      return Error{ErrorCode::kConflict, "hibernation blocked: " + name};
+  RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(config.directory));
+  if (!request_id.is_null() && !copy["lastCommit"].is_null() &&
+      copy["lastCommit"]["requestId"] == request_id) {
+    RK_ASSIGN_OR_RETURN(details,
+                        Checkpoints(context.objects).Describe(copy["lastCommit"]["manifestId"]));
+    details.update(
+        {{"state", copy["state"]}, {"base", copy["base"]}, {"committed", copy["lastCommit"]}});
+    return details;
+  }
+  if (check_blockers) {
+    RK_ASSIGN_OR_RETURN(snapshot, Snapshot());
+    for (const auto& [name, value] : snapshot["stopBlockers"].items())
+      if ((value.is_boolean() && value.get<bool>()) ||
+          (value.is_number() && value.get<uint64_t>() != 0))
+        return Error{ErrorCode::kConflict, "stop blocked: " + name};
+  }
   auto save = [&]() -> Result<Json> {
-    phase = PhaseClock::now();
     RK_RETURN_IF_ERROR(Shutdown());
-    timing.fields["browserShutdown"] = browser.ShutdownTiming();
-    timing.fields["navigationExport"] = navigation.FinalExportTiming();
-    timing.fields["navigationExport"]["ms"] =
-        browser.ShutdownTiming().value("navigationExport", 0.0);
-    timing.fields["browserShutdown"]["ms"] = PhaseMs(phase);
     files.Stop();
-    RK_RETURN_IF_ERROR(files.PrepareCheckpoint());
-    // No session worker can mutate files after the shutdown boundary.
-    for (const auto* relative : {"uploads", "file-library/staging"})
-      fs::remove_all(config.directory / relative);
-    phase = PhaseClock::now();
-    checkpoint_cache.Stop();
-    AddPhase(&timing.fields, "scan", "ms", PhaseMs(phase));
+    if (!request_id.is_null() && PhaseClock::now() < deadline) {
+      RK_RETURN_IF_ERROR(files.PrepareCheckpoint());
+      for (const auto* relative : {"uploads", "file-library/staging"})
+        fs::remove_all(LongPath(config.directory) / relative);
+    }
     RK_RETURN_IF_ERROR(store.Close());
-    RK_ASSIGN_OR_RETURN(
-        checkpoint, Checkpoints(objects, config.object_access, &timing.fields, &checkpoint_cache)
-                        .Create(config.directory, config.tenant, config.options.build_id));
-    phase = PhaseClock::now();
-    RK_RETURN_IF_ERROR(Checkpoints::Journal(config.directory, PlacementEpoch(), checkpoint,
-                                            config.options.build_id));
-    timing.fields["journal"] = timing.fields.value("journal", 0.0) + PhaseMs(phase);
-    return Checkpoints::Hibernation(config.directory);
+    checkpoint_cache.Stop();
+    RK_RETURN_IF_ERROR(MarkStopped());
+    RK_ASSIGN_OR_RETURN(stopped_copy, Checkpoints::Copy(config.directory));
+    if (request_id.is_null() || PhaseClock::now() >= deadline)
+      return Json{{"state", "dirty"}, {"base", stopped_copy["base"]}, {"committed", nullptr}};
+    RK_ASSIGN_OR_RETURN(checkpoint, Checkpoints(context.objects, config.object_access,
+                                                &timing.fields, &checkpoint_cache)
+                                        .Create(config.directory, config.tenant,
+                                                config.options.build_id, deadline, defer_commits));
+    stopped_copy["state"] = "clean";
+    stopped_copy["base"] = checkpoint["manifestId"];
+    stopped_copy["lastCommit"] = {{"requestId", request_id},
+                                  {"manifestId", checkpoint["manifestId"]}};
+    RK_RETURN_IF_ERROR(Checkpoints::WriteCopy(config.directory, stopped_copy));
+    RK_RETURN_IF_ERROR(Checkpoints::TruncateChanges(config.directory));
+    return Json{{"state", "clean"},
+                {"base", stopped_copy["base"]},
+                {"committed", stopped_copy["lastCommit"]},
+                {"objects", checkpoint["objects"]},
+                {"buildId", config.options.build_id}};
   };
   try {
     auto saved = save();

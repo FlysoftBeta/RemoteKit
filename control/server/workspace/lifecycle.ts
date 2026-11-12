@@ -11,7 +11,7 @@ import type { DomainContext, DomainServices } from '../application';
 import type { NodeLink } from '../cluster/node-link';
 import { systemClock, type Clock } from '../util/clock';
 
-type HibernationReason = 'idle' | 'relief' | 'rebalance';
+type StopReason = 'idle' | 'relief' | 'rebalance';
 type ReliefState = { waitingAfter?: number; inflight?: Promise<void> };
 
 export class UncertainRecovery {
@@ -20,7 +20,7 @@ export class UncertainRecovery {
     { identity: string; retryAt: number; attempts: number }
   >();
   private readonly relief = new Map<string, ReliefState>();
-  private readonly hibernatingNodes = new Set<string>();
+  private readonly stoppingNodes = new Set<string>();
 
   private needsRelief(node: NodeLink) {
     const sample = node.metrics.latest();
@@ -56,7 +56,7 @@ export class UncertainRecovery {
         state = {};
         this.relief.set(node.nodeId, state);
       }
-      const reason: HibernationReason =
+      const reason: StopReason =
         node.metrics.underPressure() &&
         nodes
           .all()
@@ -71,7 +71,7 @@ export class UncertainRecovery {
           : 'relief';
       const tracking = state;
       tracking.inflight = this.relieveNode(node, tracking, reason)
-        .catch((error) => log.warn('hibernate.relief_failed', { nodeId: node.nodeId, err: error }))
+        .catch((error) => log.warn('stop.relief_failed', { nodeId: node.nodeId, err: error }))
         .finally(() => {
           tracking.inflight = undefined;
         });
@@ -79,7 +79,7 @@ export class UncertainRecovery {
     }
     return Promise.all(jobs).then(() => {});
   }
-  private async relieveNode(node: NodeLink, state: ReliefState, reason: HibernationReason) {
+  private async relieveNode(node: NodeLink, state: ReliefState, reason: StopReason) {
     const candidates = this.context.endpoint.placement
       .activeTenants(node.nodeId)
       .map((tenant) => this.context.tenants.get(tenant))
@@ -92,38 +92,38 @@ export class UncertainRecovery {
       .sort((a, b) => a.viewerAbsentSince - b.viewerAbsentSince || a.tenantId.localeCompare(b.tenantId));
     for (const runtime of candidates) {
       if (!this.needsRelief(node)) return;
-      const hibernated = await this.context.tenants.serial(runtime.tenantId, async () => {
+      const stopped = await this.context.tenants.serial(runtime.tenantId, async () => {
         if (!this.context.endpoint.isPlacedOn(runtime.tenantId, node.nodeId)) return false;
         const snapshot = await this.context.endpoint.snapshot(runtime.tenantId);
         if (!this.needsRelief(node)) return false;
-        return this.hibernate(runtime.tenantId, snapshot, false, reason);
+        return this.stop(runtime.tenantId, snapshot, false, reason);
       });
-      if (hibernated) {
+      if (stopped) {
         state.waitingAfter = Date.now();
         return;
       }
     }
   }
-  // An administrator may hibernate at once; automatic hibernation also needs Memory Saver and idle time.
-  hibernationBlocker(
+  // An administrator may stop at once; automatic stops also need Memory Saver and idle time.
+  stopBlocker(
     tenant: string,
     snapshot: EndpointSnapshot,
     immediate: boolean,
     relief = false,
   ): string | undefined {
     const runtime = this.context.tenants.get(tenant);
-    const blockers = snapshot.hibernation;
-    if (this.context.endpoint.placement.peek(tenant)?.state !== 'active') return '会话未运行';
+    const blockers = snapshot.stopBlockers;
+    if (this.context.endpoint.placement.peek(tenant)?.runState !== 'running') return '会话未运行';
     if (runtime.viewer) return '用户在线';
     if (this.context.store.workspaces.workspace(tenant).tabs.some((tab) => tab.signIn))
       return '正在登录学习账号';
-    if (!blockers) return '节点未报告休眠条件';
+    if (!blockers) return '节点未报告停止条件';
     if (
       !immediate &&
       (!this.context.store.workspaces.workspace(tenant).settings.browser.memorySaverEnabled ||
         this.context.clock.monotonicMs() - runtime.viewerAbsentSince < (relief ? 60000 : 600000))
     )
-      return '未到休眠时间';
+      return '未到停止时间';
     if (
       this.context.store.operations
         .pendingOperations(tenant)
@@ -142,11 +142,11 @@ export class UncertainRecovery {
     )
       return '会话状态尚未稳定';
   }
-  async hibernate(
+  async stop(
     tenant: string,
     snapshot: EndpointSnapshot,
     immediate = false,
-    reason: HibernationReason = 'idle',
+    reason: StopReason = 'idle',
   ): Promise<boolean> {
     const relief = reason !== 'idle';
     const placement = this.context.endpoint.placement.peek(tenant);
@@ -158,34 +158,34 @@ export class UncertainRecovery {
       (this.relief.has(node.nodeId) || node.reliefRequestedAt !== undefined || node.metrics.underPressure())
     )
       return false;
-    if (placement && this.hibernatingNodes.has(placement.nodeId)) {
-      if (immediate) throw new RemoteKitError('conflict', '节点正在休眠其他会话');
+    if (placement && this.stoppingNodes.has(placement.nodeId)) {
+      if (immediate) throw new RemoteKitError('conflict', '节点正在停止其他会话');
       return false;
     }
-    const blocker = this.hibernationBlocker(tenant, snapshot, immediate, relief);
+    const blocker = this.stopBlocker(tenant, snapshot, immediate, relief);
     if (blocker) {
       if (immediate) throw new RemoteKitError('conflict', blocker);
       return false;
     }
     const sample = node?.metrics.latest();
     const predicted = node?.metrics.predicted();
-    this.hibernatingNodes.add(placement!.nodeId);
+    this.stoppingNodes.add(placement!.nodeId);
     try {
-      await this.context.endpoint.hibernate(tenant);
+      await this.context.endpoint.stop(tenant);
     } finally {
-      this.hibernatingNodes.delete(placement!.nodeId);
+      this.stoppingNodes.delete(placement!.nodeId);
     }
-    log.info('hibernate.auto', {
+    log.info('stop.auto', {
       tenant,
       node: placement!.nodeId,
       reason,
       pressure: sample?.pressure ?? null,
       predicted: predicted ?? null,
     });
-    this.finishHibernation(tenant);
+    this.finishStop(tenant);
     return true;
   }
-  finishHibernation(tenant: string) {
+  finishStop(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
     const state = this.context.store.workspaces.workspace(tenant);
     runtime.resetEndpoint();

@@ -16,11 +16,11 @@ namespace remotekit {
 class CheckpointCacheProbe {
  public:
   static void Age(CheckpointCache& cache) {
-    cache.no_peer_ = PhaseClock::now() - std::chrono::seconds(31);
     std::lock_guard lock(cache.watcher_.mutex_);
     for (auto& [name, changed] : cache.watcher_.changes_.paths)
       changed = PhaseClock::now() - std::chrono::seconds(11);
   }
+  static void RefreshNow(CheckpointCache& cache) { cache.next_refresh_ = PhaseClock::now(); }
   static void Overflow(DirectoryWatcher& watcher) {
     std::lock_guard lock(watcher.mutex_);
     for (int i = 0; i < 2048; ++i) {
@@ -56,7 +56,7 @@ class Link : public ManagementLink {
   std::set<std::string> committed;
   std::mutex mutex;
   size_t commit_requests = 0, locate_requests = 0;
-  std::vector<Json> batches;
+  std::vector<Json> batches, refreshes;
   std::function<void()> on_commit;
   bool Next(std::string&, uint64_t&, bool& eof) override {
     eof = true;
@@ -89,6 +89,11 @@ class Link : public ManagementLink {
       committed.insert(fields["objectId"].get<std::string>());
       return Json{{"accepted", true}};
     }
+    if (name == "object.claims.refresh") {
+      Check(fields["ids"].size() <= 1024, "bounded claim refresh");
+      refreshes.push_back(fields);
+      return Json{{"ok", true}};
+    }
     Check(name == "object.locate", "unexpected request");
     ++locate_requests;
     Check(fields["ids"].size() <= 1024, "bounded locate batch");
@@ -99,17 +104,24 @@ class Link : public ManagementLink {
   }
 };
 std::string Read(const fs::path& path) {
-  std::ifstream file(path, std::ios::binary);
+  std::ifstream file(LongPath(path), std::ios::binary);
   return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
 }
 void Write(const fs::path& path, const std::string& bytes) {
-  fs::create_directories(path.parent_path());
-  std::ofstream file(path, std::ios::binary);
+  fs::create_directories(LongPath(path).parent_path());
+  std::ofstream file(LongPath(path), std::ios::binary);
   file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+Result<Json> Commit(Session& session) {
+  auto result = session.StopAndCommit("test-commit");
+  if (!result)
+    return result.error();
+  result.value()["manifestId"] = result.value()["base"];
+  return result;
 }
 void RoundTrip(const fs::path& root) {
   const std::string session(32, 'a');
-  const auto directory = root / "one/data/sessions" / session;
+  const auto directory = LongPath(root / "one/data/sessions" / session);
   auto config = TestConfig();
   const auto options = Take(RuntimeOptions::FromConfig(config, root / "one", "dev", "test"));
   Link source_link, target_link;
@@ -126,6 +138,8 @@ void RoundTrip(const fs::path& root) {
   Write(directory / "small", "persistent");
   Write(directory / "large", std::string(2 * 1024 * 1024 + 13, 'x'));
   Write(directory / "empty", "");
+  Write(directory / std::string(110, 'a') / std::string(110, 'b') / std::string(110, 'c'),
+        "long path");
   Write(directory / "profile/Session Storage/CURRENT", "db");
   Write(directory / "profile/Session Storage/LOCK", "omit");
   Write(directory / "profile/Session Storage/LOG", "omit");
@@ -133,7 +147,7 @@ void RoundTrip(const fs::path& root) {
   Write(directory / "profile/Cookies-journal", "keep journal");
   Write(directory / "profile/Cache/value", "omit");
   fs::create_directories(directory / "empty-directory");
-  const auto checkpoint = Take(first.Hibernate(source));
+  const auto checkpoint = Take(Commit(first));
   Check(source_link.committed.size() == checkpoint["objects"].size(), "all objects committed");
   const auto manifest = checkpoint["manifestId"].get<std::string>();
   Check(fs::exists(directory.wstring() + L".checkpoint-index.json"), "external chunk index");
@@ -169,13 +183,11 @@ void RoundTrip(const fs::path& root) {
   for (const auto& id : checkpoint["objects"])
     target_link.sources[id.get<std::string>()] =
         Json::array({{{"nodeId", "source"}, {"address", peer.Address()}}});
-  const auto remote_directory = root / "two/data/sessions" / session;
+  const auto remote_directory = LongPath(root / "two/data/sessions" / session);
   Take(Checkpoints(target).Restore(remote_directory, "tenant", manifest));
   for (const auto& [path, bytes] : expected)
     Check(Read(remote_directory / path) == bytes, "peer restored bytes");
   Check(target_link.committed == source_link.committed, "peer copies committed");
-  // Control committed the earlier hibernation; its journal is gone before the next checkpoint.
-  fs::remove(directory.wstring() + L".hibernation.json");
   const auto upgraded = Take(Checkpoints(source).Create(directory, "tenant", "previous-build"));
   fs::remove_all(directory);
   Take(Checkpoints(source).Restore(directory, "tenant", upgraded["manifestId"]));
@@ -185,11 +197,9 @@ void RoundTrip(const fs::path& root) {
   const auto shared = Take(Checkpoints(target).Create(remote_directory, "other", "dev"));
   Check(shared["manifestId"] == manifest && shared["objects"] == checkpoint["objects"],
         "identical checkpoint content shares blocks and manifests across sessions and tenants");
-  Take(WriteDurableJson(remote_directory.wstring() + L".checkpoint", manifest));
   Write(remote_directory / "warm-only", "warm");
   Take(Checkpoints(target).Restore(remote_directory, "tenant", manifest));
-  Check(fs::exists(remote_directory / "warm-only"), "warm copy used");
-  Take(WriteDurableJson(remote_directory.wstring() + L".checkpoint", manifest));
+  Check(!fs::exists(remote_directory / "warm-only"), "warm repair removes uncommitted extras");
   fs::remove(remote_directory / "small");
   Write(remote_directory / "profile/Cookies-wal", "corrupt");
   Take(Checkpoints(target).Restore(remote_directory, "tenant", manifest));
@@ -197,7 +207,6 @@ void RoundTrip(const fs::path& root) {
             Read(remote_directory / "profile/Cookies-wal") == "keep wal",
         "warm validation repairs missing and changed files");
   Take(Checkpoints(target).Create(remote_directory, "tenant", "dev"));
-  Take(WriteDurableJson(remote_directory.wstring() + L".checkpoint", manifest));
   const auto unchanged_time = fs::last_write_time(remote_directory / "small");
   Write(remote_directory / "replacement", "XXXXXXXXXX");
   fs::last_write_time(remote_directory / "replacement", unchanged_time);
@@ -206,21 +215,6 @@ void RoundTrip(const fs::path& root) {
   Take(Checkpoints(target).Restore(remote_directory, "tenant", manifest));
   Check(Read(remote_directory / "small") == "persistent",
         "warm validation checks file ID at equal size and mtime");
-  const auto empty_restore = Checkpoints(target).Restore(remote_directory, "tenant", nullptr);
-  Check(!empty_restore && empty_restore.error().code == ErrorCode::kConflict &&
-            Read(remote_directory / "small") == "persistent",
-        "null restore refuses populated Profile");
-  Take(Checkpoints::Journal(remote_directory, 7, checkpoint, "dev"));
-  Check(Take(Checkpoints::Hibernation(remote_directory))["placementEpoch"] == 7,
-        "durable journal identity");
-  const auto stale = Checkpoints(target).Restore(remote_directory, "tenant", std::string(64, '0'));
-  Check(!stale && stale.error().code == ErrorCode::kConflict &&
-            Read(remote_directory / "small") == "persistent",
-        "uncommitted hibernation rejects stale checkpoint without mutation");
-  const auto null_journal = Checkpoints(target).Restore(remote_directory, "tenant", nullptr);
-  Check(!null_journal && null_journal.error().code == ErrorCode::kConflict,
-        "uncommitted hibernation rejects null checkpoint");
-  Take(WriteDurableJson(remote_directory.wstring() + L".checkpoint", manifest));
   fs::remove(remote_directory / "small");
   Write(remote_directory / "profile/Cookies-wal", "leave this changed file");
   const auto local_index =
@@ -230,7 +224,7 @@ void RoundTrip(const fs::path& root) {
   Take(target.Store().Delete(missing_id));
   const auto unavailable = Checkpoints(target).Restore(remote_directory, "tenant", manifest);
   Check(!unavailable && unavailable.error().code == ErrorCode::kUnavailable &&
-            fs::exists(remote_directory / "warm-only") && !fs::exists(remote_directory / "small") &&
+            !fs::exists(remote_directory / "small") &&
             Read(remote_directory / "profile/Cookies-wal") == "leave this changed file",
         "unavailable warm repair preserves directory");
   Take(Checkpoints(target).Restore(root / "new-session", "tenant", nullptr));
@@ -265,10 +259,9 @@ void DraftCheckpoint(const fs::path& root) {
   {
     Session session(sdk, options, "tenant", session_id, 1, {}, link, objects);
     Take(session.Initialize());
-    checkpoint = Take(session.Hibernate(objects));
+    checkpoint = Take(Commit(session));
   }
-  Check(!fs::exists(directory / "file-library/incoming"),
-        "draft payloads discarded at hibernation");
+  Check(!fs::exists(directory / "file-library/incoming"), "draft payloads discarded at stop");
   const auto restored_data = root / "draft-restored-node/data";
   const auto restored_directory = restored_data / "sessions" / session_id;
   Take(Checkpoints(objects).Restore(restored_directory, "tenant", checkpoint["manifestId"]));
@@ -422,11 +415,21 @@ void PreStageIdentity(const fs::path& root) {
   Check(cache.Find("quiet-file", stable).has_value(), "quiet stable file reuses pre-staged chunks");
   for (const auto& batch : link.batches)
     Check(batch.value("tenantId", std::string()) == "tenant", "pre-stage owns tenant claims");
-  cache.PeerPresent(true);
-  Write(directory / "peer-active", "do not pre-stage");
+
+  Write(directory / "peer-active", "pre-stage with peer");
+  for (int i = 0; i < 500 && !cache.Changes().paths.contains("peer-active"); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  CheckpointCacheProbe::Age(cache);
   cache.MaybeStage(objects, "tenant");
-  Check(!cache.Find("peer-active", Take(CheckpointIdentity(directory / "peer-active"))),
-        "an RTC peer stops pre-staging");
+  CheckpointCacheProbe::Wait(cache);
+  Check(cache.Find("peer-active", Take(CheckpointIdentity(directory / "peer-active"))).has_value(),
+        "pre-staging remains enabled for every running Session");
+  CheckpointCacheProbe::RefreshNow(cache);
+  cache.MaybeStage(objects, "tenant");
+  CheckpointCacheProbe::Wait(cache);
+  Check(!link.refreshes.empty() && link.refreshes[0]["tenantId"] == "tenant" &&
+            !link.refreshes[0]["ids"].empty(),
+        "staged chunks refresh tenant claims");
   cache.Stop();
 }
 void Blockers(const fs::path& root) {
@@ -438,9 +441,9 @@ void Blockers(const fs::path& root) {
   Take(session.Initialize());
   Take(session.Views().RecordClosed("1", "closed"));
   const auto snapshot = Take(session.Snapshot());
-  Check(snapshot["hibernation"]["unacknowledgedClosedEvents"] == 1, "durable close blocker");
-  const auto hibernated = session.Hibernate(objects);
-  Check(!hibernated && hibernated.error().code == ErrorCode::kConflict, "close event blocks");
+  Check(snapshot["stopBlockers"]["unacknowledgedClosedEvents"] == 1, "durable close blocker");
+  const auto stopped = Commit(session);
+  Check(!stopped && stopped.error().code == ErrorCode::kConflict, "close event blocks");
   Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
                           {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
   test::LibraryFixture library(root / "library", objects, "tenant");
@@ -455,10 +458,10 @@ void Blockers(const fs::path& root) {
                                    {{asset.id, "asset", "text/plain"}}};
   Take(library.Prepare(selection));
   Take(library.Begin(7, "upload", {"name", "text/plain", 3}, [] { return Result<void>(); }));
-  const auto blockers = library.Hibernation([](uint64_t grant) { return grant == 7; });
+  const auto blockers = library.StopBlockers([](uint64_t grant) { return grant == 7; });
   Check(blockers["pendingNativeSelections"] == 1 && blockers["inFlightUploads"] == 1,
         "library owns selection and upload counts");
-  Check(library.Hibernation([](uint64_t) { return false; })["inFlightUploads"] == 0,
+  Check(library.StopBlockers([](uint64_t) { return false; })["inFlightUploads"] == 0,
         "revoked upload is not in flight");
 }
 void Metrics(const fs::path& root) {
@@ -518,39 +521,37 @@ class FenceLink : public Link {
     return true;
   }
 };
-class JournalLink : public Link {
+class CopyLink : public Link {
  public:
   const std::string session = std::string(32, 'd');
-  fs::path directory;
-  bool replay = false;
+  bool replay = false, graceful = false;
   size_t step = 0;
-  std::vector<Json> replies;
+  std::vector<Json> replies, events;
   std::optional<ReadyState> ReadySessions() override {
-    return ReadyState{
-        1,
-        Json::array({{{"tenantId", "tenant"}, {"sessionId", session}, {"placementEpoch", 1}}}),
-        {{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
-         {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}};
+    return ReadyState{1,
+                      Json::array({{{"tenantId", "tenant"},
+                                    {"sessionId", session},
+                                    {"placementEpoch", 1},
+                                    {"dataState", "dirty"}}}),
+                      {{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                       {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}};
+  }
+  bool SendEvent(const Json& event, uint64_t, DeliveryFlag = {}) override {
+    events.push_back(event);
+    return true;
   }
   bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
     eof = false;
     generation = 1;
     Json request{{"tenantId", "tenant"}, {"placementEpoch", 1}};
     if (!replay && step == 0) {
-      request["method"] = "session.open";
-      request["sessionId"] = session;
-      request["profileKey"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-      request["checkpoint"] = nullptr;
-    } else if ((!replay && step <= 3) || (replay && step == 0)) {
-      request["method"] = "session.hibernate";
-      if (!replay && step == 3)
-        request["placementEpoch"] = 2;
-    } else if ((!replay && step == 4) || (replay && step == 1)) {
-      request["method"] = "session.open";
-      request["sessionId"] = session;
-      request["profileKey"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-      request["checkpoint"] = replay ? replies[0]["result"]["manifestId"] : Json(nullptr);
-      request["placementEpoch"] = 2;
+      request.update({{"method", "session.open"},
+                      {"sessionId", session},
+                      {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                      {"checkpoint", nullptr}});
+    } else if (!graceful && ((!replay && step <= 3) || (replay && step <= 1))) {
+      request.update({{"method", "session.stop"},
+                      {"commit", step == 3 || (replay && step == 1) ? "different" : "commit-one"}});
     } else {
       request["method"] = "shutdown";
     }
@@ -559,40 +560,141 @@ class JournalLink : public Link {
     return true;
   }
   bool SendReply(uint64_t, const Json& reply) override {
-    if (reply.value("ok", false) && reply.value("result", Json::object()).contains("manifestId"))
-      Check(fs::exists(directory.wstring() + L".hibernation.json"), "journal durable before reply");
     replies.push_back(reply);
     return true;
   }
 };
-void JournalReplay(const fs::path& root) {
-  const auto options =
-      Take(RuntimeOptions::FromConfig(TestConfig(), root / "journal", "dev", "test"));
+void CommitReplay(const fs::path& root) {
+  const auto options = Take(RuntimeOptions::FromConfig(TestConfig(), root / "copy", "dev", "test"));
   media::Sdk sdk;
-  JournalLink first;
-  first.directory = options.data / "sessions" / first.session;
+  CopyLink first;
   {
-    Service service(sdk, options, first, cluster::Key{});
-    Check(service.Run() == 0, "journal service");
+    Service service(sdk, options, first, {});
+    Check(service.Run() == 0, "copy service");
   }
   Check(first.replies[1]["ok"] && first.replies[2]["ok"] &&
             first.replies[1]["result"] == first.replies[2]["result"],
-        "duplicate hibernation returns committed manifest");
-  Check(first.replies[3]["error"]["code"] == "conflict" &&
-            first.replies[4]["error"]["code"] == "conflict",
-        "journal fences different epoch and null open");
-  JournalLink restarted;
+        "commit repeats after unload");
+  Check(first.replies[3]["result"]["committed"].is_null(),
+        "different ID reuses stopped clean copy");
+  CopyLink restarted;
   restarted.replay = true;
-  restarted.directory = first.directory;
   {
-    Service service(sdk, options, restarted, cluster::Key{});
-    Check(service.Run() == 0, "journal restart service");
+    Service service(sdk, options, restarted, {});
+    Check(service.Run() == 0, "copy restart");
   }
-  Check(restarted.replies[0]["result"]["manifestId"] == first.replies[1]["result"]["manifestId"] &&
-            restarted.replies[1]["ok"],
-        "restart replays journal and matching open succeeds");
-  Check(!fs::exists(first.directory.wstring() + L".hibernation.json"),
-        "matching open consumes journal");
+  Check(restarted.replies[0]["result"] == first.replies[1]["result"],
+        "commit repeats after restart");
+  Check(restarted.events[0]["sessions"][0]["copy"]["lastCommit"]["requestId"] == "commit-one",
+        "ready reports durable commit");
+}
+void GracefulCommit(const fs::path& root) {
+  const auto options =
+      Take(RuntimeOptions::FromConfig(TestConfig(), root / "graceful", "dev", "test"));
+  media::Sdk sdk;
+  CopyLink link;
+  link.graceful = true;
+  {
+    Service service(sdk, options, link, {});
+    Check(service.Run() == 0, "graceful shutdown");
+  }
+  const auto directory = options.data / "sessions" / link.session;
+  const auto copy = Take(Checkpoints::Copy(directory));
+  Check(copy["state"] == "clean" && copy["stoppedCleanly"] == true &&
+            copy["lastCommit"]["requestId"].get<std::string>().starts_with("node-"),
+        "graceful shutdown commits with node request ID");
+  CopyLink restarted;
+  restarted.graceful = restarted.replay = true;
+  {
+    Service service(sdk, options, restarted, {});
+    Check(service.Run() == 0, "graceful restart");
+  }
+  Check(restarted.events[0]["sessions"][0]["copy"]["lastCommit"] == copy["lastCommit"],
+        "node ready reports shutdown commit");
+}
+void DeferredCommit(const fs::path& root) {
+  const auto options =
+      Take(RuntimeOptions::FromConfig(TestConfig(), root / "deferred", "dev", "test"));
+  CopyLink offline;
+  media::Sdk sdk;
+  objects::ObjectService objects(options.data, offline, {}, "test", "dev");
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  Json committed;
+  {
+    Session session(sdk, options, "tenant", offline.session, 1, {}, offline, objects);
+    Take(session.Initialize());
+    Write(options.data / "sessions" / offline.session / "payload", "offline state");
+    committed =
+        Take(session.StopAndCommit("node-offline", false, PhaseClock::time_point::max(), true));
+    Check(offline.committed.empty() && committed["state"] == "clean",
+          "offline shutdown publishes locally");
+  }
+  CopyLink restarted;
+  restarted.graceful = restarted.replay = true;
+  {
+    Service service(sdk, options, restarted, {});
+    Check(service.Run() == 0, "deferred reconnect");
+  }
+  Check(restarted.committed.contains(committed["base"].get<std::string>()),
+        "reconnect registers deferred manifest");
+  const auto limited =
+      Take(RuntimeOptions::FromConfig(TestConfig(), root / "budget", "dev", "test"));
+  Session session(sdk, limited, "tenant", offline.session, 1, {}, offline, objects);
+  Take(session.Initialize());
+  const auto stopped = Take(session.StopAndCommit("budget", false, PhaseClock::now()));
+  const auto copy = Take(Checkpoints::Copy(limited.data / "sessions" / offline.session));
+  Check(stopped["state"] == "dirty" && stopped["committed"].is_null() &&
+            copy["stoppedCleanly"] == true,
+        "exhausted commit budget leaves a cleanly stopped dirty copy");
+}
+void CopyRecovery(const fs::path& root) {
+  const auto directory = LongPath(root / std::string(32, 'e'));
+  Write(directory / "unchanged", "stable");
+  Write(directory / "journal", "old");
+  Write(directory / "gap", "old");
+  Write(directory / "removed", "old");
+  auto previous = Take(Checkpoints::Scan(directory, Json(), {}));
+  Take(WriteDurableJson(directory.wstring() + L".checkpoint-index.json", previous));
+  Json copy{{"sessionId", directory.filename().string()},
+            {"placementEpoch", uint64_t(3)},
+            {"base", std::string(64, 'a')},
+            {"state", "dirty"},
+            {"stoppedCleanly", false},
+            {"changesAt", 0},
+            {"lastCommit", nullptr}};
+  Take(Checkpoints::WriteCopy(directory, copy));
+  Check(Checkpoints::ReuseCopy(copy, 3, nullptr), "dirty copy beats checkpoint pointer");
+  Check(!Checkpoints::ReuseCopy(copy, 2, nullptr), "newer epoch fences copy");
+  copy["state"] = "clean";
+  Check(Checkpoints::ReuseCopy(copy, 4, copy["base"]), "matching clean base reuses directory");
+  Check(!Checkpoints::ReuseCopy(copy, 4, std::string(64, 'b')), "different clean base restores");
+  DirectoryChanges journal;
+  journal.continuous = true;
+  journal.paths["journal"] = PhaseClock::now();
+  Write(directory / "journal", "journal content");
+  Take(Checkpoints::FlushChanges(directory, journal));
+  const auto saved = Take(Checkpoints::Copy(directory));
+  Write(directory / "gap", "unflushed content");
+  fs::remove(directory / "removed");
+  Write(directory / std::string(105, 'a') / std::string(105, 'b') / std::string(105, 'c'),
+        "long journal path");
+  const auto long_file =
+      directory / std::string(105, 'a') / std::string(105, 'b') / std::string(105, 'c');
+  HANDLE held = CreateFileW(long_file.c_str(), GENERIC_READ, FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  Check(held != INVALID_HANDLE_VALUE, "metadata walk can read long paths");
+  const auto recovered =
+      Take(Checkpoints::RecoverChanges(directory, saved["changesAt"].get<int64_t>()));
+  CloseHandle(held);
+  Check(recovered.paths.contains("journal") && recovered.paths.contains("gap") &&
+            recovered.removed.contains("removed"),
+        "journal union metadata gap and removed files");
+  Check(Take(Checkpoints::Scan(directory, previous, recovered)) ==
+            Take(Checkpoints::Scan(directory, Json(), {})),
+        "recovered change list equals full scan");
+  Take(Checkpoints::TruncateChanges(directory));
+  Check(Read(directory.wstring() + L".changes").empty(), "commit truncates journal");
 }
 void Fencing(const fs::path& root) {
   const auto options =
@@ -620,7 +722,10 @@ int main(int argc, char** argv) {
     Blockers(root);
     Metrics(root);
     Fencing(root);
-    JournalReplay(root);
+    CommitReplay(root);
+    CopyRecovery(root);
+    GracefulCommit(root);
+    DeferredCommit(root);
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;

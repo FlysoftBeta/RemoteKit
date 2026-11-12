@@ -14,6 +14,7 @@ export class FakeNode extends EventEmitter {
   transport!: Transport;
   helloReply!: Record<string, any>;
   metrics: NodeMetrics = fakeMetrics();
+  reportCopies = true;
   readonly sessions = new Map<string, Record<string, any>>();
   readonly objects = new Map<
     string,
@@ -160,7 +161,7 @@ export class FakeNode extends EventEmitter {
                     this.sessions.set(message.tenantId, message);
                     this.publishMetrics();
                   }
-                  if (message.method === 'session.hibernate') {
+                  if (message.method === 'session.stop') {
                     this.sessions.delete(message.tenantId);
                     this.publishMetrics();
                   }
@@ -194,6 +195,7 @@ export class FakeNode extends EventEmitter {
             )
           )
             this.sessions.delete(tenant);
+        if (this.reportCopies) this.send({ event: 'node.ready', sessions: [], complete: true });
         this.publishMetrics();
         await this.barrier();
       }

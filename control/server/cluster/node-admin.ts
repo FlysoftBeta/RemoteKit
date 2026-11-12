@@ -41,6 +41,11 @@ export class NodeAdmin {
         users: this.placement
           .activeTenants(node.nodeId)
           .flatMap((tenant) => this.store.accounts.userForTenant(tenant)?.username ?? []),
+        dirtyUsers: (
+          this.store.db
+            .prepare("SELECT tenant FROM session_placements WHERE node_id=? AND data_state='dirty'")
+            .all(node.nodeId) as { tenant: string }[]
+        ).map((row) => this.store.accounts.userForTenant(row.tenant)?.username ?? row.tenant),
         replicaBytes: this.objects.replicaBytes(node.nodeId),
         metrics: sample
           ? {
@@ -59,10 +64,14 @@ export class NodeAdmin {
       };
     });
   }
-  remove(nodeId: string) {
+  remove(nodeId: string, discardDirty = false) {
     const node = this.nodes.get(nodeId);
     if (!node) throw new RemoteKitError('not_found', '节点未配置');
     if (node.state.state === 'ready') throw new RemoteKitError('conflict', '在线节点不能移除');
+    const dirty = this.store.db
+      .prepare("SELECT tenant FROM session_placements WHERE node_id=? AND data_state='dirty'")
+      .all(nodeId);
+    if (dirty.length && !discardDirty) throw new RemoteKitError('conflict', '需要确认放弃节点上未提交的更改');
     this.store.transaction(() => {
       if (this.nodes.isRemoved(nodeId)) return;
       this.store.db.prepare('INSERT INTO removed_nodes VALUES (?,?)').run(nodeId, Date.now());

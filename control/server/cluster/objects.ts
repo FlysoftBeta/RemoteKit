@@ -93,6 +93,25 @@ export class ObjectIndex {
     };
     this.retired = retiringObjects(store);
     nodes.objectKeys = clusterObjectKeys(store);
+    nodes.handlers.set('object.claims.refresh', (node, message) => {
+      const { tenantId, ids } = message;
+      if (
+        typeof tenantId !== 'string' ||
+        !Array.isArray(ids) ||
+        ids.length > 1024 ||
+        ids.some((id) => !objectId(id))
+      )
+        throw new RemoteKitError('invalid_request', 'Invalid claim refresh');
+      if (!this.placedOn(tenantId, node.nodeId))
+        throw new RemoteKitError('forbidden', 'Session is not placed on this node');
+      this.store.transaction(() => {
+        const refresh = this.store.db.prepare(
+          'UPDATE object_claims SET claimed_at=? WHERE tenant=? AND id=?',
+        );
+        for (const id of ids) refresh.run(this.now(), tenantId, id);
+      });
+      return { ok: true };
+    });
     nodes.handlers.set('object.committed', (node, message) => this.committed(node, message));
     nodes.handlers.set('object.committed.batch', (node, message) => this.committedBatch(node, message));
     nodes.handlers.set('object.locate', (node, message) => this.locate(node, message));
@@ -865,7 +884,7 @@ export class ObjectIndex {
       this.store.db
         .prepare(
           `DELETE FROM warm_session_copies WHERE node_id=? AND tenant NOT IN
-        (SELECT tenant FROM session_placements WHERE node_id=? AND state='active')`,
+        (SELECT tenant FROM session_placements WHERE node_id=? AND run_state='running')`,
         )
         .run(node.nodeId, node.nodeId);
       let free = node.metrics.latest()?.value.disk.free ?? sample.value.disk.free;
@@ -977,6 +996,7 @@ export class ObjectIndex {
     this.nodes.off('ready', this.ready);
     this.nodes.off('metrics', this.metrics);
     this.nodes.off('offline', this.offline);
+    this.nodes.handlers.delete('object.claims.refresh');
     this.nodes.handlers.delete('object.committed');
     this.nodes.handlers.delete('object.committed.batch');
     this.nodes.handlers.delete('object.locate');

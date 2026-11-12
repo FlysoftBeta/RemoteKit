@@ -42,7 +42,7 @@ export class TenantRuntime {
   snapshotSequence = 0;
   backgroundTasks = new Map<string, import('../../shared/product').BackgroundTask>();
   lastError?: RemoteKitError;
-  lastErrorKey?: 'resource_limit' | 'endpoint' | 'hibernating';
+  lastErrorKey?: 'resource_limit' | 'endpoint' | 'stopping';
   mediaGeneration?: number;
   pendingRtcCheck = false;
   started = false;

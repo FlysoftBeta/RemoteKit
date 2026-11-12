@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { LibrarySnapshot } from '../../shared/file-library';
 import { defaultAuthSettings, type AtRestKey } from '../auth/crypto';
@@ -391,6 +392,30 @@ export const migrations: {
           row.id,
         );
       }
+    },
+  },
+  {
+    version: 19,
+    name: 'session-local-copies',
+    up(db) {
+      db.exec(`ALTER TABLE session_placements RENAME TO session_placements_old;
+        CREATE TABLE session_placements (
+          tenant TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, node_id TEXT NOT NULL,
+          placement_epoch INTEGER NOT NULL, key_ciphertext TEXT NOT NULL,
+          run_state TEXT NOT NULL CHECK(run_state IN ('running','stopped')),
+          data_state TEXT NOT NULL CHECK(data_state IN ('clean','dirty')),
+          pending_commit TEXT, checkpoint_id INTEGER);
+        INSERT INTO session_placements
+          SELECT tenant,session_id,node_id,placement_epoch,key_ciphertext,
+            CASE state WHEN 'active' THEN 'running' ELSE 'stopped' END,
+            CASE state WHEN 'hibernated' THEN 'clean' ELSE 'dirty' END,
+            NULL,checkpoint_id FROM session_placements_old;`);
+      const pending = db.prepare('UPDATE session_placements SET pending_commit=? WHERE tenant=?');
+      for (const row of db
+        .prepare("SELECT tenant FROM session_placements_old WHERE state='hibernating'")
+        .all() as { tenant: string }[])
+        pending.run(randomUUID(), row.tenant);
+      db.exec('DROP TABLE session_placements_old');
     },
   },
 ];

@@ -125,7 +125,7 @@ try {
   assert.equal(control.objects.usage().objects, 0);
 
   await endpoint.ensureSession('first');
-  await endpoint.hibernate('first');
+  await endpoint.stop('first');
   const firstPlacement = endpoint.placement.peek('first')!;
   const secondPlacement = endpoint.placement.peek('second')!;
   const firstDirectory = join(join(run, 'node/data'), 'sessions', firstPlacement.sessionId);
@@ -135,8 +135,8 @@ try {
   await writeFile(join(firstDirectory, 'shared-checkpoint-block'), shared);
   await writeFile(join(secondDirectory, 'shared-checkpoint-block'), shared);
   await endpoint.snapshot('first');
-  await endpoint.hibernate('first');
-  await endpoint.hibernate('second');
+  await endpoint.stop('first');
+  await endpoint.stop('second');
   const sharedReferences = store.db
     .prepare(
       `SELECT id FROM checkpoint_objects WHERE tenant IN ('first','second') GROUP BY id HAVING count(DISTINCT tenant)=2`,
@@ -151,7 +151,7 @@ try {
     located.some((request) => request.tenantId === 'first' && request.ids.includes(restored.checkpoint!)),
   );
   await endpoint.ensureSession('first');
-  await endpoint.hibernate('first');
+  await endpoint.stop('first');
   await writeFile(
     join(run, 'result.json'),
     JSON.stringify(

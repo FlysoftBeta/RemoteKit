@@ -1,4 +1,5 @@
 #include "persistence/directory_watcher.hpp"
+#include "persistence/durable_json.hpp"
 #include <array>
 #include <fstream>
 
@@ -11,7 +12,7 @@ DirectoryWatcher::~DirectoryWatcher() {
 }
 void DirectoryWatcher::Start(const fs::path& directory) {
   Stop();
-  directory_ = directory;
+  directory_ = LongPath(directory);
   fs::create_directories(directory_);
   directory_handle_ =
       CreateFileW(directory_.c_str(), FILE_LIST_DIRECTORY,
@@ -129,5 +130,16 @@ void DirectoryWatcher::Invalidate() {
 DirectoryChanges DirectoryWatcher::Snapshot() const {
   std::lock_guard lock(mutex_);
   return changes_;
+}
+void DirectoryWatcher::Merge(const DirectoryChanges& changes) {
+  std::lock_guard lock(mutex_);
+  changes_.continuous &= changes.continuous;
+  for (const auto& [name, at] : changes.paths)
+    changes_.paths.try_emplace(name, at);
+  changes_.subtrees.insert(changes.subtrees.begin(), changes.subtrees.end());
+  changes_.removed.insert(changes.removed.begin(), changes.removed.end());
+  for (const auto& [name, at] : changes_.paths)
+    if (fs::exists(LongPath(directory_ / Utf8Path(name))))
+      changes_.removed.erase(name);
 }
 }  // namespace remotekit

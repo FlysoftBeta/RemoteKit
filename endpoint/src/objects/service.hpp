@@ -32,17 +32,24 @@ class ObjectService {
                               const std::string& tenant = {},
                               size_t* requests = nullptr);
   bool PreStage(std::function<void()> work);
+  bool StageBytes(size_t bytes, const std::atomic<bool>& cancel);
+  Result<void> RefreshClaims(const std::string& tenant, const std::vector<std::string>& ids);
   Result<ObjectInfo> Write(const std::filesystem::path& path,
                            const ObjectStore::Check& check,
                            const Json& claim);
   Result<Json> Dispatch(const Json& request);
   Result<void> PutChunk(const Json& header, std::span<const uint8_t> bytes);
   void CancelPuts();
+  void CommitDeadline(std::chrono::steady_clock::time_point deadline) {
+    commit_deadline_ = deadline.time_since_epoch().count();
+  }
 
  private:
   Result<Json> DispatchPut(const Json& request);
   Result<ObjectInfo> Fetch(const std::string& id, const Json& sources);
   Result<ObjectInfo> EnsureLocal(const std::string& id, const Json& sources);
+  std::atomic<std::chrono::steady_clock::duration::rep> commit_deadline_{
+      std::chrono::steady_clock::time_point::max().time_since_epoch().count()};
   Keys keys_;
   bool configured_ = false;
   std::filesystem::path put_root_;
@@ -67,6 +74,8 @@ class ObjectService {
   WorkQueue work_;
   WorkQueue staging_{1};
   std::atomic<bool> staging_busy_{false};
+  std::mutex staging_rate_mutex_;
+  std::chrono::steady_clock::time_point staging_next_{};
   std::unique_ptr<documents::ObjectDocuments> documents_;
 };
 class SessionObjects {

@@ -43,7 +43,7 @@ struct OperationTiming {
   ~OperationTiming() {
     fields["total"] = PhaseMs(start);
     {
-      const auto event = fields.value("event", std::string("session.hibernate.timing"));
+      const auto event = fields.value("event", std::string("session.stop.timing"));
       fields.erase("event");
       LogEvent(LogLevel::kInfo, event, fields);
     }
