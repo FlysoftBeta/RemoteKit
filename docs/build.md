@@ -70,9 +70,9 @@ npm start
 
 默认监听 `http://127.0.0.1:3001`。开发时 `npm run dev`（服务端）+ `npm run client`（Vite 5173，代理 HTTP/WS）。
 
-Control 只读一个环境变量 `REMOTEKIT_CONTROL_CONFIG`（默认 `control/data/control.json`，不存在时按默认值创建，同时生成集群密钥文件）。所有监听、访问地址、存储与节点配置都在这个文件里，格式与校验规则见[多节点 · 配置](cluster.md#配置)。默认配置有一个本地节点 `local`，`local.executable` 指向 `build/endpoint/endpoint/endpoint_service.exe`；开发时在 `nodes.local.browser` 指向 `C:/src/chromium/src/out/dev/remotekit_browser.exe`（默认是 Endpoint 同目录）。编码器与码控参数（见[编码](encoding.md#适配器与后端选择)）、`browserTraceDir` 等都写在 `nodeDefaults` 或节点项里；Endpoint 不接受这些命令行参数。开发追踪开关 `REMOTEKIT_SERVER_TRACE`、`REMOTEKIT_MEDIA_TRACE` 仍是环境变量（见[诊断](diagnostics.md#开发侧追踪)）。
+Control 只读一个环境变量 `REMOTEKIT_CONTROL_CONFIG`（默认 `control/data/control.json`，不存在时按默认值创建，同时生成 Control 身份密钥 `control.key` 与本地节点的 `node.json`）。所有监听、访问地址、存储与节点配置都在这个文件里，格式与校验规则见[多节点 · 配置](cluster.md#配置)。默认配置有一个本地节点 `local`，`local.executable` 指向 `build/endpoint/endpoint/endpoint_service.exe`；Browser 必须在 Endpoint 同目录（开发时由构建脚本或测试把两者放到同一个运行目录）。编码器与码控参数（见[编码](encoding.md#适配器与后端选择)）写在顶层 `media` 或节点的 `media` 里；Endpoint 不接受这些命令行参数。开发追踪开关 `REMOTEKIT_SERVER_TRACE`、`REMOTEKIT_MEDIA_TRACE` 仍是环境变量（见[诊断](diagnostics.md#开发侧追踪)）。
 
-**远端节点**：在 Control 配置里设置 `cluster.controlUrl`（节点访问 Control 的 `ws(s)://<地址>:<端口>/api/node`），在 `nodes` 中加入节点 ID（不带 `local`），写明 `peer.address`，Viewer 不在同一网络时再设 `rtc.ports` 与 `rtc.address`。Control 启动后写出 `config/nodes/<节点 ID>/node.json`。在节点上建一个目录，放入 `remotekit_node.exe`（GitHub 发布页的独立下载，或 Control 主机的 `versions/<buildId>/bin/remotekit_node.exe`）和原样复制的 `node.json`，再运行：
+**远端节点**：在 Control 配置的 `nodes` 中加入节点 ID，写 `remote.control`（节点访问 Control 的 `ws(s)://<地址>:<端口>/api/node`）与 `peer`，Viewer 不在同一网络时再设 `rtc.ports` 与 `rtc.address`（见[多节点 · 配置](cluster.md#配置)）。Control 启动后为它生成身份并写出 `config/nodes/<节点 ID>/node.json`。节点身份改变时（新加入、Control 的 `control.key` 被替换，或从旧的共享集群密钥升级上来）必须把新的 `node.json` 与当前版本的 `remotekit_node.exe` 重新复制到节点上；旧 updater 无法连接新版 Control。在节点上建一个目录，放入 `remotekit_node.exe`（GitHub 发布页的独立下载，或 Control 主机的 `versions/<buildId>/bin/remotekit_node.exe`）和原样复制的 `node.json`，再运行：
 
 ```powershell
 .\remotekit_node.exe run "--root=$PWD"
@@ -158,7 +158,7 @@ manifest 只含绝对 URL，管理器只认识配置里的一个 manifest URL（
 <root>/
   remotekit_control.exe   管理器
   current                 当前 buildId
-  config/                 manager.json、release.key、control.json、cluster.key、nodes/
+  config/                 manager.json、release.key、control.json、control.key、nodes/<远端节点>/node.json
   data/                   control.db、诊断、本地节点根 node/
   versions/<buildId>/     唯一的当前版本：版本树 + release/node.tar.zst + payload.tar
   work/                   下载片、中间 payload、安装暂存

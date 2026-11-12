@@ -4,57 +4,73 @@
 
 ## 配置
 
-**Control 配置文件**是唯一的配置来源：`REMOTEKIT_CONTROL_CONFIG` 指定路径（默认 `<control>/data/control.json`；发布包为 `config/control.json`），不存在时按默认值创建。严格校验，未知键或类型错误拒绝启动；相对路径相对配置文件所在目录。
-
-每个网络入口都分开写"在哪监听"和"别人从哪访问"，两者常因 NAT、端口转发或多网卡而不同：
-
-| 入口 | 监听 | 访问方 | 访问地址 |
-|---|---|---|---|
-| Control HTTP/WS | `http.listen`（`host:port`） | 浏览器 | `http.origins`（Viewer 页面的 Origin） |
-| 节点 → Control | 同上 `/api/node` | 远端节点 | `cluster.controlUrl`，单个节点可用 `nodes.<id>.controlUrl` 覆盖 |
-| 节点间对象传输 | `peer.listen`（`host:port`，TCP） | 其他节点 | `peer.address`（`host:port`） |
-| Viewer 媒体（WebRTC） | `rtc.ports`（`"min-max"` UDP 端口段；`null` 由系统选择） | Viewer | 节点本机网卡地址；另设 `rtc.address` 时追加该主机名/IP |
+**Control 配置文件**是唯一的配置来源：`REMOTEKIT_CONTROL_CONFIG` 指定路径（默认 `<control>/data/control.json`；发布包为 `config/control.json`），不存在时按默认值创建。严格校验，未知键或类型错误拒绝启动；所有相对路径相对配置文件所在目录，开发与打包用同一套默认值。按含义分组：
 
 ```json
 {
   "http": { "listen": "0.0.0.0:3001", "origins": ["https://example.org:3001"], "tls": { "key": "certs/privkey.pem", "cert": "certs/fullchain.pem" } },
-  "storage": { "database": "../data/control.db", "diagnostics": "../data/diagnostics" },
-  "cluster": { "keyFile": "cluster.key", "controlUrl": "ws://192.168.1.10:3001/api/node" },
+  "storage": { "database": "../data/control.db", "diagnostics": "../data/diagnostics", "logs": "../logs" },
+  "media": { "encoder": "auto", "fps": 60, "bitrate": 36000000, "maxBitrate": 48000000 },
   "nodes": {
-    "local": { "local": { "root": "../data/node" } },
+    "local": {
+      "local": { "root": "../data/node" },
+      "peer": { "listen": "0.0.0.0:3101", "address": "192.168.1.10:3101" }
+    },
     "gpu-1": {
+      "remote": { "control": "ws://192.168.1.10:3001/api/node" },
       "peer": { "listen": "0.0.0.0:3101", "address": "192.168.1.20:3101" },
-      "rtc": { "ports": "40000-40019", "address": "example.org" }
+      "rtc": { "ports": "40000-40019", "address": "example.org" },
+      "limits": { "maxSessions": 4 },
+      "media": { "encoder": "nvenc" }
     }
-  }
+  },
+  "quotas": { "tenantObjectBytes": null }
 }
 ```
 
-- `storage`：数据库与诊断归档位置；`quotas.tenantObjectBytes`：每 Tenant 对象字节配额，默认不设。
-- `cluster.keyFile`：32 字节集群密钥（base64），缺失时生成。
-- `nodeDefaults` 与 `nodes.<nodeId>`：编码器与码控参数、数据目录、Browser 路径、`maxSessions`、`peer`、`rtc`、`diskReserveBytes`、`sessionMemoryBytes`。节点项是对默认值的部分覆盖。只有一个节点时 `peer.address` 可省略（取 `127.0.0.1:<listen 端口>`），多节点时远端节点必须写。`maxSessions`、`diskReserveBytes`、`sessionMemoryBytes` 默认不设：没有显式上限时集群按实测容量尽力服务（见[指标与放置](#指标与放置)）；设置后是硬上限。
-- 带 `local` 的是**本地节点**：Control 自己启动 Endpoint，经 stdio 通信，`local.root` 是节点根目录。打包版 Control 启动本地节点前用自己版本里的 `bin/remotekit_node.exe install` 把同一 buildId 的运行时装到 `<local.root>/runtime/<buildId>/`（与远端节点的目录结构相同，其他版本删除），再运行其中的 `bin/endpoint_service.exe`，配置里不出现版本；只有开发构建（buildId `dev`）用 `local.executable` 指向自己编译的 Endpoint。
-- 不带 `local` 的是**远端节点**，主动连接 Control。Control 为每个远端节点写出 `<配置目录>/nodes/<nodeId>/node.json`（`nodeId`、该节点使用的 Control 地址、集群密钥），运维把这个文件原样复制到节点根目录即可；节点从配置中删除后，对应文件也被删除。
+| 分组 | 含义 | 去向 |
+|---|---|---|
+| `local` / `remote` | 节点怎样启动与接入：本地节点由 Control 经 stdio 拉起（`root` 是节点根目录，开发构建另有 `executable`）；远端节点主动连接 `remote.control`（`ws(s)://host:port/api/node`） | 只有 Control 用 |
+| `peer` | 节点间对象传输：`listen` 在哪监听、`address` 别人从哪访问。每个节点各自写，不继承；集群只有一个节点时可省略（默认 `127.0.0.1:3101`），多于一个节点时每个节点都必须写，两个本地节点不能共用监听端口 | 下发给 Endpoint，变化需要重启节点 |
+| `rtc` | Viewer 媒体：`ports` 为 UDP 端口段（`null` 由系统选择），`address` 是额外对外宣告的主机名/IP（要求 `ports`） | 下发给 Endpoint，变化需要重启节点 |
+| `limits` | 放置策略：`maxSessions`、`diskReserveBytes`、`sessionMemoryBytes`（正整数或 `null`）。默认不设：没有显式上限时按实测容量尽力服务（见[指标与放置](#指标与放置)）；设置后是硬上限 | 只有 Control 用，不下发、不进 configHash |
+| `media` | 编码与码控调优；顶层是集群默认值，节点内的 `media` 按键覆盖 | 下发给 Endpoint，不重启：之后启动的 Session 使用新值 |
 
-`rtc.address` 用于 Viewer 不在节点所在网络的情况，例如路由器把公网 UDP 端口段转发到节点：Endpoint 在每次 offer 时解析该名称（动态 DNS 随之更新），对端口段内的每个本机 UDP host 候选再发一份地址替换后的候选，原候选保留给同网络的 Viewer。端口段必须固定才能转发，所以设置 `rtc.address` 时要求 `rtc.ports`；每个 RTC 连接占用段内一个端口，端口段大小应不少于节点同时连接的 Viewer 数。
+- `storage`：数据库、诊断归档与日志位置；`quotas.tenantObjectBytes`：每 Tenant 对象字节配额，默认不设。
+- 节点数据目录固定为 `<节点根>/data`，Browser 固定在 `endpoint_service.exe` 旁边，不再可配置。
+- 节点生效配置 = `{nodeId, peer, rtc, media}`。`configHash` 只覆盖 `peer` 与 `rtc`（需要重新监听端口的部分）：重连时它变化，Endpoint 优雅退出（退出码 4），由监管者重启；`media` 变化在下一次握手时下发，Endpoint 记住它，之后创建的 Session 和编码器使用新值，不重启。
+- 加载配置只做三件"写"的事：缺少 `control.key` 时生成；为没有身份文件的节点生成身份并写出 `node.json`；删除已不在配置里的远端节点的 `node.json`。凭据恢复工具只解析配置，不做这些事。
+- 旧布局（顶层 `cluster`、`nodeDefaults`、节点内平铺的调优键）在启动时转换一次为上面的布局，原文件保留为 `control.json.v1`（`control/server/config-v1.ts`）。
 
-节点生效配置 = 默认值 + 覆盖 + `nodeId`，其规范 JSON 的 SHA-256 是 `configHash`。Endpoint 不读任何配置参数或环境变量，只在握手后接收这份配置。重连时 configHash 变化，Endpoint 优雅退出（退出码 4），由监管者重启以采用新配置，节点端无需操作。
+### 节点身份
 
-**节点端**只有 `<root>/node.json`：`nodeId`、`control`（`ws(s)://host:port/api/node`）和 `key`，三项都必需，由 Control 生成。节点必须在 Control 配置的 `nodes` 中登记才能接入。集群密钥从不进入日志、命令行或错误信息。
+每一方都有自己的 X25519 静态密钥：Control 在配置目录的 `control.key`；节点的密钥由 Control 在该节点 ID 第一次出现在配置里时生成，写入它的 `node.json`：
+
+| 键 | 内容 |
+|---|---|
+| `nodeId` | 节点 ID |
+| `privateKey` | 节点私钥（base64） |
+| `controlPublicKey` | Control 公钥（base64） |
+| `control` | 仅远端节点：要连接的 Control 地址 |
+
+- 远端节点的文件在 `<配置目录>/nodes/<nodeId>/node.json`，运维把它复制到节点根目录；本地节点的文件由 Control 直接写到 `<local.root>/node.json`。Control 从自己写出的这个文件读取节点公钥——它就是该节点身份的唯一记录。
+- 节点从配置中删除：远端节点的 `node.json` 被删除；Control 不再知道它的公钥，它的握手会失败——这就是吊销。同一个 ID 重新加入会得到新密钥。
+- 文件与当前状态不符时 Control 不拒绝启动：`control.key` 被替换或 `nodeId` 不符时为该节点生成新身份并记 `config.identity_regenerated`（warn），该节点要拿到新的 `node.json` 才能接入；只有远端地址变化时只改写 `control` 字段、保留密钥（`config.bootstrap_updated`）。
+- 管理 App → 节点显示每个节点公钥指纹（SHA-256 前 16 位十六进制）和远端节点 `node.json` 的路径；握手因身份不符被拒时显示"身份不匹配：请将新的 node.json 复制到该节点"。
 
 ## 集群通道
 
-Control 与所有节点之间、节点与节点之间用同一个握手：`Noise_NNpsk0_25519_AESGCM_SHA256`，PSK 是集群密钥，prologue `remotekit-cluster-1`，节点是发起方。
+Control 与所有节点之间、节点与节点之间用同一个握手：`Noise_IK_25519_AESGCM_SHA256`，prologue `remotekit-cluster-2`，节点是发起方并已知对方的静态公钥。
 
-- 第一条消息的载荷是 `node.hello{role, nodeId, buildId, incarnation}`（role 为 `endpoint`、`updater` 或 `peer`）；密钥不对时解密失败，对端不回复直接断开。
-- 第二条消息的载荷是 `node.ready`（connectionEpoch、buildId、生效配置、configHash、该节点上的活跃会话清单）、`node.release`（给 updater）或 `node.reject{code: build_mismatch | unknown_node | no_release}`。
+- 第一条消息带发起方的静态公钥与载荷 `node.hello{role, nodeId, buildId, incarnation}`（role 为 `endpoint`、`updater` 或 `peer`）。Control 只在发起方静态公钥等于该 `nodeId` 已配置的公钥、且节点未被移除时继续；否则握手直接失败、不回复——密钥不对的一方得不到任何信息。第二条消息认证 Control 自己（`ee`、`se`），载荷是 `node.ready`（connectionEpoch、buildId、生效配置、configHash、对象密钥、该节点上的活跃会话清单、`peers`）、`node.release`（给 updater）或 `node.reject{code: build_mismatch | no_release}`。
+- **节点之间**：`node.ready` 带 `peers:[{nodeId, address, publicKey}]`（其他所有已配置、未移除的节点）；集合变化（管理员移除/重新加入）时 Control 向所有在线节点推 `node.peers`。对象传输的服务端只接受静态公钥在当前集合里的发起方，并用集合里的 ID 而不是对方自称的 ID；客户端按目标节点的公钥做 IK，连到错误的服务端会握手失败。服务期间每个请求都重新确认对方仍在集合里，所以移除节点对已建立的连接也立即生效。
 - 握手后使用 Noise Split 得到的两个方向 AES-256-GCM 状态。与 Noise 规范的唯一差异：单条传输消息上限 4MiB（规范为 65535 字节）。nonce 用尽或任一次解密失败即断开。
 - 明文首字节区分 JSON（≤1MiB 的请求/回复/事件）与 BINARY（u32 头长度 + JSON 头 + 原始字节，用于更新包和对象数据）。
-- 载体：远端节点用 Control HTTP(S) 监听上的 WebSocket `/api/node`，一个 Noise 消息对应一个二进制帧；通道自带认证与加密，所以普通 `ws://` 也安全，不再依赖 Bearer、TLS 代理或 loopback 规则；节点自带 WebSocket 客户端（`stream_socket.cpp` 的 Schannel TLS，不经 WinHTTP），`wss://` 不校验服务器证书与吊销状态（自签名、私有 CA、域名不符、过期、已吊销都接受），也不使用系统代理；Control 的身份由 Noise PSK 握手证明。WinHTTP 的忽略标志没有"忽略吊销"，所以不能用它承载这条通道。连接失败的日志带阶段与错误码（DNS、TCP、TLS 握手、HTTP 状态、Noise 握手）。本地节点用 stdio，`u32le 长度 + 消息`，密钥只经子进程环境变量传入且立即清除——同机部署不经过网络栈，但握手与语义完全相同。节点之间用 TCP，帧格式同 stdio。
+- 载体：远端节点用 Control HTTP(S) 监听上的 WebSocket `/api/node`，一个 Noise 消息对应一个二进制帧；通道自带认证与加密，所以普通 `ws://` 也安全，不依赖 TLS；节点自带 WebSocket 客户端（`stream_socket.cpp` 的 Schannel TLS），`wss://` 不校验服务器证书与吊销状态，也不使用系统代理——Control 的身份由 Noise 静态密钥证明。连接失败的日志带阶段与错误码（DNS、TCP、TLS 握手、HTTP 状态、Noise 握手）。本地节点用 stdio，`u32le 长度 + 消息`，与远端节点一样从节点根目录的 `node.json` 取身份——同机部署不经过网络栈，但握手与语义完全相同。节点之间用 TCP，帧格式同 stdio。
 - 双向请求：Control → Endpoint 是管理方法（20 秒超时为 `outcome_unknown`，每节点最多 256 个在途）；Endpoint → Control 只有 `object.committed`、`object.locate` 等少数请求，同样的超时语义，在独立工作线程上等待，不阻塞管理分发。
 - 节点每 15 秒 `node.ping`，任一侧 45 秒没收到任何消息即断开。同一 nodeId 的新连接替换旧连接。
 
-两侧实现（Control 用 `node:crypto`，Endpoint 用 Windows CNG）都对 `protocol/cluster-noise-vectors.json`（cacophony 向量）校验，并有 Node ↔ C++ 的互通测试。
+两侧实现（Control 用 `node:crypto`，Endpoint 用 Windows CNG）都对 `protocol/cluster-noise-vectors.json`（cacophony 的 IK 向量）校验，并有 Node ↔ C++ 的互通测试。
 
 ## 版本锁定与更新
 
@@ -90,7 +106,7 @@ Control 版本目录中的 `release/node.tar.zst` 与 `release/node.json` 不在
 - **配额**：`quotas.tenantObjectBytes` 按 Tenant 引用或认领的**不同对象**大小之和计算；共享对象对每个引用它的 Tenant 全额计费，所以去重不会让一个用户的配额依赖别人。`object.committed` 与文件库导入时检查。
 - **读取授权**：Endpoint Session 只能读它的 Tenant 引用或认领的对象。每个 Session 有一个授权集，只由三处填充：本 Session 自己写入的对象、Control 推送的文件库描述、对本 Tenant 成功的 `object.locate{tenantId, ids}`（Control 只为有权的 id 返回副本地址，否则 `forbidden`）。节点本地恰好有某个副本不构成读取权限。Viewer 下载、Browser 暂存、缩略图与照片输入、checkpoint 恢复（含热副本）都经过这个授权集。
 - **副本**：目标为 min(2, 就绪节点数)，Control 让磁盘占用最低的节点执行 `object.fetch{ids, sources}`（每节点最多 4 个并发）。节点上线后 Control 分页读取 `object.inventory{cursor}` 对账：索引里没有、首次观察起超过 2 小时的对象删除，节点上缺失的副本从索引移除。只登记副本的提交不带 `tenantId`。
-- **节点之间**：每个节点在 `peer.listen` 上监听 TCP，握手 role `peer`，buildId 必须相同；任何持有集群密钥的节点都可读取任何对象的存储文件（只有密文），`object.get{id, offset}` 按 1MiB 分块返回并以 `object.end{size, sha256}` 结束，可从 offset 续传；每个服务端最多 8 个并发连接。
+- **节点之间**：每个节点在 `peer.listen` 上监听 TCP，握手 role `peer`，buildId 必须相同，只接受当前节点集合里的身份（见[集群通道](#集群通道)）；集合里的任何节点都可读取任何对象的存储文件（只有密文），`object.get{id, offset}` 按 1MiB 分块返回并以 `object.end{size, sha256}` 结束，可从 offset 续传；每个服务端最多 8 个并发连接。
 - **本地缺失**：Endpoint 需要对象而本地没有时，先 `object.locate` 拿到副本地址，从对端拉取并校验后写入本地存储，再 `object.committed` 登记为新副本。Browser 自己从不访问对象存储。
 - **Control 写入**：Control 自己取得的字节（学习 App 的附件）流式写入磁盘占用最低的就绪节点：`object.put.begin{putId, tenantId, sizeHint?}`，二进制帧 `{putId, offset}` + ≤1MiB 载荷，`object.put.end{putId}` → `{objectId, size, storedSize, storedSha256}`（节点同时以该 `tenantId` 提交认领），`object.put.cancel{putId}`。单对象最多 256MiB，每节点 4 个并发写入；临时文件在取消、断线和启动时清理。
 

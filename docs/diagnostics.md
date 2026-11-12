@@ -39,7 +39,7 @@
 |---|---|---|
 | `REMOTEKIT_MEDIA_TRACE` | Browser | 每代 32768 条 OSR 环形记录，见[渲染](rendering.md#媒体追踪) |
 | `REMOTEKIT_SERVER_TRACE` | Endpoint | 65536 条：Fence 观察、AdaptFrame、SDK 提交、编码队列/VPP/硬件完成、SetRates、wire RTP、输入各阶段 |
-| `--browser-trace-dir` | Endpoint → Browser | Chromium 启动追踪（16 秒，有界缓冲） |
+| `REMOTEKIT_BROWSER_TRACE_DIR` | Endpoint → Browser | Chromium 启动追踪（16 秒，有界缓冲）；只在不带 `NDEBUG` 的开发构建中读取 |
 
 身份关联：Browser PID + generation + slot + value；Endpoint frame cookie（跨代唯一）与源内容身份；发布回调返回的实际 wire RTP；输入用 peer + client sequence + browser sequence。Endpoint 的 QPC、SDK TimeTicks 与 UTC 通过括号式校准关联；客户端↔Endpoint 的时钟估计与客户端↔Control 的时钟估计是两件事（媒体和触控直接对 Endpoint 做 `clock.ping`，Control 的时钟只用于产品新鲜度）。
 

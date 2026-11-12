@@ -20,7 +20,7 @@ Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、�
 
 | 所有者 | 数据 |
 |---|---|
-| Control 配置文件 | HTTP 监听、集群密钥文件、每个节点的配置、配额 |
+| Control 配置文件与身份 | HTTP 监听、存储位置、每个节点的接入方式/网络/放置上限/媒体调优、配额；`control.key` 与各节点的 `node.json`（节点身份） |
 | Control SQLite | 账户（含最近登录、停用时间）、口令/PIN hash、token hash、人脸模板（加密）；workspace（Space、Window、Tab、active 关系、地址意图、恢复阶段、窗口视图状态）；已安装 App 与图标；收藏；使用记录；设置；站点偏好；操作收据；弹窗收养收据；文件目录、分组、篮子顺序、选择事务；剪贴板；会话放置与加密的 Tenant 密钥；对象索引与副本；checkpoint；被移除的节点；待各节点清理的已删除 Session |
 | Control 内存 | Viewer 租约、实际内容区尺寸、页面对话框/全屏/文件请求的临时投影、节点连接状态与指标、Memory Saver 计时 |
 | Endpoint Session | Browser 进程、Session 目录里的 `session.db`（期望 view 配置的执行副本、自然关闭事件、导航恢复数据、下载导入交接、文件库资产元数据/草稿/选择回执/派生映射，见[多节点 · Session 存储](cluster.md#session-存储)）、站点偏好（只在内存，由 Control 推送）与 UA、媒体策略的运行缓存、文件草稿与暂存、媒体/输入/GPU 资源、内存中的 Profile 密钥与集群对象密钥 |

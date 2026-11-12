@@ -82,14 +82,14 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 - **送达证据决定 `unavailable` 与 `outcome_unknown`**：每条传输记录请求是否已写出。写出前失败（连接已关、写失败、本地排队超时）是 `unavailable`；写出后超时、断开、回复格式错误或过大是 `outcome_unknown`。服务端处理已经执行后才发现回复无法编码，同样是 `outcome_unknown`。执行后才发现授权或目标已变化，结果是 `outcome_unknown`，披露另由授权门禁控制。健康探测超时不会成为被阻塞动作的结果：那个动作没有发出，是 `unavailable`。
 - 外部服务与工具在边界处按其类型化证据分类一次：HTTP 401 → `unauthenticated`，403 → `forbidden`，404 → `not_found`，429 → `rate_limited`（读取 Retry-After），408/5xx 与读请求的传输失败 → `unavailable`，变更请求发出后的传输失败 → `outcome_unknown`，无法归类的上游失败 → `internal`。
 
-**线上形状**：Native（Endpoint、Browser）与管理通道是 `error:{code, message, reason?, retryAfterMs?, errorId?}`；Control → Viewer 是 `error:{code, message, retryAfterMs?, errorId?}`。
+**线上形状**：Native（Endpoint、Browser）与管理通道是 `error:{code, message, reason?, retryAfterMs?, errorId?}`；Control → Viewer 是 `error:{code, message, reason?, retryAfterMs?, errorId?}`（`reason` 只取协议里封闭的 Native 原因枚举，供 Viewer 区分例如 `browser_restarting` 与最终失败）。产品状态里的 Endpoint 错误、学习与会话导入的失败记录同样是带 code/reason/errorId 的结构，不是字符串。
 - `retryAfterMs` 只随 `busy`、`rate_limited`、`unavailable` 出现（0…86 400 000 的整数）；其他 code 带上它会在校验时被丢弃。提示只调整允许重试时的等待，永远不会让不可重试的 code 变得可以重试。HTTP 同时设置 `Retry-After` 头，但客户端只读 JSON。
 - Native（Endpoint、Browser）的 `message` 是英文运维诊断；需要向用户区分的情形（如加密文档与损坏文档、单文件过大与配额已满）带一个 `reason`，取自协议里封闭的枚举，只用于选择展示文字。Control 是展示边界：把 Native 错误转换成 Viewer 用的中文 `message`（按 `reason`，否则按 code 的通用句），原始诊断进日志和诊断包。Viewer 直接显示 `message`；code 的通用句只有 `shared/errors.ts` 一张表。Endpoint 经 DataChannel 直接回复 Viewer 的请求（文件服务、文档阅读）不经过 Control，回复里同样带 Native 的错误形状；这条路径的展示边界是 Viewer 的 DataChannel 解码处。两处用同一个转换（`control/shared/errors.ts` 的 `nativeError` 与原因文字表），英文诊断进 `detail`。
 - Browser 控制回复：`{version:1, id, ok:false, error:{code, message, reason?, retryAfterMs?}}`，code 用名称字符串。SDK 的类型化调用把 Browser 的应用错误原样交给调用方，不折叠成传输状态；SDK 传输状态区分"未发出"（通道已关、写失败）与"已发出、结果未知"（超时、发出后断开、回复无效）。
 - 操作收据的失败是 `status:'failed'` 加结构化 `error:{code, message}`；`expired`（generation 已轮换）是 `failed` + `conflict`。Viewer 按收据里的 code 处理，与直接回复的错误走同一套处理。
 - 每个边界只转换一次；中途转发保留 code、`reason`、`retryAfterMs` 与 `errorId`，包装时原始异常放进 `cause`，不替换。
 
-**错误 ID**：`internal`、`outcome_unknown`、`unavailable` 在第一次离开产生它的进程时获得一个 ID（Control `c-`、Endpoint `e-`，后接 10 位十六进制），同时写一条带完整诊断（code、reason、英文诊断、OS 错误码、cause 链与栈）的结构化日志；之后各层原样转发，不再生成新 ID。Control 转发 Endpoint 错误时沿用 `e-` ID，并在自己的日志里记一条同 ID 的记录。Viewer 的 `formatError` 在文字后附"（错误 ID …）"；管理 App → 诊断按 ID 查找：`c-` 查 Control 日志，`e-` 经 `node.logs.search` 查各节点的 `endpoint.log`。其余 code 是调用方能自己处理的结果，不分配 ID。
+**错误 ID**：`internal`、`outcome_unknown`、`unavailable` 在第一次离开产生它的进程时获得一个 ID（Control `c-`、Endpoint `e-`、Viewer `v-`，后接 10 位十六进制），同时写一条带完整诊断（code、reason、英文诊断、OS 错误码、cause 链与栈）的结构化日志；之后各层原样转发，不再生成新 ID。Control 转发 Endpoint 错误时沿用 `e-` ID，并在自己的日志里记一条同 ID 的记录。只在浏览器里发生的失败（解码、页面挂载、摄像头、呈现协议）由 Viewer 自己生成 `v-` ID 并立即显示，再经 WS `client.error{errorId, context, error}` 报给 Control（内存队列最多 50 条，在线时发送），Control 用同一 ID 记一条 `viewer.error`。管理 App → 诊断按 ID 查找：`c-`/`v-` 查 Control 日志，`e-` 经 `node.logs.search` 查各节点的 `endpoint.log`。其余 code 是调用方能自己处理的结果，不分配 ID。
 
 **处理规则集中在一处**：`control/shared/error-policy.ts` 与 `endpoint/src/util/error_policy.hpp` 把 code 映射为处理方式和默认等待（`busy` 250ms 起翻倍、上限 5 秒；`unavailable` 1 秒起翻倍、上限 5 分钟；`rate_limited` 无提示时 30 秒）。后台调度（文档转换、学习附件下载、会话导入、下载导入、更新器）都从这里取策略：只有 `busy`、`rate_limited`、`unavailable` 自动重试，`outcome_unknown` 先对账，其余 code 记录为最终结果，等用户操作或构建、输入、配额变化后再评估。持久化的失败记录保存 code、诊断、`retry_at` 与构建 ID；`rejected`、`internal` 只对产生它的构建有效。
 
@@ -98,6 +98,19 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 - 意外异常在请求边界和线程入口被捕获：请求返回 `internal`，线程入口把所属组件标记为失败，而不是终止进程。只在校验调用方请求时才把解析异常归为 `invalid_request`；解析对端回复或本地存储时的异常是 `internal`（已送达的请求则是 `outcome_unknown`）。
 - 不确定的 GPU 工作、编码任务和原生回调不靠超时"放弃"：资源保留到有证据为止，必要时保留到进程结束。
 - 控制 RPC 超时只使本次结果成为 `outcome_unknown`，不关闭 SDK 通道、不清除 Endpoint 的控制句柄。SDK 使用每通道请求 ID 匹配回复，丢弃迟到回复并释放其 Mojo 附件与本地资源句柄；后续健康检查有界等待。只有管道确实断开或进程退出才允许替换 Browser，连续失败最多启动三次，按 1/2/4 秒退避，健康运行一分钟后恢复额度。拒绝重启的错误附带最近一次真实失败（进程退出码及其含义、控制管道超时或 `output.status` 错误）和 Session 目录下 `browser.log` 的路径；Endpoint 自己终止的进程（退出码 0）不算失败。GPU 输出启动失败通过现有 Session 错误投影显示在标签页/工作区。
+
+### Viewer 怎样呈现失败
+
+按"谁能处理"而不是按错误码堆横幅，规则只在 `control/client/failures/` 一处（`presentFailure(error, context)`）：
+
+| 类 | 谁处理 | 典型 code / reason | 呈现 |
+|---|---|---|---|
+| 正在恢复 | 系统 | `busy`、`rate_limited`、`unavailable`、确认中的 `outcome_unknown`、`browser_restarting`/`browser_crashed`、连接中断 | 受影响的东西上显示进行中的状态（"正在重新连接…"），没有错误措辞、没有重试按钮；重试在后台自动进行，预算用完后放慢但不停止。1.5 秒内恢复的不显示；20 秒后改用"仍在…/暂时无法…，恢复后自动继续"；连接类 30 秒后进入平静的持续状态 |
+| 用户能处理 | 用户 | `unauthenticated`、`locked`、容量与输入超限、带文档/照片原因的 `rejected`、用户输入导致的 `invalid_request`、自己操作的目标已变化（`conflict`/`not_found`，先静默刷新） | 只给一个具体动作（登录、解锁、管理窗口、换一个文件、重新拍摄……）。"空间不足 / 打开我的文件"只用于真正的存储、目录与文件篮容量 |
+| 谁都处理不了 | 管理员 | `internal`、`forbidden`、`corrupt_record`/`corrupt_state`、非输入导致的 `invalid_request` | 说明什么没有发生、东西现在是什么状态，另起一行显示可复制的错误 ID；没有重试 |
+| 静默 | — | `canceled` | 不显示 |
+
+位置按作用域：输入框下（field）、出问题的那个条目上（item：文件卡、上传/拍照任务、附件行、标签页）、所在的窗口/面板（surface：活动内容上是顶部居中的浮动小条，只覆盖、不挤压——挤压会改变远端视口尺寸）、全局通知（只放不属于任何可见界面的事：Control 连接、窗口已关闭的后台任务；右下角，按 key 去重，最多 3 条）、全屏（登录、锁定、连接被接管）。错误一路保持类型化直到呈现处，只有 `presentFailure` 生成文字。
 
 ## 代码结构
 
