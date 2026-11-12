@@ -107,7 +107,7 @@ function summary() {
   writeFileSync(join(out, 'summary.md'), table.join('\n') + '\n');
 }
 async function run(item, slot) {
-  await waitForLogonBudget();
+  const failedLogonsBefore = await waitForLogonBudget();
   if (interrupted) return;
   const { scenario, browser, pointer, viewport } = item;
   const port = basePort + slot * 20;
@@ -126,6 +126,7 @@ async function run(item, slot) {
       pointer,
       viewport,
       status: 'BLOCKED',
+      failedLogonsBefore,
       reason: 'Requires --payload or --package-root',
       evidence,
     });
@@ -198,7 +199,7 @@ async function run(item, slot) {
   };
   if (viewport !== 'default') env.E2E_VIEWPORT = viewport;
   if (values.dpr) env.E2E_DPR = values.dpr;
-  console.log(`START ${scenario.name} ${browser} ${pointer} ${evidence}`);
+  console.log(`START ${scenario.name} ${browser} ${pointer} ${evidence} failedLogons=${failedLogonsBefore}`);
   const log = createWriteStream(join(evidence, 'scenario.log'));
   const executable =
     scenario.kind === 'package'
@@ -258,6 +259,7 @@ async function run(item, slot) {
     status: timedOut ? 'TIMEOUT' : code === 0 && !driverFailure ? 'PASS' : 'FAIL',
     ...(driverFailure ? { reason: driverFailure } : {}),
     code,
+    failedLogonsBefore,
     endpoint,
     embedder,
     evidence,
