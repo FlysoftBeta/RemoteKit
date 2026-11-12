@@ -29,9 +29,9 @@ export function cliOptions() {
 }
 
 export async function launch({
-  browser: browserName = 'edge',
-  dpr = 1,
-  pointer: pointerType = 'mouse',
+  browser: browserName = process.env.E2E_BROWSER ?? 'edge',
+  dpr = Number(process.env.E2E_DPR ?? 1),
+  pointer: pointerType = process.env.E2E_POINTER ?? 'mouse',
   out,
   stack,
   initialAuth = true,

@@ -165,9 +165,6 @@ async function run(item, slot) {
     case 'output-port':
       args = [evidence, String(port)];
       break;
-    case 'smoke':
-      args = [];
-      break;
     case 'package':
       args = [
         ...(values.payload
@@ -176,9 +173,6 @@ async function run(item, slot) {
         '--work-dir',
         evidence,
       ];
-      break;
-    case 'port-output':
-      args = [String(port), evidence];
       break;
     case 'output':
       args = [evidence];
