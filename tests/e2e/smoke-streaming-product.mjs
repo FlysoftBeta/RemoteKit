@@ -1,10 +1,16 @@
-// Run with the packaged Node and resolve ws from the package, never the source tree.
-import assert from 'node:assert/strict';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { repository, startStack } from './kit/stack.mjs';
+// Run with the packaged Node and resolve ws from the package, never the source tree.
+import assert from 'node:assert/strict';
 
-const [packageRoot, origin] = process.argv.slice(2);
+const [providedPackage, providedOrigin] = process.argv.slice(2);
+const stack = providedOrigin
+  ? undefined
+  : await startStack({ scenario: 'smoke-streaming-product', seed: false });
+const packageRoot = providedPackage ?? repository;
+const origin = providedOrigin ?? stack.origin;
 const { WebSocket } = createRequire(resolve(packageRoot, 'control/dist/server.mjs'))('ws');
 // Startup/authentication contract only. Browser actions and media require a real
 // Viewer WebRTC check against the extracted package during release validation.
@@ -94,7 +100,10 @@ try {
   const initial = await waitState((state) => state.endpointError === null);
   assert.equal(auth?.locked, false, 'Registration must grant initial access');
   assert.equal(initial.quality.mode, 'product');
-  assert.deepEqual((await rpc('admin.users', {})).map((user) => user.username), ['package-smoke']);
+  assert.deepEqual(
+    (await rpc('admin.users', {})).map((user) => user.username),
+    ['package-smoke'],
+  );
   // Product operations travel over the WebSocket as receipts; this one needs no browser.
   const showStats = !initial.workspace.settings.workspace.showStats;
   const receipt = await rpc('operation.submit', {
@@ -143,4 +152,5 @@ try {
 } finally {
   clearTimeout(timeout);
   socket?.terminate();
+  await stack?.stop();
 }

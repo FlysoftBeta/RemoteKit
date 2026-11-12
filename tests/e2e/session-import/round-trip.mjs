@@ -1,39 +1,31 @@
-import { stageRuntime } from '../../integration/stage-runtime.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { buildHarness, startControl, until } from '../cluster-test-support.mjs';
+import { startStack, until } from '../kit/stack.mjs';
 
 const [endpoint, browser, output, portArg = '33961'] = process.argv.slice(2);
 assert(endpoint && browser && output);
 const run = resolve(output);
 const port = Number(portArg);
 const origin = `http://127.0.0.1:${port}`;
-await mkdir(run);
-const server = await buildHarness(join(run, 'runtime'));
-const config = join(run, 'control.json');
-await writeFile(
-  config,
-  JSON.stringify({
-    http: { listen: `127.0.0.1:${port}`, origins: [origin] },
-    storage: { database: join(run, 'control.db') },
-    nodes: {
-      local: {
-        local: {
-          executable: stageRuntime(endpoint, browser, join(run, 'node-runtime/bin')),
-          root: join(run, 'node'),
-        },
-      },
-    },
-  }),
-);
-const control = startControl(server, config, run);
+await mkdir(run, { recursive: true });
+const stack = await startStack({
+  scenario: 'session-import',
+  run,
+  port,
+  endpoint,
+  browser,
+  seed: false,
+  fixtures: false,
+  dev: false,
+});
+const control = stack.control;
 try {
-  await until('node ready', async () => {
+  await until(async () => {
     const state = await control.call('inspect');
     return state.nodes[0]?.state === 'ready' && state.nodes[0].metrics;
-  });
+  }, 'node ready');
   const response = await fetch(origin + '/api/auth/setup', {
     method: 'POST',
     headers: { Origin: origin, 'Content-Type': 'application/json' },
@@ -62,13 +54,13 @@ try {
   const recovered = await control.call('storageImport', { tenant, params });
   assert.equal(recovered.importId, params.importId);
   assert(!Object.hasOwn(recovered, 'job'));
-  const done = await until('import complete', async () => {
+  const done = await until(async () => {
     const state = await control.call('storageImportStatus', {
       tenant,
       params: { importId: params.importId },
     });
     return state.state === 'done' && state;
-  });
+  }, 'import complete');
   assert.deepEqual(done.cookies, { applied: 1, rejected: 0 });
   assert.deepEqual(done.localStorage, { applied: 1, rejected: 0 });
   assert.deepEqual(await control.call('storageImport', { tenant, params }), done);
@@ -89,5 +81,5 @@ try {
   );
   console.log('Session import recovered the forced lost begin reply and retained its result.');
 } finally {
-  await control.stop();
+  await stack.stop();
 }

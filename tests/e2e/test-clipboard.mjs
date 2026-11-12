@@ -1,34 +1,32 @@
+import { startFixture } from './kit/fixtures.mjs';
+import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
+
+import { randomUUID } from 'node:crypto';
+import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { zstdDecompressSync } from 'node:zlib';
+import { requireControl, startStack, until } from './kit/stack.mjs';
+
 /**
  * Edge / Chrome 89, isolated Control and native H264 clipboard verification.
  * node tests/e2e/test-clipboard.mjs <playwright module> <viewer exe>
  *   <endpoint exe> <browser exe> <unused evidence directory> [port=34120]
  */
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
-import { mkdir, readFile, writeFile, appendFile, readdir } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { zstdDecompressSync } from 'node:zlib';
-import { startProductStack, until } from './input-product-stack.mjs';
-import { instrumentViewer, requireControl } from './cluster-test-support.mjs';
 
 const [modulePath, viewerExe, endpoint, browser, output, portArg = '34120'] = process.argv.slice(2);
 assert([modulePath, viewerExe, endpoint, browser, output].every(Boolean));
 const run = resolve(output);
 const port = Number(portArg);
-assert(Number.isInteger(port) && port >= 34100 && port + 3 <= 34199);
 const origin = `http://127.0.0.1:${port}`;
 const fixtureOrigin = `http://127.0.0.1:${port + 1}`;
 const marker = 'RKCLIP' + randomUUID().replaceAll('-', '');
 const oversizeMarker = 'RKLARGE' + randomUUID().replaceAll('-', '');
-const { chromium } = createRequire(import.meta.url)(resolve(modulePath));
+
 const Database = requireControl('better-sqlite3');
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
-await mkdir(run);
-const html = (await readFile(new URL('./fixtures/clipboard.html', import.meta.url), 'utf8'))
-  .replaceAll('CLIPBOARD_MARKER', marker)
-  .replaceAll('OVERSIZE_MARKER', oversizeMarker);
+await mkdir(run, { recursive: true });
+
 const remote = [];
 const results = [];
 let user, admin, chrome, db;
@@ -36,22 +34,18 @@ const result = (scenario, detail) => {
   results.push({ scenario, status: 'verified', at: new Date().toISOString(), detail });
   console.log(scenario, JSON.stringify(detail));
 };
-const fixture = createServer(async (request, response) => {
-  if (request.method === 'POST' && request.url === '/event') {
-    let body = '';
-    for await (const chunk of request) body += chunk;
-    remote.push(JSON.parse(body));
-    response.end();
-  } else
-    response
-      .writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
-      .end(html);
+const fixture = await startFixture('test-clipboard', port + 1, { remote, marker, oversizeMarker });
+
+const stack = await startStack({
+  seed: false,
+  fixtures: false,
+  ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
+  run,
+  port,
+  endpoint,
+  browser,
 });
-await new Promise((done, reject) => {
-  fixture.once('error', reject);
-  fixture.listen(port + 1, '127.0.0.1', done);
-});
-const control = startProductStack({ run, port, endpoint, browser });
+const control = stack.control.child;
 control.stdout.on('data', (data) => void appendFile(join(run, 'control.log'), data));
 control.stderr.on('data', (data) => void appendFile(join(run, 'control.log'), data));
 const stopped = new Promise((done) => control.once('exit', done));
@@ -66,7 +60,7 @@ const row = () =>
     .get('clipboard-user');
 const revision = () => row()?.revision ?? 0;
 const connect = async (username, setup = false) => {
-  const context = await chrome.newContext({
+  const context = await createViewerContext(chrome, {
     viewport: { width: 1100, height: 1000 },
     deviceScaleFactor: 1,
     isMobile: true,
@@ -208,7 +202,7 @@ async function privacy() {
 }
 try {
   await until(async () => (await fetch(origin + '/api/auth/setup')).ok, 'Control startup');
-  chrome = await chromium.launch({
+  chrome = await launchBrowser({
     executablePath: resolve(viewerExe),
     headless: true,
     args: ['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required'],
@@ -439,7 +433,7 @@ try {
     JSON.stringify({ results, marker, oversizeMarker, remote }, null, 2),
   );
   await chrome?.close();
-  control.kill('SIGTERM');
+  await stack.stop();
   await Promise.race([stopped, pause(10000)]);
   fixture.closeAllConnections();
   fixture.close();

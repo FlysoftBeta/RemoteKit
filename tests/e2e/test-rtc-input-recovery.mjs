@@ -5,7 +5,7 @@ import { startStack, until } from './kit/stack.mjs';
 import { launch } from './kit/viewer.mjs';
 
 const phase = process.env.QA_PHASE ?? 'after';
-const root = resolve(process.env.QA_OUT ?? 'develop/tmp/e2e-shell/rtc-input', phase, String(Date.now()));
+const root = resolve(process.env.E2E_RUN ?? 'develop/tmp/e2e-shell/rtc-input', phase, String(Date.now()));
 mkdirSync(root, { recursive: true });
 const stack = await startStack({
   scenario: 'rtc-input',

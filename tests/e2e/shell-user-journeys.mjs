@@ -1,27 +1,23 @@
-// Real Viewer journeys. Test hooks only read authoritative state or reveal unlock.
-import assert from 'node:assert/strict';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { startStack, until } from './kit/stack.mjs';
-import { launch } from './kit/viewer.mjs';
+import { createViewerContext, launch } from './kit/viewer.mjs';
+
+// Real Viewer journeys. Test hooks only read authoritative state or reveal unlock.
+import assert from 'node:assert/strict';
 
 const root = resolve(process.argv[2] ?? 'develop/tmp/e2e-shell/journeys');
 mkdirSync(root, { recursive: true });
 const stack = await startStack({
   scenario: 'shell-journeys',
-  port: 34070,
+  port: Number(process.env.E2E_PORT ?? 34070),
   seed: false,
   run: join(root, 'stack'),
 });
 stack.username = 'shell-admin';
 stack.password = 'shell-journey-password';
 const results = [];
-const variants = [
-  ['edge', false],
-  ['edge', true],
-  ['chrome89', false],
-  ['chrome89', true],
-];
+const variants = [[process.env.E2E_BROWSER ?? 'edge', process.env.E2E_POINTER === 'touch']];
 let memberAbsentAt;
 let memberTab;
 let normalContext;
@@ -45,19 +41,19 @@ async function prepare(browser, phone, first = false) {
   const cdp = await context.newCDPSession(page);
   await cdp.send('Network.enable');
   await page.addInitScript(() => {
-    window.shellQA = { peers: [], sockets: [], errors: [], wire: [] };
+    window.clusterQA = { peers: [], sockets: [], errors: [], wire: [] };
     const Peer = RTCPeerConnection;
     window.RTCPeerConnection = class extends Peer {
       constructor(...args) {
         super(...args);
-        shellQA.peers.push(this);
+        clusterQA.peers.push(this);
       }
       createDataChannel(...args) {
         const channel = super.createDataChannel(...args);
         channel.addEventListener('message', (event) => {
           try {
             const m = JSON.parse(event.data);
-            if (m.error || m.type === 'input.result') shellQA.wire.push(m);
+            if (m.error || m.type === 'input.result') clusterQA.wire.push(m);
           } catch {}
         });
         return channel;
@@ -67,11 +63,11 @@ async function prepare(browser, phone, first = false) {
     window.WebSocket = class extends Socket {
       constructor(...args) {
         super(...args);
-        shellQA.sockets.push(this);
+        clusterQA.sockets.push(this);
         this.addEventListener('message', (event) => {
           try {
             const m = JSON.parse(event.data);
-            if (m.error) shellQA.errors.push(m);
+            if (m.error) clusterQA.errors.push(m);
           } catch {}
         });
       }
@@ -85,9 +81,9 @@ async function prepare(browser, phone, first = false) {
         await page.evaluate(() => ({
           state: window.__remotekitTest?.state(),
           text: document.body.innerText,
-          peers: window.shellQA?.peers.map((p) => p.connectionState),
-          errors: window.shellQA?.errors,
-          wire: window.shellQA?.wire,
+          peers: window.clusterQA?.peers.map((p) => p.connectionState),
+          errors: window.clusterQA?.errors,
+          wire: window.clusterQA?.wire,
         })),
         null,
         2,
@@ -372,13 +368,11 @@ try {
     });
     if (i === 0) {
       await q.step('03-member-real-login', async () => {
-        normalBrowser = await q.browser
-          .browserType()
-          .launch({
-            executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-            headless: true,
-          });
-        normalContext = await normalBrowser.newContext({ viewport: { width: 1600, height: 1000 } });
+        normalBrowser = await q.browser.browserType().launch({
+          executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+          headless: true,
+        });
+        normalContext = await createViewerContext(normalBrowser, { viewport: { width: 1600, height: 1000 } });
         const other = await normalContext.newPage();
         await other.goto(stack.origin);
         await other.locator('.viewer-lock-blank').waitFor();
@@ -496,8 +490,8 @@ try {
       // Chromium's Network domain leaves existing UDP/WS sessions alive. Close those
       // transports under offline emulation to exercise a complete network loss.
       await page.evaluate(() => {
-        shellQA.sockets.forEach((s) => s.close());
-        shellQA.peers.forEach((p) => p.close());
+        clusterQA.sockets.forEach((s) => s.close());
+        clusterQA.peers.forEach((p) => p.close());
       });
       await page.keyboard.type(' while offline', { delay: 90 });
       await pause(3000);
@@ -512,7 +506,7 @@ try {
       await pause(5000);
       await q.unlock();
       await until(
-        () => page.evaluate(() => shellQA.peers.some((p) => p.connectionState === 'connected')),
+        () => page.evaluate(() => clusterQA.peers.some((p) => p.connectionState === 'connected')),
         'RTC reconverges',
         90000,
       );
@@ -645,7 +639,7 @@ try {
       const errorText = await d.innerText();
       const id =
         errorText.match(/c-[a-f0-9]+/i)?.[0] ??
-        (await r.page.evaluate(() => shellQA.errors.find((e) => e.error?.errorId)?.error.errorId));
+        (await r.page.evaluate(() => clusterQA.errors.find((e) => e.error?.errorId)?.error.errorId));
       assert(id, 'an error ID produced during the journey');
       await r.click(r.button('取消', d));
       await r.section(af, '诊断');

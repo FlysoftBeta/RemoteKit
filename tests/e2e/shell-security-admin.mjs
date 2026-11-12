@@ -1,8 +1,9 @@
-// Idle locking, both reveal methods, diagnostic collection, and error lookup.
-import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runScenario } from './kit/viewer.mjs';
+// Idle locking, both reveal methods, diagnostic collection, and error lookup.
+import assert from 'node:assert/strict';
+
 await runScenario('shell-security-admin', async (v, stack) => {
   const { page } = v;
   const phone = process.env.QA_PHONE === '1';

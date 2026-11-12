@@ -1,21 +1,20 @@
-import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { startStack } from './kit/stack.mjs';
+import { createViewerContext, launchBrowser } from './kit/viewer.mjs';
 
-const [engine = 'edge', origin = 'http://127.0.0.1:5179', output = 'develop/tmp/local-selection'] =
-  process.argv.slice(2);
-const { chromium } = createRequire(import.meta.url)(
-  process.env.REMOTEKIT_PLAYWRIGHT ??
-    join(homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'),
-);
-const browser = await chromium.launch(
+import assert from 'node:assert/strict';
+
+const [engine = 'edge', , output = process.env.E2E_RUN] = process.argv.slice(2);
+
+const stack = await startStack({ scenario: 'local-selection', run: output, seed: false, fixtures: false });
+const origin = stack.origin;
+const browser = await launchBrowser(
   engine === 'chrome89'
     ? { executablePath: 'C:/src/tmp/chrome89-google/app/chrome.exe', headless: true }
     : { channel: 'msedge', headless: true },
 );
-const context = await browser.newContext({
+const context = await createViewerContext(browser, {
   viewport: { width: 900, height: 800 },
   hasTouch: true,
   isMobile: true,
@@ -207,4 +206,5 @@ try {
 } finally {
   await writeFile(join(run, `${engine}.json`), JSON.stringify(results, null, 2));
   await browser.close();
+  await stack.stop();
 }

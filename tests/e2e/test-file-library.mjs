@@ -1,13 +1,13 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { startFixture } from './kit/fixtures.mjs';
+import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
+
+import { join, resolve } from 'node:path';
+import { startStack, until } from './kit/stack.mjs';
+
 /** Real H264, device upload, native FileList delivery and partition/library regression. */
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, writeFile, appendFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
-import { join, resolve } from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { startProductStack, until } from './files-stack.mjs';
-import { instrumentViewer } from './cluster-test-support.mjs';
 
 const [modulePath, viewerExe, endpoint, browser, output, listenPort = '34200', server] =
   process.argv.slice(2);
@@ -20,80 +20,23 @@ await mkdir(run, { recursive: true });
 const events = [],
   results = [];
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const fixture = createServer(async (req, res) => {
-  if (req.method === 'POST') {
-    let body = '';
-    for await (const bytes of req) body += bytes;
-    events.push(JSON.parse(body));
-    return res.end();
-  }
-  if (req.url === '/self-close') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(`<!doctype html>
-      <button id="closeSelf" style="position:fixed;inset:0" onclick="window.close()">Close page</button>
-      <script>
-        const report = () => fetch('/event', {method:'POST',body:JSON.stringify({
-          type:'geometry',width:innerWidth,height:innerHeight,
-          boxes:{closeSelf:document.getElementById('closeSelf').getBoundingClientRect().toJSON()}
-        })});
-        report();addEventListener('resize',report);
-      </script>`);
-    return;
-  }
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(`<!doctype html>
-    <meta name="viewport" content="width=device-width,initial-scale=1"><title>File library regression</title>
-    <style>body{font:18px system-ui;margin:24px;background:#eaf2fc}input,button{display:block;margin:24px 0;height:44px;width:320px}canvas{position:fixed;right:0;bottom:0}</style>
-    <h1>Native file selection</h1><input id="single" type="file" accept=".txt"><input id="multiple" type="file" multiple>
-    <button id="download">Download a file</button>
-    <button id="closePage" onclick="window.open('/self-close')">Open self-closing page</button><canvas width="16" height="16"></canvas>
-    <script>
-      const report = (type, extra = {}) => fetch('/event', {
-        method: 'POST', body: JSON.stringify({ type, ...extra }),
-      });
-      const controls = ['single', 'multiple', 'download', 'closePage'].map(id => document.getElementById(id));
-      controls[2].onclick = event => {
-        report('download-click', { trusted: event.isTrusted });
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(new Blob(['RemoteKit download import'], { type: 'text/plain' }));
-        link.download = 'download.txt';
-        link.click();
-      };
-      const geometry = () => report('geometry', {
-        width: innerWidth, height: innerHeight,
-        boxes: Object.fromEntries(controls.map(element => [element.id, element.getBoundingClientRect().toJSON()])),
-      });
-      geometry();
-      addEventListener('resize', geometry);
-      for (const input of controls.slice(0, 2)) {
-        input.onchange = async () => {
-          const files = await Promise.all([...input.files].map(async file => ({
-            name: file.name, size: file.size,
-            hash: Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer())),
-              byte => byte.toString(16).padStart(2, '0')).join(''),
-          })));
-          report('selected', { id: input.id, files });
-          input.value = '';
-        };
-      }
-      let tick = 0;
-      setInterval(() => {
-        const drawing = document.querySelector('canvas').getContext('2d');
-        drawing.fillStyle = ++tick % 2 ? 'red' : 'blue';
-        drawing.fillRect(0, 0, 16, 16);
-      }, 120);
-    </script>`);
-});
-await new Promise((done) => fixture.listen(port + 1, '127.0.0.1', done));
-const control = startProductStack({
+const fixture = await startFixture('test-file-library', port + 1, { events });
+
+const stack = await startStack({
+  seed: false,
+  fixtures: false,
+  ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
   run,
   port,
   endpoint,
   browser,
   ...(server ? { server: resolve(server) } : {}),
 });
+const control = stack.control.child;
 for (const stream of ['stdout', 'stderr'])
   control[stream].on('data', (bytes) => void appendFile(join(run, 'control.' + stream + '.log'), bytes));
 const stopped = new Promise((done) => control.once('exit', done));
-const { chromium } = createRequire(import.meta.url)(resolve(modulePath));
+
 let chrome, viewer;
 async function stage(name, work) {
   const started = Date.now();
@@ -104,11 +47,11 @@ async function stage(name, work) {
 }
 try {
   await until(async () => (await fetch(origin + '/api/auth/setup').catch(() => null))?.ok, 'Control ready');
-  chrome = await chromium.launch({ executablePath: resolve(viewerExe), headless: true });
-  const context = await chrome.newContext({
+  chrome = await launchBrowser({ executablePath: resolve(viewerExe), headless: true });
+  const context = await createViewerContext(chrome, {
     viewport:
-      process.env.FILES_POINTER === 'touch' ? { width: 390, height: 844 } : { width: 1600, height: 1000 },
-    hasTouch: process.env.FILES_POINTER === 'touch',
+      process.env.E2E_POINTER === 'touch' ? { width: 390, height: 844 } : { width: 1600, height: 1000 },
+    hasTouch: process.env.E2E_POINTER === 'touch',
   });
   const password = randomUUID();
   const response = await context.request.post(origin + '/api/auth/setup', {
@@ -147,7 +90,7 @@ try {
     );
     const target = geometry.boxes[id];
     await (
-      process.env.FILES_POINTER === 'touch'
+      process.env.E2E_POINTER === 'touch'
         ? page.touchscreen.tap.bind(page.touchscreen)
         : page.mouse.click.bind(page.mouse)
     )(
@@ -278,16 +221,8 @@ try {
 } finally {
   await writeFile(join(run, 'fixture-events.json'), JSON.stringify(events, null, 2));
   await chrome?.close();
-  if (control.connected) control.disconnect();
-  const timeout = setTimeout(() => {
-    if (control.exitCode === null)
-      execFileSync('taskkill', ['/pid', String(control.pid), '/T', '/F'], {
-        windowsHide: true,
-        stdio: 'ignore',
-      });
-  }, 10000);
-  await stopped;
-  clearTimeout(timeout);
+  await stack.stop();
+
   fixture.closeAllConnections();
   await new Promise((done) => fixture.close(done));
 }

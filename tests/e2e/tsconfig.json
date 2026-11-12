@@ -4,5 +4,5 @@
     "allowImportingTsExtensions": true,
     "typeRoots": ["../../control/node_modules/@types"]
   },
-  "include": ["*.mts"]
+  "include": ["*.mts", "kit/*.mts"]
 }

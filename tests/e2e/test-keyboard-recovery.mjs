@@ -1,2 +1,3 @@
-import { keyboardOcclusion } from './input-keyboard-occlusion.mjs';
+import { keyboardOcclusion } from './kit/keyboard-occlusion.mjs';
+
 await keyboardOcclusion('recovery');

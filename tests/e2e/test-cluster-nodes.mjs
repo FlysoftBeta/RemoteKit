@@ -1,15 +1,15 @@
-import { shellViewer } from './shell-avail-support.mjs';
-import { stageRuntime } from './../integration/stage-runtime.mjs';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { startFixture } from './kit/fixtures.mjs';
+import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
+
+import { join, resolve } from 'node:path';
+import { startStack, until } from './kit/stack.mjs';
+
 /** Real Viewer/H264, two local nodes, checkpoint relocation and demand peer object read.
  * args: playwright module, Edge exe, Endpoint exe, Browser exe, new evidence directory, [port]
  */
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
-import { join, resolve } from 'node:path';
-import { buildHarness, startControl, until } from './cluster-test-support.mjs';
 
 const [modulePath, edge, endpoint, browser, output, portArg = '33831'] = process.argv.slice(2);
 assert([modulePath, edge, endpoint, browser, output].every(Boolean));
@@ -17,74 +17,44 @@ const run = resolve(output),
   port = Number(portArg),
   origin = `http://127.0.0.1:${port}`;
 const fixtureOrigin = `http://127.0.0.1:${port + 1}`;
-await mkdir(run);
+await mkdir(run, { recursive: true });
 const evidence = async (name, value) => {
   console.log(name);
   await writeFile(join(run, name + '.json'), JSON.stringify(value, null, 2));
 };
 const events = [];
-const fixture = createServer(async (request, response) => {
-  if (request.method === 'POST') {
-    let raw = '';
-    for await (const bytes of request) raw += bytes;
-    events.push(JSON.parse(raw));
-    response.end();
-    return;
-  }
-  response.setHeader('Content-Type', 'text/html; charset=utf-8');
-  response.end(`<!doctype html><title>Cluster ${request.url}</title>
-    <style>body{margin:20px;background:#e3effa}button,input{display:block;margin-bottom:20px}</style>
-    <button id="store">Persist state</button><input id="file" type="file"><canvas width="24" height="24"></canvas>
-    <script>
-    const report=(type,extra={})=>fetch('/event',{method:'POST',body:JSON.stringify({type,path:location.pathname,cookie:document.cookie,storage:localStorage.getItem('cluster'),...extra})});
-    store.onclick=()=>{document.cookie='cluster=persisted; Max-Age=86400; SameSite=Lax';localStorage.setItem('cluster','stored-value');report('stored')};
-    file.onchange=async()=>{const f=file.files[0];report('attached',{name:f.name,size:f.size,hash:Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await f.arrayBuffer())),b=>b.toString(16).padStart(2,'0')).join('')})};
-    document.addEventListener('click',event=>report('clicked',{id:event.target.id,trusted:event.isTrusted}));
-    const geometry=()=>report('ready',{width:innerWidth,height:innerHeight,boxes:Object.fromEntries([store,file].map(el=>[el.id,el.getBoundingClientRect().toJSON()]))});
-    geometry();addEventListener('resize',geometry);
-    let tick=0;setInterval(()=>{const c=document.querySelector('canvas').getContext('2d');c.fillStyle=++tick%2?'red':'blue';c.fillRect(0,0,24,24)},100);
-    </script>`);
+const fixture = await startFixture('test-cluster-nodes', port + 1, { events });
+
+const stack = await startStack({
+  scenario: 'cluster-nodes',
+  run,
+  port,
+  endpoint,
+  browser,
+  seed: false,
+  fixtures: false,
+  dev: false,
+  nodes: ['alpha', 'beta'],
+  nodeLimits: { maxSessions: 1 },
+  ports: { control: port, viewer: port + 4, fixture: port + 1, peers: [port + 2, port + 3] },
 });
-await new Promise((done) => fixture.listen(port + 1, '127.0.0.1', done));
-const server = await buildHarness(join(run, 'runtime'));
-const nodes = Object.fromEntries(
-  ['alpha', 'beta'].map((id, index) => [
-    id,
-    {
-      peer: { listen: `127.0.0.1:${port + 2 + index}`, address: `127.0.0.1:${port + 2 + index}` },
-      limits: { maxSessions: 1 },
-      local: {
-        executable: stageRuntime(endpoint, browser, join(run, 'node-runtime/bin')),
-        root: join(run, id, 'root'),
-      },
-    },
-  ]),
-);
-const configPath = join(run, 'control.json');
-await writeFile(
-  configPath,
-  JSON.stringify({
-    http: { listen: `127.0.0.1:${port}`, origins: [origin] },
-    storage: { database: join(run, 'control.db') },
-    nodes,
-  }),
-);
-const control = startControl(server, configPath, run);
-const { chromium } = createRequire(import.meta.url)(resolve(modulePath));
+const control = stack.control;
+const nodes = stack.nodes;
+
 let viewers;
 const contexts = [];
 const password = randomUUID();
 let setupDone = false;
 // The first account comes from setup; the administrator creates the others, which then log in.
 async function connect(name, context) {
-  context ??= await viewers.newContext({ viewport: { width: 1000, height: 760 } });
+  context ??= await createViewerContext(viewers, { viewport: { width: 1000, height: 760 } });
   if (!contexts.includes(context)) contexts.push(context);
   const response = await context.request.post(origin + (setupDone ? '/api/auth/login' : '/api/auth/setup'), {
     headers: { Origin: origin },
     data: { username: name, password },
   });
   assert.equal(response.status(), 200, await response.text());
-  const viewer = await shellViewer(context, run, name);
+  const viewer = await instrumentViewer(context, run, name);
   await viewer.page.goto(origin);
   await viewer.ready();
   await viewer.service();
@@ -96,7 +66,7 @@ async function connect(name, context) {
 }
 async function workspace(viewer, path) {
   await viewer.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
-  await until('browser available', async () => (await viewer.state()).browser.state === 'available');
+  await until(async () => (await viewer.state()).browser.state === 'available', 'browser available');
   const state = await viewer.state();
   const window = state.workspace.windows.at(-1);
   await viewer.action({ type: 'tab.navigate', tabId: window.activeTabId, url: fixtureOrigin + path });
@@ -106,10 +76,10 @@ async function workspace(viewer, path) {
 async function tap(viewer, path, id) {
   await viewer.page.waitForFunction(() => {
     const viewport = document.querySelector('.remote-viewport');
-    const workspace = shellQA.state?.workspace;
+    const workspace = clusterQA.state?.workspace;
     const active = workspace?.tabs.find((tab) => tab.id === workspace.windows[0]?.activeTabId);
     return (
-      shellQA.layout?.views.some((view) => view.id === active?.webviewId && !view.stale) &&
+      clusterQA.layout?.views.some((view) => view.id === active?.webviewId && !view.stale) &&
       viewport?.querySelector('video')?.videoWidth > 0 &&
       !viewport.classList.contains('resize-waiting') &&
       !viewport.querySelector('canvas[data-video-input]')?.classList.contains('no-frame')
@@ -117,10 +87,12 @@ async function tap(viewer, path, id) {
   });
   const region = viewer.page.locator('.remote-viewport').first();
   const box = await region.boundingBox();
-  const geometry = await until('fixture geometry', () =>
-    events.findLast(
-      (event) => event.type === 'ready' && event.path === path && Math.abs(event.width - box.width) < 2,
-    ),
+  const geometry = await until(
+    () =>
+      events.findLast(
+        (event) => event.type === 'ready' && event.path === path && Math.abs(event.width - box.width) < 2,
+      ),
+    'fixture geometry',
   );
   const target = geometry.boxes[id];
   await viewer.page.mouse.click(
@@ -132,14 +104,13 @@ const placementFor = (snapshot, name) =>
   snapshot.placements.find((p) => p.tenant === snapshot.users.find((u) => u.username === name)?.tenant);
 async function stopAndCommit(viewer, name) {
   await viewer.page.close();
-  await until('Viewer detached', async () => {
+  await until(async () => {
     const snapshot = await control.call('inspect');
     const tenant = placementFor(snapshot, name).tenant;
     return snapshot.runtimes.find((r) => r.tenant === tenant)?.viewer === false;
-  });
+  }, 'Viewer detached');
   await control.call('advance', { ms: 600001 });
   return until(
-    'checkpoint committed for ' + name,
     async () => {
       const snapshot = await control.call('inspect');
       const tenant = placementFor(snapshot, name)?.tenant;
@@ -151,11 +122,12 @@ async function stopAndCommit(viewer, name) {
         snapshot
       );
     },
+    'checkpoint committed for ' + name,
     90000,
   );
 }
 try {
-  await until('both nodes ready with metrics', async () => {
+  await until(async () => {
     try {
       const snapshot = await control.call('inspect');
       return (
@@ -164,8 +136,8 @@ try {
     } catch {
       return false;
     }
-  });
-  viewers = await chromium.launch({
+  }, 'both nodes ready with metrics');
+  viewers = await launchBrowser({
     executablePath: resolve(edge),
     headless: true,
     args: ['--autoplay-policy=no-user-gesture-required'],
@@ -176,7 +148,7 @@ try {
     await first.call('admin.createUser', { username, password });
   await workspace(first, '/first');
   await tap(first, '/first', 'store');
-  await until('persistent state set', () => events.some((event) => event.type === 'stored'));
+  await until(() => events.some((event) => event.type === 'stored'), 'persistent state set');
   const firstWindow = (await first.state()).workspace.windows[0];
   await first.action({ type: 'tab.create', windowId: firstWindow.id });
   const tabs = (await first.state()).workspace.tabs;
@@ -223,18 +195,18 @@ try {
   assert(placementFor(checkpoint, 'cluster-first').checkpoint_id);
   await evidence('checkpoint-committed', checkpoint);
   // The third tenant consumes the source slot while the source stays online as an object peer.
-  await until('source metrics reflect the stop', async () => {
+  await until(async () => {
     const snapshot = await control.call('inspect');
     return snapshot.nodes.find((n) => n.nodeId === source.node_id)?.metrics?.sessions === 0;
-  });
+  }, 'source metrics reflect the stop');
   const third = await connect('cluster-third');
   await workspace(third, '/fill-source');
   assert.equal(placementFor(await control.call('inspect'), 'cluster-third').node_id, source.node_id);
   await stopAndCommit(second, 'cluster-second');
-  await until('destination metrics reflect the stop', async () => {
+  await until(async () => {
     const snapshot = await control.call('inspect');
     return snapshot.nodes.find((n) => n.nodeId === other.node_id)?.metrics?.sessions === 0;
-  });
+  }, 'destination metrics reflect the stop');
   const restoreEvents = events.length;
   const restored = await connect('cluster-first', first.context);
   const media = await restored.media();
@@ -249,16 +221,18 @@ try {
   );
   await restored.action({ type: 'tab.activate', tabId: before[0].id });
   await restored.media();
-  const persisted = await until('cookie and localStorage restored', () =>
-    events
-      .slice(restoreEvents)
-      .findLast(
-        (event) =>
-          event.type === 'ready' &&
-          event.path === '/first' &&
-          event.cookie.includes('cluster=persisted') &&
-          event.storage === 'stored-value',
-      ),
+  const persisted = await until(
+    () =>
+      events
+        .slice(restoreEvents)
+        .findLast(
+          (event) =>
+            event.type === 'ready' &&
+            event.path === '/first' &&
+            event.cookie.includes('cluster=persisted') &&
+            event.storage === 'stored-value',
+        ),
+    'cookie and localStorage restored',
   );
   const objectPath = join(
     join(nodes[target.node_id].local.root, 'data'),
@@ -276,8 +250,9 @@ try {
   );
   const locateStart = control.events.length;
   await tap(restored, '/first', 'file');
-  const request = await until('page file chooser', async () =>
-    (await restored.state()).fileRequests.find((r) => r.state === 'pending'),
+  const request = await until(
+    async () => (await restored.state()).fileRequests.find((r) => r.state === 'pending'),
+    'page file chooser',
   );
   const prepared = await restored.call('library.prepare', {
     operationId: randomUUID(),
@@ -285,8 +260,9 @@ try {
     entryIds: [library.basket[0]],
   });
   await restored.call('selection.commit', { requestId: request.id, selectionId: prepared.selectionId }, true);
-  const attached = await until('moved file attached', () =>
-    events.findLast((event) => event.type === 'attached'),
+  const attached = await until(
+    () => events.findLast((event) => event.type === 'attached'),
+    'moved file attached',
   );
   assert.equal(attached.hash, createHash('sha256').update(bytes).digest('hex'));
   assert.equal(attached.name, 'moved.txt');
@@ -316,7 +292,7 @@ try {
   });
 } finally {
   await viewers?.close();
-  await control.stop();
+  await stack.stop();
   fixture.closeAllConnections();
   await new Promise((done) => fixture.close(done));
 }

@@ -1,17 +1,18 @@
+import { startFixture } from './kit/fixtures.mjs';
+import { launchPersistentViewer } from './kit/viewer.mjs';
+
+import { randomBytes } from 'node:crypto';
+import { appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { startStack } from './kit/stack.mjs';
+import { registerViewer } from './kit/viewer.mjs';
 /**
  * H264 mobile IME regression with a desktop Chromium renderer, CDP preedit,
  * and synthetic Android-style geometry. Chrome 89 uses DOM composition events;
  * newer Viewers use Input.imeSetComposition.
  * node tests/e2e/test-mobile-ime.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port] [Control server.mjs]
  */
-import { createServer } from 'node:http';
-import { startProductStack } from './input-product-stack.mjs';
-import { registerViewer } from './product-stack.mjs';
-import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { resolve, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { randomBytes } from 'node:crypto';
 
 const [playwright, viewer, endpoint, browser, output, listenPort = '34120', controlServer] =
   process.argv.slice(2);
@@ -25,41 +26,24 @@ const run = resolve(output);
 const port = Number(listenPort);
 const origin = 'http://127.0.0.1:' + port;
 const fixtureOrigin = 'http://127.0.0.1:' + (port + 1);
-const { chromium } = createRequire(import.meta.url)(resolve(playwright));
-await mkdir(run);
-const fixturePage = await readFile(new URL('test-keyboard-viewport.html', import.meta.url));
+
+await mkdir(run, { recursive: true });
+
 const fixtureEvents = [];
-const fixture = createServer(async (request, response) => {
-  if (request.url === '/event' && request.method === 'POST') {
-    try {
-      let body = '';
-      for await (const chunk of request) {
-        body += chunk;
-        if (body.length > 65536) {
-          response.writeHead(413).end();
-          return;
-        }
-      }
-      const event = JSON.parse(body);
-      fixtureEvents.push(event);
-      if (fixtureEvents.length > 2048) fixtureEvents.shift();
-      await appendFile(join(run, 'fixture-events.jsonl'), JSON.stringify(event) + '\n');
-      response.end();
-    } catch {
-      response.writeHead(400).end();
-    }
-    return;
-  }
-  response.setHeader('Content-Type', 'text/html; charset=utf-8');
-  response.end(fixturePage);
-});
-await new Promise((accept, reject) => {
-  fixture.once('error', reject);
-  fixture.listen(port + 1, '127.0.0.1', accept);
-});
+const fixture = await startFixture('test-mobile-ime', port + 1, { fixtureEvents, run });
 
 const server = resolve(controlServer || join(root, 'control/dist/server.mjs'));
-const control = startProductStack({ run, port, endpoint, browser, server });
+const stack = await startStack({
+  seed: false,
+  fixtures: false,
+  ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
+  run,
+  port,
+  endpoint,
+  browser,
+  server,
+});
+const control = stack.control.child;
 control.stdout.on('data', (data) => void appendFile(join(run, 'control.stdout.log'), data));
 control.stderr.on('data', (data) => void appendFile(join(run, 'control.stderr.log'), data));
 const stopped = new Promise((accept, reject) => {
@@ -103,7 +87,7 @@ try {
     assert(attempt < 900 && control.exitCode === null, 'Fresh isolated Control did not start');
     await pause(100);
   }
-  context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
+  context = await launchPersistentViewer(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
     headless: true,
     viewport: { width: 820, height: 1040 },
@@ -665,7 +649,7 @@ try {
   try {
     await context?.close();
   } finally {
-    control.kill('SIGTERM');
+    await stack.stop();
     fixture.closeAllConnections();
     await new Promise((accept) => fixture.close(accept));
     await stopped;

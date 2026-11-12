@@ -1,10 +1,11 @@
-// Complete network loss (HTTP plus existing WS/RTC), real input and upload closure.
-import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { resolve, join } from 'node:path';
 import { connect, createServer } from 'node:net';
+import { join, resolve } from 'node:path';
 import { startStack, until } from './kit/stack.mjs';
 import { launch } from './kit/viewer.mjs';
+// Complete network loss (HTTP plus existing WS/RTC), real input and upload closure.
+import assert from 'node:assert/strict';
+
 const root = resolve(process.argv[2] ?? 'develop/tmp/e2e-shell/transport-journeys');
 const port = Number(process.env.REMOTEKIT_E2E_PORT ?? 34080);
 mkdirSync(root, { recursive: true });

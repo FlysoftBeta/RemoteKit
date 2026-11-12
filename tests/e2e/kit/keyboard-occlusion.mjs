@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
+import { createServer } from 'node:http';
+import { join, resolve } from 'node:path';
 import { startStack } from './stack.mjs';
 import { launch } from './viewer.mjs';
 

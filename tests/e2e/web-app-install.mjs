@@ -1,6 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { runScenario } from './kit/viewer.mjs';
+
 await runScenario('web-app-install', async (v, stack) => {
   const { page, shot, tile, step, errors, out } = v;
   const launcher = v.openStart;

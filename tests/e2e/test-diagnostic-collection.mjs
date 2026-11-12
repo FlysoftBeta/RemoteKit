@@ -1,61 +1,39 @@
-/**
- * Real H.264 diagnostic-collection regression on an isolated loopback instance.
- * node tests/e2e/test-diagnostic-collection.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port] [local scenario module]
- */
-import { startProductStack } from './kit/stack.mjs';
-import { registerViewer } from './product-stack.mjs';
 import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir, readFile, readdir } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
+import { startFixture } from './kit/fixtures.mjs';
+import { startStack } from './kit/stack.mjs';
+import { launchPersistentViewer, registerViewer } from './kit/viewer.mjs';
+
 import { join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { zstdDecompressSync } from 'node:zlib';
+/**
+ * Real H.264 diagnostic-collection regression on an isolated loopback instance.
+ * node tests/e2e/test-diagnostic-collection.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port]
+ */
+
 import assert from 'node:assert/strict';
 
-const [playwright, viewer, endpoint, browser, output, listenPort = '33785', scenarioPath] =
-  process.argv.slice(2);
+const [playwright, viewer, endpoint, browser, output, listenPort = '33785'] = process.argv.slice(2);
 assert(
   [playwright, viewer, endpoint, browser, output].every(Boolean),
   'Expected Playwright, Viewer, Endpoint, Browser and output paths',
 );
-const scenarioModule = scenarioPath && (await import(pathToFileURL(resolve(scenarioPath)).href));
-const scenario = scenarioModule ? scenarioModule.createScenario() : undefined;
-const receiverAudio = scenarioModule?.receiverAudio ?? 'recvonly';
-assert(['recvonly', 'inactive'].includes(receiverAudio), 'Invalid experiment audio direction');
-const { chromium } = createRequire(import.meta.url)(resolve(playwright));
+
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const run = resolve(output);
 const port = Number(listenPort);
 const origin = 'http://127.0.0.1:' + port;
 const fixtureOrigin = 'http://127.0.0.1:' + (port + 1);
-await mkdir(run);
+await mkdir(run, { recursive: true });
 const log = async (stage, value) => {
   await appendFile(join(run, 'diagnostic-collection-results.jsonl'), JSON.stringify({ stage, value }) + '\n');
   console.log(stage);
 };
 const archiveDirectory = join(run, 'diagnostics');
 let fixtureVisits = 0;
-const fixture = createServer((request, response) => {
-  if (request.url === '/') fixtureVisits++;
-  if (scenario) return scenario.fixture(request, response);
-  response.setHeader('Content-Type', 'text/html; charset=utf-8');
-  response.end(`<!doctype html><meta charset="utf-8"><title>Diagnostic collection fixture</title>
-    <style>body { margin:24px; font:16px Arial; background:#d0e5fc; }</style>
-    <h1>Diagnostic collection fixture</h1><canvas width="24" height="24"></canvas>
-    <script>
-      console.warn('diagnostic-fixture-console-marker');
-      const ctx = document.querySelector('canvas').getContext('2d');
-      let frame = 0;
-      setInterval(() => {
-        ctx.fillStyle = frame++ % 2 ? '#ef512a' : '#0463aa';
-        ctx.fillRect(0, 0, 24, 24);
-      }, 80);
-    </script>`);
-});
-await new Promise((accept, reject) => {
-  fixture.once('error', reject);
-  fixture.listen(port + 1, '127.0.0.1', accept);
+const fixture = await startFixture('test-diagnostic-collection', port + 1, {
+  onVisit: () => fixtureVisits++,
 });
 
 function readArchive(compressed) {
@@ -94,19 +72,21 @@ function readArchive(compressed) {
   }
   throw Error('Missing tar terminator');
 }
-function startControl() {
-  const control = startProductStack({
+async function startControl() {
+  const stack = await startStack({
+    seed: false,
+    fixtures: false,
+    ports: { control: port + 3, viewer: port, fixture: port + 1, peer: port + 2 },
     run,
     dev: true,
     port,
     endpoint,
     browser,
-    media: scenarioModule?.media ?? {},
     configOverrides: {
       storage: { database: join(run, 'control.db'), diagnostics: archiveDirectory },
-      ...scenarioModule?.controlConfig,
     },
   });
+  const control = stack.control.child;
   control.stdout.on('data', (data) => void appendFile(join(run, 'control.stdout.log'), data));
   control.stderr.on('data', (data) => void appendFile(join(run, 'control.stderr.log'), data));
   const stopped = new Promise((accept, reject) => {
@@ -115,11 +95,10 @@ function startControl() {
   });
   void stopped.catch(() => {});
   return async () => {
-    if (control.connected) control.disconnect();
-    await stopped;
+    await stack.stop();
   };
 }
-let stopControl = startControl();
+let stopControl = await startControl();
 
 const sleep = (ms) => new Promise((accept) => setTimeout(accept, ms));
 async function until(check, message, timeout = 12000) {
@@ -140,10 +119,10 @@ try {
     }).catch(() => undefined);
     return response?.ok && (await response.json()).setupRequired === true;
   }, 'Fresh isolated Control did not start');
-  context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
+  context = await launchPersistentViewer(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
     headless: process.env.REMOTEKIT_QA_HEADLESS === '1',
-    viewport: scenarioModule?.viewport ?? { width: 1152, height: 820 },
+    viewport: { width: 1152, height: 820 },
     deviceScaleFactor: 1,
     timeout: 15000,
     args: [
@@ -157,113 +136,100 @@ try {
   page.on('pageerror', (error) => void log('client-error', { message: error.message, stack: error.stack }));
   page.setDefaultTimeout(5000);
 
-  await page.addInitScript(
-    ({ receiverAudio }) => {
-      const probe = (window.diagnosticQA = { peers: [], channels: [], replies: [], exposedEarly: false });
-      const ids = new WeakMap();
-      let nextId = 0;
-      const id = (value) => {
-        if (!value) return null;
-        if (!ids.has(value)) ids.set(value, ++nextId);
-        return ids.get(value);
+  await page.addInitScript(() => {
+    const probe = (window.diagnosticQA = { peers: [], channels: [], replies: [], exposedEarly: false });
+    const ids = new WeakMap();
+    let nextId = 0;
+    const id = (value) => {
+      if (!value) return null;
+      if (!ids.has(value)) ids.set(value, ++nextId);
+      return ids.get(value);
+    };
+    const NativePeer = RTCPeerConnection;
+    window.RTCPeerConnection = class extends NativePeer {
+      constructor(...args) {
+        super(...args);
+        probe.peers.push(this);
+      }
+      createDataChannel(...args) {
+        const channel = super.createDataChannel(...args);
+        if (this.getTransceivers().length) probe.channels.push(channel);
+        return channel;
+      }
+    };
+    const NativeSocket = WebSocket;
+    window.WebSocket = class extends NativeSocket {
+      constructor(...args) {
+        super(...args);
+        const methods = new Map();
+        this.addEventListener('message', (event) => {
+          const reply = JSON.parse(event.data);
+          const method = methods.get(reply.id);
+          if (!method) return;
+          methods.delete(reply.id);
+          probe.replies.push({ method, result: reply.result, error: reply.error });
+        });
+        this.addEventListener('open', () => {
+          if (new URL(this.url).pathname === '/api/socket') probe.controlSocket = this;
+        });
+        this.observeDiagnostic = ({ id, method }) => methods.set(id, method);
+      }
+      send(data) {
+        if (typeof data === 'string' && new URL(this.url).pathname === '/api/socket') {
+          const message = JSON.parse(data);
+          if (message.method?.startsWith('diagnostics.')) this.observeDiagnostic(message);
+          if (message.method === 'diagnostics.sample') probe.latestLayout = message.params?.data?.layout;
+        }
+        return super.send(data);
+      }
+    };
+    new MutationObserver(() => {
+      const started = probe.replies.find((reply) => reply.method === 'diagnostics.start')?.result;
+      const complete = probe.replies.some((reply) => reply.result?.status === 'complete');
+      if (
+        started &&
+        !complete &&
+        (document.body?.innerText.includes(started.id) ||
+          [...document.querySelectorAll('input')].some((input) => input.value === started.id))
+      )
+        probe.exposedEarly = true;
+    }).observe(document, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['value'],
+    });
+    probe.media = async () => {
+      const peer = probe.peers.find((candidate) => candidate.getTransceivers().length > 0);
+      const stats = peer && (await peer.getStats());
+      const codecs =
+        stats &&
+        [...stats.values()]
+          .filter(
+            (stat) =>
+              stat.type === 'inbound-rtp' &&
+              (stat.kind || stat.mediaType) === 'video' &&
+              stat.framesDecoded > 0,
+          )
+          .map((stat) => stats.get(stat.codecId)?.mimeType?.toLowerCase());
+      return {
+        peer: id(peer),
+        count: probe.peers.filter((candidate) => candidate.getTransceivers().length > 0).length,
+        connected: peer?.connectionState,
+        tracks: peer?.getReceivers().map((receiver) => id(receiver.track)),
+        transceivers: peer?.getTransceivers().map((transceiver) => ({
+          kind: transceiver.receiver.track.kind,
+          direction: transceiver.currentDirection,
+        })),
+        channels: probe.channels.map((channel) => [id(channel), channel.label, channel.readyState]),
+        videoReady: [...document.querySelectorAll('.remote-video-plane video')].some(
+          (video) => video.videoWidth > 0,
+        ),
+        codecs,
       };
-      const NativePeer = RTCPeerConnection;
-      window.RTCPeerConnection = class extends NativePeer {
-        constructor(...args) {
-          super(...args);
-          probe.peers.push(this);
-        }
-        createDataChannel(...args) {
-          const channel = super.createDataChannel(...args);
-          if (this.getTransceivers().length) probe.channels.push(channel);
-          return channel;
-        }
-        addTransceiver(trackOrKind, init) {
-          // Experiment-only negotiation isolation; muting a media element does
-          // not remove its RTP stream or WebRTC synchronization relationship.
-          return super.addTransceiver(
-            trackOrKind,
-            trackOrKind === 'audio' && receiverAudio === 'inactive'
-              ? { ...init, direction: 'inactive' }
-              : init,
-          );
-        }
-      };
-      const NativeSocket = WebSocket;
-      window.WebSocket = class extends NativeSocket {
-        constructor(...args) {
-          super(...args);
-          const methods = new Map();
-          this.addEventListener('message', (event) => {
-            const reply = JSON.parse(event.data);
-            const method = methods.get(reply.id);
-            if (!method) return;
-            methods.delete(reply.id);
-            probe.replies.push({ method, result: reply.result, error: reply.error });
-          });
-          this.addEventListener('open', () => {
-            if (new URL(this.url).pathname === '/api/socket') probe.controlSocket = this;
-          });
-          this.observeDiagnostic = ({ id, method }) => methods.set(id, method);
-        }
-        send(data) {
-          if (typeof data === 'string' && new URL(this.url).pathname === '/api/socket') {
-            const message = JSON.parse(data);
-            if (message.method?.startsWith('diagnostics.')) this.observeDiagnostic(message);
-            if (message.method === 'diagnostics.sample') probe.latestLayout = message.params?.data?.layout;
-          }
-          return super.send(data);
-        }
-      };
-      new MutationObserver(() => {
-        const started = probe.replies.find((reply) => reply.method === 'diagnostics.start')?.result;
-        const complete = probe.replies.some((reply) => reply.result?.status === 'complete');
-        if (
-          started &&
-          !complete &&
-          (document.body?.innerText.includes(started.id) ||
-            [...document.querySelectorAll('input')].some((input) => input.value === started.id))
-        )
-          probe.exposedEarly = true;
-      }).observe(document, {
-        subtree: true,
-        childList: true,
-        characterData: true,
-        attributes: true,
-        attributeFilter: ['value'],
-      });
-      probe.media = async () => {
-        const peer = probe.peers.find((candidate) => candidate.getTransceivers().length > 0);
-        const stats = peer && (await peer.getStats());
-        const codecs =
-          stats &&
-          [...stats.values()]
-            .filter(
-              (stat) =>
-                stat.type === 'inbound-rtp' &&
-                (stat.kind || stat.mediaType) === 'video' &&
-                stat.framesDecoded > 0,
-            )
-            .map((stat) => stats.get(stat.codecId)?.mimeType?.toLowerCase());
-        return {
-          peer: id(peer),
-          count: probe.peers.filter((candidate) => candidate.getTransceivers().length > 0).length,
-          connected: peer?.connectionState,
-          tracks: peer?.getReceivers().map((receiver) => id(receiver.track)),
-          transceivers: peer?.getTransceivers().map((transceiver) => ({
-            kind: transceiver.receiver.track.kind,
-            direction: transceiver.currentDirection,
-          })),
-          channels: probe.channels.map((channel) => [id(channel), channel.label, channel.readyState]),
-          videoReady: [...document.querySelectorAll('.remote-video-plane video')].some(
-            (video) => video.videoWidth > 0,
-          ),
-          codecs,
-        };
-      };
-    },
-    { receiverAudio },
-  );
+    };
+  });
   const downloads = [];
   page.on('download', (download) => downloads.push(download.suggestedFilename()));
   const cdp = await context.newCDPSession(page);
@@ -363,20 +329,10 @@ try {
     .click({ timeout: 120000 });
 
   const media = () => read('diagnosticQA.media()');
-  if (scenario) {
-    // The scenario deliberately starts on a blank window. Wait for its initial
-    // connection and channels before sending the first remote navigation.
-    await until(async () => {
-      const state = await media();
-      return (
-        state.connected === 'connected' &&
-        state.channels.filter((channel) => channel[2] === 'open').length === 1
-      );
-    }, 'Scenario could not open its RTC channels');
-  }
+
   await fill('.address-form input', fixtureOrigin);
   await page.keyboard.press('Enter');
-  if (scenario) await until(() => fixtureVisits > 0, 'Scenario navigation did not reach the fixture');
+
   const baseline = await until(async () => {
     const state = await media();
     return (
@@ -437,8 +393,7 @@ try {
     false,
   );
   await sameMedia();
-  if (scenario) await scenario.start({ page });
-  else await page.screenshot({ path: join(run, 'collecting.png') });
+  await page.screenshot({ path: join(run, 'collecting.png') });
   await until(
     () =>
       read(
@@ -446,7 +401,7 @@ try {
       ),
     'Expected four accepted live samples',
   );
-  if (scenario) await scenario.measure({ read, log, sleep, page, run });
+
   const preStop = await readdir(archiveDirectory).catch((error) => {
     if (error.code !== 'ENOENT') throw error;
     return [];
@@ -565,12 +520,12 @@ try {
     assert(matchedRtpFrames.length > 0, 'No presented frame with receive time and matching RTP metadata');
   assert(sender, 'No real outbound video counters in Endpoint samples');
   assert(outputStats, 'No Browser output and Endpoint encode stats');
-  if (scenario?.validateArchive) await scenario.validateArchive({ client, endpointSamples, log });
+
   assert.deepEqual(downloads, []);
   if (process.env.REMOTEKIT_QA_DIAGNOSTICS_RESTART === '1') {
     await page.goto('about:blank');
     await stopControl();
-    stopControl = startControl();
+    stopControl = await startControl();
     await until(async () => {
       const response = await fetch(origin + '/api/auth/setup', {
         signal: AbortSignal.timeout(1000),

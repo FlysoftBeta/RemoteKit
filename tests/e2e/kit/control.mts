@@ -1,12 +1,12 @@
-import { configureLog, FileLogSink } from '../../control/server/log';
-import { runtimeConfig } from '../../control/server/config';
-import { NodeRegistry } from '../../control/server/cluster/node-link';
-import { Placement } from '../../control/server/cluster/placement';
-import { loadRelease } from '../../control/server/cluster/release';
-import { EndpointGateway } from '../../control/server/endpoint/gateway';
-import { open } from '../../control/server/persistence/database';
-import { createApplication, startApplication } from '../../control/server/application';
-import { createHttp } from '../../control/server/http/server';
+import { createApplication, startApplication } from '../../../control/server/application';
+import { NodeRegistry } from '../../../control/server/cluster/node-link';
+import { Placement } from '../../../control/server/cluster/placement';
+import { loadRelease } from '../../../control/server/cluster/release';
+import { runtimeConfig } from '../../../control/server/config';
+import { EndpointGateway } from '../../../control/server/endpoint/gateway';
+import { createHttp } from '../../../control/server/http/server';
+import { configureLog, FileLogSink } from '../../../control/server/log';
+import { open } from '../../../control/server/persistence/database';
 const config = runtimeConfig();
 configureLog(new FileLogSink(config.logDir));
 const store = open(config.dbPath, { buildId: config.buildId });
@@ -22,7 +22,14 @@ const clock = {
   wallMs: () => Date.now(),
 };
 const gateway = new EndpointGateway(nodes, new Placement(store, nodes));
-const control = createApplication(store, gateway, undefined, clock);
+const control = createApplication(
+  store,
+  gateway,
+  undefined,
+  clock,
+  config.quotas.tenantObjectBytes,
+  config.sessionImport,
+);
 const server = createHttp(control, {
   nodes,
   diagnosticDir: config.diagnosticDir,
@@ -30,6 +37,9 @@ const server = createHttp(control, {
   origins: [...config.origins],
   clientDir: config.clientDir,
 });
+const removed = nodes.isRemoved;
+const paused = new Set<string>();
+nodes.isRemoved = (id) => paused.has(id) || removed(id);
 const notify = (message: object) => {
   if (process.connected) process.send?.(message, () => {});
 };
@@ -49,6 +59,52 @@ nodes.handlers.set('object.locate', (node, request) => {
 });
 process.on('message', (message: any) => {
   void (async () => {
+    if (message.method === 'down') {
+      paused.add(message.nodeId);
+      nodes.get(message.nodeId)!.evict();
+      (nodes.get(message.nodeId) as any).child?.kill();
+      await control.objects.tick();
+      const other = nodes.all().find((node) => node.nodeId !== message.nodeId)!;
+      if (message.exclusiveObject) {
+        await other.request('object.delete', '', { ids: [message.exclusiveObject] });
+        store.db
+          .prepare('DELETE FROM object_replicas WHERE id=? AND node_id=?')
+          .run(message.exclusiveObject, other.nodeId);
+      }
+      control.library.refreshAvailability(message.tenant);
+      return { offline: true };
+    }
+    if (message.method === 'up') {
+      paused.delete(message.nodeId);
+      nodes.get(message.nodeId)!.start();
+      return { starting: true };
+    }
+    if (message.method === 'seedFace') {
+      const viewer = control.tenants.get(message.tenant).viewer!.security;
+      await control.security.capabilities(message.tenant, viewer);
+      const model = viewer.face.modelVersion!;
+      const record = store.security.security(viewer.user.id);
+      const template = Array.from({ length: 128 }, (_, i) => (i === 0 ? 1 : 0));
+      record.face = {
+        sealed: store.security.faceVault.seal(viewer.user.id, template, model),
+        modelVersion: model,
+      };
+      record.settings.faceEnabled = true;
+      store.security.saveSecurity(viewer.user.id, record);
+      return { model };
+    }
+    if (message.method === 'stop') return control.userAdmin.stop(message.username);
+    if (message.method === 'snapshots')
+      return Promise.all(
+        store.db
+          .prepare('SELECT username,tenant FROM users')
+          .all()
+          .map(async (user: any) => ({
+            username: user.username,
+            state: control.viewers.productState(user.tenant),
+            snapshot: await control.endpoint.snapshot(user.tenant, { outputDiagnostics: true }).catch(String),
+          })),
+      );
     if (message.method === 'advance') {
       elapsed += message.ms;
       await control.reconciler.tick();
@@ -56,9 +112,15 @@ process.on('message', (message: any) => {
     }
     if (message.method === 'inspect') {
       return {
+        services: [...(control.servicePeers as any).connections.values()].map((entry: any) => ({
+          tenant: entry.tenant,
+          nodeId: entry.node.nodeId,
+          connectionId: entry.connectionId,
+          epoch: entry.peer.epoch,
+        })),
         nodes: control.nodeAdmin.list().map((node) => ({
           ...node,
-          metrics: nodes.get(node.nodeId)?.metrics.latest()?.value,
+          metrics: nodes.get(node.nodeId!)?.metrics.latest()?.value,
         })),
         observations: Object.fromEntries(
           store.db

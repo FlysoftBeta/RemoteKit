@@ -1,13 +1,13 @@
-/** Real Control + standalone updater + real Endpoint, initial install then build-mismatch update.
- * args: Endpoint exe, Browser exe, new evidence directory, [port]
- */
-import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFile, copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { buildHarness, startControl, until } from './cluster-release-support.mjs';
-import { makeNodeRelease } from './make-node-release.mjs';
+import { makeNodeRelease } from './kit/node-release.mjs';
+import { stageControlRelease, startStack, until } from './kit/stack.mjs';
+/** Real Control + standalone updater + real Endpoint, initial install then build-mismatch update.
+ * args: Endpoint exe, Browser exe, new evidence directory, [port]
+ */
+import assert from 'node:assert/strict';
 
 const [endpointArg, browserArg, output, portArg = '33851'] = process.argv.slice(2);
 assert([endpointArg, browserArg, output].every(Boolean));
@@ -15,7 +15,7 @@ const endpoint = resolve(endpointArg),
   browser = resolve(browserArg),
   run = resolve(output),
   port = Number(portArg);
-await mkdir(run);
+await mkdir(run, { recursive: true });
 const nodeRoot = join(run, 'node');
 await mkdir(nodeRoot);
 const installed = join(nodeRoot, 'remotekit_node.exe');
@@ -31,33 +31,33 @@ for (const generation of ['first', 'second']) {
     servers.push(join(runtime, 'control/dist/server.mjs'));
     releases.push(JSON.parse(await readFile(join(runtime, 'release/node.json'), 'utf8')));
   } else {
-    servers.push(await buildHarness(runtime));
+    servers.push(await stageControlRelease(runtime));
     releases.push(await makeNodeRelease(runtime, endpoint, generation, browser));
   }
 }
 assert.notEqual(releases[0].buildId, releases[1].buildId);
-const configPath = join(run, 'control.json');
-await writeFile(
-  configPath,
-  JSON.stringify({
-    http: { listen: `127.0.0.1:${port}` },
-    storage: { database: join(run, 'control.db') },
-    nodes: {
-      'updater-test': {
-        remote: { control: `ws://127.0.0.1:${port}/api/node` },
-        peer: { listen: `127.0.0.1:${port + 1}`, address: `127.0.0.1:${port + 1}` },
-      },
-    },
-  }),
-);
-let control, updater;
+const launchControl = async (index) =>
+  startStack({
+    scenario: 'node-updater',
+    run,
+    control: 'release',
+    release: resolve(servers[index], '../../..'),
+    seed: false,
+    fixtures: false,
+    ports: { control: port, viewer: port + 3, fixture: port + 2, peer: port + 1 },
+    nodes: { 'updater-test': { remote: { control: `ws://127.0.0.1:${port}/api/node` } } },
+  });
+let stack, control, updater;
 try {
-  control = startControl(servers[0], configPath, run);
-  await until('first Control listening', () =>
-    fetch(`http://127.0.0.1:${port}/api/auth/setup`).then(
-      (r) => r.ok,
-      () => false,
-    ),
+  stack = await launchControl(0);
+  control = stack.control;
+  await until(
+    () =>
+      fetch(`http://127.0.0.1:${port}/api/auth/setup`).then(
+        (r) => r.ok,
+        () => false,
+      ),
+    'first Control listening',
   );
   await copyFile(join(run, 'nodes/updater-test/node.json'), join(nodeRoot, 'node.json'));
   updater = spawn(installed, ['run', '--root=' + nodeRoot], {
@@ -69,14 +69,14 @@ try {
   const verify = async (index) => {
     const release = releases[index];
     await until(
-      'node.ready ' + index,
       () => control.events.find((event) => event.event === 'node.ready' && event.buildId === release.buildId),
+      'node.ready ' + index,
       90000,
     );
-    await until('Endpoint metrics ' + index, async () => {
+    await until(async () => {
       const snapshot = await control.call('inspect');
       return snapshot.nodes.some((node) => node.buildId === release.buildId && node.metrics);
-    });
+    }, 'Endpoint metrics ' + index);
     assert.equal((await readFile(join(nodeRoot, 'current'), 'utf8')).trim(), release.buildId);
     assert.deepEqual(
       JSON.parse(await readFile(join(nodeRoot, 'runtime', release.buildId, 'build.json'), 'utf8')),
@@ -92,8 +92,9 @@ try {
     console.log('node.ready release ' + index);
   };
   await verify(0);
-  await control.stop();
-  control = startControl(servers[1], configPath, run);
+  await stack.stop();
+  stack = await launchControl(1);
+  control = stack.control;
   await verify(1);
   const supervisor = await readFile(join(nodeRoot, 'logs/supervisor.log'), 'utf8');
   const records = supervisor
@@ -124,7 +125,7 @@ try {
   console.error(error);
 } finally {
   // Only this test's updater and child are terminated; Control closes its Noise carrier first.
-  await control?.stop();
+  await stack?.stop();
   if (updater && updater.exitCode === null) {
     const stopped = new Promise((done) => updater.once('exit', done));
     const killer = spawn('taskkill', ['/PID', String(updater.pid), '/T', '/F'], {

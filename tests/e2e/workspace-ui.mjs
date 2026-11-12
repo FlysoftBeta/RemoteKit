@@ -1,5 +1,6 @@
 import { captureFailureScreenshots } from './failure-presentation.mjs';
 import { runScenario } from './kit/viewer.mjs';
+
 await runScenario('workspace-ui', async (v, stack) => {
   const { page, pointer, touch, shot, tile, step, errors, uploads, viewports, log } = v;
   const launcher = v.openStart;

@@ -1,46 +1,21 @@
-import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import { mkdir, appendFile, writeFile } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
-import { startStack, until } from './input-stack.mjs';
-import { launch } from './input-viewer.mjs';
+import { startFixture } from './kit/fixtures.mjs';
 
-const root = resolve(process.env.INPUT_JOURNEY_OUT ?? 'develop/tmp/e2e-input');
+import assert from 'node:assert/strict';
+import { appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { startStack, until } from './kit/stack.mjs';
+import { launch } from './kit/viewer.mjs';
+
+const root = resolve(process.env.E2E_RUN ?? 'develop/tmp/e2e-input');
 const telemetry = new Map();
 const pendingImages = new Set();
-const fixture = createServer(async (req, res) => {
-  if (req.url.startsWith('/slow-image.png')) {
-    pendingImages.add(res);
-    res.on('close', () => pendingImages.delete(res));
-    return;
-  }
-  if (req.method === 'POST') {
-    let body = '';
-    for await (const chunk of req) body += chunk;
-    const value = JSON.parse(body);
-    telemetry.set(value.caseId, value);
-    await appendFile(join(root, 'journey-fixture.jsonl'), body + '\n');
-    return res.end('ok');
-  }
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Input journey form</title><style>body{margin:0;padding:16px;font:18px/1.5 Arial;background:#f6f8fc;color:#193450}h1{font-size:24px;margin:0 0 12px}label{display:block;margin:16px 0}input,textarea{display:block;box-sizing:border-box;width:100%;padding:10px;font:20px Arial}p{font:22px/1.7 monospace}a,button{padding:12px;display:inline-block}#words{white-space:nowrap;font:20px monospace}#tail{height:200px;background:#bed3ec}</style>
-  <h1>Conference registration / 报名表</h1><div id="words">alpha bravo charlie delta</div>
-  <a id="link" href="/next${new URL(req.url, 'http://fixture').search}">Open next page</a>
-  <label>Name / 姓名<input id="name" autocomplete="name"></label>
-  <label>Email<input id="email" type="email"></label><label>Notes<textarea id="notes"></textarea></label>
-  ${Array.from({ length: 10 }, (_, i) => `<label>Question ${i + 1}<input id="q${i}"></label>`).join('')}
-  <button id="submit" onclick="document.querySelector('#status').textContent='Submitted';report('submit')">Submit</button><div id="status"></div><div id="tail">End of long form</div>
-  ${req.url.startsWith('/loading') ? '<img src="/slow-image.png" alt="Loading illustration">' : ''}
-  <script>
-  const caseId=new URLSearchParams(location.search).get('case');let n=0;
-  function report(type){const nodes=[...document.querySelectorAll('[id]')];const word=()=>{const r=document.createRange();r.setStart(words.firstChild,6);r.setEnd(words.firstChild,11);return r.getBoundingClientRect().toJSON()};fetch('/event',{method:'POST',body:JSON.stringify({caseId,type,n:++n,path:location.pathname,width:innerWidth,height:innerHeight,scrollY,scale:visualViewport.scale,active:document.activeElement.id,selection:getSelection().toString(),values:Object.fromEntries(nodes.filter(x=>x.matches('input,textarea')).map(x=>[x.id,x.value])),geometry:{...Object.fromEntries(nodes.map(x=>[x.id,x.getBoundingClientRect().toJSON()])),word:word()}})})}
-  for(const t of ['input','focusin','focusout','selectionchange','compositionstart','compositionupdate','compositionend','scroll','resize'])addEventListener(t,()=>report(t));
-  report('ready');setInterval(()=>report('sample'),600);
-  </script>`);
+const fixture = await startFixture('input-user-journeys', Number(process.env.E2E_PORT) + 5, {
+  pendingImages,
+  telemetry,
+  root,
 });
 await mkdir(root, { recursive: true });
-await new Promise((done) => fixture.listen(34148, '127.0.0.1', done));
+
 const selected = process.argv[2];
 const enabledSteps = new Set((process.env.INPUT_JOURNEY_STEPS ?? '').split(',').filter(Boolean));
 try {
@@ -49,10 +24,7 @@ try {
       const id = `journey-${engine}-${pointer}`;
       if (selected && selected !== id) continue;
       const run = join(root, id + '-' + Date.now());
-      await mkdir(run);
-      process.env.E2E_INPUT_PORT = String(
-        34140 + (engine === 'chrome89' ? 20 : 0) + (pointer === 'touch' ? 10 : 0),
-      );
+      await mkdir(run, { recursive: true });
       let stack, session;
       const results = [];
       try {
@@ -216,7 +188,7 @@ try {
         async function copyOutsideViewer(text) {
           const syncEnabled = (await state()).workspace.settings.workspace.clipboardSync;
           const local = await context.newPage();
-          await local.goto(`http://127.0.0.1:34148/device?case=device-${id}`, {
+          await local.goto(`http://127.0.0.1:${Number(process.env.E2E_PORT) + 5}/device?case=device-${id}`, {
             waitUntil: 'domcontentloaded',
           });
           const box = await local.locator('#name').boundingBox();
@@ -238,7 +210,7 @@ try {
           await pause(500);
         }
         await step('01-open-form', async () => {
-          await navigate(`http://127.0.0.1:34148/?case=${id}`);
+          await navigate(`http://127.0.0.1:${Number(process.env.E2E_PORT) + 5}/?case=${id}`);
           await shot('01-form');
           return { platform: await cdp.send('Browser.getVersion'), viewport: page.viewportSize() };
         });
@@ -576,7 +548,10 @@ try {
           const address = page.locator('.address-form input').first();
           await click(address);
           await page.keyboard.press('Control+A');
-          await page.keyboard.type(`http://127.0.0.1:34148/loading?case=${id}`, { delay: 20 });
+          await page.keyboard.type(
+            `http://127.0.0.1:${Number(process.env.E2E_PORT) + 5}/loading?case=${id}`,
+            { delay: 20 },
+          );
           await page.keyboard.press('Enter');
           await until(() => latest()?.path === '/loading', 'loading form document', 45000);
           await page.waitForFunction(

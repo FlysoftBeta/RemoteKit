@@ -1,9 +1,14 @@
 import { createServer } from 'node:http';
-import { cliOptions, launch } from './kit/viewer.mjs';
 import { startStack } from './kit/stack.mjs';
+import { cliOptions, launch } from './kit/viewer.mjs';
 
 const options = cliOptions();
-const stack = await startStack({ scenario: 'drive', browser: options['browser-path'] });
+options.port ??= '34000';
+const stack = await startStack({
+  scenario: 'drive',
+  browser: options['browser-path'],
+  run: options.out,
+});
 let viewer;
 let server;
 let closing;

@@ -1,21 +1,17 @@
-import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { instrumentViewer } from './cluster-test-support.mjs';
-import { startStack, until } from './files-stack.mjs';
+import { startStack, until } from './kit/stack.mjs';
+import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
 
-const before = process.argv.includes('--before');
+import assert from 'node:assert/strict';
+
 const selectedDevice = process.argv.find((arg) => arg.startsWith('--device='))?.split('=')[1];
-const output = resolve(process.env.FILES_RUN ?? `develop/tmp/e2e-files/files-ui-${Date.now()}`);
+const output = resolve(process.env.E2E_RUN ?? `develop/tmp/e2e-files/files-ui-${Date.now()}`);
 const require = createRequire(import.meta.url);
-const { chromium } = require(
-  process.env.REMOTEKIT_PLAYWRIGHT ??
-    join(homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'),
-);
+
 mkdirSync(output, { recursive: true });
 let stack;
 const events = [];
@@ -42,23 +38,33 @@ const fixture = createServer(async (request, response) => {
       })});
     </script>`);
 });
-await new Promise((done) => fixture.listen(Number(process.env.FILES_PORT ?? 34200) + 1, '127.0.0.1', done));
+await new Promise((done) => fixture.listen(Number(process.env.E2E_PORT ?? 34200) + 1, '127.0.0.1', done));
 const fixtureOrigin = `http://127.0.0.1:${fixture.address().port}`;
 const results = [];
 try {
   for (const device of selectedDevice ? [selectedDevice] : ['chrome89', 'edge']) {
     const out = join(output, device);
     mkdirSync(out, { recursive: true });
-    stack = await startStack({ scenario: `files-ui-${device}`, run: join(out, 'stack') });
-    const tablet = process.env.FILES_POINTER ? process.env.FILES_POINTER === 'touch' : device === 'chrome89';
-    const browser = await chromium.launch(
+    stack = await startStack({
+      scenario: `files-ui-${device}`,
+      run: join(out, 'stack'),
+      fixtures: false,
+      ports: {
+        control: Number(process.env.E2E_PORT) + 3,
+        viewer: Number(process.env.E2E_PORT),
+        fixture: Number(process.env.E2E_PORT) + 1,
+        peer: Number(process.env.E2E_PORT) + 2,
+      },
+    });
+    const tablet = process.env.E2E_POINTER ? process.env.E2E_POINTER === 'touch' : device === 'chrome89';
+    const browser = await launchBrowser(
       device === 'chrome89'
         ? { executablePath: 'C:/src/tmp/chrome89-google/app/chrome.exe', headless: true }
         : { channel: 'msedge', headless: true },
     );
-    const context = await browser.newContext({
+    const context = await createViewerContext(browser, {
       viewport: tablet
-        ? process.env.FILES_POINTER
+        ? process.env.E2E_POINTER
           ? { width: 390, height: 844 }
           : { width: 800, height: 1280 }
         : { width: 1600, height: 1000 },
@@ -142,9 +148,7 @@ try {
       await page.screenshot({ path: join(out, 'upload-document.png') });
       await page.waitForTimeout(1000);
       await tabs.filter({ hasText: '全部' }).click();
-      if (!before)
-        await until(async () => (await uploaded()).length === 10, 'all ten uploads after tab switch', 90000);
-      else await page.waitForTimeout(3000);
+      await until(async () => (await uploaded()).length === 10, 'all ten uploads after tab switch', 90000);
       const count = (await uploaded()).length;
       await page.screenshot({ path: join(out, 'upload-return.png') });
 
@@ -218,22 +222,20 @@ try {
       });
       writeFileSync(join(output, 'results.json'), JSON.stringify(results, null, 2));
       console.log(JSON.stringify(results.at(-1)));
-      if (!before) {
-        assert.equal(count, 10);
-        assert(initial.confirmVisible && wheel.confirmVisible, 'picker confirmation stays inside panel');
-        assert.equal(initial.scrollSurfaces, 1);
-        assert.equal(wheel.scrollSurfaces, 1);
-        assert(wheel.gridScroll > initial.gridScroll, 'mouse wheel scrolls the grid');
-        await dialog.getByRole('button', { name: '加入文件篮', exact: true }).click();
-        const eventCount = events.length;
-        await dialog.getByRole('button', { name: '发送', exact: true }).click();
-        await until(
-          () => events.slice(eventCount).some((event) => event.files?.length),
-          'native selected file callback',
-        );
-        await until(async () => !(await call('library.get')).basket.length, 'basket checkout reconciled');
-      }
-      if (before) await dialog.getByRole('button', { name: '取消文件选择', exact: true }).click();
+
+      assert.equal(count, 10);
+      assert(initial.confirmVisible && wheel.confirmVisible, 'picker confirmation stays inside panel');
+      assert.equal(initial.scrollSurfaces, 1);
+      assert.equal(wheel.scrollSurfaces, 1);
+      assert(wheel.gridScroll > initial.gridScroll, 'mouse wheel scrolls the grid');
+      await dialog.getByRole('button', { name: '加入文件篮', exact: true }).click();
+      const eventCount = events.length;
+      await dialog.getByRole('button', { name: '发送', exact: true }).click();
+      await until(
+        () => events.slice(eventCount).some((event) => event.files?.length),
+        'native selected file callback',
+      );
+      await until(async () => !(await call('library.get')).basket.length, 'basket checkout reconciled');
     } catch (error) {
       await page.screenshot({ path: join(out, 'failure.png') });
       writeFileSync(

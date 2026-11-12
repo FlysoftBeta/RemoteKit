@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { startJourney } from './files-user-session.mjs';
+import { startJourney } from './kit/viewer.mjs';
+
 const results = [];
 function pdf() {
   const objects = [
@@ -24,22 +25,12 @@ function pdf() {
   for (const offset of offsets.slice(1)) text += String(offset).padStart(10, '0') + ' 00000 n \n';
   return Buffer.from(text + `trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`);
 }
-for (const browser of ['edge', 'chrome89'])
-  for (const pointer of ['mouse', 'touch']) {
-    if (process.env.FILES_ONLY && !process.env.FILES_ONLY.split(',').includes(`${browser}-${pointer}`))
-      continue;
+for (const browser of [process.env.E2E_BROWSER ?? 'edge'])
+  for (const pointer of [process.env.E2E_POINTER ?? 'mouse']) {
     const j = await startJourney(browser, pointer),
       { page, click, button, menu, type } = j;
     const stages = [];
     const step = async (name, work) => {
-      if (process.env.FILES_JOURNEY_STEPS && !process.env.FILES_JOURNEY_STEPS.split(',').includes(name))
-        return;
-      if (
-        process.env.FILES_PHASE === 'native' &&
-        Number(name.slice(0, 2)) >= 2 &&
-        Number(name.slice(0, 2)) <= 9
-      )
-        return;
       try {
         await work();
         await j.shot(name);

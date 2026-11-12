@@ -1,6 +1,7 @@
+import { runScenario } from './kit/viewer.mjs';
 // Phone-sized touch journey: dynamic switcher titles, drags, Start, App lifecycle.
 import assert from 'node:assert/strict';
-import { runScenario } from './kit/viewer.mjs';
+
 await runScenario('shell-phone-daily', async (v, stack) => {
   const { page } = v;
   await page.setViewportSize({ width: 390, height: 844 });

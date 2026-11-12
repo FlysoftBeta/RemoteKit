@@ -120,11 +120,17 @@ def main():
             ),
             encoding='utf-8',
         )
+        env['E2E_STACK_OPTIONS'] = json.dumps({
+            'scenario': 'package', 'run': str(run), 'control': 'release', 'release': str(package),
+            'deployment': str(deployment), 'seed': False, 'fixtures': False, 'nodes': [],
+            'ports': {'control': port, 'peer': peer_port},
+            'configOverrides': json.loads(config.read_text(encoding='utf-8')),
+        })
         with (run / 'stderr.log').open('wb') as errors, (run / 'stdout.log').open('wb') as output:
             child = subprocess.Popen(
-                [str(deployment / 'remotekit_control.exe'), 'run', '--root=' + str(deployment)],
+                [str(package / 'bin/node.exe'), str(ROOT / 'tests/e2e/kit/stack.mjs')],
                 cwd=deployment,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,
                 env=env,
                 stdout=output,
                 stderr=errors,
