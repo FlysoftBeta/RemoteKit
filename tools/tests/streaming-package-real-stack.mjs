@@ -1,4 +1,5 @@
 import { launchTestBrowser } from '../../tests/e2e/kit/browser.mjs';
+import { createControlConfig } from '../../tests/config-fixture.mjs';
 // node streaming-package-real-stack.mjs <deployment root> <playwright module> <viewer exe> <new evidence dir>
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
@@ -49,17 +50,19 @@ const origin = 'http://127.0.0.1:' + port;
 await mkdir(join(runtime, 'config'), { recursive: true });
 await writeFile(
   join(runtime, 'config/control.json'),
-  JSON.stringify({
-    http: { listen: '127.0.0.1:' + port, origins: [origin] },
-    storage: { database: '../data/control.db', diagnostics: '../data/diagnostics' },
-    nodes: { local: { local: { root: '../data/node' } } },
-  }),
+  JSON.stringify(
+    createControlConfig({
+      http: { listen: '127.0.0.1:' + port, origins: [origin] },
+      storage: { database: '../data/control.db', diagnostics: '../data/diagnostics', logs: '../logs' },
+      nodes: { local: { local: { root: '../data/node' } } },
+    }),
+  ),
 );
 const env = { ...process.env };
 for (const name of ['NODE_PATH', 'NODE_OPTIONS', 'REMOTEKIT_CONTROL_CONFIG']) delete env[name];
 await writeFile(
   join(runtime, 'config/manager.json'),
-  JSON.stringify({ manifest: origin + '/control.manifest' }),
+  JSON.stringify({ version: 1, manifest: origin + '/control.manifest', checkIntervalMinutes: 60 }),
 );
 await writeFile(join(runtime, 'config/release.key'), randomBytes(32).toString('base64'));
 const child = spawn(join(runtime, 'remotekit_control.exe'), ['run', '--root=' + runtime], {
