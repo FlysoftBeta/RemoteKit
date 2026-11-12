@@ -20,7 +20,11 @@ async (host) => {
   const recover = async (id, clicks) => {
     await ready();
     await quickTap();
-    await base.page.waitForTimeout(300);
+    for (let attempt = 0; attempt < 100; ++attempt) {
+      const fixture = await base.inspect();
+      if ((fixture.telemetry[qa.case + ':root']?.clicks ?? 0) >= clicks) break;
+      await base.page.waitForTimeout(50);
+    }
     const tap = await qa.sample(id + '-tap');
     assert(root(tap).clicks === clicks, 'Recovery tap missing or duplicated');
     const before = root(tap).positions.rootY;
@@ -103,7 +107,23 @@ async (host) => {
     });
     await qa.touch('touchEnd', []);
     await base.page.evaluate(() => clientGestureQA.tail);
-    return recover(id, 1);
+    const result = await recover(id, 1);
+    const recovered = await qa.sample(id + '-recovered');
+    const longPress = recovered.data.sent.find(
+      ({ message }) => message.event?.type === 'gesture' && message.event.action === 'longPress',
+    );
+    assert(
+      longPress &&
+        recovered.data.received.some(
+          ({ message }) =>
+            message.type === 'input.result' &&
+            message.ok &&
+            String(message.clientSequence) === String(longPress.message.sequence),
+        ),
+      'Timeout recovery did not exercise an admitted long press',
+    );
+    assert(root(recovered).counts.touchcancel === 1, 'Timeout recovery did not cancel exactly once');
+    return [...result, recovered.summary];
   };
   cases.layout = async () => {
     const id = `v${base.version}-resize-gesture-${Date.now()}`;
