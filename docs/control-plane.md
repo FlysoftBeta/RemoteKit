@@ -4,15 +4,15 @@ Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、�
 
 ## 存储与迁移
 
-**唯一的迁移路径**：`persistence/schema.ts` 只有一种到达当前版本（17）的方式：空库先执行冻结的 v12 基线（`baseline-v12.ts`，永不修改），再依次执行 `migrations.ts` 中的编号步骤 13…17；已有库从自己的版本继续。所有建表、改表都在基线或某个编号步骤里，正常启动不执行任何 DDL。低于 12、高于当前版本、或有表却没有 `schema_version` 的库拒绝启动（`unsupported_schema`）。
+持久化格式的通用规则见[架构 · 持久化格式](architecture.md#持久化格式)。Control 数据库是一个存储，版本记在 `schema_version` 里（当前 23），库里的 JSON 文档随库的版本走，不单独带版本。
 
-**迁移前备份**：已有库需要迁移时，先 `VACUUM INTO` 到数据库所在目录的 `backups/control-v<from>-to-v<to>-<buildId>-<UTC>.db`，以只读方式打开做 `quick_check` 并核对版本，通过后才迁移；只保留最新 3 份。全部步骤与版本更新在一个事务里，任一步失败整体回滚，错误带步骤编号与原始异常。迁移后跑 `integrity_check`。备份不含 `.key`：静态密钥从不改变，恢复时把备份复制回 `control.db`（删除 `-wal`/`-shm`）即可。迁移需要静态密钥时（v17 要解开学习账户会话）密钥缺失或不符就失败并回滚，不猜。
+**基线与迁移**：`persistence/baseline.ts` 是当前版本的完整 schema。空库直接执行基线；已有库读出版本，依次执行 `persistence/migrations.ts` 中编号大于它的步骤（目前为空），最后版本必须等于当前版本，否则拒绝启动（`internal` + `corrupt_state`）。所有建表、改表都在基线或某个编号步骤里，正常启动不执行任何 DDL。格式变化只能新增编号步骤，同时更新基线；`control/test/fixtures/control-v23.sql` 是当前发布写出的库，测试它不经迁移、不做备份即可打开且记录原样可读。
 
-**存储的文档有类型**：SQLite 里不透明的 JSON 值（Tab、Space、窗口状态、设置、站点偏好、App、收藏、操作收据与动作、认证设置、文件库条目与分区、选择清单、会话导入各列、加密的学习会话与人脸模板等）只经 `persistence/codec.ts` 的解码器读写：键集合封闭、类型固定，解码器的推断类型必须可赋给 `shared/` 里的类型，漂移是编译错误。`persistence/` 之外不解析也不序列化存储数据。解码失败是 `internal` + `reason: corrupt_record`（`detail` 指出表、键、路径与期望），只让需要这一行的请求失败，数据原样保留——读路径从不补默认值、不删除、不改写；缺失的字段只在迁移步骤里显式回填（例如 v17 补齐认证设置、选择清单的 `limits`，把旧动作载荷改成当前形状，把缺少 `device` 的新教育会话清除并标为 `expired`）。
+**迁移前备份**：有待执行的步骤时，先 `VACUUM INTO` 到数据库所在目录的 `backups/control-v<from>-to-v<to>-<buildId>-<UTC>.db`，以只读方式打开做 `quick_check` 并核对版本，通过后才迁移；只保留最新 3 份。全部步骤与版本更新在一个事务里，任一步失败整体回滚，错误带步骤编号与原始异常（`corrupt_state`）。迁移后跑 `integrity_check`。备份不含 `.key`：静态密钥从不改变，恢复时把备份复制回 `control.db`（删除 `-wal`/`-shm`）即可。
+
+**存储的文档有类型**：SQLite 里不透明的 JSON 值（Tab、Space、窗口状态、设置、站点偏好、App、收藏、操作收据与动作、认证设置、文件库条目与分区、选择清单、会话导入各列、加密的学习会话与人脸模板等）只经 `persistence/codec.ts` 的解码器与编码器读写，定义在 `persistence/documents.ts`（加密载荷在 `sealed-documents.ts`）：键集合封闭、类型与取值范围固定，可选字段在定义里声明；解码器的推断类型必须可赋给 `shared/` 里的类型，漂移是编译错误。编码器写之前同样校验，写不出解码器不接受的值。`persistence/` 之外不解析也不序列化存储数据。原生 SQL 列的类型由 `persistence/sqlite.ts` 校验。解码失败是 `internal` + `reason: corrupt_record`（`detail` 指出表、键、路径与期望），只让需要这一行的请求失败，数据原样保留——读路径从不补默认值、不删除、不改写。必需的行（账户的设置、安全设置、文件库状态）由创建账户的代码写入，读取处不代造。
 
 **启动自检**：每次打开都运行 `quick_check`（失败拒绝启动）、`foreign_key_check`，并把每一行存储文档解码一遍；外键与解码问题逐条记 `store.integrity_problem`（error），保留运行，结果（最多 200 条）显示在管理 App → 概览。
-
-**迁移测试**：`control/test/fixtures/control-v12.sql`…`v16.sql` 是由各版本历史代码真实生成的库（文件头记录来源 commit），每个文档列都有当时代码写过的形状。测试把每个 fixture 迁移到当前版本：备份存在且可用、自检没有问题、规范化后的 schema 与新建库完全一致。新增迁移必须新增对应版本的 fixture。
 
 **文件库是关系表**：`library_state`（revision、篮子目标分区）、`library_entries`（每条目一行，条目文档经解码器）、`library_entry_objects`（条目引用的对象：当前/原始资产、照片候选，供 GC 与配额直接查询）、`library_partitions`、`library_basket`（有序）、`library_excluded_sources`。业务逻辑仍在 `LibrarySnapshot` 对象上修改，`save()` 只写与已读行不同的部分，一次变更一个事务。
 

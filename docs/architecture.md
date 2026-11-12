@@ -112,6 +112,27 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 
 位置按作用域：输入框下（field）、出问题的那个条目上（item：文件卡、上传/拍照任务、附件行、标签页）、所在的窗口/面板（surface：活动内容上是顶部居中的浮动小条，只覆盖、不挤压——挤压会改变远端视口尺寸）、全局通知（只放不属于任何可见界面的事：Control 连接、窗口已关闭的后台任务；右下角，按 key 去重，最多 3 条）、全屏（登录、锁定、连接被接管）。错误一路保持类型化直到呈现处，只有 `presentFailure` 生成文字。
 
+## 持久化格式
+
+每种落盘格式属于一个存储，有显式版本和唯一一对解码器与编码器（同一份格式定义）。
+
+- **解码严格**：形状与类型精确，必需字段必须存在，未知字段拒绝，枚举封闭，范围检查。合法缺省的字段在格式定义里声明为可选，读取处不补默认值、不强制转换、不静默修复。单条记录违反为 `corrupt_record`，整个存储违反为 `corrupt_state`，按[错误模型](#错误模型)带错误 ID。编码器写之前用同一定义校验。
+- **默认值属于创建者**：新值（新账户的设置、新 Session 的副本记录）由创建它的代码给全，读取方从不代造缺失的记录或字段。
+- **唯一的缓存例外**：checkpoint 增量索引是按定义可重建的缓存，内容非法时按不存在处理并整体重建；其他格式都不这样处理。
+- **迁移集中在一处**：格式变化只通过该存储唯一的迁移模块，每一步把版本 N−1 的值变成 N；当前每个列表都是空的，也没有任何读取旧格式的代码。
+
+| 存储 | 版本所在 | 格式定义 | 迁移模块 |
+|---|---|---|---|
+| Control 数据库（含所有 JSON 文档列） | `schema_version` | `control/server/persistence/{baseline,documents,sealed-documents}.ts` | `control/server/persistence/migrations.ts`（见[控制面 · 存储与迁移](control-plane.md#存储与迁移)） |
+| `control.json`、`control.key`、`node.json` | 文件内 `version` | `control/server/config-formats.ts`；原生读者 `endpoint/src/persistence/config_formats.hpp` | `control/server/config-migrations.ts`、`endpoint/src/persistence/format_migrations.hpp` |
+| `manager.json`、`snapshot-owner.json` | 文件内 `version` | `endpoint/src/persistence/config_formats.hpp` | `endpoint/src/persistence/format_migrations.hpp` |
+| Session 数据库 `session.db`（views、事件、下载交接、导航恢复、文件库记录） | `PRAGMA user_version` | `endpoint/src/persistence/session_documents.hpp`、`files/library_records.hpp` | `endpoint/src/persistence/session_migrations.cpp`（迁移前 `VACUUM INTO` 备份、校验、保留与回滚，与 Control 数据库相同） |
+| 副本记录 `<id>.copy.json`、变更日志 `.changes`（每行带版本）、checkpoint manifest、增量索引 | 记录内 `version` | `endpoint/src/persistence/checkpoint_formats.hpp` | `endpoint/src/persistence/format_migrations.hpp` |
+| 对象存储文件 | 文件头 `RKO2` 与头版本 | `endpoint/src/objects/store.cpp` | 文件头版本 |
+| 诊断归档 manifest 与 `.reason` | 文件内版本 | `control/server/diagnostics/formats.ts` | — |
+
+发布与更新的 manifest、载荷、签名与增量有各自的严格协议（见[构建与发布 · 发布](build.md#发布)）。Viewer 只持久化用户 token（Cookie），不使用 localStorage、sessionStorage 或 IndexedDB 保存产品状态。
+
 ## 代码结构
 
 ```
@@ -156,7 +177,7 @@ endpoint/
     management/    ClusterLink（管理链路）与方法表
     objects/       加密对象存储、节点间传输（PeerServer/PeerClient）
     platform/      Windows 作业与进程
-    persistence/   Session 存储（session.db、SQLite 封装、旧格式导入）、checkpoint 与增量扫描、运行中的版本与快照客户端
+    persistence/   Session 存储（session.db、SQLite 封装、格式定义与迁移）、checkpoint 与增量扫描、运行中的版本与快照客户端
     session/       Session（组装）、BrowserRuntime/BrowserRpc、ViewController、导航恢复
     rtc/           PeerController、授权、DataChannel 路由与通道、发件箱、service peer
     media/         Comp 节拍、Slot、输出、媒体管线、呈现屏障、编码器（QSV/NVENC）、适配器、音频、追踪

@@ -32,7 +32,7 @@
 
 **Browser 崩溃**：Browser 内嵌 Crashpad，以 Browser 可执行文件自身作为 handler 进程，Browser、renderer、GPU 与 utility 进程崩溃时把 minidump 写到 Endpoint 用 `--crash-dir` 指定的节点 `logs/crashes/<sessionId>/`（不在 Session 目录里，不进 checkpoint；没有该参数时不启用崩溃报告）；不配置上传地址、上传同意恒为否，handler 随 Browser 退出。Browser 非正常退出（CHECK 的 `0x80000003`、访问违例等）时，Endpoint 在 `endpoint.log` 写一条 `browser.crashed` 事件（同时追加到该 Session 崩溃目录的 `events.jsonl`）：退出码、Browser 日志中最后一行 `FATAL`/`Check failed`、最新 dump 路径。诊断归档收录崩溃事件与最新 3 个 dump（每个最多 16 MiB）。
 
-**限制与生命周期**：每次最长 10 分钟，采样数据 32MiB 未压缩（日志另计上述预算），单个请求 128KiB；全局并发 4 个；最近 1024 个状态记录。锁定、授权变化、断线、时长/大小上限、正常关闭都会以对应原因结束；重复 stop/status 幂等。归档是 USTAR + Zstandard（Node 内置），包含 manifest、非空的 client/control/endpoint/events JSONL 成员与 `logs/` 下的原始日志，先写部分文件再发布，路径 `<db目录>/diagnostics/<SHA256(tenant)>/<id>.tar.zst`（附 `.reason`），重启后仍可按 ID 查询。强制终止 Control 会丢失进行中的内存数据；已完成的归档目前没有自动清理。
+**限制与生命周期**：每次最长 10 分钟，采样数据 32MiB 未压缩（日志另计上述预算），单个请求 128KiB；全局并发 4 个；最近 1024 个状态记录。锁定、授权变化、断线、时长/大小上限、正常关闭都会以对应原因结束；重复 stop/status 幂等。归档是 USTAR + Zstandard（Node 内置），包含 manifest、非空的 client/control/endpoint/events JSONL 成员与 `logs/` 下的原始日志，先写部分文件再发布，路径 `<db目录>/diagnostics/<SHA256(tenant)>/<id>.tar.zst`，旁边的 `.reason` 是 `{version, reason}`；manifest 带 `schemaVersion`，两者的格式定义在 `control/server/diagnostics/formats.ts`，重启后仍可按 ID 查询。强制终止 Control 会丢失进行中的内存数据；已完成的归档目前没有自动清理。
 
 ## 开发侧追踪
 
