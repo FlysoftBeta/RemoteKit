@@ -46,7 +46,7 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 
 **操作页面**：DOM 事件 → 客户端门禁（平面 ready、焦点租约）→ DataChannel → Endpoint 校验 peer/授权/序号/布局 → 本地控制 RPC → Browser 校验文档与焦点 → Chromium 输入路由。详见[输入](input.md)、[移动编辑](mobile-editing.md)。
 
-**改变产品状态**：Viewer 发 `product.action`（DataChannel）→ Endpoint 校验 peer → 管理事件交给 Control → 每 Tenant 串行提交（收据 + workspace 同一事务）→ Control 调用 Endpoint 执行 → WS 推送新快照。详见[Control](control-plane.md)。
+**改变产品状态**：Viewer 发 `product.action`（DataChannel）→ Endpoint 校验 peer、持久化为有序事件 → Control 每 Tenant 串行提交（收据 + workspace + 事件游标同一事务）后确认 → Control 发布新的期望状态，Endpoint 收敛并报告观察状态 → WS 推送新快照。Control 与 Endpoint 之间的协调见[多节点 · 协调协议](cluster.md#协调协议)。详见[Control](control-plane.md)。
 
 **稳态下的连接**：resize、焦点切换、导航、锁定都不销毁 RTC 连接；只有布局换代时有一次屏障。Viewer WebSocket 断开决定产品 visible=false 及回收资格；RTC 断开只决定渲染/编码需求。
 

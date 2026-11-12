@@ -87,13 +87,23 @@ Control 包和节点运行时的根目录有相同的 `build.json{buildId}`。bu
 
 Control 版本目录中的 `release/node.tar.zst` 与 `release/node.json` 不在发布物里，由 Control 主机的管理器安装版本时从 payload 的 `node/` 记录生成，供本地节点安装和远端节点更新共用。Control 由管理器从 GitHub Releases 更新（见[构建与发布 · 发布](build.md#发布)）；Control 一换版本，节点随即全部被视为断开（`build_mismatch`），各自从 Control 下载新运行时后重新上线；代价是每次发布所有用户的 Browser 冷启动一次。
 
+## 协调协议
+
+Control 与 Endpoint 之间只有三种交互，没有逐方法的恢复路径：
+
+**期望 / 观察**。Control 为每个节点维护 `node.desired{revision, sessions}`（放在该节点上的全部 Session 与 epoch、`dataState`，替代 fencing 清单），为每个 Session 维护整份 `session.desired`：运行或停止、提交请求、Profile 密钥与要恢复的 checkpoint、站点规则、媒体策略、质量、剪贴板、按产品顺序的期望 view、RTC 授权与锁定、要描述的资产（字段见[协议参考](protocols.md#control--endpoint)）。`revision` 单调递增并由 Control 持久化；Endpoint 只接受当前连接、当前 epoch 下更高的 revision，同 revision 不同内容是 `conflict`。Endpoint 为每个放置保留一个协调器（Browser 关闭后仍在），存最新期望文档，在每个 Session 自己的串行通道里收敛：先撤销授权、应用锁定，再在启动 Browser 前备好站点规则、剪贴板与媒体策略，Browser 起来后先写站点规则与剪贴板，再恢复/创建隐藏的 view、完成导航恢复，最后一次性应用布局、可见性与文件授权。Browser 重启沿用已存的期望文档重新收敛，不等 Control；Endpoint 进程重启后只有期望 view 留在 `session.db` 里，要等新的 fencing 与完整期望文档才启动 Browser——持久化的 view 不能恢复授权。Endpoint 在变化时（合并、间隔 ≥ 100 毫秒）和每次重连时发 `session.observed`：它反映了哪个期望 revision（`observedRevision`、各部分的 `applied` revision）、是否已收敛、Browser 状态与 incarnation、副本记录与已发布的 checkpoint、实际 view、待收养弹窗、恢复进度、RTC、停止阻塞项、资产描述与事件游标。
+
+**有序事件流**。页面自行关闭、下载导入结果、剪贴板变化、登录视图结果、Viewer 经 DataChannel 发来的产品动作，都先在 `session.db` 的 `events` 表里持久化（之后才确认 Browser 一侧），按 `(streamId, seq)` 发出，带不变的 `eventId`。Control 有一个持久的收件箱与游标：按顺序处理，每个事件的产品效果与游标在同一个事务里提交（关闭事件先删产品标签；下载结果先写入文件库或持久的排除决定；剪贴板先写值或冲突片段；登录结果先放进加密的持久任务；产品动作先有收据，原授权已失效的动作持久地拒绝而不在新 Viewer 下执行），然后 `session.events.ack{streamId, upTo}` 累计确认连续已提交的前缀。重连时 Endpoint 从确认位置之后重发；checkpoint 恢复或新放置时换 `streamId` 并重新编号，`eventId` 不变，Control 用它去重。积压上限每 Session 4096 条、32 MiB，从不丢弃未确认的事件：满了就不再接收会产生事件的新工作。停止后的副本不为删除已确认事件而重新写库，等下次可写打开时再清理。
+
+**一次性 RPC**。导航与 history 命令、页面对话框与关闭回复、生命周期动作、文件选择、会话导入写入、RTC 信令、人脸挑战、对象操作和诊断读取仍是请求/回复，但每个请求都带 `opId`（沿用已有的操作 ID、选择 ID、导入 ID，或新生成）、`replay` 与目标（Endpoint incarnation、Session、epoch）。Endpoint 按 `opId` 去重并缓存最近 1024 个结果；结果不确定的调用方用同一 `opId`、`replay:true` 再问：缓存里有就返回原结果，没有就是 `outcome_unknown`，绝不重新执行。目标在第一次接收时固定，Browser、页面或放置变了就拒绝执行——旧请求永远不会改投到新对象上。
+
 ## 会话、放置与密钥
 
 `session_placements` 记录每个 Tenant 的 `session_id`（32 位十六进制，分配一次，重新放置时保留）、持有权威副本的节点、`placement_epoch`、`run_state`（`running | stopped`）、`data_state`（`clean | dirty`，见[Session 副本与提交](#session-副本与提交)）、未决提交 `pending_commit`、最新已提交 checkpoint 与加密的 Tenant DEK。DEK 用 Control 的静态密钥文件 `<db>.key`（与人脸模板共用）以 AES-256-GCM 封装。
 
-- Control 在每个节点连接代次内，向某个 Tenant 发出第一个请求之前先发 `session.open{sessionId, placementEpoch, checkpoint, profileKey}`；Profile 密钥由 DEK 经 HKDF-SHA256 派生，Endpoint 只放在内存里并在销毁时清零。Endpoint 只在 `session.open` 时创建 Session，目录 `<dataPath>/sessions/<sessionId>`；同参数幂等，同 Tenant 不同 sessionId 或 epoch 回退为 `conflict`，未打开的 Tenant 上的其他方法为 `not_found`。
+- Session 由 Control 的 `session.desired{sessionId, placementEpoch, checkpoint, profileKey, run, …}` 打开（见[协调协议](#协调协议)）；Profile 密钥由 DEK 经 HKDF-SHA256 派生，Endpoint 只放在内存里并在销毁时清零。Endpoint 只在 `session.open` 时创建 Session，目录 `<dataPath>/sessions/<sessionId>`；同参数幂等，同 Tenant 不同 sessionId 或 epoch 回退为 `conflict`，未打开的 Tenant 上的其他方法为 `not_found`。
 - Profile 密钥经 Endpoint 新建的匿名管道交给 Browser：只把读端放进 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 继承，参数 `--profile-key-handle=<句柄值>`；Browser 在创建任何 BrowserContext 之前读出恰好 32 字节，不足、多余或句柄无效都拒绝启动（见[页面生命周期 · Profile](page-lifecycle.md#profile-持久化)）。Browser 进程内的会话编号固定为 1，Profile 位于 `<sessionDir>/session-1/profile-1`。
-- **fencing**：每次重新放置都使 epoch 加一。`node.ready` 携带放在该节点上的全部 Session（不论运行与否，带 epoch 与 `dataState`）；Endpoint 在每次（重新）连接时终止并遗忘不在清单中或 epoch 过旧的 Session，删除它们的副本记录，目录变成冷副本（7 天后或磁盘压力时删除，`session.cold.delete{}`）；epoch 更新而清单说是 `clean` 的旧副本直接删除（例如管理员放弃了它的未提交更改）。
+- **fencing**：每次重新放置都使 epoch 加一。`node.desired` 列出放在该节点上的全部 Session（不论运行与否，带 epoch 与 `dataState`）；Endpoint 在每次（重新）连接时终止并遗忘不在清单中或 epoch 过旧的 Session，删除它们的副本记录，目录变成冷副本（7 天后或磁盘压力时删除，`session.cold.delete{}`）；epoch 更新而清单说是 `clean` 的旧副本直接删除（例如管理员放弃了它的未提交更改）。
 
 ## 对象存储
 
@@ -136,25 +146,25 @@ Endpoint 自己的 Session 状态在 Session 目录的 `session.db`（SQLite，W
 
 checkpoint 不是 Session 数据的唯一形态：节点上的 Session 目录可以比任何已提交的 checkpoint 更新。模型显式接受这一点——每份本地副本有一条副本记录 `<sessionId>.copy.json`：`{sessionId, placementEpoch, base, state, stoppedCleanly, changesAt, lastCommit}`。`state` 为 `clean` 表示目录与 `base`（manifest id）完全一致；为 `dirty` 表示可能含有任何 checkpoint 都没有的更改。Session 为运行而打开时（Browser 启动之前）副本即记为 `dirty`、`stoppedCleanly:false`，只有成功提交后才回到 `clean`。已经传输的块不等于可用：只有提交了 manifest 的 checkpoint 才能用来恢复。
 
-**同节点打开沿用本地副本**。`session.open{sessionId, placementEpoch, checkpoint, profileKey}`：有该 Session 的副本记录、epoch 不比请求新、且（`dirty` 或 `base` 等于请求的 checkpoint）时，**原样使用目录**，不恢复、不回退——Endpoint 进程重启（更新、配置变化、崩溃）后同节点重新打开不会丢掉上次提交之后的更改，从未提交过的 Session 也照常打开。`stoppedCleanly:false`（Endpoint 或 Browser 意外退出）时，Chromium 自己恢复它的数据库，与桌面 Chrome 崩溃后相同。其他情况按请求的 checkpoint 恢复：本地索引对得上时逐文件校验修补（warm），否则物化到 `.restore` 再原子替换（cold），然后写 `clean` 副本记录。epoch 过旧仍按 fencing 拒绝。
+**同节点打开沿用本地副本**。期望状态要求运行而 Session 尚未打开时：有该 Session 的副本记录、epoch 不比请求新、且（`dirty` 或 `base` 等于请求的 checkpoint）时，**原样使用目录**，不恢复、不回退——Endpoint 进程重启（更新、配置变化、崩溃）后同节点重新打开不会丢掉上次提交之后的更改，从未提交过的 Session 也照常打开。`stoppedCleanly:false`（Endpoint 或 Browser 意外退出）时，Chromium 自己恢复它的数据库，与桌面 Chrome 崩溃后相同。其他情况按请求的 checkpoint 恢复：本地索引对得上时逐文件校验修补（warm），否则物化到 `.restore` 再原子替换（cold），然后写 `clean` 副本记录。epoch 过旧仍按 fencing 拒绝。
 
 **变更跟踪始终开启**。每个运行中的 Session 在 Browser 启动前就用 `ReadDirectoryChangesW` 递归监视自己的目录，变化与删除的路径每 5 秒追加到节点级变更日志 `<sessionId>.changes`（带写出时间），每次提交后截断。意外退出后，变更列表 = 日志内容 ∪ 一次只看元数据的遍历：大小、last write time、文件 ID 与索引不同的文件，last write time 不早于 `changesAt − 2 秒` 的文件，以及删除的文件——不读文件内容。只有索引缺失或非法时才完整重建。NTFS 的 last write time 是变化信号，不使用 USN。开发构建用 `REMOTEKIT_CHECKPOINT_VERIFY=1` 把增量结果与完整遍历比对。
 
 **块持续产出**。运行中的 Session 后台低优先级把静默 10 秒以上的变化文件预先切块存为对象：读前读后各记一次文件身份，读期间变化的作废；全节点共享 16 MiB/s 的速率上限，每个 Session 同时一个文件。不超过 1MiB 的文件是一个对象，更大的按 1MiB 固定切块（SQLite 原地改页、LevelDB 只追加或整文件新建，固定切块的增量效果最好）；未变的文件复用索引里的块。预存的块以该 Tenant 的认领提交，Endpoint 每 30 分钟用 `object.claims.refresh{tenantId, ids}` 续期仍未提交的块，Control 只为该 Tenant 已认领的 id 续期。
 
-**提交需要一致点**。目前唯一的一致点是 Browser 干净停止。`session.stop{placementEpoch, commit: requestId | null}`：
+**提交需要一致点**。目前唯一的一致点是 Browser 干净停止。期望状态 `run:"stopped"`，`commit` 为提交请求 ID 或 null：
 
 1. 有阻塞项则 `conflict`（指明是哪一项）：未确认的自然关闭事件、未决原生选择、上传中、页面请求（对话框、文件选择）、下载中、RTC 连接存在、生命周期不确定、导航恢复未完成。计数由各自的所有者组件报告在快照的 `stopBlockers` 字段里。
 2. 优雅关闭 Browser：`BrowserRuntime::Shutdown()` 先导出所有导航状态有变化的 view（总计最多 20 秒），再发 `browser.shutdown`，等 Browser 作业中的进程全部退出（最多 30 秒）；只有退出码 0 且作业为空才算干净，不干净则 `unavailable`。强制终止只用于故障与 fencing。
 3. 不提交时到此为止：副本保持 `dirty`，`stoppedCleanly:true`。
 4. 提交时：删除上传草稿与暂存，关闭 `session.db`（之后任何写入都是缺陷），只扫描变更列表并把剩下的文件切块。排除名为 `Cache`、`Code Cache`、`GPUCache`、`DawnWebGPUCache`、`DawnGraphiteCache`、`Shared Dictionary`、`VideoDecodeStats`、`blob_storage` 的目录、LevelDB 的 `LOCK`/`LOG`/`LOG.old`、上传与文件库暂存目录；SQLite 的 `-journal`/`-wal` 保留——干净关闭才是一致性的前提。读取、hash、压缩、加密在有界工作池上并行；对象登记按批发出（`object.committed.batch`，每批 ≤1024 个、一个事务）。
-5. 生成 manifest 对象（版本 2：buildId、文件与块列表、目录），登记，然后写副本记录 `{state: clean, base: manifest, lastCommit: {requestId, manifestId}}` 并截断变更日志，回复 `{state, base, committed: {requestId, manifestId}}`。manifest 里的 buildId 只记录生成它的构建；恢复只校验格式版本，不要求构建相同。
+5. 生成 manifest 对象（版本 2：buildId、文件与块列表、目录），登记，然后写副本记录 `{state: clean, base: manifest, lastCommit: {requestId, manifestId}}` 并截断变更日志，在观察状态里报告 `data:{state, base, committed:{requestId, manifestId}}` 与 checkpoint 描述。manifest 里的 buildId 只记录生成它的构建；恢复只校验格式版本，不要求构建相同。
 
-提交按 `requestId` 幂等：同一 id 直接从副本记录的 `lastCommit` 回答，即使 Session 已不在内存或 Endpoint 已重启；Session 不在内存而副本是 `clean` 时，不同的 id 直接回答当前 `{state: clean, base}`。路径超过 `MAX_PATH` 的文件同样能扫描、物化与恢复。
+提交按 `requestId` 幂等：同一 id 直接从副本记录的 `lastCommit` 得到结果，即使 Session 已不在内存或 Endpoint 已重启；Session 不在内存而副本是 `clean` 时，不同的 id 直接报告当前 `{state: clean, base}`。阻塞项只推迟收敛，不清除停止请求；一旦开始关闭数据库并发布 checkpoint，必须先完成或恢复这一次提交，之后的"运行"期望不能越过它。路径超过 `MAX_PATH` 的文件同样能扫描、物化与恢复。
 
-**优雅关闭 Endpoint**（服务停止、退出码 3/4）：停止每个 Session，并在全节点 60 秒预算内用节点生成的 requestId 逐个提交；没来得及的保持 `dirty`、`stoppedCleanly:true`——同节点重新打开仍沿用它。重连后 Endpoint 发一条 `node.ready` 事件，列出本节点每个 Session 副本的 `copy:{state, base, lastCommit}`（`complete` 表示已全部列出）；Control 把它没有请求过的提交当作请求过的一样校验对象并提交指针；校验完成前不重新打开该 Session，避免按旧指针恢复。
+**优雅关闭 Endpoint**（服务停止、退出码 3/4）：停止每个 Session，并在全节点 60 秒预算内用节点生成的 requestId 逐个提交；没来得及的保持 `dirty`、`stoppedCleanly:true`——同节点重新打开仍沿用它。重连后每个 Session 的第一份观察状态带副本记录（`data`）；Control 把它没有请求过的提交当作请求过的一样校验对象并提交指针；校验完成前不重新打开该 Session，避免按旧指针恢复。
 
-**Control 侧**：放置是 `run_state × data_state`。停止并提交前先在事务里写 `pending_commit`（epoch 不变），请求超时 180 秒（导航导出 20 秒、进程退出 30 秒、再加提交）。成功：校验对象、提交 checkpoint 指针（保留最新 2 个），改为 `stopped/clean`；错误码证明没有执行（阻塞项 `conflict`、送达前的 `unavailable`、`busy`）：回到 `running/dirty`；`outcome_unknown`：保留 `pending_commit`，对账用**同一个 requestId** 再问，直到得到结果。未决提交期间认领受保护，不会被 GC。
+**Control 侧**：放置是 `run_state × data_state`。停止并提交时先在事务里写 `pending_commit`（epoch 不变），然后发布带这个 requestId 的期望状态；不需要单独的请求、超时或补发——观察状态报告 `committed.requestId` 等于它时，校验对象、提交 checkpoint 指针（保留最新 2 个），改为 `stopped/clean`，下一份期望文档清除 `commit`。重连只是重发期望状态。未决提交期间认领受保护，不会被 GC。
 
 **放置规则**：`clean` 的 Session 可以放到任何合格节点（从 checkpoint 恢复，或沿用同一 manifest 的本地副本）。`dirty` 的 Session 只能在持有它的节点上运行；那个节点离线时 Session 是 `unavailable`，reason `session_data_on_offline_node`（Viewer："会话数据所在节点离线，恢复后自动继续"）。再平衡只移动 `clean` 的 Session。管理 App → 用户对这种 Session 提供"放弃未提交的更改"：确认框显示最后一次提交时间，确认后 epoch 加一、隔离旧副本、以最新已提交的 checkpoint 记为 `stopped/clean`。
 

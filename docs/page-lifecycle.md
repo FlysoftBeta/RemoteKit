@@ -83,7 +83,7 @@ lifecycle_uncertain
 
 **节奏**：导出由 Endpoint 调度线程拥有，每 Session 同时一个传输，每次维护 tick 推进一块；候选最多 256 个、轮转选择；任务 60 秒期限，发布完整的替换文件之前重新校验身份。快照只观察和登记导出，不在快照里排空大导出（曾经这样做阻塞了其他工作）。pending/uncertain 的生命周期取消导出并保留上一个完整文件。
 
-**恢复**：同样分阶段推进（load → settling → unload → begin → chunks → commit → restore → waiting → visible → complete；settling 最多等 1 秒初始加载，waiting 最多 11 秒），每个维护 tick 只推进一个 view 的一个阶段，所以 `session.ensure` 不需要等每个页面的网络提交。普通失败转入 fallback：用产品 URL 发一个新的 GET。曾经 4 个慢页面每个同步恢复约 11 秒，超过 Control 请求超时，并通过全局调度线程阻塞其他 Tenant——加长超时不是解法。
+**恢复**：同样分阶段推进（load → settling → unload → begin → chunks → commit → restore → waiting → visible → complete；settling 最多等 1 秒初始加载，waiting 最多 11 秒），每个维护 tick 只推进一个 view 的一个阶段，所以收敛不需要等每个页面的网络提交。普通失败转入 fallback：用产品 URL 发一个新的 GET。曾经 4 个慢页面每个同步恢复约 11 秒，超过 Control 请求超时，并通过全局调度线程阻塞其他 Tenant——加长超时不是解法。
 
 ## Profile 持久化
 

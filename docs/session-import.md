@@ -206,7 +206,7 @@ Control → 设备（`ref` 是所回复的设备事件 seq）：
 
 Endpoint 只做转发与 Browser 换代检查：
 
-- `session.storage.import {cookies, localStorage}`：确保 Browser 运行（同 `session.ensure`），转发 `storage.import`，回复 `{accepted:true, job, browserIncarnation}`。
+- `session.storage.import {cookies, localStorage}`：要求 Session 正在运行（期望状态 `run:"running"`），转发 `storage.import`，回复 `{accepted:true, job, browserIncarnation}`。
 - `session.storage.importStatus {job, browserIncarnation}`：incarnation 不符 → `conflict`；否则转发 `storage.import.status`。
 - `session.identity`：确保 Browser 运行，转发 `identity`。
 

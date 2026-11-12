@@ -113,55 +113,65 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
 
 ## Control ↔ Endpoint
 
-集群通道（本地 stdio 或远端 WebSocket，握手与加密见[多节点 · 集群通道](cluster.md#集群通道)）上的 JSON 消息：
+集群通道（本地 stdio 或远端 WebSocket，握手与加密见[多节点 · 集群通道](cluster.md#集群通道)）上的 JSON 消息。协调模型见[多节点 · 协调协议](cluster.md#协调协议)；契约在 `control/server/endpoint/coordination.ts` 与 Endpoint 的对应解码器，两侧对同一份 `protocol/coordination.fixture.json` 校验。
 
 ```
 握手      node.hello{role, nodeId, buildId, incarnation}
-          → node.ready{connectionEpoch, buildId, config, configHash, sessions, objectKey, objectIdKey} | node.release{release} | node.reject{code, buildId}
-请求      {id, method, tenantId, ...参数}
-回复      {id, ok:true, result} | {id, ok:false, error:{code, message, reason?, retryAfterMs?}}
-事件      {event:"rtc.signal" | "client.action" | "clipboard.changed" | "node.metrics", ...}
-          {event:"session.events", tenantId, sessionId, browserIncarnation, events:[…]}（自然关闭、下载导入、view.signIn{webviewId, provider, result}）
-反向请求  {id, request:"object.committed" | "object.locate", ...}（Endpoint → Control，回复形状相同）
-          object.committed{objectId, size, storedSize, storedSha256, tenantId?, derivedFrom?, kind?, putId?}
-          object.locate{tenantId, ids} → {sources:{[id]:[{nodeId, address}]}}（无权的 id 为 forbidden）
+          → node.ready{connectionEpoch, buildId, config, configHash, objectKey, objectIdKey, peers} | node.release{release} | node.reject{code, buildId}
+期望状态  node.desired{connectionEpoch, revision, sessions:[{tenantId, sessionId, placementEpoch, dataState}]}
+          session.desired{tenantId, sessionId, placementEpoch, connectionEpoch, revision, run, commit, profileKey, checkpoint,
+                          sitePreferences, mediaPolicy, quality, clipboard, views, authorization, lock, library}
+观察状态  {event:"session.observed", tenantId, sessionId, placementEpoch, endpointIncarnation, nodeRevision, seq, observedRevision,
+           converged, browser, browserIncarnation, browserRestart, data, checkpoint, applied, authorization, lock, views,
+           pendingPopups, recovery, rtc, blockers, library, events, stats, lastError}
+事件流    {event:"session.event", tenantId, sessionId, placementEpoch, streamId, seq, eventId, browserIncarnation, type, body}
+          session.events.ack{tenantId, sessionId, placementEpoch, streamId, upTo}
+一次性    {id, method, opId, replay, endpointIncarnation, tenantId, sessionId, placementEpoch, params}
+回复      {id, ok:true, result} | {id, ok:false, error:{code, message, reason?, retryAfterMs?, errorId?}}
+其他事件  {event:"rtc.signal" | "node.metrics", ...}
+反向请求  {id, request:"object.committed" | "object.committed.batch" | "object.locate" | "object.claims.refresh", ...}（Endpoint → Control，回复形状相同）
 Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, offset}+≤1MiB … object.put.end{putId}
           → {objectId, size, storedSize, storedSha256}；object.put.cancel{putId}
+节点集合  node.peers{peers}
 保活      {type:"node.ping"} / {type:"node.pong"}
 更新包    package.get{buildId, offset} → BINARY package.chunk{offset} … package.end{size}（role updater）
 ```
 
+**期望状态的字段**（`session.desired`，整份文档，`revision` 单调递增并由 Control 持久化）：
+
+| 字段 | 内容 |
+|---|---|
+| `run` / `commit` | `running` 或 `stopped`；`commit` 为提交请求 ID 或 null（`running` 带 commit 是 `invalid_request`） |
+| `profileKey` / `checkpoint` | Profile 密钥；打开时要恢复的已提交 checkpoint |
+| `sitePreferences` / `mediaPolicy` / `quality` | 完整站点规则表；`{degradationPreference, maxFps, audio}`；有效 DPR |
+| `clipboard` | `{revision, value:{text, html}}`；在任何 view 之前写入 Browser |
+| `views` | 按产品顺序的期望 view：`viewId`、`presence`（`ensure` 或 `ifPresent`）、URL、尺寸、visible、device、occludedBottom/occlusionRevision、可选 `signIn`（`changyan`/`xinjiaoyu`）与 `adopt`（收养弹窗） |
+| `authorization` / `lock` | RTC 授权（connectionId、epoch、unlocked、文件授权）与锁定状态；先于其他字段生效 |
+| `library.describe` | 需要 Endpoint 描述的资产 |
+
+**事件类型**：`view.closed`、`download.imported`、`download.failed`、`clipboard.changed`（带 `baseRevision`，超限时只带大小）、`view.signIn`、`client.action`。
+
+**一次性方法**（都带 `opId`，见[协调协议](cluster.md#协调协议)）：
+
 | 方法 | 说明 |
 |---|---|
-| `session.open` | 创建或确认 Session：sessionId、placementEpoch、checkpoint、profileKey、可选 clipboard {revision,text,html}（在任何 view 之前写入 Browser）；其他方法只对已打开的 Tenant 有效 |
-| `clipboard.write` | `{revision,text,html}`，在线更新 Browser 剪贴板；作用域抑制回传 |
-| `session.stop` | `{placementEpoch, commit: requestId \| null}`：优雅关闭 Browser；带 `commit` 时提交 checkpoint，按 requestId 幂等，回复 `{state, base, committed}`（见[多节点 · Session 副本与提交](cluster.md#session-副本与提交)）。 |
-| `session.ensure` | 启动/取得 Session，幂等；返回 browserIncarnation 与恢复状态，不等导航 |
-| `session.snapshot` | 只读：views、stats、pendingPopups、未确认事件、导航操作；不启动 Browser；`outputDiagnostics:true` 附输出状态 |
-| `session.logs.read` | 诊断用原始日志窗口：`{log: browser \| endpoint \| endpoint.1, end?, maxBytes ≤ 512 KiB}` → `{exists, size, start, end, data(base64)}`，读取 `[max(0, end−maxBytes), end)`，`end` 缺省为当前大小；`browser` 是节点 `logs/browser/<sessionId>.log`，`endpoint` 是节点的 `logs/endpoint.log`，`crashes`/`dump/<name>` 来自节点 `logs/crashes/<sessionId>/` |
-| `node.logs.search` | 节点级（不属于任何 Session）：`{errorId}` → `{lines}`，在 `logs/endpoint.log` 与 `.1`–`.4` 中找顶层或 `err.errorId` 等于该 ID 的 JSON 行，最多 50 行，按时间从旧到新 |
-| `session.sitePreferences` | 完整 origin→UA、持久权限决定和协议处理器规则表 |
-| `session.mediaPolicy` | `{degradationPreference, maxFps, audio}`；`audio` 为 false 时音频发送器停用、PCM 不进编码器 |
-| `session.events.ack` | 确认已处理的自然关闭、下载导入与登录视图事件 |
-| `session.files.authorize` | 授权原生选择器与文件库的 DC 文件操作 |
-| `session.library.describe/prepare/selectionStatus` | 文件资产描述与选择事务 |
-| `view.ensure` / `view.configure` | 稳定 viewId、URL、稳定 viewport、device、visible、occludedBottom/occlusionRevision；`requireRunning` 防止维护请求拉起 Browser；`signIn: changyan \| xinjiaoyu` 创建专用登录视图（见[学习与题库 · 登录](learning.md#登录)） |
 | `view.navigate` / `view.command` / `view.navigation.ack` | 导航与 history 命令（带 operationId/Generation/Sequence）；终态确认 |
-| `view.lifecycle` | freeze/discard/unload/restore；不确定恢复带 requireRunning、browserIncarnation、lifecycleGeneration |
+| `view.lifecycle` | freeze/discard/unload/restore；不确定恢复带 browserIncarnation、lifecycleGeneration |
 | `view.close` / `view.close.reply` | 关闭；对 beforeunload 的回复带完整身份 |
-| `view.adopt` | 收养弹窗：provisionalId + 产品分配的 viewId |
 | `view.page.reply` / `view.page.exitFullscreen` | 对话框回复、退出网页全屏（精确绑定运行实例与文档） |
-| `rtc.offer` / `rtc.ice` / `rtc.close` | 信令；`rtc.offer` 必带 `avSync`，应答回显该 peer 实际采用的值 |
-| `rtc.authorize` | connectionId、epoch、unlocked |
-| `rtc.actionResult` | 产品动作的收据回传 |
+| `view.appInfo` | 读取页面的 App 信息（安装网页为 App） |
+| `session.identity` | Browser 的 UA 与 Client Hints 元数据 |
+| `session.snapshot` | 只读诊断快照；`outputDiagnostics:true` 附输出状态 |
+| `session.logs.read` | 诊断用原始日志窗口：`{log: browser | endpoint | endpoint.1, end?, maxBytes ≤ 512 KiB}` → `{exists, size, start, end, data(base64)}`；`browser` 是节点 `logs/browser/<sessionId>.log`，`crashes`/`dump/<name>` 来自节点 `logs/crashes/<sessionId>/` |
+| `session.library.prepare/selectionStatus` | 文件选择事务 |
+| `session.storage.import/importStatus` | 会话导入写入 |
+| `rtc.offer` / `rtc.ice` / `rtc.close` / `rtc.actionResult` | 信令（`rtc.offer` 必带 `avSync`）；产品动作的收据回传 |
 | `auth.face.capabilities/begin/status/cancel` | 人脸挑战 |
-| `object.derivation{params:{id, kind}}` → `{id} \| null`；`object.render{params:{id}}` → `{documentId}` | 文档渲染结果查询与预渲染 |
-| `object.fetch{ids, sources}` / `object.delete{ids}` / `object.inventory{cursor}` | 节点级（不需要打开的 Session）：拉取副本、删除、分页列出存储的对象 |
-| `session.cold.delete` | 节点级：删除冷副本 |
-| `session.delete` | 节点级：`{sessionId}`；停止该 Session（不写 checkpoint）、从放置清单移除，并删除其目录、checkpoint 标记与索引；返回 `{stopped}` |
-| `shutdown` | 优雅关闭整个 Endpoint |
+| `object.derivation` / `object.render` / `object.fetch` / `object.delete` / `object.inventory` | 节点级：文档渲染结果、拉取副本、删除、分页列出对象 |
+| `node.logs.search` | 节点级：`{errorId}` → `{lines}`，最多 50 行，按时间从旧到新 |
+| `session.cold.delete` / `session.delete` / `shutdown` | 节点级：删除冷副本；删除一个 Session 的全部本地数据；优雅关闭 Endpoint |
 
-快照中 view 的 `actual/desired`：0 live、1 frozen、2 discarded、3 unloaded。快照的 `stopBlockers` 字段报告停止阻塞项（未确认关闭事件、未决原生选择、上传中、页面请求、下载中的计数，以及 RTC 是否连接、生命周期是否不确定）。
+观察状态中 view 的 `actual/desired`：0 live、1 frozen、2 discarded、3 unloaded；`blockers` 是停止阻塞项（未确认事件、未决原生选择、上传中、页面请求、下载中与未交接的下载导入的计数，以及 RTC 是否连接、生命周期是否不确定）。
 
 **Endpoint ↔ Endpoint**：TCP，u32le 长度帧，同一个 Noise 握手（role `peer`，buildId 必须相同）。`object.get{id, offset}` → BINARY `object.chunk{offset}`（≤1MiB 存储文件字节）… `object.end{size, sha256}`，或 `object.error{code, message, retryAfterMs?}`。
 

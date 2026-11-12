@@ -101,12 +101,13 @@ RPC 受理、导航开始、文档提交、资源加载完成是不同结果。
 
 ## 对账
 
-Control 约每 1.5 秒对每个活跃 Tenant 做一次维护（不同 Tenant 互不阻塞）：
+对账是"计算期望 → 有变化才发布 → 消费观察"（见[多节点 · 协调协议](cluster.md#协调协议)），每个 Tenant 串行、互不阻塞：
 
-1. **在线**：先下发完整站点规则和媒体策略，再 `session.ensure`，再恢复或创建需要的 WebView。只在值变化时 `view.configure`，避免反复打断输出和输入。未确认的导航不会被普通 ensure 重复执行。
-2. **恢复**：Endpoint 优先使用自己的内部导航恢复数据；没有可用数据时才用 Control 保存的有限地址信息。恢复由 Endpoint 的定时状态机分步推进，`session.ensure` 立即返回 accepted，不逐页等待导航。恢复期间 Control 保留产品 URL 与导航意图，显示 restoring，不把中间的 about:blank 写回产品状态。
-3. **离线维护**：`session.snapshot` 只观察，不启动 Browser；Browser 已退出时返回 `running:false`。离线时不补建缺失的 WebView。对仍在运行的页面做隐藏/回收时带 `requireRunning`，避免快照之后进程退出、维护请求又把 Browser 拉起来。
-4. **缺失对象**：用有限的产品信息重建，并清理 orphan。自然关闭（`view.closed` 持久事件）与崩溃丢失用不同证据处理：缺页本身不是关闭证据。
+1. **计算期望**：由持久化的 workspace 与放置、Viewer 租约与锁定、视口、质量、剪贴板、文件授权与描述需求算出整份 `session.desired`。期望 revision 与文档 hash 持久化，Control 重启后不会发出比存活 Endpoint 已见更低的 revision。
+2. **发布**：内容变化时发新 revision；重连时原样重发。没有逐方法的补发与重放，也没有"已经发过"的缓存。
+3. **消费观察**：`session.observed` 是 URL/标题/加载/历史与驻留状态、页面对话框、全屏与文件选择绑定、恢复与 Browser 重启、弹窗发现、媒体策略实际值、RTC 恢复、停止阻塞项的唯一来源。观察到达时先更新协调缓存（不进 Tenant 队列），产品投影再排队处理；等待"某个 revision 已生效"的调用（例如网站权限回复要等站点决定已应用）只依赖协调缓存。
+4. **恢复**：Endpoint 优先使用自己的内部导航恢复数据；没有可用数据时才用 Control 保存的有限地址信息。恢复由 Endpoint 分步推进，期间 Control 保留产品 URL 与导航意图，显示 restoring，不把中间的 about:blank 写回产品状态。
+5. **自然关闭与丢失**：页面自己关闭是持久的 `view.closed` 事件，Control 先在事务里删除产品标签再确认；在此之前 Endpoint 对该 view 保持关闭抑制，即使期望文档里还有它也不重建。崩溃丢失没有这个事件，缺页本身不是关闭证据。
 
 ## 页面对话框、关闭与弹窗
 
@@ -151,12 +152,12 @@ Control 保存每用户一份最新剪贴板，Browser 是本地粘贴缓存；�
 - 最新值为纯文本（≤1 MiB UTF-8）与 HTML（≤2 MiB），有单调 revision。超限保留旧值，只报告大小；图片等无文本格式记录为空。正文不进入日志、追踪、诊断或错误消息。
 - `ClipboardBridge` 观察页面、脚本与 Browser 菜单写入，递增共享映射的 `clipboard_sequence`。Endpoint 按序号取 `clipboard.read`，发 `clipboard.changed {viewId?,excludeFromHistory,text,html,…}`；Control 按当前 Session/Tenant 串行接受，更新 revision 和片段，再向已授权 Viewer 推送 `{type:clipboard,revision,text}`。
 - 写入来源由 Chromium ClipboardEndpoint 的 WebContents 映射到 view/tab/app，记录页面 URL 与可用标题；无法归属时为 browser App。Chromium `kNoDisplay / kNoLocalClipboardHistory` 由补丁 `0019` 保留，`excludeFromHistory` 阻止片段记录，最新剪贴板仍正常更新。
-- `session.open / session.ensure` 携带 `{revision,text,html}`，只在 Browser incarnation 需要时回填。在线的 `clipboard.set {text}` 与 `library.copySnippet {id}` 通过独立 Endpoint `clipboard.write` 更新缓存，不被后续 ensure 的旧 seed 覆盖。Browser 用明确作用域抑制回填上报，不使用计时器。
+- 剪贴板是 `session.desired.clipboard{revision, value}`，Endpoint 在创建任何 view 之前写入 Browser；在线的 `clipboard.set {text}` 与 `library.copySnippet {id}` 只是让期望文档带上新 revision。`clipboard.changed` 事件带 Browser 当时已应用的 `baseRevision`：等于 Control 当前 revision 才成为新值；否则说明与更新的设备写入并发，保留当前值，把页面写入的内容存为剪贴板片段，不丢失。处置在确认事件前持久化。
 - Viewer 用 `clipboard.get {}` 恢复应用缓存，返回 `{revision,text}`；本地选择操作不依赖设备同步开关。`clipboard.set` 接受设备或本地选择写入，返回 `{revision}`。`library.snippet {id}` 按 Tenant 读取全文；复制片段返回 `{revision,text}`，保留原始来源。
 - 片段只记录非空纯文本，按用户+SHA-256 去重，重复复制更新时间和来源。`library_snippets(entry_id,tenant,text,hash,origin,copied_at)` 保存正文；目录带 `kind:snippet`、字节大小和首个非空行的 ≤200 字符预览。未整理保留最新 200 条，移入分区的保留；排除 `clipboard/''` 来源停止收集，清除来源删除未整理片段，已整理的保留。
 - “与本机剪贴板同步”（`clipboardSync`）默认开启。远端新值写设备剪贴板，未聚焦时只保留最新待写值；设备粘贴事件先同步再投远端。回到前台仅在 clipboard-read 已 granted 时读取，不自动请求权限；显式远端粘贴可发起读取。本地选择粘贴只在已授权时刷新设备，其余用应用缓存。scope/revision/文本 hash 防止跨账号和回声。
 - “重置浏览器数据”要求 Session 已停止，清除最新剪贴板；历史片段仍由文件库管理。删除用户同时删除最新值与片段。
-- 集群帧按类型限制：`clipboard.changed` 4 MiB；带剪贴板的 `session.open/ensure` 20 MiB；在线 `clipboard.write` 20 MiB；其他 1 MiB。Viewer WS 普通请求仍为 1 MiB，`clipboard.set` 可容纳 1 MiB 文本最坏 JSON 转义，传输上限为 6 MiB+64 KiB。
+- 集群帧按类型限制：`clipboard.changed` 事件 4 MiB；`session.desired` 整份文档 < 4 MiB（剪贴板正文计入）；其他 1 MiB。Viewer WS 普通请求仍为 1 MiB，`clipboard.set` 可容纳 1 MiB 纯文本。
 
 
 ## 设置
