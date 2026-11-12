@@ -1,6 +1,7 @@
 /**
  * H264 mobile IME regression with a desktop Chromium renderer, CDP preedit,
- * and synthetic Android-style geometry. Requires Input.imeSetComposition.
+ * and synthetic Android-style geometry. Chrome 89 uses DOM composition events;
+ * newer Viewers use Input.imeSetComposition.
  * node tests/e2e/test-mobile-ime.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port] [Control server.mjs]
  */
 import { createServer } from 'node:http';
@@ -362,7 +363,7 @@ try {
     });
   const identity = (first, latest) =>
     latest.connected === 'connected' &&
-    latest.peerCount === 1 &&
+    latest.peerCount === first.peerCount &&
     ['video', 'stream', 'peer', 'tracks', 'channels'].every(
       (key) => JSON.stringify(first[key]) === JSON.stringify(latest[key]),
     );
@@ -438,11 +439,44 @@ try {
       await cdp.send('Input.dispatchKeyEvent', { ...key, type: 'keyUp' });
     }
   };
-  const preedit = (text) =>
-    ime229(() =>
-      cdp.send('Input.imeSetComposition', { text, selectionStart: text.length, selectionEnd: text.length }),
-    );
-  const commit = (text) => ime229(() => cdp.send('Input.insertText', { text }));
+  const domComposition = /\/89\./.test(version.product);
+  await log('composition-driver', domComposition ? 'DOM composition events' : 'CDP IME');
+  let composing = false;
+  const compose = (text, commit) =>
+    ime229(async () => {
+      if (domComposition) {
+        await page.evaluate(
+          ({ text, commit, begin }) => {
+            const editor = document.activeElement;
+            if (!editor?.matches('.remote-input')) throw Error('Composition proxy is not focused');
+            const emit = (type, data) =>
+              editor.dispatchEvent(new CompositionEvent(type, { data, bubbles: true }));
+            if (begin) emit('compositionstart', '');
+            editor.value = text;
+            editor.setSelectionRange(text.length, text.length);
+            emit(commit ? 'compositionend' : 'compositionupdate', text);
+            editor.dispatchEvent(
+              new InputEvent('input', {
+                bubbles: true,
+                data: text,
+                inputType: commit ? 'insertFromComposition' : 'insertCompositionText',
+                isComposing: !commit,
+              }),
+            );
+          },
+          { text, commit, begin: !composing },
+        );
+      } else if (commit) await cdp.send('Input.insertText', { text });
+      else
+        await cdp.send('Input.imeSetComposition', {
+          text,
+          selectionStart: text.length,
+          selectionEnd: text.length,
+        });
+      composing = !commit;
+    });
+  const preedit = (text) => compose(text, false);
+  const commit = (text) => compose(text, true);
   const from = fixtureEvents.length;
   await preedit('ni');
   await observe(
@@ -489,7 +523,7 @@ try {
   const replacementTarget = remountWire.findLast(
     (event) => event.type === 'input.editable' && event.editable > 0,
   )?.target;
-  await log('mobile-ime-remount', { feedback, remount, remountWire });
+  await log('mobile-ime-remount', { first, replacementTarget, feedback, remount, remountWire });
   await screenshot('mobile-ime-remount');
   assert(
     remount.focus &&
@@ -582,7 +616,13 @@ try {
   );
   await ready();
   await log('mobile-ime-manual-reopen', await sample());
+  const blurStart = await page.evaluate(() => keyboardQA.wire.length);
   await tap('tl');
+  await wait(
+    (start) =>
+      keyboardQA.wire.slice(start).some((event) => event.type === 'input.editable' && event.editable === 0),
+    blurStart,
+  );
   await wait(
     () => !document.activeElement?.matches('.remote-input') || document.activeElement.inputMode === 'none',
   );

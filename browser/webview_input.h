@@ -45,7 +45,6 @@ class InputController {
    public:
     explicit FocusObserver(InputController& input) : input_(input) {}
     void Attach(content::WebContents* contents) { Observe(contents); }
-    content::WebContents* contents() const { return web_contents(); }
 
    private:
     void OnFocusChangedInPage(const content::FocusedNodeDetails& details) override {

@@ -44,6 +44,10 @@ void WebViewExecution::InstallContents() {
     owner_.sign_in_->Attach(contents_.get());
   DeviceConfiguration::InstallSiteIdentity(contents_.get());
   owner_.Observe(contents_.get());
+  owner_.input_->focus_observer_.Attach(contents_.get());
+  owner_.input_->focused_document_ = {};
+  owner_.input_->focused_node_id_ = 0;
+  owner_.input_->focus_source_ = 0;
   AttachOffscreenHost();
   auto* implementation = static_cast<content::WebContentsImpl*>(contents_.get());
   if (auto* manager = implementation->GetTextInputManager())
