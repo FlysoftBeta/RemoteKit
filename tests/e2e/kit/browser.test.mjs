@@ -48,6 +48,7 @@ test('persistent and raw launches receive the seeded Local State before starting
     launchPersistentContext(path, options) {
       checkSeed(path);
       assert.equal(options.headless, true);
+      assert.equal(options.ignoreDefaultArgs, false);
       return context;
     },
   };

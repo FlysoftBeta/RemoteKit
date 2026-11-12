@@ -85,5 +85,9 @@ export async function launchTestBrowser({
     );
     browserType = chromium;
   }
-  return browserType.launchPersistentContext(profile, { headless: true, ...options });
+  return browserType.launchPersistentContext(profile, {
+    headless: true,
+    ...options,
+    ignoreDefaultArgs: false,
+  });
 }
