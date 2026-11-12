@@ -32,6 +32,8 @@ for (const browser of ['edge', 'chrome89'])
       { page, click, button, menu, type } = j;
     const stages = [];
     const step = async (name, work) => {
+      if (process.env.FILES_JOURNEY_STEPS && !process.env.FILES_JOURNEY_STEPS.split(',').includes(name))
+        return;
       if (
         process.env.FILES_PHASE === 'native' &&
         Number(name.slice(0, 2)) >= 2 &&
@@ -375,20 +377,22 @@ for (const browser of ['edge', 'chrome89'])
         );
         await j.shot('16-bank-signed-in');
         await fetch(j.provider.origin + '/fixture/expire');
-        await type(page.getByRole('textbox', { name: '搜索题目', exact: true }), 'expired-session');
+        const search = page.getByRole('textbox', { name: '搜索题目', exact: true });
+        await click(search);
+        await page.keyboard.type('expired-session', { delay: 45 });
         await j.until(
-          async () => (await j.viewer.state()).learning.accounts.xinjiaoyu.status === 'expired',
+          async () => (await j.viewer.state()).learning.accounts.xinjiaoyu.status === 'signed_out',
           'expiry reflected',
         );
         await page.waitForTimeout(2000);
-        await page.getByRole('button', { name: '登录新教育', exact: true }).waitFor({ timeout: 5000 });
+        await page.getByRole('button', { name: '开始登录', exact: true }).waitFor({ timeout: 5000 });
+        assert.equal((await j.viewer.state()).user.username, j.stack.username);
+        await page.getByRole('button', { name: '开始', exact: true }).waitFor();
       });
     } finally {
       results.push({ browser, pointer, run: j.run, stages });
-      writeFileSync(
-        `develop/tmp/e2e-files/user-journey-matrix-${process.env.FILES_PORT ?? '34200'}.json`,
-        JSON.stringify(results, null, 2),
-      );
       await j.close();
+      writeFileSync(join(j.run, 'user-journey-matrix.json'), JSON.stringify(results, null, 2));
+      if (stages.some((stage) => stage.status === 'fail')) process.exitCode = 1;
     }
   }

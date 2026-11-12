@@ -12,6 +12,7 @@ import { AuthClient, type AccountSession } from './providers/changyan/auth';
 import { ZhixueAuthClient } from './providers/changyan/zhixue-auth';
 import type { XinjiaoyuSession } from './providers/xinjiaoyu/client';
 import type { ProviderResult } from './providers/models';
+import { learningError } from './errors';
 
 export interface Sessions {
   changyan: AccountSession;
@@ -73,7 +74,7 @@ export class LearningAccounts {
   }
   session<P extends LearningProvider>(tenant: string, provider: P): Sessions[P] {
     const row = this.row(tenant, provider);
-    if (!row || row.status !== 'signed_in') throw new RemoteKitError('unauthenticated', '请先登录学习账号');
+    if (!row || row.status !== 'signed_in') throw new RemoteKitError('forbidden', '请先登录学习账号');
     return openLearningSession(this.key, tenant, provider, row.sealed);
   }
   save<P extends LearningProvider>(
@@ -110,7 +111,7 @@ export class LearningAccounts {
       let session = this.session(tenant, provider);
       const current = () => {
         if (this.generation(tenant, provider) !== generation)
-          throw new RemoteKitError('unauthenticated', '学习账号已退出');
+          throw new RemoteKitError('forbidden', '学习账号已退出');
       };
       try {
         let result: ProviderResult<T, Sessions[P]>;
@@ -138,12 +139,9 @@ export class LearningAccounts {
       } catch (error) {
         current();
         if (error instanceof RemoteKitError && error.code === 'unauthenticated') {
-          this.store.db
-            .prepare("UPDATE learning_accounts SET status='expired' WHERE tenant=? AND provider=?")
-            .run(tenant, provider);
-          this.setState(tenant, provider);
+          this.delete(tenant, provider);
         }
-        throw error;
+        throw learningError(error);
       }
     });
   }

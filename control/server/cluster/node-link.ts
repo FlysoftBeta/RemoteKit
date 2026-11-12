@@ -416,6 +416,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
           throw new Error('Invalid Session observation');
         const previous = this.observations.get(message.tenantId);
         if (previous && BigInt(previous.seq) >= BigInt(message.seq)) return;
+        if (message.lastError?.code === 'unauthenticated') message.lastError.code = 'forbidden';
         this.observations.set(message.tenantId, message as SessionObserved);
       } else if (
         typeof message.streamId !== 'string' ||
@@ -450,12 +451,13 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       return;
     }
     if (message.ok) pending.resolve(message.result);
-    else
-      pending.reject(
-        parseWireError(message.error)
-          ? message.error
-          : { code: 'outcome_unknown', message: 'Node returned an invalid error envelope' },
-      );
+    else {
+      const error = parseWireError(message.error)
+        ? message.error
+        : { code: 'outcome_unknown', message: 'Node returned an invalid error envelope' };
+      if (error.code === 'unauthenticated') error.code = 'forbidden';
+      pending.reject(error);
+    }
   }
   send(message: object) {
     const connection = this.current;

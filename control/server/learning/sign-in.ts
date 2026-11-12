@@ -7,6 +7,7 @@ import { log, reportError } from '../log';
 import { windowClosing } from '../workspace/model';
 import { closeSignInTab } from '../workspace/sign-in';
 import { LearningAccounts } from './accounts';
+import { learningError } from './errors';
 import type { CaptchaSeccode } from './providers/changyan/auth';
 import { decodeIdentity, type XinjiaoyuSession } from './providers/xinjiaoyu/client';
 import type { XinjiaoyuProvider } from './providers/xinjiaoyu/resources';
@@ -273,7 +274,7 @@ export class SignIn {
             status: 'failed',
             failureKind,
             error: wireError(
-              reportError(toRemoteKitError(error), 'learning.sign_in_failed', { tenant: flow.tenant }),
+              reportError(learningError(error), 'learning.sign_in_failed', { tenant: flow.tenant }),
             ),
           }
         : undefined,

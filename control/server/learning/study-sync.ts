@@ -237,7 +237,7 @@ export class StudySync {
     const generation = this.accounts.generation(tenant, 'changyan');
     const authorize = () => {
       if (runtime.abort.signal.aborted || this.accounts.generation(tenant, 'changyan') !== generation)
-        throw new RemoteKitError('unauthenticated', '学习账号已退出');
+        throw new RemoteKitError('forbidden', '学习账号已退出');
       this.accounts.session(tenant, 'changyan');
     };
     try {

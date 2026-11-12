@@ -150,12 +150,8 @@ export function presentFailure(value: RemoteKitError | WireError, context: Failu
     action: context.action ?? action(label, kind, context),
   });
   if (context.issue === 'lease') return user(failureText.lease, '重新加载', 'reload');
-  if (context.credential !== 'mailbox' && error.code === 'unauthenticated') {
+  if (error.code === 'unauthenticated') {
     if (context.issue === 'credentials') return user(failureText.invalidCredentials, '修改登录信息', 'edit');
-    if (context.credential === 'changyan' || context.credential === 'xinjiaoyu') {
-      const provider = context.credential === 'changyan' ? '畅言' : '新教育';
-      return user(`未能读取学习内容，${provider}登录已过期`, `登录${provider}`, 'provider-login');
-    }
     return user(failureText.signIn, '登录', 'sign-in');
   }
   if (error.code === 'locked') return user(failureText.unlock, '解锁', 'unlock');

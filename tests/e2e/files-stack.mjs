@@ -7,7 +7,8 @@ export { seedUser } from './kit/stack.mjs';
 export const until = (check, label, timeout = 90000) => wait(check, label, timeout);
 const root = resolve('.');
 export const basePort = Number(process.env.FILES_PORT ?? 34200);
-export const runPath = (name) => resolve('develop/tmp/e2e-files', `${name}-${Date.now()}`);
+export const runPath = (name) =>
+  resolve(process.env.FILES_RUN ?? join('develop/tmp/e2e-files', `${name}-${Date.now()}`));
 export function stopTree(child) {
   if (!child?.pid || child.exitCode !== null) return;
   try {

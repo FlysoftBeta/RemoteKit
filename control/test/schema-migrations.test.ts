@@ -173,7 +173,7 @@ for (const version of [12, 13, 14, 15, 16, 18, 19]) {
           status: 'expired',
           displayName: 'Xinjiaoyu Student',
         });
-        assert.throws(() => accounts.session('tenant', 'xinjiaoyu'), { code: 'unauthenticated' });
+        assert.throws(() => accounts.session('tenant', 'xinjiaoyu'), { code: 'forbidden' });
       } else {
         assert.equal(xinjiaoyu.sealed, originalSession);
         assert.equal(xinjiaoyu.status, 'signed_in');

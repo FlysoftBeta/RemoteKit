@@ -229,6 +229,30 @@ test('balanced placement publishes desired once per revision and fences reconnec
   }
 });
 
+test('Endpoint peer authentication failures cannot invalidate the Viewer Control session', async () => {
+  const h = await harness();
+  try {
+    const endpoint = await h.connect();
+    endpoint.handle = async () => {
+      throw { code: 'unauthenticated', message: 'Peer identity not admitted' };
+    };
+    await assert.rejects(h.registry.get('alpha')!.request('object.fetch', 'one'), {
+      code: 'forbidden',
+      message: 'Peer identity not admitted',
+    });
+    endpoint.desiredHandler = (_document, observation) => {
+      observation.converged = false;
+      observation.lastError = { code: 'unauthenticated', message: 'Peer identity not admitted' };
+    };
+    await h.gateway.synchronize('one');
+    const observation = await h.gateway.waitObserved('one', (value) => !!value.lastError);
+    assert.equal(observation.lastError?.code, 'forbidden');
+    assert.equal(observation.lastError?.message, 'Peer identity not admitted');
+  } finally {
+    await h.close();
+  }
+});
+
 test('stop and reopen on the same node and epoch accepts the new coordinator observation', async () => {
   const h = await harness();
   try {

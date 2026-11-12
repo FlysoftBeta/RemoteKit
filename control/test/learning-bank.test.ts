@@ -6,7 +6,49 @@ import { BankService } from '../server/learning/bank-service';
 import { MediaProxy } from '../server/learning/media-proxy';
 import { XinjiaoyuProvider } from '../server/learning/providers/xinjiaoyu/resources';
 import { createApplication } from '../server/application';
-import { registerUser, testGateway } from './server-fixture';
+import { registerUser, requestViewer, testGateway } from './server-fixture';
+import { RemoteKitError } from '../shared/errors';
+
+test('provider expiry signs out learning while retaining the Viewer session and workspace', async (t) => {
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  const user = await registerUser(store, 'learning-expiry', 'learning-password123');
+  const app = createApplication(store, testGateway({ request: async () => ({}) }));
+  t.mock.method(XinjiaoyuProvider.prototype, 'subjects', async () => {
+    throw new RemoteKitError('unauthenticated', 'provider expired');
+  });
+  try {
+    await app.viewers.attachViewer(
+      user.tenantId,
+      'lease',
+      () => {},
+      { identity: 'control-session', valid: () => true },
+      true,
+    );
+    app.learning.accounts.save(user.tenantId, 'xinjiaoyu', {
+      token: 'fixture-token',
+      accessToken: 'fixture-access',
+      clientSessionId: 'fixture-client',
+      device: 'pc',
+      deviceType: 'Chrome',
+      safeCode: 'fixture-safe',
+    });
+    await assert.rejects(requestViewer(app, user.tenantId, 'lease', 'bank.subjects', {}), {
+      code: 'forbidden',
+      message: '学习账号登录已失效，请重新登录',
+    });
+    assert.equal(app.tenants.get(user.tenantId).viewer?.id, 'lease');
+    const state = app.viewers.productState(user.tenantId);
+    assert.equal(state.user.username, 'learning-expiry');
+    assert.equal(state.learning.accounts.xinjiaoyu.status, 'signed_out');
+    assert.deepEqual(await requestViewer(app, user.tenantId, 'lease', 'clipboard.get', {}), {
+      revision: '0',
+      text: '',
+    });
+  } finally {
+    await app.close();
+    store.db.close();
+  }
+});
 
 test('bank maps every filter, subtype, difficulty, catalog, rich field and media through the provider transport', async () => {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });

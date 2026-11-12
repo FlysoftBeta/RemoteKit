@@ -188,8 +188,8 @@ test('POST transport loss is unknown and never retried, reads honor HTTP handlin
 });
 
 test('mail authentication is permanent while typed transport evidence retains delivery certainty', () => {
-  assert.equal(mailError({ code: 'EAUTH' }, true).code, 'unauthenticated');
-  assert.equal(mailError({ authenticationFailed: true }, false).code, 'unauthenticated');
+  assert.equal(mailError({ code: 'EAUTH' }, true).code, 'forbidden');
+  assert.equal(mailError({ authenticationFailed: true }, false).code, 'forbidden');
   assert.equal(mailError({ responseCode: 550 }, true).code, 'forbidden');
   assert.equal(mailError({ code: 'ECONNRESET' }, false).code, 'unavailable');
   assert.equal(mailError({ code: 'ECONNRESET' }, true).code, 'outcome_unknown');
