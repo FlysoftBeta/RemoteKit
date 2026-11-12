@@ -6,6 +6,7 @@ import type { ProductState } from '../../shared/product';
 import type { OperationsSnapshot } from '../control/operations-store';
 import type { WorkspaceSnapshot } from '../control/workspace-session';
 import { KeyboardViewport } from '../editing/keyboard-viewport';
+import { ShellKeyboard } from '../editing/shell-keyboard';
 import { NoticeCenter, SurfaceState, failureError, notices, presentFailure } from '../failures';
 import { FileChooserDialog } from '../files/file-chooser-dialog';
 import type { ViewerSession } from '../viewer-session';
@@ -231,6 +232,10 @@ export function Stage({
   children: React.ReactNode;
 }) {
   const rtcPhase = useViewerSessionSelector(media, (snapshot) => snapshot.rtc.phase);
+  useLayoutEffect(() => {
+    const keyboard = new ShellKeyboard(document, floatingActions);
+    return () => keyboard.dispose();
+  }, [floatingActions]);
   const { shell, width: contentWidth, call, action } = stage;
   const { fullscreen, productReady, diagnosticState, diagnostics } = controls;
   const { status } = workspaceState;

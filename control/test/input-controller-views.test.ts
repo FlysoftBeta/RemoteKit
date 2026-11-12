@@ -276,17 +276,17 @@ test('editing controller defers edits through presentation loss and expires them
   view.toggleKeyboard();
   assert.deepEqual(
     sent.map((event) => event.type),
-    ['ime_set', 'ime_commit', 'editing.dismiss'],
+    ['ime_set', 'ime_commit'],
   );
-  assert.equal(sent[2].target, '31');
-  assert.equal(sent[2].revision, '1');
+  assert.equal(view.getSnapshot().observedOwner?.endsWith('/31'), true);
+  assert.equal(view.keyboardShown, false);
   sent.length = 0;
   view.toggleKeyboard();
   view.configure(true, false, { ...resize, keyboardDismissals: 1 });
-  assert.deepEqual(
-    sent.map((event) => event.type),
-    ['editing.dismiss'],
-  );
+  assert.deepEqual(sent, []);
+  assert.equal(view.getSnapshot().observedOwner?.endsWith('/31'), true);
+  view.toggleKeyboard();
+  assert.equal(view.keyboardShown, true);
   sent.length = 0;
   view.release();
   assert.deepEqual(sent, []);
