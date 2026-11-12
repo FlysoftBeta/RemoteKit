@@ -1,3 +1,4 @@
+import { installDesiredSource } from './coordination-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -33,6 +34,7 @@ async function harness(overrides: Partial<RegistryOptions> = {}) {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const placement = new Placement(store, registry);
   const gateway = new EndpointGateway(registry, placement);
+  installDesiredSource(gateway);
   const server = createServer();
   server.on('upgrade', (req, socket, head) => {
     if (!registry.handleUpgrade(req, socket, head)) socket.destroy();
@@ -180,78 +182,48 @@ test('node request cap, timeout, offline certainty and ping/pong', async () => {
   }
 });
 
-test('sticky balanced placement seals keys, opens per epoch, retries not_found once and filters node events', async () => {
+test('balanced placement publishes desired once per revision and fences reconnects', async () => {
   const h = await harness();
   try {
-    await assert.rejects(h.gateway.snapshot('one'), { code: 'unavailable' });
-    const alpha = await h.connect();
-    const beta = await h.connect({ nodeId: 'beta' });
-    await Promise.all([h.gateway.snapshot('one'), h.gateway.snapshot('one')]);
-    assert.deepEqual(
-      alpha.requests.map((request) => request.method),
-      ['session.open', 'session.snapshot', 'session.snapshot'],
-    );
-    const first = h.placement.peek('one')!;
-    assert.match(first.sessionId, /^[a-f0-9]{32}$/);
-    const key = alpha.requests[0].profileKey;
+    const alpha = await h.connect(),
+      beta = await h.connect({ nodeId: 'beta' });
+    await h.gateway.synchronize('one');
+    await h.gateway.synchronize('one');
+    const documents = alpha.requests.filter((request) => request.method === 'session.desired');
+    assert.equal(documents.length, 1);
+    const first = h.placement.peek('one')!,
+      key = documents[0].profileKey;
     assert.equal(Buffer.from(key, 'base64').length, 32);
     assert.equal(first.keyCiphertext.includes(key), false);
-    assert.throws(() => h.store.atRestKey.open('other-tenant', first.keyCiphertext));
-    for (const tenant of ['two', 'three', 'four']) await h.gateway.snapshot(tenant);
+    assert.throws(() => h.store.atRestKey.open('other', first.keyCiphertext));
+    for (const tenant of ['two', 'three', 'four']) await h.gateway.synchronize(tenant);
     assert.deepEqual(
       ['one', 'two', 'three', 'four'].map((tenant) => h.placement.peek(tenant)!.nodeId),
       ['alpha', 'beta', 'alpha', 'beta'],
     );
-    await assert.rejects(h.gateway.snapshot('five'), { code: 'unavailable' });
-    let missing = true;
-    alpha.handler = (request) => {
-      if (request.method === 'session.snapshot' && missing) {
-        missing = false;
-        throw { code: 'not_found', message: 'View not found' };
-      }
-      return {};
-    };
-    const before = alpha.requests.length;
-    await assert.rejects(h.gateway.snapshot('one'), { code: 'not_found' });
-    assert.deepEqual(
-      alpha.requests.slice(before).map((request) => request.method),
-      ['session.snapshot'],
-    );
-    alpha.handler = (request) => {
-      if (request.method !== 'session.open') throw { code: 'not_found', message: 'View not found' };
-      return {};
-    };
-    await assert.rejects(h.gateway.snapshot('one'), { code: 'not_found' });
+    await assert.rejects(h.gateway.synchronize('five'), { code: 'unavailable' });
     const offline = once(h.registry.get('alpha')!, 'offline');
     alpha.close();
     await offline;
     assert.equal(h.gateway.isReady('one'), false);
     assert.equal(h.gateway.isReady('two'), true);
-    await assert.rejects(h.gateway.snapshot('one'), { code: 'unavailable' });
-    assert.equal(h.placement.peek('one')!.nodeId, 'alpha');
-    const reconnected = await h.connect({ incarnation: alpha.incarnation });
-    await h.gateway.snapshot('one');
-    assert.deepEqual(
-      reconnected.requests.map((request) => request.method),
-      ['session.open', 'session.snapshot'],
+    const next = await h.connect({ incarnation: alpha.incarnation });
+    await h.registry.get('alpha')!.request('fixture.barrier', '');
+    await h.gateway.synchronize('one');
+    const published = next.requests.find((request) => request.method === 'session.desired')!;
+    assert.equal(published.sessionId, first.sessionId);
+    assert.equal(published.profileKey, key);
+    assert.ok(
+      next.requests.findIndex((request) => request.method === 'node.desired') <
+        next.requests.indexOf(published),
     );
-    assert.equal(reconnected.requests[0].profileKey, key);
-    assert.equal(reconnected.requests[0].sessionId, first.sessionId);
-    let signals = 0,
-      actions = 0;
-    const unsubSignal = h.gateway.onSignal(() => signals++);
-    const unsubAction = h.gateway.onClientAction(() => actions++);
-    const barrier = once(beta, 'frame');
-    for (const tenantId of ['one', 'two']) {
-      beta.send({ event: 'rtc.signal', tenantId, connectionId: 'x', signal: {} });
-      beta.send({ event: 'client.action', tenantId, connectionId: 'x' });
-    }
-    beta.send({ type: 'node.ping' });
-    await barrier;
+    let signals = 0;
+    const unsubscribe = h.gateway.onSignal(() => signals++);
+    beta.send({ event: 'rtc.signal', tenantId: 'one', connectionId: 'x', signal: {} });
+    beta.send({ event: 'rtc.signal', tenantId: 'two', connectionId: 'x', signal: {} });
+    await beta.barrier();
     assert.equal(signals, 1);
-    assert.equal(actions, 1);
-    unsubSignal();
-    unsubAction();
+    unsubscribe();
   } finally {
     await h.close();
   }
@@ -273,40 +245,42 @@ test('clipboard management events cross the encrypted link and reject stale node
     const alpha = await h.connect();
     const beta = await h.connect({ nodeId: 'beta' });
     h.store.clipboards.record('one', { text: 'seed', html: '' });
-    await h.gateway.ensureSession('one');
-    for (const method of ['session.open', 'session.ensure'])
-      assert.deepEqual(alpha.requests.find((request) => request.method === method)?.clipboard, {
-        revision: '1',
-        text: 'seed',
-        html: '',
-      });
-    const sessionId = h.placement.peek('one')!.sessionId;
-    const event = {
-      type: 'clipboard.changed',
-      tenantId: 'one',
-      sessionId,
+    await h.gateway.synchronize('one');
+    assert.deepEqual(alpha.requests.find((request) => request.method === 'session.desired')?.clipboard, {
+      revision: '1',
+      value: { text: 'seed', html: '' },
+    });
+    alpha.event('one', '1', 'clipboard.changed', {
       browserSequence: '1',
+      baseRevision: '1',
       text: 'first',
       html: '',
-    };
-    alpha.send(event);
-    alpha.send({ ...event, browserSequence: '2', text: 'last' });
-    alpha.send({ ...event, sessionId: 'stale', text: 'wrong session' });
-    beta.send({ ...event, text: 'wrong node' });
-    await Promise.all([alpha.barrier(), beta.barrier()]);
+      excludeFromHistory: false,
+    });
+    await alpha.barrier();
+    await new Promise((resolve) => setImmediate(resolve));
+    await control.tenants.drain();
+    alpha.event('one', '2', 'clipboard.changed', {
+      browserSequence: '2',
+      baseRevision: '2',
+      text: 'last',
+      html: '',
+      excludeFromHistory: false,
+    });
+    await alpha.barrier();
+    await new Promise((resolve) => setImmediate(resolve));
     await control.tenants.drain();
     assert.deepEqual(h.store.clipboards.latest('one'), { revision: '3', text: 'last', html: '' });
     const before = alpha.requests.length;
     const warn = test.mock.method(log, 'warn', () => {});
     try {
-      alpha.send({
-        type: 'clipboard.changed',
-        tenantId: 'one',
-        sessionId,
+      alpha.event('one', '3', 'clipboard.changed', {
         browserSequence: '3',
+        baseRevision: '3',
         oversize: true,
         textBytes: 5 * 1024 * 1024,
         htmlBytes: 0,
+        excludeFromHistory: false,
       });
       await alpha.barrier();
       await control.tenants.drain();
@@ -318,7 +292,7 @@ test('clipboard management events cross the encrypted link and reject stale node
     } finally {
       warn.mock.restore();
     }
-    assert.equal(alpha.requests.length, before);
+    assert.ok(alpha.requests.slice(before).every((request) => request.method === 'session.events.ack'));
   } finally {
     await control.close();
     await h.close();
@@ -376,8 +350,10 @@ test('node offline and process changes affect only placed tenants while a same-p
   try {
     await h.connect();
     await h.connect({ nodeId: 'beta' });
-    await h.gateway.snapshot('one');
-    await h.gateway.snapshot('two');
+    for (const tenant of ['one', 'two']) {
+      h.store.workspaces.writeWorkspace(emptyWorkspace(tenant));
+      await h.gateway.synchronize(tenant);
+    }
     const one = control.tenants.get('one');
     const two = control.tenants.get('two');
     for (const runtime of [one, two]) {
@@ -430,16 +406,11 @@ test('browser status reasons map once at the Endpoint boundary and keep uncertai
       ['browser_crashed', '浏览器异常退出，正在恢复…'],
       ['browser_restarting', '浏览器正在恢复，请稍候…'],
       ['output_failed', '浏览器画面输出失败，请稍后重试'],
-    ]) {
-      node.handler = (request) => {
-        if (request.method === 'session.open') return {};
-        throw { code: 'unavailable', reason, message: detail };
-      };
-      await assert.rejects(h.gateway.ensureSession('one'), {
-        code: 'unavailable',
-        message,
-        detail,
-      });
+    ] as const) {
+      await h.gateway.synchronize('one');
+      node.observe('one', { lastError: { code: 'unavailable', reason, message: detail } });
+      await node.barrier();
+      await assert.rejects(h.gateway.snapshot('one'), { code: 'unavailable', message, detail });
       const runtime = control.tenants.get('one');
       runtime.reconciliation.error = undefined;
       runtime.started = true;
@@ -449,16 +420,6 @@ test('browser status reasons map once at the Endpoint boundary and keep uncertai
       assert.equal(control.viewers.productState('one').endpointError?.message, message);
       assert.equal(control.viewers.productState('one').endpointError?.code, 'unavailable');
     }
-    node.handler = () => ({
-      running: false,
-      views: [],
-      status: { code: 'unavailable', reason: 'browser_crashed', message: detail },
-    });
-    await assert.rejects(h.gateway.snapshot('one'), {
-      code: 'unavailable',
-      message: '浏览器异常退出，正在恢复…',
-      detail,
-    });
     node.handler = () => {
       throw { code: 'outcome_unknown', reason: 'browser_restarting', message: detail };
     };
@@ -469,6 +430,29 @@ test('browser status reasons map once at the Endpoint boundary and keep uncertai
     });
   } finally {
     await control.close();
+    await h.close();
+  }
+});
+
+test('fresh lifecycle decisions get new opIds while generation-bound retries retain identity', async () => {
+  const h = await harness();
+  try {
+    const node = await h.connect();
+    await h.gateway.synchronize('one');
+    for (let index = 0; index < 2; index++)
+      await h.gateway.lifecycle('one', { viewId: '1', action: 'freeze' });
+    const fresh = node.requests.filter((request) => request.method === 'view.lifecycle');
+    assert.notEqual(fresh[0].opId, fresh[1].opId);
+    for (let index = 0; index < 2; index++)
+      await h.gateway.lifecycle('one', {
+        viewId: '1',
+        action: 'unload',
+        browserIncarnation: 'browser-1',
+        lifecycleGeneration: '4',
+      });
+    const guarded = node.requests.filter((request) => request.method === 'view.lifecycle').slice(-2);
+    assert.equal(guarded[0].opId, guarded[1].opId);
+  } finally {
     await h.close();
   }
 });

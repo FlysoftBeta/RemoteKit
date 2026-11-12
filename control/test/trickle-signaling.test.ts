@@ -19,11 +19,11 @@ class SignalEndpoint implements EndpointLink {
       this.listener = undefined;
     };
   }
+  observe() {
+    return { running: true, views: [], browserPid: 1 };
+  }
   async request(method: string, tenant: string, args: any = {}) {
     this.calls.push({ method, tenant, args });
-    if (method === 'session.snapshot') return { running: true, views: [], browserPid: 1 };
-    if (method === 'session.ensure') return { running: true, browserPid: 1 };
-    if (method === 'rtc.authorize') return { applied: true, epoch: args.epoch };
     if (method === 'rtc.offer')
       return { accepted: true, avSync: args.avSync, pending: true, connectionId: args.connectionId };
     return { accepted: true, applied: true, closed: true };

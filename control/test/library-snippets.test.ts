@@ -43,7 +43,7 @@ test('snippets keep text in Control, deduplicate per tenant and refresh origin a
     assert.equal(entry.assetId, undefined);
     assert.equal(entry.kind === 'snippet' && entry.preview, 'hello world');
     assert.equal(JSON.stringify(first).includes('full text'), false);
-    assert.deepEqual(store.library.snippet('one', entry.id), { text });
+    assert.deepEqual(store.library.snippet('one', entry.id), { text, html: '' });
     store.library.recordSnippet('one', 'newer', page, 11);
     store.library.change('one', 'organize', 'organize', (snapshot) => {
       snapshot.partitions.push({ id: 'partition', name: 'Saved' });
@@ -81,7 +81,7 @@ test('retention keeps newest 200 unorganized snippets and all organized snippets
     assert.equal(snapshot.entries.length, 201);
     assert(snapshot.entries.some((entry) => entry.id === first.id));
     assert.throws(() => store.library.snippet('tenant', removed), { code: 'not_found' });
-    assert.deepEqual(store.library.snippet('tenant', first.id), { text: 'organized' });
+    assert.deepEqual(store.library.snippet('tenant', first.id), { text: 'organized', html: '' });
     store.library.deleteTenant('tenant');
     assert.equal(
       (store.db.prepare('SELECT count(*) AS count FROM library_snippets').get() as { count: bigint }).count,
@@ -107,7 +107,7 @@ test('snippet fetch, exclusion, source purge and file-selection barriers use lib
     await library.recordSnippet('tenant', 'first', page, 1);
     await library.recordSnippet('tenant', 'second', page, 2);
     const [second, first] = store.library.snapshot('tenant').entries;
-    assert.deepEqual(await call('library.snippet', { id: first.id }), { text: 'first' });
+    assert.deepEqual(await call('library.snippet', { id: first.id }), { text: 'first', html: '' });
     await call('library.partition', { operationId: 'partition', name: 'Saved' });
     const partitionId = store.library.snapshot('tenant').partitions[0].id;
     await call('library.move', { operationId: 'move', ids: [first.id], partitionId });
@@ -130,7 +130,7 @@ test('snippet fetch, exclusion, source purge and file-selection barriers use lib
     assert.throws(() => store.library.snippet('tenant', second.id), { code: 'not_found' });
     assert.equal(store.library.snapshot('tenant').entries.length, 1);
     assert.equal(store.library.snapshot('tenant').entries[0].source, null);
-    assert.deepEqual(await call('library.snippet', { id: first.id }), { text: 'first' });
+    assert.deepEqual(await call('library.snippet', { id: first.id }), { text: 'first', html: '' });
     await call('library.delete', { operationId: 'delete', ids: [first.id] });
     await assert.rejects(call('library.snippet', { id: first.id }), { code: 'not_found' });
   } finally {

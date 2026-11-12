@@ -243,6 +243,7 @@ test('a NodeLink write deadline closes the unwritten queue and encoding defects 
   t.after(() => registry.stop());
   const carrier = new QueuedCarrier();
   const link = registry.get('local')!;
+  link.coordinate = async () => {};
   link.attach(
     {
       carrier,
@@ -259,6 +260,7 @@ test('a NodeLink write deadline closes the unwritten queue and encoding defects 
   await assert.rejects(link.request('fixture', 'tenant', cyclic), { code: 'internal' });
   assert.equal(carrier.sends, 0);
   const pending = assert.rejects(link.request('fixture', 'tenant', {}, 10), { code: 'unavailable' });
+  await new Promise((resolve) => setImmediate(resolve));
   t.mock.timers.tick(10);
   await pending;
   assert.equal(carrier.closed, true);

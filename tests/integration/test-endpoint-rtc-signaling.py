@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 import uuid
-from cluster_bridge import endpoint_command
+from cluster_bridge import endpoint_command, SessionDriver
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,53 +37,28 @@ def main():
     with (run / 'stderr.log').open('wb') as log:
         child = subprocess.Popen(endpoint_command(args.endpoint, args.browser, run / 'state'), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
 
-        def read():
-            for line in child.stdout:
-                try:
-                    messages.put(json.loads(line))
-                except ValueError:
-                    messages.put({'invalidJson': True})
-
-        threading.Thread(target=read, daemon=True).start()
-
-        def send(request_id, method, **params):
-            child.stdin.write((json.dumps({'id': request_id, 'method': method, 'tenantId': tenant, **params}) + '\n').encode())
-            child.stdin.flush()
-
+        driver=SessionDriver(child,run/'state',tenant)
         try:
-            send('ensure', 'session.ensure')
-            ensured = messages.get(timeout=20)
-            assert ensured.get('id') == 'ensure' and ensured.get('ok'), ensured
-            internal_id = ensured['result']['sessionId']
-            assert tenant != internal_id, 'test must distinguish Tenant UUID from internal Session ID'
-            send('offer', 'rtc.offer', connectionId=connection, sdp=sdp, trickle=True)
-            accepted = messages.get(timeout=5)
-            assert accepted.get('id') == 'offer' and accepted.get('result', {}).get('pending') is True, accepted
-            send('parallel', 'session.snapshot')
-            answer_seen = complete_seen = parallel_seen = False
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline and not (answer_seen and complete_seen and parallel_seen):
-                message = messages.get(timeout=max(.01, deadline - time.monotonic()))
-                if message.get('event') == 'rtc.signal':
-                    assert message.get('tenantId') == tenant, {'tenantUuid': tenant, 'internalSessionId': internal_id, 'actual': message.get('tenantId')}
-                    assert message.get('connectionId') == connection, message
-                    signal = message['signal']
-                    assert signal['type'] != 'error', signal
-                    if signal['type'] == 'answer':
-                        assert signal.get('sdp', '').startswith('v=0')
-                        answer_seen = True
-                    complete_seen |= signal['type'] == 'complete'
-                    evidence.append({'event': message['event'], 'tenantId': message['tenantId'], 'connectionId': connection, 'signalType': signal['type']})
-                elif message.get('id') == 'parallel':
-                    assert message.get('ok'), message
-                    parallel_seen = True
-                else:
-                    raise AssertionError(message)
-            assert answer_seen and complete_seen and parallel_seen
-            send('close', 'rtc.close', connectionId=connection)
-            send('shutdown', 'shutdown')
-            child.wait(timeout=15)
-            assert child.returncode == 0
+            driver.publish(run='running')
+            observed=driver.wait(lambda value:value['browser']=='running')
+            internal_id=observed['sessionId']
+            assert tenant!=internal_id
+            accepted=driver.rpc('rtc.offer',connectionId=connection,leaseId='probe',sdp=sdp,trickle=True,avSync=False)
+            assert accepted['pending'] is True,accepted
+            # Observations continue while candidate gathering is in progress.
+            assert driver.observe()['browser']=='running'
+            with driver.condition:
+                assert driver.condition.wait_for(lambda:any(value['signal']['type']=='complete' for value in driver.signals),15),driver.signals
+            signals=list(driver.signals)
+            assert any(value['signal']['type']=='answer' and value['signal']['sdp'].startswith('v=0') for value in signals),signals
+            for message in signals:
+                assert message['tenantId']==tenant and message['connectionId']==connection,message
+                assert message['signal']['type']!='error',message
+                evidence.append(dict(event=message['event'],tenantId=tenant,connectionId=connection,signalType=message['signal']['type']))
+            driver.rpc('rtc.close',connectionId=connection)
+            driver.rpc('shutdown')
+            child.wait(timeout=20)
+            assert child.returncode==0
         finally:
             if child.poll() is None:
                 child.terminate()

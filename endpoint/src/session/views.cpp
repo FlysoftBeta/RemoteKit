@@ -427,7 +427,8 @@ Result<Json> ViewController::Snapshot(bool output_diagnostics) {
         auto requests = std::move(page_requests_result).value();
         if (view.value("close_state", std::string()) == "closing")
           AddCloseRequest(item, requests);
-        item["pageRequests"] = requests.value("requests", requests);
+        item["pageRequests"] = {{"pending", requests.at("pending")},
+                                {"events", requests.at("events")}};
         {
           std::lock_guard lock(chooser_mutex);
           chooser_requests[view_id] = {{"instance", view.at("instance")},
@@ -511,14 +512,7 @@ Result<std::vector<std::string>> ViewController::FileChooserAccept(
 }
 
 void ViewController::AddCloseRequest(Json& output, const Json& requests) {
-  // page.requests wraps its snapshot in "requests". Handle its documented
-  // pending list without relying on JSON field order.
-  const Json* data = &requests;
-  if (requests.contains("requests"))
-    data = &requests["requests"];
-  if (!data->contains("pending"))
-    return;
-  for (auto& pending : (*data)["pending"]) {
+  for (auto& pending : requests.at("pending")) {
     if (pending.value("kind", std::string()) == "beforeunload" ||
         pending.value("beforeunload", false)) {
       output["pending_close"] = {{"requestId", pending.at("request")}};

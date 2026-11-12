@@ -1,3 +1,4 @@
+import { applyDesiredViews } from './coordination-fixture';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ControlDatabase } from '../server/persistence/database';
@@ -12,11 +13,14 @@ test('sign-in tabs pass purpose to Endpoint, skip usage, previews, popups and au
   const calls: { method: string; args: any }[] = [];
   const views: any[] = [];
   const endpoint = testGateway({
+    observe: () => ({ running: true, browserIncarnation: 'browser', views }),
     request: async (method, _tenant, args) => {
       calls.push({ method, args });
-      if (method === 'session.snapshot') return { running: true, browserIncarnation: 'browser', views };
-      if (method === 'view.ensure')
-        views.push({ ...args, instance: '1', document: '1', actual: 0, canDiscard: true });
+      if (method === 'session.desired') {
+        const current = new Map(views.map((view) => [view.viewId, view]));
+        applyDesiredViews(current, args as never);
+        views.splice(0, views.length, ...current.values());
+      }
       return { accepted: true, applied: true, closed: true };
     },
   });
@@ -42,7 +46,13 @@ test('sign-in tabs pass purpose to Endpoint, skip usage, previews, popups and au
     const tab = state.tabs[0];
     assert.equal(tab.signIn, 'xinjiaoyu');
     await app.tenants.serial(user.tenantId, () => app.reconciler.reconcileProduct(user.tenantId));
-    assert.equal(calls.find((call) => call.method === 'view.ensure')?.args.signIn, 'xinjiaoyu');
+    assert.equal(
+      calls
+        .filter((call) => call.method === 'session.desired')
+        .flatMap((call) => call.args.views)
+        .find((view) => view.signIn)?.signIn,
+      'xinjiaoyu',
+    );
     assert.equal(app.viewers.productState(user.tenantId).learning.accounts.xinjiaoyu.status, 'signing_in');
     app.workspace.recordPage(state, tab, { instance: '1', document: '1' }, 'browser');
     assert.equal(

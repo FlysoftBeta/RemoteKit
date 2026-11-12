@@ -65,12 +65,14 @@ export class LibraryRepository {
     copiedAt: number,
     nativeConflict?: { html: string },
   ): LibrarySnapshot | undefined {
-    if (!text || Buffer.byteLength(text, 'utf8') > clipboardLimits.text) return;
+    if ((!text && !nativeConflict?.html) || Buffer.byteLength(text, 'utf8') > clipboardLimits.text) return;
     return transaction(this.db, () => {
       const snapshot = this.snapshot(tenant);
       const source = { app: 'clipboard', channel: '' };
       if (!nativeConflict && sourceExcluded(snapshot, source)) return;
-      const hash = createHash('sha256').update(text).digest('hex');
+      const hash = createHash('sha256')
+        .update(nativeConflict ? JSON.stringify([text, nativeConflict.html]) : text)
+        .digest('hex');
       const existing = this.db
         .prepare('SELECT entry_id FROM library_snippets WHERE tenant=? AND hash=?')
         .get(tenant, hash) as { entry_id: string } | undefined;

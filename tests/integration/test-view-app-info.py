@@ -16,7 +16,7 @@ import time
 import uuid
 import zlib
 
-from cluster_bridge import endpoint_command
+from cluster_bridge import endpoint_command, SessionDriver
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -157,27 +157,17 @@ def main():
             endpoint_command(args.endpoint, args.browser, run / 'state'),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
             creationflags=subprocess.CREATE_NO_WINDOW)
-        replies = queue.Queue()
+        driver = SessionDriver(child,run / 'state','app-info')
 
-        def read_replies():
-            for line in child.stdout:
-                replies.put(json.loads(line))
-
-        threading.Thread(target=read_replies, daemon=True).start()
-
-        def call(method, error=None, **fields):
-            request = dict(id=str(len(transcript) + 1), method=method,
-                           tenantId='app-info', **fields)
-            child.stdin.write((json.dumps(request) + '\n').encode())
-            child.stdin.flush()
-            reply = replies.get(timeout=30)
-            transcript.append(dict(request=request, response=reply))
-            assert reply.get('id') == request['id'], reply
+        def call(method,error=None,**fields):
+            if method == 'session.snapshot':
+                value=driver.observe()
+                return dict(value,running=value['browser'] == 'running')
+            result=driver.rpc(method,ok=error is None,**fields)
             if error:
-                assert not reply['ok'] and reply['error']['code'] == error, reply
-                return reply
-            assert reply['ok'], reply
-            return reply['result']
+                assert result['error']['code']==error,result
+                return result
+            return result
 
         def view(view_id):
             return next(item for item in call('session.snapshot')['views'] if item['viewId'] == view_id)
@@ -193,18 +183,16 @@ def main():
             nonlocal next_view
             next_view += 1
             view_id = str(next_view)
-            call('view.ensure', viewId=view_id, url=origin + '/' + key,
-                 width=320, height=240, visible=False,
-                 device=dict(width=320, height=240, deviceScaleFactor=1))
+            driver.view(viewId=view_id,url=origin+'/'+key,width=320,height=240)
             wait_for(lambda: view(view_id),
                      lambda item: item.get('title') == 'App info ' + key and not item.get('loading'),
                      key)
             return view_id
 
         try:
-            call('view.appInfo', viewId='999', error='not_found')
-            assert not call('session.snapshot')['running']
-            call('session.ensure')
+            driver.publish(run='running')
+            driver.wait(lambda value:value['browser']=='running')
+            call('view.appInfo',viewId='999',error='not_found')
             main_view = create('manifest')
             info = call('view.appInfo', viewId=main_view)
             assert set(info) == {'title', 'url', 'manifest', 'icon'}, info
@@ -237,32 +225,31 @@ def main():
             slow_release.set()
             for action, expected in (('freeze', 1), ('discard', 2)):
                 call('view.lifecycle', viewId=main_view, action=action)
-                frozen = ready(main_view)
+                frozen = wait_for(lambda:view(main_view),lambda item:item['actual']==expected and not item.get('pending'),'lifecycle state')
                 assert frozen['actual'] == expected, frozen
                 call('view.appInfo', viewId=main_view, error='unavailable')
                 call('view.lifecycle', viewId=main_view, action='restore')
-                assert ready(main_view)['actual'] == 0
+                assert wait_for(lambda:view(main_view),lambda item:item['actual']==0 and not item.get('pending'),'restored')['actual']==0
                 assert call('view.appInfo', viewId=main_view)['title'] == 'App info manifest'
             recovery_view = create('freeze-timeout')
             call('view.lifecycle', viewId=recovery_view, action='freeze')
-            uncertain = ready(recovery_view)
+            uncertain = wait_for(lambda:view(recovery_view),lambda item:item.get('lifecycle_uncertain'),'uncertain freeze',timeout=25)
             assert uncertain['lifecycle_uncertain'], uncertain
             call('view.appInfo', viewId=recovery_view, error='unavailable')
             snapshot = call('session.snapshot')
             call('view.lifecycle', viewId=recovery_view, action='unload', requireRunning=True,
                  browserIncarnation=snapshot['browserIncarnation'],
                  lifecycleGeneration=uncertain['lifecycle_generation'])
-            assert ready(recovery_view)['actual'] == 3
+            assert wait_for(lambda:view(recovery_view),lambda item:item['actual']==3 and not item.get('pending'),'unloaded')['actual']==3
             call('view.appInfo', viewId=recovery_view, error='unavailable')
             call('view.lifecycle', viewId=recovery_view, action='restore')
-            assert ready(recovery_view)['actual'] == 0
-            snapshot = call('session.snapshot')
-            os.kill(snapshot['browserPid'], 9)
-            wait_for(lambda: call('session.snapshot'), lambda item: not item['running'], 'Browser exit')
-            call('view.appInfo', viewId=main_view, error='unavailable')
-            assert not call('session.snapshot')['running']
-            shutdown = call('shutdown', error='unavailable')
-            assert shutdown['error']['message'] == 'unclean Browser shutdown', shutdown
+            assert wait_for(lambda:view(recovery_view),lambda item:item['actual']==0 and not item.get('pending'),'restored')['actual']==0
+            snapshot=driver.observe()
+            old_browser=snapshot['browserIncarnation']
+            os.kill(snapshot['browserPid'],9)
+            driver.wait(lambda value:value['browser']=='running' and value['browserIncarnation']!=old_browser)
+            driver.wait(lambda value:any(view['viewId']==main_view and view['actual']==0 and not view.get('pending') and not view.get('loading') and view.get('title')=='App info manifest' for view in value['views']))
+            assert call('view.appInfo',viewId=main_view)['title']=='App info manifest'
             call('shutdown')
             child.wait(timeout=15)
             assert child.returncode == 0, child.returncode
@@ -278,7 +265,7 @@ def main():
                     child.wait(timeout=15)
             server.shutdown()
             server.server_close()
-            (run / 'transcript.json').write_text(json.dumps(transcript, indent=2), encoding='utf-8')
+            (run / 'transcript.json').write_text(json.dumps(driver.evidence, indent=2), encoding='utf-8')
             (run / 'hits.json').write_text(json.dumps(hits, indent=2), encoding='utf-8')
 
 

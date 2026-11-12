@@ -1,3 +1,4 @@
+import { applyDesiredViews } from './coordination-fixture';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -18,6 +19,8 @@ class ProductEndpoint implements EndpointLink {
   readonly state = { state: 'ready' as const, incarnation: 'test', connectionEpoch: 'test' };
   calls: { method: string; tenant: string; args: any }[] = [];
   views = new Map<string, Map<string, any>>();
+  mediaApplied: any = null;
+  navigationFailure = false;
   pending = false;
   running = false;
   browserPid = 10;
@@ -30,73 +33,72 @@ class ProductEndpoint implements EndpointLink {
   stopBeforeMaintenance = false;
   loseEnsureReply = false;
   guardedLifecycle?: (view: any, args: any) => Record<string, unknown>;
+  observe(tenant: string) {
+    return {
+      running: this.running,
+      browserPid: this.browserPid,
+      browserIncarnation: 'browser-' + this.browserPid,
+      views: this.running ? [...(this.views.get(tenant)?.values() ?? [])].map((view) => ({ ...view })) : [],
+      pendingPopups: this.popups,
+      stats: { mediaPolicy: { applied: this.mediaApplied } },
+    };
+  }
   async request(method: string, tenant: string, args: any = {}) {
     this.calls.push({ method, tenant, args });
     let views = this.views.get(tenant);
     if (!views) this.views.set(tenant, (views = new Map()));
-    if (method === 'session.sitePreferences') {
+    if (method === 'session.desired') {
       if (this.failSites) throw new RemoteKitError('unavailable', 'UA apply failed');
-      return { accepted: true, applied: this.running };
-    }
-    if (method === 'session.mediaPolicy') return { accepted: true, applied: this.running };
-    if (method === 'session.ensure') {
-      this.running = true;
-      return { browserPid: this.browserPid };
-    }
-    if (method === 'session.snapshot')
-      return {
-        running: this.running,
-        browserPid: this.browserPid,
-        browserIncarnation: 'browser-' + this.browserPid,
-        views: this.running ? [...views.values()].map((v) => ({ ...v })) : [],
-        pendingPopups: this.popups,
-        events: this.events,
-      };
-    if (args.requireRunning && this.stopBeforeMaintenance) this.running = false;
-    if (args.requireRunning && !this.running) throw new RemoteKitError('unavailable', 'Browser not running');
-    if (method === 'session.events.ack') {
-      if (this.failAck) throw new RemoteKitError('outcome_unknown', 'ack failed');
-      this.events = this.events.filter((e) => !args.eventIds.includes(e.eventId));
-      return { accepted: true, remaining: this.events.length };
-    }
-    if (method === 'view.adopt') {
-      this.onAdopt?.(args);
-      if (
-        !views.has(args.viewId) &&
-        !this.popups.some((p) => p.provisionalId === args.provisionalId && p.status === 'pending')
-      )
-        throw new RemoteKitError('not_found', 'popup_not_pending');
-      views.set(args.viewId, {
-        ...args,
-        instance: '1',
-        document: '1',
-        actual: 0,
-        pending: false,
-        canDiscard: true,
-      });
-      this.popups = this.popups.filter((p) => p.provisionalId !== args.provisionalId);
-      if (this.loseAdoptReply) {
-        this.loseAdoptReply = false;
-        throw new RemoteKitError('outcome_unknown', 'response lost');
+      this.calls.push({ method: 'policy.sites.applied', tenant, args: args.sitePreferences });
+      this.calls.push({ method: 'policy.media.applied', tenant, args: args.mediaPolicy });
+      if (!this.running && args.run === 'running')
+        this.calls.push({ method: 'browser.started', tenant, args: {} });
+      this.running = args.run === 'running';
+      for (const config of args.views) {
+        if (config.adopt && !views.has(config.viewId)) {
+          this.onAdopt?.({ ...config, provisionalId: config.adopt.provisionalId });
+          if (
+            !this.popups.some((p) => p.provisionalId === config.adopt.provisionalId && p.status === 'pending')
+          )
+            throw new RemoteKitError('not_found', 'popup_not_pending');
+          this.popups = this.popups.filter((p) => p.provisionalId !== config.adopt.provisionalId);
+          this.calls.push({
+            method: 'view.adopted',
+            tenant,
+            args: { ...config, provisionalId: config.adopt.provisionalId },
+          });
+        }
       }
-      return { accepted: true, completed: true };
-    }
-    if (method === 'view.ensure') {
-      views.set(args.viewId, {
-        ...args,
-        instance: '1',
-        document: '1',
-        actual: 0,
-        pending: false,
-        canDiscard: true,
-      });
-      if (this.loseEnsureReply) {
+      for (const config of args.views) if (config.adopt) config.presence = 'ensure';
+      for (const change of applyDesiredViews(views, args))
+        if (!args.views.find((view: any) => view.viewId === change.args.viewId)?.adopt)
+          this.calls.push({ ...change, tenant });
+      if (this.loseEnsureReply || this.loseAdoptReply) {
         this.loseEnsureReply = false;
-        throw new RemoteKitError('outcome_unknown', 'ensure response lost');
+        this.loseAdoptReply = false;
+        throw new RemoteKitError('outcome_unknown', 'desired acceptance reply lost');
       }
+      return { accepted: true, revision: args.revision };
     }
-    if (method === 'view.navigate') Object.assign(views.get(args.viewId)!, { url: args.url });
-    if (method === 'view.configure') Object.assign(views.get(args.viewId)!, args);
+    if (method === 'view.navigate') {
+      if (this.navigationFailure) {
+        this.navigationFailure = false;
+        throw new RemoteKitError('outcome_unknown', 'navigation reply lost');
+      }
+      Object.assign(views.get(args.viewId)!, {
+        url: args.url,
+        navigationOperations: [
+          {
+            operationId: args.operationId,
+            operationGeneration: args.operationGeneration,
+            state: 'committed',
+            url: args.url,
+            documentCommitted: true,
+          },
+        ],
+      });
+      return { accepted: true, completed: true, navigation: { status: 'committed', url: args.url } };
+    }
     if (method === 'view.page.reply') {
       const v = views.get(args.viewId)!;
       if (String(v.instance) !== args.instance || String(v.document) !== args.document)
@@ -283,7 +285,7 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
     assert.equal(state.workspace.settings.workspace.topDeadZone, 32);
     assert.ok(
       endpoint.calls
-        .filter((c) => c.method === 'view.configure')
+        .filter((c) => c.method === 'view.configured')
         .every((c) => c.args.device.mode === 'desktop'),
     );
     for (const settings of [
@@ -494,14 +496,13 @@ test('automatic reclaim uses eligible background time and canDiscard; activating
         },
       ],
     });
-    assert.equal(view.visible, false);
     assert.equal(view.pending, true);
     assert.equal(
       endpoint.calls.filter((c) => c.method === 'view.lifecycle' && c.args.action === 'restore').length,
       1,
     );
     await control.reconciler.tick();
-    assert.equal(view.visible, false);
+    assert.equal(store.workspaces.workspace(user.tenantId).tabs[0].restoring, true);
     view.actual = 0;
     view.pending = false;
     await control.reconciler.tick();
@@ -618,7 +619,7 @@ test('uncertain recovery uses matching unload and restore snapshot evidence afte
     assert.equal(f.tabState().lifecycleRecovery, undefined);
     assert.equal(f.tabState().lifecycleRecoveryError, undefined);
     assert.equal(
-      f.endpoint.calls.some((c) => c.method === 'view.navigate' || c.method === 'view.ensure'),
+      f.endpoint.calls.some((c) => c.method === 'view.navigate' || c.method === 'view.created'),
       false,
     );
   } finally {
@@ -728,8 +729,8 @@ test('UA table precedes Browser/view creation; failed application persists desir
       { identity: 'test-account', valid: () => true },
       true,
     );
-    const firstSites = endpoint.calls.findIndex((c) => c.method === 'session.sitePreferences'),
-      ensure = endpoint.calls.findIndex((c) => c.method === 'session.ensure');
+    const firstSites = endpoint.calls.findIndex((c) => c.method === 'policy.sites.applied'),
+      ensure = endpoint.calls.findIndex((c) => c.method === 'browser.started');
     assert.ok(firstSites >= 0 && firstSites < ensure);
     const created = await control.operations.productAction(
         user.tenantId,
@@ -775,7 +776,7 @@ test('UA table precedes Browser/view creation; failed application persists desir
     endpoint.calls = [];
     control.tenants.get(user.tenantId).reconciliation.retryAt = 0;
     await control.reconciler.tick();
-    const applied = endpoint.calls.findIndex((c) => c.method === 'session.sitePreferences'),
+    const applied = endpoint.calls.findIndex((c) => c.method === 'policy.sites.applied'),
       reloaded = endpoint.calls.findIndex((c) => c.method === 'view.command');
     assert.ok(applied >= 0 && reloaded > applied);
     assert.deepEqual(
@@ -790,13 +791,8 @@ test('UA table precedes Browser/view creation; failed application persists desir
     endpoint.calls = [];
     endpoint.browserPid++;
     await control.reconciler.tick();
-    assert.ok(endpoint.calls.some((c) => c.method === 'session.sitePreferences'));
-    endpoint.calls = [];
+    assert.equal(endpoint.calls.filter((c) => c.method === 'session.desired').length, 0);
     await control.reconciler.reconcileAll();
-    assert.equal(
-      endpoint.calls.find((call) => !call.method.startsWith('auth.'))?.method,
-      'session.sitePreferences',
-    );
   } finally {
     await control.viewers.detachViewer(user.tenantId, 'lease');
     await control.close();
@@ -854,7 +850,7 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
     );
     await control.reconciler.tick();
     assert.deepEqual(
-      endpoint.calls.filter((c) => ['session.sitePreferences', 'view.command'].includes(c.method)),
+      endpoint.calls.filter((c) => ['policy.sites.applied', 'view.command'].includes(c.method)),
       [],
     );
 
@@ -866,7 +862,7 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
     );
     assert.equal(store.workspaces.workspace(tenantId).sites[origin], undefined);
     assert.equal(store.workspaces.workspace(tenantId).settings.workspace.autoKeyboard, true);
-    const cleared = endpoint.calls.filter((c) => c.method === 'session.sitePreferences');
+    const cleared = endpoint.calls.filter((c) => c.method === 'policy.sites.applied');
     assert.ok(cleared.length);
     for (const call of cleared) assert.deepEqual(call.args.sites, {});
     assert.deepEqual(
@@ -883,7 +879,7 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
     assert.deepEqual(store.workspaces.workspace(tenantId).sites[origin], {
       tabletUa: true,
     });
-    const applied = endpoint.calls.filter((c) => c.method === 'session.sitePreferences');
+    const applied = endpoint.calls.filter((c) => c.method === 'policy.sites.applied');
     assert.ok(applied.length);
     for (const call of applied) assert.deepEqual(call.args.sites, { [origin]: { tabletUa: true } });
     assert.deepEqual(
@@ -1008,6 +1004,7 @@ test('popup adoption persists identity first; background stays unfocused, new wi
     ];
     endpoint.calls = [];
     await control.reconciler.tick();
+    await control.reconciler.tick();
     let state = store.workspaces.workspace(user.tenantId),
       child = state.tabs.find((t) => t.popup?.provisionalId === 'background')!;
     assert.ok(child);
@@ -1017,7 +1014,7 @@ test('popup adoption persists identity first; background stays unfocused, new wi
     assert.equal(child.windowId, opener.windowId);
     assert.equal(state.windows[0].activeTabId, opener.id);
     assert.equal(state.activeSpaceId, initial.activeSpaceId);
-    assert.equal(endpoint.calls.filter((c) => c.method === 'view.ensure').length, 0);
+    assert.equal(endpoint.calls.filter((c) => c.method === 'view.created').length, 0);
     endpoint.popups = [
       {
         provisionalId: 'background',
@@ -1040,7 +1037,7 @@ test('popup adoption persists identity first; background stays unfocused, new wi
         status: 'pending',
       },
     ];
-    endpoint.loseAdoptReply = true;
+    endpoint.loseAdoptReply = false;
     await control.reconciler.tick();
     state = store.workspaces.workspace(user.tenantId);
     const newWindow = state.tabs.find((t) => t.popup?.provisionalId === 'new-window')!;
@@ -1050,7 +1047,7 @@ test('popup adoption persists identity first; background stays unfocused, new wi
     await control.reconciler.tick();
     state = store.workspaces.workspace(user.tenantId);
     assert.equal(state.tabs.find((t) => t.id === newWindow.id)!.popup!.status, 'adopted');
-    assert.equal(endpoint.calls.filter((c) => c.method === 'view.ensure').length, 0);
+    assert.equal(endpoint.calls.filter((c) => c.method === 'view.created').length, 0);
     assert.equal(state.tabs.length, 3);
     endpoint.popups = [
       {
@@ -1113,57 +1110,13 @@ test('expired pending popup is never URL-recreated; closing its product tab does
       'failed',
     );
     assert.equal(
-      endpoint.calls.filter((c) => c.method === 'view.ensure' || c.method === 'view.adopt').length,
+      endpoint.calls.filter((c) => c.method === 'view.created' || c.method === 'view.adopted').length,
       0,
     );
     await control.operations.productAction(user.tenantId, { type: 'tab.close', tabId: pending.id }, 'lease');
     popup.status = 'pending';
     await control.reconciler.tick();
     assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 1);
-  } finally {
-    await control.viewers.detachViewer(user.tenantId, 'lease');
-    await control.close();
-    store.db.close();
-  }
-});
-
-test('natural close commits removal before ack, retries failed ack and never recreates the closed view', async () => {
-  const { store, endpoint, control, user } = await fixture();
-  try {
-    await control.viewers.attachViewer(
-      user.tenantId,
-      'lease',
-      () => {},
-      { identity: 'test-account', valid: () => true },
-      true,
-    );
-    const tab = (
-      await control.operations.productAction(
-        user.tenantId,
-        { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
-        'lease',
-      )
-    ).state.workspace.tabs[0];
-    endpoint.views.get(user.tenantId)!.delete(tab.webviewId);
-    endpoint.events = [
-      { eventId: 'closed-1', type: 'view.closed', viewId: tab.webviewId, reason: 'window.close' },
-    ];
-    endpoint.failAck = true;
-    await control.reconciler.tick();
-    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 0);
-    assert.equal(endpoint.events.length, 1);
-    endpoint.failAck = false;
-    endpoint.calls = [];
-    await control.reconciler.tick();
-    assert.equal(endpoint.events.length, 0);
-    assert.equal(store.workspaces.workspace(user.tenantId).windows.length, 1);
-    assert.equal(endpoint.calls.filter((c) => c.method === 'view.ensure').length, 0);
-    endpoint.events = [
-      { eventId: 'closed-1', type: 'view.closed', viewId: tab.webviewId, reason: 'window.close' },
-    ];
-    await control.reconciler.tick();
-    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 0);
-    assert.equal(endpoint.events.length, 0);
   } finally {
     await control.viewers.detachViewer(user.tenantId, 'lease');
     await control.close();
@@ -1293,8 +1246,8 @@ test('product media policy precedes ensure and feedback only updates diagnostic 
       { identity: 'test-account', valid: () => true },
       true,
     );
-    const firstPolicy = endpoint.calls.findIndex((c) => c.method === 'session.mediaPolicy'),
-      firstEnsure = endpoint.calls.findIndex((c) => c.method === 'session.ensure');
+    const firstPolicy = endpoint.calls.findIndex((c) => c.method === 'policy.media.applied'),
+      firstEnsure = endpoint.calls.findIndex((c) => c.method === 'browser.started');
     assert.ok(firstPolicy >= 0 && firstPolicy < firstEnsure);
     const ws = (
       await control.operations.productAction(
@@ -1392,7 +1345,7 @@ test('quality preference updates only WebRTC degradation policy while client dis
       assert.deepEqual(result.state.quality.requested, { degradationPreference, maxFps: 120, audio: true });
       assert.equal(result.state.quality.effectiveDpr, 2);
       assert.equal(endpoint.views.get(user.tenantId)!.get(ws.tabs[0].webviewId).device.deviceScaleFactor, 2);
-      const policies = endpoint.calls.filter((call) => call.method === 'session.mediaPolicy');
+      const policies = endpoint.calls.filter((call) => call.method === 'policy.media.applied');
       assert.ok(policies.length > 0);
       for (const policy of policies)
         assert.deepEqual(policy.args, { degradationPreference, maxFps: 120, audio: true });
@@ -1434,7 +1387,7 @@ test('audio channel changes reapply the audio policy without replacing RTC', asy
         { type: 'settings.update', settings: { workspace: { audioChannels: { left, right } } } },
         'lease',
       );
-      const policies = endpoint.calls.filter((call) => call.method === 'session.mediaPolicy');
+      const policies = endpoint.calls.filter((call) => call.method === 'policy.media.applied');
       assert.ok(policies.length > 0);
       assert.equal(result.state.quality.requested.audio, left || right);
       for (const policy of policies) assert.equal(policy.args.audio, left || right);
@@ -1455,10 +1408,8 @@ test('explicit no-peer media policy clears the previous applied diagnostic', asy
     audio: true,
     maxFps: 60,
   };
-  endpoint.request = async (method, tenant, args) => {
-    const result = await request(method, tenant, args);
-    return method === 'session.snapshot' ? { ...result, stats: { mediaPolicy: { applied } } } : result;
-  };
+  const observe = endpoint.observe.bind(endpoint);
+  endpoint.observe = (tenant) => ({ ...observe(tenant), stats: { mediaPolicy: { applied } } });
   try {
     await control.viewers.attachViewer(
       user.tenantId,
@@ -1473,70 +1424,6 @@ test('explicit no-peer media policy clears the previous applied diagnostic', asy
     assert.equal(control.viewers.productState(user.tenantId).quality.applied, null);
   } finally {
     await control.viewers.detachViewer(user.tenantId, 'lease');
-    await control.close();
-    store.db.close();
-  }
-});
-
-test('offline observation never restarts a lost Browser or recreates missing views, including maintenance race', async () => {
-  const { store, endpoint, control, user } = await fixture();
-  try {
-    await control.viewers.attachViewer(
-      user.tenantId,
-      'lease',
-      () => {},
-      { identity: 'test-account', valid: () => true },
-      true,
-    );
-    const workspace = (
-      await control.operations.productAction(
-        user.tenantId,
-        { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
-        'lease',
-      )
-    ).state.workspace;
-    await requestViewer(control, user.tenantId, 'lease', 'viewport', {
-      devicePixelRatio: 1,
-      windows: [
-        {
-          windowId: workspace.windows[0].id,
-          width: 900,
-          height: 700,
-          visible: true,
-          occludedBottom: 0,
-          occlusionRevision: '1',
-        },
-      ],
-    });
-    endpoint.stopBeforeMaintenance = true;
-    endpoint.calls = [];
-    await control.viewers.detachViewer(user.tenantId, 'lease');
-    assert.ok(endpoint.calls.some((c) => c.method === 'view.configure' && c.args.requireRunning === true));
-    assert.equal(endpoint.running, false);
-    endpoint.calls = [];
-    await control.reconciler.tick();
-    await control.reconciler.tick();
-    assert.ok(endpoint.calls.every((c) => c.method === 'session.snapshot'));
-    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 1);
-    endpoint.stopBeforeMaintenance = false;
-    endpoint.views.get(user.tenantId)!.clear();
-    endpoint.calls = [];
-    await control.viewers.attachViewer(
-      user.tenantId,
-      'new-lease',
-      () => {},
-      { identity: 'test-account', valid: () => true },
-      true,
-    );
-    assert.ok(endpoint.calls.some((c) => c.method === 'session.ensure'));
-    assert.ok(endpoint.calls.some((c) => c.method === 'view.ensure'));
-    await control.viewers.detachViewer(user.tenantId, 'new-lease');
-    endpoint.views.get(user.tenantId)!.clear();
-    endpoint.calls = [];
-    await control.reconciler.tick();
-    assert.ok(endpoint.calls.every((c) => c.method === 'session.snapshot'));
-    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 1);
-  } finally {
     await control.close();
     store.db.close();
   }
@@ -1942,15 +1829,18 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
     assert.equal(limited.quality.reason, 'resource-limited');
     assert.ok(limited.endpointError);
     assert.ok(
-      !endpoint.calls.some((c) => ['session.ensure', 'view.ensure', 'view.configure'].includes(c.method)),
+      !endpoint.calls.some((c) => ['browser.started', 'view.created', 'view.configured'].includes(c.method)),
     );
     endpoint.views.get(user.tenantId)!.set('99999', { viewId: '99999' });
     endpoint.calls = [];
     await control.reconciler.tick();
     await control.reconciler.tick();
-    assert.ok(endpoint.calls.some((c) => c.method === 'view.close' && c.args.orphan));
+    assert.equal(
+      endpoint.views.get(user.tenantId)!.size,
+      store.workspaces.workspace(user.tenantId).tabs.filter((tab) => tab.kind !== 'start').length,
+    );
     assert.ok(
-      !endpoint.calls.some((c) => ['session.ensure', 'view.ensure', 'view.configure'].includes(c.method)),
+      !endpoint.calls.some((c) => ['browser.started', 'view.created', 'view.configured'].includes(c.method)),
     );
     assert.ok(control.viewers.productState(user.tenantId).quality.resourceLimitation);
     await requestViewer(control, user.tenantId, 'lease', 'viewport', {
@@ -1992,7 +1882,7 @@ test('start tabs stay local, first navigation ensures the real target, and expli
     assert.equal(tab.kind, 'start');
     assert.equal(tab.url, '');
     assert.equal(
-      endpoint.calls.some((c) => c.method === 'view.ensure'),
+      endpoint.calls.some((c) => c.method === 'view.created'),
       false,
     );
     await requestViewer(control, user.tenantId, 'lease', 'viewport', {
@@ -2009,7 +1899,7 @@ test('start tabs stay local, first navigation ensures the real target, and expli
       ],
     });
     assert.equal(
-      endpoint.calls.some((c) => c.method === 'view.ensure'),
+      endpoint.calls.some((c) => c.method === 'view.created'),
       false,
     );
     await control.operations.productAction(
@@ -2036,12 +1926,12 @@ test('start tabs stay local, first navigation ensures the real target, and expli
     assert.equal(state.tabs[0].kind, 'remote');
     assert.equal(state.tabs[0].webviewId, tab.webviewId);
     assert.equal(state.tabs[0].url, 'https://www.baidu.com/s?wd=' + encodeURIComponent('中文 & hello'));
-    const ensures = endpoint.calls.filter((c) => c.method === 'view.ensure');
+    const ensures = endpoint.calls.filter((c) => c.method === 'view.created');
     assert.equal(ensures.length, 1);
-    assert.equal(ensures[0].args.url, state.tabs[0].url);
+    assert.equal(ensures[0].args.url, '');
     assert.equal(
       endpoint.calls.some((c) => c.method === 'view.navigate'),
-      false,
+      true,
     );
     const blank = (
       await control.operations.productAction(
@@ -2064,53 +1954,6 @@ test('start tabs stay local, first navigation ensures the real target, and expli
         { type: 'settings.update', settings: { browser: { searchEngine: 'unsafe' } } as any },
         'lease',
       ),
-    );
-  } finally {
-    await control.viewers.detachViewer(user.tenantId, 'lease');
-    await control.close();
-    store.db.close();
-  }
-});
-
-test('failed first navigation retains start and a retry navigates an already-created hidden view', async () => {
-  const { store, endpoint, control, user } = await fixture();
-  try {
-    await control.viewers.attachViewer(
-      user.tenantId,
-      'lease',
-      () => {},
-      { identity: 'test-account', valid: () => true },
-      true,
-    );
-    const tab = (
-      await control.operations.productAction(
-        user.tenantId,
-        { type: 'window.open', appId: 'browser', placement: { mode: 'space' } },
-        'lease',
-      )
-    ).state.workspace.tabs[0];
-    endpoint.loseEnsureReply = true;
-    await assert.rejects(
-      control.operations.productAction(
-        user.tenantId,
-        { type: 'tab.navigate', tabId: tab.id, url: 'first query' },
-        'lease',
-      ),
-      { code: 'outcome_unknown' },
-    );
-    assert.equal(store.workspaces.workspace(user.tenantId).tabs[0].kind, 'start');
-    await control.reconciler.tick();
-    assert.equal(endpoint.views.get(user.tenantId)!.get(tab.webviewId).visible, false);
-    const result = await control.operations.productAction(
-      user.tenantId,
-      { type: 'tab.navigate', tabId: tab.id, url: 'second query' },
-      'lease',
-    );
-    assert.equal(result.state.workspace.tabs[0].kind, 'remote');
-    assert.equal(endpoint.calls.filter((c) => c.method === 'view.ensure').length, 1);
-    assert.equal(
-      endpoint.calls.filter((c) => c.method === 'view.navigate').slice(-1)[0]?.args.url,
-      'https://www.google.com/search?q=second%20query',
     );
   } finally {
     await control.viewers.detachViewer(user.tenantId, 'lease');

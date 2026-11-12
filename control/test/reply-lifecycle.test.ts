@@ -1,3 +1,4 @@
+import { applyDesiredViews } from './coordination-fixture';
 import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
 import { RemoteKitError } from '../shared/errors';
@@ -27,35 +28,32 @@ class LifecycleEndpoint implements EndpointLink {
   replace() {
     this.browserIncarnation = 'browser-B'; /* PID and local counters can repeat. */
   }
+  observe() {
+    if (this.offlineNextSnapshot) {
+      this.offlineNextSnapshot = false;
+      this.running = false;
+    }
+    return {
+      status: !this.running ? { code: 'unavailable' as const, message: 'Browser recovering' } : undefined,
+      running: this.running,
+      browserIncarnation: this.running ? this.browserIncarnation : undefined,
+      browserPid: this.running ? this.browserPid : 0,
+      views: this.running && this.view ? [{ ...this.view }] : [],
+    };
+  }
   async request(method: string, _tenant: string, args: any = {}): Promise<any> {
     const identity = () => ({ browserIncarnation: this.browserIncarnation, instance: '1', document: '2' });
-    if (method === 'session.ensure') {
-      this.starts++;
-      this.running = true;
-      return { running: true, browserPid: this.browserPid, browserIncarnation: this.browserIncarnation };
-    }
-    if (method === 'session.sitePreferences' || method === 'session.mediaPolicy')
-      return { accepted: true, applied: this.running };
-    if (method === 'session.snapshot') {
-      if (this.offlineNextSnapshot) {
-        this.offlineNextSnapshot = false;
-        this.running = false;
+    if (method === 'session.desired') {
+      if (!this.running && args.run === 'running') this.starts++;
+      this.running = args.run === 'running';
+      const views = new Map(this.view ? [[this.view.viewId, this.view]] : []);
+      applyDesiredViews(views, args);
+      this.view = [...views.values()][0];
+      if (this.view) {
+        this.view.instance = '1';
+        this.view.document = '2';
       }
-      return {
-        running: this.running,
-        browserPid: this.running ? this.browserPid : 0,
-        browserIncarnation: this.running ? this.browserIncarnation : null,
-        views: this.running && this.view ? [{ ...this.view }] : [],
-        events: this.events,
-      };
-    }
-    if (method === 'view.ensure') {
-      this.view = { ...args, instance: '1', document: '2', actual: 0 };
-      return {};
-    }
-    if (method === 'view.configure') {
-      Object.assign(this.view, args);
-      return {};
+      return { accepted: true };
     }
     if (method === 'view.close') {
       this.view.close_state = 'closing';
@@ -154,12 +152,13 @@ test('offline empty snapshot and replacement missing view preserve product tab a
     assert.ok(pending.state.workspace.pendingClose);
     endpoint.offlineNextSnapshot = true;
     await control.reconciler.tick();
+    endpoint.running = true;
+    control.tenants.get(tenant).reconciliation.retryAt = 0;
     assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
-    assert.equal(store.workspaces.workspace(tenant).pendingClose, null);
-    assert.equal(store.workspaces.workspace(tenant).pendingWindowCloseId, null);
     endpoint.replace();
     endpoint.view = undefined;
     await control.reconciler.tick();
+    assert.equal(store.workspaces.workspace(tenant).pendingClose, null);
     assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
   } finally {
     await control.close();
@@ -229,8 +228,26 @@ test('close replies bind full identity, reject stale UI tokens and require expli
     endpoint.view = undefined;
     await control.reconciler.tick();
     assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
-    endpoint.events = [{ eventId: 'closed-1', type: 'view.closed', viewId: tab.webviewId }];
-    await control.reconciler.tick();
+    const placed = control.endpoint.placement.peek(tenant)!;
+    control.endpoint.nodes.emit('session.event', {
+      nodeId: 'fixture',
+      message: {
+        event: 'session.event',
+        tenantId: tenant,
+        sessionId: placed.sessionId,
+        placementEpoch: placed.placementEpoch,
+        connectionEpoch: 'test',
+        endpointIncarnation: 'test',
+        streamId: 'stream',
+        seq: '1',
+        eventId: 'closed-1',
+        browserIncarnation: 'browser-B',
+        type: 'view.closed',
+        body: { viewId: tab.webviewId },
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
     assert.equal(store.workspaces.workspace(tenant).tabs.length, 0);
     assert.deepEqual(endpoint.replies[0], {
       viewId: tab.webviewId,

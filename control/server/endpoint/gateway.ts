@@ -218,8 +218,14 @@ export class EndpointGateway {
         if (!params.browserIncarnation)
           throw new RemoteKitError('unavailable', 'Session Browser has not been observed');
       }
-      const identity = params.operationId ?? params.selectionId ?? params.importId ?? params.generation;
-      const opId = identity ? rpcId(method, target, params) : randomUUID();
+      let identity: unknown[] | undefined;
+      if (params.operationId) identity = [params.operationGeneration, params.operationId];
+      else if (method === 'session.library.prepare') identity = [params.selectionId];
+      else if (method === 'session.storage.import') identity = [params.importId];
+      else if (method === 'view.lifecycle' && params.lifecycleGeneration !== undefined)
+        identity = [params.browserIncarnation, params.viewId, params.lifecycleGeneration, params.action];
+      else if (method === 'rtc.offer' || method === 'rtc.close') identity = [params.connectionId];
+      const opId = identity ? rpcId(method, target, ...identity) : randomUUID();
       const request: OneShotRequest = { method, tenantId: tenant, ...target, opId, replay: false, params };
       return (await node.invoke(request)) as T;
     } catch (error) {
@@ -240,21 +246,36 @@ export class EndpointGateway {
     if (current?.runState === 'stopped' && current.dataState === 'clean') return current.checkpointId ?? 0;
     const placed = this.placement.beginStop(tenant);
     await this.synchronize(tenant);
-    await this.waitObserved(
+    const observed = await this.waitObserved(
       tenant,
       (value) =>
-        value.browser === 'stopped' &&
-        value.data?.state === 'clean' &&
-        value.data.base !== null &&
-        (value.data.committed === null || value.data.committed.requestId === placed.pendingCommit),
+        value.lastError !== null ||
+        (value.browser === 'stopped' &&
+          value.data?.state === 'clean' &&
+          value.data.base !== null &&
+          (value.data.committed === null || value.data.committed.requestId === placed.pendingCommit)),
       180000,
     );
+    if (observed.lastError) throw endpointError(observed.lastError);
     return this.placement.peek(tenant)?.checkpointId ?? 0;
   }
   async snapshot(tenant: string, args: { outputDiagnostics?: boolean } = {}): Promise<EndpointSnapshot> {
     if (args.outputDiagnostics) return this.invoke('session.snapshot', tenant, args);
+    const snapshot = this.current(tenant);
+    if (snapshot.status)
+      throw new EndpointSnapshotError(endpointError(snapshot.status), snapshot.browserRestart);
+    return snapshot;
+  }
+  current(tenant: string): EndpointSnapshot {
     const value = this.observation(tenant);
     if (!value) throw new RemoteKitError('unavailable', 'Session has not been observed');
+    const node = this.nodes.get(this.placement.peek(tenant)!.nodeId);
+    if (
+      node &&
+      value.lastError?.reason === 'output_failed' &&
+      /allocat|out of memory/i.test(value.lastError.message)
+    )
+      node.allocationFailedAt ??= Date.now();
     return {
       running: value.browser === 'running',
       browserIncarnation: value.browserIncarnation ?? undefined,

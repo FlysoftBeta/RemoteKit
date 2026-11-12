@@ -51,6 +51,7 @@ async function harness(window = 30) {
   let chunks = 0;
   const requests: any[] = [];
   const gateway = testGateway({
+    observe: () => ({ running: true, browserIncarnation: 'import-browser', views: [] }),
     async request(method, _tenant, args) {
       requests.push({ method, args });
       if (method === 'session.identity') return browserIdentity;
@@ -739,6 +740,7 @@ test('TLS factories require implicit IMAP TLS, send IMAP ID, and enforce SMTP TL
 });
 test('WS methods require the product lease, deployment is admin-only and overview exposes inbox/outbox failures', async () => {
   const h = await harness(0);
+  h.active = true;
   const control = createApplication(h.store, h.gateway, undefined, h.clock, undefined, importConfig);
   await control.sessionImporter.stop();
   control.sessionImporter = h.importer;

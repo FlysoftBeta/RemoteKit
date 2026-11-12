@@ -82,6 +82,10 @@ export class CoordinationRepository {
       )
       .run(event.tenantId, event.sessionId, event.streamId, event.seq);
   }
+  deleteTenant(tenant: string) {
+    for (const table of ['session_desired', 'session_event_inbox', 'session_event_cursors'])
+      this.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
+  }
   cancelInterruptedSignIns() {
     this.db
       .prepare(

@@ -142,7 +142,10 @@ export class ViewerSecurity {
 
   retiring(tenant: string, connectionId: string | null) {
     return [...this.revocations].find(
-      ([viewer, owner]) => owner === tenant && viewer.peer?.connectionId === connectionId,
+      ([viewer, owner]) =>
+        owner === tenant &&
+        !!viewer.peer &&
+        (connectionId === null || viewer.peer.connectionId === connectionId),
     )?.[0];
   }
   async retryRevocations() {
@@ -194,14 +197,22 @@ export class ViewerSecurity {
     peer.requests++;
     peer.appliedEpoch = 0;
     try {
-      await this.endpoint.synchronize(tenant);
+      const desired = await this.endpoint.synchronize(tenant);
       const observed = await this.endpoint.waitObserved(
         tenant,
         (value) =>
-          value.authorization.connectionId === connectionId &&
-          value.authorization.epoch === epoch &&
-          value.authorization.unlocked === unlocked,
+          (value.authorization.connectionId === connectionId &&
+            value.authorization.epoch >= epoch &&
+            (value.authorization.epoch !== epoch || value.authorization.unlocked === unlocked)) ||
+          (BigInt(value.observedRevision) >= BigInt(desired.revision) && value.lastError !== null),
       );
+      if (
+        observed.lastError &&
+        (observed.authorization.connectionId !== connectionId ||
+          observed.authorization.epoch !== epoch ||
+          observed.authorization.unlocked !== unlocked)
+      )
+        throw new RemoteKitError('unavailable', observed.lastError.message);
       const result = { applied: true, epoch: observed.authorization.epoch };
       if (result?.applied !== true || result.epoch !== epoch || viewer.peer !== peer || peer.epoch !== epoch)
         throw new RemoteKitError('outcome_unknown', 'Endpoint 授权结果未知');

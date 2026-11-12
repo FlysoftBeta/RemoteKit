@@ -34,7 +34,10 @@ function fixture() {
         get: () => ({ state: { state: 'ready', connectionEpoch: 'connection' } }),
       }),
       placement: { peek: () => ({ nodeId: 'node', sessionId: 'a'.repeat(32), placementEpoch: 1 }) },
-      observation: () => ({ browserIncarnation: 'browser' }),
+      observation: () => ({
+        browserIncarnation: 'browser',
+        authorization: { connectionId: null, epoch: 0, unlocked: false },
+      }),
       acknowledge: async (ack: EventsAck) => {
         acknowledgments.push(ack);
       },
@@ -181,6 +184,32 @@ test('clipboard disposition and concurrent snippets commit atomically before ack
     await f.close();
   }
 });
+test('HTML-only concurrent native clipboard copies survive as snippets and account removal clears dedupe evidence', async () => {
+  const f = fixture();
+  try {
+    f.store.clipboards.record('user', { text: 'device', html: '' });
+    const native = f.event('1', {
+      type: 'clipboard.changed',
+      body: {
+        browserSequence: '1',
+        baseRevision: '0',
+        excludeFromHistory: true,
+        text: '',
+        html: '<img src="data:image/png;base64,AA==">',
+      },
+    });
+    await f.events.receive('node', native);
+    const entry = f.store.library.snapshot('tenant').entries[0];
+    assert.equal(f.store.library.snippet('tenant', entry.id).html, '<img src="data:image/png;base64,AA==">');
+    assert.equal(f.store.clipboards.latest('user')?.text, 'device');
+    f.store.transaction(() => f.store.coordination.deleteTenant('tenant'));
+    assert.equal(f.store.coordination.cursor(native), '0');
+    assert.equal(f.store.coordination.receive(native), null);
+  } finally {
+    await f.close();
+  }
+});
+
 test('failed download catalog commits never acknowledge and retired client actions never retarget a Viewer', async () => {
   const f = fixture();
   try {

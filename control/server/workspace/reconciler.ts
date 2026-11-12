@@ -152,6 +152,8 @@ export class Reconciler {
         return;
       }
       const desired = this.context.store.workspaces.workspace(tenant);
+      const observed = this.context.endpoint.observation(tenant);
+      if (observed) await this.services.popups.observePopups(desired, observed);
       let resourceLimitation = this.services.policy.qualityFor(tenant, desired).resourceLimitation;
       const sent = await this.context.endpoint.synchronize(tenant);
       if (sent.run === 'running')
@@ -162,7 +164,7 @@ export class Reconciler {
             (value.browser === 'running' || value.lastError !== null),
         );
       runtime.started = true;
-      const snapshot = await this.context.endpoint.snapshot(tenant),
+      const snapshot = this.context.endpoint.current(tenant),
         state = this.context.store.workspaces.workspace(tenant),
         actual: any[] = Array.isArray(snapshot?.views) ? snapshot.views : [];
       this.services.learning.signIn.reconcile(state, snapshot.browserIncarnation, snapshot.running !== false);
@@ -320,6 +322,8 @@ export class Reconciler {
       this.services.pageRequests.collectDialogs(tenant, state, snapshot);
       if (fullscreenChanged) this.services.viewers.push(tenant);
       resourceLimitation = this.services.policy.qualityFor(tenant, state).resourceLimitation;
+      if (snapshot.status)
+        throw new EndpointSnapshotError(endpointError(snapshot.status), snapshot.browserRestart);
       if (snapshot.running === false && !resourceLimitation)
         throw new RemoteKitError('unavailable', 'Browser已离线，页面保留并等待恢复');
       const viewer = runtime.viewer,
@@ -420,7 +424,7 @@ export class Reconciler {
       return;
     }
     await this.context.endpoint.synchronize(tenant);
-    const snapshot = await this.context.endpoint.snapshot(tenant),
+    const snapshot = this.context.endpoint.current(tenant),
       state = this.context.store.workspaces.workspace(tenant);
     this.services.learning.signIn.reconcile(state, snapshot.browserIncarnation, snapshot.running !== false);
     this.context.store.workspaces.saveWorkspace(state);
@@ -444,6 +448,8 @@ export class Reconciler {
       );
       this.services.operations.saveWorkspace(state);
     }
+    if (snapshot.status)
+      throw new EndpointSnapshotError(endpointError(snapshot.status), snapshot.browserRestart);
     if (await this.services.lifecycle.stop(tenant, snapshot)) return;
     if (snapshot.running === false) {
       runtime.started = false;

@@ -124,12 +124,6 @@ test('Session protection accrues only while eligible; every automatic stop commi
   const gateway = testGateway({
     async request(method, _tenant, args) {
       calls.push({ method, args });
-      if (method === 'session.stop')
-        return {
-          state: 'clean',
-          base: 'manifest',
-          committed: { requestId: (args as any).commit, manifestId: 'manifest' },
-        };
       return { accepted: true };
     },
   });
@@ -138,7 +132,7 @@ test('Session protection accrues only while eligible; every automatic stop commi
   const snapshot: EndpointSnapshot = {
     views: [],
     stopBlockers: {
-      unacknowledgedClosedEvents: 0,
+      unacknowledgedEvents: 0,
       pendingNativeSelections: 0,
       inFlightUploads: 0,
       pendingPageRequests: 0,
@@ -175,7 +169,7 @@ test('Session protection accrues only while eligible; every automatic stop commi
     assert.ok(control.lifecycle.stopBlocker(tenantId, snapshot, false));
     gateway.nodes.get('fixture')!.allocationFailedAt = Date.now();
     assert.equal(await control.lifecycle.stop(tenantId, snapshot), true);
-    const stop = calls.find((call) => call.method === 'session.stop')!;
+    const stop = calls.find((call) => call.method === 'session.desired' && call.args.run === 'stopped')!;
     assert.equal(stop.args.commit, 'fixture-commit');
     const result = store.workspaces.workspace(tenantId).tabs[0];
     assert.equal(result.idleKeepAliveOutcome?.outcome, 'stopped');
@@ -208,10 +202,14 @@ test('Endpoint allocation failures trigger exhaustion; other output failures do 
   let message = 'OSR handle duplicate failed';
   const gateway = testGateway({
     async request() {
+      return {};
+    },
+    observe() {
       return { status: { code: 'unavailable', reason: 'output_failed', message }, views: [] };
     },
   });
   const node = gateway.nodes.get('fixture')!;
+  gateway.placement.resolve('tenant');
   await assert.rejects(gateway.snapshot('tenant'), { reason: 'output_failed' });
   assert.equal(node.allocationFailedAt, undefined);
   message = 'OSR plane resources allocation failed';

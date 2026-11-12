@@ -9,7 +9,6 @@ import { createApplication, type DomainServices } from '../server/application';
 
 const endpoint = {
   async request(method: string) {
-    if (method === 'session.snapshot') return { running: false, views: [] };
     return { accepted: true, applied: false };
   },
 };

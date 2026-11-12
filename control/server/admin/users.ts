@@ -176,6 +176,7 @@ export class UserAdmin {
       if (placement && placement.runState !== 'stopped') throw new RemoteKitError('conflict', '需先停止');
       this.context.store.transaction(() => {
         this.context.store.clipboards.clear(user.id);
+        this.context.store.coordination.deleteTenant(user.tenant);
         const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);
         if (sessionId) this.services.sessionPurge.enqueue(sessionId);
       });
@@ -206,6 +207,7 @@ export class UserAdmin {
         const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);
         if (sessionId) this.services.sessionPurge.enqueue(sessionId);
         this.services.objects.forgetTenant(user.tenant);
+        store.coordination.deleteTenant(user.tenant);
         store.library.deleteTenant(user.tenant);
         store.operations.deleteTenant(user.tenant);
         store.workspaces.deleteTenant(user.tenant);

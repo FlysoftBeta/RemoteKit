@@ -221,7 +221,7 @@ const snapshot = (): EndpointSnapshot => ({
   running: true,
   views: [],
   stopBlockers: {
-    unacknowledgedClosedEvents: 0,
+    unacknowledgedEvents: 0,
     pendingNativeSelections: 0,
     inFlightUploads: 0,
     pendingPageRequests: 0,

@@ -127,20 +127,34 @@ test('local stdio shares authenticated handshake, encrypted RPCs and lost-reply 
   const response = decoder.push((await reply)[0])[0];
   assert.equal(jsonObject(handshake.readMessage(response)).configHash, 'local-hash');
   const transport = handshake.split();
+  const fenced = once(child.stdin, 'data');
+  const frameQueue = decoder.push((await fenced)[0]);
+  const initial = decodeFrame(transport.receive.decrypt(frameQueue[0]));
+  assert.equal(initial.kind, 'json');
+  if (initial.kind !== 'json') throw Error('Expected fencing');
+  assert.equal(initial.message.method, 'node.desired');
+  child.stdout.write(
+    encodeStdio(
+      transport.send.encrypt(encodeJson({ id: initial.message.id, ok: true, result: { accepted: true } })),
+    ),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
   const link = registry.get('local')!;
   const outbound = once(child.stdin, 'data');
-  const request = link.request('session.snapshot', 'tenant');
+  const request = link.request('fixture.read', 'tenant');
   const frame = decodeFrame(transport.receive.decrypt(decoder.push((await outbound)[0])[0]));
   assert.equal(frame.kind, 'json');
   if (frame.kind !== 'json') throw new Error('Expected JSON');
   child.stdout.write(
     encodeStdio(
-      transport.send.encrypt(encodeJson({ id: frame.message.id, ok: true, result: { running: true } })),
+      transport.send.encrypt(
+        encodeJson({ id: frame.message.id, opId: frame.message.opId, ok: true, result: { running: true } }),
+      ),
     ),
   );
   assert.deepEqual(await request, { running: true });
   const written = once(child.stdin, 'data');
-  const lost = assert.rejects(link.request('session.ensure', 'tenant'), { code: 'outcome_unknown' });
+  const lost = assert.rejects(link.request('fixture.write', 'tenant'), { code: 'outcome_unknown' });
   await written;
   await new Promise((resolve) => setImmediate(resolve));
   child.emit('exit', 1);

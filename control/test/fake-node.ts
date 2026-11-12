@@ -1,3 +1,6 @@
+import { observedSession } from './coordination-fixture';
+import { RpcResults } from '../server/endpoint/rpc-results';
+import type { SessionDesired } from '../server/endpoint/coordination';
 import { nodePrivateKey } from './node-fixture';
 import { EventEmitter, once } from 'node:events';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
@@ -9,12 +12,20 @@ import { decodeFrame, encodeJson, jsonObject } from '../server/cluster/frames';
 
 export class FakeNode extends EventEmitter {
   readonly requests: Record<string, any>[] = [];
-  readonly incarnation = randomBytes(16).toString('hex');
+  incarnation = randomBytes(16).toString('hex');
   socket!: WebSocket;
   transport!: Transport;
   helloReply!: Record<string, any>;
   metrics: NodeMetrics = fakeMetrics();
-  reportCopies = true;
+  readonly observations = new Map<string, ReturnType<typeof observedSession>>();
+  readonly results = new RpcResults();
+  fenceGate?: Promise<void>;
+  desiredHandler?: (
+    document: SessionDesired,
+    value: ReturnType<typeof observedSession>,
+  ) => void | Promise<void>;
+  private nodeRevision = '0';
+  private sequence = 0n;
   readonly sessions = new Map<string, Record<string, any>>();
   readonly objects = new Map<
     string,
@@ -83,6 +94,82 @@ export class FakeNode extends EventEmitter {
     }
     return {};
   }
+  private async dispatch(message: Record<string, any>): Promise<unknown> {
+    if (message.method === 'node.desired') {
+      await this.fenceGate;
+      this.nodeRevision = message.revision;
+      const wanted = new Set(message.sessions.map((value: any) => value.tenantId));
+      for (const tenant of this.sessions.keys()) if (!wanted.has(tenant)) this.sessions.delete(tenant);
+      for (const target of message.sessions) {
+        let desired = this.sessions.get(target.tenantId) as SessionDesired | undefined;
+        if (
+          desired &&
+          (desired.sessionId !== target.sessionId || desired.placementEpoch !== target.placementEpoch)
+        ) {
+          this.sessions.delete(target.tenantId);
+          desired = undefined;
+        }
+        const prior = this.observations.get(target.tenantId);
+        const value =
+          prior && prior.sessionId === target.sessionId && prior.placementEpoch === target.placementEpoch
+            ? { ...prior, connectionEpoch: this.helloReply.connectionEpoch }
+            : observedSession(target, this.helloReply.connectionEpoch, this.incarnation, desired);
+        value.nodeRevision = this.nodeRevision;
+        value.seq = String(++this.sequence);
+        this.observations.set(target.tenantId, value);
+        this.send(value);
+      }
+      return { accepted: true, revision: message.revision };
+    }
+    if (message.method === 'session.desired') {
+      this.sessions.set(message.tenantId, message);
+      const value = observedSession(
+        message as SessionDesired,
+        this.helloReply.connectionEpoch,
+        this.incarnation,
+        message as SessionDesired,
+      );
+      if (message.commit) {
+        const ids = [...this.objects.values()]
+          .filter((object) => object.tenantId === message.tenantId)
+          .map((object) => object.id);
+        if (ids.length)
+          Object.assign(value, {
+            checkpoint: { manifestId: ids[ids.length - 1], objects: ids, buildId: 'dev' },
+            data: {
+              state: 'clean',
+              base: ids[ids.length - 1],
+              stoppedCleanly: true,
+              changesAt: 0,
+              committed: { requestId: message.commit, manifestId: ids[ids.length - 1] },
+            },
+          });
+      }
+      value.library.descriptions = await Promise.all(
+        message.library.describe.map(async (assetId: string) => ({
+          assetId,
+          asset: await this.handler({ method: 'fixture.describe', tenantId: message.tenantId, assetId }),
+        })),
+      );
+      await this.desiredHandler?.(message as SessionDesired, value);
+      value.nodeRevision = this.nodeRevision;
+      value.seq = String(++this.sequence);
+      this.observations.set(message.tenantId, value);
+      this.send(value);
+      this.publishMetrics();
+      return { accepted: true, revision: message.revision };
+    }
+    if (message.method === 'session.events.ack') return { accepted: true, upTo: message.upTo };
+    if (
+      message.endpointIncarnation !== this.incarnation ||
+      !message.params ||
+      typeof message.replay !== 'boolean'
+    )
+      throw { code: 'invalid_request', message: 'Invalid RPC envelope' };
+    return this.results.execute(message, () =>
+      this.handler({ ...message.params, id: message.id, method: message.method, tenantId: message.tenantId }),
+    );
+  }
   handler: (message: Record<string, any>) => unknown = (message) => this.handle(message);
   async connect(
     url: string,
@@ -90,6 +177,7 @@ export class FakeNode extends EventEmitter {
     hello: Record<string, unknown> = {},
     privateKey = nodePrivateKey(String(hello.nodeId ?? 'alpha')),
   ) {
+    if (typeof hello.incarnation === 'string') this.incarnation = hello.incarnation;
     this.socket = new WebSocket(url);
     this.socket.on('error', () => {});
     await once(this.socket, 'open');
@@ -152,24 +240,12 @@ export class FakeNode extends EventEmitter {
           }
           this.requests.push(message);
           this.emit('request', message);
-          void Promise.resolve()
-            .then(() => this.handler(message))
-            .then(
-              (result) => {
-                if (result !== undefined) {
-                  if (message.method === 'session.open') {
-                    this.sessions.set(message.tenantId, message);
-                    this.publishMetrics();
-                  }
-                  if (message.method === 'session.stop') {
-                    this.sessions.delete(message.tenantId);
-                    this.publishMetrics();
-                  }
-                  this.send({ id: message.id, ok: true, result });
-                }
-              },
-              (error) => this.send({ id: message.id, ok: false, error }),
-            );
+          void this.dispatch(message).then(
+            (result) => {
+              if (result !== undefined) this.send({ id: message.id, opId: message.opId, ok: true, result });
+            },
+            (error) => this.send({ id: message.id, opId: message.opId, ok: false, error }),
+          );
         } catch {
           this.socket.terminate();
         }
@@ -185,17 +261,6 @@ export class FakeNode extends EventEmitter {
         this.pending.clear();
       });
       if (this.helloReply.type === 'node.ready') {
-        for (const [tenant, session] of this.sessions)
-          if (
-            !this.helloReply.sessions.some(
-              (allowed: any) =>
-                allowed.tenantId === tenant &&
-                allowed.sessionId === session.sessionId &&
-                allowed.placementEpoch === session.placementEpoch,
-            )
-          )
-            this.sessions.delete(tenant);
-        if (this.reportCopies) this.send({ event: 'node.ready', sessions: [], complete: true });
         this.publishMetrics();
         await this.barrier();
       }
@@ -217,8 +282,30 @@ export class FakeNode extends EventEmitter {
     this.send({ type: 'node.ping' });
     await pong;
   }
+  observe(tenant: string, patch: Partial<ReturnType<typeof observedSession>>) {
+    const value = this.observations.get(tenant)!;
+    Object.assign(value, patch, { seq: String(++this.sequence) });
+    this.send(value);
+  }
+  event(tenant: string, seq: string, type: string, body: object) {
+    const target = this.sessions.get(tenant)!;
+    this.send({
+      event: 'session.event',
+      connectionEpoch: this.helloReply.connectionEpoch,
+      endpointIncarnation: this.incarnation,
+      tenantId: tenant,
+      sessionId: target.sessionId,
+      placementEpoch: target.placementEpoch,
+      streamId: 'fixture-stream',
+      seq,
+      eventId: 'event-' + seq,
+      browserIncarnation: 'browser-1',
+      type,
+      body,
+    });
+  }
   publishMetrics() {
-    this.metrics.sessions = this.sessions.size;
+    this.metrics.sessions = [...this.sessions.values()].filter((value) => value.run === 'running').length;
     this.send({ event: 'node.metrics', ...this.metrics });
   }
   request(request: string, tenantId: string, args: object = {}): Promise<any> {
@@ -229,7 +316,17 @@ export class FakeNode extends EventEmitter {
         reject(new Error('Fake node request timeout'));
       }, 5000);
       this.pending.set(id, { resolve, reject, timer });
-      this.send({ ...args, id, request, tenantId });
+      this.send({
+        id,
+        request,
+        tenantId,
+        sessionId: null,
+        placementEpoch: null,
+        endpointIncarnation: this.incarnation,
+        opId: id,
+        replay: false,
+        params: args,
+      });
     });
   }
   send(message: object) {

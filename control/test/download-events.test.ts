@@ -7,7 +7,9 @@ import { FileLibrary } from '../server/files/library';
 import { log } from '../server/log';
 import { LibraryRepository } from '../server/persistence/library';
 import { migrate } from '../server/persistence/schema';
-import { PageRequests } from '../server/workspace/page-requests';
+import { SessionEvents } from '../server/workspace/session-events';
+import { CoordinationRepository } from '../server/persistence/coordination';
+import { EventEmitter } from 'node:events';
 import { RemoteKitError } from '../shared/errors';
 import type { ProductWorkspace } from '../shared/product';
 
@@ -33,16 +35,22 @@ function fixture() {
       () => null,
     );
   let library = manager();
-  const acknowledgements: string[][] = [];
+  const acknowledgements: { streamId: string; upTo: string }[] = [];
   const runtime = { backgroundTasks: new Map() };
-  const consumer = new PageRequests(
+  const coordination = new CoordinationRepository(db, new AtRestKey(null));
+  const nodes = Object.assign(new EventEmitter(), {
+    get: () => ({ state: { state: 'ready', connectionEpoch: 'connection' } }),
+  });
+  const consumer = new SessionEvents(
     {
+      store: { coordination, transaction: (fn: () => unknown) => db.transaction(fn)() },
       tenants: { get: () => runtime },
       endpoint: {
-        ackEvents: async (_tenant: string, { eventIds }: { eventIds: string[] }) => {
+        nodes,
+        placement: { peek: () => ({ nodeId: 'node', sessionId: 'session', placementEpoch: 1 }) },
+        acknowledge: async (ack: { streamId: string; upTo: string }) => {
           assert.ok(db.prepare('SELECT 1 FROM file_library_operations WHERE tenant=?').get('tenant'));
-          acknowledgements.push(eventIds);
-          return { accepted: true };
+          acknowledgements.push({ streamId: ack.streamId, upTo: ack.upTo });
         },
       },
     } as never,
@@ -50,17 +58,36 @@ function fixture() {
       get library() {
         return library;
       },
-      operations: { saveWorkspace: () => {} },
       viewers: { push: () => {} },
     } as never,
   );
-  const state = { tenantId: 'tenant', tabs: [] } as unknown as ProductWorkspace;
+  let sequence = 0;
+  const sourceSequences = new Map<string, string>();
   return {
     db,
     runtime,
     repository,
     acknowledgements,
-    consume: (events: DownloadEvent[]) => consumer.consumeClosedEvents(state, { events }),
+    consume: async (events: DownloadEvent[]) => {
+      for (const event of events) {
+        let seq = sourceSequences.get(event.eventId);
+        if (!seq) sourceSequences.set(event.eventId, (seq = String(++sequence)));
+        const { type, eventId, ...body } = event;
+        await consumer.receive('node', {
+          event: 'session.event',
+          tenantId: 'tenant',
+          sessionId: 'session',
+          placementEpoch: 1,
+          connectionEpoch: 'connection',
+          streamId: 'stream',
+          seq,
+          eventId,
+          browserIncarnation: 'browser',
+          type,
+          body,
+        } as never);
+      }
+    },
     exclude: (channel: string) =>
       library.request(
         'tenant',
@@ -107,7 +134,10 @@ test('download entries use a separate collected source, host with port, and no p
   f.reopen();
   await f.consume([imported]);
   assert.equal(f.repository.snapshot('tenant').entries.length, 1);
-  assert.deepEqual(f.acknowledgements, [[imported.eventId], [imported.eventId]]);
+  assert.deepEqual(f.acknowledgements, [
+    { streamId: 'stream', upTo: '1' },
+    { streamId: 'stream', upTo: '1' },
+  ]);
 });
 
 test('download sources can be excluded through the library source API', async (t) => {
@@ -155,7 +185,7 @@ test('excluded sources omit entries and full catalogs retain the download until 
     (error: RemoteKitError) => error.code === 'limit_exceeded',
   );
   assert.equal(f.repository.snapshot('tenant').entries.length, 4096);
-  assert.equal(f.runtime.backgroundTasks.get('full').error.capacity, 'catalog');
+  assert.equal(f.acknowledgements[f.acknowledgements.length - 1]?.upTo, '2');
   full.entries = [];
   f.repository.save('tenant', full);
   f.reopen();
@@ -186,13 +216,13 @@ test('failed downloads only log and acknowledge; a failed catalog commit never a
     ],
   );
   assert.equal(f.repository.snapshot('tenant').entries.length, 0);
-  assert.deepEqual(f.acknowledgements, [['failed']]);
+  assert.deepEqual(f.acknowledgements, [{ streamId: 'stream', upTo: '1' }]);
   const save = f.repository.save.bind(f.repository);
   f.repository.save = () => {
     throw new Error('disk full');
   };
   await assert.rejects(f.consume([imported]), /disk full/);
-  assert.deepEqual(f.acknowledgements, [['failed']]);
+  assert.deepEqual(f.acknowledgements, [{ streamId: 'stream', upTo: '1' }]);
   assert.equal(f.repository.snapshot('tenant').entries.length, 0);
   f.repository.save = save;
   await f.consume([imported]);

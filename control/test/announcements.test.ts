@@ -10,7 +10,7 @@ const password = 'password123';
 async function stack() {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const endpoint = {
-    request: async (method: string) => (method === 'session.snapshot' ? { running: false, views: [] } : {}),
+    request: async () => ({}),
   } as unknown as EndpointLink;
   const control = createApplication(store, testGateway(endpoint));
   const admin = await registerUser(store, 'administrator', password);

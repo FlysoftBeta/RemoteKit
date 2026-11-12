@@ -1,200 +1,115 @@
-#!/usr/bin/env python3
-"""Exercise the real JSONL Endpoint service and isolated browser processes."""
-import argparse,json,os,queue,subprocess,threading,time
-from cluster_bridge import endpoint_command
+﻿#!/usr/bin/env python3
+"""Exercise desired convergence, RPC replay and event retirement against the real Browser."""
+import argparse
+import http.server
+import json
 from pathlib import Path
-from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-ROOT=Path(__file__).resolve().parents[2]
-def main():
- p=argparse.ArgumentParser(description=__doc__)
- p.add_argument('--endpoint',type=Path,default=ROOT/'build/endpoint/endpoint/endpoint_service.exe')
- p.add_argument('--browser',type=Path,default=Path('C:/src/chromium/src/out/dev/remotekit_browser.exe'))
- p.add_argument('--recovery',action='store_true')
- p.add_argument('--snapshot-lifecycle',action='store_true',help='Check observation never launches or restarts a Browser')
- p.add_argument('--device-info',action='store_true')
- p.add_argument('--tenants',type=int,default=1)
- p.add_argument('--work-dir',type=Path,default=ROOT/'develop/tmp/service-smoke')
- a=p.parse_args();a.work_dir.mkdir(parents=True,exist_ok=True)
- run=a.work_dir/str(time.time_ns());run.mkdir()
- fixture=run/'fixture.html'
- fixture.write_text('<meta name="viewport" content="width=device-width,initial-scale=1"><script>'
-  'if(location.hash==="#device"){const report=()=>document.title=JSON.stringify({ua:navigator.userAgent,platform:navigator.platform,'
-  'chPlatform:navigator.userAgentData?.platform,mobile:navigator.userAgentData?.mobile,dpr:devicePixelRatio,'
-  'coarse:matchMedia("(pointer:coarse)").matches,hover:matchMedia("(hover:hover)").matches,'
-  'touchPoints:navigator.maxTouchPoints,width:innerWidth,height:innerHeight,screenWidth:screen.width,screenHeight:screen.height});report();setInterval(report,100);}'
-  'else{localStorage.visits=String(Number(localStorage.visits||0)+1);document.title="visits:"+localStorage.visits;}</script>',encoding='utf-8')
- class FixtureHandler(BaseHTTPRequestHandler):
-  def do_GET(self):
-   self.send_response(200)
-   self.send_header('Content-Type','text/html; charset=utf-8')
-   self.end_headers()
-   self.wfile.write(fixture.read_bytes())
-  def log_message(self,*args):pass
- fixture_server=ThreadingHTTPServer(('127.0.0.1',0),FixtureHandler)
- threading.Thread(target=fixture_server.serve_forever,daemon=True).start()
- fixture_origin='http://127.0.0.1:'+str(fixture_server.server_port)
- fixture_url=fixture_origin+'/fixture'
- with (run/'stderr.log').open('wb') as log:
-  child=subprocess.Popen(endpoint_command(a.endpoint, a.browser, run/'state'),
-    stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-  replies=queue.Queue()
-  def read():
-   for line in child.stdout:
-    try:replies.put(json.loads(line))
-    except ValueError:replies.put({'ok':False,'error':'invalid stdout: '+repr(line)})
-  threading.Thread(target=read,daemon=True).start();serial=0;evidence=[]
-  def call(method,tenant='test-tenant-1',**args):
-   nonlocal serial
-   serial+=1;request={'id':str(serial),'method':method,'tenantId':tenant,**args}
-   child.stdin.write((json.dumps(request)+'\n').encode());child.stdin.flush()
-   reply=replies.get(timeout=30)
-   evidence.append({'request':request,'response':reply})
-   if reply.get('id')!=str(serial) or not reply.get('ok'):raise RuntimeError(reply)
-   return reply['result']
-  try:
-   if a.snapshot_lifecycle:
-    def rejected_maintenance():
-     for method,args in [('view.configure',{'visible':False}),('view.lifecycle',{'action':'discard'})]:
-      try:call(method,viewId='1',requireRunning=True,**args)
-      except RuntimeError as error:assert 'browser not running' in str(error),error
-      else:raise AssertionError('guarded maintenance started an offline Browser')
-    rejected_maintenance()
-    for _ in range(3):
-     state=call('session.snapshot')
-     assert state['running'] is False and state['browserPid']==0 and state['views']==[] and state['events']==[],state
-    launched=call('session.ensure');pid=launched['browserPid']
-    assert pid>0 and call('session.ensure')['browserPid']==pid
-    call('view.ensure',viewId='1',url='about:blank',width=640,height=480,visible=False,
-      device={'deviceScaleFactor':1})
-    call('view.configure',viewId='1',requireRunning=True,visible=False)
-    live=call('session.snapshot');assert live['running'] and len(live['views'])==1,live
-    # Kill only this test's Browser root. Endpoint must observe the exact exit,
-    # terminate its retained job and preserve desired/recovery state itself.
-    import ctypes
-    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
-    kernel.OpenProcess.restype=ctypes.c_void_p
-    kernel.WaitForSingleObject.argtypes=[ctypes.c_void_p,ctypes.c_uint32]
-    kernel.CloseHandle.argtypes=[ctypes.c_void_p]
-    handle=kernel.OpenProcess(0x00100000,False,pid)
-    assert handle,ctypes.get_last_error()
-    try:
-     subprocess.run(['taskkill','/PID',str(pid),'/F'],check=True,capture_output=True)
-     assert kernel.WaitForSingleObject(handle,10000)==0
-    finally:kernel.CloseHandle(handle)
-    rejected_maintenance()
-    for _ in range(3):
-     state=call('session.snapshot')
-     assert state['running'] is False and state['browserPid']==0 and state['views']==[] and state['pendingPopups']==[],state
-     assert state['events']==live['events'],state
-    time.sleep(1)
-    restarted=call('session.ensure');assert restarted['browserPid']!=pid,restarted
-    state=call('session.snapshot');assert state['running'] and len(state['views'])==1,state
-    deadline=time.monotonic()+20
-    while any(view.get('loading') or view.get('pending') for view in state['views']):
-     assert time.monotonic()<deadline,state
-     time.sleep(.05)
-     state=call('session.snapshot')
-    call('shutdown');child.wait(timeout=15);assert child.returncode==0
-    log.flush();launches=(run/'stderr.log').read_text(encoding='utf-8',errors='replace').count('\"ev\":\"browser.launched\"')
-    assert launches==2,launches
-    (run/'evidence.json').write_text(json.dumps(evidence,indent=2),encoding='utf-8')
-    print(json.dumps({'passed':True,'browserLaunches':launches,'evidence':str(run)}));return
-   ids=[]
-   for index in range(a.tenants):
-    tenant='test-tenant-'+str(index+1);session=call('session.ensure',tenant);ids.append(session['sessionId'])
-    view=str(index*100+1)
-    args={'viewId':view,'url':fixture_url if a.recovery else 'about:blank','width':1280,'height':720,'visible':True,
-      'device':{'width':1280,'height':720,'deviceScaleFactor':1}}
-    call('view.ensure',tenant,**args);call('view.ensure',tenant,**args)
-    state=call('session.snapshot',tenant)
-    assert [v['viewId'] for v in state['views']]==[view],state
-    if a.recovery:
-     deadline=time.monotonic()+15
-     while time.monotonic()<deadline:
-      state=call('session.snapshot',tenant)
-      if state['views'][0].get('title')=='visits:1' and not state['views'][0].get('loading'):break
-      time.sleep(.05)
-     assert state['views'][0].get('title')=='visits:1',state
-     time.sleep(6)
-     os.kill(state['browserPid'],9)
-     time.sleep(1)
-     call('session.ensure',tenant)
-     deadline=time.monotonic()+20
-     while time.monotonic()<deadline:
-      state=call('session.snapshot',tenant)
-      if state['views'] and state['views'][0].get('title')=='visits:2' and not state['views'][0].get('loading'):break
-      time.sleep(.05)
-     assert state['sessionId']==session['sessionId'],state
-     assert state['views'][0].get('title')=='visits:2',state
+import subprocess
+import threading
+import time
+import uuid
+from cluster_bridge import endpoint_command, SessionDriver
 
-    # Background tabs retain independent viewport dimensions without consuming
-    # the active plane's atlas extent.
-    args.update(viewId=str(index*100+2),width=820,height=1180,visible=False,
-      device={'width':820,'height':1180,'deviceScaleFactor':2})
-    call('view.ensure',tenant,**args)
-    state=call('session.snapshot',tenant);assert len(state['views'])==2,state
-    if a.device_info:
-     # Independent page DPR must survive a common 2x capture atlas and hidden
-     # tabs. Use live renderer values rather than the requested configuration.
-     device_url=fixture_url+'?device=1#device'
-     call('view.navigate',tenant,viewId=view,url=device_url)
-     call('view.configure',tenant,viewId=args['viewId'],visible=True,width=820,height=1180,device=args['device'])
-     call('view.navigate',tenant,viewId=args['viewId'],url=device_url)
-     deadline=time.monotonic()+15
-     while time.monotonic()<deadline:
-      state=call('session.snapshot',tenant);observed={}
-      for item in state['views']:
-       try:observed[item['viewId']]=json.loads(item.get('title',''))
-       except ValueError:pass
-      if abs(observed.get(view,{}).get('dpr',0)-1)<1e-5 and abs(observed.get(args['viewId'],{}).get('dpr',0)-2)<1e-5:break
-      time.sleep(.1)
-     assert abs(observed.get(view,{}).get('dpr',0)-1)<1e-5,observed
-     assert abs(observed.get(args['viewId'],{}).get('dpr',0)-2)<1e-5,observed
-     native=observed[view]
-     assert native['chPlatform']=='Windows',native
-     # The origin UA preference changes identity without changing input capabilities.
-     call('view.configure',tenant,viewId=view,visible=True,width=1280,height=720,
-       device={'width':1280,'height':720,'deviceScaleFactor':2})
-     call('session.sitePreferences',tenant,sites={fixture_origin:{'tabletUa':True}})
-     call('view.command',tenant,viewId=view,command='reload')
-     deadline=time.monotonic()+15
-     while time.monotonic()<deadline:
-      state=call('session.snapshot',tenant);changed={};changed_loading=True
-      for item in state['views']:
-       if item['viewId']==view:
-        changed_loading=item.get('loading',True)
-        try:changed=json.loads(item.get('title',''))
-        except ValueError:pass
-      if changed.get('chPlatform')=='Android' and not changed_loading:break
-      time.sleep(.1)
-     assert changed.get('chPlatform')=='Android' and 'Android' in changed.get('ua',''),changed
-     assert all(changed[key]==native[key] for key in ['coarse','hover','touchPoints']),changed
-    call('view.close',tenant,viewId=view,force=True)
-    call('view.configure',tenant,viewId=args['viewId'],visible=True,width=820,height=1180,device=args['device'])
-    state=call('session.snapshot',tenant);assert len(state['views'])==1,state
-    if a.device_info:
-     call('view.navigate',tenant,viewId=args['viewId'],url=device_url)
-     info={};deadline=time.monotonic()+15
-     while time.monotonic()<deadline:
-      state=call('session.snapshot',tenant)
-      try:info=json.loads(state['views'][0].get('title',''))
-      except ValueError:pass
-      if abs(info.get('dpr',0)-2)<1e-5 and info.get('chPlatform')=='Android' and not state['views'][0].get('loading'):break
-      time.sleep(.05)
-     assert info.get('platform')=='Linux armv81' and info.get('chPlatform')=='Android',info
-     assert 'Android' in info['ua'] and 'Mobile' not in info['ua'],info
-     assert info['mobile'] is False and not info['coarse'] and info['hover'] and info['touchPoints']==0,info
-     assert abs(info['dpr']-2)<1e-5 and info['width']==820 and info['height']==1180,info
-    call('view.close',tenant,viewId=args['viewId'],force=True)
-    state=call('session.snapshot',tenant);assert state['views']==[],state
-   assert len(set(ids))==len(ids)
-   call('shutdown')
-   child.wait(timeout=15);assert child.returncode==0
-   (run/'evidence.json').write_text(json.dumps(evidence,indent=2),encoding='utf-8')
-   print(json.dumps({'passed':True,'tenants':a.tenants,'evidence':str(run)}))
-  finally:
-   (run/'evidence.json').write_text(json.dumps(evidence,indent=2),encoding='utf-8')
-   if child.poll() is None:
-    child.terminate();child.wait(timeout=15)
-   fixture_server.shutdown();fixture_server.server_close()
-if __name__=='__main__':main()
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--endpoint", type=Path, default=ROOT/"build/endpoint/endpoint/endpoint_service.exe")
+    parser.add_argument("--browser", type=Path, default=Path("C:/src/chromium/src/out/rel/remotekit_browser.exe"))
+    parser.add_argument("--work-dir", type=Path, default=ROOT/"develop/tmp/service-smoke")
+    parser.add_argument("--tenants", type=int, default=1)
+    parser.add_argument("--recovery", action="store_true")
+    parser.add_argument("--snapshot-lifecycle", action="store_true")
+    parser.add_argument("--device-info", action="store_true")
+    args = parser.parse_args()
+    run = args.work_dir.resolve()/uuid.uuid4().hex[:12]
+    run.mkdir(parents=True)
+    class Fixture(http.server.BaseHTTPRequestHandler):
+        def log_message(self,*_):
+            pass
+        def do_GET(self):
+            body = b"""<!doctype html><script>
+              localStorage.visits=String(Number(localStorage.visits||0)+1);
+              const report=()=>document.title=JSON.stringify({visits:localStorage.visits,width:innerWidth,height:innerHeight,
+                dpr:devicePixelRatio,mobile:navigator.userAgentData?.mobile,platform:navigator.platform});
+              report();addEventListener('resize',report);
+              </script>"""
+            self.send_response(200)
+            self.send_header("Content-Type","text/html")
+            self.end_headers()
+            self.wfile.write(body)
+    fixture = http.server.ThreadingHTTPServer(("127.0.0.1",0),Fixture)
+    threading.Thread(target=fixture.serve_forever,daemon=True).start()
+    origin = "http://127.0.0.1:"+str(fixture.server_port)
+    with (run/"stderr.log").open("wb") as log:
+        root = run/"state"
+        child = subprocess.Popen(endpoint_command(args.endpoint,args.browser,root),
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,creationflags=subprocess.CREATE_NO_WINDOW)
+        driver = SessionDriver(child,root)
+        try:
+            for index in range(args.tenants):
+                tenant = "service-"+str(index)
+                driver.publish(tenant,run="stopped",commit=None)
+                driver.wait(lambda value:value["converged"] and value["browser"]=="stopped",tenant)
+                invalid = driver.document(tenant)
+                invalid.update(run="running",commit="invalid",revision=str(int(invalid["revision"])+1))
+                rejected = driver.send(invalid,ok=False)
+                assert rejected["error"]["code"]=="invalid_request", rejected
+                driver.publish(tenant,run="running",commit=None)
+                driver.wait(lambda value:value["converged"] and value["browser"]=="running",tenant)
+                state = driver.view(tenant,viewId="1",url=origin+"/initial",width=640,height=480,visible=True)
+                instance = state["views"][0]["instance"]
+                driver.send(driver.document(tenant))
+                driver.wait(lambda value:value["views"][0]["instance"]==instance,tenant)
+                ready = driver.wait(lambda value:value["views"] and value["views"][0].get("title","").startswith("{") and not value["views"][0].get("loading"),tenant)
+                report = json.loads(ready["views"][0]["title"])
+                assert report["visits"]=="1" and report["dpr"]==1 and report["mobile"] is False,report
+                operation = dict(viewId="1",url=origin+"/navigate",browserIncarnation=ready["browserIncarnation"],
+                    operationId=str(uuid.uuid4()),operationGeneration=str(uuid.uuid4()),operationSequence="1")
+                op_id = str(uuid.uuid4())
+                result = driver.rpc("view.navigate",tenant,op_id=op_id,**operation)
+                assert driver.rpc("view.navigate",tenant,op_id=op_id,replay=True,**operation)==result
+                conflict = driver.rpc("view.navigate",tenant,op_id=op_id,ok=False,**dict(operation,url=origin+"/conflict"))
+                assert conflict["error"]["code"]=="conflict",conflict
+                unknown = driver.rpc("view.navigate",tenant,op_id="not-retained",replay=True,ok=False,**operation)
+                assert unknown["error"]["code"]=="outcome_unknown",unknown
+                driver.wait(lambda value:value["views"] and '"visits":"2"' in value["views"][0].get("title",""),tenant)
+                if args.recovery:
+                    pid = driver.observe(tenant)["browserPid"]
+                    subprocess.run(["taskkill","/PID",str(pid),"/F"],check=True,capture_output=True)
+                    recovered = driver.wait(lambda value:value["browserPid"] not in (0,pid) and len(value["views"])==1 and not value["recovery"]["pending"],tenant)
+                    assert recovered["browserIncarnation"] != ready["browserIncarnation"]
+                    stale = driver.rpc("view.navigate",tenant,op_id=op_id,replay=True,ok=False,**operation)
+                    assert stale["error"]["code"]=="conflict",stale
+                if args.snapshot_lifecycle:
+                    driver.publish(tenant,run="stopped",commit=None)
+                    stopped = driver.wait(lambda value:value["converged"] and value["browser"]=="stopped",tenant)
+                    for _ in range(3):
+                        assert driver.observe(tenant)["browserPid"]==0
+                    driver.publish(tenant,run="running",commit=None)
+                    driver.wait(lambda value:value["converged"] and value["browser"]=="running" and len(value["views"])==1,tenant)
+                driver.rpc("view.close",tenant,viewId="1",force=True)
+                driver.wait(lambda value:len(value["views"])==0 and any(event["tenantId"]==tenant and event["type"]=="view.closed" for event in driver.events),tenant)
+                event = next(event for event in driver.events if event["tenantId"]==tenant and event["type"]=="view.closed")
+                driver.publish(tenant,quality=dict(effectiveDpr=1))
+                driver.wait(lambda value:value["converged"] and value["views"]==[],tenant)
+                driver.acknowledge(event)
+                driver.publish(tenant,views=[])
+                driver.wait(lambda value:int(value["events"]["ackedThrough"]) >= int(event["seq"]),tenant)
+                committed = driver.commit("service-finished-"+str(index),tenant)
+                assert committed["data"]["committed"]["requestId"]=="service-finished-"+str(index)
+            driver.rpc("shutdown",tenant="")
+            child.wait(timeout=70)
+            assert child.returncode==0,child.returncode
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+            fixture.shutdown()
+            (run/"evidence.json").write_text(json.dumps(driver.evidence,indent=2),encoding="utf-8")
+    print(json.dumps(dict(evidence=str(run))))
+
+
+if __name__ == "__main__":
+    main()

@@ -14,7 +14,7 @@ async function stack() {
   const endpoint = {
     request: async (method: string, _tenant: string, args: any) => {
       requests.push({ method, args });
-      return method === 'session.snapshot' ? { running: false, views: [] } : {};
+      return {};
     },
   } as unknown as EndpointLink;
   const control = createApplication(store, testGateway(endpoint));
@@ -242,7 +242,7 @@ test('reset browser data clears clipboard without starting an absent or stopped 
       await h.call('admin.resetSession', { username });
       assert.equal(h.store.clipboards.latest(user.id), undefined);
       assert.equal(
-        h.requests.slice(before).some((request) => request.method === 'session.ensure'),
+        h.requests.slice(before).some((request) => request.method === 'session.desired'),
         false,
       );
     }

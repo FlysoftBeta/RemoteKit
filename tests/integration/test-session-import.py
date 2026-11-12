@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from cluster_bridge import endpoint_command
+from cluster_bridge import endpoint_command, SessionDriver
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -54,26 +54,19 @@ def main():
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
             creationflags=subprocess.CREATE_NO_WINDOW)
 
-        def read():
-            for line in child.stdout:
-                replies.put(json.loads(line))
-
-        threading.Thread(target=read, daemon=True).start()
+        driver = SessionDriver(child, run / "state", "import-test")
+        driver.publish(run="running")
+        driver.wait(lambda value:value["browser"] == "running")
 
         def call(method, error=None, **fields):
-            nonlocal serial
-            serial += 1
-            request = {"id": str(serial), "method": method, "tenantId": "import-test", **fields}
-            child.stdin.write((json.dumps(request) + "\n").encode())
-            child.stdin.flush()
-            reply = replies.get(timeout=40)
-            evidence.append({"request": request, "response": reply})
-            assert reply["id"] == str(serial), reply
+            if method == "session.snapshot":
+                value=driver.observe()
+                return dict(value, running=value["browser"] == "running")
+            result=driver.rpc(method,ok=error is None,**fields)
             if error:
-                assert not reply["ok"] and reply["error"]["code"] == error, reply
-                return reply["error"]
-            assert reply["ok"], reply
-            return reply["result"]
+                assert result["error"]["code"] == error, result
+                return result["error"]
+            return result
 
         def cookie(name="imported", **fields):
             return {"name": name, "value": "yes", "domain": "127.0.0.1", "path": "/",
@@ -83,9 +76,8 @@ def main():
         def finish(job):
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
-                status = call("session.storage.importStatus", job=job["job"],
+                status = call("session.storage.importStatus", importId=job["importId"],
                               browserIncarnation=job["browserIncarnation"])
-                assert status["accepted"], status
                 if status["state"] == "done":
                     return status
                 assert status["state"] == "pending", status
@@ -93,7 +85,7 @@ def main():
             raise AssertionError("import did not finish")
 
         try:
-            call("session.storage.importStatus", error="conflict", job="1",
+            call("session.storage.importStatus", error="conflict", importId="1",
                  browserIncarnation="stale")
             identity = call("session.identity")
             assert identity["accepted"] and identity["userAgent"], identity
@@ -114,24 +106,23 @@ def main():
                     {"origin": origin, "items": [["key", "x" * (256 * 1024)]]}]},
                 {"cookies": [], "localStorage": [{"origin": origin, "items": [["key", 1]]}]},
             ]:
-                call("session.storage.import", error="invalid_request", **invalid)
-            job = call("session.storage.import", cookies=[
+                call("session.storage.import", error="invalid_request", importId=str(uuid.uuid4()), **invalid)
+            job = call("session.storage.import", importId=str(uuid.uuid4()), cookies=[
                 cookie(), cookie("http_only", httpOnly=True),
                 cookie("persistent", expires=int(time.time() * 1000) + 3600000),
                 cookie("__Secure-invalid")], localStorage=[{"origin": origin, "items": values}])
-            assert job["accepted"] and job["job"].isdecimal(), job
+            assert job["state"] in ("pending","done") and job["importId"], job
             result = finish(job)
             assert result["cookies"] == {"applied": 3, "rejected": 1}, result
             assert result["localStorage"] == {"applied": len(values), "rejected": 0}, result
-            call("session.storage.importStatus", error="conflict", job=job["job"],
+            call("session.storage.importStatus", importId=job["importId"],
                  browserIncarnation=job["browserIncarnation"])
-            call("session.storage.importStatus", error="conflict", job="999999",
+            call("session.storage.importStatus", error="not_found", importId="999999",
                  browserIncarnation=job["browserIncarnation"])
-            stale = call("session.storage.importStatus", error="conflict", job="1",
+            stale = call("session.storage.importStatus", error="conflict", importId="1",
                          browserIncarnation="stale")
-            assert stale["message"] == "stale_browser_incarnation", stale
-            call("view.ensure", viewId="1", url=origin, width=640, height=480,
-                 visible=False, device={"deviceScaleFactor": 1})
+            assert stale["message"] == "RPC Browser is retired", stale
+            driver.view(viewId="1",url=origin,width=640,height=480)
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 snapshot = call("session.snapshot")
@@ -145,8 +136,7 @@ def main():
             assert dict(observed["storage"]) == dict(values), observed
             assert set(observed["cookie"].split("; ")) == {"imported=yes", "persistent=yes"}, observed
             assert observed["ua"] == identity["userAgent"], observed
-            jobs = [call("session.storage.import", cookies=[], localStorage=[]) for _ in range(16)]
-            call("session.storage.import", error="limit_exceeded", cookies=[], localStorage=[])
+            jobs = [call("session.storage.import", importId=str(uuid.uuid4()), cookies=[], localStorage=[]) for _ in range(16)]
             for empty in jobs:
                 result = finish(empty)
                 assert result["cookies"] == result["localStorage"] == {"applied": 0, "rejected": 0}
@@ -162,7 +152,7 @@ def main():
                     child.kill()
                     child.wait()
             server.shutdown()
-            (run / "evidence.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+            (run / "evidence.json").write_text(json.dumps(driver.evidence, indent=2), encoding="utf-8")
     print(f"Session import readback and lifecycle verified; evidence: {run}")
 
 

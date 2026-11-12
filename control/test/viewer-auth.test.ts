@@ -34,7 +34,7 @@ test('detaching a Viewer retains a failed peer revocation and retries it without
     f.endpoint,
     'request',
     async (method: string, tenant: string, params: Record<string, unknown> = {}) => {
-      if (method === 'rtc.authorize' && params.unlocked === false && failing)
+      if (method === 'session.desired' && (params.authorization as any).unlocked === false && failing)
         throw new Error('native revocation unavailable');
       return request(method, tenant, params);
     },
@@ -65,17 +65,19 @@ class AuthEndpoint implements EndpointLink {
       this.signal = undefined;
     };
   }
+  observe() {
+    return {
+      running: true,
+      views: [],
+      rtc: { active: !!this.connectionId, connectionId: this.connectionId },
+    };
+  }
   async request(method: string, _tenant: string, params: Record<string, unknown> = {}): Promise<any> {
     this.calls.push({ method, params });
     switch (method) {
-      case 'session.snapshot':
-        return {
-          running: true,
-          views: [],
-          rtc: { active: !!this.connectionId, connectionId: this.connectionId },
-        };
-      case 'session.sitePreferences':
-        return { applied: true, accepted: true };
+      case 'session.desired':
+        if ((params.authorization as any).unlocked && this.authGate) await this.authGate.promise;
+        return { accepted: true };
       case 'rtc.offer':
         this.connectionId = String(params.connectionId);
         queueMicrotask(() =>
@@ -89,9 +91,6 @@ class AuthEndpoint implements EndpointLink {
       case 'rtc.close':
         this.connectionId = undefined;
         return { closed: true };
-      case 'rtc.authorize':
-        if (params.unlocked && this.authGate) await this.authGate.promise;
-        return { applied: true, epoch: params.epoch };
       case 'auth.face.capabilities':
         return { available: true, modelVersion: 'test-sface' };
       case 'auth.face.begin':
@@ -177,7 +176,11 @@ test('late unlock acknowledgement cannot restore rights after a subsequent lock'
   f.endpoint.authGate = defer();
   const pending = f.request('auth.verify', { method: 'password', secret: password });
   const rejected = assert.rejects(pending, { code: 'outcome_unknown' });
-  while (!f.endpoint.calls.some((c) => c.method === 'rtc.authorize' && c.params.epoch === 3))
+  while (
+    !f.endpoint.calls.some(
+      (c) => c.method === 'session.desired' && (c.params.authorization as any).epoch === 3,
+    )
+  )
     await new Promise((resolve) => setTimeout(resolve, 5));
   await f.request('auth.lock');
   f.endpoint.authGate.resolve();

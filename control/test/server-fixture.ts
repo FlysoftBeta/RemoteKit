@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto';
+import { observedSession } from './coordination-fixture';
+import type { SessionDesired } from '../server/endpoint/coordination';
+import type { EndpointSnapshot } from '../server/endpoint/types';
 import { NodeRegistry } from '../server/cluster/node-link';
 import type { SessionPlacement } from '../server/cluster/placement';
 import { endpointDefaults, testNode, nodePrivateKey } from './node-fixture';
@@ -6,7 +10,10 @@ import { EndpointGateway } from '../server/endpoint/gateway';
 import type { EndpointLink, EndpointLinkState } from '../server/endpoint/link';
 import type { Clock } from '../server/util/clock';
 export function testGateway(
-  link: Pick<EndpointLink, 'request' | 'onSignal' | 'onClientAction'> & { state?: EndpointLinkState },
+  link: Pick<EndpointLink, 'request' | 'onSignal'> & {
+    state?: EndpointLinkState;
+    observe?: (tenant: string) => Partial<EndpointSnapshot>;
+  },
 ): EndpointGateway {
   const nodes = new NodeRegistry({
     nodes: { fixture: testNode('fixture') },
@@ -17,12 +24,9 @@ export function testGateway(
   Object.defineProperty(node, 'state', {
     get: () => link.state ?? { state: 'ready', incarnation: 'fixture', connectionEpoch: 'fixture' },
   });
-  node.request = async (method, tenant, args) =>
-    method === 'session.open' ? {} : link.request(method, tenant, args);
   if (link.onSignal) node.onSignal = link.onSignal.bind(link);
-  if (link.onClientAction) node.onClientAction = link.onClientAction.bind(link);
   const placements = new Map<string, SessionPlacement>();
-  return new EndpointGateway(nodes, {
+  const gateway = new EndpointGateway(nodes, {
     peek: (tenant) => placements.get(tenant),
     resolve: (tenant) => {
       if (node.state.state !== 'ready') throw new RemoteKitError('unavailable', 'Fixture offline');
@@ -30,7 +34,7 @@ export function testGateway(
       if (!placement) {
         placement = {
           tenant,
-          sessionId: tenant,
+          sessionId: createHash('sha256').update(tenant).digest('hex').slice(0, 32),
           nodeId: 'fixture',
           placementEpoch: 1,
           keyCiphertext: '',
@@ -72,7 +76,16 @@ export function testGateway(
       current.placementEpoch++;
       return current;
     },
-    commitCheckpoint: () => 1,
+    commitCheckpoint: (placement, manifestId) => {
+      Object.assign(placements.get(placement.tenant)!, {
+        runState: 'stopped',
+        dataState: 'clean',
+        pendingCommit: null,
+        checkpoint: manifestId,
+        checkpointId: 1,
+      });
+      return 1;
+    },
     markWarm: () => {},
     activeSessions: (nodeId) =>
       [...placements.values()].filter((p) => p.nodeId === nodeId && p.runState === 'running').length,
@@ -88,6 +101,76 @@ export function testGateway(
     },
     checkpoints: () => ({ count: 0, latestAt: null, latestBytes: 0 }),
   });
+  const documents = new Map<string, SessionDesired>();
+  const failures = new Map<string, any>();
+  const applied = new Map<string, SessionDesired>();
+  let sequence = 0n;
+  node.coordinate = async () => {
+    for (const [tenant, document] of documents)
+      if (failures.has(tenant)) {
+        try {
+          await link.request('session.desired', tenant, { ...document });
+          failures.delete(tenant);
+          applied.set(tenant, document);
+        } catch {}
+      }
+  };
+  const refresh = (tenant: string) => {
+    const placement = placements.get(tenant);
+    if (!placement || node.state.state !== 'ready') return;
+    const desired = documents.get(tenant);
+    const value = observedSession(
+      { tenantId: tenant, sessionId: placement.sessionId, placementEpoch: placement.placementEpoch },
+      node.state.connectionEpoch,
+      node.state.incarnation,
+      desired,
+      link.observe?.(tenant),
+    );
+    value.seq = String(++sequence);
+    if (applied.has(tenant)) {
+      const actual = applied.get(tenant)!;
+      value.authorization = {
+        ...actual.authorization,
+        revoked: !actual.authorization.unlocked,
+        filesApplied: actual.authorization.unlocked,
+      };
+      value.lock = actual.lock;
+    }
+    if (failures.has(tenant)) {
+      value.lastError = failures.get(tenant);
+      value.converged = false;
+      const revision = applied.get(tenant)?.revision ?? '0';
+      value.applied.sitePreferencesRevision = revision;
+      value.applied.viewsRevision = revision;
+      value.applied.mediaPolicyRevision = revision;
+    }
+    return value;
+  };
+  node.observations.get = (tenant: string) => refresh(tenant);
+  node.publish = async (message: any) => {
+    if (message.method === 'session.events.ack')
+      return link.request(message.method, message.tenantId, message);
+    documents.set(message.tenantId, message);
+    try {
+      await link.request('session.desired', message.tenantId, message);
+      if (BigInt(applied.get(message.tenantId)?.revision ?? '0') <= BigInt(message.revision)) {
+        failures.delete(message.tenantId);
+        applied.set(message.tenantId, message);
+      }
+    } catch (error: any) {
+      if (documents.get(message.tenantId) === message)
+        failures.set(message.tenantId, {
+          code: error.code ?? 'internal',
+          message: error.message ?? String(error),
+        });
+    }
+    const observation = refresh(message.tenantId)!;
+    nodes.emit('session.observed', { nodeId: 'fixture', message: observation });
+    node.emit('session.observed', observation);
+    return { accepted: true, revision: message.revision };
+  };
+  node.invoke = async (request) => link.request(request.method, request.tenantId, request.params);
+  return gateway;
 }
 export class TestClock implements Clock {
   private monotonic = 0;

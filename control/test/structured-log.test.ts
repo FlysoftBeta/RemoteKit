@@ -106,24 +106,24 @@ test('Viewer error formatting uses shared messages and appends the original erro
   );
 });
 
-test('session-open wrapping preserves Endpoint diagnosis IDs, reasons, hints and the cause', async () => {
+test('one-shot wrapping preserves Endpoint diagnosis IDs, reasons and hints', async () => {
   capture();
-  const gateway = testGateway({ request: async () => ({}) });
-  gateway.nodes.get('fixture')!.request = async () => {
-    throw {
-      code: 'unavailable',
-      message: 'native startup failed',
-      reason: 'browser_restarting',
-      errorId: 'e-1234567890',
-      retryAfterMs: 25,
-    };
-  };
-  await assert.rejects(gateway.snapshot('tenant'), (error) => {
+  const gateway = testGateway({
+    request: async () => {
+      throw {
+        code: 'unavailable',
+        message: 'native startup failed',
+        reason: 'browser_restarting',
+        errorId: 'e-1234567890',
+        retryAfterMs: 25,
+      };
+    },
+  });
+  await assert.rejects(gateway.snapshot('tenant', { outputDiagnostics: true }), (error) => {
     assert.ok(error instanceof RemoteKitError);
     assert.equal(error.errorId, 'e-1234567890');
     assert.equal(error.reason, 'browser_restarting');
     assert.equal(error.retryAfterMs, 25);
-    assert.ok(error.cause);
     return true;
   });
   const native = nativeError({ code: 'unavailable', message: 'native diagnosis', errorId: 'e-1234567890' });

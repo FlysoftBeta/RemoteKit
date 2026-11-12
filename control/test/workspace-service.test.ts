@@ -1,3 +1,4 @@
+import { applyDesiredViews } from './coordination-fixture';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -27,25 +28,21 @@ class Endpoint {
     icon: { png: png.toString('base64'), width: 192, height: 192 },
   };
 
+  observe() {
+    return { running: true, browserIncarnation: 'browser', views: [...this.views.values()] };
+  }
   async request(method: string, tenant: string, args: any = {}) {
     this.calls.push({ method, tenant, args });
-    if (method === 'session.snapshot')
-      return { running: true, browserIncarnation: 'browser', views: [...this.views.values()] };
+    if (method === 'session.desired') {
+      this.calls.push(...applyDesiredViews(this.views, args).map((change) => ({ ...change, tenant })));
+      return { accepted: true };
+    }
     if (method === 'view.appInfo') return this.info;
-    if (method === 'view.ensure')
-      this.views.set(args.viewId, {
-        ...args,
-        title: 'Initial page',
-        instance: 'instance',
-        document: 'initial',
-        actual: 0,
-        loading: false,
-      });
     if (method === 'view.navigate') {
       const view = this.views.get(args.viewId);
       Object.assign(view, { url: args.url, loading: true });
     }
-    if (method === 'view.configure') Object.assign(this.views.get(args.viewId) ?? {}, args);
+
     if (method === 'view.close') {
       if (this.rejectedClose.has(args.viewId)) throw new RemoteKitError('rejected', 'Close rejected');
       const view = this.views.get(args.viewId);
@@ -122,7 +119,7 @@ test('workspace WS routes preserve bounded local state and split settings while 
       { code: 'invalid_request' },
     );
     assert.equal(
-      f.endpoint.calls.some((call) => call.method === 'view.ensure'),
+      f.endpoint.calls.some((call) => call.method === 'view.created'),
       false,
     );
   } finally {
@@ -547,7 +544,7 @@ test('web App popups split beside their opener, overflow into a space and route 
       assert.equal(browserPopup.state.tabs.filter((tab) => tab.windowId === window.id).length, 1);
     assert.equal(
       f.endpoint.calls.some(
-        (call) => call.method === 'view.ensure' && call.args.url.startsWith('https://popup.test/'),
+        (call) => call.method === 'view.created' && call.args.url.startsWith('https://popup.test/'),
       ),
       false,
     );

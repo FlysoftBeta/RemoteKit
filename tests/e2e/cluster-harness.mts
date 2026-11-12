@@ -57,6 +57,12 @@ process.on('message', (message: any) => {
           ...node,
           metrics: nodes.get(node.nodeId)?.metrics.latest()?.value,
         })),
+        observations: Object.fromEntries(
+          store.db
+            .prepare('SELECT tenant FROM session_placements')
+            .all()
+            .map((row: any) => [row.tenant, gateway.observation(row.tenant)]),
+        ),
         users: store.db.prepare('SELECT username,tenant FROM users').all(),
         placements: store.db
           .prepare(

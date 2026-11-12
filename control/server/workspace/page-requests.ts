@@ -1,3 +1,4 @@
+import { endpointError } from '../endpoint/gateway';
 import { createHash } from 'node:crypto';
 import { parseWireError, RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import { SITE_PERMISSIONS, type FileRequest, type PageDialogReply } from '../../shared/product';
@@ -615,7 +616,15 @@ export class PageRequests {
     }
     if (changed) {
       this.services.operations.saveWorkspace(state);
-      await this.context.endpoint.synchronize(tenant);
+      const desired = await this.context.endpoint.synchronize(tenant);
+      const applied = await this.context.endpoint.waitObserved(
+        tenant,
+        (value) =>
+          BigInt(value.observedRevision) >= BigInt(desired.revision) &&
+          (BigInt(value.applied.sitePreferencesRevision) >= BigInt(desired.revision) ||
+            value.lastError !== null),
+      );
+      if (applied.lastError) throw endpointError(applied.lastError);
     }
     let fields: PageReplyFields;
     switch (reply.kind) {

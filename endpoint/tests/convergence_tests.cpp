@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
     std::mutex mutex;
     std::vector<std::string> order;
     std::atomic<unsigned> prepares{0}, starts{0}, configured{0}, stopped{0}, requests{0};
-    std::atomic<bool> blocked{true}, authorized{true}, running{false};
+    std::atomic<bool> blocked{true}, authorized{true}, running{false}, sampling_failed{true};
     const auto record = [&](const char* action) {
       std::lock_guard lock(mutex);
       order.push_back(action);
@@ -66,6 +66,8 @@ int main(int argc, char** argv) {
               return Json{{"state", "clean"}};
             },
             .observe = [&]() -> Result<Json> {
+              if (sampling_failed)
+                return Error{ErrorCode::kInternal, "Session copy is corrupt"};
               return Json{{"browser", running ? "running" : "stopped"},
                           {"browserIncarnation", running ? Json("browser") : Json()}};
             },
@@ -84,6 +86,9 @@ int main(int argc, char** argv) {
             .send = [](const Json&, uint64_t) { return true; },
         });
     coordinator.Activate("connection", "1", 1);
+    Await([&] { return coordinator.Latest().value("browser", "") == "failed"; });
+    Check(!coordinator.Latest().at("lastError").is_null(), "sampling failure remains observable");
+    sampling_failed = false;
     Check(bool(coordinator.Publish(desired, 1)), "desired accepted");
     Await([&] { return coordinator.Latest().value("converged", false); });
     {

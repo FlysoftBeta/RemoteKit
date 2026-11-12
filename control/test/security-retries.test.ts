@@ -16,12 +16,22 @@ function securityFixture() {
   configureLog({ write: (line) => records.push(JSON.parse(line)) });
   let failLock = false;
   let calls = 0;
+  let viewer: ReturnType<ViewerSecurity['create']>;
   const endpoint = {
-    authorizeRtc: async (_tenant: string, params: { epoch: number; unlocked: boolean }) => {
+    synchronize: async () => {
       calls++;
-      if (failLock && !params.unlocked) throw new Error('native lock failed');
-      return { applied: true, epoch: params.epoch };
+      if (failLock && viewer.locked) throw new Error('native lock failed');
+      return { revision: '1' };
     },
+    waitObserved: async () => ({
+      authorization: {
+        connectionId: viewer.peer!.connectionId,
+        epoch: viewer.peer!.epoch,
+        unlocked: !viewer.locked,
+      },
+      lastError: null,
+    }),
+
     faceCapabilities: async () => ({ available: true, modelVersion: 'test' }),
     faceStatus: async () => {
       throw new Error('camera transport failed');
@@ -35,7 +45,7 @@ function securityFixture() {
     () => true,
     () => {},
   );
-  const viewer = security.create({ id: 'user' } as AuthState['user'], true);
+  viewer = security.create({ id: 'user' } as AuthState['user'], true);
   return {
     security,
     viewer,

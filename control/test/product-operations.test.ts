@@ -1,3 +1,4 @@
+import { applyDesiredViews } from './coordination-fixture';
 import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
 import { requestViewer } from './server-fixture';
@@ -18,33 +19,25 @@ class Endpoint {
   failNavigate = false;
   failHideOnce = false;
   onCommand?: (args: any) => void;
+  observe() {
+    return { running: true, browserIncarnation: this.incarnation, views: this.views };
+  }
   async request(method: string, _tenant: string, args: any = {}) {
     this.calls.push({ method, args });
-    if (method === 'session.snapshot')
-      return { running: true, browserIncarnation: this.incarnation, views: this.views };
-    if (method === 'session.sitePreferences' || method === 'session.mediaPolicy')
-      return { accepted: true, applied: true };
-    if (method === 'view.ensure') {
-      this.views.push({
-        viewId: args.viewId,
-        url: args.url,
-        actual: 0,
-        loading: false,
-        instance: '1',
-        document: '1',
-      });
+    if (method === 'session.desired') {
+      const views = new Map(this.views.map((view) => [view.viewId, view]));
+      if (args.views.some((view: any) => !view.visible) && this.failHideOnce) {
+        this.failHideOnce = false;
+        this.calls.push({ method: 'view.configured', args: args.views.find((view: any) => !view.visible) });
+        throw new RemoteKitError('outcome_unknown', 'desired reply lost');
+      }
+      const changes = applyDesiredViews(views, args);
+      this.views = [...views.values()];
+      this.calls.push(...changes);
     }
     if (method === 'view.navigate' && this.failNavigate)
       throw new RemoteKitError('outcome_unknown', 'reply lost');
     if (method === 'view.command') this.onCommand?.(args);
-    if (method === 'view.configure') {
-      if (args.visible === false && this.failHideOnce) {
-        this.failHideOnce = false;
-        throw new RemoteKitError('outcome_unknown', 'hide reply lost');
-      }
-      const view = this.views.find((view) => view.viewId === args.viewId);
-      if (view) Object.assign(view, args);
-    }
     if (method === 'view.close.reply') return { accepted: true, browser: { ok: true } };
     if (method === 'view.close')
       return {
@@ -149,9 +142,9 @@ for (const initial of ['start', 'remote'] as const) {
         assert.ok(
           f.endpoint.calls.some(
             (call) =>
-              call.method === 'view.configure' &&
+              call.method === 'view.configured' &&
               call.args.visible === false &&
-              call.args.requireRunning === true,
+              call.args.presence === 'ifPresent',
           ),
         );
       assert.equal(
@@ -312,7 +305,7 @@ test('a delayed stop terminal settles after the cancelled navigator has restored
     await f.control.reconciler.tick();
     assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].kind, 'start');
     assert.equal(f.control.operations.operationStatus(f.tenant, stop).status, 'applying');
-    const ensureCount = f.endpoint.calls.filter((call) => call.method === 'view.ensure').length;
+    const ensureCount = f.endpoint.calls.filter((call) => call.method === 'view.created').length;
     view.navigationOperations = [
       {
         ...f.control.operations.operationStatus(f.tenant, stop),
@@ -329,7 +322,7 @@ test('a delayed stop terminal settles after the cancelled navigator has restored
         (call) => call.method === 'view.navigation.ack' && call.args.operationId === stop.operationId,
       ),
     );
-    assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.ensure').length, ensureCount);
+    assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.created').length, ensureCount);
   } finally {
     await f.control.close();
     f.store.db.close();
@@ -406,7 +399,7 @@ for (const outcome of ['committed', 'failed'] as const) {
       );
       assert.equal(
         f.endpoint.calls.some(
-          (call) => call.method === 'view.configure' && call.args.requireRunning === true,
+          (call) => call.method === 'view.configured' && call.args.presence === 'ifPresent',
         ),
         false,
       );
@@ -609,15 +602,14 @@ test('provisional start rollback hides its existing Native plane, retries failur
     f.endpoint.failHideOnce = true;
     await f.control.reconciler.tick();
     assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].kind, 'start');
-    assert.equal(view.visible, true);
     await f.control.reconciler.tick();
     assert.equal(view.visible, false);
     assert.equal(f.endpoint.views.length, 1);
     const hides = () =>
       f.endpoint.calls.filter(
         (call) =>
-          call.method === 'view.configure' &&
-          call.args.requireRunning === true &&
+          call.method === 'view.configured' &&
+          call.args.presence === 'ifPresent' &&
           call.args.visible === false,
       );
     assert.equal(hides().length, 2);
@@ -627,7 +619,7 @@ test('provisional start rollback hides its existing Native plane, retries failur
     );
     await f.control.reconciler.tick();
     assert.equal(hides().length, 2);
-    // When the snapshot omits visibility, a successful hide cache avoids work.
+    // Unchanged desired views do not require another publication.
     delete view.visible;
     await f.control.reconciler.tick();
     assert.equal(hides().length, 2);
@@ -654,11 +646,11 @@ test('a local start page hides an existing Native plane during resource limitati
       'lease',
     );
     const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
-      before = f.endpoint.calls.filter((call) => call.method === 'view.ensure').length;
+      before = f.endpoint.calls.filter((call) => call.method === 'view.created').length;
     await f.control.reconciler.tick();
-    assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.ensure').length, before);
+    assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.created').length, before);
     assert.equal(
-      f.endpoint.calls.some((call) => call.method === 'view.configure'),
+      f.endpoint.calls.some((call) => call.method === 'view.configured'),
       false,
     );
     const other = (
@@ -691,13 +683,16 @@ test('a local start page hides an existing Native plane during resource limitati
     await f.control.reconciler.tick();
     assert.equal(f.endpoint.views[0].visible, false);
     assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].kind, 'start');
-    assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.ensure').length, before);
+    assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.created').length, before);
     assert.equal(
       f.endpoint.calls.some((call) => call.method === 'view.lifecycle' || call.method === 'view.close'),
       false,
     );
-    const hide = f.endpoint.calls.find((call) => call.method === 'view.configure')!;
-    assert.deepEqual(hide.args, { viewId: tab.webviewId, visible: false, requireRunning: true });
+    const hide = f.endpoint.calls.find((call) => call.method === 'view.configured')!;
+    assert.deepEqual(
+      { viewId: hide.args.viewId, visible: hide.args.visible, presence: hide.args.presence },
+      { viewId: tab.webviewId, visible: false, presence: 'ifPresent' },
+    );
   } finally {
     await f.control.close();
     f.store.db.close();
@@ -774,11 +769,11 @@ test('lost native navigation reply is unknown, status and tick never replay it, 
     f.endpoint.failNavigate = true;
     assert.equal((await f.control.operations.submitOperation(f.tenant, op, 'lease')).status, 'unknown');
     f.endpoint.views = [];
-    const before = f.endpoint.calls.filter((call) => call.method === 'view.ensure').length;
+    const before = f.endpoint.calls.filter((call) => call.method === 'view.created').length;
     await f.control.reconciler.tick();
     await f.control.operations.submitOperation(f.tenant, op, 'lease');
     assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.navigate').length, 1);
-    assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.ensure').length, before);
+    assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.created').length, before);
   } finally {
     await f.control.close();
     f.store.db.close();
@@ -1058,7 +1053,7 @@ test('retired Browser resolves resource eligibility while retaining unknown navi
     assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].pendingUrl, undefined);
     assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.navigate').length, 1);
     assert.equal(
-      f.endpoint.calls.filter((call) => call.method === 'view.ensure').slice(-1)[0]?.args.url,
+      f.endpoint.calls.filter((call) => call.method === 'view.created').slice(-1)[0]?.args.url,
       'https://old.test/',
     );
   } finally {

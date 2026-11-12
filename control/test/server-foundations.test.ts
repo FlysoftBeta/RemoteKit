@@ -21,36 +21,39 @@ test('gateway normalizes identity and preserves execution certainty across nativ
     async request() {
       calls++;
       if (failure) throw failure;
-      return { views: [{ viewId: '1' }, { view: 2 }, { id: '3' }] };
+      return { views: [{ viewId: '1' }, { viewId: '2' }, { viewId: '3' }] };
     },
   });
-  await assert.rejects(gateway.snapshot('tenant'), { code: 'unavailable' });
+  await assert.rejects(gateway.snapshot('tenant', { outputDiagnostics: true }), { code: 'unavailable' });
   assert.equal(calls, 0);
   const initial = readyTransition(undefined, 'process-a', 'connection-a');
   state = initial.state;
   assert.equal(initial.processChanged, true);
   assert.equal(readyTransition('process-a', 'process-a', 'connection-b').processChanged, false);
   assert.equal(readyTransition('process-a', 'process-b', 'connection-c').processChanged, true);
-  assert.deepEqual((await gateway.snapshot('tenant')).views, [
+  assert.deepEqual((await gateway.snapshot('tenant', { outputDiagnostics: true })).views, [
     { viewId: '1' },
     { viewId: '2' },
     { viewId: '3' },
   ]);
   for (const code of Object.keys(httpStatus)) {
     failure = { code, message: '拒绝请求' };
-    await assert.rejects(gateway.snapshot('tenant'), {
+    await assert.rejects(gateway.snapshot('tenant', { outputDiagnostics: true }), {
       code,
       detail: '拒绝请求',
     });
   }
   failure = { code: 'busy', message: '繁忙' };
-  await assert.rejects(gateway.snapshot('tenant'), { code: 'busy' });
+  await assert.rejects(gateway.snapshot('tenant', { outputDiagnostics: true }), { code: 'busy' });
   failure = { message: '拒绝请求' };
-  await assert.rejects(gateway.snapshot('tenant'), { code: 'outcome_unknown' });
+  await assert.rejects(gateway.snapshot('tenant', { outputDiagnostics: true }), { code: 'outcome_unknown' });
   failure = 'native diagnostic';
-  await assert.rejects(gateway.snapshot('tenant'), { code: 'outcome_unknown', detail: 'native diagnostic' });
+  await assert.rejects(gateway.snapshot('tenant', { outputDiagnostics: true }), {
+    code: 'outcome_unknown',
+    detail: 'native diagnostic',
+  });
   failure = new Error('local bug');
-  await assert.rejects(gateway.snapshot('tenant'), { code: 'internal' });
+  await assert.rejects(gateway.snapshot('tenant', { outputDiagnostics: true }), { code: 'internal' });
 });
 
 test('tenant disposal cancels pending signaling and queues isolate keys after a rejection', async () => {

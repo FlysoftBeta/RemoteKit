@@ -135,7 +135,7 @@ export const tab = object(
         previousUrl: s(),
         previousKind: tabKind,
       },
-      { resolved: b(), browserIncarnation: s() },
+      { resolved: b(), browserIncarnation: s(), viewPrepared: b() },
     ),
   },
 ) satisfies Codec<ProductTab>;

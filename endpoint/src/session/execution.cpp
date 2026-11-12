@@ -185,6 +185,12 @@ Result<Json> SessionExecution::Stop(const Json& commit,
                        {"committed", copy.at("lastCommit")}});
     return checkpoint;
   }
+  if (copy.at("state") == "clean" && !commit.is_null() && !copy.at("base").is_null()) {
+    copy["lastCommit"] = {{"requestId", commit}, {"manifestId", copy.at("base")}};
+    RK_RETURN_IF_ERROR(Checkpoints::WriteCopy(directory_, copy));
+    return Json{
+        {"state", "clean"}, {"base", copy.at("base")}, {"committed", copy.at("lastCommit")}};
+  }
   if (copy.at("state") == "clean" || commit.is_null())
     return Json{{"state", copy.at("state")}, {"base", copy.at("base")}, {"committed", nullptr}};
   if (!copy.at("stoppedCleanly").get<bool>())
@@ -216,6 +222,7 @@ Result<Json> SessionExecution::Stop(const Json& commit,
   return checkpoint;
 }
 Result<void> SessionExecution::Fence() {
+  retired_ = true;
   const auto session = runtime_.exchange({});
   running_ = false;
   reader_.reset();
@@ -298,6 +305,8 @@ Result<Json> SessionExecution::Descriptions() {
   return values;
 }
 Result<Json> SessionExecution::Observe() {
+  if (retired_)
+    return Error{ErrorCode::kUnavailable, "Session actor is retired"};
   RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory_));
   Json snapshot{
       {"views", Json::array()},
@@ -343,6 +352,7 @@ Result<Json> SessionExecution::Observe() {
     if (copy.at("state") == "clean" && !copy.at("base").is_null()) {
       RK_ASSIGN_OR_RETURN(described, Checkpoints(objects_).Describe(copy.at("base")));
       checkpoint = std::move(described);
+      checkpoint["manifestId"] = copy.at("base");
     }
   }
   RK_ASSIGN_OR_RETURN(descriptions, Descriptions());
@@ -366,6 +376,8 @@ Result<Json> SessionExecution::Observe() {
               {"stats", snapshot.at("stats")}};
 }
 void SessionExecution::Maintain() {
+  if (retired_)
+    return;
   if (auto session = runtime_.load()) {
     session->FlushSignals();
     session->MaintainRecovery();

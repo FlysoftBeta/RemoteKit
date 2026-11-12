@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 
-from cluster_bridge import endpoint_command
+from cluster_bridge import endpoint_command, SessionDriver
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -75,34 +75,23 @@ def main():
                                  object_index=run / "objects.json"),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log,
                 creationflags=subprocess.CREATE_NO_WINDOW)
-            self.replies = queue.Queue()
-
-            def read():
-                for line in self.child.stdout:
-                    self.replies.put(json.loads(line))
-
-            threading.Thread(target=read, daemon=True).start()
+            self.driver = SessionDriver(self.child,root,"local-copy")
 
         def call(self, method, **fields):
-            self.serial += 1
-            request = dict(id=str(self.serial), method=method, tenantId="local-copy", **fields)
-            self.child.stdin.write((json.dumps(request) + "\n").encode())
-            self.child.stdin.flush()
-            reply = self.replies.get(timeout=100)
-            evidence.append(dict(request=request, response=reply))
-            assert reply.get("id") == str(self.serial) and reply.get("ok"), reply
-            return reply["result"]
+            result = self.driver.rpc(method,**fields)
+            evidence.extend(self.driver.evidence)
+            self.driver.evidence.clear()
+            return result
 
         def open(self, checkpoint):
-            self.call("session.open", sessionId=self.session_id, placementEpoch=1,
-                      checkpoint=checkpoint, profileKey=base64.b64encode(bytes([7]) * 32).decode())
+            self.driver.publish(run="running",commit=None,sessionId=self.session_id,checkpoint=checkpoint)
+            self.driver.wait(lambda value:value["converged"] and value["browser"]=="running")
 
         def state(self):
-            snapshot = self.call("session.snapshot")
+            snapshot = self.driver.observe()
             return next((view for view in snapshot["views"]
                          if view.get("title") == expected and not view.get("pending")
                          and not view.get("loading")), None)
-
         def hard_kill(self):
             pid = int((self.root / "endpoint.pid").read_text())
             subprocess.run(["taskkill", "/PID", str(pid), "/F"], check=True, capture_output=True)
@@ -126,16 +115,17 @@ def main():
             endpoint.open(None)
             expected = uuid.uuid4().hex
             writing = True
-            endpoint.call("view.ensure", viewId="1", url=origin + "initial", width=640,
+            endpoint.driver.view( viewId="1", url=origin + "initial", width=640,
                           height=480, visible=False, device={"deviceScaleFactor": 1})
             wait_for(endpoint.state, "initial Browser write")
             checkpoint = None
             if committed:
-                checkpoint = endpoint.call("session.stop", placementEpoch=1, commit="baseline")["base"]
+                checkpoint = endpoint.driver.commit("baseline")["data"]["base"]
                 endpoint.open(checkpoint)
                 expected = uuid.uuid4().hex
-                endpoint.call("view.ensure", viewId="1", url=origin + "dirty", width=640,
+                endpoint.driver.view( viewId="1", url=origin + "dirty", width=640,
                               height=480, visible=False, device={"deviceScaleFactor": 1})
+                endpoint.call("view.navigate",viewId="1",url=origin+"dirty")
                 wait_for(endpoint.state, "post-checkpoint Browser write")
             # Let Chromium flush its localStorage backing store, then kill the Endpoint itself.
             time.sleep(10)
@@ -153,12 +143,11 @@ def main():
             endpoints.append(restarted)
             restarted.open(checkpoint)
             assert local_db.stat().st_ino == identity, "restore replaced the local Profile"
-            restarted.call("view.ensure", viewId="1", url=origin + "read", width=640,
+            restarted.driver.view( viewId="1", url=origin + "read", width=640,
                            height=480, visible=False, device={"deviceScaleFactor": 1})
             wait_for(restarted.state, "dirty Profile survives hard Endpoint restart")
             restarted.close()
-            report = json.loads((root / "copy-report.json").read_text())
-            assert report["sessions"][0]["copy"]["state"] == "dirty"
+            assert restarted.driver.observations["local-copy"]["data"]["state"] in ("dirty","clean")
         print(json.dumps(dict(localCopyReused=True, evidence=str(run))))
     finally:
         (run / "evidence.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")

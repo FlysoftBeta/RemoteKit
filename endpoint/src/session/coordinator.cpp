@@ -205,12 +205,45 @@ Result<void> SessionCoordinator::Converge(const Json& desired, const Scope& scop
   return {};
 }
 void SessionCoordinator::Observe(const Scope& scope, bool force) {
-  auto sampled = hooks_.observe();
-  if (!sampled) {
-    error_ = sampled.error();
+  if (!Current(scope.generation))
     return;
+  auto sampled = hooks_.observe();
+  Json observation;
+  if (sampled) {
+    observation = std::move(sampled).value();
+  } else {
+    error_ = sampled.error();
+    observation = {
+        {"browser", "failed"},
+        {"browserIncarnation", nullptr},
+        {"browserPid", 0},
+        {"browserRestart", "exhausted"},
+        {"data", nullptr},
+        {"checkpoint", nullptr},
+        {"authorization",
+         {{"connectionId", nullptr},
+          {"epoch", 0},
+          {"unlocked", false},
+          {"revoked", true},
+          {"filesApplied", false}}},
+        {"lock", {{"leaseId", nullptr}, {"epoch", 0}, {"state", "locked"}}},
+        {"views", Json::array()},
+        {"pendingPopups", Json::array()},
+        {"recovery", {{"pending", false}, {"views", Json::object()}, {"exportPending", false}}},
+        {"rtc", {{"active", false}, {"connectionId", nullptr}, {"avSync", nullptr}}},
+        {"blockers",
+         {{"unacknowledgedEvents", 0},
+          {"pendingNativeSelections", 0},
+          {"inFlightUploads", 0},
+          {"pendingPageRequests", 0},
+          {"downloadsInProgress", 0},
+          {"pendingDownloadImports", 0},
+          {"rtcConnected", false},
+          {"lifecycleUncertain", true}}},
+        {"library", {{"descriptions", Json::array()}}},
+        {"events", {{"streamId", nullptr}, {"ackedThrough", "0"}, {"lastSeq", "0"}}},
+        {"stats", Json::object()}};
   }
-  auto observation = std::move(sampled).value();
   const auto incarnation = observation.value("browserIncarnation", Json());
   const auto browser = incarnation.is_string() ? incarnation.get<std::string>() : std::string();
   if (browser != browser_incarnation_) {

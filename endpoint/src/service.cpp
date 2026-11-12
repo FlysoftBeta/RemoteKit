@@ -57,7 +57,10 @@ Result<void> Service::Clear() {
     stopping.push_back(std::async(std::launch::async, [this, managed, deadline] {
       auto stopped = managed.coordinator->Execute([&]() -> Result<Json> {
         const auto commit = "node-" + incarnation_ + "-" + managed.execution->Id();
-        return managed.execution->Stop(failed_ ? Json() : Json(commit), false, deadline,
+        RK_ASSIGN_OR_RETURN(
+            copy, Checkpoints::Copy(options_.data / "sessions" / managed.execution->Id()));
+        const bool clean = !copy.is_null() && copy.at("state") == "clean";
+        return managed.execution->Stop(failed_ || clean ? Json() : Json(commit), false, deadline,
                                        !link_.Current(fenced_generation_));
       });
       if (!stopped)

@@ -36,6 +36,10 @@ export class Navigation {
     );
     if (browser && observed.browserIncarnation !== browser)
       throw new RemoteKitError('outcome_unknown', 'Original navigation Browser was retired');
+    if (t.navigation) {
+      t.navigation.viewPrepared = true;
+      this.context.store.workspaces.saveWorkspace(state);
+    }
     await this.context.endpoint.navigate(tenant, {
       viewId: t.webviewId,
       url: address,

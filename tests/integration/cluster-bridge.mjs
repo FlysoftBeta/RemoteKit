@@ -130,7 +130,11 @@ try {
 }
 const pending = new Map();
 const inFlight = new Map();
-const opened = new Set();
+const reverse = new Map();
+const results = new Map();
+const observations = new Map();
+const connectionEpoch = randomUUID();
+let endpointIncarnation;
 async function objectIndex() {
   if (!args['object-index']) return {};
   try {
@@ -167,21 +171,30 @@ try {
       !/^[0-9a-f]{32}$/.test(hello.incarnation)
     )
       throw Error('invalid endpoint hello');
+    endpointIncarnation = hello.incarnation;
     return {
       type: 'node.ready',
       peers: initialPeers,
-      connectionEpoch: randomUUID(),
+      connectionEpoch,
       buildId,
       config,
       configHash,
-      sessions: placements,
       objectKey: Buffer.alloc(32, 8).toString('base64'),
       objectIdKey: Buffer.alloc(32, 9).toString('base64'),
     };
   });
   key.fill(0);
   lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
-  const send = (json) => transport.send(channel.send.encrypt(encode(json)));
+  const send = (json) => {
+    const request = reverse.get(json.id);
+    if (request && typeof json.ok === 'boolean') {
+      json.opId = request.opId;
+      results.set(request.opId, { fingerprint: request.fingerprint, reply: json });
+      while (results.size > 1024) results.delete(results.keys().next().value);
+      reverse.delete(json.id);
+    }
+    return transport.send(channel.send.encrypt(encode(json)));
+  };
   let peerSet = JSON.stringify(initialPeers);
   let pollingPeers = false;
   const peerTimer = setInterval(async () => {
@@ -204,7 +217,31 @@ try {
   child.once('exit', () => clearInterval(peerTimer));
   const received = (async () => {
     while (true) {
-      const { json } = decode(channel.receive.decrypt(await transport.next(45000)));
+      let { json } = decode(channel.receive.decrypt(await transport.next(45000)));
+      if (json.request) {
+        if (
+          !json.params ||
+          typeof json.opId !== 'string' ||
+          typeof json.replay !== 'boolean' ||
+          json.endpointIncarnation !== endpointIncarnation
+        )
+          throw Error('invalid Endpoint RPC envelope');
+        const { id, replay, ...body } = json;
+        const fingerprint = JSON.stringify(canonical(body));
+        const previous = results.get(json.opId);
+        reverse.set(id, { opId: json.opId, fingerprint });
+        if (previous) {
+          if (previous.fingerprint !== fingerprint)
+            send({ id, ok: false, error: { code: 'conflict', message: 'opId payload conflicts' } });
+          else send({ ...previous.reply, id });
+          continue;
+        }
+        if (replay) {
+          send({ id, ok: false, error: { code: 'outcome_unknown', message: 'RPC result is not retained' } });
+          continue;
+        }
+        json = { ...json.params, id, request: json.request, tenantId: json.tenantId, opId: json.opId };
+      }
       if (json.type === 'node.ping') {
         send({ type: 'node.pong' });
         continue;
@@ -256,8 +293,13 @@ try {
         send({ id: json.id, ok: true, result: { ok: true } });
         continue;
       }
-      if (json.event === 'node.ready') {
-        if (json.sessions.length) await writeFile(resolve(root, 'copy-report.json'), JSON.stringify(json));
+      if (json.event === 'session.observed') {
+        observations.set(json.tenantId, json);
+        process.stdout.write(JSON.stringify(json) + '\n');
+        continue;
+      }
+      if (json.event === 'session.event') {
+        process.stdout.write(JSON.stringify(json) + '\n');
         continue;
       }
       if (json.event === 'node.metrics') {
@@ -267,22 +309,14 @@ try {
       if (pending.has(json.id)) {
         const waiter = pending.get(json.id);
         pending.delete(json.id);
-        if (json.ok) waiter.resolve();
+        if (json.ok) waiter.resolve(json.result);
         else waiter.reject(Error(JSON.stringify(json.error)));
       } else {
         const request = inFlight.get(json.id);
-        if (json.ok && request?.method === 'session.open') {
-          opened.add(request.tenantId);
-          placements = placements.filter((p) => p.tenantId !== request.tenantId);
-          placements.push({
-            tenantId: request.tenantId,
-            sessionId: request.sessionId,
-            placementEpoch: request.placementEpoch,
-            dataState: 'dirty',
-          });
+        if (json.ok && request?.method === 'node.desired') {
+          placements = request.sessions;
           await writeFile(resolve(root, 'bridge-sessions.json'), JSON.stringify(placements));
         }
-        if (json.ok && request?.method === 'session.stop') opened.delete(request.tenantId);
         process.stdout.write(JSON.stringify(json) + '\n');
         inFlight.delete(json.id);
         if (!inFlight.size) drained?.();
@@ -293,32 +327,26 @@ try {
     if (child.exitCode === null && child.signalCode === null && !child.stdout.readableEnded) fail(error);
     for (const waiter of pending.values()) waiter.reject(error);
   });
+  const fenceId = '__initial_fence';
+  const fenced = new Promise((resolve, reject) => pending.set(fenceId, { resolve, reject }));
+  send({ id: fenceId, method: 'node.desired', connectionEpoch, revision: '1', sessions: placements });
+  await fenced;
+  process.stdout.write(
+    JSON.stringify({ event: 'test.ready', connectionEpoch, endpointIncarnation, placements }) + '\n',
+  );
   for await (const line of lines) {
     if (!line.trim()) continue;
     const request = JSON.parse(line);
-    if (
-      request.tenantId &&
-      request.method !== 'session.open' &&
-      request.method !== 'session.stop' &&
-      request.method !== 'shutdown' &&
-      !request.method.startsWith('object.') &&
-      !opened.has(request.tenantId)
-    ) {
-      const id = '__cluster_bridge_open_' + ++serial;
-      const done = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
-      send({
-        id,
-        method: 'session.open',
-        tenantId: request.tenantId,
-        sessionId: sha256(request.tenantId).slice(0, 32),
-        placementEpoch: 1,
-        profileKey: Buffer.alloc(32, 7).toString('base64'),
-        objectKey: Buffer.alloc(32, 8).toString('base64'),
-        objectIdKey: Buffer.alloc(32, 9).toString('base64'),
-        checkpoint: null,
-      });
-      await done;
-      opened.add(request.tenantId);
+    if (request.method === 'test.observe') {
+      const value = observations.get(request.tenantId);
+      process.stdout.write(
+        JSON.stringify({
+          id: request.id,
+          ok: !!value,
+          ...(value ? { result: value } : { error: { code: 'not_found', message: 'Session not observed' } }),
+        }) + '\n',
+      );
+      continue;
     }
     inFlight.set(request.id, request);
     send(request);

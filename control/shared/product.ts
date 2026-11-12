@@ -126,6 +126,7 @@ export interface ProductTab {
     status: 'applying' | 'unknown' | 'committed' | 'rejected';
     previousUrl: string;
     previousKind: ProductTabKind;
+    viewPrepared?: boolean;
   };
   kind?: ProductTabKind;
   id: string;

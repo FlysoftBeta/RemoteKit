@@ -1,3 +1,5 @@
+#include "coordination_fixture.hpp"
+#include <condition_variable>
 #include "peer_fixture.hpp"
 #include "session_db_fixture.hpp"
 #include "runtime_config_fixture.hpp"
@@ -441,7 +443,7 @@ void Blockers(const fs::path& root) {
   Take(session.Initialize());
   Take(session.Views().RecordClosed("1", "closed"));
   const auto snapshot = Take(session.Snapshot());
-  Check(snapshot["stopBlockers"]["unacknowledgedClosedEvents"] == 1, "durable close blocker");
+  Check(snapshot["stopBlockers"]["unacknowledgedEvents"] == 1, "durable close blocker");
   const auto stopped = Commit(session);
   Check(!stopped && stopped.error().code == ErrorCode::kConflict, "close event blocks");
   Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
@@ -483,83 +485,62 @@ void Metrics(const fs::path& root) {
           "GPU counters");
   std::cout << sample.dump() << '\n';
 }
-class FenceLink : public Link {
- public:
-  size_t step = 0;
-  uint64_t generation = 1;
-  std::vector<Json> replies;
-  std::optional<ReadyState> ReadySessions() override {
-    return ReadyState{generation,
-                      Json::array(),
-                      {{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
-                       {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}};
-  }
-  bool Next(std::string& bytes, uint64_t& stamp, bool& eof) override {
-    eof = false;
-    Json request;
-    if (step == 0)
-      request = {{"method", "session.open"},
-                 {"tenantId", "tenant"},
-                 {"sessionId", std::string(32, 'c')},
-                 {"placementEpoch", 2},
-                 {"checkpoint", nullptr},
-                 {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}};
-    else if (step == 1) {
-      generation = 2;
-      request = {{"method", "session.snapshot"}, {"tenantId", "tenant"}};
-    } else if (step == 2)
-      request = {{"method", "session.cold.delete"}, {"tenantId", ""}};
-    else
-      request = {{"method", "shutdown"}};
-    request["id"] = step++;
-    stamp = generation;
-    bytes = request.dump();
-    return true;
-  }
-  bool SendReply(uint64_t, const Json& reply) override {
-    replies.push_back(reply);
-    return true;
-  }
-};
 class CopyLink : public Link {
  public:
   const std::string session = std::string(32, 'd');
   bool replay = false, graceful = false;
   size_t step = 0;
   std::vector<Json> replies, events;
-  std::optional<ReadyState> ReadySessions() override {
+  std::mutex event_mutex;
+  std::condition_variable wake;
+  std::optional<ReadyState> ReadyConfiguration() override {
     return ReadyState{1,
-                      Json::array({{{"tenantId", "tenant"},
-                                    {"sessionId", session},
-                                    {"placementEpoch", 1},
-                                    {"dataState", "dirty"}}}),
                       {{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
-                       {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}};
+                       {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
+                      "connection"};
   }
   bool SendEvent(const Json& event, uint64_t, DeliveryFlag = {}) override {
-    events.push_back(event);
+    std::lock_guard lock(event_mutex);
+    if (event.value("event", Json()) == "session.observed")
+      events.push_back(event);
+    wake.notify_all();
     return true;
+  }
+  void WaitRevision(const std::string& revision) {
+    std::unique_lock lock(event_mutex);
+    Check(wake.wait_for(lock, std::chrono::seconds(10),
+                        [&] {
+                          return std::any_of(events.begin(), events.end(), [&](const Json& event) {
+                            return event.value("event", Json()) == "session.observed" &&
+                                   event.value("observedRevision", Json()) == revision &&
+                                   event.value("converged", false);
+                          });
+                        }),
+          "desired commit convergence");
   }
   bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
     eof = false;
     generation = 1;
-    Json request{{"tenantId", "tenant"}, {"placementEpoch", 1}};
-    if (!replay && step == 0) {
-      request.update({{"method", "session.open"},
-                      {"sessionId", session},
-                      {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
-                      {"checkpoint", nullptr}});
-    } else if (!graceful && ((!replay && step <= 3) || (replay && step <= 1))) {
-      request.update({{"method", "session.stop"},
-                      {"commit", step == 3 || (replay && step == 1) ? "different" : "commit-one"}});
+    Json request;
+    if (step == 0)
+      request = test::NodeDesired(Json::array({test::Placement(session)}));
+    else if (graceful || step >= 4) {
+      if (!graceful)
+        WaitRevision("2");
+      request = test::Rpc("shutdown");
+      request.update({{"tenantId", ""}, {"sessionId", nullptr}, {"placementEpoch", nullptr}});
     } else {
-      request["method"] = "shutdown";
+      if (step >= 2)
+        WaitRevision("1");
+      request = test::Desired(session, 1, step == 3 ? "2" : "1");
+      request["commit"] = step == 3 ? "different" : "commit-one";
     }
     request["id"] = step++;
     bytes = request.dump();
     return true;
   }
   bool SendReply(uint64_t, const Json& reply) override {
+    std::lock_guard lock(event_mutex);
     replies.push_back(reply);
     return true;
   }
@@ -569,24 +550,23 @@ void CommitReplay(const fs::path& root) {
   media::Sdk sdk;
   CopyLink first;
   {
-    Service service(sdk, options, first, {});
+    Service service(sdk, options, first, {}, "endpoint");
     Check(service.Run() == 0, "copy service");
   }
-  Check(first.replies[1]["ok"] && first.replies[2]["ok"] &&
-            first.replies[1]["result"] == first.replies[2]["result"],
-        "commit repeats after unload");
-  Check(first.replies[3]["result"]["committed"].is_null(),
-        "different ID reuses stopped clean copy");
+  Check(first.replies[1]["ok"] && first.replies[2]["ok"] && first.replies[3]["ok"],
+        "desired commit revisions accepted");
+  const auto copy = Take(Checkpoints::Copy(options.data / "sessions" / first.session));
+  Check(copy["state"] == "clean" && copy["lastCommit"]["requestId"] == "different",
+        "new stop intent witnesses reuse of a clean copy");
   CopyLink restarted;
   restarted.replay = true;
   {
-    Service service(sdk, options, restarted, {});
+    Service service(sdk, options, restarted, {}, "endpoint");
     Check(service.Run() == 0, "copy restart");
   }
-  Check(restarted.replies[0]["result"] == first.replies[1]["result"],
-        "commit repeats after restart");
-  Check(restarted.events[0]["sessions"][0]["copy"]["lastCommit"]["requestId"] == "commit-one",
-        "ready reports durable commit");
+  Check(!restarted.events.empty() && restarted.events[0]["event"] == "session.observed" &&
+            restarted.events[0]["data"]["committed"] == copy["lastCommit"],
+        "initial observation recovers durable commit evidence");
 }
 void GracefulCommit(const fs::path& root) {
   const auto options =
@@ -594,8 +574,22 @@ void GracefulCommit(const fs::path& root) {
   media::Sdk sdk;
   CopyLink link;
   link.graceful = true;
+  const auto seed = options.data / "sessions" / link.session;
+  Write(seed / "payload", "dirty shutdown state");
   {
-    Service service(sdk, options, link, {});
+    SessionDb database(seed);
+    Take(database.Open());
+    Take(database.Close());
+  }
+  Take(Checkpoints::WriteCopy(seed, {{"sessionId", link.session},
+                                     {"placementEpoch", 1},
+                                     {"base", nullptr},
+                                     {"state", "dirty"},
+                                     {"stoppedCleanly", true},
+                                     {"changesAt", 0},
+                                     {"lastCommit", nullptr}}));
+  {
+    Service service(sdk, options, link, {}, "endpoint");
     Check(service.Run() == 0, "graceful shutdown");
   }
   const auto directory = options.data / "sessions" / link.session;
@@ -606,11 +600,11 @@ void GracefulCommit(const fs::path& root) {
   CopyLink restarted;
   restarted.graceful = restarted.replay = true;
   {
-    Service service(sdk, options, restarted, {});
+    Service service(sdk, options, restarted, {}, "endpoint");
     Check(service.Run() == 0, "graceful restart");
   }
-  Check(restarted.events[0]["sessions"][0]["copy"]["lastCommit"] == copy["lastCommit"],
-        "node ready reports shutdown commit");
+  Check(restarted.events[0]["data"]["committed"] == copy["lastCommit"],
+        "initial observation reports shutdown commit");
 }
 void DeferredCommit(const fs::path& root) {
   const auto options =
@@ -633,7 +627,7 @@ void DeferredCommit(const fs::path& root) {
   CopyLink restarted;
   restarted.graceful = restarted.replay = true;
   {
-    Service service(sdk, options, restarted, {});
+    Service service(sdk, options, restarted, {}, "endpoint");
     Check(service.Run() == 0, "deferred reconnect");
   }
   Check(restarted.committed.contains(committed["base"].get<std::string>()),
@@ -699,13 +693,42 @@ void CopyRecovery(const fs::path& root) {
 void Fencing(const fs::path& root) {
   const auto options =
       Take(RuntimeOptions::FromConfig(TestConfig(), root / "fence", "dev", "test"));
-  FenceLink link;
+  class FenceLink final : public CopyLink {
+   public:
+    bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
+      if (step < 2)
+        return CopyLink::Next(bytes, generation, eof);
+      if (step == 2)
+        WaitRevision("1");
+      Json request;
+      if (step == 2)
+        request = test::NodeDesired(Json::array(), "connection", "2");
+      else if (step == 3)
+        request = test::Rpc("session.logs.read", {{"log", "browser"}, {"maxBytes", 128}},
+                            "old-session", session);
+      else {
+        request = test::Rpc(step == 4 ? "session.cold.delete" : "shutdown", Json::object(),
+                            "node-" + std::to_string(step));
+        request.update({{"tenantId", ""}, {"sessionId", nullptr}, {"placementEpoch", nullptr}});
+      }
+      generation = 1;
+      eof = false;
+      request["id"] = step++;
+      bytes = request.dump();
+      return true;
+    }
+  } link;
   media::Sdk sdk;
-  Service service(sdk, options, link, cluster::Key{});
+  Service service(sdk, options, link, {}, "endpoint");
   Check(service.Run() == 0, "fencing service");
-  Check(link.replies[0]["ok"] && link.replies[1]["error"]["code"] == "not_found",
-        "reconnect fencing forgets stale session");
-  Check(link.replies[2]["result"]["deleted"] == 1, "node-wide cold delete");
+  const auto find = [&](int id) {
+    for (const auto& reply : link.replies)
+      if (reply["id"] == id)
+        return reply;
+    throw std::runtime_error("missing fence reply");
+  };
+  Check(find(3)["error"]["code"] == "conflict", "old Session request is fenced");
+  Check(find(4)["result"]["deleted"] == 1, "node-wide cold delete");
 }
 }  // namespace
 int main(int argc, char** argv) {

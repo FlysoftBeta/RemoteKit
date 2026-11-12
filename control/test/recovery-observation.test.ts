@@ -1,3 +1,4 @@
+import { applyDesiredViews } from './coordination-fixture';
 import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
 import { requestViewer } from './server-fixture';
@@ -14,23 +15,23 @@ class RecoveryEndpoint implements EndpointLink {
   configured: any[] = [];
   desiredVisible = false;
   navigated?: string;
+  observe() {
+    return {
+      running: true,
+      browserPid: 10,
+      browserIncarnation: 'recovery-browser',
+      views: this.view ? [{ ...this.view }] : [],
+    };
+  }
   async request(method: string, _tenant: string, args: any = {}): Promise<any> {
-    if (method === 'session.ensure') return { browserPid: 10, browserIncarnation: 'recovery-browser' };
-    if (method === 'session.sitePreferences' || method === 'session.mediaPolicy')
-      return { accepted: true, applied: true };
-    if (method === 'session.snapshot')
-      return {
-        running: true,
-        browserPid: 10,
-        browserIncarnation: 'recovery-browser',
-        views: this.view ? [{ ...this.view }] : [],
-      };
-    if (method === 'view.ensure')
-      this.view = { ...args, instance: '1', document: '1', actual: 0, pending: false };
-    if (method === 'view.configure') {
-      this.configured.push(args);
-      this.desiredVisible = args.visible;
-      Object.assign(this.view, args, { visible: this.view.recovery?.pending ? false : args.visible });
+    if (method === 'session.desired') {
+      const views = new Map(this.view ? [[this.view.viewId, this.view]] : []);
+      for (const change of applyDesiredViews(views, args)) {
+        this.configured.push(change.args);
+        this.desiredVisible = change.args.visible;
+      }
+      this.view = [...views.values()][0];
+      if (this.view?.recovery?.pending) this.view.visible = false;
     }
     if (method === 'view.navigate') this.navigated = args.url;
     return {};

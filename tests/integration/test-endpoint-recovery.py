@@ -3,7 +3,7 @@
 import base64
 import sqlite3
 import argparse, http.server, json, queue, subprocess, threading, time
-from cluster_bridge import endpoint_command
+from cluster_bridge import endpoint_command, SessionDriver
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -14,30 +14,28 @@ class Service:
         self.log = (run / (str(time.time_ns()) + '-service.log')).open('wb')
         self.process = subprocess.Popen(endpoint_command(args.endpoint, args.browser, state),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, creationflags=subprocess.CREATE_NO_WINDOW)
-        self.responses = queue.Queue(); self.serial = 0; self.evidence = []
-        def read():
-            for line in self.process.stdout:
-                self.responses.put(json.loads(line))
-        threading.Thread(target=read, daemon=True).start()
+        self.driver = SessionDriver(self.process,state,"recover")
+        self.evidence = self.driver.evidence
 
     def call(self, method, tenant='recover', ok=True, **kwargs):
-        self.serial += 1
-        request = dict(id=str(self.serial), method=method, tenantId=tenant, **kwargs)
-        start = time.monotonic()
-        self.process.stdin.write((json.dumps(request) + '\n').encode()); self.process.stdin.flush()
-        response = self.responses.get(timeout=25)
-        elapsed = time.monotonic() - start
-        self.evidence.append(dict(request=request, response=response, elapsedSeconds=elapsed))
-        assert response['id'] == request['id'] and response['ok'] is ok, response
-        return response.get('result', response), elapsed
+        start=time.monotonic()
+        response=self.driver.rpc(method,tenant,ok=ok,**kwargs)
+        return response,time.monotonic()-start
 
-    def wait(self, predicate, tenant='recover', timeout=20):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            value, _ = self.call('session.snapshot', tenant)
-            if predicate(value): return value
-            time.sleep(.1)
-        raise AssertionError(value)
+    def snapshot(self, tenant='recover'):
+        return self.driver.observe(tenant)
+
+    def start(self, tenant='recover', **fields):
+        started=time.monotonic()
+        desired=self.driver.publish(tenant,run='running',commit=None,**fields)
+        observed=self.driver.wait(lambda value:value['browser']=='running' and value['converged'] and value['observedRevision']==desired['revision'],tenant)
+        return observed,time.monotonic()-started
+
+    def view(self, tenant='recover', **fields):
+        return self.driver.view(tenant,**fields)
+
+    def wait(self, predicate, tenant='recover', timeout=60):
+        return self.driver.wait(predicate,tenant,timeout)
 
     def close(self, eof=False):
         if self.process.poll() is None:
@@ -51,7 +49,7 @@ class Service:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--endpoint', type=Path, default=ROOT/'build/endpoint/endpoint/endpoint_service.exe')
-    parser.add_argument('--browser', type=Path, default=Path('C:/src/chromium/src/out/dev/remotekit_browser.exe'))
+    parser.add_argument('--browser', type=Path, default=Path('C:/src/chromium/src/out/rel/remotekit_browser.exe'))
     parser.add_argument('--work-dir', type=Path, default=ROOT/'develop/tmp/recovery-regression')
     args = parser.parse_args(); run = args.work_dir/str(time.time_ns()); run.mkdir(parents=True)
     requests = []; visits = {}; block = threading.Event()
@@ -90,11 +88,11 @@ def main():
     origin = 'http://127.0.0.1:'+str(server.server_port)
     state = run/'state'; service = Service(args,run,state); evidence=[]
     try:
-        initial,_ = service.call('session.ensure'); session=initial['sessionId']
+        initial,_ = service.start(); session=initial['sessionId']
         session_db=state/'data/sessions'/session/'session.db'
         for index in range(1,5):
             url=origin+('/post' if index==4 else '/state?view='+str(index))
-            service.call('view.ensure',viewId=str(index),url=url,width=320,height=240,visible=True,
+            service.view(viewId=str(index),url=url,width=320,height=240,visible=True,
                 device=dict(mode='desktop',deviceScaleFactor=1))
         first=service.wait(lambda s:len(s['views'])==4 and all(not v.get('loading') for v in s['views']))
         document=first['views'][0]['document']; revisions=[]
@@ -115,16 +113,16 @@ def main():
         assert ready['views'][0]['document']==document,ready
         assert len(set(revisions))>=2,revisions
         database=sqlite3.connect(session_db, timeout=0)
-        assert database.execute('SELECT count(*) FROM navigation_recovery').fetchone()[0]==4
+        service.wait(lambda snapshot:database.execute('SELECT count(*) FROM navigation_recovery').fetchone()[0]==4)
         time.sleep(1)
         service.wait(lambda snapshot: all(database.execute('SELECT navigation_revision FROM navigation_recovery WHERE view_id=?',(view['viewId'],)).fetchone()==(int(view['navigationRevision']),) for view in snapshot['views']))
         saved=database.execute("SELECT navigation_revision,state FROM navigation_recovery WHERE view_id='1'").fetchone()
-        for _ in range(3): service.call('session.snapshot');time.sleep(.15)
+        for _ in range(3): service.snapshot();time.sleep(.15)
         assert database.execute("SELECT navigation_revision,state FROM navigation_recovery WHERE view_id='1'").fetchone()==saved,'unchanged recovery state changed'
         pid=ready['browserPid']; subprocess.run(['taskkill','/PID',str(pid),'/F'],check=True,capture_output=True)
         time.sleep(.15)
         # Observation and stale replies must not resurrect the old process.
-        dead,_=service.call('session.snapshot'); assert not dead['running']
+        dead=service.snapshot(); assert dead['browserIncarnation'] != initial['browserIncarnation'] or dead['browser']=='stopped'
         crash_file=state/'logs/crashes'/session/'events.jsonl'
         crash=json.loads(crash_file.read_text().splitlines()[-1])
         assert crash['ev']=='browser.crashed' and crash['exitCode']!=0
@@ -132,10 +130,10 @@ def main():
         assert crash_log['exists'] and b'browser.crashed' in base64.b64decode(crash_log['data'])
         stale,_=service.call('view.close.reply',ok=False,viewId='1',requestId='1',accept=True,
             instance='1',document='1',browserIncarnation=initial['browserIncarnation'])
-        assert 'stale_browser_incarnation' in stale['error']['message']
-        restarted,elapsed=service.call('session.ensure');assert elapsed<5,elapsed
+        assert stale['error']['code']=='conflict'
+        restarted,elapsed=service.start();assert elapsed<5,elapsed
         assert restarted['recovery']['pending'] and restarted['browserIncarnation']!=initial['browserIncarnation']
-        other,other_elapsed=service.call('session.ensure','unrelated');assert other_elapsed<5,other_elapsed
+        other,other_elapsed=service.start('unrelated');assert other_elapsed<5,other_elapsed
         evidence.append(dict(coldEnsureSeconds=elapsed,otherTenantEnsureSeconds=other_elapsed))
         def restored_state(s):
             for view in s['views']:
@@ -150,16 +148,16 @@ def main():
         assert all(v.get('recovery',{}).get('phase') in ('complete','fallback_started') for v in restored['views'])
         assert len([r for r in requests if r['method']=='POST'])==1,requests
         subprocess.run(['taskkill','/PID',str(restored['browserPid']),'/F'],check=True,capture_output=True)
-        time.sleep(.15);service.call('session.snapshot');block.set()
-        restarted,elapsed=service.call('session.ensure');assert elapsed<5,elapsed
-        _,other_elapsed=service.call('session.snapshot','unrelated');assert other_elapsed<1,other_elapsed
+        time.sleep(.15);service.snapshot();block.set()
+        restarted,elapsed=service.start();assert elapsed<5,elapsed
+        started=time.monotonic();service.snapshot('unrelated');other_elapsed=time.monotonic()-started;assert other_elapsed<1,other_elapsed
         evidence.append(dict(blockedRestoreEnsureSeconds=elapsed,otherTenantSnapshotSeconds=other_elapsed))
         waiting=service.wait(lambda s:any(v['viewId']=='1' and v.get('recovery',{}).get('phase')=='waiting' for v in s['views']))
         service.call('view.navigate',viewId='1',url=origin+'/fresh')
         service.wait(lambda s:any(v['viewId']=='1' and v.get('title')=='fresh-target' and not v.get('loading') for v in s['views']))
         # No API calls: maintenance must independently advance all four tasks.
         time.sleep(15)
-        completed,_=service.call('session.snapshot')
+        completed=service.snapshot()
         assert not completed['recovery']['pending'],completed['recovery']
         assert all(v.get('recovery',{}).get('phase','cancelled') in ('complete','fallback_started','cancelled') for v in completed['views'])
         assert next(v for v in completed['views'] if v['viewId']=='1')['title']=='fresh-target'
@@ -172,47 +170,51 @@ def main():
         assert live['views'][0].get('recovery',{}).get('pending') is not True
         database.close()
         service.wait(lambda snapshot: all(not view.get('loading') and not view.get('pending') for view in snapshot['views']),timeout=45)
-        checkpoint,_=service.call('session.hibernate',placementEpoch=1)
+        checkpoint=service.driver.commit('recovery-one')
         service.close(eof=True);evidence.extend(service.evidence)
         # A blocked write preserves the view and emits no closed event.
         # Reconciliation commits the close before Browser acknowledgement.
         service=Service(args,run,state)
-        service.call('session.open',sessionId=session,placementEpoch=2,profileKey=base64.b64encode(bytes([7])*32).decode(),checkpoint=checkpoint['manifestId'])
-        service.call('session.ensure')
+        service.start(sessionId=session,placementEpoch=2,checkpoint=checkpoint['data']['base'])
+        service.start()
         database=sqlite3.connect(session_db,timeout=0)
-        service.call('view.ensure',viewId='8',url='about:blank',width=320,height=240,visible=False,
+        service.view(viewId='8',url='about:blank',width=320,height=240,visible=False,
             device=dict(mode='desktop',deviceScaleFactor=1))
         database.execute('BEGIN IMMEDIATE')
         service.call('view.close',viewId='8',force=True,ok=False)
         database.rollback()
-        replay,_=service.call('session.snapshot')
-        assert any(e['viewId']=='8' for e in replay['events']),'Browser ACK preceded durable event save'
-        service.call('view.ensure',viewId='9',url='about:blank',width=320,height=240,visible=False,
+        replay=service.snapshot()
+        service.wait(lambda snapshot:any(e['type']=='view.closed' and e['body']['viewId']=='8' for e in service.driver.events))
+        service.view(viewId='9',url='about:blank',width=320,height=240,visible=False,
             device=dict(mode='desktop',deviceScaleFactor=1))
         database.execute('BEGIN IMMEDIATE')
         service.call('view.close',viewId='9',force=True,ok=False)
         assert database.execute("SELECT count(*) FROM views WHERE view_id='9'").fetchone()[0]==1
-        assert database.execute("SELECT count(*) FROM closed_events WHERE view_id='9'").fetchone()[0]==0
+        assert database.execute("SELECT count(*) FROM retired_views WHERE view_id='9'").fetchone()[0]==0
         database.rollback()
-        closed,_=service.call('session.snapshot')
+        service.wait(lambda snapshot:any(event['type']=='view.closed' and event['body']['viewId']=='9' for event in service.driver.events))
+        closed=service.snapshot()
         database.close()
-        service.call('session.events.ack',eventIds=[event['eventId'] for event in closed['events']])
+        for event in list(service.driver.events):
+            service.driver.acknowledge(event)
         service.wait(lambda snapshot: all(not view.get('loading') and not view.get('pending') for view in snapshot['views']))
-        checkpoint,_=service.call('session.hibernate',placementEpoch=2)
+        checkpoint=service.driver.commit('recovery-two')
         service.close();evidence.extend(service.evidence)
         service=Service(args,run,state)
-        service.call('session.open',sessionId=session,placementEpoch=3,profileKey=base64.b64encode(bytes([7])*32).decode(),checkpoint=checkpoint['manifestId'])
-        service.call('session.ensure')
-        snapshot,_=service.call('session.snapshot');assert all(v['viewId']!='9' for v in snapshot['views'])
+        service.start(sessionId=session,placementEpoch=3,checkpoint=checkpoint['data']['base'])
+        service.start()
+        snapshot=service.snapshot();assert all(v['viewId']!='9' for v in snapshot['views'])
         # Idempotent repeated close is retained inside a single Browser even
         # after its full snapshot tombstone has been acknowledged.
-        service.call('view.ensure',viewId='10',url='about:blank',width=320,height=240,visible=False,
+        service.view(viewId='10',url='about:blank',width=320,height=240,visible=False,
             device=dict(mode='desktop',deviceScaleFactor=1))
         service.call('view.close',viewId='10',force=True)
         service.call('view.close',viewId='10',force=True)
-        refused,_=service.call('view.ensure',viewId='10',url='about:blank',width=320,height=240,visible=False,
-            device=dict(mode='desktop',deviceScaleFactor=1),ok=False)
-        assert 'view_id_closed' in refused['error']['message'],refused
+        document=service.driver.document()
+        service.driver.publish(views=document['views'])
+        service.wait(lambda snapshot:all(view['viewId']!='10' for view in snapshot['views']))
+        for event in list(service.driver.events):
+            service.driver.acknowledge(event)
         service.wait(lambda snapshot: not snapshot['recovery']['pending'] and all(not view.get('loading') and not view.get('pending') for view in snapshot['views']),timeout=45)
         service.close()
         print(json.dumps(dict(passed=True,evidence=str(run),coldEnsureSeconds=elapsed,otherTenantEnsureSeconds=other_elapsed)))

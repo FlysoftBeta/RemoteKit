@@ -1,3 +1,4 @@
+#include "coordination_fixture.hpp"
 #include "util/log.hpp"
 #include "util/wire_error.hpp"
 #include "util/file_io.hpp"
@@ -117,6 +118,13 @@ void Search(const fs::path& root) {
 class Link final : public ManagementLink {
  public:
   std::vector<Json> requests, replies;
+  std::mutex mutex;
+  std::optional<ReadyState> ReadyConfiguration() override {
+    return ReadyState{1,
+                      {{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                       {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
+                      "connection"};
+  }
   size_t next = 0;
   bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
     generation = 1;
@@ -128,6 +136,7 @@ class Link final : public ManagementLink {
   }
   bool Current(uint64_t generation) override { return generation == 1; }
   bool SendReply(uint64_t, const Json& reply) override {
+    std::lock_guard lock(mutex);
     replies.push_back(reply);
     return true;
   }
@@ -146,20 +155,17 @@ void Boundaries(const fs::path& root) {
             read.error().os->value == ERROR_SHARING_VIOLATION,
         "sharing violation captured structurally");
   Link link;
-  const Json open = {{"id", 10},
-                     {"method", "session.open"},
-                     {"tenantId", "tenant"},
-                     {"sessionId", std::string(32, 'a')},
-                     {"placementEpoch", 1},
-                     {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
-                     {"checkpoint", nullptr}};
-  auto conflict = open;
-  conflict["id"] = 11;
+  auto desired = test::Desired();
+  auto conflict = desired;
   conflict["profileKey"] = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
-  link.requests = {{{"id", 1}, {"method", "node.logs.search"}, {"errorId", "e-0123456789"}},
-                   open,
-                   conflict,
-                   {{"id", 2}, {"method", "shutdown"}}};
+  auto search = test::Rpc("node.logs.search", {{"errorId", "e-0123456789"}}, "search");
+  search.update({{"tenantId", ""}, {"sessionId", nullptr}, {"placementEpoch", nullptr}});
+  auto shutdown = test::Rpc("shutdown", Json::object(), "shutdown");
+  shutdown.update({{"tenantId", ""}, {"sessionId", nullptr}, {"placementEpoch", nullptr}});
+  link.requests = {test::NodeDesired(Json::array({test::Placement()})), search, desired, conflict,
+                   shutdown};
+  for (size_t index = 0; index < link.requests.size(); ++index)
+    link.requests[index]["id"] = index;
   auto config = TestConfig();
   const auto options = Take(RuntimeOptions::FromConfig(config, root, "dev", "test"));
   media::Sdk sdk;
@@ -170,7 +176,7 @@ void Boundaries(const fs::path& root) {
   {
     Capture capture(capture_path);
     {
-      Service service(sdk, options, link, {});
+      Service service(sdk, options, link, {}, "endpoint");
       Check(service.Run() == 0, "management fixture");
     }
     Error error = WithOsError(ErrorCode::kUnavailable, "shared file", OsError::Kind::kWin32,
@@ -223,11 +229,16 @@ void Boundaries(const fs::path& root) {
     input.Stop();
   }
   CloseHandle(held);
-  Check(link.replies.front().at("error").at("code") == "unavailable" &&
-            ValidErrorId(link.replies.front().at("error").at("errorId").get<std::string>()),
+  const auto reply = [&](int id) {
+    for (const auto& value : link.replies)
+      if (value["id"] == id)
+        return value;
+    throw std::runtime_error("missing log reply");
+  };
+  Check(reply(1).at("error").at("code") == "unavailable" &&
+            ValidErrorId(reply(1).at("error").at("errorId").get<std::string>()),
         "management error id");
-  Check(link.replies.at(2).at("error").at("code") == "conflict" &&
-            !link.replies.at(2).at("error").contains("errorId"),
+  Check(reply(3).at("error").at("code") == "conflict" && !reply(3).at("error").contains("errorId"),
         "management conflict has no id");
   Check(ValidErrorId(dc_reply.at("error").at("errorId").get<std::string>()),
         "DataChannel boundary id");

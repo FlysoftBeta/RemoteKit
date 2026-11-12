@@ -10,7 +10,11 @@ export function compileDesired(
   tenant: string,
 ): SessionDesired {
   const runtime = context.tenants.get(tenant);
-  const placement = context.endpoint.placement.peek(tenant) ?? context.endpoint.placement.resolve(tenant);
+  const previous = context.endpoint.placement.peek(tenant);
+  const placement =
+    previous && !(runtime.viewer && previous.runState === 'stopped' && previous.pendingCommit === null)
+      ? previous
+      : context.endpoint.placement.resolve(tenant);
   const node = context.endpoint.nodes.get(placement.nodeId);
   if (node?.state.state !== 'ready') throw new RemoteKitError('unavailable', 'Session node is offline');
   const state = context.store.workspaces.workspace(tenant);
@@ -19,8 +23,8 @@ export function compileDesired(
   const connectionId = runtime.connectionId ?? runtime.rtc.disconnectedPeer?.connectionId ?? null;
   const security = viewer?.security ?? services.security.retiring(tenant, connectionId);
   const peer = security?.peer;
-  const unlocked =
-    !!viewer && viewer.security.lock.state !== 'locked' && !!peer && peer.connectionId === connectionId;
+  const lockUnlocked = !!viewer && viewer.security.lock.state !== 'locked';
+  const unlocked = lockUnlocked && !!peer && peer.connectionId === connectionId;
   const quality = services.policy.qualityFor(tenant, state);
   const viewport = viewer?.viewport ?? runtime.lastViewport;
   const views: DesiredView[] = [];
@@ -34,7 +38,7 @@ export function compileDesired(
       current?.lifecycle_uncertain === true || !!tab.lifecycleRecovery || !!tab.lifecycleRecoveryError;
     const visible =
       !!viewer &&
-      unlocked &&
+      lockUnlocked &&
       !quality.resourceLimitation &&
       !isLocalTab(tab) &&
       !lifecycleBlocked &&
@@ -48,7 +52,14 @@ export function compileDesired(
         : undefined;
     views.push({
       viewId: tab.webviewId,
-      presence: isLocalTab(tab) || lifecycleBlocked || oldTarget ? 'ifPresent' : 'ensure',
+      presence:
+        isLocalTab(tab) ||
+        lifecycleBlocked ||
+        oldTarget ||
+        !!quality.resourceLimitation ||
+        (navigating && tab.navigation?.viewPrepared)
+          ? 'ifPresent'
+          : 'ensure',
       url: navigating ? (current?.url ?? 'about:blank') : tab.url,
       width: region?.width ?? 1440,
       height: region?.height ?? 900,
@@ -94,7 +105,7 @@ export function compileDesired(
     lock: {
       leaseId: viewer?.id ?? null,
       epoch: security?.epoch ?? 0,
-      state: unlocked ? 'unlocked' : 'locked',
+      state: lockUnlocked ? 'unlocked' : 'locked',
     },
     library: { describe: context.endpoint.descriptionRequests(tenant) },
   };

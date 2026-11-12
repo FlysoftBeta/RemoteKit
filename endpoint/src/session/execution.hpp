@@ -53,6 +53,6 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   std::chrono::steady_clock::time_point last_events_sent_{};
   uint64_t sent_through_ = 0;
   std::string sent_stream_, staged_revision_;
-  bool starting_ = false;
+  bool starting_ = false, retired_ = false;
 };
 }  // namespace remotekit

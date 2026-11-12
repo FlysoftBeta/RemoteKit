@@ -1,3 +1,4 @@
+import { applyDesiredViews } from './coordination-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -19,20 +20,24 @@ class PromptEndpoint implements EndpointLink {
   view: any;
   calls: { method: string; args: any }[] = [];
   onRequest?: (method: string, args: any) => void | Promise<void>;
+  observe() {
+    return {
+      running: true,
+      browserPid: 10,
+      browserIncarnation: 'browser-A',
+      views: this.view ? [this.view] : [],
+    };
+  }
   async request(method: string, _tenant: string, args: any = {}): Promise<any> {
     await this.onRequest?.(method, args);
     this.calls.push({ method, args });
-    if (method === 'session.snapshot')
-      return {
-        running: true,
-        browserPid: 10,
-        browserIncarnation: 'browser-A',
-        views: this.view ? [this.view] : [],
-      };
-    if (method === 'session.ensure')
-      return { running: true, browserPid: 10, browserIncarnation: 'browser-A' };
-    if (method === 'view.ensure') this.view = { ...args, instance: '1', document: '2', actual: 0 };
-    if (method === 'view.configure') Object.assign(this.view, args);
+    if (method === 'session.desired') {
+      const views = new Map(this.view ? [[this.view.viewId, this.view]] : []);
+      applyDesiredViews(views, args);
+      const previous = this.view;
+      this.view = [...views.values()][0];
+      if (!previous && this.view) this.view.document = '2';
+    }
     if (method === 'view.page.reply') {
       this.view.pageRequests.pending = [];
       return { accepted: true, browser: { ok: true } };
@@ -169,12 +174,12 @@ test('permission persistence and awaited application precede guarded reply; tran
       const order: string[] = [];
       let applied = false;
       f.endpoint.onRequest = async (method, args) => {
-        if (method === 'session.sitePreferences') {
+        if (method === 'session.desired') {
           assert.equal(
             f.store.workspaces.workspace(f.tenant).sites[origin].permissions?.geolocation,
             decision,
           );
-          assert.equal(args.sites[origin].permissions.clipboard_read, decision);
+          assert.equal(args.sitePreferences.sites[origin].permissions.clipboard_read, decision);
           order.push('apply');
           await new Promise<void>((resolve) => setImmediate(resolve));
           applied = true;
@@ -195,7 +200,7 @@ test('permission persistence and awaited application precede guarded reply; tran
         'lease',
       );
       if (decision === 'allow' || decision === 'block')
-        assert.deepEqual(order.slice(0, 2), ['apply', 'reply']);
+        assert.ok(order.indexOf('apply') >= 0 && order.lastIndexOf('reply') > order.indexOf('apply'));
       else assert.deepEqual(order, ['reply']);
     }
   } finally {
@@ -219,7 +224,7 @@ test('protocol handler accept moves ownership, block persists, dismiss does not 
       const dialog = await f.show({ kind: 'protocol_handler', protocol: 'mailto', url: origin + '/?%s' });
       const order: string[] = [];
       f.endpoint.onRequest = (method, args) => {
-        if (method === 'session.sitePreferences') {
+        if (method === 'session.desired') {
           const sites = f.store.workspaces.workspace(f.tenant).sites;
           assert.equal(sites[origin].protocolHandlers?.[0].allowed, accept);
           assert.equal(sites['https://other.test'], undefined);
@@ -236,7 +241,8 @@ test('protocol handler accept moves ownership, block persists, dismiss does not 
         { type: 'page.reply', dialogId: dialog.id, reply: { kind: 'protocol_handler', accept, remember } },
         'lease',
       );
-      if (remember) assert.deepEqual(order.slice(0, 2), ['apply', 'reply']);
+      if (remember)
+        assert.ok(order.indexOf('apply') >= 0 && order.lastIndexOf('reply') > order.indexOf('apply'));
       else assert.deepEqual(order, ['reply']);
     }
   } finally {
@@ -322,7 +328,7 @@ test('site actions apply without reload, preserve tablet UA and prune empty orig
     assert.deepEqual(f.store.workspaces.workspace(f.tenant).sites[origin], {
       permissions: { local_fonts: 'allow' },
     });
-    assert.ok(f.endpoint.calls.some((call) => call.method === 'session.sitePreferences'));
+    assert.ok(f.endpoint.calls.some((call) => call.method === 'session.desired'));
     assert.ok(!f.endpoint.calls.some((call) => call.method === 'view.command'));
     const workspace = f.store.workspaces.workspace(f.tenant);
     workspace.sites[origin] = {
@@ -419,7 +425,7 @@ test('failed preference application keeps the saved decision and never forwards 
       permissions: ['local_fonts'],
     });
     f.endpoint.onRequest = (method) => {
-      if (method === 'session.sitePreferences') throw new RemoteKitError('unavailable', '应用失败');
+      if (method === 'session.desired') throw new RemoteKitError('unavailable', '应用失败');
     };
     await assert.rejects(
       f.control.operations.productAction(

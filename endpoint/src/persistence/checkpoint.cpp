@@ -319,6 +319,8 @@ Result<Json> Checkpoints::Describe(const std::string& manifest) {
   for (const auto& file : value["files"])
     for (const auto& chunk : file.at("chunks"))
       ids.insert(chunk.get<std::string>());
+  if (ids.size() > 32768)
+    return Error{ErrorCode::kLimitExceeded, "checkpoint descriptor exceeds object limit"};
   return Json{{"objects", ids}, {"buildId", value["buildId"]}};
 }
 bool Checkpoints::Excluded(const fs::path& relative, bool directory) {

@@ -89,8 +89,12 @@ test('a blocked tenant does not stop later reconciliation ticks for another tena
   });
   const snapshots = new Map<string, number>();
   const endpoint = testGateway({
+    observe(tenant) {
+      snapshots.set(tenant, (snapshots.get(tenant) ?? 0) + 1);
+      return { running: true, browserIncarnation: tenant, views: [] };
+    },
     async request(method, tenant) {
-      if (method === 'session.snapshot') {
+      if (method === 'session.desired') {
         snapshots.set(tenant, (snapshots.get(tenant) ?? 0) + 1);
         if (blocked && tenant === blockedTenant) await gate;
         return { running: true, browserIncarnation: tenant, views: [] };
