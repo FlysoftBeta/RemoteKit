@@ -60,6 +60,7 @@ export class ClipboardService {
             event.text,
             origin,
             this.context.clock.wallMs(),
+            concurrent ? { html: event.html } : undefined,
           );
         commit(concurrent ? 'concurrent-snippet' : 'applied');
       });
@@ -100,8 +101,8 @@ export class ClipboardService {
         .snapshot(authority.tenantId)
         .entries.find((entry) => entry.id === entryId);
       if (entry?.kind !== 'snippet') throw new RemoteKitError('not_found', '剪贴片段不存在');
-      const { text } = this.context.store.library.snippet(authority.tenantId, entry.id);
-      const value = await this.accept(authority.tenantId, text, '', entry.origin);
+      const { text, html } = this.context.store.library.snippet(authority.tenantId, entry.id);
+      const value = await this.accept(authority.tenantId, text, html, entry.origin);
       if (!value) throw new RemoteKitError('not_found', '账号不存在');
       await this.context.endpoint.synchronize(authority.tenantId);
       return { revision: value.revision, text };

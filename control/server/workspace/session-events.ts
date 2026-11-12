@@ -1,7 +1,8 @@
-﻿import type { DomainContext, DomainServices } from '../application';
+import type { DomainContext, DomainServices } from '../application';
 import type { SessionEvent } from '../endpoint/coordination';
 import type { DownloadEvent } from '../endpoint/types';
 import { log } from '../log';
+import { toRemoteKitError } from '../../shared/errors';
 
 export class SessionEvents {
   private readonly queues = new Map<string, Promise<void>>();
@@ -21,7 +22,11 @@ export class SessionEvents {
       this.queues.set(key, pending);
       void pending
         .catch((err) =>
-          log.warn('session.event_failed', { tenant: message.tenantId, eventId: message.eventId, err }),
+          log.warn('session.event_failed', {
+            tenant: message.tenantId,
+            eventId: message.eventId,
+            ...(message.type === 'clipboard.changed' ? { code: toRemoteKitError(err).code } : { err }),
+          }),
         )
         .finally(() => {
           if (this.queues.get(key) === pending) this.queues.delete(key);

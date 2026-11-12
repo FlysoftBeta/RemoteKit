@@ -51,10 +51,10 @@ export interface Selection {
 
 export class LibraryRepository {
   constructor(private readonly db: Database.Database) {}
-  snippet(tenant: string, entryId: string): { text: string } {
+  snippet(tenant: string, entryId: string): { text: string; html: string } {
     const row = this.db
-      .prepare('SELECT text FROM library_snippets WHERE tenant=? AND entry_id=?')
-      .get(tenant, entryId) as { text: string } | undefined;
+      .prepare('SELECT text,html FROM library_snippets WHERE tenant=? AND entry_id=?')
+      .get(tenant, entryId) as { text: string; html: string } | undefined;
     if (!row) throw new RemoteKitError('not_found', '剪贴片段不存在');
     return row;
   }
@@ -63,12 +63,13 @@ export class LibraryRepository {
     text: string,
     origin: SnippetOrigin,
     copiedAt: number,
+    nativeConflict?: { html: string },
   ): LibrarySnapshot | undefined {
     if (!text || Buffer.byteLength(text, 'utf8') > clipboardLimits.text) return;
     return transaction(this.db, () => {
       const snapshot = this.snapshot(tenant);
       const source = { app: 'clipboard', channel: '' };
-      if (sourceExcluded(snapshot, source)) return;
+      if (!nativeConflict && sourceExcluded(snapshot, source)) return;
       const hash = createHash('sha256').update(text).digest('hex');
       const existing = this.db
         .prepare('SELECT entry_id FROM library_snippets WHERE tenant=? AND hash=?')
@@ -77,10 +78,10 @@ export class LibraryRepository {
       const entryId = entry?.id ?? randomUUID();
       this.db
         .prepare(
-          `INSERT INTO library_snippets VALUES (?,?,?,?,?)
-        ON CONFLICT(tenant,hash) DO UPDATE SET copied_at=excluded.copied_at`,
+          `INSERT INTO library_snippets(entry_id,tenant,text,hash,copied_at,html) VALUES (?,?,?,?,?,?)
+        ON CONFLICT(tenant,hash) DO UPDATE SET copied_at=excluded.copied_at,html=excluded.html`,
         )
-        .run(entryId, tenant, text, hash, copiedAt);
+        .run(entryId, tenant, text, hash, copiedAt, nativeConflict?.html ?? '');
       snapshot.entries = snapshot.entries.filter((item) => item.id !== entryId);
       const firstLine = text.split(/\r\n|\r|\n/).find((line) => line.trim()) ?? '';
       snapshot.entries.unshift({

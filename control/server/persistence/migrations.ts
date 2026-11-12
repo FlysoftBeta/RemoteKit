@@ -413,4 +413,11 @@ export const migrations: {
         CREATE TABLE session_event_inbox (tenant TEXT NOT NULL, session_id TEXT NOT NULL, event_id TEXT NOT NULL, type TEXT NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL, disposition TEXT, PRIMARY KEY(tenant,session_id,event_id));`);
     },
   },
+  {
+    version: 22,
+    name: 'concurrent-clipboard-snippets',
+    up(db) {
+      db.exec("ALTER TABLE library_snippets ADD COLUMN html TEXT NOT NULL DEFAULT ''");
+    },
+  },
 ];
