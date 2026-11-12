@@ -63,6 +63,7 @@ int wmain(int argc, wchar_t** argv) {
     fs::create_directories(runtime / L"bin");
     Write(runtime / L"build.json", {{"buildId", std::string(64, 'a')}});
     std::ofstream(runtime / L"bin/endpoint_service.exe") << "dummy";
+    std::ofstream(runtime / L"bin/remotekit_snapshot.exe") << "dummy";
     std::ofstream(root / L"current") << std::string(64, 'a') << '\n';
     Check(ReadCurrent(root) == std::string(64, 'a'));
     std::ofstream(root / L"current") << "../escape";

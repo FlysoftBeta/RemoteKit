@@ -49,9 +49,9 @@ inline Bytes PayloadTar(const std::string& id) {
   std::string build = Json{{"buildId", id}}.dump();
   for (auto path : {"build.json", "node/build.json"})
     Entry(tar, path, build);
-  for (auto path :
-       {"bin/node.exe", "bin/remotekit_control.exe", "bin/remotekit_node.exe",
-        "control/dist/server.mjs", "node/bin/endpoint_service.exe", "node/bin/remotekit_node.exe"})
+  for (auto path : {"bin/node.exe", "bin/remotekit_control.exe", "bin/remotekit_node.exe",
+                    "control/dist/server.mjs", "node/bin/endpoint_service.exe",
+                    "node/bin/remotekit_node.exe", "node/bin/remotekit_snapshot.exe"})
     Entry(tar, path, "fixture");
   tar.resize(tar.size() + 1024);
   return tar;

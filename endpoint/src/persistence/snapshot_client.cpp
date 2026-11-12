@@ -12,8 +12,12 @@ SnapshotClient::~SnapshotClient() {
 }
 Result<Json> SnapshotClient::Request(const Json& request) {
   std::vector<uint8_t> bytes;
-  if (!Available() || !snapshot::SendJson(pipe_, request) || !snapshot::Receive(pipe_, bytes))
+  if (!Available() || !snapshot::SendJson(pipe_, request) || !snapshot::Receive(pipe_, bytes)) {
+    if (Available())
+      CloseHandle(pipe_);
+    pipe_ = INVALID_HANDLE_VALUE;
     return Error{ErrorCode::kUnavailable, "snapshot service is unavailable"};
+  }
   auto reply = Json::parse(bytes, nullptr, false);
   if (!reply.is_object() || !reply.contains("ok"))
     return Error{ErrorCode::kUnavailable, "invalid snapshot service response"};
@@ -45,8 +49,11 @@ Result<std::string> SnapshotClient::Read(const std::string& id,
                                        {"offset", offset},
                                        {"length", length}}));
   std::vector<uint8_t> bytes;
-  if (!snapshot::Receive(pipe_, bytes) || bytes.size() != header.at("length"))
+  if (!snapshot::Receive(pipe_, bytes) || bytes.size() != header.at("length")) {
+    CloseHandle(pipe_);
+    pipe_ = INVALID_HANDLE_VALUE;
     return Error{ErrorCode::kUnavailable, "snapshot data frame is incomplete"};
+  }
   return std::string(bytes.begin(), bytes.end());
 }
 Result<void> SnapshotClient::Release(const std::string& id) {

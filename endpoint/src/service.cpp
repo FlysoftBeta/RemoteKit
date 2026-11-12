@@ -338,19 +338,19 @@ bool Service::HandleRequest(Json request, uint64_t generation) {
 }
 void Service::Versions() {
   SnapshotClient client(options_.node_id);
-  static bool unavailable_streak = false;
+
   auto unavailable = [&](const Error& error) {
     snapshot_available_ = false;
-    if (!unavailable_streak)
+    if (!snapshot_unavailable_streak_)
       LogError(LogLevel::kWarn, "snapshot.unavailable", error);
-    unavailable_streak = true;
+    snapshot_unavailable_streak_ = true;
   };
   if (!client.Available()) {
     unavailable(Error{ErrorCode::kUnavailable, "snapshot service is unavailable"});
     return;
   }
-  snapshot_available_ = true;
-  unavailable_streak = false;
+  if (!snapshot_unavailable_streak_)
+    snapshot_available_ = true;
   int64_t interval = 300000;
 #ifndef NDEBUG
   if (const char* value = std::getenv("REMOTEKIT_TEST_VERSION_INTERVAL_MS"))
@@ -367,6 +367,8 @@ void Service::Versions() {
     auto ready = managed.coordinator->Execute([&]() -> Result<Json> {
       return Json(managed.execution->VersionDue(VersionNow(), interval));
     });
+    if (!ready)
+      LogError(LogLevel::kWarn, "snapshot.schedule_failed", ready.error());
     if (ready && ready.value() == true) {
       due.push_back(managed);
       paths.push_back("sessions/" + managed.execution->Id());
@@ -379,12 +381,16 @@ void Service::Versions() {
     unavailable(taken.error());
     return;
   }
+  snapshot_available_ = true;
+  snapshot_unavailable_streak_ = false;
   for (const auto& managed : due) {
     auto saved = managed.coordinator->Execute(
         [&] { return managed.execution->SaveVersion(client, taken.value()); });
-    if (!saved)
+    if (!saved) {
+      if (!client.Available())
+        unavailable(saved.error());
       LogError(LogLevel::kWarn, "snapshot.version_failed", saved.error());
-    else {
+    } else {
       auto reported = managed.coordinator->Report();
       if (!reported)
         LogError(LogLevel::kWarn, "snapshot.report_failed", reported.error());

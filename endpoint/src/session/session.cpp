@@ -283,8 +283,7 @@ Result<void> Session::Initialize() {
             {"stoppedCleanly", true}, {"changesAt", 0},
             {"lastCommit", nullptr}};
   RK_RETURN_IF_ERROR(checkpoint_cache.Start(config.directory));
-  opened_at_ = VersionNow();
-  version_at_ = copy.value("lastVersion", Json::object()).value("takenAt", opened_at_);
+  version_at_ = copy.value("lastVersion", Json::object()).value("takenAt", VersionNow());
   copy["placementEpoch"] = config.placement_epoch;
   copy["state"] = "dirty";
   copy["stoppedCleanly"] = false;
@@ -414,8 +413,8 @@ Result<Json> Session::Snapshot(bool output_diagnostics) {
   return snapshot;
 }
 bool Session::VersionDue(int64_t now, int64_t interval) const {
-  return remotekit::VersionDue(Running(), checkpoint_cache.Changes(), now,
-                               std::max(opened_at_, version_at_), interval);
+  const auto changes = checkpoint_cache.Changes();
+  return remotekit::VersionDue(Running(), changes, now, version_at_, interval);
 }
 Result<Json> Session::SaveVersion(SnapshotClient& client, const Json& snapshot) {
   if (!Running())

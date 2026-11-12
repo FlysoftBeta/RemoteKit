@@ -139,6 +139,7 @@ async function prepare(name, sequence, current) {
     const bin = path.join(root, 'runtime', current, 'bin');
     await mkdir(bin, { recursive: true });
     await copyFile(dummy, path.join(bin, 'endpoint_service.exe'));
+    await copyFile(dummy, path.join(bin, 'remotekit_snapshot.exe'));
     await writeFile(path.join(bin, '..', 'build.json'), JSON.stringify({ buildId: current }));
     await writeFile(path.join(root, 'current'), current);
   }

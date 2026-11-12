@@ -124,7 +124,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
   Http http(config.proxy, stop, &log);
   std::unique_ptr<updater::ChildProcess> child;
   std::vector<std::unique_ptr<updater::SnapshotSupervisor>> snapshots;
-  ULONGLONG started = 0, restart_at = 0, check_at = 0;
+  ULONGLONG started = 0, restart_at = 0, check_at = 0, snapshot_check_at = 0;
   unsigned backoff = 1, attempt = 0;
   std::atomic<bool> done = false;
   std::optional<std::string> installed;
@@ -134,9 +134,9 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
     if (child) {
       child->Stop(60000);
       child.reset();
-      snapshots.clear();
       log.Event(LogLevel::kInfo, "control.stopped");
     }
+    snapshots.clear();
   };
   try {
     while (!updater::Stopping(stop)) {
@@ -184,6 +184,16 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
       if (!child && !id.empty() && now >= restart_at) {
         try {
           child = StartControl(root, id, log, control_log);
+          started = GetTickCount64();
+        } catch (const std::exception&) {
+          log.Event(LogLevel::kError, "control.start_failed");
+          restart_at = now + backoff * 1000;
+          backoff = std::min(30u, backoff * 2);
+        }
+      }
+      if (child && snapshots.empty() && now >= snapshot_check_at) {
+        snapshot_check_at = now + 1000;
+        try {
           snapshots.clear();
           auto bytes = Read(root / L"config/control.json", 1024 * 1024);
           auto control = ParseJson({reinterpret_cast<const char*>(bytes.data()), bytes.size()});
@@ -194,15 +204,20 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
             auto local = fs::path(std::u8string(local_text.begin(), local_text.end()));
             if (local.is_relative())
               local = root / L"config" / local;
+            auto executable = local / L"runtime" / id / L"bin/remotekit_snapshot.exe";
+            if (node.at("local").contains("executable")) {
+              const auto text = node.at("local").at("executable").get<std::string>();
+              auto endpoint = fs::path(std::u8string(text.begin(), text.end()));
+              if (endpoint.is_relative())
+                endpoint = root / L"config" / endpoint;
+              executable = endpoint.parent_path() / L"remotekit_snapshot.exe";
+            }
             snapshots.push_back(std::make_unique<updater::SnapshotSupervisor>(
-                root / L"versions" / id / L"node/bin/remotekit_snapshot.exe",
-                fs::absolute(local).lexically_normal(), node_id));
+                fs::absolute(executable).lexically_normal(), fs::absolute(local).lexically_normal(),
+                node_id));
           }
-          started = GetTickCount64();
         } catch (const std::exception&) {
-          log.Event(LogLevel::kError, "control.start_failed");
-          restart_at = now + backoff * 1000;
-          backoff = std::min(30u, backoff * 2);
+          snapshots.clear();
         }
       }
       if (!worker.joinable() && now >= check_at) {

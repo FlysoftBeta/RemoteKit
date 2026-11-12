@@ -87,7 +87,7 @@ class Session {
   BrowserRuntime browser;
   SessionDb store;
   CheckpointCache checkpoint_cache;
-  int64_t opened_at_ = 0, version_at_ = 0;
+  int64_t version_at_ = 0;
   const std::shared_ptr<media::ServerTrace> trace;
   ControllerContext context;
   std::atomic<uint64_t> generation_{0};

@@ -62,6 +62,7 @@ def node_archive(destination, build_id, dummy, updater):
     with tarfile.open(destination, "w", format=tarfile.PAX_FORMAT) as archive:
         file_entry(archive, "node/build.json", json.dumps({"buildId": build_id}).encode())
         archive.add(dummy, arcname="node/bin/endpoint_service.exe", recursive=False)
+        archive.add(dummy, arcname="node/bin/remotekit_snapshot.exe", recursive=False)
         archive.add(updater, arcname="node/bin/remotekit_node.exe", recursive=False)
         file_entry(archive, "node/bin/" + "long/" * 30 + "asset.txt", b"node archive PAX fixture")
 

@@ -335,7 +335,12 @@ export class Placement {
             detail: 'Checkpoint object is not committed',
           });
       }
-      if (current.checkpoint === manifestId && (version.kind === 'running' || current.dataState === 'clean'))
+      const sameVersion =
+        current.checkpoint === manifestId &&
+        this.store.db
+          .prepare('SELECT 1 FROM checkpoints WHERE tenant=? AND id=? AND placement_epoch=? AND created_at=?')
+          .get(placement.tenant, current.checkpointId, placement.placementEpoch, version.takenAt);
+      if (sameVersion && (version.kind === 'running' || current.dataState === 'clean'))
         return current.checkpointId!;
       const row = this.store.db
         .prepare('SELECT coalesce(max(id),0)+1 AS id FROM checkpoints WHERE tenant=?')

@@ -92,8 +92,8 @@ Result<void> CheckpointCache::Version(const Json& version) {
       std::max<int64_t>(0, now - version.at("takenAt").get<int64_t>() + 2000));
   watcher_.Prune(PhaseClock::now() - age);
   RK_RETURN_IF_ERROR(Checkpoints::TruncateChanges(directory_));
-  RK_RETURN_IF_ERROR(Checkpoints::FlushChanges(directory_, watcher_.Snapshot()));
   last_flush_ = PhaseClock::now();
+  RK_RETURN_IF_ERROR(Checkpoints::FlushChanges(directory_, watcher_.Snapshot()));
   return {};
 }
 void CheckpointCache::Stop() {

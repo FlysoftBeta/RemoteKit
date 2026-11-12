@@ -216,6 +216,7 @@ async function prepareControl(node) {
     cp(updater, path.join(tree, 'bin/remotekit_node.exe')),
     cp(updater, path.join(tree, 'node/bin/remotekit_node.exe')),
     cp(dummy, path.join(tree, 'node/bin/endpoint_service.exe')),
+    cp(dummy, path.join(tree, 'node/bin/remotekit_snapshot.exe')),
     ...['server.mjs', 'recover-credentials.mjs', 'client'].map((file) =>
       cp(path.join(dist, file), path.join(tree, 'control/dist', file), { recursive: true }),
     ),

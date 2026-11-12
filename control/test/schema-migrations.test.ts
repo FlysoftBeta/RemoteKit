@@ -350,7 +350,7 @@ test('unsupported versions and nonempty unversioned databases are refused', () =
   try {
     for (const [index, ddl] of [
       'CREATE TABLE anything (id TEXT)',
-      ...[11, 23].map(
+      ...[11, 24].map(
         (version) =>
           `CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES (${version})`,
       ),

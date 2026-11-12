@@ -70,6 +70,7 @@ function payload(id) {
     ['node/build.json', Buffer.from(JSON.stringify({ buildId: id }))],
     ['node/bin/endpoint_service.exe', Buffer.from('endpoint')],
     ['node/bin/remotekit_node.exe', Buffer.from('updater')],
+    ['node/bin/remotekit_snapshot.exe', Buffer.from('snapshot')],
     ['control/dist/client/data.bin', common],
   ]);
   const records = [];

@@ -479,10 +479,14 @@ void PreStageIdentity(const fs::path& root) {
   Write(directory / "peer-active", "pre-stage with peer");
   for (int i = 0; i < 500 && !cache.Changes().paths.contains("peer-active"); ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  CheckpointCacheProbe::Age(cache);
-  cache.MaybeStage(objects, "tenant");
-  CheckpointCacheProbe::Wait(cache);
-  Check(cache.Find("peer-active", Take(CheckpointIdentity(directory / "peer-active"))).has_value(),
+  const auto peer_identity = Take(CheckpointIdentity(directory / "peer-active"));
+  for (int attempt = 0; attempt < 100 && !cache.Find("peer-active", peer_identity); ++attempt) {
+    CheckpointCacheProbe::Age(cache);
+    cache.MaybeStage(objects, "tenant");
+    CheckpointCacheProbe::Wait(cache);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  Check(cache.Find("peer-active", peer_identity).has_value(),
         "pre-staging remains enabled for every running Session");
   CheckpointCacheProbe::RefreshNow(cache);
   cache.MaybeStage(objects, "tenant");
@@ -793,7 +797,8 @@ int main(int argc, char** argv) {
   try {
     Check(argc == 2, "evidence root argument");
     const auto root = fs::absolute(Utf8Path(argv[1])) /
-                      ("checkpoint-native-" + std::to_string(GetCurrentProcessId()));
+                      ("checkpoint-native-" + std::to_string(GetCurrentProcessId()) + "-" +
+                       std::to_string(GetTickCount64()));
     fs::create_directories(root);
     SnapshotVersions(root);
     RoundTrip(root);

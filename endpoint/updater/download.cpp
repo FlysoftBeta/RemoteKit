@@ -93,7 +93,8 @@ bool RuntimeInstalled(const fs::path& runtime, const std::string& id) {
   auto build = cluster::ReadBuildId(runtime);
   return build && build.value() == id &&
          fs::is_regular_file(runtime / L"bin/endpoint_service.exe") &&
-         fs::is_regular_file(runtime / L"bin/remotekit_node.exe");
+         fs::is_regular_file(runtime / L"bin/remotekit_node.exe") &&
+         fs::is_regular_file(runtime / L"bin/remotekit_snapshot.exe");
 }
 Result<void> InstallRuntime(const fs::path& root, const fs::path& archive, const std::string& id) {
   auto runtime = root / L"runtime" / id;
@@ -128,7 +129,9 @@ std::string ReadCurrent(const fs::path& root) {
     return {};
   auto runtime = root / L"runtime" / id;
   auto build = cluster::ReadBuildId(runtime);
-  if (!build || build.value() != id || !fs::is_regular_file(runtime / L"bin/endpoint_service.exe"))
+  if (!build || build.value() != id ||
+      !fs::is_regular_file(runtime / L"bin/endpoint_service.exe") ||
+      !fs::is_regular_file(runtime / L"bin/remotekit_snapshot.exe"))
     return {};
   return id;
 }

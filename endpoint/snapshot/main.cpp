@@ -72,17 +72,23 @@ class Service {
  public:
   explicit Service(fs::path root) : root_(fs::absolute(root).lexically_normal()) {
     fs::create_directories(root_);
+    root_lock_ = CreateFileW((root_ / L"snapshot.lock").c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                             nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Check(root_lock_ == INVALID_HANDLE_VALUE ? HRESULT_FROM_WIN32(GetLastError()) : S_OK);
     CheckPath(root_, false);
-    wchar_t volume[MAX_PATH]{}, filesystem[MAX_PATH]{};
+    wchar_t volume[MAX_PATH]{};
     Check(GetVolumePathNameW(root_.c_str(), volume, MAX_PATH) ? S_OK
                                                               : HRESULT_FROM_WIN32(GetLastError()));
-    Check(GetVolumeInformationW(volume, nullptr, 0, nullptr, nullptr, nullptr, filesystem, MAX_PATH)
-              ? S_OK
-              : HRESULT_FROM_WIN32(GetLastError()));
-    Check(_wcsicmp(filesystem, L"NTFS") == 0 ? S_OK : VSS_E_VOLUME_NOT_SUPPORTED);
     volume_ = volume;
     journal_ = root_ / L"snapshot-owner.json";
-    Cleanup();
+    try {
+      Cleanup();
+    } catch (const Failure& error) {
+      std::cout << Json{{"event", "snapshot.cleanup_failed"},
+                        {"os", {{"kind", "hresult"}, {"value", int64_t(error.hr)}}}}
+                       .dump()
+                << std::endl;
+    }
   }
   void Disconnect(uint64_t owner) {
     std::lock_guard lock(mutex_);
@@ -93,7 +99,7 @@ class Service {
     leases_.Expire(Clock::now());
   }
   void Request(HANDLE pipe, uint64_t owner, const Json& request) {
-    std::lock_guard lock(mutex_);
+    std::unique_lock lock(mutex_);
     try {
       Require(request.is_object() && request.contains("method"));
       const auto method = request.at("method").get<std::string>();
@@ -132,6 +138,7 @@ class Service {
           }
         }
         leases_.emplace(id, std::move(lease));
+        lock.unlock();
         SendJson(pipe, {{"ok", true},
                         {"result",
                          {{"snapshotId", id}, {"takenAt", shadow->taken_at}, {"files", files}}}});
@@ -144,12 +151,15 @@ class Service {
       lease.renewed = Clock::now();
       if (method == "snapshot.release") {
         leases_.erase(found);
+        lock.unlock();
         SendJson(pipe, {{"ok", true}, {"result", Json::object()}});
         return;
       }
       Require(method == "snapshot.read");
       const auto name = request.at("path").get<std::string>();
       Require(lease.paths.contains(name));
+      Require(request.at("offset").is_number_unsigned() &&
+              request.at("length").is_number_unsigned());
       const auto offset = request.at("offset").get<uint64_t>();
       const auto length = request.at("length").get<uint32_t>();
       Require(length <= kMaxRead);
@@ -168,13 +178,20 @@ class Service {
       CloseHandle(file);
       Check(ok ? S_OK : HRESULT_FROM_WIN32(error));
       bytes.resize(read);
+      lock.unlock();
       if (SendJson(pipe, {{"ok", true}, {"result", {{"length", read}}}}))
         Send(pipe, bytes);
     } catch (const Failure& error) {
+      if (lock.owns_lock())
+        lock.unlock();
       ErrorReply(pipe, error);
     } catch (const Json::exception&) {
+      if (lock.owns_lock())
+        lock.unlock();
       ErrorReply(pipe, {E_INVALIDARG, true});
     } catch (const fs::filesystem_error& error) {
+      if (lock.owns_lock())
+        lock.unlock();
       ErrorReply(pipe, {HRESULT_FROM_WIN32(error.code().value())});
     }
   }
@@ -251,6 +268,7 @@ class Service {
     if (!input)
       return;
     Json record = Json::parse(input, nullptr, false);
+    input.close();
     Require(record.is_object() && record.contains("snapshotId"));
     GUID id{};
     Check(CLSIDFromString(Path(record.at("snapshotId").get<std::string>()).c_str(), &id));
@@ -282,10 +300,18 @@ class Service {
     Check(ok ? S_OK : E_FAIL);
   }
   std::shared_ptr<Shadow> Take() {
+    Cleanup();
+    wchar_t filesystem[MAX_PATH]{};
+    Check(GetVolumeInformationW(volume_.c_str(), nullptr, 0, nullptr, nullptr, nullptr, filesystem,
+                                MAX_PATH)
+              ? S_OK
+              : HRESULT_FROM_WIN32(GetLastError()));
+    Check(_wcsicmp(filesystem, L"NTFS") == 0 ? S_OK : VSS_E_VOLUME_NOT_SUPPORTED);
     auto shadow = std::make_shared<Shadow>();
     Check(CreateVssBackupComponents(&shadow->backup));
     Check(shadow->backup->InitializeForBackup());
     Check(shadow->backup->SetContext(VSS_CTX_FILE_SHARE_BACKUP));
+    Check(shadow->backup->SetBackupState(FALSE, FALSE, VSS_BT_COPY, FALSE));
     VSS_ID set{};
     Check(shadow->backup->StartSnapshotSet(&set));
     auto volume = volume_.wstring();
@@ -304,6 +330,7 @@ class Service {
               << std::endl;
     return shadow;
   }
+  HANDLE root_lock_ = INVALID_HANDLE_VALUE;
   fs::path root_, volume_, journal_;
   std::mutex mutex_;
   Leases<Shadow> leases_;

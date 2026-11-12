@@ -256,6 +256,13 @@ try {
             if (!entry.sources.some((source) => source.address === config.peer.address))
               entry.sources.push({ nodeId: config.nodeId, address: config.peer.address });
             index[identity] = entry;
+            if (!json.tenantId)
+              for (const known of Object.values(index))
+                if (
+                  known.objectId === object.objectId &&
+                  !known.sources.some((source) => source.nodeId === config.nodeId)
+                )
+                  known.sources.push({ nodeId: config.nodeId, address: config.peer.address });
           }
           await writeFile(args['object-index'], JSON.stringify(index));
         }

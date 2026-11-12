@@ -152,7 +152,7 @@ test('configured caps remain hard, including placements newer than the metrics',
     h.nodes.get('beta')!.diskDraining = true;
     h.placement.resolve('first');
     assert.throws(() => h.placement.resolve('second'), { code: 'unavailable', message: '没有可用的节点' });
-    h.placement.evacuate('alpha');
+    h.placement.forgetTenant('first');
     for (const overrides of [
       { sessions: 1 },
       { disk: { total: 1000, free: 99 } },
@@ -189,6 +189,8 @@ test('warm bonus applies only below predicted pressure threshold and only to the
     h.store.db
       .prepare('INSERT INTO checkpoints VALUES (?,?,?,?,?,?)')
       .run('tenant', 1, sleeping.placementEpoch, manifest, 'dev', 0);
+    h.store.db.prepare('INSERT INTO checkpoint_objects VALUES (?,?,?)').run('tenant', manifest, manifest);
+    h.store.db.prepare('INSERT INTO object_replicas VALUES (?,?)').run(manifest, 'alpha');
     h.store.db
       .prepare(
         "UPDATE session_placements SET run_state='stopped',data_state='clean',checkpoint_id=1 WHERE tenant='tenant'",

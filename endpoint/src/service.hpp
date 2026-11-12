@@ -39,6 +39,7 @@ class Service {
   NodeMetrics metrics_;
   std::atomic<bool> snapshot_available_{false};
   void Versions();
+  bool snapshot_unavailable_streak_ = false;
   std::atomic<size_t> session_count_{0};
   std::atomic<uint64_t> metrics_generation_{0};
   std::atomic<uint64_t> fenced_generation_{0};

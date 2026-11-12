@@ -85,6 +85,23 @@ test('running versions retain four checkpoints and restore the newest complete v
   }
 });
 
+test('equal manifests at different snapshot times are distinct versions and repeated reports are idempotent', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.gateway.synchronize('tenant');
+    await h.commit(alpha, 'tenant', id(1));
+    const placed = h.placement.peek('tenant')!;
+    h.placement.commitCheckpoint(placed, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 1000 });
+    h.placement.commitCheckpoint(placed, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 2000 });
+    h.placement.commitCheckpoint(placed, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 2000 });
+    assert.equal(h.placement.checkpoints('tenant').count, 2);
+    assert.equal(h.placement.newestComplete('tenant')!.takenAt, 2000);
+  } finally {
+    await h.close();
+  }
+});
+
 test('a version with a missing data chunk falls back even when its manifest is available', async () => {
   const h = await harness();
   try {
