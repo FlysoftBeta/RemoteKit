@@ -136,7 +136,7 @@
   align-items: flex-start;
   justify-content: flex-end;
   flex-direction: column;
-  color: var(--surface);
+  color: var(--on-accent);
   border-radius: var(--radius-md);
   padding: 12px;
   text-align: left;

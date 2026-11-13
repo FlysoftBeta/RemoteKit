@@ -98,7 +98,7 @@
 .timeline-replies {
   margin: 0 12px 10px 56px;
   padding: 0 0 0 12px;
-  border-left: 2px solid rgba(127, 127, 127, 0.3);
+  border-left: 2px solid var(--border-neutral);
   list-style: none;
 }
 .timeline-reply {

@@ -79,7 +79,7 @@ export function FloatingPanel({
         flexDirection: 'column',
         borderRadius: '14px',
         overflow: 'hidden',
-        boxShadow: '0 12px 32px rgb(15 23 42 / 24%), 0 0 0 1px rgb(15 23 42 / 8%)',
+        boxShadow: '0 12px 32px var(--shadow-dock), 0 0 0 1px var(--border-notice)',
       }}
     >
       <Box

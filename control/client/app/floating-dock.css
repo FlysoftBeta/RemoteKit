@@ -61,7 +61,7 @@
   flex: none;
   border-radius: var(--radius-circle);
   background: var(--dock-background);
-  color: var(--surface);
+  color: var(--on-accent);
   box-shadow: 0 1px 6px var(--shadow-dock);
   cursor: pointer;
   pointer-events: auto;
