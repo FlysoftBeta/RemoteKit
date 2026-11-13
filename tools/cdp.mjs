@@ -54,7 +54,12 @@ export async function cdpConnect(url, { timeoutMs = 15000 } = {}) {
     }
     pending.clear();
   };
-  socket.onclose = () => rejectPending(new Error('CDP closed'));
+  let closed;
+  const closedPromise = new Promise((resolve) => (closed = resolve));
+  socket.onclose = () => {
+    rejectPending(new Error('CDP closed'));
+    closed();
+  };
   socket.onerror = () => rejectPending(new Error('CDP connection failed'));
   socket.onmessage = ({ data }) => {
     const message = JSON.parse(data);
@@ -66,6 +71,7 @@ export async function cdpConnect(url, { timeoutMs = 15000 } = {}) {
     else waiter.resolve(message.result);
   };
   return {
+    closed: closedPromise,
     send(method, params = {}) {
       return new Promise((resolve, reject) => {
         if (socket.readyState !== 1) return reject(new Error('CDP closed'));

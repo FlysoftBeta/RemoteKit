@@ -20,6 +20,7 @@ import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 import { launchTestBrowser } from '../../../tests/e2e/kit/browser.mjs';
+import { trackCleanupPid } from '../../../tests/e2e/kit/cleanup.mjs';
 import { summarize } from './summarize.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -90,6 +91,16 @@ async function removeProfile(out, path) {
   if (existsSync(path) && !isInside(realpathSync(out), realpathSync(path)))
     throw Error(`Cleanup path escapes run: ${path}`);
   await rm(path, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 });
+}
+function alive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    throw error;
+  }
 }
 function killOwned(child) {
   if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
@@ -265,6 +276,7 @@ export async function run(options = {}) {
     flushed = new Set();
   let bench,
     receiver,
+    receiverPid,
     cdp,
     ready,
     epochReady = false,
@@ -474,12 +486,13 @@ export async function run(options = {}) {
     });
     receiver.stderr.pipe(streams['receiver.stderr.log']);
     receiver.on('error', fail);
+    // The spawned msedge.exe may start the real browser and exit 0; the browser process reported
+    // over CDP and the CDP connection's lifetime identify the receiver from then on.
     receiver.on('exit', (code) => {
-      if (!shuttingDown) fail(`Receiver exited ${code}`);
+      if (code !== 0 && !shuttingDown) fail(`Receiver launcher exited ${code}`);
     });
-    metadata.receiverPid = receiver.pid;
+    metadata.receiverLauncherPid = receiver.pid;
     metadata.benchPid = bench.pid;
-    send({ type: 'receiver', pid: receiver.pid });
     let endpoint;
     await until(
       () => {
@@ -499,7 +512,16 @@ export async function run(options = {}) {
       () => failure,
     );
     cdp = await cdpConnect(endpoint);
+    cdp.closed.then(() => {
+      if (!shuttingDown) fail('Receiver browser closed');
+    });
     metadata.receiverCdpVersion = await cdp.send('Browser.getVersion');
+    const { processInfo } = await cdp.send('SystemInfo.getProcessInfo');
+    receiverPid = processInfo.find((entry) => entry.type === 'browser')?.id;
+    if (!receiverPid) throw Error('Receiver browser process is missing from CDP diagnostics');
+    trackCleanupPid(out, receiverPid);
+    metadata.receiverPid = receiverPid;
+    send({ type: 'receiver', pid: receiverPid });
     for (let tenant = 1; tenant < count; ++tenant)
       await cdp.send('Target.createTarget', { url: `${origin}/${receiverPage}?tenant=${tenant}` });
     await until(
@@ -509,7 +531,7 @@ export async function run(options = {}) {
       () => failure,
     );
     metadata.browserPids = browserPids;
-    const moduleIds = [bench.pid, receiver.pid, ...browserPids];
+    const moduleIds = [bench.pid, receiverPid, ...browserPids];
     const moduleResult = spawnSync(
       'powershell.exe',
       [
@@ -594,7 +616,12 @@ export async function run(options = {}) {
     await cleanup(async () => {
       if (bench) await until(() => bench.exitCode !== null || bench.signalCode !== null, 10000, 'bench exit');
       if (receiver)
-        await until(() => receiver.exitCode !== null || receiver.signalCode !== null, 10000, 'receiver exit');
+        await until(
+          () => receiver.exitCode !== null || receiver.signalCode !== null,
+          10000,
+          'receiver launcher exit',
+        );
+      await until(() => !alive(receiverPid), 10000, 'receiver exit');
     });
     await cleanup(async () => {
       for (const path of ownedDirectories()) await removeProfile(out, path);
@@ -614,7 +641,7 @@ export async function run(options = {}) {
         (name) => name === 'receiver-profile' || /^browser-\d+$/.test(name),
       ),
       benchExited: !bench || bench.exitCode !== null || bench.signalCode !== null,
-      receiverExited: !receiver || receiver.exitCode !== null || receiver.signalCode !== null,
+      receiverExited: !alive(receiverPid),
       errors: cleanupErrors,
     };
     if (cleanupErrors.length) fail(cleanupErrors.join('; '));
