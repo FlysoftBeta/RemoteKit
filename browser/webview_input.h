@@ -22,6 +22,7 @@ class InputController {
                                     content::RenderWidgetHostViewBase*,
                                     bool);
   SharedAtlasTextInput TextInputState();
+  Status CanFocus(bool focused) const;
   Status Focus(bool focused);
   void RenderFrameDeleted(content::RenderFrameHost* frame);
   void RenderFrameHostChanged(content::RenderFrameHost* old_frame,

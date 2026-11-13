@@ -38,8 +38,7 @@ bool LiveView(BrowserRuntime& runtime, SessionId session, WebViewId view) {
   const auto* model = runtime.view_model.FindWebView(session, view);
   const auto* record = runtime.views.Find(session, view);
   if (runtime.shutting_down || !model || !record || model->actual != Residency::live ||
-      model->pending || record->webview->lifecycle_uncertain() ||
-      record->requests->close_state() != "open")
+      model->pending || record->webview->lifecycle_uncertain() || !record->requests->IsOpen())
     return false;
   auto* contents = record->webview->contents();
   return contents && !contents->IsBeingDestroyed() && contents->GetPrimaryMainFrame() &&

@@ -26,7 +26,8 @@ struct Events {
   std::condition_variable cv;
   std::deque<Event> pending;
   unsigned callbacks = 0;
-  bool block_stats = false, stats_entered = false, release_stats = false;
+  enum class Barrier { kIdle, kArmed, kEntered, kClosing, kAcknowledged, kReleased };
+  Barrier barrier = Barrier::kIdle;
 };
 void OnEvent(void* context,
              uint64_t peer,
@@ -41,10 +42,17 @@ void OnEvent(void* context,
                        size ? std::string(static_cast<const char*>(bytes), size) : std::string(),
                        mid ? mid : "", value});
   ++q.callbacks;
-  if (type == REMOTEKIT_RTC_STATS && q.block_stats) {
-    q.stats_entered = true;
+  if (type == REMOTEKIT_RTC_STATS && q.barrier == Events::Barrier::kArmed) {
+    q.barrier = Events::Barrier::kEntered;
     q.cv.notify_all();
-    q.cv.wait(lock, [&] { return q.release_stats; });
+    q.cv.wait(lock, [&] {
+      return q.barrier == Events::Barrier::kClosing || q.barrier == Events::Barrier::kReleased;
+    });
+    if (q.barrier == Events::Barrier::kClosing) {
+      q.barrier = Events::Barrier::kAcknowledged;
+      q.cv.notify_all();
+      q.cv.wait(lock, [&] { return q.barrier == Events::Barrier::kReleased; });
+    }
   }
   q.cv.notify_all();
 }
@@ -349,14 +357,15 @@ int main(int argc, char** argv) {
   // WebRTC delivers a cached report synchronously or collects it asynchronously.
   {
     std::lock_guard lock(events.mutex);
-    events.block_stats = true;
+    events.barrier = Events::Barrier::kArmed;
   }
   std::atomic<int> stats_status{REMOTEKIT_SDK_INVALID_STATE};
   std::thread request_stats([&] { stats_status = remotekit_rtc_request_stats(a); });
   {
     std::unique_lock lock(events.mutex);
-    if (!events.cv.wait_for(lock, std::chrono::seconds(5), [&] { return events.stats_entered; })) {
-      events.release_stats = true;
+    if (!events.cv.wait_for(lock, std::chrono::seconds(5),
+                            [&] { return events.barrier == Events::Barrier::kEntered; })) {
+      events.barrier = Events::Barrier::kReleased;
       events.cv.notify_all();
       lock.unlock();
       request_stats.join();
@@ -365,12 +374,23 @@ int main(int argc, char** argv) {
   }
   std::atomic<int> close_status{REMOTEKIT_SDK_INVALID_STATE};
   std::thread close_peer([&] { close_status = remotekit_rtc_close(a); });
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  const bool waited = close_status.load() == REMOTEKIT_SDK_INVALID_STATE;
+  const auto closing_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  uint32_t receive_level = 0;
+  while (remotekit_rtc_get_receive_level(a, &receive_level) == REMOTEKIT_SDK_OK &&
+         std::chrono::steady_clock::now() < closing_deadline)
+    std::this_thread::yield();
+  bool waited = std::chrono::steady_clock::now() < closing_deadline;
+  {
+    std::unique_lock lock(events.mutex);
+    events.barrier = Events::Barrier::kClosing;
+    events.cv.notify_all();
+    waited = waited && events.cv.wait_for(lock, std::chrono::seconds(5), [&] {
+      return events.barrier == Events::Barrier::kAcknowledged;
+    }) && close_status.load() == REMOTEKIT_SDK_INVALID_STATE;
+  }
   {
     std::lock_guard lock(events.mutex);
-    events.block_stats = false;
-    events.release_stats = true;
+    events.barrier = Events::Barrier::kReleased;
     events.cv.notify_all();
   }
   request_stats.join();

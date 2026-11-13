@@ -133,10 +133,12 @@ int main() try {
     Require(remotekit_rtc_set_remote_description(sender, 1, sending_offer.data(),
                                                  sending_offer.size()) ==
             REMOTEKIT_SDK_INVALID_ARGUMENT);
+    Require(remotekit_rtc_set_av_sync(sender, synced) == REMOTEKIT_SDK_OK);
     auto mono_offer = offer;
     mono_offer.replace(mono_offer.find("stereo=1"), 8, "stereo=0");
     Require(remotekit_rtc_set_remote_description(sender, 1, mono_offer.data(), mono_offer.size()) ==
             REMOTEKIT_SDK_INVALID_ARGUMENT);
+    Require(remotekit_rtc_set_av_sync(sender, synced) == REMOTEKIT_SDK_OK);
     Require(remotekit_rtc_set_remote_description(sender, 1, offer.data(), offer.size()) == 0);
     Require(remotekit_rtc_set_av_sync(sender, synced) == REMOTEKIT_SDK_INVALID_STATE);
     Require(Wait(events, events.answer));

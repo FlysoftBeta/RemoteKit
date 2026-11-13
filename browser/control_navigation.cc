@@ -19,8 +19,9 @@ Result<std::optional<NavigationOperations::Identity>> DecodeNavigationOperation(
   const auto* sequence = wire.FindString("operationSequence");
   uint64_t parsed = 0;
   if (!id || id->empty() || id->size() > 128 || !generation || generation->empty() ||
-      generation->size() > 128 ||
-      (!acknowledge && (!sequence || !base::StringToUint64(*sequence, &parsed) || !parsed)))
+      generation->size() > 128 || (!acknowledge && !sequence) ||
+      (wire.contains("operationSequence") &&
+       (!sequence || !base::StringToUint64(*sequence, &parsed) || !parsed)))
     return {{}, {ErrorCode::kInvalidRequest, "Invalid navigation operation identity"}};
   return {NavigationOperations::Identity{*id, *generation, parsed}, {}};
 }
@@ -37,6 +38,7 @@ Result<NavigationTransferRequest> DecodeNavigationTransfer(const base::DictValue
   request.transfer = decoder.Optional<uint64_t>("transfer");
   request.session = decoder.Optional<uint64_t>("session");
   request.view = decoder.Optional<uint64_t>("view");
+  decoder.Consume({"operationId", "operationGeneration", "operationSequence"});
   auto operation = DecodeNavigationOperation(wire, envelope.method == "navigation.ack");
   if (!operation)
     return {{}, operation.status};
@@ -53,6 +55,7 @@ Result<NavigateRequest> DecodeNavigate(const base::DictValue& wire, RequestEnvel
   request.url = decoder.Optional<std::string>("url");
   request.session = decoder.Optional<uint64_t>("session");
   request.view = decoder.Optional<uint64_t>("view");
+  decoder.Consume({"operationId", "operationGeneration", "operationSequence"});
   auto operation = DecodeNavigationOperation(wire, envelope.method == "navigation.ack");
   if (!operation)
     return {{}, operation.status};
@@ -76,7 +79,7 @@ ControlResult ControlDispatcher::HandleNavigationTransfer(
   if (!record || !runtime_.view_model.FindWebView(session, view))
     return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
-  if (record->requests->close_state() == "closing")
+  if (!record->requests->IsOpen())
     return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   if (*method == "navigation.ack") {
@@ -191,7 +194,7 @@ ControlResult ControlDispatcher::HandleNavigate(const NavigateRequest& request) 
   if (!record || !runtime_.view_model.FindWebView(session, view))
     return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
-  if (record->requests->close_state() == "closing")
+  if (!record->requests->IsOpen())
     return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   Status status;

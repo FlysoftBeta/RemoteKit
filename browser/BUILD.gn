@@ -83,10 +83,12 @@ executable("remotekit_browser") {
     "osr_renderer.cc",
     "osr_renderer.h",
     "osr_wake_state.h",
+    "page_close_state.h",
     "page_requests.cc",
     "page_requests.h",
     "popup_registry.cc",
     "popup_registry.h",
+    "profile_file.h",
     "profile_key.cc",
     "profile_key.h",
     "profile_network_state.cc",
@@ -278,6 +280,7 @@ executable("remotekit_begin_frame_probe") {
 executable("remotekit_profile_isolation_probe") {
   testonly = true
   sources = [
+    "profile_file.h",
     "profile_isolation_probe.cc",
     "profile_key.cc",
     "profile_key.h",
@@ -296,6 +299,7 @@ executable("remotekit_profile_isolation_probe") {
     "//services/network/public/cpp",
     "//services/network/public/mojom",
     "//ui/base/clipboard",
+    "//url",
   ]
 }
 

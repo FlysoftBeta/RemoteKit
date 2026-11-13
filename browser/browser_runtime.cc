@@ -128,14 +128,13 @@ void BrowserRuntime::DrainClosed() {
   popups.Prune();
   std::vector<WebViewId> closed_ids;
   for (const auto& [id, record] : views.records)
-    if (record.requests->close_state() == "closed")
+    if (record.requests->close_state() == CloseState::kClosed)
       closed_ids.push_back(id);
   for (auto id : closed_ids)
     RemoveView(id);
 }
 Status BrowserRuntime::CanDiscard(WebViewId index) const {
-  if (views.records.at(index).requests->close_state() == "closing" ||
-      views.records.at(index).requests->close_state() == "closed")
+  if (!views.records.at(index).requests->IsOpen())
     return {ErrorCode::kUnavailable, "WebView is closing"};
   if (views.records.at(index).requests->pending_count())
     return {ErrorCode::kBusy, "Page request pending"};

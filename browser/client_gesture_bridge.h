@@ -31,7 +31,6 @@ class ClientGestureBridge final : public ui::TouchDispositionGestureFilterClient
                   int64_t source_elapsed_us);
   base::TimeTicks NativeTimestamp(base::TimeTicks sampled);
   Status Momentum(const GestureInput&);
-  bool has_routed_raw() const { return first_id_ != 0; }
   bool has_routed_terminal() const { return terminal_routed_; }
   bool awaiting_ack() const { return !pending_.empty(); }
   size_t pending_ack_count() const { return pending_.size(); }

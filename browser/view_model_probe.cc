@@ -50,6 +50,9 @@ void CheckLifecycleAndInput() {
   const auto focused = token();
   CHECK(model.AcceptInput(session.value, {focused, 2, key}));
 
+  CHECK(!model.CanRequestLifecycle(session.value, view.value, Lifecycle::restore));
+  CHECK(model.CanFocus(session.value, view.value, true));
+  CHECK(state()->focused && token() == focused && !state()->pending);
   const auto freeze = model.RequestLifecycle(session.value, view.value, Lifecycle::freeze);
   CHECK(freeze);
   CHECK(state()->desired == Residency::frozen && state()->actual == Residency::live);

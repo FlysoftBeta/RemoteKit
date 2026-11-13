@@ -1,4 +1,5 @@
 #include "browser/compat.h"
+#include "browser/profile_file.h"
 
 #include <map>
 #include <vector>
@@ -29,21 +30,21 @@ class ProfileClientHintsDelegate final : public content::ClientHintsControllerDe
   explicit ProfileClientHintsDelegate(const base::FilePath& profile)
       : tracker_(base::BindRepeating(&content::GetNetworkService)),
         file_(profile.AppendASCII("ClientHints.json")) {
-    std::string text;
-    if (!base::ReadFileToString(file_, &text))
+    const auto file = ReadProfileFile(file_);
+    if (file.state == ProfileFileState::kMissing)
       return;
-    auto data = base::JSONReader::ReadDict(text, base::JSON_PARSE_RFC);
-    if (!data)
+    if (file.state == ProfileFileState::kReadFailed) {
+      persistence_ = Persistence::kMemoryOnly;
       return;
-    for (const auto [key, value] : *data) {
-      const auto origin = url::Origin::Create(GURL(key));
-      if (origin.opaque() || !value.is_list())
-        continue;
-      for (const auto& item : value.GetList()) {
-        if (item.is_int() && network::mojom::IsKnownEnumValue(static_cast<Hint>(item.GetInt())))
-          hints_[origin].push_back(static_cast<Hint>(item.GetInt()));
-      }
     }
+    auto data = base::JSONReader::ReadDict(file.text, base::JSON_PARSE_RFC);
+    auto hints = data ? ParseClientHints(*data) : std::nullopt;
+    if (!hints) {
+      persistence_ = Persistence::kMemoryOnly;
+      LOG(ERROR) << "Invalid ClientHints.json in " << file_;
+      return;
+    }
+    hints_ = std::move(*hints);
   }
   network::NetworkQualityTracker* GetNetworkQualityTracker() override { return &tracker_; }
   void GetAllowedClientHintsFromSource(const url::Origin& origin,
@@ -85,6 +86,8 @@ class ProfileClientHintsDelegate final : public content::ClientHintsControllerDe
 
  private:
   void Save() {
+    if (persistence_ == Persistence::kMemoryOnly)
+      return;
     base::DictValue data;
     for (const auto& [origin, hints] : hints_) {
       base::ListValue values;
@@ -106,7 +109,9 @@ class ProfileClientHintsDelegate final : public content::ClientHintsControllerDe
   base::FilePath file_;
   scoped_refptr<base::SequencedTaskRunner> writer_ = base::ThreadPool::CreateSequencedTaskRunner(
       {base::MayBlock(), base::TaskShutdownBehavior::BLOCK_SHUTDOWN});
-  std::map<url::Origin, std::vector<Hint>> hints_;
+  enum class Persistence { kWritable, kMemoryOnly };
+  Persistence persistence_ = Persistence::kWritable;
+  ClientHints hints_;
   std::vector<Hint> additional_;
   gfx::Size viewport_;
   bool force_empty_ = false;

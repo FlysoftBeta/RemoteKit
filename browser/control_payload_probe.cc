@@ -1,6 +1,8 @@
 // CPU-only: calls the exact production response writer and accept exporter.
 #include "remotekit/browser/control_response.h"
 #include "browser/control_input_codec.h"
+#include "browser/control_requests.h"
+#include "browser/page_close_state.h"
 #include "browser/control_clipboard.h"
 #include "browser/signin_result.h"
 #include "remotekit/browser/file_chooser_accept.h"
@@ -213,6 +215,74 @@ void ControlContract() {
   CHECK(decoded_touch.samples[0].points[0].width == 18 &&
         decoded_touch.samples[0].points[0].height == 24);
 }
+void PageRequestResults() {
+  using namespace remotekit::browser;
+  CHECK(IsOpen(AfterBeforeUnload(CloseState::kClosing, false)));
+  CHECK(!IsOpen(AfterBeforeUnload(CloseState::kClosing, true)));
+  CHECK(!IsOpen(AfterBeforeUnload(CloseState::kClosed, false)));
+  auto cancelled = FileReceiptResult("cancelled", "selection", "file failure");
+  CHECK(cancelled.FindBool("ok") == true && !cancelled.contains("error"));
+  CHECK_EQ(*cancelled.FindString("state"), "cancelled");
+  CHECK_EQ(*cancelled.FindString("reason"), "file failure");
+  CHECK_EQ(*cancelled.FindString("selection_id"), "selection");
+  auto selected = FileReceiptResult("selected", "selection", "");
+  CHECK(selected.FindBool("ok") == true && !selected.contains("reason"));
+}
+void StrictRequests() {
+  using namespace remotekit::browser;
+  base::DictValue request;
+  RequestDecoder missing(request);
+  CHECK(!missing.Optional<bool>("optional"));
+  CHECK(missing.Finish(ShutdownRequest{}));
+  request.Set("optional", "wrong");
+  RequestDecoder malformed(request);
+  CHECK(!malformed.Optional<bool>("optional"));
+  CHECK(!malformed.Finish(ShutdownRequest{}));
+  request.Remove("optional");
+  request.Set("unexpected", true);
+  CHECK(!RequestDecoder(request).Finish(ShutdownRequest{}));
+  base::DictValue wire;
+  for (auto field : {"instance", "document", "focus", "sequence"})
+    wire.Set(field, "1");
+  auto key = base::DictValue()
+                 .Set("type", "key")
+                 .Set("action", "down")
+                 .Set("physical_code", 1)
+                 .Set("windows_key_code", 65)
+                 .Set("dom_code", 65)
+                 .Set("dom_key", "65");
+  wire.Set("event", key.Clone());
+  CHECK(DecodeControlInput(wire, 1, 1));
+  for (auto field : {"modifiers", "repeat", "text", "unmodified_text"}) {
+    auto invalid = key.Clone();
+    invalid.Set(field, base::ListValue());
+    wire.Set("event", std::move(invalid));
+    CHECK(!DecodeControlInput(wire, 1, 1));
+  }
+  auto mouse = base::DictValue()
+                   .Set("type", "mouse")
+                   .Set("action", "move")
+                   .Set("x", 1)
+                   .Set("y", 1)
+                   .Set("button", 0);
+  for (auto field : {"modifiers", "click_count"}) {
+    auto invalid = mouse.Clone();
+    invalid.Set(field, "wrong");
+    wire.Set("event", std::move(invalid));
+    CHECK(!DecodeControlInput(wire, 1, 1));
+  }
+  wire.Set("event", base::DictValue()
+                        .Set("type", "touch")
+                        .Set("action", "cancel")
+                        .Set("gestureMode", "client-v1")
+                        .Set("gestures", base::ListValue())
+                        .Set("points", base::ListValue())
+                        .Set("samples", false));
+  CHECK(!DecodeControlInput(wire, 1, 1));
+  wire.FindDict("event")->Remove("samples");
+  wire.FindDict("event")->Set("clockMode", false);
+  CHECK(!DecodeControlInput(wire, 1, 1));
+}
 void Responses() {
   base::DictValue request;
   request.Set("id", 73);
@@ -334,6 +404,8 @@ int main() {
   base::AtExitManager at_exit;
   SignInResults();
   ControlContract();
+  StrictRequests();
+  PageRequestResults();
   Responses();
   RenderEndpointResponses();
   AcceptHints();

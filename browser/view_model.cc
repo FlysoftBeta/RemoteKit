@@ -200,12 +200,19 @@ WebView* ViewModel::MutableView(SessionId s, WebViewId v) {
   auto j = i->second.views.find(v);
   return j == i->second.views.end() ? nullptr : &j->second;
 }
-Status ViewModel::SetFocus(SessionId s, WebViewId id, bool focused) {
-  auto v = MutableView(s, id);
+Status ViewModel::CanFocus(SessionId s, WebViewId id, bool focused) const {
+  auto v = FindWebView(s, id);
   if (!v)
     return Fail(ErrorCode::kNotFound, "WebView not found in session");
   if (focused && (v->actual != Residency::live || v->pending))
     return Fail(ErrorCode::kConflict, "WebView is not available");
+  return {};
+}
+Status ViewModel::SetFocus(SessionId s, WebViewId id, bool focused) {
+  auto status = CanFocus(s, id, focused);
+  if (!status)
+    return status;
+  auto* v = MutableView(s, id);
   if (focused)
     for (auto& [other_id, other] : sessions_.at(s).views)
       if (other_id != id && other.focused) {
@@ -290,8 +297,10 @@ Status ViewModel::AcceptInput(SessionId s, const InputEvent& e) {
   v->last_sequence = e.sequence;
   return {};
 }
-Result<LifecycleRequest> ViewModel::RequestLifecycle(SessionId s, WebViewId id, Lifecycle action) {
-  auto v = MutableView(s, id);
+Result<Residency> ViewModel::CanRequestLifecycle(SessionId s,
+                                                 WebViewId id,
+                                                 Lifecycle action) const {
+  auto v = FindWebView(s, id);
   if (!v)
     return {{}, Fail(ErrorCode::kNotFound, "WebView not found in session")};
   if (v->pending)
@@ -319,6 +328,14 @@ Result<LifecycleRequest> ViewModel::RequestLifecycle(SessionId s, WebViewId id, 
     default:
       return {{}, Fail(ErrorCode::kInvalidRequest, "Unknown lifecycle operation")};
   }
+  return {target, {}};
+}
+Result<LifecycleRequest> ViewModel::RequestLifecycle(SessionId s, WebViewId id, Lifecycle action) {
+  auto allowed = CanRequestLifecycle(s, id, action);
+  if (!allowed)
+    return {{}, allowed.status};
+  auto* v = MutableView(s, id);
+  const auto target = allowed.value;
   v->desired = target;
   v->pending = LifecycleRequest{id, ++v->lifecycle_generation, action, target};
   // Invalidate queued input immediately, even if the external operation later fails.

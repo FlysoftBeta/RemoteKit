@@ -6,7 +6,6 @@ namespace remotekit::browser {
 // nor forced Begin acknowledges that Comp resumed demand.
 class OsrWakeProof {
  public:
-  constexpr void ObserveBegin(const RenderBegin&) {}
   constexpr void RecordIdle(const RenderIdentity& identity) {
     if (!stopped_)
       idle_ = identity;

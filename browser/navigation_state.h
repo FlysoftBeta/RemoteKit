@@ -30,8 +30,6 @@ class NavigationState {
   NavigationState(const NavigationState&) = delete;
   NavigationState& operator=(const NavigationState&) = delete;
   int entry_count() const;
-  int selected_index() const { return selected_index_; }
-  bool retains_session_storage() const { return !namespaces_.empty(); }
   void SetSessionStorageShouldPersist(bool persist);
 
  private:

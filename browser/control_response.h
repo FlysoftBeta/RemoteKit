@@ -9,6 +9,9 @@
 #include "base/values.h"
 
 namespace remotekit::browser {
+base::DictValue FileReceiptResult(std::string_view state,
+                                  std::string_view selection_id,
+                                  std::string_view reason);
 class ControlResult {
  public:
   ControlResult(base::DictValue fields);

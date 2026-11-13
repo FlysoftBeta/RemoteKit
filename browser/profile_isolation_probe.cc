@@ -2,6 +2,8 @@
 // No Browser, GPU, network traffic or Windows clipboard is created.
 #include "remotekit/browser/profile_network_state.h"
 #include "remotekit/browser/profile_key.h"
+#include "browser/profile_file.h"
+#include "browser/compat.h"
 
 #include <windows.h>
 
@@ -28,6 +30,45 @@
 #include "ui/base/clipboard/scoped_clipboard_writer.h"
 
 namespace {
+void ProfileFiles() {
+  using namespace remotekit::browser;
+  base::ScopedTempDir temp;
+  CHECK(temp.CreateUniqueTempDir());
+  const auto salt = temp.GetPath().AppendASCII("MediaDeviceSalt");
+  CHECK(ReadProfileFile(salt).state == ProfileFileState::kMissing);
+  const auto created = LoadMediaDeviceSalt(salt);
+  CHECK_EQ(created.size(), 64u);
+  CHECK_EQ(LoadMediaDeviceSalt(salt), created);
+  for (const auto* invalid :
+       {"", "bad", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}) {
+    CHECK(base::WriteFile(salt, invalid));
+    CHECK_EQ(LoadMediaDeviceSalt(salt).size(), 64u);
+    CHECK_EQ(ReadProfileFile(salt).text, invalid);
+  }
+  base::File locked(salt, base::File::FLAG_OPEN | base::File::FLAG_READ |
+                              base::File::FLAG_WIN_EXCLUSIVE_READ |
+                              base::File::FLAG_WIN_EXCLUSIVE_WRITE);
+  CHECK(locked.IsValid());
+  CHECK(ReadProfileFile(salt).state == ProfileFileState::kReadFailed);
+  CHECK_EQ(LoadMediaDeviceSalt(salt).size(), 64u);
+  locked.Close();
+  CHECK_EQ(ReadProfileFile(salt).text, std::string(64, 'x'));
+  const auto hint = static_cast<int>(network::mojom::WebClientHintsType::kUA);
+  auto hints = base::DictValue().Set("https://example.test", base::ListValue().Append(hint));
+  CHECK(ParseClientHints(hints));
+  for (const auto* origin : {"invalid", "https://example.test/path"}) {
+    auto invalid = hints.Clone();
+    invalid.Set(origin, base::ListValue().Append(hint));
+    CHECK(!ParseClientHints(invalid));
+  }
+  for (const auto& invalid : {base::Value("wrong"), base::Value(base::ListValue().Append("wrong")),
+                              base::Value(base::ListValue().Append(-1))}) {
+    auto data = hints.Clone();
+    data.Set("https://other.test", invalid.Clone());
+    CHECK(!ParseClientHints(data));
+  }
+}
+
 std::unique_ptr<remotekit::browser::ProfileKey> ReadKey(base::span<const uint8_t> bytes) {
   HANDLE read_handle = nullptr;
   HANDLE write_handle = nullptr;
@@ -95,6 +136,7 @@ int main(int argc, char** argv) {
   base::SingleThreadTaskExecutor tasks;
   base::ThreadPoolInstance::CreateAndStartWithDefaultParams("ProfileIsolationProbe");
   mojo::core::Init();
+  ProfileFiles();
   CheckKeyHandoff();
   base::ScopedTempDir temporary;
   CHECK(temporary.CreateUniqueTempDir());

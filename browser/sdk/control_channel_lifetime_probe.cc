@@ -397,6 +397,143 @@ void TypedRenderFailure(bool opening) {
   responder.join();
   CHECK_EQ(remotekit_sdk_control_close(control.id), REMOTEKIT_SDK_OK);
 }
+void FileReceiptStatuses() {
+  for (auto reason : {"", "remote_rejected", "file validation failed"}) {
+    const auto reply = remotekit::browser::FileReceiptResult(reason[0] ? "cancelled" : "selected",
+                                                             "selection", reason);
+    remotekit_sdk_failure failure{};
+    CHECK_EQ(ReplyStatus(reply, &failure), REMOTEKIT_SDK_OK);
+    CHECK_EQ(ReplyStatus(reply, nullptr), REMOTEKIT_SDK_OK);
+  }
+}
+void StrictRenderResources() {
+  std::vector<uint64_t> handles;
+  for (size_t i = 0; i < 13; ++i) {
+    const auto handle = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    CHECK(handle);
+    handles.push_back(reinterpret_cast<uintptr_t>(handle));
+  }
+  auto valid = base::DictValue()
+                   .Set("version", 1)
+                   .Set("id", 1)
+                   .Set("ok", true)
+                   .Set("generation", "1")
+                   .Set("width", 64)
+                   .Set("height", 64)
+                   .Set("mapping_size", int(sizeof(remotekit::SharedRenderMapping)))
+                   .Set("mapping_handle", base::NumberToString(handles[0]))
+                   .Set("adapter_luid_low", "4294967295")
+                   .Set("adapter_luid_high", "-1")
+                   .Set("render_channel", "strict-token");
+  for (size_t group = 0; group < 3; ++group) {
+    base::ListValue list;
+    for (size_t i = 0; i < 4; ++i)
+      list.Append(base::NumberToString(handles[1 + group * 4 + i]));
+    valid.Set(group == 0   ? "ready_fence_handles"
+              : group == 1 ? "consumed_fence_handles"
+                           : "texture_handles",
+              std::move(list));
+  }
+  remotekit_sdk_render_setup setup{};
+  CHECK(ParseRender(valid, &setup));
+  for (auto field : {"width", "height", "mapping_size"}) {
+    auto invalid = valid.Clone();
+    invalid.Set(field, base::NumberToString(*valid.FindInt(field)));
+    CHECK(!ParseRender(invalid, &setup));
+  }
+  for (auto field : {"adapter_luid_low", "adapter_luid_high"}) {
+    auto invalid = valid.Clone();
+    invalid.Set(field, 0);
+    CHECK(!ParseRender(invalid, &setup));
+  }
+  auto unknown = valid.Clone();
+  unknown.Set("unexpected", true);
+  CHECK(!ParseRender(unknown, &setup));
+  auto wrapped = base::DictValue()
+                     .Set("version", 1)
+                     .Set("id", 1)
+                     .Set("ok", true)
+                     .Set("resources", valid.Clone());
+  CHECK(!ParseRender(wrapped, &setup));
+  for (uint64_t handle : handles)
+    CHECK(CloseHandle(NativeHandle(handle)));
+
+  auto token = base::DictValue()
+                   .Set("session", "1")
+                   .Set("view", "2")
+                   .Set("instance", "3")
+                   .Set("document", "4")
+                   .Set("focus", "5");
+  CHECK(ValidReplyToken(base::DictValue().Set("token", token.Clone())));
+  token.Set("unexpected", "6");
+  CHECK(!ValidReplyToken(base::DictValue().Set("token", token.Clone())));
+  for (auto field : {"reason", "retryAfterMs", "errorId", "unexpected"}) {
+    auto reply = remotekit::browser::ControlResult::Failure(
+        1, remotekit::protocol::ErrorCode::kBusy, "pending");
+    reply.FindDict("error")->Set(field, false);
+    CHECK_EQ(ReplyStatus(reply, nullptr), REMOTEKIT_SDK_DATA_MISMATCH);
+  }
+}
+void MissingOpenProof(int proof) {
+  auto control = NewChannel();
+  std::thread responder([&] {
+    const auto request = ReadJsonRequest(control.peer.get());
+    auto reply = remotekit::browser::ControlResult::Success(*request.FindInt("id"));
+    if (proof == 1)
+      reply.Set("accepted", false);
+    if (proof == 2)
+      reply.Set("accepted", "true");
+    std::vector<mojo::ScopedMessagePipeHandle> none;
+    ReplyWithEndpoints(control.peer.get(), reply, &none);
+  });
+  remotekit_sdk_render_setup setup{};
+  setup.struct_size = sizeof(setup);
+  CHECK_EQ(
+      remotekit_sdk_control_open_render(control.id, GetCurrentProcessId(), &setup, 1000, nullptr),
+      REMOTEKIT_SDK_DATA_MISMATCH);
+  CHECK_EQ(setup.generation, 0u);
+  responder.join();
+  CHECK_EQ(remotekit_sdk_control_close(control.id), REMOTEKIT_SDK_OK);
+}
+void PendingRenderDelay(bool timeout, bool malformed) {
+  auto control = NewChannel();
+  std::thread responder([&] {
+    auto request = ReadJsonRequest(control.peer.get());
+    std::vector<mojo::ScopedMessagePipeHandle> none;
+    auto accepted = remotekit::browser::ControlResult::Success(*request.FindInt("id"));
+    accepted.Set("accepted", true);
+    ReplyWithEndpoints(control.peer.get(), accepted, &none);
+    request = ReadJsonRequest(control.peer.get());
+    auto pending = remotekit::browser::ControlResult::Failure(
+        *request.FindInt("id"), remotekit::protocol::ErrorCode::kBusy, "pending", {}, {}, 150);
+    pending.Set("pending", true);
+    if (malformed)
+      pending.FindDict("error")->Set("reason", 1);
+    const auto started = std::chrono::steady_clock::now();
+    ReplyWithEndpoints(control.peer.get(), pending, &none);
+    if (timeout || malformed)
+      return;
+    request = ReadJsonRequest(control.peer.get());
+    CHECK(std::chrono::steady_clock::now() - started >= 150ms);
+    auto failure = remotekit::browser::ControlResult::Failure(
+        *request.FindInt("id"), remotekit::protocol::ErrorCode::kRejected, "complete");
+    ReplyWithEndpoints(control.peer.get(), failure, &none);
+  });
+  remotekit_sdk_render_setup setup{};
+  setup.struct_size = sizeof(setup);
+  CHECK_EQ(remotekit_sdk_control_open_render(control.id, GetCurrentProcessId(), &setup,
+                                             timeout ? 70 : 2000, nullptr),
+           malformed ? REMOTEKIT_SDK_DATA_MISMATCH
+           : timeout ? REMOTEKIT_SDK_TIMEOUT
+                     : REMOTEKIT_SDK_REFUSED);
+  responder.join();
+  if (timeout || malformed) {
+    std::vector<uint8_t> bytes;
+    CHECK_EQ(mojo::ReadMessageRaw(control.peer.get(), &bytes, nullptr, MOJO_READ_MESSAGE_FLAG_NONE),
+             MOJO_RESULT_SHOULD_WAIT);
+  }
+  CHECK_EQ(remotekit_sdk_control_close(control.id), REMOTEKIT_SDK_OK);
+}
 void LostBetweenRenderRequests() {
   auto control = NewChannel();
   std::thread responder([&] {
@@ -492,7 +629,7 @@ void ShutdownDrainsLeases() {
   });
   WaitFor([] {
     std::lock_guard lock(State().lock);
-    return State().stopping;
+    return State().phase == SDKPhase::kStopping;
   });
   request.join();
   CHECK_EQ(request_status, REMOTEKIT_SDK_LOST);
@@ -504,6 +641,7 @@ void ShutdownDrainsLeases() {
   held.reset();
   shutdown.join();
   CHECK_EQ(shutdown_status, REMOTEKIT_SDK_OK);
+  CHECK(State().phase == SDKPhase::kStopped);
   CHECK_EQ(remotekit_sdk_initialize(), REMOTEKIT_SDK_INVALID_STATE);
 }
 
@@ -590,7 +728,9 @@ void ClipboardPayloadBounds() {
 }  // namespace
 
 int main() {
+  CHECK(State().phase == SDKPhase::kUninitialized);
   CHECK_EQ(remotekit_sdk_initialize(), REMOTEKIT_SDK_OK);
+  CHECK(State().phase == SDKPhase::kRunning);
   DeliveryStatuses();
   ParallelChannelsAndClose();
   SameChannelSerializationAndQueuedClose();
@@ -600,6 +740,13 @@ int main() {
   OpenRenderAttachmentContract(1);
   TypedRenderFailure(true);
   TypedRenderFailure(false);
+  FileReceiptStatuses();
+  StrictRenderResources();
+  for (int proof = 0; proof < 3; ++proof)
+    MissingOpenProof(proof);
+  PendingRenderDelay(false, false);
+  PendingRenderDelay(true, false);
+  PendingRenderDelay(false, true);
   LostBetweenRenderRequests();
   UnclaimedControlClose();
   RawControlRejectsAttachments();

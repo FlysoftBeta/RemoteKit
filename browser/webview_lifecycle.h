@@ -14,6 +14,7 @@ class LifecycleCoordinator {
                                    std::uint64_t request);
   void StartLifecycleTimer();
   Status CanRecoverLifecycle() const;
+  Status CanRequestLifecycle(Lifecycle action, bool recover_uncertain = false) const;
   Status RequestLifecycle(Lifecycle action,
                           Completion completion = {},
                           bool recover_uncertain = false);

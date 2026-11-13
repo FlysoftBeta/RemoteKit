@@ -62,7 +62,7 @@ Peer::Peer(uint64_t id, const remotekit_rtc_options& options)
       authorization(std::make_shared<MediaAuthorization>(!options.auth_required)) {}
 
 void Peer::Close() {
-  closing.store(true);
+  phase.store(Phase::kClosing);
   std::lock_guard audio_guard(audio_mutex);
   if (signaling_started)
     signaling->BlockingCall([this] {
@@ -110,7 +110,7 @@ void Peer::Event(uint32_t type,
                  const char* auxiliary,
                  int32_t value) {
   std::lock_guard lock(event_mutex);
-  if (!closing.load())
+  if (!IsClosing())
     options.event(options.context, id, type, bytes, size, auxiliary, value);
 }
 
@@ -180,7 +180,7 @@ class LocalDescriptionObserver : public webrtc::SetLocalDescriptionObserverInter
   LocalDescriptionObserver(std::weak_ptr<Peer> p, std::string sdp, bool offer)
       : peer_(p), sdp_(std::move(sdp)), offer_(offer) {}
   void OnSetLocalDescriptionComplete(webrtc::RTCError error) override {
-    if (auto p = peer_.lock(); p && !p->closing.load()) {
+    if (auto p = peer_.lock(); p && !p->IsClosing()) {
       if (!error.ok())
         p->Error(remotekit::protocol::ErrorCode::kOutcomeUnknown, error.message());
       else {
@@ -212,7 +212,7 @@ class CreateDescriptionObserver : public webrtc::CreateSessionDescriptionObserve
   CreateDescriptionObserver(std::weak_ptr<Peer> p, bool offer) : peer_(p), offer_(offer) {}
   void OnSuccess(webrtc::SessionDescriptionInterface* raw) override {
     std::unique_ptr<webrtc::SessionDescriptionInterface> sdp(raw);
-    if (auto p = peer_.lock(); p && !p->closing.load()) {
+    if (auto p = peer_.lock(); p && !p->IsClosing()) {
       std::string text = sdp->ToString();
       p->pc->SetLocalDescription(std::move(sdp), webrtc::make_ref_counted<LocalDescriptionObserver>(
                                                      peer_, std::move(text), offer_));
@@ -229,9 +229,10 @@ class CreateDescriptionObserver : public webrtc::CreateSessionDescriptionObserve
 };
 class RemoteDescriptionObserver : public webrtc::SetRemoteDescriptionObserverInterface {
  public:
-  RemoteDescriptionObserver(std::weak_ptr<Peer> p, bool offer) : peer_(p), offer_(offer) {}
+  RemoteDescriptionObserver(std::weak_ptr<Peer> p, bool offer, uint32_t level)
+      : peer_(p), offer_(offer), level_(level) {}
   void OnSetRemoteDescriptionComplete(webrtc::RTCError error) override {
-    if (auto p = peer_.lock(); p && !p->closing.load()) {
+    if (auto p = peer_.lock(); p && !p->IsClosing()) {
       if (!error.ok()) {
         const bool incompatible = error.type() == webrtc::RTCErrorType::INVALID_PARAMETER ||
                                   error.type() == webrtc::RTCErrorType::INVALID_RANGE ||
@@ -240,14 +241,18 @@ class RemoteDescriptionObserver : public webrtc::SetRemoteDescriptionObserverInt
         p->Error(incompatible ? remotekit::protocol::ErrorCode::kRejected
                               : remotekit::protocol::ErrorCode::kOutcomeUnknown,
                  error.message());
-      } else if (offer_)
-        p->Offer(false);
+      } else {
+        p->remote_limits->h264_level.store(level_);
+        if (offer_)
+          p->Offer(false);
+      }
     }
   }
 
  private:
   std::weak_ptr<Peer> peer_;
   bool offer_;
+  uint32_t level_;
 };
 
 int Peer::Start() {
@@ -404,19 +409,32 @@ int remotekit_rtc_create(const remotekit_rtc_options* options, uint64_t* id) {
   return REMOTEKIT_SDK_OK;
 }
 int remotekit_rtc_close(uint64_t id) {
-  std::shared_ptr<Peer> p;
-  auto& r = GetRegistry();
+  std::shared_ptr<Peer> peer;
+  auto& registry = GetRegistry();
+  Peer::Phase previous;
   {
-    std::lock_guard lock(r.mutex);
-    auto it = r.peers.find(id);
-    if (it == r.peers.end())
+    std::lock_guard lock(registry.mutex);
+    const auto found = registry.peers.find(id);
+    if (found == registry.peers.end())
       return REMOTEKIT_SDK_INVALID_STATE;
-    p = std::move(it->second);
-    r.peers.erase(it);
+    peer = found->second;
+    previous = peer->phase.exchange(Peer::Phase::kClosing);
   }
-  std::lock_guard lock(p->api_mutex);
-  p->Close();
+  if (previous != Peer::Phase::kOpen) {
+    peer->close_done.Wait();
+    return REMOTEKIT_SDK_OK;
+  }
+  {
+    std::lock_guard lock(peer->api_mutex);
+    peer->Close();
+  }
   RemoteKitSdkEndRtc();
+  {
+    std::lock_guard lock(registry.mutex);
+    peer->phase.store(Peer::Phase::kClosed);
+    peer->close_done.Signal();
+    registry.peers.erase(id);
+  }
   return REMOTEKIT_SDK_OK;
 }
 int remotekit_rtc_create_offer(uint64_t id) {
@@ -433,7 +451,7 @@ int remotekit_rtc_set_media_authorized(uint64_t id, int authorized) {
     return REMOTEKIT_SDK_INVALID_STATE;
   std::lock_guard api_lock(peer->api_mutex);
   std::lock_guard audio_lock(peer->audio_mutex);
-  if (peer->closing.load())
+  if (peer->IsClosing())
     return REMOTEKIT_SDK_INVALID_STATE;
   auto& gate = *peer->authorization;
   auto epoch = gate.epoch.load();
@@ -471,7 +489,7 @@ int remotekit_rtc_set_audio_enabled(uint64_t id, int enabled) {
     return REMOTEKIT_SDK_INVALID_STATE;
   std::lock_guard api_lock(peer->api_mutex);
   std::lock_guard audio_lock(peer->audio_mutex);
-  if (peer->closing.load())
+  if (peer->IsClosing())
     return REMOTEKIT_SDK_INVALID_STATE;
   peer->audio_enabled = enabled != 0;
   return peer->signaling->BlockingCall([&] {
@@ -485,7 +503,6 @@ int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* byt
   if (!ValidBytes(bytes, size) || (offer != 0 && offer != 1))
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   return WithPeer(id, [&](Peer& p) {
-    p.remote_description_started = true;
     webrtc::SdpParseError error;
     auto sdp =
         webrtc::CreateSessionDescription(offer ? webrtc::SdpType::kOffer : webrtc::SdpType::kAnswer,
@@ -523,8 +540,10 @@ int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* byt
       auto audio_track = p.factory->CreateAudioTrack("remotekit-audio", p.audio_source.get());
       // A shared stream lip-syncs video to NetEq's delay, raising video playout delay.
       auto added = p.pc->AddTrack(audio_track, {p.av_sync ? "remotekit-video" : "remotekit-audio"});
-      if (!added.ok())
+      if (!added.ok()) {
+        p.audio_source = nullptr;
         return REMOTEKIT_SDK_INVALID_STATE;
+      }
       p.audio_sender = added.value();
       for (auto& transceiver : p.pc->GetTransceivers())
         if (transceiver->sender() == added.value() &&
@@ -555,10 +574,9 @@ int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* byt
         remote_level = remote_level ? std::min(remote_level, level) : level;
       }
     }
-    p.remote_limits->h264_level.store(remote_level);
-    std::fprintf(stderr, "RTC remote H264 receive level: peer=%llu level=%u\n", p.id, remote_level);
+    p.remote_description_started = true;
     p.pc->SetRemoteDescription(std::move(sdp), webrtc::make_ref_counted<RemoteDescriptionObserver>(
-                                                   p.weak_from_this(), offer != 0));
+                                                   p.weak_from_this(), offer != 0, remote_level));
     return REMOTEKIT_SDK_OK;
   });
 }

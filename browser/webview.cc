@@ -101,6 +101,12 @@ void WebView::ReleaseRemoteInput() {
   input_->ReleaseKeyboard(true, true);
   input_->ReleasePointer(true);
 }
+Status WebView::CanFocus(bool focused) const {
+  return input_->CanFocus(focused);
+}
+Status WebView::CanRequestLifecycle(Lifecycle action, bool recover_uncertain) const {
+  return lifecycle_->CanRequestLifecycle(action, recover_uncertain);
+}
 Status WebView::Focus(bool focused) {
   return input_->Focus(focused);
 }
@@ -214,9 +220,5 @@ bool WebView::lifecycle_uncertain() const {
 }
 std::uint64_t WebView::navigation_revision() const {
   return navigation_->navigation_revision_;
-}
-bool WebView::TouchProcessingPending() const {
-  return touch_->AwaitingHitTest() || touch_->touch_cleanup_pending_ ||
-         touch_->touch_pending_callbacks_;
 }
 }  // namespace remotekit::browser

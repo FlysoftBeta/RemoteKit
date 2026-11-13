@@ -1,5 +1,6 @@
 #include "remotekit/browser/browser_context.h"
 #include "browser/site_preferences.h"
+#include "browser/profile_file.h"
 #include "browser/page_requests.h"
 #include "base/strings/escape.h"
 #include "base/strings/string_util.h"
@@ -130,12 +131,7 @@ BrowserContext::BrowserContext(base::FilePath path, std::unique_ptr<ProfileKey> 
     : path_(std::move(path)) {
   CHECK(base::CreateDirectory(path_));
   const auto salt_file = path_.AppendASCII("MediaDeviceSalt");
-  if (!base::ReadFileToString(salt_file, &media_device_salt_)) {
-    const auto random = base::RandBytesAsString(32);
-    media_device_salt_ = base::HexEncode(random);
-    CHECK(base::WriteFile(salt_file, media_device_salt_));
-  }
-  CHECK_EQ(media_device_salt_.size(), 64u);
+  media_device_salt_ = LoadMediaDeviceSalt(salt_file);
   client_hints_ = CreateClientHintsDelegate(path_);
   background_sync_ = std::make_unique<ProfileBackgroundSync>();
   push_ = std::make_unique<UnavailablePush>();

@@ -12,6 +12,17 @@ ControlResult::ControlResult(base::DictValue fields) {
 base::DictValue ControlResult::TakeFields() && {
   return std::move(fields_);
 }
+base::DictValue FileReceiptResult(std::string_view state,
+                                  std::string_view selection_id,
+                                  std::string_view reason) {
+  auto result = ControlResult::Success(0);
+  result.Set("state", state);
+  if (!selection_id.empty())
+    result.Set("selection_id", selection_id);
+  if (!reason.empty())
+    result.Set("reason", reason);
+  return result;
+}
 base::DictValue ControlResult::Success(int id, base::DictValue fields) {
   fields.Set("version", protocol::kControlVersion);
   fields.Set("id", id);

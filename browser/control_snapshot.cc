@@ -74,7 +74,7 @@ ControlResult ControlDispatcher::HandleSnapshot(const SnapshotRequest& request) 
       const auto& adapter = runtime_.views.records.at(i).webview;
       if (adapter->view_id() != view_id)
         continue;
-      value.Set("close_state", runtime_.views.records.at(i).requests->close_state());
+      value.Set("close_state", runtime_.views.records.at(i).requests->CloseStateName());
       value.Set("close_reason", runtime_.views.records.at(i).requests->close_reason());
       value.Set("width", runtime_.views.records.at(i).spec.width);
       value.Set("height", runtime_.views.records.at(i).spec.height);

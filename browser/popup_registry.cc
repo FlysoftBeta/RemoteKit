@@ -5,7 +5,7 @@ void PopupRegistry::Prune() {
   for (auto& [key, popup] : pending) {
     if (popup.status != "pending")
       continue;
-    const bool closed = popup.requests->close_state() == "closed";
+    const bool closed = popup.requests->close_state() == CloseState::kClosed;
     if (!closed && base::TimeTicks::Now() < popup.deadline)
       continue;
     popup.status = closed ? "closed" : "timed_out";

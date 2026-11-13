@@ -297,11 +297,17 @@ SharedAtlasTextInput InputController::TextInputState() {
   }
   return result;
 }
-Status InputController::Focus(bool focused) {
+Status InputController::CanFocus(bool focused) const {
   if (focused && (owner_.lifecycle_->lifecycle_uncertain_ || !owner_.contents() ||
                   !owner_.execution_->visible_ || !RootWidget(owner_.contents()) ||
                   !RootView(owner_.contents())))
     return Fail(ErrorCode::kConflict, "Visible renderer view required for focus");
+  return owner_.model_->CanFocus(owner_.session_, owner_.view_, focused);
+}
+Status InputController::Focus(bool focused) {
+  auto allowed = CanFocus(focused);
+  if (!allowed)
+    return allowed;
   if (!focused) {
     RemoteContextMenu::Get().CloseFor(owner_.session_, owner_.view_);
     RemoteTouchSelectionMenuRunner::Get().CloseFor(owner_.session_, owner_.view_);

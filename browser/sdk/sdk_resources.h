@@ -1,6 +1,8 @@
 #pragma once
 #include "remotekit/browser/sdk/sdk_internal.h"
 namespace remotekit::sdk {
+bool ParseRender(const base::DictValue&, remotekit_sdk_render_setup*);
+bool ValidReplyToken(const base::DictValue&);
 HANDLE NativeHandle(uint64_t value);
 int ReplyStatus(const base::DictValue&, remotekit_sdk_failure*);
 bool ValidHandle(uint64_t value);

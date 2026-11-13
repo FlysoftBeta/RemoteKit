@@ -45,7 +45,13 @@ Result<InputPayload> DecodeIme(const base::DictValue* event) {
 }
 Result<InputPayload> DecodeKey(const base::DictValue* event) {
   InputPayload payload;
-
+  for (auto field : {"modifiers", "repeat", "text", "unmodified_text"}) {
+    const auto* value = event->Find(field);
+    if (value && !(std::string_view(field) == "modifiers" ? value->is_int()
+                   : std::string_view(field) == "repeat"  ? value->is_bool()
+                                                          : value->is_string()))
+      return PayloadError("invalid_key_field");
+  }
   const auto* action = event->FindString("action");
   const auto physical = event->FindInt("physical_code"),
              windows = event->FindInt("windows_key_code"), dom_code = event->FindInt("dom_code");
@@ -147,6 +153,8 @@ Result<InputPayload> DecodeTouch(const base::DictValue* event) {
     touch.action = TouchInput::Action::cancel;
   else
     return PayloadError("invalid_touch_action");
+  if (event->contains("startServerWallUs") && !Number(*event, "startServerWallUs"))
+    return PayloadError("invalid_touch_clock");
   if (const auto* mode = event->FindString("clockMode")) {
     const auto* sequence = event->FindString("sequenceId");
     const auto elapsed = Number(*event, "sampleElapsedUs");
@@ -163,6 +171,10 @@ Result<InputPayload> DecodeTouch(const base::DictValue* event) {
   } else if (event->contains("sequenceId") || event->contains("sampleElapsedUs") ||
              event->contains("startServerWallUs"))
     return PayloadError("incomplete_touch_clock");
+  if (event->contains("clockMode") && !event->FindString("clockMode"))
+    return PayloadError("invalid_touch_clock");
+  if (event->contains("samples") && !event->FindList("samples"))
+    return PayloadError("invalid_touch_samples");
   if (const auto* samples = event->FindList("samples")) {
     if (!touch.clock || touch.action != TouchInput::Action::move || samples->size() > 32)
       return PayloadError("invalid_touch_samples");
@@ -230,6 +242,9 @@ Result<InputPayload> DecodeGesture(const base::DictValue* event) {
   return {std::move(payload), {}};
 }
 Result<InputPayload> DecodeMouse(const base::DictValue* event) {
+  for (auto field : {"modifiers", "click_count"})
+    if (event->contains(field) && !event->FindInt(field))
+      return PayloadError("invalid_mouse_field");
   const auto* action = event->FindString("action");
   const auto x = Number(*event, "x"), y = Number(*event, "y");
   const auto button = event->FindInt("button");
@@ -272,6 +287,8 @@ Result<InputPayload> DecodeMouse(const base::DictValue* event) {
   return {std::move(mouse), {}};
 }
 Result<InputPayload> DecodeWheel(const base::DictValue* event) {
+  if (event->contains("modifiers") && !event->FindInt("modifiers"))
+    return PayloadError("invalid_wheel_modifiers");
   InputPayload payload;
 
   auto x = Number(*event, "x"), y = Number(*event, "y"), dx = Number(*event, "dx"),

@@ -200,20 +200,15 @@ Status LifecycleCoordinator::CanRecoverLifecycle() const {
     return Fail(ErrorCode::kConflict, "No stable navigation checkpoint for lifecycle recovery");
   return CheckAutomaticNavigationRestore(*navigation_state_);
 }
-Status LifecycleCoordinator::RequestLifecycle(Lifecycle action,
-                                              Completion completion,
-                                              bool recover_uncertain) {
+Status LifecycleCoordinator::CanRequestLifecycle(Lifecycle action, bool recover_uncertain) const {
   if (lifecycle_request_)
     return Fail(ErrorCode::kBusy, "Lifecycle transition pending");
   if (lifecycle_uncertain_ && action != Lifecycle::unload)
     return Fail(ErrorCode::kConflict, "Browser lifecycle state uncertain; unload required");
   if (action == Lifecycle::freeze || action == Lifecycle::discard) {
-    // Freezing/discarding before the cancel ACK can strand the old sequence.
-    // Reject before creating a lifecycle request; callers may retry after drain.
-    if (owner_.touch_->client_gesture_bridge_ &&
-        (!owner_.touch_->touches_.empty() || owner_.touch_->touch_pending_callbacks_))
-      owner_.input_->ReleasePointer(true);
-    if (owner_.touch_->touch_cleanup_pending_)
+    if (owner_.touch_->touch_cleanup_pending_ ||
+        (owner_.touch_->client_gesture_bridge_ &&
+         (!owner_.touch_->touches_.empty() || owner_.touch_->touch_pending_callbacks_)))
       return Fail(ErrorCode::kBusy, "Touch cancellation must drain before freeze/discard; retry");
     if (owner_.touch_->OwnershipUnconfirmed())
       return Fail(ErrorCode::kConflict, "Touch cleanup uncertain; unload required");
@@ -226,8 +221,10 @@ Status LifecycleCoordinator::RequestLifecycle(Lifecycle action,
     if (!allowed)
       return allowed;
   }
+  auto eligible = owner_.model_->CanRequestLifecycle(owner_.session_, owner_.view_, action);
+  if (!eligible)
+    return eligible.status;
   const Residency previous = model->actual;
-  auto next_state = residency_;
   if (action == Lifecycle::freeze || action == Lifecycle::discard) {
     auto guard = CheckQuiescent();
     if (!guard)
@@ -237,16 +234,13 @@ Status LifecycleCoordinator::RequestLifecycle(Lifecycle action,
         return Fail(ErrorCode::kRejected, "WebContentsDiscard feature is disabled");
       if (owner_.contents()->WasDiscarded())
         return Fail(ErrorCode::kConflict, "WebContents is already marked discarded");
-      next_state = ResidencyState::kDiscarding;
-    } else
-      next_state = ResidencyState::kFreezing;
+    }
   } else if (action == Lifecycle::restore) {
     if (previous == Residency::frozen) {
       if (!owner_.contents() || owner_.contents()->IsBeingDestroyed() ||
           owner_.contents()->IsCrashed() ||
           owner_.contents()->GetVisibility() != content::Visibility::HIDDEN)
         return Fail(ErrorCode::kConflict, "Thaw requires a hidden WebView with an intact renderer");
-      next_state = ResidencyState::kRestoring;
     } else if (previous == Residency::discarded) {
       if (!owner_.contents() || !owner_.contents()->WasDiscarded() ||
           !owner_.contents()->GetController().NeedsReload() ||
@@ -260,14 +254,12 @@ Status LifecycleCoordinator::RequestLifecycle(Lifecycle action,
       auto allowed = CheckAutomaticNavigationRestore(captured.value);
       if (!allowed)
         return allowed;
-      next_state = ResidencyState::kRestoring;
     } else if (previous == Residency::unloaded) {
       if (!navigation_state_)
         return Fail(ErrorCode::kNotFound, "No saved navigation history is available");
       auto allowed = CheckAutomaticNavigationRestore(*navigation_state_);
       if (!allowed)
         return allowed;
-      next_state = ResidencyState::kRestoring;
     }
   } else if (action != Lifecycle::unload)
     return Fail(ErrorCode::kInvalidRequest, "Unknown lifecycle action");
@@ -281,10 +273,25 @@ Status LifecycleCoordinator::RequestLifecycle(Lifecycle action,
   } else if (owner_.contents() && (action == Lifecycle::unload || action == Lifecycle::freeze ||
                                    action == Lifecycle::discard)) {
     auto captured = CaptureNavigationState(*owner_.contents());
+    if (!captured && (!lifecycle_uncertain_ || !navigation_state_))
+      return captured.status;
+  }
+  return {};
+}
+Status LifecycleCoordinator::RequestLifecycle(Lifecycle action,
+                                              Completion completion,
+                                              bool recover_uncertain) {
+  auto allowed = CanRequestLifecycle(action, recover_uncertain);
+  if (!allowed)
+    return allowed;
+  const Residency previous = owner_.model_->FindWebView(owner_.session_, owner_.view_)->actual;
+  const auto next_state = action == Lifecycle::discard  ? ResidencyState::kDiscarding
+                          : action == Lifecycle::freeze ? ResidencyState::kFreezing
+                                                        : ResidencyState::kRestoring;
+  if (!recover_uncertain && owner_.contents() && action != Lifecycle::restore) {
+    auto captured = CaptureNavigationState(*owner_.contents());
     if (captured)
       navigation_state_ = std::make_unique<NavigationState>(std::move(captured.value));
-    else if (!lifecycle_uncertain_ || !navigation_state_)
-      return captured.status;
   }
   auto request = owner_.model_->RequestLifecycle(owner_.session_, owner_.view_, action);
   if (!request)

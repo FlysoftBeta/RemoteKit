@@ -6,6 +6,8 @@ using namespace remotekit::rtc;
 #include "base/at_exit.h"
 #include "base/check.h"
 #include "base/command_line.h"
+#include "base/files/scoped_temp_dir.h"
+#include <thread>
 
 int RemoteKitSdkBeginRtc() {
   return REMOTEKIT_SDK_OK;
@@ -227,9 +229,127 @@ void SenderPreference() {
   CHECK_EQ(remotekit_rtc_adapt_frame(id, 1936, 1088, 1000000, &adaptation), REMOTEKIT_SDK_OK);
   CHECK_EQ(remotekit_rtc_adapt_frame(id, 1936, 1088, 1000000, &adaptation),
            REMOTEKIT_SDK_INVALID_ARGUMENT);
+  CHECK_EQ(WithPeer(id,
+                    [](Peer& p) {
+                      p.pc->Close();
+                      p.audio_sender = nullptr;
+                      p.audio_source = nullptr;
+                      return REMOTEKIT_SDK_OK;
+                    }),
+           REMOTEKIT_SDK_OK);
+  const std::string audio_offer =
+      "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\n"
+      "a=recvonly\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 stereo=1\r\n";
+  CHECK_EQ(remotekit_rtc_set_remote_description(id, 1, audio_offer.data(), audio_offer.size()),
+           REMOTEKIT_SDK_INVALID_STATE);
+  CHECK(!peer->audio_source);
+  CHECK(!peer->remote_description_started);
+  CHECK_EQ(peer->remote_limits->h264_level.load(), 51u);
+  const std::string video_offer =
+      "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
+      "m=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\n"
+      "a=recvonly\r\na=rtpmap:96 H264/90000\r\n"
+      "a=fmtp:96 packetization-mode=1;profile-level-id=42e020\r\n";
+  CHECK_EQ(remotekit_rtc_set_remote_description(id, 1, video_offer.data(), video_offer.size()),
+           REMOTEKIT_SDK_OK);
+  CHECK_EQ(peer->remote_limits->h264_level.load(), 51u);
   CHECK_EQ(remotekit_rtc_close(id), REMOTEKIT_SDK_OK);
   CHECK_EQ(remotekit_rtc_adapt_frame(id, 1936, 1088, 2000000, &adaptation),
            REMOTEKIT_SDK_INVALID_STATE);
+}
+void ConcurrentCloseBarrier() {
+  base::WaitableEvent entered, observed, release;
+  struct Callback {
+    base::WaitableEvent *entered, *observed, *release;
+    Peer* peer = nullptr;
+  } callback{&entered, &observed, &release};
+  remotekit_rtc_options options{};
+  options.context = &callback;
+  options.event = [](void* context, uint64_t, uint32_t, const void*, size_t, const char*, int32_t) {
+    auto& state = *static_cast<Callback*>(context);
+    state.entered->Signal();
+    const auto deadline = base::TimeTicks::Now() + base::Seconds(5);
+    while (!state.peer->IsClosing()) {
+      CHECK(base::TimeTicks::Now() < deadline);
+      std::this_thread::yield();
+    }
+    state.observed->Signal();
+    state.release->Wait();
+  };
+  auto peer = std::make_shared<Peer>(NewID(), options);
+  callback.peer = peer.get();
+  {
+    std::lock_guard lock(GetRegistry().mutex);
+    GetRegistry().peers.emplace(peer->id, peer);
+  }
+  std::thread event([&] { peer->Event(REMOTEKIT_RTC_STATS); });
+  CHECK(entered.TimedWait(base::Seconds(5)));
+  std::atomic<int> first{-1}, second{-1};
+  std::thread close_first([&] { first = remotekit_rtc_close(peer->id); });
+  CHECK(observed.TimedWait(base::Seconds(5)));
+  std::thread close_second([&] { second = remotekit_rtc_close(peer->id); });
+  const auto deadline = base::TimeTicks::Now() + base::Seconds(5);
+  for (;;) {
+    CHECK(base::TimeTicks::Now() < deadline);
+    std::lock_guard lock(GetRegistry().mutex);
+    CHECK(GetRegistry().peers.contains(peer->id));
+    if (GetRegistry().peers.at(peer->id).use_count() >= 4)
+      break;
+    std::this_thread::yield();
+  }
+  CHECK_EQ(first.load(), -1);
+  CHECK_EQ(second.load(), -1);
+  release.Signal();
+  event.join();
+  close_first.join();
+  close_second.join();
+  CHECK_EQ(first.load(), REMOTEKIT_SDK_OK);
+  CHECK_EQ(second.load(), REMOTEKIT_SDK_OK);
+  CHECK(!FindPeer(peer->id));
+  CHECK(peer->phase.load() == Peer::Phase::kClosed);
+}
+int trace_failures = 0;
+void TraceWriteFailures() {
+  base::ScopedTempDir temp;
+  CHECK(temp.CreateUniqueTempDir());
+  auto env = base::Environment::Create();
+  const auto previous = env->GetVar("REMOTEKIT_SERVER_TRACE");
+  const auto old_handler = logging::GetLogMessageHandler();
+  logging::SetLogMessageHandler(
+      [](int severity, const char*, int, size_t, const std::string& text) {
+        if (severity == logging::LOGGING_ERROR &&
+            (text.find("Cannot create RTC trace directory") != std::string::npos ||
+             text.find("Cannot write RTC trace") != std::string::npos)) {
+          ++trace_failures;
+          return true;
+        }
+        return false;
+      });
+  const auto blocked = temp.GetPath().AppendASCII("file");
+  CHECK(base::WriteFile(blocked, "blocked"));
+  CHECK(env->SetVar("REMOTEKIT_SERVER_TRACE", blocked.AsUTF8Unsafe()));
+  {
+    SdkTrace trace(99);
+    trace.Save();
+    trace.Save();
+  }
+  CHECK_EQ(trace_failures, 1);
+  CHECK(env->SetVar("REMOTEKIT_SERVER_TRACE", temp.GetPath().AsUTF8Unsafe()));
+  const auto output = temp.GetPath().AppendASCII("sdk-" + std::to_string(base::GetCurrentProcId()) +
+                                                 "-peer-99.jsonl");
+  CHECK(base::CreateDirectory(output));
+  {
+    SdkTrace trace(99);
+    trace.Save();
+    trace.Save();
+  }
+  CHECK_EQ(trace_failures, 2);
+  logging::SetLogMessageHandler(old_handler);
+  if (previous)
+    CHECK(env->SetVar("REMOTEKIT_SERVER_TRACE", *previous));
+  else
+    CHECK(env->UnSetVar("REMOTEKIT_SERVER_TRACE"));
 }
 void AuthMessageLimit() {
   size_t accepted = 0;
@@ -261,5 +381,7 @@ int main(int argc, char** argv) {
   HardwareFrameQp();
   SenderPreference();
   AuthMessageLimit();
+  ConcurrentCloseBarrier();
+  TraceWriteFailures();
   std::puts("RTC adaptation production probe passed");
 }

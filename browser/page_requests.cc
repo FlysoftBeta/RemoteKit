@@ -307,12 +307,12 @@ void PageRequests::Bind(content::WebContents* contents) {
   }
 }
 void PageRequests::RequestClose() {
-  if (close_state_ == "closing" || close_state_ == "closed")
+  if (!IsOpen())
     return;
-  close_state_ = "closing";
+  close_state_ = CloseState::kClosing;
   close_reason_ = "requested";
   if (!web_contents()) {
-    close_state_ = "closed";
+    close_state_ = CloseState::kClosed;
     return;
   }
   if (web_contents()->NeedToFireBeforeUnloadOrUnloadEvents())
@@ -324,13 +324,12 @@ void PageRequests::BeforeUnloadFired(content::WebContents*,
                                      bool proceed,
                                      bool* proceed_to_fire_unload) {
   *proceed_to_fire_unload = proceed;
-  if (close_state_ == "closing" && !proceed)
-    close_state_ = "cancelled";
+  close_state_ = AfterBeforeUnload(close_state_, proceed);
 }
 void PageRequests::CloseContents(content::WebContents*) {
-  if (close_state_ != "closing")
+  if (close_state_ != CloseState::kClosing)
     close_reason_ = "window.close";
-  close_state_ = "closed";
+  close_state_ = CloseState::kClosed;
 }
 void PageRequests::Event(base::DictValue event) {
   if (events_.size() == kLimit)
@@ -423,13 +422,8 @@ void PageRequests::Prune() {
 void PageRequests::FileResult(std::uint64_t id,
                               const char* state,
                               const Pending& request,
-                              const std::string& error) {
-  auto result = Result();
-  result.Set("state", state);
-  if (!request.selection_id.empty())
-    result.Set("selection_id", request.selection_id);
-  if (!error.empty())
-    result.Set("error", Clip(error));
+                              const std::string& reason) {
+  auto result = FileReceiptResult(state, request.selection_id, Clip(reason));
   file_results_.insert_or_assign(id, FileReceipt{std::move(result), request.selection_binding});
   while (file_results_.size() > kLimit)
     file_results_.erase(file_results_.begin());
@@ -808,7 +802,7 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
   }
   auto* request = found->second.get();
   if (reply.FindBool("close_only").value_or(false) &&
-      (close_state_ != "closing" || request->type != Pending::Type::dialog ||
+      (close_state_ != CloseState::kClosing || request->type != Pending::Type::dialog ||
        !request->data.FindBool("beforeunload").value_or(false)))
     return Result(protocol::ErrorCode::kConflict, "closing_beforeunload_required");
   if (reply.FindBool("dialog_only").value_or(false) && request->type != Pending::Type::dialog)

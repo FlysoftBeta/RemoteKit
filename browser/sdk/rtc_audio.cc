@@ -84,12 +84,12 @@ int remotekit_rtc_submit_audio(uint64_t id,
   webrtc::scoped_refptr<PageAudioSource> source;
   {
     std::lock_guard lock(peer->api_mutex);
-    if (peer->closing.load() || !peer->audio_source)
+    if (peer->IsClosing() || !peer->audio_source)
       return REMOTEKIT_SDK_INVALID_STATE;
     source = peer->audio_source;
   }
   std::lock_guard lock(peer->audio_mutex);
-  if (peer->closing.load() || peer->authorization->epoch.load() != authorization)
+  if (peer->IsClosing() || peer->authorization->epoch.load() != authorization)
     return REMOTEKIT_SDK_INVALID_STATE;
   if (!peer->audio_enabled)
     return REMOTEKIT_SDK_OK;
@@ -120,7 +120,7 @@ int remotekit_rtc_submit_audio(uint64_t id,
     // ChannelSend::StartSend sets first_frame_, which advances its existing
     // RTP clock by the absolute capture-time gap instead of compressing it.
     const int status = peer->signaling->BlockingCall([&] {
-      if (peer->closing.load() || !peer->audio_sender)
+      if (peer->IsClosing() || !peer->audio_sender)
         return REMOTEKIT_SDK_INVALID_STATE;
       auto parameters = peer->audio_sender->GetParameters();
       for (auto& encoding : parameters.encodings)

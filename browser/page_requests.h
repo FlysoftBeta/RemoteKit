@@ -2,6 +2,8 @@
 #define REMOTEKIT_BROWSER_PAGE_REQUESTS_H_
 
 #include <cstdint>
+#include "protocol/errors.h"
+#include "browser/page_close_state.h"
 #include <deque>
 #include <functional>
 #include <map>
@@ -75,7 +77,18 @@ class PageRequests final : public content::WebContentsDelegate,
   // Public delegate/observer APIs do not expose widget tooltip updates. A native
   // view/widget hook must forward them here; this method creates no native UI.
   void RequestClose();
-  const std::string& close_state() const { return close_state_; }
+  CloseState close_state() const { return close_state_; }
+  bool IsOpen() const { return browser::IsOpen(close_state_); }
+  const char* CloseStateName() const {
+    switch (close_state_) {
+      case CloseState::kOpen:
+        return "open";
+      case CloseState::kClosing:
+        return "closing";
+      case CloseState::kClosed:
+        return "closed";
+    }
+  }
   const std::string& close_reason() const { return close_reason_; }
   void CloseContents(content::WebContents*) override;
   using content::WebContentsObserver::BeforeUnloadFired;
@@ -168,7 +181,7 @@ class PageRequests final : public content::WebContentsDelegate,
   void FileResult(std::uint64_t,
                   const char*,
                   const Pending& request,
-                  const std::string& error = {});
+                  const std::string& reason = {});
   void DidStartNavigation(content::NavigationHandle*) override;
   void DidFinishNavigation(content::NavigationHandle*) override;
   void RenderFrameDeleted(content::RenderFrameHost*) override;
@@ -179,7 +192,7 @@ class PageRequests final : public content::WebContentsDelegate,
                            int active_match_ordinal,
                            bool final_update) override;
 
-  std::string close_state_ = "open";
+  CloseState close_state_ = CloseState::kOpen;
   std::string close_reason_ = "removed";
   std::uint64_t next_id_ = 1;
   std::map<std::uint64_t, std::unique_ptr<Pending>> pending_;

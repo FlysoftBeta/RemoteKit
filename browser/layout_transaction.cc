@@ -30,7 +30,7 @@ Result<LayoutPlan> LayoutTransaction::Prepare(ViewRegistry::Specifications specs
     const auto found = views_.records.find(id);
     if (found != views_.records.end()) {
       const auto& record = found->second;
-      if (record.requests->close_state() == "closing" && spec != record.spec)
+      if (!record.requests->IsOpen() && spec != record.spec)
         return {{}, {ErrorCode::kConflict, "View is closing"}};
       if (spec.visible && (spec != record.spec || plan.scale != output_scale ||
                            plan.width != logical_width || plan.height != logical_height)) {

@@ -30,7 +30,7 @@ class StatsObserver : public webrtc::RTCStatsCollectorCallback {
     auto peer = peer_.lock();
     if (!peer)
       return;
-    if (peer->closing.load()) {
+    if (peer->IsClosing()) {
       peer->stats_pending = false;
       return;
     }

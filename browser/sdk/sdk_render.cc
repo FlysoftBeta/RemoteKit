@@ -113,7 +113,7 @@ int remotekit_sdk_render_connect(const char* name_utf8,
   channel->context = context;
   auto& state = State();
   std::lock_guard lock(state.lock);
-  if (state.stopping || !state.next_handle)
+  if (state.phase != SDKPhase::kRunning || !state.next_handle)
     return REMOTEKIT_SDK_INVALID_STATE;
   // The opaque token is scoped to its original live Control connection. Claim
   // is atomic with control close/retire/new-open and consumes it exactly once.

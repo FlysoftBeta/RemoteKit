@@ -7,6 +7,7 @@
 #include "base/values.h"
 #include "base/strings/string_number_conversions.h"
 #include <type_traits>
+#include <set>
 #include "protocol/page_viewport.hpp"
 
 namespace remotekit::browser {
@@ -205,8 +206,12 @@ inline bool Assign(const std::optional<uint64_t>& value, uint64_t* result) {
 class RequestDecoder {
  public:
   explicit RequestDecoder(const base::DictValue& wire) : wire_(wire) {}
+  void Consume(std::initializer_list<std::string_view> fields) {
+    consumed_.insert(fields.begin(), fields.end());
+  }
   template <class T>
   std::optional<T> Optional(std::string_view field) {
+    consumed_.insert(field);
     const auto* value = wire_.Find(field);
     if (!value)
       return std::nullopt;
@@ -242,12 +247,16 @@ class RequestDecoder {
   Result<T> Finish(T request) const {
     if (!status_)
       return {{}, status_};
+    for (const auto [field, value] : wire_)
+      if (!consumed_.contains(field))
+        return {{}, {ErrorCode::kInvalidRequest, "Unknown field " + field}};
     return {std::move(request), {}};
   }
 
  private:
   const base::DictValue& wire_;
   Status status_;
+  std::set<std::string_view> consumed_{"version", "id", "method"};
 };
 
 Result<std::optional<NavigationOperations::Identity>> DecodeNavigationOperation(

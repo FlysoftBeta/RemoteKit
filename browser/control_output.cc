@@ -12,6 +12,7 @@ Result<OutputConfigureRequest> DecodeOutputConfigure(const base::DictValue& wire
   OutputConfigureRequest request;
   static_cast<RequestEnvelope&>(request) = envelope;
   RequestDecoder decoder(wire);
+  decoder.Consume({"viewConfigs"});
   if (const auto* value = wire.Find("viewConfigs")) {
     if (!value->is_list() || value->GetList().size() > kSharedAtlasMaxViews)
       return {{}, {ErrorCode::kInvalidRequest, "Invalid view configurations"}};
@@ -21,6 +22,11 @@ Result<OutputConfigureRequest> DecodeOutputConfigure(const base::DictValue& wire
       const auto* config = item.GetIfDict();
       if (!config)
         return {{}, {ErrorCode::kInvalidRequest, "View configuration must be an object"}};
+      for (const auto [key, field] : *config)
+        if (key != "session" && key != "view" && key != "width" && key != "height" &&
+            key != "device" && key != "device_scale_factor" && key != "visible" &&
+            key != "occludedBottom" && key != "occlusionRevision")
+          return {{}, {ErrorCode::kInvalidRequest, "Unknown view configuration field " + key}};
       ViewConfiguration decoded;
       const auto* session = config->FindString("session");
       const auto* view = config->FindString("view");
@@ -36,7 +42,7 @@ Result<OutputConfigureRequest> DecodeOutputConfigure(const base::DictValue& wire
         return {{}, {ErrorCode::kInvalidRequest, "Invalid view configuration"}};
       const auto occlusion = config->FindInt("occludedBottom");
       const auto* revision = config->FindString("occlusionRevision");
-      if (occlusion || revision) {
+      if (config->contains("occludedBottom") || config->contains("occlusionRevision")) {
         if (!occlusion || *occlusion < 0 || !revision ||
             !base::StringToUint64(*revision, &decoded.viewport.revision))
           return {{}, {ErrorCode::kInvalidRequest, "Invalid page viewport"}};

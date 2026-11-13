@@ -31,7 +31,22 @@ Result<PageControlRequest> DecodePageRequest(const base::DictValue& wire,
   request.view = decoder.Optional<uint64_t>("view");
   request.instance = decoder.Optional<uint64_t>("instance");
   request.document = decoder.Optional<uint64_t>("document");
+  if (envelope.method == "page.reply") {
+    for (auto field : {"accept", "close_only", "dialog_only", "file_only"})
+      decoder.Optional<bool>(field);
+    for (auto field : {"text", "username", "password", "decision"})
+      decoder.Optional<std::string>(field);
+    decoder.Optional<base::ListValue>("files");
+  } else if (envelope.method == "page.command") {
+    decoder.Optional<std::string>("text");
+    decoder.Optional<double>("level");
+    for (auto field : {"forward", "match_case", "new_session"})
+      decoder.Optional<bool>(field);
+  } else if (envelope.method == "page.contextMenu") {
+    decoder.Optional<uint64_t>("menu");
+  }
   request.payload = wire.Clone();
+  decoder.Consume({"operationId", "operationGeneration", "operationSequence"});
   auto operation = DecodeNavigationOperation(wire, envelope.method == "navigation.ack");
   if (!operation)
     return {{}, operation.status};
@@ -160,7 +175,7 @@ ControlResult ControlDispatcher::HandleExitFullscreen(const ExitFullscreenReques
   if (!record || !runtime_.view_model.FindWebView(session, view))
     return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
-  if (record->requests->close_state() == "closing")
+  if (!record->requests->IsOpen())
     return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   const auto token = runtime_.view_model.Token(session, view).value;

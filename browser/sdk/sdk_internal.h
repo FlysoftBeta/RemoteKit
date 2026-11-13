@@ -74,6 +74,7 @@ struct RenderConnection {
   remotekit_sdk_render_callback callback = nullptr;
   void* context = nullptr;
 };
+enum class SDKPhase { kUninitialized, kRunning, kStopping, kStopped };
 struct SDKState {
   std::mutex lock;
   std::unique_ptr<base::AtExitManager> at_exit;
@@ -83,9 +84,8 @@ struct SDKState {
   std::map<uint64_t, std::shared_ptr<RenderConnection>> render_channels;
   std::condition_variable idle;
   size_t operations = 0;
-  bool stopping = false;
+  SDKPhase phase = SDKPhase::kUninitialized;
   uint64_t next_handle = 1;
-  bool stopped = false;
   bool owns_thread_pool = false;
   size_t rtc_peers = 0;
 };
@@ -113,7 +113,7 @@ class OperationLease {
   OperationLease() {
     auto& state = State();
     std::lock_guard lock(state.lock);
-    if (state.at_exit && !state.stopping && !state.stopped) {
+    if (state.phase == SDKPhase::kRunning) {
       ++state.operations;
       acquired_ = true;
     }

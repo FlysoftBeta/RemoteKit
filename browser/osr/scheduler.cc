@@ -50,7 +50,6 @@ void Scheduler::Begin(const RenderBegin& begin) {
     owner_.Fatal("Begin attempted reuse before its slot consumed GPU fence");
     return;
   }
-  wake_proof_.ObserveBegin(begin);
   slot.reserved = true;
   queue_.push_back({begin});
   owner_.trace_.Add("rend_begin", begin.identity, 0, static_cast<int>(queue_.size()));

@@ -118,8 +118,6 @@ struct alignas(64) SharedRenderMapping {
 inline constexpr std::uint32_t kSharedRenderMagic = 0x524B5253;  // RKRS
 inline constexpr std::uint32_t kSharedRenderVersion = 8;
 inline constexpr std::uint32_t kRenderSlotCount = kSharedAtlasSlotCount;
-using RenderView = SharedAtlasView;
-using RenderFrame = SharedAtlasFrame;
 static_assert(std::is_trivially_copyable_v<SharedRenderMapping>);
 static_assert(offsetof(SharedRenderSlot, publication_sequence) % 8 == 0);
 static_assert(offsetof(SharedRenderMapping, publication_sequence) % 8 == 0);

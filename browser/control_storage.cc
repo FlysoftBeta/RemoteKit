@@ -32,6 +32,7 @@ Result<ImportedCookie> DecodeCookie(const base::Value& wire) {
   auto secure = decoder.Optional<bool>("secure");
   auto http_only = decoder.Optional<bool>("httpOnly");
   auto same_site = decoder.Optional<std::string>("sameSite");
+  decoder.Consume({"expires"});
   const auto* expires = value.Find("expires");
   if (!name || !content || !domain || !path || !host_only || !secure || !http_only || !same_site ||
       !expires || name->size() + content->size() > 4096 || domain->empty() ||

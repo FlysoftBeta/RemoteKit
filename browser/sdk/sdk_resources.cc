@@ -29,29 +29,18 @@ bool StringUint64(const base::DictValue& value, std::string_view key, uint64_t* 
   return text && DecimalUint64(*text, result);
 }
 bool Uint32Field(const base::DictValue& dict, std::string_view key, uint32_t* result) {
-  if (auto number = dict.FindInt(key)) {
-    if (*number < 0)
-      return false;
-    *result = static_cast<uint32_t>(*number);
-    return true;
-  }
-  uint64_t number = 0;
-  if (!StringUint64(dict, key, &number) || number > std::numeric_limits<uint32_t>::max())
+  const auto value = dict.FindInt(key);
+  if (!value || *value < 0)
     return false;
-  *result = static_cast<uint32_t>(number);
+  *result = static_cast<uint32_t>(*value);
   return true;
 }
 bool Int32Field(const base::DictValue& dict, std::string_view key, int32_t* result) {
-  if (auto number = dict.FindInt(key)) {
-    *result = *number;
-    return true;
-  }
   const auto* text = dict.FindString(key);
-  int64_t number = 0;
-  if (!text || !DecimalInt64(*text, &number) || number < std::numeric_limits<int32_t>::min() ||
-      number > std::numeric_limits<int32_t>::max())
+  int64_t value = 0;
+  if (!text || !DecimalInt64(*text, &value) || value < INT32_MIN || value > INT32_MAX)
     return false;
-  *result = static_cast<int32_t>(number);
+  *result = static_cast<int32_t>(value);
   return true;
 }
 HANDLE NativeHandle(uint64_t value) {
@@ -67,8 +56,6 @@ bool ValidHandle(uint64_t value) {
 
 ReplyHandles::ReplyHandles(const base::DictValue& reply) {
   Collect(reply);
-  if (const auto* resources = reply.FindDict("resources"))
-    Collect(*resources);
 }
 ReplyHandles::~ReplyHandles() {
   for (uint64_t value : owned_)
@@ -136,21 +123,37 @@ void LogRenderOpenFailure(bool opening, const base::DictValue& reply, std::strin
              << " failed: " << fallback;
 }
 bool ParseRender(const base::DictValue& reply, remotekit_sdk_render_setup* setup) {
-  const auto* resources = reply.FindDict("resources");
-  if (reply.Find("resources") && !resources)
-    return false;
-  const auto& dict = resources ? *resources : reply;
+  static constexpr std::string_view fields[] = {"version",
+                                                "id",
+                                                "ok",
+                                                "generation",
+                                                "width",
+                                                "height",
+                                                "mapping_size",
+                                                "mapping_handle",
+                                                "ready_fence_handles",
+                                                "consumed_fence_handles",
+                                                "texture_handles",
+                                                "render_channel",
+                                                "adapter_luid_low",
+                                                "adapter_luid_high"};
+  for (const auto [key, value] : reply)
+    if (std::find(std::begin(fields), std::end(fields), key) == std::end(fields))
+      return false;
+  const auto& dict = reply;
   remotekit_sdk_render_setup parsed{};
   parsed.struct_size = sizeof(parsed);
+  uint64_t adapter_low = 0;
   if (!StringUint64(dict, "generation", &parsed.generation) || !parsed.generation ||
       !Uint32Field(dict, "width", &parsed.width) || !parsed.width || parsed.width > 16384 ||
       !Uint32Field(dict, "height", &parsed.height) || !parsed.height || parsed.height > 16384 ||
       !Uint32Field(dict, "mapping_size", &parsed.mapping_size) ||
       parsed.mapping_size != sizeof(remotekit::SharedRenderMapping) ||
       !StringUint64(dict, "mapping_handle", &parsed.mapping_handle) ||
-      !Uint32Field(dict, "adapter_luid_low", &parsed.adapter_luid_low) ||
+      !StringUint64(dict, "adapter_luid_low", &adapter_low) || adapter_low > UINT32_MAX ||
       !Int32Field(dict, "adapter_luid_high", &parsed.adapter_luid_high))
     return false;
+  parsed.adapter_luid_low = static_cast<uint32_t>(adapter_low);
   const auto* name = dict.FindString("render_channel");
   if (!name || name->empty() || name->size() > 128)
     return false;
@@ -220,13 +223,11 @@ int remotekit_sdk_control_open_render(uint64_t handle,
     if (control_channel->closed.load(std::memory_order_acquire))
       return REMOTEKIT_SDK_CHANNEL_CLOSED;
   }
-  std::optional<base::TimeTicks> deadline;
+  const auto deadline = base::TimeTicks::Now() + base::Milliseconds(timeout_ms);
   bool opening = true;
   bool written = false;
   for (;;) {
-    if (!deadline)
-      deadline = base::TimeTicks::Now() + base::Milliseconds(timeout_ms);
-    const uint32_t remaining = opening ? timeout_ms : RemainingMilliseconds(*deadline);
+    const uint32_t remaining = RemainingMilliseconds(deadline);
     if (!remaining)
       return REMOTEKIT_SDK_TIMEOUT;
     const int id = NextRequestId();
@@ -252,20 +253,32 @@ int remotekit_sdk_control_open_render(uint64_t handle,
       LogRenderOpenFailure(opening, *reply, "invalid_reply_envelope");
       return REMOTEKIT_SDK_DATA_MISMATCH;
     }
-    if (!RemainingMilliseconds(*deadline))
+    if (!RemainingMilliseconds(deadline))
       return REMOTEKIT_SDK_TIMEOUT;
+    remotekit_sdk_failure decoded_failure{};
+    const int reply_status = ReplyStatus(*reply, &decoded_failure);
+    if (reply_status == REMOTEKIT_SDK_DATA_MISMATCH)
+      return reply_status;
+    if (reply->contains("pending") && !reply->FindBool("pending").has_value())
+      return REMOTEKIT_SDK_DATA_MISMATCH;
+    if (failure)
+      *failure = decoded_failure;
     // Only a successful describe may carry one endpoint. All rejected, pending
     // or opening replies destroy their attachments before returning.
     if (!attachments.empty() && (opening || reply->FindBool("ok") != true || Pending(*reply))) {
       LogRenderOpenFailure(opening, *reply, "unexpected_render_endpoint");
       return REMOTEKIT_SDK_DATA_MISMATCH;
     }
+    if (opening && reply_status == REMOTEKIT_SDK_OK)
+      for (const auto [key, value] : *reply)
+        if (key != "version" && key != "id" && key != "ok" && key != "accepted")
+          return REMOTEKIT_SDK_DATA_MISMATCH;
     if (opening) {
       const bool accepted = reply->FindBool("ok") == true && reply->FindBool("accepted") == true &&
                             !reply->Find("error");
       if (!accepted && !Pending(*reply)) {
         LogRenderOpenFailure(true, *reply, "open_not_accepted");
-        return ReplyStatus(*reply, failure);
+        return reply_status == REMOTEKIT_SDK_OK ? REMOTEKIT_SDK_DATA_MISMATCH : reply_status;
       }
       opening = false;
     } else if (reply->FindBool("ok") == true) {
@@ -278,16 +291,15 @@ int remotekit_sdk_control_open_render(uint64_t handle,
         LogRenderOpenFailure(false, *reply, "invalid_render_resources");
         return REMOTEKIT_SDK_DATA_MISMATCH;
       }
-      if (!RemainingMilliseconds(*deadline))
+      if (!RemainingMilliseconds(deadline))
         return REMOTEKIT_SDK_TIMEOUT;
-      const auto* resources = reply->FindDict("resources");
-      const auto& description = resources ? *resources : *reply;
-      const auto* token = description.FindString("render_channel");
+      const auto* token = reply->FindString("render_channel");
       {
         auto& state = State();
         std::lock_guard lock(state.lock);
         const auto found = state.channels.find(handle);
-        if (state.stopping || found == state.channels.end() || found->second != control_channel ||
+        if (state.phase != SDKPhase::kRunning || found == state.channels.end() ||
+            found->second != control_channel ||
             control_channel->closed.load(std::memory_order_acquire))
           return REMOTEKIT_SDK_LOST;
         for (const auto& [other_id, other] : state.channels) {
@@ -300,7 +312,7 @@ int remotekit_sdk_control_open_render(uint64_t handle,
           LogRenderOpenFailure(false, *reply, "invalid_render_endpoint");
           return REMOTEKIT_SDK_DATA_MISMATCH;
         }
-        if (!RemainingMilliseconds(*deadline)) {
+        if (!RemainingMilliseconds(deadline)) {
           control_channel->pending_render.Reset();
           return REMOTEKIT_SDK_TIMEOUT;
         }
@@ -310,11 +322,12 @@ int remotekit_sdk_control_open_render(uint64_t handle,
       return REMOTEKIT_SDK_OK;
     } else if (!Pending(*reply)) {
       LogRenderOpenFailure(false, *reply, "describe_not_accepted");
-      return ReplyStatus(*reply, failure);
+      return reply_status;
     }
-    const uint32_t sleep_ms = RemainingMilliseconds(*deadline);
+    const uint32_t sleep_ms = RemainingMilliseconds(deadline);
     if (!sleep_ms)
       return REMOTEKIT_SDK_TIMEOUT;
-    base::PlatformThread::Sleep(base::Milliseconds(std::min<uint32_t>(10, sleep_ms)));
+    base::PlatformThread::Sleep(base::Milliseconds(std::min<uint32_t>(
+        decoded_failure.has_retry_after ? decoded_failure.retry_after_ms : 10, sleep_ms)));
   }
 }

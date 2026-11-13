@@ -97,10 +97,14 @@ class SdkTrace {
                  .Set("wire_rtp_timestamp", static_cast<double>(e.wire_rtp))
                  .Set("status", e.status));
     }
-    base::CreateDirectory(directory_);
-    base::WriteFile(directory_.AppendASCII("sdk-" + std::to_string(base::GetCurrentProcId()) +
-                                           "-peer-" + std::to_string(peer_) + ".jsonl"),
-                    bytes);
+    if (!base::CreateDirectory(directory_)) {
+      LOG(ERROR) << "Cannot create RTC trace directory " << directory_;
+      return;
+    }
+    if (!base::WriteFile(directory_.AppendASCII("sdk-" + std::to_string(base::GetCurrentProcId()) +
+                                                "-peer-" + std::to_string(peer_) + ".jsonl"),
+                         bytes))
+      LOG(ERROR) << "Cannot write RTC trace for peer " << peer_ << " in " << directory_;
   }
 
  private:

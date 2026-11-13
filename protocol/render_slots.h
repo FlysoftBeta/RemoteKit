@@ -84,8 +84,10 @@ class RenderWakeState {
 // This state never represents GPU completion or texture reuse permission.
 class RenderGenerationState {
  public:
+  enum class Phase { kActive, kStopping, kStopped };
+  constexpr Phase phase() const { return phase_; }
   constexpr bool CanBegin(uint64_t generation) const {
-    return generation && !stopping_ && (!generation_ || generation_ == generation);
+    return generation && phase_ == Phase::kActive && (!generation_ || generation_ == generation);
   }
   constexpr bool RecordBegin(uint64_t generation) {
     if (!CanBegin(generation))
@@ -97,25 +99,24 @@ class RenderGenerationState {
     return generation && (!generation_ || generation_ == generation);
   }
   constexpr bool RecordStop(uint64_t generation) {
-    if (!CanStop(generation) || stopping_)
+    if (!CanStop(generation) || phase_ != Phase::kActive)
       return false;
     generation_ = generation;
-    stopping_ = true;
+    phase_ = Phase::kStopping;
     return true;
   }
   constexpr bool RecordStopped(uint64_t generation) {
-    if (!stopping_ || stopped_ || generation != generation_)
+    if (phase_ != Phase::kStopping || generation != generation_)
       return false;
-    stopped_ = true;
+    phase_ = Phase::kStopped;
     return true;
   }
-  constexpr bool stopping() const { return stopping_; }
-  constexpr bool stopped() const { return stopped_; }
+  constexpr bool stopping() const { return phase_ != Phase::kActive; }
+  constexpr bool stopped() const { return phase_ == Phase::kStopped; }
 
  private:
   uint64_t generation_ = 0;
-  bool stopping_ = false;
-  bool stopped_ = false;
+  Phase phase_ = Phase::kActive;
 };
 static_assert(sizeof(RenderIdentity) == 24);
 static_assert(sizeof(RenderBegin) == 32);

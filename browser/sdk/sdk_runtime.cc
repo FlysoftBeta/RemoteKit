@@ -34,7 +34,7 @@ void RunPoolLifecycle(SDKState& state, bool start) {
 int RemoteKitSdkBeginRtc() {
   auto& state = State();
   std::lock_guard lock(state.lock);
-  if (!state.at_exit || state.stopped || state.stopping)
+  if (state.phase != SDKPhase::kRunning)
     return REMOTEKIT_SDK_INVALID_STATE;
   ++state.rtc_peers;
   return REMOTEKIT_SDK_OK;
@@ -52,9 +52,9 @@ uint32_t remotekit_sdk_abi_version(void) {
 int remotekit_sdk_initialize(void) {
   auto& state = State();
   std::lock_guard<std::mutex> lock(state.lock);
-  if (state.stopped || state.stopping)
+  if (state.phase == SDKPhase::kStopped || state.phase == SDKPhase::kStopping)
     return REMOTEKIT_SDK_INVALID_STATE;
-  if (state.at_exit)
+  if (state.phase == SDKPhase::kRunning)
     return REMOTEKIT_SDK_OK;
   state.at_exit = std::make_unique<base::AtExitManager>();
   mojo::core::Configuration configuration;
@@ -67,7 +67,7 @@ int remotekit_sdk_initialize(void) {
     state.io_thread.reset();
     mojo::core::ShutDown();
     state.at_exit.reset();
-    state.stopped = true;
+    state.phase = SDKPhase::kStopped;
     return REMOTEKIT_SDK_INVALID_STATE;
   }
   if (!base::ThreadPoolInstance::Get()) {
@@ -76,17 +76,18 @@ int remotekit_sdk_initialize(void) {
   }
   state.ipc_support = std::make_unique<mojo::core::ScopedIPCSupport>(
       state.io_thread->task_runner(), mojo::core::ScopedIPCSupport::ShutdownPolicy::CLEAN);
+  state.phase = SDKPhase::kRunning;
   return REMOTEKIT_SDK_OK;
 }
 
 int remotekit_sdk_shutdown(void) {
   auto& state = State();
   std::unique_lock lock(state.lock);
-  if (!state.at_exit || state.stopping)
+  if (state.phase != SDKPhase::kRunning)
     return REMOTEKIT_SDK_INVALID_STATE;
   if (state.rtc_peers || !state.render_channels.empty())
     return REMOTEKIT_SDK_INVALID_STATE;
-  state.stopping = true;
+  state.phase = SDKPhase::kStopping;
   for (auto& [id, channel] : state.channels) {
     channel->closed.store(true, std::memory_order_release);
     channel->pending_render.Reset();
@@ -109,7 +110,7 @@ int remotekit_sdk_shutdown(void) {
   mojo::core::ShutDown();
   lock.lock();
   state.at_exit.reset();
-  state.stopped = true;
+  state.phase = SDKPhase::kStopped;
   return REMOTEKIT_SDK_OK;
 }
 

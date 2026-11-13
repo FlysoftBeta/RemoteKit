@@ -45,6 +45,23 @@ int ReplyStatus(const base::DictValue& reply, remotekit_sdk_failure* failure) {
   const auto* message = error ? error->FindString("message") : nullptr;
   if (reply.FindBool("ok") != false || !code || !message || !protocol::ParseErrorCode(*code))
     return REMOTEKIT_SDK_DATA_MISMATCH;
+  const auto parsed_code = *protocol::ParseErrorCode(*code);
+  for (const auto [key, value] : *error)
+    if (key != "code" && key != "message" && key != "reason" && key != "retryAfterMs" &&
+        key != "errorId")
+      return REMOTEKIT_SDK_DATA_MISMATCH;
+  if (error->contains("reason") &&
+      (!error->FindString("reason") || !protocol::ParseErrorReason(*error->FindString("reason"))))
+    return REMOTEKIT_SDK_DATA_MISMATCH;
+  if (error->contains("errorId") &&
+      (!error->FindString("errorId") || error->FindString("errorId")->empty()))
+    return REMOTEKIT_SDK_DATA_MISMATCH;
+  const auto retry = error->FindInt("retryAfterMs");
+  if (error->contains("retryAfterMs") && (!retry || *retry < 0 || *retry > 86400000 ||
+                                          (parsed_code != protocol::ErrorCode::kBusy &&
+                                           parsed_code != protocol::ErrorCode::kRateLimited &&
+                                           parsed_code != protocol::ErrorCode::kUnavailable)))
+    return REMOTEKIT_SDK_DATA_MISMATCH;
   if (failure) {
     *failure = {};
     auto copy = [](auto& target, const std::string& source) {
@@ -56,47 +73,37 @@ int ReplyStatus(const base::DictValue& reply, remotekit_sdk_failure* failure) {
     if (const auto* reason = error->FindString("reason");
         reason && protocol::ParseErrorReason(*reason))
       copy(failure->reason, *reason);
-    const auto parsed = *protocol::ParseErrorCode(*code);
-    const auto retry = error->FindInt("retryAfterMs");
-    if (retry && *retry >= 0 && *retry <= 86400000 &&
-        (parsed == protocol::ErrorCode::kBusy || parsed == protocol::ErrorCode::kRateLimited ||
-         parsed == protocol::ErrorCode::kUnavailable)) {
+    if (retry) {
       failure->retry_after_ms = *retry;
       failure->has_retry_after = 1;
     }
   }
   return REMOTEKIT_SDK_REFUSED;
 }
-bool ReadToken(const base::DictValue& reply, remotekit_sdk_token* token) {
+bool ValidReplyToken(const base::DictValue& reply) {
   const auto* node = reply.Find("token");
   if (!node)
     return true;
   const auto* dict = node->GetIfDict();
-  if (!dict)
+  if (!dict || dict->size() != 5)
     return false;
-  remotekit_sdk_token parsed{};
-  if (!StringUint64(*dict, "session", &parsed.session) || !parsed.session ||
-      !StringUint64(*dict, "view", &parsed.view) || !parsed.view ||
-      !StringUint64(*dict, "instance", &parsed.instance) || !parsed.instance ||
-      !StringUint64(*dict, "document", &parsed.document) || !parsed.document ||
-      !StringUint64(*dict, "focus", &parsed.focus) || !parsed.focus)
-    return false;
-  *token = parsed;
+  for (auto field : {"session", "view", "instance", "document", "focus"}) {
+    uint64_t value = 0;
+    if (!StringUint64(*dict, field, &value) || !value)
+      return false;
+  }
   return true;
 }
 int Command(uint64_t handle,
             const char* json,
             size_t size,
             uint32_t timeout_ms,
-            remotekit_sdk_token* token,
             remotekit_sdk_failure* failure) {
   OperationLease lease;
   if (!lease)
     return REMOTEKIT_SDK_CHANNEL_CLOSED;
   if (failure)
     *failure = {};
-  if (token)
-    *token = {};
   if (!json || !size || size > browser::kClipboardJsonLimit || !timeout_ms || timeout_ms > 30000)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   // SAFETY: the caller supplies size bytes of JSON as required by this C ABI.
@@ -106,7 +113,7 @@ int Command(uint64_t handle,
   if (status != REMOTEKIT_SDK_OK)
     return status;
   ReplyHandles handles(*reply);
-  if (token && !ReadToken(*reply, token))
+  if (!ValidReplyToken(*reply))
     return REMOTEKIT_SDK_DATA_MISMATCH;
   return ReplyStatus(*reply, failure);
 }
@@ -145,7 +152,7 @@ int remotekit_sdk_control_connect(const char* name_utf8, uint64_t* handle) {
   if (!channel->pipe.is_valid())
     return REMOTEKIT_SDK_CHANNEL_CLOSED;
   std::lock_guard lock(state.lock);
-  if (state.stopping || state.next_handle == 0)
+  if (state.phase != SDKPhase::kRunning || state.next_handle == 0)
     return REMOTEKIT_SDK_INVALID_STATE;
   const uint64_t id = state.next_handle++;
   state.channels.emplace(id, std::move(channel));
@@ -174,7 +181,7 @@ int ControlRequestInternal(uint64_t handle,
     auto& state = State();
     std::lock_guard lock(state.lock);
     const auto found = state.channels.find(handle);
-    if (state.stopping || found == state.channels.end())
+    if (state.phase != SDKPhase::kRunning || found == state.channels.end())
       return REMOTEKIT_SDK_CHANNEL_CLOSED;
     channel = found->second;
   }
@@ -320,16 +327,5 @@ int remotekit_sdk_control_command(uint64_t handle,
                                   size_t size,
                                   uint32_t timeout_ms,
                                   remotekit_sdk_failure* failure) {
-  return Command(handle, json, size, timeout_ms, nullptr, failure);
-}
-int remotekit_sdk_control_command_token(uint64_t handle,
-                                        const char* json,
-                                        size_t size,
-                                        uint32_t timeout_ms,
-                                        remotekit_sdk_token* token,
-                                        remotekit_sdk_failure* failure) {
-  if (!token)
-    return REMOTEKIT_SDK_INVALID_ARGUMENT;
-  *token = {};
-  return Command(handle, json, size, timeout_ms, token, failure);
+  return Command(handle, json, size, timeout_ms, failure);
 }

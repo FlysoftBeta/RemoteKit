@@ -90,6 +90,7 @@ class WebView final : public content::WebContentsObserver,
   void RestoreNavigationOperations(NavigationOperations operations);
   Status CanShow() const;
   Status SetVisible(bool);
+  Status CanFocus(bool focused) const;
   Status Focus(bool);
   void ReleaseRemoteInput();
   void ConfigureDevice(int width, int height, float scale = 1);
@@ -103,7 +104,6 @@ class WebView final : public content::WebContentsObserver,
   // A first touch start resolves its OOPIF target asynchronously. A new touch
   // sequence supersedes it; other input retries BUSY during target resolution.
   Status TouchInjectionStatus() const;
-  bool TouchProcessingPending() const;
   void RefreshClientTouchOwner();
   // UI-sequence diagnostic snapshot; absent fields mean no current native view
   // or submitted frame. Reads cached state without requesting frame reports.
@@ -118,6 +118,7 @@ class WebView final : public content::WebContentsObserver,
   // for accepted operations (possibly synchronously). Rejected requests never
   // invoke it. Renderer ack/poll and navigation completion have a 10s bound.
   // A timeout leaves browser state uncertain: only unload is then allowed.
+  Status CanRequestLifecycle(Lifecycle action, bool recover_uncertain = false) const;
   Status RequestLifecycle(Lifecycle, Completion = {}, bool recover_uncertain = false);
   Status CanRecoverLifecycle() const;
   // Read-only eligibility. Execution repeats this guard on the UI sequence.

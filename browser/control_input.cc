@@ -41,6 +41,7 @@ Result<InputRequest> DecodeInput(const base::DictValue& wire, RequestEnvelope en
   request.output_generation = decoder.Optional<uint64_t>("output_generation");
   request.session = decoder.Optional<uint64_t>("session");
   request.view = decoder.Optional<uint64_t>("view");
+  decoder.Consume({"event", "instance", "document", "focus", "sequence"});
   const auto* event = wire.FindDict("event");
   const auto* type = event ? event->FindString("type") : nullptr;
   if (type && *type == "menus.close") {
@@ -95,7 +96,7 @@ ControlResult ControlDispatcher::HandleInput(const InputRequest& request) {
   if (!record || !runtime_.view_model.FindWebView(session, view))
     return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
-  if (record->requests->close_state() == "closing")
+  if (!record->requests->IsOpen())
     return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   Status status;

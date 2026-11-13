@@ -219,6 +219,8 @@ class ViewModel {
   Status ResetWebView(SessionId, WebViewId);
   const Session* FindSession(SessionId) const;
   const WebView* FindWebView(SessionId, WebViewId) const;
+  Status CanFocus(SessionId, WebViewId, bool focused) const;
+  Result<Residency> CanRequestLifecycle(SessionId, WebViewId, Lifecycle) const;
   Status SetFocus(SessionId, WebViewId, bool);
   Status CommitDocument(SessionId, WebViewId);
   // External instance loss (e.g. crash): invalidates all queued work without

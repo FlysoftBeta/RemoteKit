@@ -79,10 +79,6 @@ REMOTEKIT_SDK_API int remotekit_sdk_control_request(uint64_t handle,
                                                     uint32_t timeout_ms);
 REMOTEKIT_SDK_API int remotekit_sdk_control_close(uint64_t handle);
 
-struct remotekit_sdk_token {
-  uint64_t session, view, instance, document, focus;
-};
-
 #define REMOTEKIT_SDK_ABI_VERSION 4
 #define REMOTEKIT_SDK_RENDER_SLOT_COUNT 4
 struct remotekit_sdk_render_setup {
@@ -168,22 +164,16 @@ struct remotekit_sdk_failure {
 };
 /* Worker-only JSON helpers. Optional failure is zeroed on entry and filled
  * on REFUSED with the Browser handling code, display key and diagnosis.
- * command_token also copies a valid token on REFUSED. Malformed tokens or
- * error envelopes return DATA_MISMATCH. Ignored native handles are closed. */
+ * Malformed tokens or error envelopes return DATA_MISMATCH.
+ * Ignored native handles are closed. */
 REMOTEKIT_SDK_API int remotekit_sdk_control_command(uint64_t handle,
                                                     const char* json,
                                                     size_t size,
                                                     uint32_t timeout_ms,
                                                     struct remotekit_sdk_failure* failure);
-REMOTEKIT_SDK_API int remotekit_sdk_control_command_token(uint64_t handle,
-                                                          const char* json,
-                                                          size_t size,
-                                                          uint32_t timeout_ms,
-                                                          struct remotekit_sdk_token* token,
-                                                          struct remotekit_sdk_failure* failure);
 /* Initialize struct_size. consumer_pid must be this process, timeout 1..30000.
  * Opens then polls describe within one budget. All 13 returned Windows handles
- * are caller-owned. Mapping is SharedRenderMapping v5. Endpoint owns pacing.
+ * are caller-owned. Mapping is SharedRenderMapping (kSharedRenderVersion). Endpoint owns pacing.
  * A successful describe must attach exactly one empty Mojo message pipe. SDK
  * retains that endpoint under the original Control connection until one-use
  * render_connect claims its opaque token. Failure closes all reply attachments

@@ -13,7 +13,8 @@ constexpr bool StopLifecycle() {
     return false;
   if (state.RecordStopped(10) || !state.RecordStopped(9))
     return false;
-  return state.stopped() && !state.RecordStopped(9) && !state.CanStop(10);
+  return state.phase() == remotekit::RenderGenerationState::Phase::kStopped && state.stopped() &&
+         !state.RecordStopped(9) && !state.CanStop(10);
 }
 constexpr bool EmptyGenerationStop() {
   remotekit::RenderGenerationState state;
@@ -89,10 +90,8 @@ constexpr bool LateBeginPreservesWakeProof() {
   proof.RequestRebindWake();
   // B2 was sent before Comp received B1's Idle Reject. Its later arrival at
   // Rend cannot prove that Comp received a Wake or resumed regular demand.
-  proof.ObserveBegin({{7, 12, 3, 0}, 16667, 0});
   if (!proof.pending() || proof.pending()->value != idle.value || !proof.rebind_requested())
     return false;
-  proof.ObserveBegin({{7, 13, 0, 0}, 16667, 1});
   if (!proof.pending() || !proof.rebind_requested())
     return false;
   if (proof.Delivered({7, 12, 3, 0}) || !proof.pending())

@@ -360,8 +360,9 @@ int remotekit_rtc_get_receive_level(uint64_t id, uint32_t* level_idc) {
   if (!level_idc)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   *level_idc = 0;
-  return WithPeer(id, [&](Peer& peer) {
-    *level_idc = std::min(52u, peer.remote_limits->h264_level.load());
-    return REMOTEKIT_SDK_OK;
-  });
+  auto peer = FindPeer(id);
+  if (!peer || peer->IsClosing())
+    return REMOTEKIT_SDK_INVALID_STATE;
+  *level_idc = std::min(52u, peer->remote_limits->h264_level.load());
+  return REMOTEKIT_SDK_OK;
 }

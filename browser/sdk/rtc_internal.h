@@ -24,6 +24,8 @@
 #include <vector>
 
 #include "base/no_destructor.h"
+#include "base/synchronization/waitable_event.h"
+#include "base/logging.h"
 #include "base/environment.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
@@ -192,7 +194,11 @@ class Peer : public webrtc::PeerConnectionObserver,
   std::shared_ptr<SdkTrace> trace;
   std::shared_ptr<MediaAuthorization> authorization;
   std::mutex api_mutex, event_mutex;
-  std::atomic<bool> closing{false};
+  enum class Phase { kOpen, kClosing, kClosed };
+  std::atomic<Phase> phase{Phase::kOpen};
+  bool IsClosing() const { return phase.load() != Phase::kOpen; }
+  base::WaitableEvent close_done{base::WaitableEvent::ResetPolicy::MANUAL,
+                                 base::WaitableEvent::InitialState::NOT_SIGNALED};
   std::atomic<bool> stats_pending{false};
   bool signaling_started = false;
   bool winsock_started = false;
@@ -241,7 +247,7 @@ int WithPeer(uint64_t id, F fn) {
   if (!p)
     return REMOTEKIT_SDK_INVALID_STATE;
   std::lock_guard lock(p->api_mutex);
-  if (p->closing.load())
+  if (p->IsClosing())
     return REMOTEKIT_SDK_INVALID_STATE;
   return p->signaling->BlockingCall([&] { return fn(*p); });
 }

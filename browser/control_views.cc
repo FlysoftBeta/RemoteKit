@@ -62,6 +62,7 @@ Result<CreateViewRequest> DecodeCreateView(const base::DictValue& wire, RequestE
   request.device_scale_factor = decoder.Optional<double>("device_scale_factor");
   request.session = decoder.Optional<uint64_t>("session");
   request.view = decoder.Optional<uint64_t>("view");
+  decoder.Consume({"operationId", "operationGeneration", "operationSequence"});
   auto operation = DecodeNavigationOperation(wire, envelope.method == "navigation.ack");
   if (!operation)
     return {{}, operation.status};
@@ -91,6 +92,7 @@ Result<RecreateViewRequest> DecodeRecreateView(const base::DictValue& wire,
   request.url = decoder.Optional<std::string>("url");
   request.session = decoder.Optional<uint64_t>("session");
   request.view = decoder.Optional<uint64_t>("view");
+  decoder.Consume({"operationId", "operationGeneration", "operationSequence"});
   auto operation = DecodeNavigationOperation(wire, envelope.method == "navigation.ack");
   if (!operation)
     return {{}, operation.status};
@@ -367,7 +369,7 @@ ControlResult ControlDispatcher::HandleRecreateView(const RecreateViewRequest& r
     return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
 
-  if (record->requests->close_state() == "closing" || record->requests->close_state() == "closed")
+  if (!record->requests->IsOpen())
     return error(ErrorCode::kConflict, "view_closing");
   const auto* url = Ptr(request.url);
   if (!url || !GURL(*url).is_valid())
@@ -422,7 +424,7 @@ ControlResult ControlDispatcher::HandleConfigureView(const ConfigureViewRequest&
     return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
 
   auto spec = record->spec;
-  if (record->requests->close_state() == "closing")
+  if (!record->requests->IsOpen())
     return error(ErrorCode::kConflict, "view_closing");
   if (Ptr(request.visible)) {
     spec.visible = *request.visible;
@@ -503,7 +505,7 @@ ControlResult ControlDispatcher::HandleFocus(const FocusRequest& request) {
   if (!record || !runtime_.view_model.FindWebView(session, view))
     return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
-  if (record->requests->close_state() == "closing")
+  if (!record->requests->IsOpen())
     return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   Status status;
@@ -520,6 +522,9 @@ ControlResult ControlDispatcher::HandleFocus(const FocusRequest& request) {
   auto focused = request.focused;
   if (!focused)
     return error(ErrorCode::kInvalidRequest, "focused_boolean_required");
+  status = adapter.CanFocus(*focused);
+  if (!status)
+    return ControlResult::Failure(id, *status.error, status.message, std::move(reply));
   if (*focused) {
     for (auto& [other_id, other_record] : runtime_.views.records)
       if (other_record.webview->session_id() == session && other_id != view)
@@ -545,7 +550,7 @@ ControlResult ControlDispatcher::HandleVisible(const VisibleRequest& request) {
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view))
     return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
-  if (record->requests->close_state() == "closing")
+  if (!record->requests->IsOpen())
     return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   Status status;
@@ -582,7 +587,7 @@ ControlResult ControlDispatcher::HandleLifecycle(const LifecycleControlRequest& 
   if (!record || !runtime_.view_model.FindWebView(session, view))
     return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   auto& adapter = *record->webview;
-  if (record->requests->close_state() == "closing")
+  if (!record->requests->IsOpen())
     return ControlResult::Failure(id, ErrorCode::kConflict, "view_closing");
 
   Status status;
@@ -607,8 +612,7 @@ ControlResult ControlDispatcher::HandleLifecycle(const LifecycleControlRequest& 
     uint64_t generation = 0;
     const auto* model = runtime_.view_model.FindWebView(session, view);
     if (!Assign(request.expected_lifecycle_generation, &generation) || !model ||
-        model->lifecycle_generation != generation || model->pending ||
-        record->requests->close_state() == "closing" || record->requests->close_state() == "closed")
+        model->lifecycle_generation != generation || model->pending || !record->requests->IsOpen())
       return error(ErrorCode::kConflict, "stale_lifecycle_recovery");
     if (recover_uncertain) {
       const auto allowed = adapter.CanRecoverLifecycle();
@@ -624,6 +628,9 @@ ControlResult ControlDispatcher::HandleLifecycle(const LifecycleControlRequest& 
     if (!allowed)
       return ControlResult::Failure(id, *allowed.error, allowed.message, std::move(reply));
   }
+  status = adapter.CanRequestLifecycle(*operation, recover_uncertain);
+  if (!status)
+    return ControlResult::Failure(id, *status.error, status.message, std::move(reply));
   if (runtime_.output) {
     runtime_.paused_output.insert(view);
     runtime_.output->StopView(view);
