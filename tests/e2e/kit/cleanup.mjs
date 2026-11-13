@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
   existsSync,
@@ -47,11 +48,20 @@ function checkedPath(run, path) {
   return path;
 }
 
-function records(run) {
+function allRecords(run) {
   const manifest = join(run, manifestName);
   return existsSync(manifest)
     ? readFileSync(manifest, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse)
     : [];
+}
+
+function records(run) {
+  const entries = allRecords(run);
+  return entries.slice(entries.findLastIndex((entry) => entry.type === 'run') + 1);
+}
+
+function runIdentity(run) {
+  return allRecords(run).findLast((entry) => entry.type === 'run')?.id;
 }
 
 function record(run, value) {
@@ -64,9 +74,11 @@ export function registerCleanup(run) {
   mkdirSync(run, { recursive: true });
   if (!registeredRuns.has(run)) {
     registeredRuns.add(run);
+    const id = process.env.E2E_CLEANUP_ID ?? randomUUID();
+    if (runIdentity(run) !== id) record(run, { type: 'run', id });
     process.once('beforeExit', async () => {
       try {
-        await cleanupRun(run);
+        await cleanupRun(run, { runId: id });
       } catch (error) {
         console.error('Cleanup failed:', run, error);
         process.exitCode = 1;
@@ -74,6 +86,7 @@ export function registerCleanup(run) {
     });
     process.once('exit', () => {
       if (process.env.E2E_RUN || process.env.E2E_KEEP_PROFILES === '1') return;
+      if (runIdentity(run) !== id) return;
       if (records(run).some((entry) => entry.type === 'directory' && existsSync(join(run, entry.path))))
         watchDetachedBrowser(run, { pid: process.pid });
     });
@@ -113,11 +126,15 @@ export function trackCleanupPid(run, pid) {
 
 export function watchDetachedBrowser(run, child) {
   if (!child.pid) return;
-  const watcher = spawn(process.execPath, [fileURLToPath(import.meta.url), resolve(run), String(child.pid)], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  });
+  const watcher = spawn(
+    process.execPath,
+    [fileURLToPath(import.meta.url), resolve(run), String(child.pid), runIdentity(run)],
+    {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    },
+  );
   watcher.unref();
 }
 
@@ -192,14 +209,17 @@ export async function cleanupRun(
     retryDelay = 250,
     remove = rm,
     isAlive = processAlive,
+    runId,
   } = {},
 ) {
   run = cleanupRoot(run);
   const reportPath = join(run, 'cleanup.json');
+  if (runId && runIdentity(run) !== runId) return;
   const previous = existsSync(reportPath)
     ? JSON.parse(readFileSync(reportPath, 'utf8'))
     : { directories: [] };
   const entries = records(run);
+  const identity = runIdentity(run);
   const exited = new Set(entries.filter((entry) => entry.type === 'exited').map((entry) => entry.id));
   const owners = entries.filter((entry) => entry.type === 'owner' && !exited.has(entry.id));
   const deadline = Date.now() + timeout;
@@ -212,7 +232,10 @@ export async function cleanupRun(
   const directories = [];
   for (const entry of entries.filter((value) => value.type === 'directory')) {
     const path = checkedPath(run, join(run, entry.path));
-    const prior = previous.directories.find((value) => value.path === entry.path);
+    const prior =
+      previous.runId === identity
+        ? previous.directories.find((value) => value.path === entry.path)
+        : undefined;
     if (!existsSync(path)) {
       if (prior) directories.push(prior);
       continue;
@@ -265,6 +288,7 @@ export async function cleanupRun(
     }
   }
   const report = {
+    runId: identity,
     keepProfiles,
     bytes: directories.reduce((total, entry) => total + (entry.bytes ?? 0), 0),
     directories,
@@ -306,7 +330,7 @@ export function cleanupMarkdown(results) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [run, pid] = process.argv.slice(2);
+  const [run, pid, runId] = process.argv.slice(2);
   while (processAlive(Number(pid))) await pause(1000);
-  await cleanupRun(run);
+  await cleanupRun(run, { runId });
 }

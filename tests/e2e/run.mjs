@@ -2,6 +2,7 @@ import { checkBrowserLaunchPolicy } from './kit/browser-launch-policy.mjs';
 import { cleanupMarkdown, cleanupRun } from './kit/cleanup.mjs';
 import { waitForLogonBudget } from './kit/browser.mjs';
 import { execFileSync, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -190,6 +191,7 @@ async function run(item, slot) {
     REMOTEKIT_BROWSER: embedder,
     REMOTEKIT_ENDPOINT: endpoint,
     E2E_RUN: evidence,
+    E2E_CLEANUP_ID: randomUUID(),
     E2E_KEEP_PROFILES: values['keep-profiles'] ? '1' : '0',
     E2E_PORT: String(port),
     E2E_BROWSER: browser,

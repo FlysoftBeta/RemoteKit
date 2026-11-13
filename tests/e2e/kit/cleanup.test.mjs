@@ -221,3 +221,36 @@ test('an explicit process exit in a standalone script schedules cleanup after ex
   assert.equal(report.directories[0].status, 'deleted');
   assert.equal(existsSync(join(run, 'viewer/Local State')), false);
 });
+
+test('a new run in an existing output directory cannot delete profiles retained by an earlier run', async () => {
+  const run = fixture();
+  createTrackedDirectory(run, join(run, 'old-viewer'), 'viewer-profile');
+  file(run, 'old-viewer/Local State', '{}');
+  const previous = await cleanupRun(run, { keepProfiles: true });
+  const source = `
+    import { createTrackedDirectory } from ${JSON.stringify(new URL('./cleanup.mjs', import.meta.url).href)};
+    import { writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    const run = ${JSON.stringify(run)};
+    createTrackedDirectory(run, join(run, 'new-viewer'), 'viewer-profile');
+    writeFileSync(join(run, 'new-viewer/Local State'), 'fresh');
+  `;
+  const env = { ...process.env, E2E_RUN: run, E2E_KEEP_PROFILES: '0' };
+  delete env.E2E_CLEANUP_ID;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+    encoding: 'utf8',
+    windowsHide: true,
+    env,
+  });
+  assert.equal(child.status, 0, child.stderr);
+  const report = JSON.parse(readFileSync(join(run, 'cleanup.json'), 'utf8'));
+  assert.notEqual(report.runId, previous.runId);
+  assert.equal(report.bytes, 5);
+  assert.deepEqual(
+    report.directories.map((entry) => entry.path),
+    ['new-viewer'],
+  );
+  assert.equal(existsSync(join(run, 'new-viewer')), false);
+  assert(existsSync(join(run, 'old-viewer/Local State')));
+  assert.equal(await cleanupRun(run, { runId: previous.runId }), undefined);
+});
