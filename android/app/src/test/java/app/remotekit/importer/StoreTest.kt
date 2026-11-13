@@ -2,14 +2,29 @@ package app.remotekit.importer
 
 import app.remotekit.importer.crypto.*
 import app.remotekit.importer.deployment.ContractJson
+import app.remotekit.importer.mail.Inbox
 import app.remotekit.importer.mail.Outbox
 import app.remotekit.importer.payload.*
 import app.remotekit.importer.protocol.*
 import app.remotekit.importer.store.*
+import app.remotekit.importer.ui.AppActions
+import app.remotekit.importer.ui.Screen
+import app.remotekit.importer.ui.ScreenNavigation
 import java.io.File
+import java.io.IOException
+import java.io.InputStream
+import java.net.SocketTimeoutException
+import java.util.Properties
+import javax.activation.DataHandler
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.spec.GCMParameterSpec
+import javax.mail.Flags
+import javax.mail.MessagingException
+import javax.mail.Session
+import javax.mail.internet.MimeMessage
+import javax.mail.util.ByteArrayDataSource
+import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -25,7 +40,7 @@ class StoreTest {
             emptyList(),
             emptyList(),
         )
-    private val sites = listOf(SiteRef("Site", "https://example.com/"))
+    private val sites = listOf(SiteRef("Site", "https://example.com/", null))
     private val words = listOf("abandon", "ability", "able", "about", "above")
 
     private class TestCipher : BlobCipher {
@@ -37,7 +52,10 @@ class StoreTest {
             return cipher.iv + cipher.doFinal(bytes)
         }
 
+        var readFailure: Exception? = null
+
         override fun decrypt(bytes: ByteArray): ByteArray {
+            readFailure?.let { throw it }
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
             return cipher.doFinal(bytes.copyOfRange(12, bytes.size))
@@ -195,13 +213,12 @@ class StoreTest {
             Outbox.messages(store, control.publicKey, 1000, true).flatMap { it.sequences },
         )
         val mails = Outbox.messages(store, control.publicKey, 1000, true)
-        val events =
-            mails.flatMap {
-                ContractJson.decodeFromString<DeviceMessage>(
-                        Envelope.open(it.envelope, control, store.deviceKey().publicKey)
-                    )
-                    .events
-            }
+        val events = mails.flatMap {
+            ContractJson.decodeFromString<DeviceMessage>(
+                    Envelope.open(it.envelope, control, store.deviceKey().publicKey)
+                )
+                .events
+        }
         assertTrue(events[1] is DeviceEvent.Import)
         assertTrue(events[2] is DeviceEvent.Withdraw)
     }
@@ -241,26 +258,243 @@ class StoreTest {
         val id = store.deviceKey().id
         store.clearAll()
         assertNotEquals(id, store.deviceKey().id)
-        assertEquals(Pairing.Unpaired(), store.snapshot.value.pairing)
+        assertEquals(Pairing.Unpaired(null), store.snapshot.value.pairing)
         assertTrue(store.snapshot.value.requests.isEmpty())
     }
 
-    @Test
-    fun v1StateIsDiscarded() {
+    private fun rejectedState(bytes: ByteArray) {
         val dir = temporary.newFolder()
-        File(dir, "state.json")
-            .writeText("""{"drafts":[{"id":"old"}],"account":{"username":"old"}}""")
-        File(dir, "envelopes").mkdir()
-        File(dir, "envelopes/old.rksi").writeText("old")
+        val state = File(dir, "state.json").apply { writeBytes(bytes) }
+        val blob =
+            File(dir, "blobs/retained").apply {
+                requireNotNull(parentFile).mkdirs()
+                writeText("retained")
+            }
+        val backup = File(dir, "state.json.bak").apply { writeText("backup") }
+        val pending = File(dir, "state.json.new").apply { writeText("pending") }
+        val error =
+            assertThrows(LocalDataException::class.java) {
+                AppStore(dir, TestCipher(), "phone", control.publicKey)
+            }
+        assertNotNull(error.cause)
+        assertArrayEquals(bytes, state.readBytes())
+        assertEquals("retained", blob.readText())
+        assertEquals("backup", backup.readText())
+        assertEquals("pending", pending.readText())
+    }
+
+    @Test
+    fun unknownVersionsAndMissingFieldsPreserveState() {
+        val dir = temporary.newFolder()
+        AppStore(dir, TestCipher(), "phone", control.publicKey)
+        val valid = ContractJson.parseToJsonElement(File(dir, "state.json").readText()).jsonObject
+        for (version in listOf(1, 3)) {
+            rejectedState(
+                JsonObject(valid + ("v" to JsonPrimitive(version))).toString().toByteArray()
+            )
+        }
+        for (field in valid.keys) {
+            rejectedState(JsonObject(valid - field).toString().toByteArray())
+        }
+        for (field in listOf("pairing", "sendMode", "inbox", "device")) {
+            val nested = valid.getValue(field).jsonObject
+            for (key in nested.keys.filter { it != "type" }) {
+                val changed = JsonObject(valid + (field to JsonObject(nested - key)))
+                rejectedState(changed.toString().toByteArray())
+            }
+        }
+    }
+
+    @Test
+    fun malformedStateAndUnknownFieldsPreserveState() {
+        val dir = temporary.newFolder()
+        AppStore(dir, TestCipher(), "phone", control.publicKey)
+        val valid = ContractJson.parseToJsonElement(File(dir, "state.json").readText()).jsonObject
+        rejectedState("{broken".toByteArray())
+        rejectedState(byteArrayOf(0xc3.toByte(), 0x28))
+        rejectedState(JsonObject(valid + ("unknown" to JsonPrimitive(1))).toString().toByteArray())
+        rejectedState(
+            JsonObject(valid + ("nextDeviceSeq" to JsonPrimitive(0))).toString().toByteArray()
+        )
+        rejectedState(
+            JsonObject(valid + ("ackedByControl" to JsonPrimitive(1))).toString().toByteArray()
+        )
+        val inbox = JsonObject(valid.getValue("inbox").jsonObject + ("unknown" to JsonNull))
+        rejectedState(JsonObject(valid + ("inbox" to inbox)).toString().toByteArray())
+    }
+
+    @Test
+    fun missingNestedEventAndSiteFieldsPreserveState() {
+        val dir = temporary.newFolder()
         val store = AppStore(dir, TestCipher(), "phone", control.publicKey)
-        assertFalse(File(dir, "envelopes").exists())
-        assertEquals(2, store.snapshot.value.v)
-        assertTrue(store.snapshot.value.outgoing.isEmpty())
+        pair(store)
+        store.addImport(payload, sites)
+        val valid = ContractJson.parseToJsonElement(File(dir, "state.json").readText()).jsonObject
+        val outgoing = valid.getValue("outgoing").jsonArray
+        val event = outgoing.first().jsonObject
+        for (field in event.keys) {
+            val events = JsonArray(listOf(JsonObject(event - field)) + outgoing.drop(1))
+            rejectedState(JsonObject(valid + ("outgoing" to events)).toString().toByteArray())
+        }
+        val requests = valid.getValue("requests").jsonArray
+        val request = requests.single().jsonObject
+        val site = request.getValue("sites").jsonArray.single().jsonObject
+        val changed =
+            JsonObject(request + ("sites" to JsonArray(listOf(JsonObject(site - "icon")))))
+        rejectedState(
+            JsonObject(valid + ("requests" to JsonArray(listOf(changed)))).toString().toByteArray()
+        )
+    }
+
+    @Test
+    fun unreadableStateIsPreserved() {
+        val dir = temporary.newFolder()
+        val state = File(dir, "state.json").apply { mkdir() }
+        val retained = File(state, "retained").apply { writeText("retained") }
+        val blob =
+            File(dir, "blobs/retained").apply {
+                requireNotNull(parentFile).mkdirs()
+                writeText("blob")
+            }
+        assertThrows(LocalDataException::class.java) {
+            AppStore(dir, TestCipher(), "phone", control.publicKey)
+        }
+        assertEquals("retained", retained.readText())
+        assertEquals("blob", blob.readText())
+    }
+
+    private fun mail(bytes: ByteArray): MimeMessage =
+        MimeMessage(Session.getInstance(Properties())).apply {
+            setHeader("X-RemoteKit-Import", "2")
+            dataHandler = DataHandler(ByteArrayDataSource(bytes, "application/octet-stream"))
+            fileName = "reply.rksi"
+        }
+
+    @Test
+    fun invalidMailIsDeletedAndValidRepliesAreDecoded() {
+        val store = store()
+        val inbox = Inbox(store, control.publicKey)
+        val json = """{"v":2,"ack":0,"events":[]}"""
+        val envelope = Envelope.seal(json, control, store.deviceKey().publicKey)
+        val valid = mail(envelope)
+        assertEquals(ControlMessage(ack = 0, events = emptyList()), inbox.readMessage(valid))
+        assertFalse(valid.isSet(Flags.Flag.DELETED))
+        val invalid =
+            listOf(
+                mail(byteArrayOf(1, 2)),
+                mail(
+                    envelope.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 1).toByte() }
+                ),
+                mail(Envelope.seal(json, control, control.publicKey)),
+                mail(Envelope.seal(json, store.deviceKey(), store.deviceKey().publicKey)),
+                mail(Envelope.seal("{}", control, store.deviceKey().publicKey)),
+                mail(envelope).apply { setHeader("X-RemoteKit-Import", "1") },
+            )
+        for (message in invalid) {
+            assertNull(inbox.readMessage(message))
+            assertTrue(message.isSet(Flags.Flag.DELETED))
+        }
+    }
+
+    @Test
+    fun headerAttachmentAndKeyReadFailuresKeepMailAndPropagate() {
+        val dir = temporary.newFolder()
+        val cipher = TestCipher()
+        val store = AppStore(dir, cipher, "phone", control.publicKey)
+        val inbox = Inbox(store, control.publicKey)
+        val headerError = MessagingException("IMAP header read", SocketTimeoutException("timeout"))
+        val header =
+            object : MimeMessage(Session.getInstance(Properties())) {
+                override fun getHeader(name: String): Array<String>? = throw headerError
+            }
+        assertSame(
+            headerError,
+            assertThrows(MessagingException::class.java) { inbox.readMessage(header) },
+        )
+        assertFalse(header.isSet(Flags.Flag.DELETED))
+        for (failure in listOf(IOException("attachment read"), SocketTimeoutException("timeout"))) {
+            val attachment =
+                object : MimeMessage(Session.getInstance(Properties())) {
+                        override fun getInputStream(): InputStream =
+                            object : InputStream() {
+                                override fun read(): Int = throw failure
+                            }
+                    }
+                    .apply {
+                        setHeader("X-RemoteKit-Import", "2")
+                        fileName = "reply.rksi"
+                    }
+            assertSame(
+                failure,
+                assertThrows(IOException::class.java) { inbox.readMessage(attachment) },
+            )
+            assertFalse(attachment.isSet(Flags.Flag.DELETED))
+        }
+        val message =
+            mail(
+                Envelope.seal(
+                    """{"v":2,"ack":0,"events":[]}""",
+                    control,
+                    store.deviceKey().publicKey,
+                )
+            )
+        val keyError = IllegalStateException("key unavailable")
+        cipher.readFailure = keyError
+        assertSame(
+            keyError,
+            assertThrows(IllegalStateException::class.java) { inbox.readMessage(message) },
+        )
+        assertFalse(message.isSet(Flags.Flag.DELETED))
+    }
+
+    @Test
+    fun timelineDeletionReportsWriteFailureAndPreservesEvents() {
+        val dir = temporary.newFolder()
+        val store = AppStore(dir, TestCipher(), "phone", control.publicKey)
+        pair(store)
+        store.addImport(payload, sites)
+        store.deleteRequest(payload.id)
+        val state = store.snapshot.value
+        val bytes = File(dir, "state.json").readBytes()
+        val failures = mutableListOf<Exception>()
+        val actions = AppActions(store) { failures.add(it) }
+        val blocked = File(dir, "state.json.new").apply { mkdir() }
+        for (event in state.outgoing.filter { it.type in setOf("pair", "withdraw") }) {
+            actions.hideEvent(event.seq)
+            assertEquals(state, store.snapshot.value)
+            assertArrayEquals(bytes, File(dir, "state.json").readBytes())
+        }
+        assertEquals(2, failures.size)
+        assertTrue(failures.all { it is IOException })
+        assertTrue(blocked.delete())
+        actions.hideEvent(1)
+        actions.hideEvent(3)
+        assertTrue(store.snapshot.value.outgoing.filter { it.type != "import" }.all { it.hidden })
+        assertEquals(2, failures.size)
+    }
+
+    @Test
+    fun loginProfileEndsOnlyWhenTheScreenChanges() {
+        val released = mutableListOf<String>()
+        val navigation = ScreenNavigation { released.add(it) }
+        navigation.navigate(Screen.Login("first"))
+        assertEquals(Screen.Login("first"), navigation.screen.value)
+        navigation.navigate(Screen.Login("first"))
+        assertTrue(released.isEmpty())
+        navigation.navigate(Screen.Home)
+        navigation.navigate(Screen.Home)
+        assertEquals(listOf("first"), released)
+        navigation.navigate(Screen.Login("second"))
+        navigation.navigate(Screen.Settings)
+        assertEquals(listOf("first", "second"), released)
+        navigation.navigate(Screen.Login("third"))
+        navigation.navigate(Screen.Login("fourth"))
+        assertEquals(listOf("first", "second", "third"), released)
     }
 
     @Test
     fun outboxSchedulingResendAndEmptySync() {
-        assertEquals(60, Outbox.delaySeconds(SendMode.Window()))
+        assertEquals(60, Outbox.delaySeconds(SendMode.Window(60)))
         assertEquals(0, Outbox.delaySeconds(SendMode.Window(0)))
         assertEquals(300, Outbox.delaySeconds(SendMode.Window(300)))
         assertNull(Outbox.delaySeconds(SendMode.Series))

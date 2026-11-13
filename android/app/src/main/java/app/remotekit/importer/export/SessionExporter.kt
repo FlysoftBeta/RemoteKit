@@ -16,8 +16,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.*
 
 data class SessionCapture(val cookies: List<ImportCookie>, val localStorage: List<OriginStorage>)
+
+internal fun readLocalStorageResult(origin: String, result: String): List<List<String>> {
+    try {
+        val value = ContractJson.parseToJsonElement(result).jsonObject
+        check(value.getValue("ok").jsonPrimitive.boolean) {
+            value.getValue("error").jsonPrimitive.content
+        }
+        return ContractJson.decodeFromJsonElement<List<List<String>>>(value.getValue("items"))
+            .also { items -> require(items.all { it.size == 2 }) }
+    } catch (error: Exception) {
+        throw IllegalStateException("无法读取 $origin 的 localStorage：${error.message}", error)
+    }
+}
 
 /** Reads the cookies and localStorage a login browser's profile holds for a set of origins. */
 class SessionExporter(private val context: Context, private val profile: Profile) {
@@ -72,7 +86,7 @@ class SessionExporter(private val context: Context, private val profile: Profile
                             view.loadDataWithBaseURL("$origin/", BLANK, "text/html", "utf-8", null)
                         }
                     }
-                    read(view).takeIf(List<List<String>>::isNotEmpty)?.let {
+                    read(view, origin).takeIf(List<List<String>>::isNotEmpty)?.let {
                         OriginStorage(origin, it)
                     }
                 }
@@ -83,12 +97,11 @@ class SessionExporter(private val context: Context, private val profile: Profile
             }
         }
 
-    private suspend fun read(view: WebView): List<List<String>> {
+    private suspend fun read(view: WebView, origin: String): List<List<String>> {
         val result = suspendCancellableCoroutine { continuation ->
             view.evaluateJavascript(READ_STORAGE) { continuation.resume(it) }
         }
-        val json = ContractJson.decodeFromString<String?>(result) ?: return emptyList()
-        return ContractJson.decodeFromString(json)
+        return readLocalStorageResult(origin, result)
     }
 
     private companion object {
@@ -96,7 +109,7 @@ class SessionExporter(private val context: Context, private val profile: Profile
         const val BLANK = "<!doctype html><title></title>"
         const val READ_STORAGE =
             "(function(){try{var s=localStorage,r=[];for(var i=0;i<s.length;i++){" +
-                "var k=s.key(i);r.push([k,s.getItem(k)])}return JSON.stringify(r)}" +
-                "catch(e){return null}})()"
+                "var k=s.key(i);r.push([k,s.getItem(k)])}return {ok:true,items:r}}" +
+                "catch(e){return {ok:false,error:String(e)}}})()"
     }
 }

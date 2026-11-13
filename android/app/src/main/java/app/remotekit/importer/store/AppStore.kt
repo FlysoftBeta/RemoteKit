@@ -8,14 +8,16 @@ import app.remotekit.importer.payload.ImportPayload
 import app.remotekit.importer.protocol.*
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.NoSuchFileException
 import java.nio.file.StandardCopyOption
 import java.util.Base64
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+
+class LocalDataException(cause: Exception) :
+    Exception("${cause.javaClass.simpleName}: ${cause.message ?: "读取失败"}", cause)
 
 class AppStore(
     private val directory: File,
@@ -39,26 +41,42 @@ class AppStore(
 
     private fun fresh(): AppSnapshot {
         val key = DeviceKey.generate()
+        val now = System.currentTimeMillis()
         return AppSnapshot(
+            v = AppSnapshot.VERSION,
             device =
                 StoredDevice(key.id, base64(key.publicKey), base64(cipher.encrypt(key.privateKey))),
             deviceName = defaultDeviceName,
+            pairing = Pairing.Unpaired(null),
+            nextDeviceSeq = 1,
+            outgoing = emptyList(),
+            ackedByControl = 0,
+            appliedControlSeq = 0,
+            controlEvents = emptyList(),
+            buffered = emptyList(),
+            requests = emptyList(),
+            pairBlob = null,
+            sendMode = SendMode.Window(60),
+            pendingProfileDeletions = emptySet(),
+            inbox = InboxCursor(now, null, null, now),
         )
     }
 
     private fun read(): AppSnapshot {
         directory.mkdirs()
-        if (stateFile.exists()) {
-            val text = stateFile.readText(Charsets.UTF_8)
-            val version =
-                ContractJson.parseToJsonElement(text).jsonObject["v"]?.jsonPrimitive?.content
-            if (version == "2") return ContractJson.decodeFromString(text)
-            check(stateFile.delete())
+        val text =
+            try {
+                Files.newBufferedReader(stateFile.toPath(), Charsets.UTF_8).use { it.readText() }
+            } catch (_: NoSuchFileException) {
+                return fresh().also(::write)
+            } catch (error: Exception) {
+                throw LocalDataException(error)
+            }
+        return try {
+            ContractJson.decodeFromString<AppSnapshot>(text).also { it.validate() }
+        } catch (error: Exception) {
+            throw LocalDataException(error)
         }
-        check(File(directory, "envelopes").deleteRecursively())
-        File(directory, "state.json.bak").delete()
-        File(directory, "state.json.new").delete()
-        return fresh().also(::write)
     }
 
     private fun atomicWrite(file: File, bytes: ByteArray) {
@@ -135,11 +153,21 @@ class AppStore(
     private fun metadata(event: DeviceEvent, type: String, id: String? = null): EventMeta {
         val message = DeviceMessage(ack = snapshot.value.appliedControlSeq, events = listOf(event))
         message.validate()
-        val sealed =
-            controlPublic?.let {
-                blob(Envelope.seal(ContractJson.encodeToString(message), deviceKey(), it))
-            }
-        return EventMeta(event.seq, event.at, type, id, sealedBlob = sealed)
+        val sealed = controlPublic?.let {
+            blob(Envelope.seal(ContractJson.encodeToString(message), deviceKey(), it))
+        }
+        return EventMeta(
+            seq = event.seq,
+            at = event.at,
+            type = type,
+            requestId = id,
+            firstSentAt = null,
+            lastSentAt = null,
+            sendError = null,
+            retired = false,
+            sealedBlob = sealed,
+            hidden = false,
+        )
     }
 
     @Synchronized

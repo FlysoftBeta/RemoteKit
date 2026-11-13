@@ -1,7 +1,5 @@
 package app.remotekit.importer.ui
 
-import android.graphics.BitmapFactory
-import android.util.Base64
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
@@ -10,11 +8,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 
@@ -47,15 +43,3 @@ fun SiteIcon(icon: ImageBitmap?, label: String, size: Dp) {
         }
     }
 }
-
-@Composable
-fun rememberIcon(base64: String?): ImageBitmap? =
-    remember(base64) {
-        base64?.let {
-            runCatching {
-                    val bytes = Base64.decode(it, Base64.NO_WRAP)
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
-                }
-                .getOrNull()
-        }
-    }

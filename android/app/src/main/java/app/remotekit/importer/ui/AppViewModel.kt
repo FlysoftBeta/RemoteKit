@@ -15,6 +15,7 @@ import java.util.UUID
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.sync.withLock
 
@@ -26,13 +27,38 @@ sealed interface Screen {
     data class Login(val id: String) : Screen
 }
 
+internal class ScreenNavigation(private val leaveLogin: (String) -> Unit) {
+    private val current = MutableStateFlow<Screen>(Screen.Home)
+    val screen = current.asStateFlow()
+
+    fun navigate(next: Screen) {
+        val previous = current.value
+        if (previous == next) return
+        current.value = next
+        if (previous is Screen.Login) leaveLogin(previous.id)
+    }
+}
+
+internal class AppActions(private val store: AppStore, private val failed: (Exception) -> Unit) {
+    operator fun invoke(block: () -> Unit) {
+        try {
+            block()
+        } catch (error: Exception) {
+            failed(error)
+        }
+    }
+
+    fun hideEvent(seq: Long) = invoke { store.hideEvent(seq) }
+}
+
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val runtime = application as ImporterApplication
     val deployment = runtime.deployment
     val store = runtime.store
     val profiles = runtime.profiles
     val snapshot = store.snapshot
-    val screen = MutableStateFlow<Screen>(Screen.Home)
+    private val navigation = ScreenNavigation(::leaveLogin)
+    val screen = navigation.screen
     val exporting = MutableStateFlow(false)
     val cleaning = MutableStateFlow(false)
     val refreshing = MutableStateFlow(false)
@@ -45,6 +71,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun visits(id: String): SiteVisits = visits.getOrPut(id) { SiteVisits() }
 
+    fun navigate(next: Screen) = navigation.navigate(next)
+
     fun notify(message: String) {
         notifications.trySend(message)
     }
@@ -53,24 +81,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (error is UserMessage) getApplication<Application>().getString(error.textResource)
         else error.message ?: "操作失败"
 
-    private fun action(block: () -> Unit) {
-        try {
-            block()
-        } catch (error: Exception) {
-            notify(errorText(error))
-        }
-    }
+    private val action = AppActions(store) { notify(errorText(it)) }
 
     fun authorize(): Boolean {
         if (store.authorized()) return true
-        screen.value = Screen.Home
+        navigate(Screen.Home)
         return false
     }
 
     fun pair(username: String, password: String, code: List<String>, device: String) = action {
         check(code.all { it.trim().lowercase() in wordlist }) { "请选择词表中的配对码" }
         store.pair(username, password, code, device)
-        screen.value = Screen.Home
+        navigate(Screen.Home)
     }
 
     fun create() = action {
@@ -79,10 +101,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         check(supported) { "请更新 Android System WebView" }
         val id = UUID.randomUUID().toString()
         store.beginDestroy(id)
-        screen.value = Screen.Login(id)
+        navigate(Screen.Login(id))
     }
 
-    fun leaveLogin(id: String) {
+    private fun leaveLogin(id: String) {
         visits.remove(id)
         runtime.releaseProfile(id) { notify(errorText(it)) }
     }
@@ -104,7 +126,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 withContext(Dispatchers.IO) { store.addImport(payload, sites) }
                 done()
-                screen.value = Screen.Home
+                navigate(Screen.Home)
                 notify("导入请求已排队")
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
@@ -122,6 +144,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             authorize()
         } else store.deleteRequest(id)
     }
+
+    fun hideEvent(seq: Long) = action.hideEvent(seq)
 
     fun send(sync: Boolean = false) {
         MailWork.send(getApplication(), sync = sync)
@@ -149,7 +173,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun saveSettings(name: String, mode: SendMode) = action {
         store.setDeviceName(name)
         store.setSendMode(mode)
-        screen.value = Screen.Home
+        navigate(Screen.Home)
     }
 
     fun clearAll() {
@@ -170,7 +194,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     deferred.forEach { store.beginDestroy(it) }
                     visits.clear()
-                    screen.value = Screen.Home
+                    navigate(Screen.Home)
                 }
             } catch (error: Exception) {
                 notify(errorText(error))

@@ -47,7 +47,7 @@ fun SettingsScreen(vm: AppViewModel) {
             TopAppBar(
                 title = { Text("设置") },
                 navigationIcon = {
-                    IconButton(onClick = { vm.screen.value = Screen.Home }) {
+                    IconButton(onClick = { vm.navigate(Screen.Home) }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回")
                     }
                 },
@@ -144,9 +144,14 @@ fun SettingsScreen(vm: AppViewModel) {
                         onClick = { confirm = true },
                         enabled = !cleaning,
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.error),
-                        border = ButtonDefaults.outlinedButtonBorder(enabled = !cleaning).copy(
-                            brush = androidx.compose.ui.graphics.SolidColor(colors.error.copy(alpha = 0.5f))
-                        ),
+                        border =
+                            ButtonDefaults.outlinedButtonBorder(enabled = !cleaning)
+                                .copy(
+                                    brush =
+                                        androidx.compose.ui.graphics.SolidColor(
+                                            colors.error.copy(alpha = 0.5f)
+                                        )
+                                ),
                     ) {
                         Text(if (cleaning) "正在清除…" else "解除配对并清除数据")
                     }

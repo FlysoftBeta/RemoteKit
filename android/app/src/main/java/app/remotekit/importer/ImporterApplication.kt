@@ -7,10 +7,17 @@ import app.remotekit.importer.deployment.decodeBase64Url
 import app.remotekit.importer.mail.Inbox
 import app.remotekit.importer.mail.MailWork
 import app.remotekit.importer.store.AppStore
+import app.remotekit.importer.store.LocalDataException
 import app.remotekit.importer.web.ProfileSessions
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+
+sealed interface LocalDataState {
+    data class Ready(val store: AppStore) : LocalDataState
+
+    data class Unreadable(val error: LocalDataException) : LocalDataState
+}
 
 class ImporterApplication : Application() {
     val mailMutex = Mutex()
@@ -32,8 +39,11 @@ class ImporterApplication : Application() {
             mailMutex.withLock { Inbox(store, decodeBase64Url(deployment.key.x25519, 32)).poll() }
         }
 
-    lateinit var store: AppStore
+    lateinit var localData: LocalDataState
         private set
+
+    val store: AppStore
+        get() = (localData as LocalDataState.Ready).store
 
     lateinit var profiles: ProfileSessions
         private set
@@ -50,15 +60,23 @@ class ImporterApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         runCatching {
-                if ("deployment.json" in assets.list("").orEmpty()) {
-                    deployment =
-                        assets.open("deployment.json").use {
-                            DeploymentConfig.parse(it.readBytes())
-                        }
-                }
+            if ("deployment.json" in assets.list("").orEmpty()) {
+                deployment =
+                    assets.open("deployment.json").use {
+                        DeploymentConfig.parse(it.readBytes())
+                    }
             }
+        }
             .onFailure { startupError = getString(R.string.invalid_deployment) }
-        store = AppStore(this, deployment?.let { decodeBase64Url(it.key.x25519, 32) })
+        localData =
+            try {
+                LocalDataState.Ready(
+                    AppStore(this, deployment?.let { decodeBase64Url(it.key.x25519, 32) })
+                )
+            } catch (error: LocalDataException) {
+                LocalDataState.Unreadable(error)
+            }
+        if (localData is LocalDataState.Unreadable) return
         profiles = ProfileSessions(store)
         supported = profiles.supported()
         if (supported) {

@@ -79,7 +79,7 @@ fun PairingScreen(vm: AppViewModel) {
             TopAppBar(
                 title = {},
                 actions = {
-                    IconButton(onClick = { vm.screen.value = Screen.Settings }) {
+                    IconButton(onClick = { vm.navigate(Screen.Settings) }) {
                         Icon(Icons.Filled.Settings, "设置")
                     }
                 },
@@ -161,7 +161,8 @@ fun PairingScreen(vm: AppViewModel) {
                             imeAction = ImeAction.Next,
                         ),
                     visualTransformation = VisualTransformation.None,
-                    keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
+                    keyboardActions =
+                        KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
                 )
                 CodeSlots(input.words, wordlist, typing = input.typing.isNotEmpty())
                 if (input.suggestions.isNotEmpty())
@@ -195,7 +196,8 @@ fun PairingScreen(vm: AppViewModel) {
                             keyboardType = KeyboardType.Email,
                             imeAction = ImeAction.Next,
                         ),
-                    keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
+                    keyboardActions =
+                        KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
                 )
                 OutlinedTextField(
                     password,
@@ -206,10 +208,16 @@ fun PairingScreen(vm: AppViewModel) {
                     visualTransformation =
                         if (visible) VisualTransformation.None else PasswordVisualTransformation(),
                     keyboardOptions =
-                        KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Next),
-                    keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
+                        KeyboardOptions(
+                            keyboardType = KeyboardType.Password,
+                            imeAction = ImeAction.Next,
+                        ),
+                    keyboardActions =
+                        KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
                     trailingIcon = {
-                        TextButton(onClick = { visible = !visible }) { Text(if (visible) "隐藏" else "显示") }
+                        TextButton(onClick = { visible = !visible }) {
+                            Text(if (visible) "隐藏" else "显示")
+                        }
                     },
                 )
                 OutlinedTextField(
@@ -301,7 +309,10 @@ private fun Notice(
     onAction: () -> Unit = {},
 ) {
     Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.errorContainer) {
-        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(
+            Modifier.fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Icon(
                     Icons.Filled.Warning,
@@ -316,7 +327,11 @@ private fun Notice(
                 )
             }
             if (action != null)
-                FilledTonalButton(onClick = onAction, enabled = enabled, modifier = Modifier.align(Alignment.End)) {
+                FilledTonalButton(
+                    onClick = onAction,
+                    enabled = enabled,
+                    modifier = Modifier.align(Alignment.End),
+                ) {
                     Text(action)
                 }
         }

@@ -9,22 +9,33 @@ import app.remotekit.importer.store.InboxCursor
 import com.sun.mail.imap.IMAPFolder
 import com.sun.mail.imap.IMAPStore
 import java.io.ByteArrayOutputStream
-import java.util.Properties
+import java.io.IOException
 import java.util.Date
+import java.util.Properties
 import javax.mail.FetchProfile
 import javax.mail.Flags
 import javax.mail.Folder
+import javax.mail.Message
 import javax.mail.Multipart
 import javax.mail.Part
 import javax.mail.Session
 import javax.mail.UIDFolder
 import javax.mail.search.ComparisonTerm
 import javax.mail.search.ReceivedDateTerm
+import org.bouncycastle.crypto.InvalidCipherTextException
 
 private const val RETENTION_MS = 30L * 24 * 60 * 60 * 1000
 private const val CLEANUP_INTERVAL_MS = 24L * 60 * 60 * 1000
 // Tolerates clock skew between the phone and the mail server's INTERNALDATE.
 private const val CLOCK_MARGIN_MS = 10L * 60 * 1000
+
+private sealed interface InboxResult {
+    data object Invalid : InboxResult
+
+    data class Decoded(val message: ControlMessage) : InboxResult
+}
+
+private class InvalidAttachment : Exception()
 
 class Inbox(private val store: AppStore, private val controlPublic: ByteArray) {
     fun poll(now: Long = System.currentTimeMillis()) {
@@ -78,7 +89,12 @@ class Inbox(private val store: AppStore, private val controlPublic: ByteArray) {
                     // `n:*` also returns the newest message when nothing is above n.
                     folder.getUID(it) > cursor.uid
                 }
-            else folder.search(ReceivedDateTerm(ComparisonTerm.GE, Date(cursor.since - CLOCK_MARGIN_MS))).toList()
+            else
+                folder
+                    .search(
+                        ReceivedDateTerm(ComparisonTerm.GE, Date(cursor.since - CLOCK_MARGIN_MS))
+                    )
+                    .toList()
         folder.fetch(
             messages.toTypedArray(),
             FetchProfile().apply {
@@ -95,18 +111,7 @@ class Inbox(private val store: AppStore, private val controlPublic: ByteArray) {
                     if (!resume && (mail.receivedDate?.time ?: 0) < cursor.since - CLOCK_MARGIN_MS)
                         return@mapNotNull null
                     if (mail.subject != subject) return@mapNotNull null
-                    try {
-                        require(mail.getHeader("X-RemoteKit-Import")?.singleOrNull() == "2")
-                        val attachment = requireNotNull(attachment(mail))
-                        val json = Envelope.open(attachment, store.deviceKey(), controlPublic)
-                        mail to
-                            ContractJson.decodeFromString<ControlMessage>(json).also { message ->
-                                message.validate()
-                            }
-                    } catch (_: Exception) {
-                        mail.setFlag(Flags.Flag.DELETED, true)
-                        null
-                    }
+                    readMessage(mail)?.let { mail to it }
                 }
                 .sortedBy { (_, message) -> message.events.firstOrNull()?.seq ?: 0 }
         // A message ahead of a gap is kept encrypted in the store, so every handled mail goes.
@@ -116,7 +121,8 @@ class Inbox(private val store: AppStore, private val controlPublic: ByteArray) {
         }
         val cleanup = now - cursor.cleanedAt >= CLEANUP_INTERVAL_MS
         if (cleanup)
-            for (mail in folder.search(ReceivedDateTerm(ComparisonTerm.LT, Date(now - RETENTION_MS)))) {
+            for (mail in
+                folder.search(ReceivedDateTerm(ComparisonTerm.LT, Date(now - RETENTION_MS)))) {
                 if (mail.subject?.startsWith("RemoteKit session import to ") == true)
                     mail.setFlag(Flags.Flag.DELETED, true)
             }
@@ -128,16 +134,50 @@ class Inbox(private val store: AppStore, private val controlPublic: ByteArray) {
         )
     }
 
+    internal fun readMessage(mail: Message): ControlMessage? =
+        when (val result = decode(mail)) {
+            InboxResult.Invalid -> {
+                mail.setFlag(Flags.Flag.DELETED, true)
+                null
+            }
+            is InboxResult.Decoded -> result.message
+        }
+
+    private fun decode(mail: Message): InboxResult {
+        if (mail.getHeader("X-RemoteKit-Import")?.singleOrNull() != "2") return InboxResult.Invalid
+        val bytes =
+            try {
+                attachment(mail) ?: return InboxResult.Invalid
+            } catch (_: InvalidAttachment) {
+                return InboxResult.Invalid
+            }
+        // IMAP reads and local key access must succeed before classifying the envelope.
+        val key = store.deviceKey()
+        return try {
+            val json = Envelope.open(bytes, key, controlPublic)
+            InboxResult.Decoded(
+                ContractJson.decodeFromString<ControlMessage>(json).also { it.validate() }
+            )
+        } catch (_: IllegalArgumentException) {
+            InboxResult.Invalid
+        } catch (_: InvalidCipherTextException) {
+            InboxResult.Invalid
+        } catch (_: IOException) {
+            // Only in-memory decompression and UTF-8 decoding happen in this block.
+            InboxResult.Invalid
+        }
+    }
+
     private fun attachment(part: Part): ByteArray? {
         if (part.fileName?.endsWith(".rksi") == true) {
-            require(part.size <= Envelope.MAX_ENVELOPE * 2)
+            if (part.size > Envelope.MAX_ENVELOPE * 2) throw InvalidAttachment()
             return part.inputStream.use { input ->
                 val output = ByteArrayOutputStream()
                 val buffer = ByteArray(8192)
                 while (true) {
                     val count = input.read(buffer)
                     if (count < 0) break
-                    require(output.size() + count <= Envelope.MAX_ENVELOPE)
+                    if (output.size() + count > Envelope.MAX_ENVELOPE) throw InvalidAttachment()
                     output.write(buffer, 0, count)
                 }
                 output.toByteArray()

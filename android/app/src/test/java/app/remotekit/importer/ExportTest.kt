@@ -1,14 +1,55 @@
 package app.remotekit.importer
 
 import app.remotekit.importer.export.parseCookieInfo
+import app.remotekit.importer.export.readLocalStorageResult
 import app.remotekit.importer.payload.ImportCookie
 import app.remotekit.importer.payload.SameSite
 import app.remotekit.importer.web.RequestLog
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ExportTest {
+    @Test
+    fun localStorageDistinguishesEmptySuccessFromReadFailure() {
+        val origin = "https://example.com"
+        assertEquals(
+            emptyList<List<String>>(),
+            readLocalStorageResult(origin, """{"ok":true,"items":[]}"""),
+        )
+        assertEquals(
+            listOf(listOf("key", "值")),
+            readLocalStorageResult(origin, """{"ok":true,"items":[["key","值"]]}"""),
+        )
+        val error =
+            assertThrows(IllegalStateException::class.java) {
+                readLocalStorageResult(
+                    origin,
+                    """{"ok":false,"error":"SecurityError: access denied"}""",
+                )
+            }
+        assertTrue(error.message!!.contains(origin))
+        assertTrue(error.message!!.contains("SecurityError: access denied"))
+    }
+
+    @Test
+    fun malformedLocalStorageResultsFailTheExport() {
+        for (result in
+            listOf(
+                "null",
+                "[]",
+                "{}",
+                """{"ok":true}""",
+                """{"ok":true,"items":[["key",null]]}""",
+            )) {
+            assertThrows(IllegalStateException::class.java) {
+                readLocalStorageResult("https://example.com", result)
+            }
+        }
+    }
+
     @Test
     fun parsesDomainCookieWithAllAttributes() {
         assertEquals(

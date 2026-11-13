@@ -3,6 +3,7 @@ package app.remotekit.importer.mail
 import android.content.Context
 import androidx.work.*
 import app.remotekit.importer.ImporterApplication
+import app.remotekit.importer.LocalDataState
 import app.remotekit.importer.deployment.decodeBase64Url
 import app.remotekit.importer.store.SendMode
 import java.util.concurrent.TimeUnit
@@ -64,6 +65,7 @@ class SendWorker(context: Context, parameters: WorkerParameters) :
     override suspend fun doWork(): Result =
         withContext(Dispatchers.IO) {
             val runtime = applicationContext as ImporterApplication
+            if (runtime.localData is LocalDataState.Unreadable) return@withContext Result.failure()
             val deployment = runtime.deployment ?: return@withContext Result.failure()
             runtime.mailMutex.withLock {
                 val selected =
@@ -108,6 +110,7 @@ class InboxWorker(context: Context, parameters: WorkerParameters) :
     override suspend fun doWork(): Result =
         withContext(Dispatchers.IO) {
             val runtime = applicationContext as ImporterApplication
+            if (runtime.localData is LocalDataState.Unreadable) return@withContext Result.failure()
             try {
                 runtime.pollInbox()
                 Result.success()

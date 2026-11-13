@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
@@ -19,7 +20,6 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
@@ -81,7 +81,7 @@ fun TimelineScreen(vm: AppViewModel) {
                     IconButton(onClick = vm::sync, enabled = !refreshing) {
                         Icon(Icons.Filled.Refresh, "同步")
                     }
-                    IconButton(onClick = { vm.screen.value = Screen.Settings }) {
+                    IconButton(onClick = { vm.navigate(Screen.Settings) }) {
                         Icon(Icons.Filled.Settings, "设置")
                     }
                 },
@@ -140,18 +140,41 @@ private fun ConnectionHeader(state: AppSnapshot, server: String) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            val pairMeta = (state.pairing as? Pairing.Pairing)?.let { p -> state.outgoing.find { it.seq == p.seq } }
+            val pairMeta =
+                (state.pairing as? Pairing.Pairing)?.let { p ->
+                    state.outgoing.find { it.seq == p.seq }
+                }
             val pairFailed = pairMeta?.sendError != null
             when (state.pairing) {
                 is Pairing.Paired ->
-                    IconBadge(Icons.Filled.Check, 40.dp, colors.primaryContainer, colors.onPrimaryContainer)
+                    IconBadge(
+                        Icons.Filled.Check,
+                        40.dp,
+                        colors.primaryContainer,
+                        colors.onPrimaryContainer,
+                    )
                 is Pairing.Pairing if pairFailed ->
-                    IconBadge(Icons.Filled.Warning, 40.dp, colors.errorContainer, colors.onErrorContainer)
+                    IconBadge(
+                        Icons.Filled.Warning,
+                        40.dp,
+                        colors.errorContainer,
+                        colors.onErrorContainer,
+                    )
                 // Static on purpose: the reply can take a day when RemoteKit is offline.
                 is Pairing.Pairing ->
-                    IconBadge(Icons.Filled.Email, 40.dp, colors.secondaryContainer, colors.onSecondaryContainer)
+                    IconBadge(
+                        Icons.Filled.Email,
+                        40.dp,
+                        colors.secondaryContainer,
+                        colors.onSecondaryContainer,
+                    )
                 else ->
-                    IconBadge(Icons.Filled.Lock, 40.dp, colors.errorContainer, colors.onErrorContainer)
+                    IconBadge(
+                        Icons.Filled.Lock,
+                        40.dp,
+                        colors.errorContainer,
+                        colors.onErrorContainer,
+                    )
             }
             Column(Modifier.weight(1f)) {
                 val (title, detail) =
@@ -160,11 +183,8 @@ private fun ConnectionHeader(state: AppSnapshot, server: String) {
                         is Pairing.Pairing ->
                             when {
                                 pairFailed -> "配对请求没能发出" to "展开下方记录可以重试"
-                                pairMeta?.firstSentAt == null ->
-                                    "配对请求等待发送" to "稍后会自动发出"
-                                else ->
-                                    "配对请求已发出" to
-                                        "RemoteKit 处理后会回信，可能要等一段时间。可以先离开，回信到达后这里会更新。"
+                                pairMeta?.firstSentAt == null -> "配对请求等待发送" to "稍后会自动发出"
+                                else -> "配对请求已发出" to "RemoteKit 处理后会回信，可能要等一段时间。可以先离开，回信到达后这里会更新。"
                             }
                         is Pairing.Unpaired -> "未配对" to (pairing.reason ?: server)
                         Pairing.Revoked -> "设备已被移除" to "清除本机数据后可以重新配对"
@@ -209,9 +229,17 @@ private fun SeriesBar(pending: Int, onSend: () -> Unit) {
 }
 
 @Composable
-private fun Banner(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, tone: Tone) {
+private fun Banner(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    text: String,
+    tone: Tone,
+) {
     val (background, foreground) = tone.colors()
-    Surface(color = background, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+    Surface(
+        color = background,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
         Row(
             Modifier.padding(14.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -288,8 +316,7 @@ private fun replyText(event: ControlEvent): String =
                 append("已写入浏览器：Cookie ${event.cookies.applied} 项")
                 if (event.cookies.rejected > 0) append("（${event.cookies.rejected} 项被拒绝）")
                 append("，本地存储 ${event.localStorage.applied} 项")
-                if (event.localStorage.rejected > 0)
-                    append("（${event.localStorage.rejected} 项被拒绝）")
+                if (event.localStorage.rejected > 0) append("（${event.localStorage.rejected} 项被拒绝）")
             }
         is ControlEvent.ImportFailed -> event.reason
         is ControlEvent.ImportDiscarded -> "已在 RemoteKit 放弃"
@@ -339,8 +366,12 @@ private fun RequestCard(state: AppSnapshot, meta: EventMeta, vm: AppViewModel) {
         when {
             request != null &&
                 state.latestImport(request.id)?.seq == meta.seq &&
-                state.retryable(request.id) -> { -> vm.retry(request.id) }
-            meta.type != "import" && meta.sendError != null -> { -> vm.send() }
+                state.retryable(request.id) -> { ->
+                vm.retry(request.id)
+            }
+            meta.type != "import" && meta.sendError != null -> { ->
+                vm.send()
+            }
             else -> null
         }
     ElevatedCard(
@@ -380,17 +411,24 @@ private fun RequestCard(state: AppSnapshot, meta: EventMeta, vm: AppViewModel) {
                     Modifier.padding(start = 19.dp, top = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    replies.forEach { reply -> ReplyLine(replyText(reply), clock(reply.at), replyTone(reply)) }
+                    replies.forEach { reply ->
+                        ReplyLine(replyText(reply), clock(reply.at), replyTone(reply))
+                    }
                     if (sendError != null) ReplyLine("发送失败：$sendError", null, Tone.Error)
                 }
             AnimatedVisibility(expanded) {
-                Column(Modifier.padding(top = 14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Column(
+                    Modifier.padding(top = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
                     HorizontalDivider(color = colors.outlineVariant)
                     Spacer(Modifier.height(4.dp))
                     request?.sites?.forEach { site -> Detail(site.name, site.url) }
                     Detail("创建", full(meta.at))
                     meta.firstSentAt?.let { Detail("首次发送", full(it)) }
-                    meta.lastSentAt?.takeIf { it != meta.firstSentAt }?.let { Detail("最近发送", full(it)) }
+                    meta.lastSentAt
+                        ?.takeIf { it != meta.firstSentAt }
+                        ?.let { Detail("最近发送", full(it)) }
                     Detail("事件序号", "#${meta.seq}")
                     replies.forEach { Detail("回信 #${it.seq}", full(it.at)) }
                     Row(
@@ -431,7 +469,8 @@ private fun RequestCard(state: AppSnapshot, meta: EventMeta, vm: AppViewModel) {
         }
     }
     if (deleting) {
-        val pendingImport = request != null && meta.type == "import" && state.mayBePending(request.id)
+        val pendingImport =
+            request != null && meta.type == "import" && state.mayBePending(request.id)
         ConfirmDialog(
             title = "删除这条记录？",
             text =
@@ -443,7 +482,7 @@ private fun RequestCard(state: AppSnapshot, meta: EventMeta, vm: AppViewModel) {
             onConfirm = {
                 deleting = false
                 if (request != null && meta.type == "import") vm.delete(request.id)
-                else vm.store.hideEvent(meta.seq)
+                else vm.hideEvent(meta.seq)
             },
         )
     }
@@ -456,7 +495,12 @@ private fun Leading(meta: EventMeta, request: ImportRequest?) {
         meta.type == "pair" ->
             IconBadge(Icons.Filled.Lock, 40.dp, colors.primaryContainer, colors.onPrimaryContainer)
         meta.type == "withdraw" ->
-            IconBadge(Icons.Filled.Delete, 40.dp, colors.surfaceContainerHighest, colors.onSurfaceVariant)
+            IconBadge(
+                Icons.Filled.Delete,
+                40.dp,
+                colors.surfaceContainerHighest,
+                colors.onSurfaceVariant,
+            )
         request != null && request.sites.size > 1 ->
             Box(Modifier.size(40.dp)) {
                 request.sites.take(2).forEachIndexed { index, site ->
@@ -469,8 +513,15 @@ private fun Leading(meta: EventMeta, request: ImportRequest?) {
                     }
                 }
             }
-        request != null && request.sites.isNotEmpty() -> RequestSiteIcon(request.sites.first(), 40.dp)
-        else -> IconBadge(Icons.AutoMirrored.Filled.Send, 40.dp, colors.surfaceContainerHighest, colors.onSurfaceVariant)
+        request != null && request.sites.isNotEmpty() ->
+            RequestSiteIcon(request.sites.first(), 40.dp)
+        else ->
+            IconBadge(
+                Icons.AutoMirrored.Filled.Send,
+                40.dp,
+                colors.surfaceContainerHighest,
+                colors.onSurfaceVariant,
+            )
     }
 }
 
@@ -490,9 +541,7 @@ private fun StatusPill(text: String, tone: Tone) {
 @Composable
 private fun ReplyLine(text: String, time: String?, tone: Tone) {
     Row(verticalAlignment = Alignment.Top) {
-        Box(
-            Modifier.padding(top = 6.dp).size(8.dp).background(tone.accent(), CircleShape)
-        )
+        Box(Modifier.padding(top = 6.dp).size(8.dp).background(tone.accent(), CircleShape))
         Spacer(Modifier.width(12.dp))
         Text(
             text,
@@ -554,9 +603,9 @@ private fun RequestSiteIcon(site: SiteRef, size: androidx.compose.ui.unit.Dp) {
         remember(site.icon) {
             site.icon?.let { encoded ->
                 runCatching {
-                        val bytes = Base64.getDecoder().decode(encoded)
-                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
-                    }
+                    val bytes = Base64.getDecoder().decode(encoded)
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                }
                     .getOrNull()
             }
         }

@@ -8,7 +8,7 @@ import kotlinx.serialization.Serializable
 sealed interface Pairing {
     @Serializable
     @SerialName("unpaired")
-    data class Unpaired(val reason: String? = null) : app.remotekit.importer.store.Pairing
+    data class Unpaired(val reason: String?) : app.remotekit.importer.store.Pairing
 
     @Serializable
     @SerialName("pairing")
@@ -27,7 +27,7 @@ fun Pairing.authorized() = this is Pairing.Paired || this is Pairing.Pairing
 sealed interface SendMode {
     @Serializable
     @SerialName("window")
-    data class Window(val seconds: Int = 60) : SendMode {
+    data class Window(val seconds: Int) : SendMode {
         init {
             require(seconds in setOf(0, 60, 300))
         }
@@ -40,28 +40,28 @@ sealed interface SendMode {
 @Serializable
 data class InboxCursor(
     val since: Long,
-    val uidValidity: Long? = null,
-    val uid: Long? = null,
-    val cleanedAt: Long = since,
+    val uidValidity: Long?,
+    val uid: Long?,
+    val cleanedAt: Long,
 )
 
 @Serializable
 data class StoredDevice(val id: String, val publicKey: String, val encryptedPrivateKey: String)
 
-@Serializable data class SiteRef(val name: String, val url: String, val icon: String? = null)
+@Serializable data class SiteRef(val name: String, val url: String, val icon: String?)
 
 @Serializable
 data class EventMeta(
     val seq: Long,
     val at: Long,
     val type: String,
-    val requestId: String? = null,
-    val firstSentAt: Long? = null,
-    val lastSentAt: Long? = null,
-    val sendError: String? = null,
-    val retired: Boolean = false,
-    val sealedBlob: String? = null,
-    val hidden: Boolean = false,
+    val requestId: String?,
+    val firstSentAt: Long?,
+    val lastSentAt: Long?,
+    val sendError: String?,
+    val retired: Boolean,
+    val sealedBlob: String?,
+    val hidden: Boolean,
 )
 
 @Serializable
@@ -85,22 +85,42 @@ enum class RequestStatus(val label: String) {
 
 @Serializable
 data class AppSnapshot(
-    val v: Int = 2,
+    val v: Int,
     val device: StoredDevice,
     val deviceName: String,
-    val pairing: Pairing = Pairing.Unpaired(),
-    val nextDeviceSeq: Long = 1,
-    val outgoing: List<EventMeta> = emptyList(),
-    val ackedByControl: Long = 0,
-    val appliedControlSeq: Long = 0,
-    val controlEvents: List<ControlEvent> = emptyList(),
-    val buffered: List<String> = emptyList(),
-    val requests: List<ImportRequest> = emptyList(),
-    val pairBlob: String? = null,
-    val sendMode: SendMode = SendMode.Window(),
-    val pendingProfileDeletions: Set<String> = emptySet(),
-    val inbox: InboxCursor = InboxCursor(System.currentTimeMillis()),
+    val pairing: Pairing,
+    val nextDeviceSeq: Long,
+    val outgoing: List<EventMeta>,
+    val ackedByControl: Long,
+    val appliedControlSeq: Long,
+    val controlEvents: List<ControlEvent>,
+    val buffered: List<String>,
+    val requests: List<ImportRequest>,
+    val pairBlob: String?,
+    val sendMode: SendMode,
+    val pendingProfileDeletions: Set<String>,
+    val inbox: InboxCursor,
 ) {
+    fun validate() {
+        require(v == VERSION) { "不支持的本地数据版本：$v" }
+        require(nextDeviceSeq > 0 && ackedByControl in 0 until nextDeviceSeq)
+        require(appliedControlSeq >= 0)
+        validateDeviceName(deviceName)
+        require(outgoing.all { it.seq in 1 until nextDeviceSeq && it.at >= 0 })
+        require(outgoing.zipWithNext().all { (a, b) -> b.seq == a.seq + 1 })
+        require(outgoing.all { it.type in setOf("pair", "import", "withdraw") })
+        controlEvents.forEach { ControlMessage(ack = 0, events = listOf(it)).validate() }
+        require(controlEvents.all { it.seq <= appliedControlSeq })
+        require(requests.all { it.createdAt >= 0 && it.cookies >= 0 && it.storageItems >= 0 })
+        require(inbox.since >= 0 && inbox.cleanedAt >= 0)
+        require(inbox.uidValidity == null || inbox.uidValidity > 0)
+        require(inbox.uid == null || (inbox.uid >= 0 && inbox.uidValidity != null))
+    }
+
+    companion object {
+        const val VERSION = 2
+    }
+
     fun latestImport(id: String) = outgoing.lastOrNull { it.requestId == id && it.type == "import" }
 
     fun reply(id: String): ControlEvent? {

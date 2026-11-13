@@ -119,7 +119,6 @@ fun LoginScreen(vm: AppViewModel, id: String) {
             webView.webChromeClient = null
             webView.webViewClient = WebViewClient()
             webView.destroy()
-            vm.leaveLogin(id)
         }
     }
     val open = { target: String ->
@@ -128,7 +127,7 @@ fun LoginScreen(vm: AppViewModel, id: String) {
         title = null
         omnibox = false
     }
-    val leave = { vm.screen.value = Screen.Home }
+    val leave = { vm.navigate(Screen.Home) }
     BackHandler(!exporting) {
         when {
             omnibox && url != null -> omnibox = false
@@ -402,9 +401,7 @@ private fun SitePickerSheet(
 ) {
     val rows = remember(visits) { visits.sortedBy { it.searchEngine } }
     var chosen by remember {
-        mutableStateOf(
-            rows.filter { it.key == current && !it.searchEngine }.map { it.key }.toSet()
-        )
+        mutableStateOf(rows.filter { it.key == current && !it.searchEngine }.map { it.key }.toSet())
     }
     val selected = rows.filter { it.key in chosen }
     ModalBottomSheet(
@@ -446,8 +443,9 @@ private fun SitePickerSheet(
                             )
                         },
                         modifier =
-                            Modifier.padding(horizontal = 8.dp)
-                                .clickable(enabled = !exporting) { toggle() },
+                            Modifier.padding(horizontal = 8.dp).clickable(enabled = !exporting) {
+                                toggle()
+                            },
                         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                     )
                 }
