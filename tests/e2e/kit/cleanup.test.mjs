@@ -68,6 +68,8 @@ test('outside paths and junctions to another directory are rejected', async () =
   assert.throws(() => createTrackedDirectory(run, outside, 'viewer-profile'), /below its run/);
   assert.throws(() => createTrackedDirectory(run, run, 'viewer-profile'), /below its run/);
   file(outside, 'untouched', 'keep');
+  assert.equal(trackNodeData(run, outside), false);
+  assert.equal(existsSync(join(outside, 'data')), false);
   const profile = join(run, 'viewer');
   createTrackedDirectory(run, profile, 'viewer-profile');
   symlinkSync(outside, join(profile, 'external'), 'junction');

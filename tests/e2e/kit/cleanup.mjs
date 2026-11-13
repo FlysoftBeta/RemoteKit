@@ -108,6 +108,7 @@ export function createTrackedDirectory(run, path, kind) {
 }
 
 export function trackNodeData(run, root) {
+  if (!inside(cleanupRoot(run), resolve(root, 'data'))) return false;
   createTrackedDirectory(run, join(root, 'data'), 'session-data');
 }
 
