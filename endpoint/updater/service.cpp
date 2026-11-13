@@ -70,10 +70,12 @@ Result<void> InstallService(const fs::path& root, const Service& specification) 
   if (!manager.value)
     return Failure("cannot open service manager");
   auto command = Quote(target.wstring()) + L" service --root=" + Quote(root.wstring());
+  // SC_ACTION_RESTART failure actions require SERVICE_START on the handle.
   ServiceHandle service{CreateServiceW(
-      manager.value, specification.name, specification.display_name, SERVICE_CHANGE_CONFIG | DELETE,
-      SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, command.c_str(), nullptr,
-      nullptr, nullptr, nullptr, nullptr)};
+      manager.value, specification.name, specification.display_name,
+      SERVICE_CHANGE_CONFIG | SERVICE_START | DELETE, SERVICE_WIN32_OWN_PROCESS,
+      SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, command.c_str(), nullptr, nullptr, nullptr, nullptr,
+      nullptr)};
   if (!service.value)
     return Failure("cannot register supervisor service");
   SC_ACTION action{SC_ACTION_RESTART, 5000};
