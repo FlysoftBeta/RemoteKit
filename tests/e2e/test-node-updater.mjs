@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { makeNodeRelease } from './kit/node-release.mjs';
+import { trackCleanupProcess, trackNodeData } from './kit/cleanup.mjs';
 import { stageControlRelease, startStack, until } from './kit/stack.mjs';
 /** Real Control + standalone updater + real Endpoint, initial install then build-mismatch update.
  * args: Endpoint exe, Browser exe, new evidence directory, [port]
@@ -18,6 +19,7 @@ const endpoint = resolve(endpointArg),
 await mkdir(run, { recursive: true });
 const nodeRoot = join(run, 'node');
 await mkdir(nodeRoot);
+trackNodeData(run, nodeRoot);
 const installed = join(nodeRoot, 'remotekit_node.exe');
 await copyFile(join(dirname(endpoint), 'remotekit_node.exe'), installed);
 const releases = [];
@@ -56,6 +58,7 @@ try {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  trackCleanupProcess(run, updater);
   for (const stream of ['stdout', 'stderr'])
     updater[stream].on('data', (bytes) => void appendFile(join(run, 'updater.' + stream + '.log'), bytes));
   const verify = async (index) => {

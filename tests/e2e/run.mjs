@@ -1,4 +1,5 @@
 import { checkBrowserLaunchPolicy } from './kit/browser-launch-policy.mjs';
+import { cleanupMarkdown, cleanupRun } from './kit/cleanup.mjs';
 import { waitForLogonBudget } from './kit/browser.mjs';
 import { execFileSync, spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
@@ -27,6 +28,7 @@ const { values, positionals } = parseArgs({
     release: { type: 'string' },
     endpoint: { type: 'string' },
     verify1: { type: 'boolean' },
+    'keep-profiles': { type: 'boolean' },
     list: { type: 'boolean' },
     timeout: { type: 'string', default: '1200000' },
   },
@@ -104,7 +106,7 @@ function summary() {
       (r) => `| ${r.scenario} | ${r.browser} | ${r.pointer} | ${r.viewport} | ${r.status} | ${r.evidence} |`,
     ),
   ];
-  writeFileSync(join(out, 'summary.md'), table.join('\n') + '\n');
+  writeFileSync(join(out, 'summary.md'), table.join('\n') + '\n' + cleanupMarkdown(results));
 }
 async function run(item, slot) {
   const failedLogonsBefore = await waitForLogonBudget();
@@ -188,6 +190,7 @@ async function run(item, slot) {
     REMOTEKIT_BROWSER: embedder,
     REMOTEKIT_ENDPOINT: endpoint,
     E2E_RUN: evidence,
+    E2E_KEEP_PROFILES: values['keep-profiles'] ? '1' : '0',
     E2E_PORT: String(port),
     E2E_BROWSER: browser,
     E2E_POINTER: pointer,
@@ -263,7 +266,9 @@ async function run(item, slot) {
     endpoint,
     embedder,
     evidence,
+    cleanup: await cleanupRun(evidence, { keepProfiles: values['keep-profiles'] ?? false }),
   };
+  writeFileSync(join(evidence, 'scenario-summary.json'), JSON.stringify(result, null, 2));
   results.push(result);
   summary();
   console.log(`END ${scenario.name} ${browser} ${pointer} ${result.status}`);
