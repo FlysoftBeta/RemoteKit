@@ -28,7 +28,7 @@ export const requireControl = createRequire(join(root, 'control/package.json'));
 export const defaultBrowser =
   process.env.REMOTEKIT_BROWSER ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe';
 export const defaultEndpoint =
-  process.env.REMOTEKIT_ENDPOINT ?? join(root, 'build/endpoint/endpoint/endpoint_service.exe');
+  process.env.REMOTEKIT_ENDPOINT ?? join(root, 'build/endpoint-package/endpoint/endpoint_service.exe');
 export const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 export const runPath = (name) =>
   resolve(process.env.E2E_RUN ?? join(root, 'develop/tmp/e2e', `${name}-${Date.now()}`));
