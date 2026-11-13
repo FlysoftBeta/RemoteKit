@@ -53,7 +53,7 @@ recover-credentials.cmd                停止 Control 后执行
 
 **分工**：Control 发起挑战并裁定授权；Endpoint 负责取帧和推理；客户端只采集。图像不经过 Control，不压缩，不落盘。
 
-**不依赖 Session**：模板在 Control，推理只需要节点自带的模型，所以人脸验证（enroll / verify / presence）整个走 Viewer 的 service peer，与 Session 在哪里、是否在运行无关。`FaceController` 由 service peer 持有；模型加载、推理串行与 OpenCV 线程上限按节点共享。只要有任何就绪节点就提供人脸选项；一个就绪节点都没有时解锁界面只显示密码与 PIN，并说明原因。
+**不依赖 Session**：模板在 Control，推理只需要节点自带的模型，所以人脸验证（enroll / verify / presence）整个走 Viewer 的 service peer，与 Session 在哪里、是否在运行无关。`FaceController` 由 service peer 持有；模型加载、推理串行与 OpenCV 线程上限按节点共享。推理线程的状态是显式的（未启动 / 运行中 / 已退出）：线程因异常退出时当前挑战以失败结束，下一次挑战开始时先回收它再重新启动，不会出现挑战被接受却无人处理。只要有任何就绪节点就提供人脸选项；一个就绪节点都没有时解锁界面只显示密码与 PIN，并说明原因。
 
 **挑战**：绑定 Viewer、service peer 的 connectionId 与授权代次、随机 challengeId、用途（enroll / verify / presence）、模型版本和过期时间。enroll 60 秒、verify 30 秒、presence 120 秒；Control 约每 500ms 轮询状态。过期、取消、被替换的结果不能解锁。enroll 要求已解锁且提供当前密码；verify 要求已锁定且有当前模型的模板；presence 要求开启"离开即锁定"。
 

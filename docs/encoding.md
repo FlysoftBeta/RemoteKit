@@ -24,7 +24,7 @@
 ## 适配器与后端选择
 
 1. Endpoint 启动 Browser 之前，按节点配置的 `encoder`（`qsv|nvenc|auto`，默认 auto：先 Intel QSV、再 NVIDIA NVENC）在对应厂商的适配器上实际初始化一次硬件编码器，成功的那块 GPU 的 LUID 被固定下来，并传给 Browser（见[渲染](rendering.md#gpu-适配器)）。
-2. auto 模式下允许 QSV→NVENC 回退，但如果显式给了只对 QSV 有意义的设置，回退就是语义错误，直接失败。
+2. auto 模式下允许 QSV→NVENC 回退，但如果显式给了只对 QSV 有意义的设置，回退就是语义错误，直接失败。后端只在这一步选定：`EncoderWorker` 拿到的总是已选定的 `qsv` 或 `nvenc`，自己不做回退。
 3. 没有可用硬件编码器时在启动 Browser 之前就报错，不退回软件编码。
 
 ## EncoderWorker：帧的所有权
@@ -34,7 +34,9 @@
 - 一个可替换的待处理输入 + 后端在途工作（受 async depth 约束，默认 1）。替换待处理输入只丢弃尚未提交的工作，不取消硬件已接受的工作。
 - 已接受的帧（排队 + 在途）最多 4 个，每帧同时持有一个 COM 引用和一个独立的 render-slot 租约。只保持 COM 纹理存活并不能阻止生产者覆盖它，所以租约必须单独持有。
 - SDK native buffer 的租约和硬件 worker 的租约是两份，各自释放。
-- 硬件 BUSY 时把同一个最早的任务推回队首。
+- 每个任务的 COM 引用、render-slot 租约和准入额度由任务自己持有，析构是唯一释放点。任务离开在途表之后才调用发布与完成回调，回调抛异常时任务照样释放；编码线程因异常退出时走与正常退出相同的收尾（Drain、清空排队与在途）。
+- 硬件 BUSY 时把同一个最早的任务推回队首，并记住它已经转换好的 NV12 输入：重试只重新提交，不重做 VPP、Signal 和 Fence 等待。没有在途工作可 Poll 时先等 5ms 再试。
+- 生命周期是一个存储的状态（stopped / running / paused / stopping / failed），不由多个标志推导；重新配置前排队与在途必须为空。
 - 速率更新等在途工作排空后再应用。码率为 0（暂停）会取消待应用的速率；恢复时请求 IDR，不重放暂停期间的旧速率。
 - 失败是粘滞的：worker 进入清理；无法证明完成的输入转入后端隔离区，而不是释放。
 - 计数分开记录：编码器 busy、待处理输入被替换、WebRTC 官方丢帧、硬件失败。只有一个笼统的"丢帧"计数无法定位瓶颈在哪一段。
@@ -46,6 +48,7 @@
 ### 会话与参数
 
 - oneVPL 2.17 dispatcher，按 adapter LUID 选择硬件 D3D11 实现（实测运行时 API 1.35），拒绝软件实现。`MFXVideoCORE_SetHandle` 安装真实的 D3D11 设备，外部分配器提供真实的纹理 MemId。
+- 初始化后用 `GetVideoParam` 回读，除帧率、颜色、LowPower 与 level 外还核对 `Width/Height/CropW/CropH` 等于请求值：VPP 与 NV12 池按请求尺寸创建，驱动若调整了几何，声明、纹理和上报尺寸就不再一致，所以直接配置失败。
 - H.264 constrained baseline：`GopRefDist=1`、`NumRefFrame=1`，无 B 帧、无 lookahead。
 - 生产默认：`TargetUsage=7`、`LowPower=ON`、VBR（TargetKbps / MaxKbps）。
 - VBV = max(目标, 最大码率) × 缓冲时长 / 8，再受 level 的 CPB 上限约束。
@@ -106,6 +109,7 @@ QSV 在编码器生命周期内不调用 `MFXVideoENCODE_Reset`：码率变化�
 - 参数：P1 / ultra-low-latency、baseline / CAVLC、无 B 帧和 lookahead、zero-reorder delay、重复 SPS/PPS、limited-range BT.709；目标用法 4、CBR。
 - 物理任务槽 ≥ max(4, async depth)，逻辑在途数仍受 async depth 限制。纹理注册、使用前 map、用后 unmap；事件完成之后才非阻塞读取码流。
 - 每个已接受任务和 EOS 有 5 秒完成期限。
+- 每个任务槽的完成事件分"已创建"和"已注册"两个阶段记录，清理只注销注册成功的事件，仅创建的只关闭句柄。初始化中途失败的回滚因此不会触发终态隔离，也不会把进程内的 NVENC 标成不可用。
 - **终态隔离**：完成状态未知时，把实际 DLL、设备、session、注册、任务、事件和保留的源租约全部隔离到进程结束；进程级最多允许 16 个这样的 session，终态失败后后端不再接受新会话。原因：`DestroyEncoder` 不是可靠的取消原语，对未 flush 的工作可能无界等待；在驱动状态未知时释放源租约会允许生产者覆盖仍在被读的纹理。`CanReleaseInputs` / `HoldInputsUntilProcessExit` 把这种终态所有权告诉 EncoderWorker。
 
 本机没有 NVIDIA 硬件，NVENC 的完成与隔离逻辑由注入式单元测试覆盖。
