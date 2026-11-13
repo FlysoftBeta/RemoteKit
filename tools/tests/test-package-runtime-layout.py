@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Package layout and installed-layout smoke contract checks without native runtimes."""
 import argparse
+import ast
+import ctypes
+from contextlib import ExitStack
+import msvcrt
+import subprocess
+from types import SimpleNamespace
 import importlib.util
 import json
 import os
@@ -10,7 +16,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
@@ -22,6 +28,127 @@ SCRATCH.mkdir(parents=True, exist_ok=True)
 
 
 class EndpointLayout(unittest.TestCase):
+    def test_process_identity_cleanup_and_etw_allowlist(self):
+        script = r"""param([string]$ResourceScript, [string]$EtwScript, [string]$CpuSource, [string]$CaseRoot)
+$ErrorActionPreference='Stop'
+$tokens=$null; $errors=$null
+$resource=[Management.Automation.Language.Parser]::ParseFile($ResourceScript,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw ($errors | Out-String)}
+$caseRoot=$CaseRoot
+$serviceRead=@($resource.EndBlock.Statements | Where-Object {$_.Extent.Text.StartsWith('$service=')})[0]
+Invoke-Expression $serviceRead.Extent.Text
+$serviceRoots=@{}
+function Get-CreationTime([int]$ProcessId) {return [long]($ProcessId*100)}
+$rootsLoop=@($resource.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.ForEachStatementAst] -and $_.Variable.Extent.Text -eq '$pair'})[0]
+Invoke-Expression $rootsLoop.Extent.Text
+if($serviceRoots[101].role -ne 'control-node' -or $serviceRoots[202].role -ne 'source-probe' -or $serviceRoots[101].created -ne 10100){throw 'Current service process contract was not read'}
+$remove=$resource.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Remove-Identity'},$true)[0]
+Invoke-Expression $remove.Extent.Text
+$known=@{11=@{createdFileTime=1};12=@{createdFileTime=2}}
+$previousCpu=@{11=9;12=10}
+$previousGpu=@{'pid_11_engine'=1;'pid_12_engine'=2;'pid_111_engine'=3}
+Remove-Identity 11
+if($known.ContainsKey(11) -or $previousCpu.ContainsKey(11) -or $previousGpu.ContainsKey('pid_11_engine')){throw 'Exited identity retained'}
+if(!$known.ContainsKey(12) -or !$previousCpu.ContainsKey(12) -or !$previousGpu.ContainsKey('pid_111_engine')){throw 'Other identity removed'}
+$etw=[Management.Automation.Language.Parser]::ParseFile($EtwScript,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw ($errors | Out-String)}
+$pipeline=$etw.FindAll({param($node) $node -is [Management.Automation.Language.PipelineAst] -and $node.Extent.Text.StartsWith('Get-CimInstance Win32_Process|Select-Object')},$true)[0]
+function Get-CimInstance { [pscustomobject]@{ProcessId=1;ParentProcessId=2;Name='test.exe';CreationDate='created';CommandLine='secret';ExecutablePath='private'} }
+$selected=Invoke-Expression ($pipeline.Extent.Text.Split('|')[0..1] -join '|')
+$names=@($selected.PSObject.Properties.Name | Sort-Object)
+if(($names -join ',') -ne 'CreationDate,Name,ParentProcessId,ProcessId'){throw 'ETW contains private process fields'}
+Add-Type -Path $CpuSource
+$cpu=[RemoteKitGpuCounters]::ReadCpu([int[]]@($PID))
+$self=Get-Process -Id $PID
+try {
+ if($cpu.Length -ne 1 -or $cpu[0].CreatedFileTime -ne $self.StartTime.ToUniversalTime().ToFileTimeUtc()){throw 'CPU sample lost process creation identity'}
+} finally {$self.Dispose()}
+
+"""
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            path = Path(temporary) / 'process-contract.ps1'
+            path.write_text(script, encoding='utf-8')
+            (Path(temporary) / 'service.json').write_text(json.dumps({'controlPid': 101, 'supervisorPid': 202}), encoding='utf-8')
+            subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-File', str(path),
+                            str(TOOLS / 'measure/watch-streaming-resources.ps1'),
+                            str(TOOLS / 'measure/streaming-etw.ps1'),
+                            str(TOOLS / 'measure/windows-gpu-counters.cs'), temporary], check=True, capture_output=True)
+
+    def test_browser_constructor_failure_releases_process_log_and_control(self):
+        source = TOOLS.parent / 'tests/integration/test-browser-shutdown-session-storage.py'
+        tree = ast.parse(source.read_text(encoding='utf-8'))
+        browser_class = next(node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name == 'Browser')
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            closed = []
+            process = Mock()
+            process.poll.return_value = None
+            def fail_connect(read, label):
+                instance.handle.value = 23
+                raise TimeoutError('injected connection timeout')
+            namespace = dict(ExitStack=ExitStack, c=ctypes, run=Path(temporary),
+                             browser_path=Path('browser.exe'), os=os, msvcrt=msvcrt, key=b'key',
+                             uuid=__import__('uuid'), subprocess=subprocess, wait_for=fail_connect,
+                             sdk=SimpleNamespace(remotekit_sdk_control_close=lambda handle: closed.append(handle.value)))
+            exec(compile(ast.Module(body=[browser_class], type_ignores=[]), str(source), 'exec'), namespace)
+            instance = namespace['Browser'].__new__(namespace['Browser'])
+            with patch.object(subprocess, 'Popen', return_value=process):
+                with self.assertRaisesRegex(TimeoutError, 'injected connection timeout'):
+                    instance.__init__('failed')
+            self.assertEqual(closed, [23])
+            process.kill.assert_called_once()
+            process.wait.assert_called_once()
+            self.assertTrue(instance.log.closed)
+
+    def test_control_freshness_includes_build_entry_inputs(self):
+        inputs = ['control/index.html', 'control/vite.config.ts', 'control/package.json',
+                  'control/package-lock.json', 'tools/build-control-server.mjs']
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            root = Path(temporary)
+            for name in inputs + ['control/client/main.ts', 'control/server/main.ts', 'control/shared/main.ts']:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('source')
+                os.utime(path, ns=(1000000000, 1000000000))
+            for name in ['server.mjs', 'recover-credentials.mjs', 'client/index.html', 'runtime/manifest.json']:
+                path = root / 'control/dist' / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('artifact')
+                os.utime(path, ns=(2000000000, 2000000000))
+            with patch.object(packager, 'ROOT', root):
+                packager.check_control_freshness()
+                for name in inputs:
+                    path = root / name
+                    os.utime(path, ns=(3000000000, 3000000000))
+                    with self.assertRaisesRegex(RuntimeError, 'Stale Control'):
+                        packager.check_control_freshness()
+                    os.utime(path, ns=(1000000000, 1000000000))
+
+    def test_sdk_export_replaces_destination_after_complete_staging(self):
+        spec = importlib.util.spec_from_file_location('export_sdk', TOOLS / 'export-sdk.py')
+        exporter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(exporter)
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            root = Path(temporary)
+            output = root / 'out'
+            output.mkdir()
+            for name in ['remotekit_sdk.dll', 'remotekit_sdk.lib', 'args.gn', 'current.dll']:
+                (output / name).write_bytes(b'fixture')
+            (output / 'remotekit_sdk.runtime_deps').write_text('current.dll\n')
+            destination = root / 'sdk'
+            (destination / 'bin').mkdir(parents=True)
+            (destination / 'bin/stale.dll').write_bytes(b'previous')
+            argv = ['export-sdk.py', '--out', str(output), '--destination', str(destination)]
+            with patch.object(sys, 'argv', argv), patch.object(exporter, 'build_metadata', return_value={}):
+                with patch.object(exporter.shutil, 'copy2', side_effect=OSError('copy failed')):
+                    with self.assertRaisesRegex(OSError, 'copy failed'):
+                        exporter.main()
+                self.assertEqual((destination / 'bin/stale.dll').read_bytes(), b'previous')
+                exporter.main()
+                self.assertFalse((destination / 'bin/stale.dll').exists())
+                self.assertTrue((destination / 'bin/current.dll').is_file())
+                self.assertTrue((destination / 'manifest.json').is_file())
+                self.assertEqual({path.name for path in root.iterdir()}, {'out', 'sdk'})
+
     def test_version_tree_and_payload(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
             root = Path(temporary)

@@ -1,3 +1,4 @@
+import { runCleanups } from './cleanup.mjs';
 import { createControlConfig } from '../../config-fixture.mjs';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -229,31 +230,39 @@ export async function startStack({
     return child;
   }
   let provider;
-  let stopped = false;
+  let stopTask;
   const onExit = () => {
     children.toReversed().forEach(stopTree);
     unlinkSync(runtimeRoot);
   };
   process.once('exit', onExit);
-  async function stop() {
-    if (stopped) return;
-    stopped = true;
-    process.removeListener('exit', onExit);
-    for (const child of children.toReversed()) {
-      if (child.connected) child.disconnect();
-      if (child.exitCode === null) {
-        await Promise.race([new Promise((done) => child.once('exit', done)), pause(8000)]);
-        stopTree(child);
-        if (child.exitCode === null)
-          await Promise.race([new Promise((done) => child.once('exit', done)), pause(10000)]);
-      }
-    }
-    for (const server of servers) {
-      server.closeAllConnections();
-      await promisify(server.close.bind(server))();
-    }
-    await provider?.close();
-    unlinkSync(runtimeRoot);
+  function stop() {
+    stopTask ??= runCleanups([
+      ...children.toReversed().map(
+        (child) => () =>
+          runCleanups([
+            () => {
+              if (child.connected) child.disconnect();
+            },
+            async () => {
+              if (child.exitCode === null) {
+                await Promise.race([new Promise((done) => child.once('exit', done)), pause(8000)]);
+                stopTree(child);
+                if (child.exitCode === null)
+                  await Promise.race([new Promise((done) => child.once('exit', done)), pause(10000)]);
+              }
+            },
+          ]),
+      ),
+      ...servers.map(
+        (server) => () =>
+          runCleanups([() => server.closeAllConnections(), () => promisify(server.close.bind(server))()]),
+      ),
+      () => provider?.close(),
+      () => unlinkSync(runtimeRoot),
+      () => process.removeListener('exit', onExit),
+    ]);
+    return stopTask;
   }
   try {
     if (learning) {

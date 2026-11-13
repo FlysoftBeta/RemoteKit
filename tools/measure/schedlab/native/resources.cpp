@@ -13,6 +13,12 @@ void CheckPdh(PDH_STATUS status, const char* operation) {
   if (status != ERROR_SUCCESS)
     throw std::runtime_error(std::string(operation) + " PDH status " + std::to_string(status));
 }
+uint64_t CreationTime(HANDLE process) {
+  FILETIME created{}, exited{}, kernel{}, user{};
+  if (!GetProcessTimes(process, &created, &exited, &kernel, &user))
+    return 0;
+  return (uint64_t(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+}
 double CpuSeconds(HANDLE process) {
   FILETIME created{}, exited{}, kernel{}, user{};
   if (!GetProcessTimes(process, &created, &exited, &kernel, &user))
@@ -57,7 +63,14 @@ Resources::~Resources() {
 }
 void Resources::AddRoot(std::string group, DWORD pid) {
   std::lock_guard lock(mutex_);
-  roots_[pid] = std::move(group);
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!process)
+    throw std::runtime_error("Cannot open resource root");
+  const auto created = CreationTime(process);
+  CloseHandle(process);
+  if (!created)
+    throw std::runtime_error("Cannot identify resource root");
+  roots_[pid] = {std::move(group), created};
 }
 nlohmann::json Resources::Sample() {
   const double now = EpochMs();
@@ -72,22 +85,51 @@ nlohmann::json Resources::Sample() {
     }
     CloseHandle(snapshot);
   }
-  std::map<DWORD, std::string> roots;
+  std::map<DWORD, Root> roots;
   {
     std::lock_guard lock(mutex_);
+    for (auto it = roots_.begin(); it != roots_.end();) {
+      HANDLE process =
+          OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, it->first);
+      const bool same = process && CreationTime(process) == it->second.created &&
+                        WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+      if (process)
+        CloseHandle(process);
+      if (!same)
+        it = roots_.erase(it);
+      else
+        ++it;
+    }
     roots = roots_;
+  }
+  for (auto it = processes_.begin(); it != processes_.end();) {
+    if (WaitForSingleObject(it->second.handle, 0) != WAIT_TIMEOUT) {
+      groups_.erase(it->first);
+      CloseHandle(it->second.handle);
+      it = processes_.erase(it);
+    } else {
+      ++it;
+    }
   }
   for (auto& [pid, parent] : parents) {
     DWORD ancestor = pid;
     for (int depth = 0; depth < 20; ++depth) {
       if (roots.contains(ancestor)) {
-        const std::string group = roots.at(ancestor);
-        groups_[pid] = group;
+        const std::string group = roots.at(ancestor).group;
         if (!processes_.contains(pid)) {
-          HANDLE handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-          if (handle) {
+          HANDLE handle =
+              OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | SYNCHRONIZE, FALSE, pid);
+          if (handle && WaitForSingleObject(handle, 0) == WAIT_TIMEOUT) {
+            const auto created = CreationTime(handle);
+            if (created < roots.at(ancestor).created) {
+              CloseHandle(handle);
+              break;
+            }
+            groups_[pid] = group;
             const bool gpu = CommandLine(handle).find(L"--type=gpu-process") != std::wstring::npos;
-            processes_[pid] = {handle, CpuSeconds(handle), gpu ? group + "/gpu" : group};
+            processes_[pid] = {handle, created, CpuSeconds(handle), gpu ? group + "/gpu" : group};
+          } else if (handle) {
+            CloseHandle(handle);
           }
         }
         break;
@@ -106,6 +148,7 @@ nlohmann::json Resources::Sample() {
     GetProcessMemoryInfo(process.handle, reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),
                          sizeof(memory));
     cpu.push_back({{"pid", pid},
+                   {"createdFileTime", process.created},
                    {"privateBytes", memory.PrivateUsage},
                    {"workingSetBytes", memory.WorkingSetSize},
                    {"group", process.group},

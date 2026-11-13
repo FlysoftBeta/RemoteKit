@@ -59,6 +59,9 @@ def check_control_freshness():
         for file in (control / tree).rglob('*')
         if file.is_file()
     ]
+    sources.extend(control / name for name in (
+        'index.html', 'vite.config.ts', 'package.json', 'package-lock.json'))
+    sources.append(ROOT / 'tools/build-control-server.mjs')
     newest = max(sources, key=lambda file: file.stat().st_mtime_ns)
     for relative in (
         'server.mjs',

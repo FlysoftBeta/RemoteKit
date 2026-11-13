@@ -33,7 +33,7 @@ try {
   $rkOwned=$true
   Add-Anchor 'start-after'
   $rkTimer=[Diagnostics.Stopwatch]::StartNew()
-  Get-CimInstance Win32_Process|Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $rkCase 'etw-processes.json')
+  Get-CimInstance Win32_Process|Select-Object ProcessId,ParentProcessId,Name,CreationDate|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $rkCase 'etw-processes.json')
   $rkRemaining=[int]($DurationSeconds*1000-$rkTimer.Elapsed.TotalMilliseconds)
   if($rkRemaining -gt 0){Start-Sleep -Milliseconds $rkRemaining}
 } finally {

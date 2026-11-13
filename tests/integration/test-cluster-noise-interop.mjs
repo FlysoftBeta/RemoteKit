@@ -1,3 +1,5 @@
+import { runCleanups } from '../e2e/kit/cleanup.mjs';
+import { observeChildExit } from '../../tools/child-process.mjs';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -295,11 +297,12 @@ async function childTest(executable, mode) {
   child.stderr.on('data', (b) => {
     stderr += b;
   });
-  const exited = new Promise((resolve) => child.once('exit', resolve));
+  const { exited, wait } = observeChildExit(child, () => stderr);
   const transport = pipeTransport(child);
   try {
     let state;
-    if (mode === 'initiator') state = await accept(transport, Buffer.alloc(32, 7), { type: 'node.ready' });
+    if (mode === 'initiator')
+      state = await wait(accept(transport, Buffer.alloc(32, 7), { type: 'node.ready' }));
     else {
       const noise = new Noise(true, Buffer.alloc(32, 6), publicKey(Buffer.alloc(32, 7)));
       transport.send(
@@ -315,13 +318,14 @@ async function childTest(executable, mode) {
           ),
         ),
       );
-      assert.equal(JSON.parse(noise.read(await transport.next())).type, 'node.ready');
+      assert.equal(JSON.parse(noise.read(await wait(transport.next()))).type, 'node.ready');
       state = noise.split();
     }
-    await exercise(transport, state, mode === 'initiator');
-    assert.equal(await exited, 0, stderr);
+    await wait(exercise(transport, state, mode === 'initiator'));
+    assert.equal((await exited).code, 0, stderr);
   } finally {
     child.kill();
+    await exited;
   }
 }
 async function webSocketTest(executable) {
@@ -349,14 +353,17 @@ async function webSocketTest(executable) {
   child.stderr.on('data', (b) => {
     stderr += b;
   });
-  const exited = new Promise((resolve) => child.once('exit', resolve));
+  const { exited, wait } = observeChildExit(child, () => stderr);
   try {
-    await work;
-    assert.equal(await exited, 0, stderr);
+    await wait(work);
+    assert.equal((await exited).code, 0, stderr);
   } finally {
-    child.kill();
-    for (const socket of server.clients) socket.terminate();
-    await new Promise((resolve) => server.close(resolve));
+    await runCleanups([
+      () => child.kill(),
+      () => exited,
+      ...[...server.clients].map((socket) => () => socket.terminate()),
+      () => new Promise((resolve) => server.close(resolve)),
+    ]);
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

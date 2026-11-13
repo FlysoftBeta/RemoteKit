@@ -35,12 +35,12 @@ export function compare(directories) {
   const n = (value) => (Number.isFinite(value) ? value.toFixed(2) : '-');
   for (let i = 0; i < groups.length; ++i) {
     for (const { summary } of groups[i]) {
-      const baseline =
-        groups[0].find((row) => key(row.summary) === key(summary))?.summary ??
-        (groups[0].length === 1 ? groups[0][0].summary : null);
+      const baseline = groups[0].find((row) => key(row.summary) === key(summary))?.summary;
+      if (!summary.case || !baseline)
+        throw Error(`No matching baseline for ${summary.label}: ${key(summary)}`);
       for (const [name, metric] of Object.entries(metrics)) {
         const value = metric(summary.aggregate),
-          before = baseline ? metric(baseline.aggregate) : null;
+          before = metric(baseline.aggregate);
         const delta = Number.isFinite(value) && Number.isFinite(before) ? value - before : null;
         lines.push(
           `| ${basename(directories[i])} | ${summary.label} | ${name} | ${n(value)} | ${n(delta)} | ${n(delta !== null && before ? (delta / before) * 100 : null)} |`,

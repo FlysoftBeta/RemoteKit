@@ -12,6 +12,32 @@ $output=Join-Path $caseRoot 'resource-samples.jsonl'
 $stopFile=Join-Path $caseRoot 'resource.stop'
 $logicalCpus=[Environment]::ProcessorCount
 $known=@{}; $previousCpu=@{}; $previousGpu=@{}; $receiverRootId=$ReceiverPid
+function Get-CreationTime([int]$ProcessId) {
+ $process=Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+ if(!$process){return $null}
+ try {
+  return $process.StartTime.ToUniversalTime().ToFileTimeUtc()
+ } catch {
+  return $null
+ } finally {
+  $process.Dispose()
+ }
+}
+$receiverCreated=Get-CreationTime $ReceiverPid
+$service=Get-Content -LiteralPath (Join-Path $caseRoot 'service.json') -Raw|ConvertFrom-Json
+$serviceRoots=@{}
+foreach($pair in @(@('controlPid','control-node'),@('supervisorPid','source-probe'))) {
+ $id=[int]$service.($pair[0])
+ $created=Get-CreationTime $id
+ if($null -ne $created){$serviceRoots[$id]=@{role=$pair[1];created=$created}}
+}
+function Remove-Identity([int]$ProcessId) {
+ [void]$known.Remove($ProcessId)
+ [void]$previousCpu.Remove($ProcessId)
+ foreach($instance in @($previousGpu.Keys)) {
+  if($instance.StartsWith("pid_${ProcessId}_")){[void]$previousGpu.Remove($instance)}
+ }
+}
 $inventoryAt=-10000; $clock=[Diagnostics.Stopwatch]::StartNew()
 $receiverPath=[IO.Path]::GetFullPath($Viewer.Replace('/','\'))
 $receiverName=[IO.Path]::GetFileName($receiverPath)
@@ -32,7 +58,7 @@ try {
    $roles=@{}
    foreach($process in $inventory) {
     if($process.Name -eq 'endpoint_service.exe' -and $process.CommandLine -and $process.CommandLine.Contains($caseRoot)){$roles[[int]$process.ProcessId]='endpoint'}
-    if($receiverRootId -and $process.ProcessId -eq $receiverRootId){$roles[[int]$process.ProcessId]='receiver-browser'}
+    if($receiverRootId -and $process.ProcessId -eq $receiverRootId -and (Get-CreationTime $receiverRootId) -eq $receiverCreated){$roles[[int]$process.ProcessId]='receiver-browser'}
    }
    for($pass=0;$pass -lt 8;$pass++) {
     foreach($process in $inventory) {
@@ -43,22 +69,38 @@ try {
      $roles[$id]="$prefix-$type"
     }
    }
+   $observed=@{}
    foreach($process in $inventory) {
-    $id=[int]$process.ProcessId;if(!$roles.ContainsKey($id)){continue}
+    $id=[int]$process.ProcessId
+    if(!$roles.ContainsKey($id)){continue}
+    $created=Get-CreationTime $id
+    if($null -eq $created){continue}
     $flags=@([regex]::Matches([string]$process.CommandLine,'--(?:use-angle|use-gl)=[^\s]+|--disable-gpu(?:\s|$)|--(?:enable|disable)-features=[^\s"]+')|ForEach-Object{$_.Value.Trim()})
-    $known[$id]=@{pid=$id;parentPid=[int]$process.ParentProcessId;role=$roles[$id];name=$process.Name;flags=$flags;createdUtc=$process.CreationDate.ToUniversalTime().ToString('o')}
+    $observed[$id]=@{pid=$id;parentPid=[int]$process.ParentProcessId;role=$roles[$id];name=$process.Name;flags=$flags;createdFileTime=$created}
    }
-   $saved=Get-Content -LiteralPath (Join-Path $caseRoot 'pids.json') -Raw|ConvertFrom-Json
-   foreach($pair in @(@('control_pid','control-node'),@('source_pid','source-probe'))) {
-    $id=[int]$saved.($pair[0]);if($id){$known[$id]=@{pid=$id;role=$pair[1];name='node.exe'}}
+   foreach($id in @($serviceRoots.Keys)) {
+    $created=Get-CreationTime $id
+    if($null -eq $created){$serviceRoots.Remove($id);continue}
+    if($created -ne $serviceRoots[$id].created){$serviceRoots.Remove($id);continue}
+    $observed[$id]=@{pid=$id;role=$serviceRoots[$id].role;name='node.exe';createdFileTime=$created}
    }
-   $known[$PID]=@{pid=$PID;role='resource-probe';name='powershell.exe'}
+   $observed[$PID]=@{pid=$PID;role='resource-probe';name='powershell.exe';createdFileTime=$self.StartTime.ToUniversalTime().ToFileTimeUtc()}
+   foreach($id in @($known.Keys)) {
+    if(!$observed.ContainsKey($id) -or $observed[$id].createdFileTime -ne $known[$id].createdFileTime){Remove-Identity $id}
+   }
+   $known=$observed
    @{kind='owned-process-inventory';receiverRootPid=$receiverRootId;logicalCpus=$logicalCpus;processes=@($known.Values)}|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $caseRoot 'resource-processes.json') -Encoding UTF8
   }
   $cpu=[Collections.Generic.List[object]]::new()
   $cpuStarted=$cycle.Elapsed.TotalMilliseconds
-  foreach($process in [RemoteKitGpuCounters]::ReadCpu([int[]]@($known.Keys))) {
+  $liveCpu=@{}
+  foreach($sample in [RemoteKitGpuCounters]::ReadCpu([int[]]@($known.Keys))){$liveCpu[$sample.Pid]=$sample}
+  foreach($id in @($known.Keys)) {
+   if(!$liveCpu.ContainsKey($id) -or $liveCpu[$id].CreatedFileTime -ne $known[$id].createdFileTime){Remove-Identity $id}
+  }
+  foreach($process in $liveCpu.Values) {
    $id=$process.Pid
+   if(!$known.ContainsKey($id)){continue}
    try {
     $seconds=$process.Seconds;$now=$clock.Elapsed.TotalSeconds;$cores=$null
     if($previousCpu.ContainsKey($id)){$elapsed=$now-$previousCpu[$id].at;if($elapsed -gt 0 -and $seconds -ge $previousCpu[$id].cpu){$cores=($seconds-$previousCpu[$id].cpu)/$elapsed}}
@@ -111,4 +153,4 @@ try {
   $writer.WriteLine((@{kind='resource-sample';gpuProvider=$GpuProvider;wallTimeMs=$wall;elapsedMs=$clock.ElapsedMilliseconds;collectionMs=$cycle.Elapsed.TotalMilliseconds;cpuCollectionMs=$cpuMs;gpuCollectionMs=($cycle.Elapsed.TotalMilliseconds-$gpuStarted);logicalCpus=$logicalCpus;collectorCpuCores=$selfCores;cpu=@($cpu);gpu=@($ownedGpu);unownedGpu=@($unownedGpu);engines=@($engines.Values);gpuError=$gpuError}|ConvertTo-Json -Depth 6 -Compress))
   $delay=$IntervalMs-$cycle.ElapsedMilliseconds;if($delay -gt 0){Start-Sleep -Milliseconds $delay}
  }
-}finally{$writer.Dispose();if($pdh){$pdh.Dispose()}}
+}finally{$writer.Dispose();if($pdh){$pdh.Dispose()};$self.Dispose()}

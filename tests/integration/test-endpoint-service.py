@@ -21,7 +21,6 @@ def main():
     parser.add_argument("--tenants", type=int, default=1)
     parser.add_argument("--recovery", action="store_true")
     parser.add_argument("--snapshot-lifecycle", action="store_true")
-    parser.add_argument("--device-info", action="store_true")
     args = parser.parse_args()
     run = args.work_dir.resolve()/uuid.uuid4().hex[:12]
     run.mkdir(parents=True)

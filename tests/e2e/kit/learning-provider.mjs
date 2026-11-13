@@ -1,3 +1,4 @@
+import { ResourceScope, runCleanups } from './cleanup.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createCipheriv, createHash, createPublicKey } from 'node:crypto';
@@ -352,79 +353,104 @@ window.initGeetest4 = (options, done) => {
       res.writeHead(500).end(String(error));
     }
   }
-  const http = createServer(handler);
-  await new Promise((done) => http.listen(httpPort, '127.0.0.1', done));
-  const origin = 'http://127.0.0.1:' + http.address().port;
-  const keyPath = join(run, 'provider.key');
-  const certPath = join(run, 'provider.crt');
-  execFileSync(
-    'openssl',
-    [
-      'req',
-      '-x509',
-      '-newkey',
-      'rsa:2048',
-      '-nodes',
-      '-keyout',
-      keyPath,
-      '-out',
-      certPath,
-      '-days',
-      '1',
-      '-subj',
-      '/CN=www.xinjiaoyu.com',
-    ],
-    { windowsHide: true, stdio: 'pipe' },
-  );
-  const key = await readFile(keyPath);
-  const cert = await readFile(certPath);
-  const pin = createHash('sha256')
-    .update(createPublicKey(key).export({ type: 'spki', format: 'der' }))
-    .digest('base64');
-  const tls = createTlsServer({ key, cert }, handler);
-  await new Promise((done) => tls.listen(tlsPort, '127.0.0.1', done));
-  const bin = join(run, 'browser-launcher');
-  await mkdir(bin);
-  for (const name of await readdir(resolve(browser, '..')))
-    if (name.endsWith('.dll')) await link(join(resolve(browser, '..'), name), join(bin, name));
-  const launcher = join(bin, 'learning-browser.exe');
-  const setup = 'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\VsDevCmd.bat';
-  const script = join(run, 'compile-launcher.cmd');
-  await writeFile(
-    script,
-    `@echo off\r\ncall "${setup}" -arch=x64 -host_arch=x64 >nul\r\ncl /nologo /std:c++20 /EHsc /O2 "${join(root, 'tests/e2e/kit/learning-browser-launcher.cpp')}" /Fo"${join(bin, 'launcher.obj')}" /Fe"${launcher}"\r\n`,
-  );
-  execFileSync('cmd.exe', ['/d', '/c', script], { windowsHide: true, stdio: 'pipe' });
-  return {
-    origin,
-    requests,
-    events,
-    sessions,
-    launcher,
-    env: {
-      NODE_ENV: 'test',
-      REMOTEKIT_TEST_BROWSER: resolve(browser),
-      REMOTEKIT_TEST_LEARNING_PORT: String(tls.address().port),
-      REMOTEKIT_TEST_LEARNING_CERT_PIN: pin,
-      REMOTEKIT_TEST_LEARNING_ENDPOINTS: JSON.stringify(
-        Object.fromEntries(
-          [
-            'https://open.changyan.com',
-            'https://xktptapi.changyan.com',
-            'https://www.zhixue.com',
-            'https://mhw.zhixue.com',
-            'https://www.xinjiaoyu.com',
-            'https://cdn.example',
-          ].map((url) => [url, origin]),
+  const resources = new ResourceScope();
+  const closeServer = (server) =>
+    runCleanups([
+      () => server.closeAllConnections(),
+      () =>
+        server.listening &&
+        new Promise((done, reject) => server.close((error) => (error ? reject(error) : done()))),
+    ]);
+  try {
+    const http = createServer(handler);
+    resources.defer(() => closeServer(http));
+    await new Promise((done, reject) => {
+      http.once('error', reject);
+      http.listen(httpPort, '127.0.0.1', done);
+    });
+    const origin = 'http://127.0.0.1:' + http.address().port;
+    const keyPath = join(run, 'provider.key');
+    const certPath = join(run, 'provider.crt');
+    execFileSync(
+      'openssl',
+      [
+        'req',
+        '-x509',
+        '-newkey',
+        'rsa:2048',
+        '-nodes',
+        '-keyout',
+        keyPath,
+        '-out',
+        certPath,
+        '-days',
+        '1',
+        '-subj',
+        '/CN=www.xinjiaoyu.com',
+      ],
+      { windowsHide: true, stdio: 'pipe' },
+    );
+    const key = await readFile(keyPath);
+    const cert = await readFile(certPath);
+    const pin = createHash('sha256')
+      .update(createPublicKey(key).export({ type: 'spki', format: 'der' }))
+      .digest('base64');
+    const tls = createTlsServer({ key, cert }, handler);
+    resources.defer(() => closeServer(tls));
+    await new Promise((done, reject) => {
+      tls.once('error', reject);
+      tls.listen(tlsPort, '127.0.0.1', done);
+    });
+    const bin = join(run, 'browser-launcher');
+    await mkdir(bin);
+    for (const name of await readdir(resolve(browser, '..')))
+      if (name.endsWith('.dll')) await link(join(resolve(browser, '..'), name), join(bin, name));
+    const launcher = join(bin, 'learning-browser.exe');
+    const setup = 'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\VsDevCmd.bat';
+    const script = join(run, 'compile-launcher.cmd');
+    await writeFile(
+      script,
+      `@echo off\r\ncall "${setup}" -arch=x64 -host_arch=x64 >nul\r\ncl /nologo /std:c++20 /EHsc /O2 "${join(root, 'tests/e2e/kit/learning-browser-launcher.cpp')}" /Fo"${join(bin, 'launcher.obj')}" /Fe"${launcher}"\r\n`,
+    );
+    execFileSync('cmd.exe', ['/d', '/c', script], { windowsHide: true, stdio: 'pipe' });
+    return {
+      origin,
+      requests,
+      events,
+      sessions,
+      launcher,
+      env: {
+        NODE_ENV: 'test',
+        REMOTEKIT_TEST_BROWSER: resolve(browser),
+        REMOTEKIT_TEST_LEARNING_PORT: String(tls.address().port),
+        REMOTEKIT_TEST_LEARNING_CERT_PIN: pin,
+        REMOTEKIT_TEST_LEARNING_ENDPOINTS: JSON.stringify(
+          Object.fromEntries(
+            [
+              'https://open.changyan.com',
+              'https://xktptapi.changyan.com',
+              'https://www.zhixue.com',
+              'https://mhw.zhixue.com',
+              'https://www.xinjiaoyu.com',
+              'https://cdn.example',
+            ].map((url) => [url, origin]),
+          ),
         ),
-      ),
-    },
-    async close() {
-      http.closeAllConnections();
-      tls.closeAllConnections();
-      await Promise.all([new Promise((done) => http.close(done)), new Promise((done) => tls.close(done))]);
-      await writeFile(join(run, 'provider-requests.json'), JSON.stringify(requests, null, 2));
-      await writeFile(join(run, 'provider-events.json'), JSON.stringify(events, null, 2));
-    },
-  };
+      },
+      async close() {
+        await runCleanups([
+          () => resources.close(),
+          () => writeFile(join(run, 'provider-requests.json'), JSON.stringify(requests, null, 2)),
+          () => writeFile(join(run, 'provider-events.json'), JSON.stringify(events, null, 2)),
+        ]);
+      },
+    };
+  } catch (error) {
+    try {
+      await resources.close();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Provider startup failed');
+    }
+    throw error;
+  }
 }

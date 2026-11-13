@@ -41,7 +41,7 @@ class PatchsetTests(unittest.TestCase):
         subprocess.run(["git", *args], cwd=self.root, check=True, capture_output=True)
 
     def manifest(self, entries):
-        patchset.MANIFEST.write_text(json.dumps({"schema_version": 1, "patches": entries}), encoding="utf-8")
+        patchset.MANIFEST.write_text(json.dumps({"schema_version": 1, "base_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root, text=True).strip(), "patches": entries}), encoding="utf-8")
 
     def run_tool(self, command, *args):
         out, err = io.StringIO(), io.StringIO()
@@ -151,6 +151,20 @@ class PatchsetTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("record file must be relative", error)
 
+    def test_rejects_wrong_baseline_and_unknown_fields(self):
+        original = json.loads(patchset.MANIFEST.read_text())
+        for command in ("status", "apply", "revert"):
+            patchset.MANIFEST.write_text(json.dumps({**original, "base_revision": "0" * 40}))
+            code, _, error = self.run_tool(command)
+            self.assertEqual(code, 1)
+            self.assertIn("differs from base_revision", error)
+            self.assertEqual((self.root / "file.txt").read_text(), "original\n")
+        for invalid in ({**original, "schema_version": True},
+                        {**original, "extra": 1},
+                        {**original, "patches": [{**self.entry, "extra": 1}]}):
+            patchset.MANIFEST.write_text(json.dumps(invalid))
+            self.assertEqual(self.run_tool("apply")[0], 1)
+
     def test_empty_series(self):
         self.manifest([])
         for command in ("status", "apply", "revert"):
@@ -160,6 +174,7 @@ class PatchsetTests(unittest.TestCase):
         (self.root / "new.txt").write_text("before\n", encoding="utf-8")
         self.git("add", "new.txt")
         self.git("commit", "-qm", "second file")
+        self.manifest([self.entry])
         self.assertEqual(self.run_tool("apply")[0], 0)
         (self.root / "new.txt").write_text("after\n", encoding="utf-8")
         self.assertEqual(self.run_tool("record", "--id", "two", "--file", "new.txt")[0], 0)

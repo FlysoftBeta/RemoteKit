@@ -115,10 +115,13 @@ try {
       const box = await canvas.boundingBox();
       await page.mouse.click(box.x + 70, box.y + 200);
       await page.keyboard.type('Desktop' + index, { delay: 70 });
-      await page.waitForTimeout(400);
-      const events = await (await fetch(stack.fixture + '/events')).json();
-      const value =
-        events.filter((event) => event.path === path && event.type === 'note').at(-1)?.value ?? '';
+      const expected = 'Desktop' + index;
+      let value = '';
+      await until(async () => {
+        const events = await (await fetch(stack.fixture + '/events')).json();
+        value = events.filter((event) => event.path === path && event.type === 'note').at(-1)?.value ?? '';
+        return value === expected;
+      }, `Fixture did not report ${expected}`);
       results.push({ expected: 'Desktop' + index, value });
     }
     writeFileSync(join(out, 'typing.json'), JSON.stringify(results, null, 2));

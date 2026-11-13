@@ -335,3 +335,28 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   while (processAlive(Number(pid))) await pause(1000);
   await cleanupRun(run, { runId });
 }
+
+export async function runCleanups(actions) {
+  const errors = [];
+  for (const action of actions) {
+    try {
+      await action();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length) throw new AggregateError(errors, 'Resource cleanup failed');
+}
+
+export class ResourceScope {
+  actions = [];
+
+  defer(action) {
+    this.actions.push(action);
+  }
+
+  async close() {
+    const actions = this.actions.splice(0).reverse();
+    await runCleanups(actions);
+  }
+}

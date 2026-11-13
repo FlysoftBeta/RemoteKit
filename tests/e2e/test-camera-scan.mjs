@@ -1,3 +1,4 @@
+import { runCleanups } from './kit/cleanup.mjs';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { cameraFixtures } from './kit/fixtures.mjs';
@@ -399,9 +400,11 @@ try {
   );
   throw error;
 } finally {
-  await saveRPCs();
-  await writeFile(join(run, 'photo-rpcs.json'), JSON.stringify(rpcEvidence, null, 2));
-  await writeFile(join(run, 'fixture-events.json'), JSON.stringify(events, null, 2));
-  await chrome?.close();
-  await stack.stop();
+  await runCleanups([
+    () => saveRPCs(),
+    () => chrome?.close(),
+    () => stack.stop(),
+    () => writeFile(join(run, 'photo-rpcs.json'), JSON.stringify(rpcEvidence, null, 2)),
+    () => writeFile(join(run, 'fixture-events.json'), JSON.stringify(events, null, 2)),
+  ]);
 }

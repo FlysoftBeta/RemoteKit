@@ -2,17 +2,16 @@
 """Provision Windows x64 Endpoint imaging libraries and inference models."""
 
 import argparse
-import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+from fetch_common import digest, download, verify
 import shutil
 import subprocess
 import sys
 import tempfile
 import tarfile
-import urllib.request
 import zipfile
 
 TOOLS = Path(__file__).resolve().parent
@@ -21,30 +20,6 @@ DEPS = TOOLS.parent / "build" / "dependencies" / "face-auth"
 MODELS = DEPS / "models"
 CACHE = DEPS / "cache"
 CONFIG = json.loads(MANIFEST.read_text(encoding="utf-8"))
-
-
-def digest(path):
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-def verify(path, expected):
-    if not path.is_file() or digest(path) != expected:
-        raise RuntimeError(f"Missing file or SHA-256 mismatch: {path}")
-
-
-def download(url, destination, expected):
-    if destination.is_file() and digest(destination) == expected:
-        return
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    partial = destination.with_name(destination.name + ".partial")
-    try:
-        with urllib.request.urlopen(url, timeout=90) as source, partial.open("wb") as output:
-            shutil.copyfileobj(source, output)
-        verify(partial, expected)
-        partial.replace(destination)
-    finally:
-        partial.unlink(missing_ok=True)
 
 
 def runtime_files():

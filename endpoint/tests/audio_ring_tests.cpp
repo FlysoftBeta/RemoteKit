@@ -1,14 +1,17 @@
 #include "../src/media/audio_ring.hpp"
 #include "protocol/audio_timeline.h"
 #include <atomic>
+#include <barrier>
 #include <iostream>
 #include <memory>
 #include <thread>
 #include <stdexcept>
+#include <source_location>
 using namespace remotekit;
-void Require(bool condition) {
+void Require(bool condition,
+             const std::source_location location = std::source_location::current()) {
   if (!condition)
-    throw std::runtime_error("audio ring assertion");
+    throw std::runtime_error("audio ring assertion at line " + std::to_string(location.line()));
 }
 AudioPacket Packet(uint64_t sequence) {
   AudioPacket packet{};
@@ -25,7 +28,39 @@ void Check(const AudioPacket& packet) {
   for (const auto sample : packet.pcm)
     Require(sample == static_cast<int16_t>(packet.sequence % 30000));
 }
+uint64_t CheckConcurrentReads() {
+  auto ring = std::make_unique<SharedAudio>();
+  AudioPacket copy{};
+  // Concurrent writer is deliberately much faster than a media clock. A
+  // reader may miss blocks but must never accept a torn payload/header.
+  std::atomic<bool> done{false};
+  std::barrier first_read(2);
+  std::jthread producer([&] {
+    PublishAudio(ring.get(), Packet(10));
+    first_read.arrive_and_wait();
+    for (uint64_t i = 11; i < 100000; ++i)
+      PublishAudio(ring.get(), Packet(i));
+    done = true;
+  });
+  uint64_t reads = 0;
+  while (!ReadAudio(ring.get(), 10, copy))
+    std::this_thread::yield();
+  first_read.arrive_and_wait();
+  Check(copy);
+  ++reads;
+  while (!done.load()) {
+    const auto sequence = AudioPublished(ring.get());
+    if (ReadAudio(ring.get(), sequence, copy)) {
+      Check(copy);
+      ++reads;
+    }
+  }
+  producer.join();
+  Require(reads > 0);
+  return reads;
+}
 int main() try {
+  const auto reads = CheckConcurrentReads();
   AudioTimeline timeline;
   Require(timeline.Plan(1, 1, 0, 1000, true).step == AudioStep::start);
   timeline.Commit(1, 1, 0, 1000);
@@ -52,24 +87,6 @@ int main() try {
   Require(!ReadAudio(ring.get(), 1, copy));
   Require(ReadAudio(ring.get(), 9, copy));
   Check(copy);
-  // Concurrent writer is deliberately much faster than a media clock. A
-  // reader may miss blocks but must never accept a torn payload/header.
-  std::atomic<bool> done{false};
-  std::thread producer([&] {
-    for (uint64_t i = 10; i < 100000; ++i)
-      PublishAudio(ring.get(), Packet(i));
-    done = true;
-  });
-  uint64_t reads = 0;
-  while (!done.load()) {
-    const auto sequence = AudioPublished(ring.get());
-    if (ReadAudio(ring.get(), sequence, copy)) {
-      Check(copy);
-      ++reads;
-    }
-  }
-  producer.join();
-  Require(reads > 0);
   const auto name = "Local\\RemoteKit.audio.test." + std::to_string(GetCurrentProcessId());
   media::AudioRing reader;
   reader.Open(name, 11, 22);

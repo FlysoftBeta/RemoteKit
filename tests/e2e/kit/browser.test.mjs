@@ -1,3 +1,7 @@
+import { EventEmitter } from 'node:events';
+import { observeChildExit } from '../../../tools/child-process.mjs';
+import { assertBrowserLogInterval, typeOnce } from './viewer.mjs';
+import { createCdpInteraction } from './cdp-interaction.mjs';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -105,4 +109,93 @@ test('a counter at six pauses launches until zero', async (t) => {
   await waiting;
   assert.equal(completed, true);
   assert.equal(counts.length, 0);
+});
+
+test('lost input fails with expected and actual values without correction', async () => {
+  const actions = [];
+  await assert.rejects(
+    typeOnce({
+      click: async () => actions.push('click'),
+      page: {
+        keyboard: { press: async () => actions.push('select'), type: async () => actions.push('type') },
+      },
+      locator: { inputValue: async () => 'lost' },
+      value: 'expected',
+    }),
+    /Expected "expected", actual "lost"/,
+  );
+  assert.deepEqual(actions, ['click', 'select', 'type']);
+});
+
+test('browser crash detection spans steps and respects an explicit interval', () => {
+  const prefix = JSON.stringify({ ev: 'browser.replacing', reason: 'process_exited' }) + '\n';
+  assert.throws(() => assertBrowserLogInterval(prefix, 0), /Browser restarted/);
+  assert.doesNotThrow(() => assertBrowserLogInterval(prefix, prefix.length));
+  const normal = JSON.stringify({ ev: 'browser.launched' }) + '\n';
+  assert.throws(
+    () =>
+      assertBrowserLogInterval(
+        JSON.stringify({ ev: 'browser.replacing', reason: 'control_pipe_disconnected' }) + '\n',
+        0,
+      ),
+    /control_pipe_disconnected/,
+  );
+  assert.doesNotThrow(() => assertBrowserLogInterval(normal, 0));
+  const crash = JSON.stringify({ ev: 'browser.crashed', exitCode: 42 }) + '\n';
+  assert.throws(() => assertBrowserLogInterval(prefix + normal + crash, prefix.length), /browser.crashed/);
+});
+
+test('shared CDP fill inputs once and waits for the observed value', async () => {
+  for (const succeeds of [true, false]) {
+    const actions = [];
+    let reads = 0;
+    const driver = createCdpInteraction({
+      cdp: {
+        send: async (method, { expression, userGesture }) => {
+          assert.equal(userGesture, false);
+          const value = expression.includes('?.value')
+            ? ++reads >= 3 && succeeds
+              ? 'expected'
+              : 'lost'
+            : { x: 1, y: 2 };
+          return { result: { value } };
+        },
+      },
+      page: {
+        mouse: { click: async () => actions.push('click') },
+        keyboard: {
+          press: async () => actions.push('select'),
+          insertText: async () => actions.push('insert'),
+        },
+      },
+      sleep: async () => {},
+      until: async (check, label) => {
+        for (let i = 0; i < 4; i++) {
+          const value = await check();
+          if (value) return value;
+        }
+        throw Error(label);
+      },
+    });
+    if (succeeds) await driver.fill('input', 'expected');
+    else await assert.rejects(driver.fill('input', 'expected'), /Expected "expected", actual "lost"/);
+    assert.deepEqual(actions, ['click', 'select', 'insert']);
+    assert(reads >= 3);
+  }
+});
+
+test('business waits and final cleanup share the exit observed at spawn', async () => {
+  const child = new EventEmitter();
+  const { exited, wait } = observeChildExit(child, () => 'stderr');
+  const waiting = wait(new Promise(() => {}));
+  child.emit('exit', 7, null);
+  await assert.rejects(waiting, /Child exited 7\/null: stderr/);
+  assert.deepEqual(await exited, { code: 7, signal: null });
+  await assert.rejects(wait(new Promise(() => {})), /Child exited 7/);
+  assert.equal(child.listenerCount('exit'), 0);
+  const failedChild = new EventEmitter();
+  const failed = observeChildExit(failedChild);
+  failedChild.emit('error', Error('spawn failed'));
+  await assert.rejects(failed.wait(new Promise(() => {})), /spawn failed/);
+  await assert.rejects(failed.exited, /spawn failed/);
 });

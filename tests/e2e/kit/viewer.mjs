@@ -1,3 +1,4 @@
+import { ResourceScope, runCleanups } from './cleanup.mjs';
 import { launchTestBrowser } from './browser.mjs';
 import { cameraFixtures } from './fixtures.mjs';
 import assert from 'node:assert/strict';
@@ -40,251 +41,269 @@ export async function launch({
   mkdirSync(out, { recursive: true });
   const chrome89 = browserName === 'chrome89';
   const touch = pointerType === 'touch';
-  const browser = await launchBrowser(
-    chrome89
-      ? { executablePath: 'C:/src/tmp/chrome89-google/app/chrome.exe', headless: true }
-      : { channel: 'msedge', headless: true },
-  );
-  const context = await createViewerContext(browser, {
-    viewport: parseViewport(process.env.E2E_VIEWPORT) ?? { width: 1600, height: 1000 },
-    deviceScaleFactor: dpr,
-    hasTouch: touch,
-  });
-  const page = await context.newPage();
-  page.setDefaultTimeout(45000);
-  // Playwright's mouse drags call Input.setInterceptDrags, which Chrome 89 lacks.
-  const cdp = touch || chrome89 ? await context.newCDPSession(page) : undefined;
-  const mouseEvent = (type) =>
-    cdp.send('Input.dispatchMouseEvent', {
-      type,
-      x: at.x,
-      y: at.y,
-      button: type === 'mouseMoved' && !at.down ? 'none' : 'left',
-      buttons: at.down ? 1 : 0,
-      clickCount: type === 'mouseMoved' ? 0 : 1,
-    });
-  const at = { x: 0, y: 0, down: false };
-  const touchEvent = (type) =>
-    cdp.send('Input.dispatchTouchEvent', {
-      type,
-      touchPoints: type === 'touchEnd' ? [] : [{ x: at.x, y: at.y, id: 1, radiusX: 4, radiusY: 4, force: 1 }],
-    });
-  // Mouse, or one touch point that moves like the mouse; touch long-press waits before the first move.
-  const pointer = {
-    async move(x, y, { steps = 1 } = {}) {
-      if (!touch && !chrome89) return page.mouse.move(x, y, { steps });
-      const from = { ...at };
-      for (let index = 1; index <= steps; index++) {
-        at.x = from.x + ((x - from.x) * index) / steps;
-        at.y = from.y + ((y - from.y) * index) / steps;
-        if (!touch) await mouseEvent('mouseMoved');
-        else if (at.down) await touchEvent('touchMove');
-      }
-    },
-    async down() {
-      if (!touch && !chrome89) return page.mouse.down();
-      at.down = true;
-      await (touch ? touchEvent('touchStart') : mouseEvent('mousePressed'));
-    },
-    async up() {
-      if (!touch && !chrome89) return page.mouse.up();
-      if (!at.down) return;
-      at.down = false;
-      await (touch ? touchEvent('touchEnd') : mouseEvent('mouseReleased'));
-    },
-  };
-
-  const errors = [];
-  const uploads = [];
-  const viewports = [];
-  const log = [];
-  let state;
-  let logOffset = 0;
-  page.on('pageerror', (error) => errors.push(String(error)));
-  page.on('websocket', (socket) => {
-    socket.on('framesent', (frame) => {
-      try {
-        const data = JSON.parse(String(frame.payload));
-        if (data.method === 'page.preview') uploads.push(data.params);
-        if (data.method === 'viewport') viewports.push(data.params);
-      } catch {}
-    });
-  });
-  const refresh = async () => {
-    state = await page.evaluate(() => window.__remotekitTest.state());
-    return state;
-  };
-  const wait = (check, label, timeout) =>
-    until(
-      async () => {
-        await refresh();
-        return check();
-      },
-      label,
-      timeout,
-    );
-  const startDialog = () => page.getByRole('dialog', { name: '开始屏幕' });
-  const tile = (name) =>
-    startDialog()
-      .locator('[data-tile-key]')
-      .filter({ has: page.getByText(name, { exact: true }) })
-      .first();
-  const shot = (name) => {
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw Error('Screenshot name must be a filename stem');
-    return page.screenshot({ path: join(out, name + '.png') });
-  };
-  async function openStart() {
-    if (await startDialog().isVisible()) {
-      await page.locator('.launcher.overlay-exiting').waitFor({ state: 'hidden' });
-      if (await startDialog().isVisible()) return;
-    }
-    await page.getByRole('button', { name: '开始', exact: true }).click();
-    await startDialog().waitFor();
-    await page.waitForTimeout(400);
-  }
-  async function closeStart() {
-    await page.getByRole('button', { name: '关闭开始屏幕', exact: true }).click();
-    await startDialog().waitFor({ state: 'hidden' });
-  }
-  async function navigate(url) {
-    const address = page.getByRole('textbox', { name: '搜索或输入网址', exact: true }).first();
-    await address.fill(url);
-    await address.press('Enter');
-    await wait(
-      () => state.workspace.tabs.some((tab) => tab.url === url && !tab.loading),
-      'navigation ' + url,
-    );
-  }
-  const endpointLog = () => readFileSync(stack.logs.endpoint, 'utf8');
-  async function assertNoBrowserRestart() {
-    const added = endpointLog().slice(logOffset);
-    if (added.includes('browser replacement reason=process_exited'))
-      throw Error('Browser process exited: ' + stack.logs.endpoint);
-  }
-  async function step(name, run) {
-    logOffset = endpointLog().length;
-    try {
-      await refresh();
-      await run();
-      log.push('ok   ' + name);
-    } catch (error) {
-      log.push('FAIL ' + name + ': ' + String(error).split('\n')[0]);
-      writeFileSync(join(out, 'fail-' + name + '.txt'), String(error.stack ?? error));
-      await shot('fail-' + name).catch(() => {});
-      await pointer.up().catch(() => {});
-      await page.keyboard.press('Escape').catch(() => {});
-      process.exitCode = 1;
-    }
-    console.log(log.at(-1));
-    writeFileSync(join(out, 'log.json'), JSON.stringify({ log, errors }, null, 2));
-  }
-  const waitUnlocked = () => page.getByRole('button', { name: '开始', exact: true }).waitFor();
-  async function authenticate() {
-    await page.getByRole('heading', { name: '解锁', exact: true }).waitFor();
-    await page.getByLabel(/^账户密码/).fill(stack.password);
-    await page.getByRole('button', { name: '解锁', exact: true }).click();
-    await waitUnlocked();
-    await wait(() => state, 'unlocked product state');
-  }
-  const sequence = ['Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right'];
-  async function unlockByKeys() {
-    for (const direction of sequence) await page.keyboard.press('Arrow' + direction);
-    await authenticate();
-  }
-  async function unlockByTaps() {
-    const { width, height } = page.viewportSize();
-    // lockDirection normalizes around (0.5, 0.5), chooses the dominant axis,
-    // and excludes the central 10% square. These are the four region centres.
-    const centres = { Up: [0.5, 0.25], Down: [0.5, 0.75], Left: [0.25, 0.5], Right: [0.75, 0.5] };
-    for (const direction of sequence) {
-      const [x, y] = centres[direction];
-      await pointer.move(x * width, y * height);
-      await pointer.down();
-      await pointer.up();
-    }
-    await authenticate();
-  }
-  async function lock() {
-    await openStart();
-    await page.getByRole('button', { name: '锁定', exact: true }).click();
-    await page.getByRole('button', { name: '开始', exact: true }).waitFor({ state: 'hidden' });
-    await page.locator('.viewer-lock-blank').waitFor();
-    await page.waitForTimeout(400);
-  }
-  async function unlock() {
-    if (await page.getByRole('button', { name: '开始', exact: true }).isVisible()) return;
-    await page.locator('.viewer-lock-blank').waitFor();
-    await page.waitForTimeout(400);
-    await page.evaluate(() => window.__remotekitTest.unlock());
-    await authenticate();
-  }
+  const resources = new ResourceScope();
   try {
-    if (initialAuth) {
-      const response = await page.request.post(stack.origin + '/api/auth/login', {
-        data: { username: stack.username, password: stack.password },
-        headers: { Origin: stack.origin },
-      });
-      if (!response.ok()) throw Error('Login failed: ' + (await response.text()));
-      await page.goto(stack.origin, { waitUntil: 'domcontentloaded' });
-      await page.waitForFunction(() => !!window.__remotekitTest);
-      await unlock();
-      await wait(() => state, 'product state');
-    }
-  } catch (error) {
-    await shot('fail-launch').catch(() => {});
-    writeFileSync(
-      join(out, 'fail-launch.json'),
-      JSON.stringify(
-        {
-          errors,
-          page: await page.evaluate(() => ({
-            text: document.body.innerText,
-            html: document.querySelector('#root')?.innerHTML,
-            state: window.__remotekitTest?.state(),
-          })),
-        },
-        null,
-        2,
-      ),
+    const browser = await launchBrowser(
+      chrome89
+        ? { executablePath: 'C:/src/tmp/chrome89-google/app/chrome.exe', headless: true }
+        : { channel: 'msedge', headless: true },
     );
-    writeFileSync(join(out, 'fail-launch.txt'), String(error.stack ?? error));
-    await browser.close();
+    resources.defer(() => browser.close());
+    const context = await createViewerContext(browser, {
+      viewport: parseViewport(process.env.E2E_VIEWPORT) ?? { width: 1600, height: 1000 },
+      deviceScaleFactor: dpr,
+      hasTouch: touch,
+    });
+    resources.defer(() => context.close());
+    const page = await context.newPage();
+    resources.defer(() => page.close());
+    page.setDefaultTimeout(45000);
+    // Playwright's mouse drags call Input.setInterceptDrags, which Chrome 89 lacks.
+    const cdp = touch || chrome89 ? await context.newCDPSession(page) : undefined;
+    if (cdp) resources.defer(() => cdp.detach());
+    const mouseEvent = (type) =>
+      cdp.send('Input.dispatchMouseEvent', {
+        type,
+        x: at.x,
+        y: at.y,
+        button: type === 'mouseMoved' && !at.down ? 'none' : 'left',
+        buttons: at.down ? 1 : 0,
+        clickCount: type === 'mouseMoved' ? 0 : 1,
+      });
+    const at = { x: 0, y: 0, down: false };
+    const touchEvent = (type) =>
+      cdp.send('Input.dispatchTouchEvent', {
+        type,
+        touchPoints:
+          type === 'touchEnd' ? [] : [{ x: at.x, y: at.y, id: 1, radiusX: 4, radiusY: 4, force: 1 }],
+      });
+    // Mouse, or one touch point that moves like the mouse; touch long-press waits before the first move.
+    const pointer = {
+      async move(x, y, { steps = 1 } = {}) {
+        if (!touch && !chrome89) return page.mouse.move(x, y, { steps });
+        const from = { ...at };
+        for (let index = 1; index <= steps; index++) {
+          at.x = from.x + ((x - from.x) * index) / steps;
+          at.y = from.y + ((y - from.y) * index) / steps;
+          if (!touch) await mouseEvent('mouseMoved');
+          else if (at.down) await touchEvent('touchMove');
+        }
+      },
+      async down() {
+        if (!touch && !chrome89) return page.mouse.down();
+        at.down = true;
+        await (touch ? touchEvent('touchStart') : mouseEvent('mousePressed'));
+      },
+      async up() {
+        if (!touch && !chrome89) return page.mouse.up();
+        if (!at.down) return;
+        at.down = false;
+        await (touch ? touchEvent('touchEnd') : mouseEvent('mouseReleased'));
+      },
+    };
+
+    const errors = [];
+    const uploads = [];
+    const viewports = [];
+    const log = [];
+    let state;
+    page.on('pageerror', (error) => errors.push(String(error)));
+    page.on('websocket', (socket) => {
+      socket.on('framesent', (frame) => {
+        try {
+          const data = JSON.parse(String(frame.payload));
+          if (data.method === 'page.preview') uploads.push(data.params);
+          if (data.method === 'viewport') viewports.push(data.params);
+        } catch {}
+      });
+    });
+    const refresh = async () => {
+      state = await page.evaluate(() => window.__remotekitTest.state());
+      return state;
+    };
+    const wait = (check, label, timeout) =>
+      until(
+        async () => {
+          await refresh();
+          return check();
+        },
+        label,
+        timeout,
+      );
+    const startDialog = () => page.getByRole('dialog', { name: '开始屏幕' });
+    const tile = (name) =>
+      startDialog()
+        .locator('[data-tile-key]')
+        .filter({ has: page.getByText(name, { exact: true }) })
+        .first();
+    const shot = (name) => {
+      if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw Error('Screenshot name must be a filename stem');
+      return page.screenshot({ path: join(out, name + '.png') });
+    };
+    async function openStart() {
+      if (await startDialog().isVisible()) {
+        await page.locator('.launcher.overlay-exiting').waitFor({ state: 'hidden' });
+        if (await startDialog().isVisible()) return;
+      }
+      await page.getByRole('button', { name: '开始', exact: true }).click();
+      await startDialog().waitFor();
+      await page.waitForTimeout(400);
+    }
+    async function closeStart() {
+      await page.getByRole('button', { name: '关闭开始屏幕', exact: true }).click();
+      await startDialog().waitFor({ state: 'hidden' });
+    }
+    async function navigate(url) {
+      const address = page.getByRole('textbox', { name: '搜索或输入网址', exact: true }).first();
+      await address.fill(url);
+      await address.press('Enter');
+      await wait(
+        () => state.workspace.tabs.some((tab) => tab.url === url && !tab.loading),
+        'navigation ' + url,
+      );
+    }
+    const endpointLog = () => readFileSync(stack.logs.endpoint, 'utf8');
+    async function assertNoBrowserRestart(start = 0) {
+      assertBrowserLogInterval(endpointLog(), start, stack.logs.endpoint);
+    }
+    async function step(name, run) {
+      try {
+        await refresh();
+        await run();
+        log.push('ok   ' + name);
+      } catch (error) {
+        log.push('FAIL ' + name + ': ' + String(error).split('\n')[0]);
+        writeFileSync(join(out, 'fail-' + name + '.txt'), String(error.stack ?? error));
+        await shot('fail-' + name).catch(() => {});
+        await pointer.up().catch(() => {});
+        await page.keyboard.press('Escape').catch(() => {});
+        process.exitCode = 1;
+      }
+      console.log(log.at(-1));
+      writeFileSync(join(out, 'log.json'), JSON.stringify({ log, errors }, null, 2));
+    }
+    const waitUnlocked = () => page.getByRole('button', { name: '开始', exact: true }).waitFor();
+    async function authenticate() {
+      await page.getByRole('heading', { name: '解锁', exact: true }).waitFor();
+      await page.getByLabel(/^账户密码/).fill(stack.password);
+      await page.getByRole('button', { name: '解锁', exact: true }).click();
+      await waitUnlocked();
+      await wait(() => state, 'unlocked product state');
+    }
+    const sequence = ['Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right'];
+    async function unlockByKeys() {
+      for (const direction of sequence) await page.keyboard.press('Arrow' + direction);
+      await authenticate();
+    }
+    async function unlockByTaps() {
+      const { width, height } = page.viewportSize();
+      // lockDirection normalizes around (0.5, 0.5), chooses the dominant axis,
+      // and excludes the central 10% square. These are the four region centres.
+      const centres = { Up: [0.5, 0.25], Down: [0.5, 0.75], Left: [0.25, 0.5], Right: [0.75, 0.5] };
+      for (const direction of sequence) {
+        const [x, y] = centres[direction];
+        await pointer.move(x * width, y * height);
+        await pointer.down();
+        await pointer.up();
+      }
+      await authenticate();
+    }
+    async function lock() {
+      await openStart();
+      await page.getByRole('button', { name: '锁定', exact: true }).click();
+      await page.getByRole('button', { name: '开始', exact: true }).waitFor({ state: 'hidden' });
+      await page.locator('.viewer-lock-blank').waitFor();
+      await page.waitForTimeout(400);
+    }
+    async function unlock() {
+      if (await page.getByRole('button', { name: '开始', exact: true }).isVisible()) return;
+      await page.locator('.viewer-lock-blank').waitFor();
+      await page.waitForTimeout(400);
+      await page.evaluate(() => window.__remotekitTest.unlock());
+      await authenticate();
+    }
+    try {
+      if (initialAuth) {
+        const response = await page.request.post(stack.origin + '/api/auth/login', {
+          data: { username: stack.username, password: stack.password },
+          headers: { Origin: stack.origin },
+        });
+        if (!response.ok()) throw Error('Login failed: ' + (await response.text()));
+        await page.goto(stack.origin, { waitUntil: 'domcontentloaded' });
+        await page.waitForFunction(() => !!window.__remotekitTest);
+        await unlock();
+        await wait(() => state, 'product state');
+      }
+    } catch (error) {
+      await runCleanups([
+        () => shot('fail-launch'),
+        () => writeFileSync(join(out, 'fail-launch.json'), JSON.stringify({ errors }, null, 2)),
+        () => writeFileSync(join(out, 'fail-launch.txt'), String(error.stack ?? error)),
+      ]).catch(() => {});
+      throw error;
+    }
+    return {
+      browser,
+      context,
+      page,
+      pointer,
+      touch,
+      errors,
+      uploads,
+      viewports,
+      log,
+      out,
+      get state() {
+        return state;
+      },
+      refresh,
+      until: wait,
+      step,
+      shot,
+      openStart,
+      closeStart,
+      tile,
+      navigate,
+      lock,
+      unlock,
+      unlockByKeys,
+      unlockByTaps,
+      waitUnlocked,
+      assertNoBrowserRestart,
+      async close() {
+        if (errors.length || log.some((line) => line.startsWith('FAIL'))) process.exitCode = 1;
+        await runCleanups([
+          () => resources.close(),
+          () => writeFileSync(join(out, 'log.json'), JSON.stringify({ log, errors }, null, 2)),
+        ]);
+      },
+    };
+  } catch (error) {
+    try {
+      await resources.close();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Viewer launch failed');
+    }
     throw error;
   }
-  return {
-    browser,
-    context,
-    page,
-    pointer,
-    touch,
-    errors,
-    uploads,
-    viewports,
-    log,
-    out,
-    get state() {
-      return state;
-    },
-    refresh,
-    until: wait,
-    step,
-    shot,
-    openStart,
-    closeStart,
-    tile,
-    navigate,
-    lock,
-    unlock,
-    unlockByKeys,
-    unlockByTaps,
-    waitUnlocked,
-    assertNoBrowserRestart,
-    async close() {
-      writeFileSync(join(out, 'log.json'), JSON.stringify({ log, errors }, null, 2));
-      if (errors.length || log.some((line) => line.startsWith('FAIL'))) process.exitCode = 1;
-      await browser.close();
-    },
-  };
+}
+
+export function assertBrowserLogInterval(log, start, path = 'endpoint log') {
+  for (const line of log.slice(start).split('\n')) {
+    if (!line.startsWith('{')) continue;
+    const event = JSON.parse(line);
+    if (event.ev === 'browser.crashed' || event.ev === 'browser.replacing') {
+      throw Error(`Browser restarted (${event.reason ?? event.ev}): ${path}: ${line}`);
+    }
+  }
+}
+
+export async function typeOnce({ click, page, locator, value }) {
+  await click(locator);
+  await page.keyboard.press('Control+A');
+  await page.keyboard.type(value, { delay: 45 });
+  const actual = await locator.inputValue();
+  assert.equal(actual, value, `Expected ${JSON.stringify(value)}, actual ${JSON.stringify(actual)}`);
 }
 
 export async function runScenario(name, run) {
@@ -305,8 +324,7 @@ export async function runScenario(name, run) {
     console.log('SHOTS ' + viewer.out);
     await run(viewer, stack);
   } finally {
-    await viewer?.close();
-    await stack.stop();
+    await runCleanups([() => viewer?.close(), () => stack.stop()]);
   }
 }
 
@@ -531,188 +549,188 @@ export async function registerViewer({ click, fill, username, password }) {
 export async function startJourney(browserName = 'edge', pointer = 'mouse') {
   const run = runPath(`journey-${browserName}-${pointer}`);
   mkdirSync(run, { recursive: true });
-  const stack = await startStack({
-    run,
-    scenario: 'files-user',
-    learning: { captcha: false },
-    nodeLimits: { diskReserveBytes: 256 * 1024 ** 2 },
-  });
-  const provider = stack.provider;
-  const camera = (await cameraFixtures(run, [3])).get(3);
-  const browser = await launchBrowser({
-    executablePath:
-      browserName === 'edge'
-        ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
-        : 'C:/src/tmp/chrome89-google/app/chrome.exe',
-    headless: true,
-    args: [
-      '--use-fake-device-for-media-stream',
-      '--use-fake-ui-for-media-stream',
-      `--use-file-for-fake-video-capture=${camera}`,
-    ],
-  });
-  const touch = pointer === 'touch';
-  const context = await createViewerContext(browser, {
-    viewport: touch ? { width: 390, height: 844 } : { width: 1600, height: 1000 },
-    hasTouch: touch,
-  });
-  const reply = await context.request.post(stack.origin + '/api/auth/login', {
-    headers: { Origin: stack.origin },
-    data: { username: stack.username, password: stack.password },
-  });
-  if (!reply.ok()) throw Error(await reply.text());
-  const viewer = await instrumentViewer(context, run, 'user');
-  const page = viewer.page;
-  page.setDefaultTimeout(30000);
-  const cdp = await context.newCDPSession(page);
-  await page.goto(stack.origin);
-  await viewer.ready(90000);
-  const log = (value) =>
-    appendFileSync(
-      join(run, 'actions.jsonl'),
-      JSON.stringify({ at: new Date().toISOString(), ...value }) + '\n',
-    );
-  const click = async (locator, twice = false) => {
-    await locator.waitFor({ state: 'visible' });
-    await locator.scrollIntoViewIfNeeded();
-    const box = await locator.boundingBox();
-    if (!box) throw Error('No target box');
-    const x = box.x + box.width / 2,
-      y = box.y + box.height / 2;
-    log({ click: await locator.innerText().catch(() => ''), x, y, pointer, twice });
-    for (let n = 0; n < (twice ? 2 : 1); n++) {
+  const resources = new ResourceScope();
+  try {
+    const stack = await startStack({
+      run,
+      scenario: 'files-user',
+      learning: { captcha: false },
+      nodeLimits: { diskReserveBytes: 256 * 1024 ** 2 },
+    });
+    resources.defer(() => stack.stop());
+    const provider = stack.provider;
+    const camera = (await cameraFixtures(run, [3])).get(3);
+    const browser = await launchBrowser({
+      executablePath:
+        browserName === 'edge'
+          ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
+          : 'C:/src/tmp/chrome89-google/app/chrome.exe',
+      headless: true,
+      args: [
+        '--use-fake-device-for-media-stream',
+        '--use-fake-ui-for-media-stream',
+        `--use-file-for-fake-video-capture=${camera}`,
+      ],
+    });
+    resources.defer(() => browser.close());
+    const touch = pointer === 'touch';
+    const context = await createViewerContext(browser, {
+      viewport: touch ? { width: 390, height: 844 } : { width: 1600, height: 1000 },
+      hasTouch: touch,
+    });
+    resources.defer(() => context.close());
+    const reply = await context.request.post(stack.origin + '/api/auth/login', {
+      headers: { Origin: stack.origin },
+      data: { username: stack.username, password: stack.password },
+    });
+    if (!reply.ok()) throw Error(await reply.text());
+    const viewer = await instrumentViewer(context, run, 'user');
+    const page = viewer.page;
+    page.setDefaultTimeout(30000);
+    const cdp = await context.newCDPSession(page);
+    resources.defer(() => cdp.detach());
+    await page.goto(stack.origin);
+    await viewer.ready(90000);
+    const log = (value) =>
+      appendFileSync(
+        join(run, 'actions.jsonl'),
+        JSON.stringify({ at: new Date().toISOString(), ...value }) + '\n',
+      );
+    const click = async (locator, twice = false) => {
+      await locator.waitFor({ state: 'visible' });
+      await locator.scrollIntoViewIfNeeded();
+      const box = await locator.boundingBox();
+      if (!box) throw Error('No target box');
+      const x = box.x + box.width / 2,
+        y = box.y + box.height / 2;
+      log({ click: await locator.innerText().catch(() => ''), x, y, pointer, twice });
+      for (let n = 0; n < (twice ? 2 : 1); n++) {
+        if (touch) {
+          await cdp.send('Input.dispatchTouchEvent', {
+            type: 'touchStart',
+            touchPoints: [{ x, y, id: 1, radiusX: 4, radiusY: 4, force: 1 }],
+          });
+          await page.waitForTimeout(65);
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        } else await page.mouse.click(x, y, { clickCount: n + 1 });
+      }
+      await page.waitForTimeout(400);
+    };
+    const tapAt = async (x, y) => {
+      log({ tapAt: { x, y }, pointer });
       if (touch) {
         await cdp.send('Input.dispatchTouchEvent', {
           type: 'touchStart',
           touchPoints: [{ x, y, id: 1, radiusX: 4, radiusY: 4, force: 1 }],
         });
-        await page.waitForTimeout(65);
+        await page.waitForTimeout(70);
         await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-      } else await page.mouse.click(x, y, { clickCount: n + 1 });
-    }
-    await page.waitForTimeout(400);
-  };
-  const tapAt = async (x, y) => {
-    log({ tapAt: { x, y }, pointer });
-    if (touch) {
-      await cdp.send('Input.dispatchTouchEvent', {
-        type: 'touchStart',
-        touchPoints: [{ x, y, id: 1, radiusX: 4, radiusY: 4, force: 1 }],
-      });
-      await page.waitForTimeout(70);
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    } else await page.mouse.click(x, y);
-    await page.waitForTimeout(500);
-  };
-  const drag = async (from, to) => {
-    const a = await from.boundingBox(),
-      b = await to.boundingBox();
-    const x = a.x + a.width / 2,
-      y = a.y + a.height / 2;
-    const endX = b.x + b.width / 2,
-      endY = b.y + b.height / 2;
-    const event = (type, px, py) =>
-      cdp.send('Input.dispatchTouchEvent', {
-        type,
-        touchPoints: type === 'touchEnd' ? [] : [{ x: px, y: py, id: 1, radiusX: 4, radiusY: 4, force: 1 }],
-      });
-    if (touch) {
-      await event('touchStart', x, y);
-      await page.waitForTimeout(650);
-    } else {
-      await page.mouse.move(x, y);
-      await page.mouse.down();
-    }
-    for (let n = 1; n <= 20; n++) {
-      const px = x + ((endX - x) * n) / 20,
-        py = y + ((endY - y) * n) / 20;
-      if (touch) await event('touchMove', px, py);
-      else
-        await cdp.send('Input.dispatchMouseEvent', {
-          type: 'mouseMoved',
-          x: px,
-          y: py,
-          button: 'left',
-          buttons: 1,
+      } else await page.mouse.click(x, y);
+      await page.waitForTimeout(500);
+    };
+    const drag = async (from, to) => {
+      const a = await from.boundingBox(),
+        b = await to.boundingBox();
+      const x = a.x + a.width / 2,
+        y = a.y + a.height / 2;
+      const endX = b.x + b.width / 2,
+        endY = b.y + b.height / 2;
+      const event = (type, px, py) =>
+        cdp.send('Input.dispatchTouchEvent', {
+          type,
+          touchPoints: type === 'touchEnd' ? [] : [{ x: px, y: py, id: 1, radiusX: 4, radiusY: 4, force: 1 }],
         });
-      await page.waitForTimeout(25);
+      if (touch) {
+        await event('touchStart', x, y);
+        await page.waitForTimeout(650);
+      } else {
+        await page.mouse.move(x, y);
+        await page.mouse.down();
+      }
+      for (let n = 1; n <= 20; n++) {
+        const px = x + ((endX - x) * n) / 20,
+          py = y + ((endY - y) * n) / 20;
+        if (touch) await event('touchMove', px, py);
+        else
+          await cdp.send('Input.dispatchMouseEvent', {
+            type: 'mouseMoved',
+            x: px,
+            y: py,
+            button: 'left',
+            buttons: 1,
+          });
+        await page.waitForTimeout(25);
+      }
+      if (touch) await event('touchEnd', endX, endY);
+      else await page.mouse.up();
+      await page.waitForTimeout(600);
+    };
+    const type = (locator, value) => typeOnce({ click, page, locator, value });
+    const shot = async (name) => {
+      await page.screenshot({ path: join(run, name + '.png') });
+      writeFileSync(join(run, name + '-state.json'), JSON.stringify(await viewer.state(), null, 2));
+      writeFileSync(join(run, name + '-dom.txt'), await page.locator('body').innerText());
+      writeFileSync(
+        join(run, name + '-surface.json'),
+        JSON.stringify(
+          await page.evaluate(() => ({
+            auth: window.clusterQA?.auth,
+            lockBlank: !!document.querySelector('.viewer-lock-blank'),
+            startVisible: [...document.querySelectorAll('button')].some(
+              (n) => n.getAttribute('aria-label') === '开始' && !!n.getBoundingClientRect().width,
+            ),
+            viewport: { width: innerWidth, height: innerHeight },
+          })),
+          null,
+          2,
+        ),
+      );
+      return join(run, name + '.png');
+    };
+    const button = (name) => page.getByRole('button', { name, exact: true }).last();
+    const menu = (name) => page.getByRole('menuitem', { name, exact: true });
+    const open = async (name) => {
+      await page.locator('.launcher.overlay-exiting').waitFor({ state: 'hidden' });
+      if (!(await page.getByRole('dialog', { name: '开始屏幕' }).isVisible())) await click(button('开始'));
+      await click(
+        page
+          .getByRole('dialog', { name: '开始屏幕' })
+          .locator('[data-tile-key]')
+          .filter({ has: page.getByText(name, { exact: true }) })
+          .first(),
+      );
+      await page.getByRole('dialog', { name: '开始屏幕' }).waitFor({ state: 'hidden' });
+      await page.locator('.launcher.overlay-exiting').waitFor({ state: 'hidden' });
+      await page.waitForTimeout(300);
+    };
+    return {
+      run,
+      provider,
+      stack,
+      browser,
+      context,
+      viewer,
+      page,
+      cdp,
+      click,
+      tapAt,
+      drag,
+      type,
+      shot,
+      button,
+      menu,
+      open,
+      until,
+      close: () => resources.close(),
+    };
+  } catch (error) {
+    try {
+      await resources.close();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Journey startup failed');
     }
-    if (touch) await event('touchEnd', endX, endY);
-    else await page.mouse.up();
-    await page.waitForTimeout(600);
-  };
-  const type = async (locator, value) => {
-    await click(locator);
-    await page.keyboard.press('Control+A');
-    await page.keyboard.type(value, { delay: 45 });
-    await page.waitForTimeout(400);
-    if ((await locator.inputValue()) !== value) {
-      log({ correction: 'Input lost focus during a transition; clicking and retyping' });
-      await click(locator);
-      await page.keyboard.press('Control+A');
-      await page.keyboard.type(value, { delay: 45 });
-    }
-  };
-  const shot = async (name) => {
-    await page.screenshot({ path: join(run, name + '.png') });
-    writeFileSync(join(run, name + '-state.json'), JSON.stringify(await viewer.state(), null, 2));
-    writeFileSync(join(run, name + '-dom.txt'), await page.locator('body').innerText());
-    writeFileSync(
-      join(run, name + '-surface.json'),
-      JSON.stringify(
-        await page.evaluate(() => ({
-          auth: window.clusterQA?.auth,
-          lockBlank: !!document.querySelector('.viewer-lock-blank'),
-          startVisible: [...document.querySelectorAll('button')].some(
-            (n) => n.getAttribute('aria-label') === '开始' && !!n.getBoundingClientRect().width,
-          ),
-          viewport: { width: innerWidth, height: innerHeight },
-        })),
-        null,
-        2,
-      ),
-    );
-    return join(run, name + '.png');
-  };
-  const button = (name) => page.getByRole('button', { name, exact: true }).last();
-  const menu = (name) => page.getByRole('menuitem', { name, exact: true });
-  const open = async (name) => {
-    await page.locator('.launcher.overlay-exiting').waitFor({ state: 'hidden' });
-    if (!(await page.getByRole('dialog', { name: '开始屏幕' }).isVisible())) await click(button('开始'));
-    await click(
-      page
-        .getByRole('dialog', { name: '开始屏幕' })
-        .locator('[data-tile-key]')
-        .filter({ has: page.getByText(name, { exact: true }) })
-        .first(),
-    );
-    await page.getByRole('dialog', { name: '开始屏幕' }).waitFor({ state: 'hidden' });
-    await page.locator('.launcher.overlay-exiting').waitFor({ state: 'hidden' });
-    await page.waitForTimeout(300);
-  };
-  return {
-    run,
-    provider,
-    stack,
-    browser,
-    context,
-    viewer,
-    page,
-    cdp,
-    click,
-    tapAt,
-    drag,
-    type,
-    shot,
-    button,
-    menu,
-    open,
-    until,
-    close: async () => {
-      await browser.close();
-      await stack.stop();
-    },
-  };
+    throw error;
+  }
 }
 
 export function parseViewport(value) {

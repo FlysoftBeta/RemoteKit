@@ -1,3 +1,4 @@
+import { cdpConnect } from '../../cdp.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -79,47 +80,6 @@ async function until(predicate, timeout, description, failure) {
     await sleep(100);
   }
   if (failure?.()) throw failure();
-}
-async function cdpConnect(url) {
-  const ws = new WebSocket(url);
-  await new Promise((done, reject) => {
-    ws.onopen = done;
-    ws.onerror = reject;
-  });
-  let next = 0;
-  const pending = new Map();
-  ws.onmessage = ({ data }) => {
-    const message = JSON.parse(data);
-    const waiter = pending.get(message.id);
-    if (!waiter) return;
-    pending.delete(message.id);
-    clearTimeout(waiter.timer);
-    if (message.error) waiter.reject(Error(message.error.message));
-    else waiter.resolve(message.result);
-  };
-  ws.onclose = () => {
-    for (const waiter of pending.values()) {
-      clearTimeout(waiter.timer);
-      waiter.reject(Error('CDP closed'));
-    }
-    pending.clear();
-  };
-  return {
-    send(method, params = {}) {
-      return new Promise((resolve, reject) => {
-        const id = ++next;
-        const timer = setTimeout(() => {
-          pending.delete(id);
-          reject(Error(`CDP timeout: ${method}`));
-        }, 15000);
-        pending.set(id, { resolve, reject, timer });
-        ws.send(JSON.stringify({ id, method, params }));
-      });
-    },
-    close() {
-      ws.close();
-    },
-  };
 }
 function isInside(parent, path) {
   const name = relative(parent, path);
@@ -617,10 +577,16 @@ export async function run(options = {}) {
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
   }
+  const summary = await finishRun(out, metadata, options, failure);
+  console.log(JSON.stringify(summary.aggregate));
+  return summary;
+}
+
+export async function finishRun(out, metadata, options, failure) {
   let summary;
   if (metadata.measurementStart) {
     summary = summarize(out);
-    if (!options['keep-traces']) {
+    if (!failure && !options['keep-traces']) {
       for (const name of readdirSync(out).filter(
         (name) =>
           /^(server-|frames-|encoded-|snapshots-)/.test(name) ||
@@ -630,7 +596,6 @@ export async function run(options = {}) {
     }
   }
   if (failure) throw failure;
-  console.log(JSON.stringify(summary.aggregate));
   return summary;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
+import tempfile
 
 
 def build_metadata(out, dll):
@@ -74,47 +75,55 @@ def main():
     metadata = build_metadata(out, dll)
     component_build = any(relative.name.lower() == "base.dll"
                           for _, relative in entries)
-    # Copy only after validating the entire manifest; never silently omit a DLL.
-    for source, relative in entries:
-        target = destination / "bin" / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-    for folder in ("bin", "lib", "include"):
-        (destination / folder).mkdir(parents=True, exist_ok=True)
-    shutil.copy2(dll, destination / "bin" / dll.name)
-    shutil.copy2(import_lib, destination / "lib" / "remotekit_sdk.lib")
-    header = Path(__file__).resolve().parents[1] / "sdk/include/remotekit_sdk.h"
-    shutil.copy2(header, destination / "include" / header.name)
-    rtc_header = header.with_name("remotekit_rtc.h")
-    shutil.copy2(rtc_header, destination / "include" / rtc_header.name)
-    shared_header = header.parents[2] / "protocol/shared_render_slots.h"
-    (destination / "include/protocol").mkdir(exist_ok=True)
-    shutil.copy2(shared_header, destination / "include/protocol/shared_render_slots.h")
-    protocol_header = header.parents[2] / "protocol/render_slots.h"
-    shutil.copy2(protocol_header, destination / "include/protocol/render_slots.h")
-    for name in ("shared_atlas.h", "shared_render_slots.h"):
-        old_header = destination / "include/remotekit" / name
-        if old_header.is_file():
-            old_header.unlink()
-    (destination / "manifest.json").write_text(json.dumps({
-        **metadata,
-        "abi_version": 2,
-        "rtc_abi_version": int(re.search(r"^#define REMOTEKIT_RTC_ABI_VERSION (\d+)u?$", rtc_header.read_text(encoding="utf-8"), re.MULTILINE).group(1)),
-        "public_headers": ["remotekit_sdk.h", "remotekit_rtc.h",
-                           "protocol/shared_render_slots.h", "protocol/render_slots.h"],
-        "gn_target": "//remotekit/browser/sdk:remotekit_sdk",
-        "component_build": component_build,
-        "runtime": {
-            "dependency_source": "GN remotekit_sdk.runtime_deps",
-            "layout": "copy the complete bin tree beside the consumer EXE",
-            "pdb_policy": "include all PDBs listed by GN",
-            "c_abi_only": True,
-        },
-        "runtime_dependencies": [str(relative) for _, relative in entries],
-        "scope": "local Mojo pipe, isolated named-channel JSON control, "
-                 "WebRTC PeerConnection SDP/ICE/DTLS-SRTP, DataChannel, "
-                 "and external asynchronous H264 encoder over D3D11 textures",
-    }, indent=2) + "\n", encoding="utf-8")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=destination.name + ".stage-", dir=destination.parent) as temporary:
+        staging = Path(temporary) / "sdk"
+        # Copy only after validating the entire manifest; never silently omit a DLL.
+        for source, relative in entries:
+            target = staging / "bin" / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        for folder in ("bin", "lib", "include"):
+            (staging / folder).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(dll, staging / "bin" / dll.name)
+        shutil.copy2(import_lib, staging / "lib" / "remotekit_sdk.lib")
+        header = Path(__file__).resolve().parents[1] / "sdk/include/remotekit_sdk.h"
+        shutil.copy2(header, staging / "include" / header.name)
+        rtc_header = header.with_name("remotekit_rtc.h")
+        shutil.copy2(rtc_header, staging / "include" / rtc_header.name)
+        shared_header = header.parents[2] / "protocol/shared_render_slots.h"
+        (staging / "include/protocol").mkdir(exist_ok=True)
+        shutil.copy2(shared_header, staging / "include/protocol/shared_render_slots.h")
+        protocol_header = header.parents[2] / "protocol/render_slots.h"
+        shutil.copy2(protocol_header, staging / "include/protocol/render_slots.h")
+        (staging / "manifest.json").write_text(json.dumps({
+            **metadata,
+            "abi_version": 2,
+            "rtc_abi_version": int(re.search(r"^#define REMOTEKIT_RTC_ABI_VERSION (\d+)u?$", rtc_header.read_text(encoding="utf-8"), re.MULTILINE).group(1)),
+            "public_headers": ["remotekit_sdk.h", "remotekit_rtc.h",
+                               "protocol/shared_render_slots.h", "protocol/render_slots.h"],
+            "gn_target": "//remotekit/browser/sdk:remotekit_sdk",
+            "component_build": component_build,
+            "runtime": {
+                "dependency_source": "GN remotekit_sdk.runtime_deps",
+                "layout": "copy the complete bin tree beside the consumer EXE",
+                "pdb_policy": "include all PDBs listed by GN",
+                "c_abi_only": True,
+            },
+            "runtime_dependencies": [str(relative) for _, relative in entries],
+            "scope": "local Mojo pipe, isolated named-channel JSON control, "
+                     "WebRTC PeerConnection SDP/ICE/DTLS-SRTP, DataChannel, "
+                     "and external asynchronous H264 encoder over D3D11 textures",
+        }, indent=2) + "\n", encoding="utf-8")
+        backup = Path(temporary) / "previous"
+        if destination.exists():
+            destination.rename(backup)
+        try:
+            staging.rename(destination)
+        except BaseException:
+            if backup.exists():
+                backup.rename(destination)
+            raise
     print(destination)
 
 

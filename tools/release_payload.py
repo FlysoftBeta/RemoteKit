@@ -1,15 +1,11 @@
 """Deterministic version-tree payloads shared by packaging and publishing."""
 
 import hashlib
+from fetch_common import digest
 from pathlib import Path
 import stat
 import tarfile
 import tempfile
-
-
-def digest(path):
-    with Path(path).open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
 def build_id(package, node_runtime):

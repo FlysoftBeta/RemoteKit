@@ -34,7 +34,15 @@ async function startGestureFixture({ port: fixturePort, run, call }) {
             if (body.length > 4096) throw Error('command too large');
           }
           const value = JSON.parse(body);
-          if (value.type !== 'remove-child') throw Error('unknown fixture command');
+          switch (value.type) {
+            case 'remove-child':
+              break;
+            case 'snapshot':
+              if (typeof value.marker !== 'string') throw Error('snapshot marker required');
+              break;
+            default:
+              throw Error('unknown fixture command');
+          }
           commands.set(id, [...(commands.get(id) ?? []), value]);
           res.end('queued');
           return;

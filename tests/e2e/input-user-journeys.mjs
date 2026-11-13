@@ -235,20 +235,14 @@ try {
     await page.waitForFunction(() => document.activeElement?.matches('.remote-input'), undefined, {
       timeout: 45000,
     });
-    let composition = true;
-    try {
-      await cdp.send('Input.imeSetComposition', { text: 'ni', selectionStart: 2, selectionEnd: 2 });
-      await pause(250);
-      await cdp.send('Input.imeSetComposition', { text: '你好', selectionStart: 2, selectionEnd: 2 });
-      await pause(300);
-      await cdp.send('Input.insertText', { text: '你好' });
-    } catch (error) {
-      composition = error.message;
-      await page.keyboard.insertText('你好');
-    }
+    await cdp.send('Input.imeSetComposition', { text: 'ni', selectionStart: 2, selectionEnd: 2 });
+    await pause(250);
+    await cdp.send('Input.imeSetComposition', { text: '你好', selectionStart: 2, selectionEnd: 2 });
+    await pause(300);
+    await cdp.send('Input.insertText', { text: '你好' });
     await until(() => latest().values.name === '你好', 'Chinese name arrived', 30000);
     await shot('02-chinese-name');
-    return { composition, value: latest().values.name };
+    return { composition: 'committed', value: latest().values.name };
   });
   await step('03-move-fields-and-edit', async () => {
     await remoteClick('email');

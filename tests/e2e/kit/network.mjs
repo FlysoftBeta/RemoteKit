@@ -4,19 +4,24 @@ export async function createNetworkProxy({ port, upstreamPort, preserveHotReload
   let online = true;
   const sockets = new Map();
   const proxy = createServer((socket) => {
+    let upstream;
+    sockets.set(socket, false);
+    socket.on('error', () => {});
+    socket.on('close', () => {
+      sockets.delete(socket);
+      upstream?.destroy();
+    });
     socket.once('data', (bytes) => {
       const hotReload = preserveHotReload && /^GET \/\?token=/.test(bytes.toString('utf8'));
       if (!online && !hotReload) return socket.destroy();
-      const upstream = connect(upstreamPort, '127.0.0.1');
-      for (const peer of [socket, upstream]) {
-        sockets.set(peer, hotReload);
-        peer.on('error', () => {});
-        peer.on('close', () => {
-          sockets.delete(peer);
-          socket.destroy();
-          upstream.destroy();
-        });
-      }
+      upstream = connect(upstreamPort, '127.0.0.1');
+      sockets.set(socket, hotReload);
+      sockets.set(upstream, hotReload);
+      upstream.on('error', () => {});
+      upstream.on('close', () => {
+        sockets.delete(upstream);
+        socket.destroy();
+      });
       upstream.write(bytes);
       socket.pipe(upstream);
       upstream.pipe(socket);

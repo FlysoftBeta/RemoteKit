@@ -1,4 +1,8 @@
 import os
+import hashlib
+import importlib.util
+import io
+import zipfile
 from pathlib import Path
 import sys
 import tarfile
@@ -9,9 +13,69 @@ from unittest.mock import patch
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 from release_payload import write_payload
+from fetch_common import digest, download
 
 SCRATCH = TOOLS.parent / 'develop/tmp'
 SCRATCH.mkdir(parents=True, exist_ok=True)
+
+
+class FetchTests(unittest.TestCase):
+    def test_streamed_download_cache_and_failure_rollback(self):
+        data = b"download" * 20000
+        expected = hashlib.sha256(data).hexdigest()
+        class Stream(io.BytesIO):
+            def read(self, size=-1):
+                if size < 0:
+                    raise AssertionError("unbounded read")
+                return super().read(size)
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            target = Path(temporary) / "archive"
+            target.write_bytes(b"old")
+            with patch('fetch_common.urllib.request.urlopen', return_value=Stream(data)):
+                download('https://example.test/archive', target, expected)
+            self.assertEqual(digest(target), expected)
+            with patch('fetch_common.urllib.request.urlopen', side_effect=AssertionError("cache miss")):
+                download('https://example.test/archive', target, expected)
+            for source in (Stream(b"corrupt"), Stream(data)):
+                with patch('fetch_common.urllib.request.urlopen', return_value=source), \
+                     self.assertRaises(RuntimeError):
+                    download('https://example.test/archive', target, "0" * 64)
+                self.assertEqual(target.read_bytes(), data)
+                self.assertEqual([p.name for p in target.parent.iterdir()], ['archive'])
+            with patch('fetch_common.shutil.copyfileobj', side_effect=OSError("interrupted")), \
+                 patch('fetch_common.urllib.request.urlopen', return_value=Stream(data)), \
+                 self.assertRaisesRegex(OSError, "interrupted"):
+                download('https://example.test/archive', target, "0" * 64)
+            self.assertEqual([p.name for p in target.parent.iterdir()], ['archive'])
+
+    def test_media_extraction_publishes_complete_trees(self):
+        spec = importlib.util.spec_from_file_location('fetch_media', TOOLS / 'fetch-media-deps.py')
+        media = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(media)
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            root = Path(temporary)
+            name = 'sqlite-amalgamation-3540100'
+            target = root / name
+            target.mkdir()
+            (target / 'stale').write_bytes(b'stale')
+            archive = root / 'sqlite.zip'
+            with zipfile.ZipFile(archive, 'w') as output:
+                output.writestr(name + '/sqlite3.c', b'c')
+            with self.assertRaisesRegex(RuntimeError, 'Incomplete'):
+                media.extract_dependency(archive, root, name, digest(archive))
+            self.assertEqual((target / 'stale').read_bytes(), b'stale')
+            with zipfile.ZipFile(archive, 'a') as output:
+                output.writestr(name + '/sqlite3.h', b'h')
+            media.extract_dependency(archive, root, name, digest(archive))
+            self.assertFalse((target / 'stale').exists())
+            (target / 'sqlite3.h').unlink()
+            media.extract_dependency(archive, root, name, digest(archive))
+            self.assertEqual((target / 'sqlite3.h').read_bytes(), b'h')
+            with patch.object(media.zipfile.ZipFile, 'extractall', side_effect=OSError('interrupted')):
+                (target / '.remotekit-media-dependency.json').unlink()
+                with self.assertRaisesRegex(OSError, 'interrupted'):
+                    media.extract_dependency(archive, root, name, digest(archive))
+            self.assertEqual((target / 'sqlite3.h').read_bytes(), b'h')
 
 
 class PayloadTests(unittest.TestCase):

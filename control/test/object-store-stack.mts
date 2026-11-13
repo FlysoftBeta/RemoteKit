@@ -1,3 +1,4 @@
+import { createControlConfig } from '../../tests/config-fixture.mjs';
 import { stageRuntime } from '../../tests/integration/stage-runtime.mjs';
 import type { LibrarySnapshot } from '../shared/file-library';
 import assert from 'node:assert/strict';
@@ -6,7 +7,7 @@ import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join, resolve } from 'node:path';
 import { createApplication } from '../server/application';
-import { mediaDefaults, runtimeConfig } from '../server/config';
+import { runtimeConfig } from '../server/config';
 import { NodeRegistry } from '../server/cluster/node-link';
 import { Placement } from '../server/cluster/placement';
 import { EndpointGateway } from '../server/endpoint/gateway';
@@ -18,32 +19,32 @@ const listener = createServer();
 await new Promise<void>((done) => listener.listen(0, '127.0.0.1', done));
 const port = (listener.address() as { port: number }).port;
 await new Promise<void>((done) => listener.close(() => done()));
-const config = {
-  media: mediaDefaults,
-  nodeId: 'storage',
-  rtc: { ports: null, address: null },
-  peer: { listen: `127.0.0.1:${port}`, address: `127.0.0.1:${port}` },
-};
 const store = new ControlDatabase(join(run, 'control.db'), { buildId: 'test' });
 await writeFile(
   join(run, 'control.json'),
-  JSON.stringify({
-    media: mediaDefaults,
-    nodes: {
+  JSON.stringify(
+    createControlConfig({
       storage: {
-        peer: config.peer,
-        local: {
-          executable: stageRuntime(
-            resolve('build/endpoint/endpoint/endpoint_service.exe'),
-            process.argv[3] ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe',
-            join(run, 'runtime/bin'),
-          ),
-          root: join(run, 'node'),
-        },
-        limits: { maxSessions: 8, diskReserveBytes: 1024 * 1024, sessionMemoryBytes: 1024 * 1024 },
+        database: join(run, 'control.db'),
+        logs: join(run, 'logs'),
+        diagnostics: join(run, 'diagnostics'),
       },
-    },
-  }),
+      nodes: {
+        storage: {
+          peer: { listen: `127.0.0.1:${port}`, address: `127.0.0.1:${port}` },
+          local: {
+            executable: stageRuntime(
+              resolve('build/endpoint/endpoint/endpoint_service.exe'),
+              process.argv[3] ?? 'C:/src/chromium/src/out/rel/remotekit_browser.exe',
+              join(run, 'runtime/bin'),
+            ),
+            root: join(run, 'node'),
+          },
+          limits: { maxSessions: 8, diskReserveBytes: 1024 * 1024, sessionMemoryBytes: 1024 * 1024 },
+        },
+      },
+    }),
+  ),
 );
 const runtime = runtimeConfig({ REMOTEKIT_CONTROL_CONFIG: join(run, 'control.json') }, []);
 const nodes = new NodeRegistry({

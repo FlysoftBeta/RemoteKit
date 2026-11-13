@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  ResourceScope,
+  runCleanups,
   cleanupMarkdown,
   cleanupRun,
   createTrackedDirectory,
@@ -255,4 +257,37 @@ test('a new run in an existing output directory cannot delete profiles retained 
   assert.equal(existsSync(join(run, 'new-viewer')), false);
   assert(existsSync(join(run, 'old-viewer/Local State')));
   assert.equal(await cleanupRun(run, { runId: previous.runId }), undefined);
+});
+
+test('resource rollback releases every acquisition in reverse order despite errors', async () => {
+  const scope = new ResourceScope();
+  const released = [];
+  scope.defer(() => released.push('first'));
+  scope.defer(() => {
+    released.push('second');
+    throw Error('second failed');
+  });
+  scope.defer(() => {
+    released.push('third');
+    throw Error('third failed');
+  });
+  await assert.rejects(scope.close(), (error) => {
+    assert.deepEqual(
+      error.errors.map((entry) => entry.message),
+      ['third failed', 'second failed'],
+    );
+    return true;
+  });
+  assert.deepEqual(released, ['third', 'second', 'first']);
+  await scope.close();
+  await assert.rejects(
+    runCleanups([
+      () => {
+        throw Error('release');
+      },
+      () => released.push('evidence'),
+    ]),
+    AggregateError,
+  );
+  assert.equal(released.at(-1), 'evidence');
 });

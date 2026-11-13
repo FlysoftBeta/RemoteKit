@@ -419,6 +419,7 @@ try {
     );
   });
   await step('restore-other-node', async () => {
+    const restoreCursor = events.length;
     first = await makeViewer('restored');
     await login(first, 'cluster-first');
     await focusApp(first, 'browser');
@@ -432,13 +433,15 @@ try {
     await click(first, first.page.getByRole('tab', { name: /Cluster \/first/ }).first());
     await until(
       () =>
-        events.findLast(
-          (e) =>
-            e.type === 'ready' &&
-            e.path === '/first' &&
-            e.storage === 'before-crash' &&
-            e.cookie.includes('cluster=before-crash'),
-        ),
+        events
+          .slice(restoreCursor)
+          .findLast(
+            (e) =>
+              e.type === 'ready' &&
+              e.path === '/first' &&
+              e.storage === 'before-crash' &&
+              e.cookie.includes('cluster=before-crash'),
+          ),
       'storage restored',
       90000,
     );
@@ -488,6 +491,7 @@ try {
       // Chromium commits cookies every 30 seconds; allow that and the delayed localStorage commit.
       await pause(35000);
       const s = await control.call('inspect');
+      const recoveryCursor = events.length;
       await killNode(placement(s, 'cluster-first').node_id);
       await pause(900);
       await shot(first, 'endpoint-down');
@@ -505,12 +509,14 @@ try {
       await navigate(first, '/first');
       await until(
         () =>
-          events.findLast(
-            (e) =>
-              e.type === 'ready' &&
-              e.storage === 'after-checkpoint-before-kill' &&
-              e.cookie.includes('cluster=after-checkpoint-before-kill'),
-          ),
+          events
+            .slice(recoveryCursor)
+            .findLast(
+              (e) =>
+                e.type === 'ready' &&
+                e.storage === 'after-checkpoint-before-kill' &&
+                e.cookie.includes('cluster=after-checkpoint-before-kill'),
+            ),
         'no rollback',
         90000,
       );
@@ -660,11 +666,13 @@ try {
       'offline node ready',
       90000,
     );
+    const recoveryCursor = events.length;
     second = await makeViewer('second-after-transfer');
     await login(second, 'cluster-second');
     await navigate(second, '/transfer-verified');
     const restored = await until(
-      () => events.findLast((e) => e.type === 'ready' && e.path === '/transfer-verified'),
+      () =>
+        events.slice(recoveryCursor).findLast((e) => e.type === 'ready' && e.path === '/transfer-verified'),
       'checkpoint data restored after offline transfer',
     );
     await report('transfer-observation', restored);

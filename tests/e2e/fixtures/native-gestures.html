@@ -261,12 +261,19 @@
           fetch('/command?id=' + encodeURIComponent(id))
             .then((r) => r.json())
             .then((commands) => {
-              for (const command of commands)
-                if (command.type === 'remove-child') {
-                  document.querySelector('#child')?.remove();
-                  events.push({ type: 'fixture-remove-child', at: performance.now() });
-                  post();
+              for (const command of commands) {
+                switch (command.type) {
+                  case 'remove-child':
+                    document.querySelector('#child')?.remove();
+                    events.push({ type: 'fixture-remove-child', at: performance.now() });
+                    post();
+                    break;
+                  case 'snapshot':
+                    events.push({ type: 'fixture-snapshot', marker: command.marker, at: performance.now() });
+                    post();
+                    break;
                 }
+              }
             })
             .catch(() => {}),
         100,

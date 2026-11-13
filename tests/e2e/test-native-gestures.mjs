@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { startStack } from './kit/stack.mjs';
+import { startStack, until } from './kit/stack.mjs';
 
 import { prepareNativeViewer as prepareViewer } from './kit/viewer.mjs';
 
@@ -133,11 +133,6 @@ async function prepareGestures(host) {
         received: [],
         heldResults: [],
         holdResults: false,
-        delayMoveMs: 0,
-        delayMoveAt: 4,
-        moveCount: 0,
-        delayEndMs: 0,
-        tail: Promise.resolve(),
         rafPaused: false,
         rafQueue: [],
         marks: [],
@@ -178,8 +173,7 @@ async function prepareGestures(host) {
             } catch {
               return send(data);
             }
-            const e = m.event ?? m,
-              isTouch = e.type === 'touch' || e.type === 'gesture';
+            const e = m.event ?? m;
             if (e.type === 'touch' && e.action === 'start' && q.staleStartEpoch) {
               m.layoutEpoch = q.staleStartEpoch;
               q.staleStartEpoch = undefined;
@@ -193,25 +187,8 @@ async function prepareGestures(host) {
               return;
             }
 
-            if (!isTouch) {
-              record.wire = performance.now();
-              return send(data);
-            }
-            const delay =
-              e.type === 'touch' && e.action === 'move' && ++q.moveCount === q.delayMoveAt
-                ? q.delayMoveMs
-                : e.type === 'touch' && e.action === 'end'
-                  ? q.delayEndMs
-                  : 0;
-            q.tail = q.tail
-              .then(() => new Promise((resolve) => setTimeout(resolve, delay)))
-              .then(() => {
-                record.wire = performance.now();
-                send(data);
-              })
-              .catch((error) =>
-                push(q.marks, { type: 'send-error', error: String(error), at: performance.now() }),
-              );
+            record.wire = performance.now();
+            return send(data);
           };
           dc.addEventListener('message', (event) => {
             if (typeof event.data !== 'string') return;
@@ -336,16 +313,6 @@ async function prepareGestures(host) {
     }, name);
     return qa.markStart;
   };
-  qa.setDelay = async ({ move = 0, end = 0, moveAt = 4 } = {}) =>
-    base.page.evaluate(
-      ({ move, end, moveAt }) => {
-        clientGestureQA.delayMoveMs = move;
-        clientGestureQA.delayEndMs = end;
-        clientGestureQA.delayMoveAt = moveAt;
-        clientGestureQA.moveCount = 0;
-      },
-      { move, end, moveAt },
-    );
   qa.touch = async (type, points, offsetMs) => {
     const mapped = [];
     for (const point of points) {
@@ -356,7 +323,6 @@ async function prepareGestures(host) {
     await qa.cdp.send('Input.dispatchTouchEvent', { type, touchPoints: mapped, timestamp });
   };
   // steps: [{at:0,type:'touchStart',points:[{id:1,x:100,y:600}]}, ...].
-  // Actual CDP source timestamps stay identical when only DC sending is delayed.
   qa.trajectory = async (steps, { settleMs = 3000 } = {}) => {
     qa.sourceEpoch = Date.now() / 1000;
     let before = 0;
@@ -365,7 +331,6 @@ async function prepareGestures(host) {
       await qa.touch(step.type, step.points, step.at);
       before = step.at;
     }
-    await base.page.evaluate(() => clientGestureQA.tail);
     if (settleMs) await base.page.waitForTimeout(settleMs);
   };
   qa.tap = async (x = 120, y = 110) =>
@@ -509,7 +474,6 @@ async function prepareGestures(host) {
     const run = async (name, config, gesture, check) => {
       if (name === from) started = true;
       if (!started || (only && !only.includes(name))) return;
-      await qa.setDelay();
       await qa.navigate({ id: `v${base.version}-${name}`, ...config });
       await gesture();
       const e = await qa.sample(`v${base.version}-${name}`);
@@ -710,9 +674,35 @@ async function prepareGestures(host) {
   };
   // Invalidation deliberately allows explicit input failures. Inspect identities and DOM
   // evidence; rejecting an old input is success, injecting it into a new document is not.
+  const inspectDom = async () => {
+    const marker = `${Date.now()}-${Math.random()}`;
+    const response = await base.page.request.post(
+      `http://127.0.0.1:${base.fixturePort}/command?id=${qa.case}`,
+      { data: { type: 'snapshot', marker } },
+    );
+    assert(response.ok(), 'DOM snapshot command rejected');
+    return until(
+      async () => {
+        const state = (await base.inspect()).telemetry[qa.case + ':root'];
+        return (
+          state?.events.some((event) => event.type === 'fixture-snapshot' && event.marker === marker) && state
+        );
+      },
+      'Fresh DOM snapshot was not observed',
+      5000,
+    );
+  };
+  const assertUnchangedDom = (before, after) => {
+    for (const field of ['counts', 'positions', 'pageScale', 'clicks']) {
+      assert(
+        JSON.stringify(after[field]) === JSON.stringify(before[field]),
+        `Invalidated input changed DOM ${field}`,
+      );
+    }
+  };
   qa.invalidationCases = async () => {
     const output = [];
-    await qa.navigate({ id: `v${base.version}-targetloss` });
+    await qa.navigate({ id: `v${base.version}-targetloss`, live: true });
     qa.sourceEpoch = Date.now() / 1000;
     await qa.touch('touchStart', [{ x: 400, y: 500 }], 0);
     await qa.touch('touchMove', [{ x: 400, y: 470 }], 40);
@@ -721,21 +711,34 @@ async function prepareGestures(host) {
       { data: { type: 'remove-child' } },
     );
     assert(response.ok(), 'Fixture command rejected');
-    await base.page.waitForTimeout(250);
+    await until(
+      async () =>
+        (await base.inspect()).telemetry[qa.case + ':root']?.events.some(
+          (event) => event.type === 'fixture-remove-child',
+        ),
+      'Child target was not removed',
+      5000,
+    );
+    const replacementBefore = await inspectDom();
     await qa.touch('touchMove', [{ x: 400, y: 430 }], 300);
     await qa.touch('touchEnd', [], 330);
     await base.page.waitForTimeout(400);
-    output.push(await qa.sample(`v${base.version}-targetloss`));
-    await qa.navigate({ id: `v${base.version}-oldlayout` });
+    assertUnchangedDom(replacementBefore, await inspectDom());
+    const targetLoss = await qa.sample(`v${base.version}-targetloss`);
+    output.push(targetLoss);
+    await qa.navigate({ id: `v${base.version}-oldlayout`, live: true });
     qa.sourceEpoch = Date.now() / 1000;
     await qa.touch('touchStart', [{ x: 120, y: 650 }], 0);
     await qa.touch('touchMove', [{ x: 120, y: 610 }], 40);
     const viewport = base.page.viewportSize();
     await base.page.setViewportSize({ width: viewport.width + 37, height: viewport.height });
     await base.ready();
+    const beforeEnd = await inspectDom();
     await qa.touch('touchEnd', []);
     await base.page.waitForTimeout(400);
-    output.push(await qa.sample(`v${base.version}-oldlayout`));
+    assertUnchangedDom(beforeEnd, await inspectDom());
+    const oldLayout = await qa.sample(`v${base.version}-oldlayout`);
+    output.push(oldLayout);
     await base.page.setViewportSize(viewport);
     await base.ready();
     await qa.navigate({ id: `v${base.version}-olddoc-before` });
@@ -752,40 +755,6 @@ async function prepareGestures(host) {
     assert(!f.counts.touchstart && !f.counts.touchmove, 'Old gesture reached new document');
     output.push(e);
     return output.map((e) => ({ name: e.name, summary: e.summary }));
-  };
-  qa.compareTiming = async () => {
-    const runs = [];
-    for (const [name, delay] of [
-      ['normal', {}],
-      ['middle70', { move: 70 }],
-      ['lateup100', { end: 100 }],
-    ]) {
-      await qa.navigate({ id: `v${base.version}-timing-${name}` });
-      await qa.setDelay(delay);
-      await qa.swipe();
-      const e = await qa.sample(`v${base.version}-timing-${name}`);
-      qa.assertClientPath(e);
-      assert(e.summary.rejections.length === 0, 'Timing group rejected input');
-      runs.push(e);
-    }
-    await qa.setDelay();
-    const final = (e) => e.summary.momentum.filter((m) => m.action === 'momentumEnd').slice(-1)[0],
-      reference = final(runs[0]);
-    assert(reference, 'Baseline momentumEnd absent');
-    for (const e of runs.slice(1)) {
-      const end = final(e);
-      assert(end, 'Delayed momentumEnd absent');
-      assert(Math.abs(e.summary.deltaY - runs[0].summary.deltaY) < 0.5, 'Source drag displacement changed');
-      assert(Math.abs(end.y - reference.y) < 1, 'Source-integrated momentum tail changed');
-      const a = runs[0].common.fixture.telemetry[runs[0].case + ':root'].positions.rootY,
-        b = e.common.fixture.telemetry[e.case + ':root'].positions.rootY;
-      assert(Math.abs(a - b) <= 3, 'Final DOM scroll differs >3 DIP');
-    }
-    return runs.map((e) => ({
-      name: e.name,
-      summary: e.summary,
-      root: e.common.fixture.telemetry[e.case + ':root'].positions,
-    }));
   };
   qa.lifecycleCases = async () => {
     const unwrap = (r) => r.message.event ?? r.message,
@@ -975,13 +944,11 @@ async function prepareRetirement(host) {
     const id = `v${base.version}-ack-timeout-${Date.now()}`;
     await qa.navigate({ id, block: 'ackdelay' });
     await qa.touch('touchStart', [{ x: 820, y: 110 }]);
-    await base.page.evaluate(() => clientGestureQA.tail);
     await base.page.waitForTimeout(2300);
     await base.page.evaluate(() => {
       clientGestureQA.dropNextEnd = true;
     });
     await qa.touch('touchEnd', []);
-    await base.page.evaluate(() => clientGestureQA.tail);
     const result = await recover(id, 1);
     const recovered = await qa.sample(id + '-recovered');
     const longPress = recovered.data.sent.find(

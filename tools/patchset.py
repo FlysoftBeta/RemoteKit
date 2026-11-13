@@ -21,10 +21,12 @@ class PatchError(Exception):
 def load_manifest():
     try:
         data = json.loads(MANIFEST.read_text(encoding="utf-8"))
-        if not isinstance(data, dict) or data.get("schema_version") != 1:
+        if not isinstance(data, dict) or type(data.get("schema_version")) is not int or data["schema_version"] != 1:
             raise PatchError("manifest schema_version must be 1")
-        if "base_revision" in data and not isinstance(data["base_revision"], str):
-            raise PatchError("base_revision must be a string")
+        if set(data) != {"schema_version", "base_revision", "patches"}:
+            raise PatchError("manifest fields must be schema_version, base_revision, patches")
+        if not isinstance(data["base_revision"], str) or not re.fullmatch(r"[0-9a-f]{40}", data["base_revision"]):
+            raise PatchError("base_revision must be a full Git revision")
         entries = data.get("patches")
         if not isinstance(entries, list):
             raise PatchError("manifest patches must be an array")
@@ -33,6 +35,8 @@ def load_manifest():
         for entry in entries:
             if not isinstance(entry, dict):
                 raise PatchError("each patch must be an object")
+            if set(entry) != {"id", "path", "sha256"}:
+                raise PatchError("patch fields must be id, path, sha256")
             ident, name, digest = (entry.get(k) for k in ("id", "path", "sha256"))
             if not isinstance(ident, str) or not ident or ident in ids:
                 raise PatchError(f"invalid or duplicate patch id: {ident!r}")
@@ -51,7 +55,7 @@ def load_manifest():
             if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                 raise PatchError(f"sha256 mismatch for {ident}")
             result.append((ident, path))
-        return result
+        return data["base_revision"], result
     except (OSError, ValueError) as exc:
         raise PatchError(f"cannot read manifest or patch: {exc}") from exc
 
@@ -196,7 +200,11 @@ def main(argv=None):
                                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if probe.returncode or Path(probe.stdout.strip()).resolve() != root:
             raise PatchError("chromium root must be the root of a Git worktree")
-        patches = load_manifest()
+        base_revision, patches = load_manifest()
+        if args.command in ("status", "apply", "revert"):
+            head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            if head != base_revision:
+                raise PatchError(f"Chromium HEAD {head} differs from base_revision {base_revision}")
         if args.command == "record":
             record_patch(root, patches, args.id, args.file)
             return 0

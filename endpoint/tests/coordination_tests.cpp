@@ -4,6 +4,7 @@
 #include <atomic>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 
 using namespace remotekit;
@@ -11,6 +12,10 @@ namespace {
 void Check(bool value, const char* message) {
   if (!value)
     throw std::runtime_error(message);
+}
+using GateRelease = std::unique_ptr<std::promise<void>, void (*)(std::promise<void>*)>;
+GateRelease ReleaseOnExit(std::promise<void>& promise) {
+  return GateRelease(&promise, [](std::promise<void>* value) { value->set_value(); });
 }
 }  // namespace
 int main(int argc, char** argv) {
@@ -178,6 +183,20 @@ int main(int argc, char** argv) {
                                 {"placementEpoch", 1},
                                 {"dataState", "dirty"}});
     Check(!coordination::ValidateNodeDesired(node), "session count overflow rejected");
+    {
+      std::promise<void> release_after_failure;
+      auto failure_gate = release_after_failure.get_future().share();
+      std::future<void> waiting;
+      try {
+        auto release_on_failure = ReleaseOnExit(release_after_failure);
+        waiting = std::async(std::launch::async, [failure_gate] { failure_gate.wait(); });
+        Check(false, "injected assertion failure");
+      } catch (const std::runtime_error&) {
+      }
+      Check(waiting.wait_for(std::chrono::seconds(1)) == std::future_status::ready,
+            "assertion failure releases asynchronous gate");
+      waiting.get();
+    }
     RpcResults results;
     Json request{{"method", "view.navigate"},
                  {"opId", "operation"},
@@ -187,7 +206,9 @@ int main(int argc, char** argv) {
     std::atomic<unsigned> calls{0};
     std::promise<void> entered, release;
     auto gate = release.get_future().share();
-    auto original = std::async(std::launch::async, [&] {
+    std::future<Result<Json>> original, duplicate;
+    auto release_gate = ReleaseOnExit(release);
+    original = std::async(std::launch::async, [&] {
       return results.Execute(request, [&]() -> Result<Json> {
         ++calls;
         entered.set_value();
@@ -198,7 +219,7 @@ int main(int argc, char** argv) {
     entered.get_future().wait();
     auto retry = request;
     retry["replay"] = true;
-    auto duplicate = std::async(std::launch::async, [&] {
+    duplicate = std::async(std::launch::async, [&] {
       return results.Execute(retry, [&]() -> Result<Json> {
         ++calls;
         return Json();
@@ -206,7 +227,7 @@ int main(int argc, char** argv) {
     });
     Check(duplicate.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout,
           "duplicate waits for original");
-    release.set_value();
+    release_gate.reset();
     Check(original.get().value() == duplicate.get().value() && calls == 1, "one RPC execution");
     auto changed = retry;
     changed["params"]["browserIncarnation"] = "replacement";

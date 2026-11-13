@@ -41,3 +41,21 @@ test('network faults close product traffic, preserve Vite, and permit reconnecti
   const restored = await client('restored traffic');
   assert.equal(String((await once(restored, 'data'))[0]), 'restored traffic');
 });
+
+test('disconnect and close release accepted sockets before their first byte', async () => {
+  const network = await createNetworkProxy({ port: 0, upstreamPort: 1 });
+  const open = async () => {
+    const socket = connect(Number(new URL(network.origin).port), '127.0.0.1');
+    await once(socket, 'connect');
+    return socket;
+  };
+  const first = await open();
+  const disconnected = once(first, 'close');
+  network.disconnect();
+  await disconnected;
+  network.reconnect();
+  const second = await open();
+  const closed = once(second, 'close');
+  await network.close();
+  await closed;
+});

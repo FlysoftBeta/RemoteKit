@@ -14,14 +14,13 @@ Run with C:\\src\\depot_tools\\python3.bat.
 """
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
+from fetch_common import digest, download
 import shutil
 import subprocess
 import tempfile
-import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -142,30 +141,6 @@ def prune_libreoffice(source):
     for path in sorted((registry / "res").iterdir()):
         if not any(locale in path.name for locale in ("en-US", "zh-CN")):
             path.unlink()
-
-
-def digest(path):
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-def download(url, destination, expected, headers=None):
-    if destination.is_file() and digest(destination) == expected:
-        return
-    request = urllib.request.Request(url)
-    for name, value in (headers or {}).items():
-        # The API redirects to a signed blob URL. GitHub credentials belong
-        # only on the API request, not on the storage host.
-        request.add_unredirected_header(name, value)
-    partial = destination.with_name(destination.name + ".partial")
-    try:
-        with urllib.request.urlopen(request, timeout=120) as source, partial.open("wb") as output:
-            shutil.copyfileobj(source, output)
-        if digest(partial) != expected:
-            raise RuntimeError(f"Dependency SHA-256 mismatch: {destination.name}")
-        partial.replace(destination)
-    finally:
-        partial.unlink(missing_ok=True)
 
 
 def extract_zip(path, destination):

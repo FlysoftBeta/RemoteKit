@@ -1,3 +1,5 @@
+import { runCleanups } from '../../tests/e2e/kit/cleanup.mjs';
+import { observeChildExit } from '../../tools/child-process.mjs';
 import { createControlConfig } from '../../tests/config-fixture.mjs';
 // Proves the bundled server runs in an isolated deployment with only native runtime dependencies.
 import { spawn } from 'node:child_process';
@@ -69,6 +71,7 @@ const child = spawn(process.execPath, [resolve(deployment, 'dist/server.mjs')], 
   windowsHide: true,
 });
 let output = '';
+const { exited, wait } = observeChildExit(child, () => output);
 child.stderr.on('data', (data) => {
   output += data;
 });
@@ -78,37 +81,42 @@ try {
   });
   // Control announces its listener in its own log file, not on stdout.
   const logPath = resolve(scratch, 'logs/control.jsonl');
-  const port = await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      clearInterval(poll);
-      reject(new Error(`Production startup timeout: ${output}`));
-    }, 5000);
-    const poll = setInterval(async () => {
-      const text = await readFile(logPath, 'utf8').catch(() => '');
-      const match = text.match(/"ev":"control\.started".*"listen":"http:\/\/127\.0\.0\.1:(\d+)"/);
-      if (match && Number(match[1])) {
-        clearTimeout(timeout);
+  const port = await wait(
+    new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
         clearInterval(poll);
-        resolve(Number(match[1]));
-      }
-    }, 50);
-    child.once('exit', (code) => {
-      clearTimeout(timeout);
-      clearInterval(poll);
-      reject(new Error(`Production exited ${code}: ${output}`));
-    });
-  });
+        reject(new Error(`Production startup timeout: ${output}`));
+      }, 5000);
+      const poll = setInterval(async () => {
+        const text = await readFile(logPath, 'utf8').catch(() => '');
+        const match = text.match(/"ev":"control\.started".*"listen":"http:\/\/127\.0\.0\.1:(\d+)"/);
+        if (match && Number(match[1])) {
+          clearTimeout(timeout);
+          clearInterval(poll);
+          resolve(Number(match[1]));
+        }
+      }, 50);
+      exited
+        .finally(() => {
+          clearTimeout(timeout);
+          clearInterval(poll);
+        })
+        .catch(() => {});
+    }),
+  );
   const base = `http://127.0.0.1:${port}`;
-  const page = await fetch(base);
+  const page = await wait(fetch(base));
   assert.equal(page.status, 200, output);
-  assert.match(await page.text(), /RemoteKit/);
-  const response = await fetch(base + '/api/auth/setup', {
-    method: 'POST',
-    headers: { Origin: 'http://production.test', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'production-user', password: 'production-password123' }),
-  });
+  assert.match(await wait(page.text()), /RemoteKit/);
+  const response = await wait(
+    fetch(base + '/api/auth/setup', {
+      method: 'POST',
+      headers: { Origin: 'http://production.test', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'production-user', password: 'production-password123' }),
+    }),
+  );
   assert.equal(response.status, 200);
-  const { user } = await response.json();
+  const { user } = await wait(response.json());
   assert.equal(user.isAdmin, true);
   const seed = new Sqlite(resolve(deployment, 'data/control.db'));
   const tenant = seed.prepare('SELECT tenant FROM users WHERE id=?').get(user.id).tenant;
@@ -133,46 +141,50 @@ try {
   })();
   seed.close();
   const cookie = response.headers.get('set-cookie').split(';')[0];
-  const me = await fetch(base + '/api/auth/me', { headers: { Cookie: cookie } });
+  const me = await wait(fetch(base + '/api/auth/me', { headers: { Cookie: cookie } }));
   assert.equal(me.status, 200);
-  assert.equal((await me.json()).user.id, user.id);
+  assert.equal((await wait(me.json())).user.id, user.id);
   const socket = new WebSocket(base.replace('http:', 'ws:') + '/api/socket', {
     origin: 'http://production.test',
     headers: { Cookie: cookie },
   });
   try {
-    const auth = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Viewer authentication timeout')), 5000);
-      socket.on('error', reject);
-      socket.on('message', (data) => {
-        const message = JSON.parse(String(data));
-        if (message.type === 'auth') {
-          clearTimeout(timer);
-          resolve(message.auth);
-        }
-      });
-    });
+    const auth = await wait(
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Viewer authentication timeout')), 5000);
+        socket.on('error', reject);
+        socket.on('message', (data) => {
+          const message = JSON.parse(String(data));
+          if (message.type === 'auth') {
+            clearTimeout(timer);
+            resolve(message.auth);
+          }
+        });
+      }),
+    );
     assert.equal(auth.user.id, user.id);
     assert.equal(auth.locked, false);
     let sequence = 0;
     const request = (method = 'admin.overview', params = {}) =>
-      new Promise((resolve, reject) => {
-        const id = 'overview-' + ++sequence;
-        const timer = setTimeout(() => {
-          socket.off('message', receive);
-          reject(new Error('Mailbox status timeout'));
-        }, 5000);
-        const receive = (data) => {
-          const message = JSON.parse(String(data));
-          if (message.id !== id) return;
-          clearTimeout(timer);
-          socket.off('message', receive);
-          if (message.type === 'error') reject(new Error(JSON.stringify(message.error)));
-          else resolve(message.result);
-        };
-        socket.on('message', receive);
-        socket.send(JSON.stringify({ id, method, params }));
-      });
+      wait(
+        new Promise((resolve, reject) => {
+          const id = 'overview-' + ++sequence;
+          const timer = setTimeout(() => {
+            socket.off('message', receive);
+            reject(new Error('Mailbox status timeout'));
+          }, 5000);
+          const receive = (data) => {
+            const message = JSON.parse(String(data));
+            if (message.id !== id) return;
+            clearTimeout(timer);
+            socket.off('message', receive);
+            if (message.type === 'error') reject(new Error(JSON.stringify(message.error)));
+            else resolve(message.result);
+          };
+          socket.on('message', receive);
+          socket.send(JSON.stringify({ id, method, params }));
+        }),
+      );
     const pairing = await request('sessionImport.pairing', { open: true });
     assert.equal(pairing.code.length, 5);
     assert.ok(pairing.code.every((word) => /^[a-z]+$/.test(word)));
@@ -180,7 +192,7 @@ try {
     for (let attempt = 0; attempt < 100; attempt++) {
       state = (await request()).sessionImport;
       if (state.lastErrorAt && state.outbox.lastErrorAt) break;
-      await sleep(250);
+      await wait(sleep(250));
     }
     assert.ok(imapConnections > 0, 'Bundled ImapFlow client reached the local TCP server');
     assert.equal(state.configured, true);
@@ -195,20 +207,28 @@ try {
   } finally {
     socket.terminate();
   }
-  assert.ok((await stat(resolve(deployment, 'data/control.db'))).isFile());
-  await writeFile(
-    resolve(scratch, 'result.json'),
-    JSON.stringify({ passed: true, node: process.version, deployment, runtimeOnly: true }, null, 2),
+  assert.ok((await wait(stat(resolve(deployment, 'data/control.db')))).isFile());
+  await wait(
+    writeFile(
+      resolve(scratch, 'result.json'),
+      JSON.stringify({ passed: true, node: process.version, deployment, runtimeOnly: true }, null, 2),
+    ),
   );
   console.log(`Production startup smoke passed: ${scratch}`);
 } finally {
-  const exited = once(child, 'exit');
-  if (child.connected) child.disconnect();
-  const kill = setTimeout(() => child.kill(), 4000);
-  await exited;
-  clearTimeout(kill);
-  await Promise.all([
-    new Promise((resolve) => imap.close(resolve)),
-    new Promise((resolve) => smtp.close(resolve)),
+  await runCleanups([
+    () => {
+      if (child.connected) child.disconnect();
+    },
+    async () => {
+      const kill = setTimeout(() => child.kill(), 4000);
+      try {
+        await exited;
+      } finally {
+        clearTimeout(kill);
+      }
+    },
+    () => new Promise((resolve) => imap.close(resolve)),
+    () => new Promise((resolve) => smtp.close(resolve)),
   ]);
 }

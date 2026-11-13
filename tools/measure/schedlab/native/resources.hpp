@@ -22,9 +22,15 @@ class Resources {
   PDH_HQUERY query_ = nullptr;
   PDH_HCOUNTER counter_ = nullptr;
   std::mutex mutex_;
-  std::map<DWORD, std::string> roots_, groups_;
+  struct Root {
+    std::string group;
+    uint64_t created = 0;
+  };
+  std::map<DWORD, Root> roots_;
+  std::map<DWORD, std::string> groups_;
   struct Process {
     HANDLE handle = nullptr;
+    uint64_t created = 0;
     double previous_seconds = 0;
     std::string group;
   };

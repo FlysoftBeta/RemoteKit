@@ -134,7 +134,14 @@ try {
     password: randomBytes(18).toString('hex'),
   });
   result.registered = true;
-  await page.getByRole('button', { name: '新建窗口', exact: true }).click();
+  const startScreen = page.getByRole('dialog', { name: '开始屏幕' });
+  if (!(await startScreen.isVisible()))
+    await page.getByRole('button', { name: '打开开始屏幕', exact: true }).click();
+  await startScreen
+    .locator('[data-tile-key]')
+    .filter({ has: page.getByText('浏览器', { exact: true }) })
+    .first()
+    .click();
   await page.locator('.address-form input').fill(fixtureOrigin);
   await page.locator('.address-form input').press('Enter');
   const ready = await until(() => events.find((e) => e.type === 'ready'), 'Remote page did not load');
