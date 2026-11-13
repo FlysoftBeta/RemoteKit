@@ -1,4 +1,5 @@
 import { createReadStream } from 'node:fs';
+import limits from '../../../protocol/limits.json';
 import { createInterface } from 'node:readline';
 import { isErrorId, RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import type { NodeRegistry } from '../cluster/node-link';
@@ -25,7 +26,7 @@ export async function findError(
           } catch {
             // Rotation or a crash can leave an incomplete line.
           }
-          if (records.length === 50) return { records, failures };
+          if (records.length === limits.logSearchLines) return { records, failures };
         }
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -53,7 +54,9 @@ export async function findError(
             ])) as { lines: string[] };
             if (!Array.isArray(result?.lines) || result.lines.some((line) => typeof line !== 'string'))
               throw new RemoteKitError('internal', '节点日志查询结果无效');
-            records.push(...result.lines.slice(0, 50).map((line) => ({ source: node.nodeId, line })));
+            records.push(
+              ...result.lines.slice(0, limits.logSearchLines).map((line) => ({ source: node.nodeId, line })),
+            );
           } catch (err) {
             failures.push({
               nodeId: node.nodeId,

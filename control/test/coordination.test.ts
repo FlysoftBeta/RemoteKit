@@ -93,7 +93,12 @@ test('inbox preserves source identity across restored streams and commits cursor
   }
 });
 
-import { coordinationLimits, validateSessionEvent } from '../server/endpoint/coordination';
+import {
+  coordinationLimits,
+  validateSessionEvent,
+  validateClipboard,
+  type SessionClipboard,
+} from '../server/endpoint/coordination';
 import { SessionFaults } from '../server/endpoint/session-faults';
 
 test('clipboard UTF-8 fields accept the contract boundary and reject one byte past', () => {
@@ -101,11 +106,11 @@ test('clipboard UTF-8 fields accept the contract boundary and reject one byte pa
     ['text', coordinationLimits.textBytes],
     ['html', coordinationLimits.htmlBytes],
   ] as const) {
-    const value = desired();
-    value.clipboard.value[field] = 'x'.repeat(bound);
-    validateDesired(value);
-    value.clipboard.value[field] += 'x';
-    assert.throws(() => validateDesired(value));
+    const value = clipboard();
+    value.value[field] = 'x'.repeat(bound);
+    validateClipboard(value);
+    value.value[field] += 'x';
+    assert.throws(() => validateClipboard(value));
     const event = {
       event: 'session.event',
       tenantId: 'tenant',
@@ -334,23 +339,42 @@ test('desired collection counts accept each contract boundary and reject one mor
   assert.throws(() => validateNodeDesired(node));
 });
 
-test('configuration and whole desired JSON bounds include the exact encoded boundary', () => {
+test('configuration JSON bound reserves the wire envelope', () => {
   const value = desired();
   value.views[0].url = '';
-  const { clipboard, ...configuration } = value;
   value.views[0].url = 'x'.repeat(
-    coordinationLimits.configurationBytes - Buffer.byteLength(JSON.stringify(configuration)),
+    coordinationLimits.configurationBytes -
+      coordinationLimits.managementEnvelopeBytes -
+      Buffer.byteLength(JSON.stringify(value)),
   );
   validateDesired(value);
   value.views[0].url += 'x';
   assert.throws(() => validateDesired(value));
-  value.views[0].url = value.views[0].url.slice(1);
-  value.clipboard.value.text = 'x'.repeat(coordinationLimits.textBytes);
-  value.clipboard.value.html = 'x'.repeat(coordinationLimits.htmlBytes);
-  const excess = Buffer.byteLength(JSON.stringify(value)) - coordinationLimits.documentBytes;
-  value.clipboard.value.html = value.clipboard.value.html.slice(excess);
-  assert.equal(Buffer.byteLength(JSON.stringify(value)), coordinationLimits.documentBytes);
-  validateDesired(value);
-  value.clipboard.value.html += 'x';
-  assert.throws(() => validateDesired(value));
+});
+
+function clipboard(): SessionClipboard {
+  const value = desired();
+  return {
+    method: 'session.clipboard',
+    tenantId: value.tenantId,
+    sessionId: value.sessionId,
+    placementEpoch: value.placementEpoch,
+    connectionEpoch: value.connectionEpoch,
+    revision: '1',
+    value: { text: '', html: '' },
+  };
+}
+
+test('clipboard document bound counts JSON escapes and reserves the wire envelope', () => {
+  const value = clipboard();
+  value.value.text = '\u0000'.repeat(600000);
+  value.value.html = 'x'.repeat(
+    coordinationLimits.documentBytes -
+      coordinationLimits.managementEnvelopeBytes -
+      Buffer.byteLength(JSON.stringify(value)),
+  );
+  validateClipboard(value);
+  assert.doesNotThrow(() => encodeJson({ ...value, id: 'f'.repeat(36) }));
+  value.value.html += 'x';
+  assert.throws(() => validateClipboard(value), { code: 'limit_exceeded' });
 });

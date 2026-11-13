@@ -1,5 +1,6 @@
 #pragma once
 #include "cluster/frames.hpp"
+#include "protocol/limits.hpp"
 #include <filesystem>
 #include <functional>
 #include <istream>
@@ -9,7 +10,7 @@
 namespace remotekit::objects {
 using cluster::Json;
 using cluster::Key;
-inline constexpr uint32_t kSegmentSize = 1024 * 1024;
+inline constexpr uint32_t kSegmentSize = limits::objectChunkBytes;
 bool ValidTenant(std::string_view tenant);
 bool ValidId(std::string_view id);
 struct Keys {

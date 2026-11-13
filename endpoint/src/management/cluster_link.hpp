@@ -20,6 +20,7 @@ class ClusterLink final : public ManagementLink {
   bool Current(uint64_t generation) override;
   bool SendReply(uint64_t generation, const Json& reply) override;
   bool SendEvent(const Json& event, uint64_t generation, DeliveryFlag delivery = {}) override;
+  QueueBudget EventBudget() override;
   void OnDisconnect(Disconnect callback) override;
   void OnBinary(Binary callback) override;
   void OnPeers(Peers callback) override;

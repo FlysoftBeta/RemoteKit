@@ -1,4 +1,5 @@
 #include "session/coordinator.hpp"
+#include "session/clipboard.hpp"
 #include "session/version_identity.hpp"
 #include <fstream>
 #include <iostream>
@@ -32,6 +33,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> order;
     std::atomic<unsigned> prepares{0}, starts{0}, configured{0}, stopped{0}, requests{0};
     std::atomic<bool> blocked{true}, authorized{true}, running{false}, sampling_failed{true};
+    PlacementClipboard clipboard;
     const auto record = [&](const char* action) {
       std::lock_guard lock(mutex);
       order.push_back(action);
@@ -41,11 +43,13 @@ int main(int argc, char** argv) {
           record("authorization");
           return {};
         },
-        .prepare = [&](const Json&) -> Result<void> {
+        .prepare = [&](const Json& document) -> Result<void> {
+          RK_RETURN_IF_ERROR(clipboard.Resolve(document.at("clipboard").at("revision")));
           record("prepare");
           ++prepares;
           return {};
         },
+        .clipboard = [&](const Json& document) { return clipboard.Deliver(document); },
         .start = [&]() -> Result<void> {
           record("start");
           ++starts;
@@ -220,6 +224,45 @@ int main(int argc, char** argv) {
     Await([&] { return reopened.Latest().value("converged", false); });
     Check(std::stoull(reopened.Latest().at("seq").get<std::string>()) > previous_sequence,
           "coordinators in one Endpoint incarnation share a monotonic observation sequence");
+    desired["revision"] = std::to_string(std::stoull(desired["revision"].get<std::string>()) + 1);
+    desired["clipboard"]["revision"] = "5";
+    Check(bool(reopened.Publish(desired, 2)), "missing clipboard desired accepted for convergence");
+    Await([&] {
+      const auto error = reopened.Latest().value("lastError", Json());
+      return error.is_object() && error.value("code", "") == "conflict" &&
+             error.value("message", "") == "clipboard revision not delivered";
+    });
+    auto delivery = target;
+    delivery.update({{"method", "session.clipboard"},
+                     {"connectionEpoch", "reconnected"},
+                     {"revision", "5"},
+                     {"value", {{"text", "delivered"}, {"html", ""}}}});
+    auto stale = delivery;
+    stale["connectionEpoch"] = "connection";
+    auto result = reopened.DeliverClipboard(stale, 2);
+    Check(!result && result.error().code == ErrorCode::kConflict,
+          "stale clipboard connection conflicts");
+    result = reopened.DeliverClipboard(delivery, 1);
+    Check(!result && result.error().code == ErrorCode::kConflict,
+          "stale clipboard generation conflicts");
+    stale = delivery;
+    stale["placementEpoch"] = 99;
+    result = reopened.DeliverClipboard(stale, 2);
+    Check(!result && result.error().code == ErrorCode::kConflict,
+          "stale clipboard placement conflicts");
+    Check(bool(reopened.DeliverClipboard(delivery, 2)), "clipboard delivered");
+    Check(bool(reopened.DeliverClipboard(delivery, 2)), "same clipboard idempotent");
+    stale = delivery;
+    stale["value"]["text"] = "different";
+    result = reopened.DeliverClipboard(stale, 2);
+    Check(!result && result.error().code == ErrorCode::kConflict,
+          "same clipboard revision changed conflicts");
+    stale = delivery;
+    stale["revision"] = "4";
+    result = reopened.DeliverClipboard(stale, 2);
+    Check(!result && result.error().code == ErrorCode::kConflict, "older clipboard conflicts");
+    Await([&] { return reopened.Latest().value("converged", false); });
+    Check(clipboard.Resolve("0").value().at("text") == "", "zero revision resolves empty");
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

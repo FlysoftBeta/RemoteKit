@@ -1,4 +1,6 @@
 #include "diagnostics/log_files.hpp"
+#include "management/reply.hpp"
+#include "protocol/limits.hpp"
 #include "util/log.hpp"
 #include "util/file_io.hpp"
 #include "util/result_macros.hpp"
@@ -38,7 +40,10 @@ Result<Json> SearchErrorLogs(const fs::path& node_root, const std::string& error
   if (!ValidErrorId(error_id))
     return Error{ErrorCode::kInvalidRequest, "invalid error id"};
   std::vector<std::string> matches;
-  for (int rotation = 0; rotation <= 4 && matches.size() < 50; ++rotation) {
+  bool truncated = false;
+  size_t encoded_bytes = Json{{"lines", Json::array()}, {"truncated", true}}.dump().size();
+  constexpr auto budget = limits::managementBytes - kReplyEnvelopeReserve;
+  for (int rotation = 0; rotation <= 4; ++rotation) {
     auto path = node_root / "logs/endpoint.log";
     if (rotation)
       path += "." + std::to_string(rotation);
@@ -53,7 +58,7 @@ Result<Json> SearchErrorLogs(const fs::path& node_root, const std::string& error
       lines.emplace_back(bytes->data() + start, length);
       start += length + 1;
     }
-    for (auto line = lines.rbegin(); line != lines.rend() && matches.size() < 50; ++line) {
+    for (auto line = lines.rbegin(); line != lines.rend(); ++line) {
       auto raw = *line;
       if (!raw.empty() && raw.back() == '\r')
         raw.remove_suffix(1);
@@ -64,13 +69,23 @@ Result<Json> SearchErrorLogs(const fs::path& node_root, const std::string& error
         continue;
       const bool top = value.value("errorId", Json()) == error_id;
       const auto nested = value.find("err");
-      if (top || (nested != value.end() && nested->is_object() &&
-                  nested->value("errorId", Json()) == error_id))
-        matches.emplace_back(raw);
+      if (!top && !(nested != value.end() && nested->is_object() &&
+                    nested->value("errorId", Json()) == error_id))
+        continue;
+      const auto size = Json(raw).dump().size() + (matches.empty() ? 0 : 1);
+      if (matches.size() >= limits::logSearchLines || encoded_bytes + size > budget) {
+        truncated = true;
+        continue;
+      }
+      encoded_bytes += size;
+      matches.emplace_back(raw);
     }
   }
   std::reverse(matches.begin(), matches.end());
-  return Json{{"lines", std::move(matches)}};
+  Json result{{"lines", std::move(matches)}};
+  if (truncated)
+    result["truncated"] = true;
+  return result;
 }
 Result<void> DeleteSessionLogs(const fs::path& node_root, const std::string& session_id) {
   const auto directory = node_root / "logs/browser";
@@ -108,6 +123,8 @@ std::vector<fs::path> RecentCrashDumps(const fs::path& directory) {
 }
 
 Result<Json> ReadLogWindow(const fs::path& path, std::optional<uint64_t> end, uint64_t max_bytes) {
+  static_assert(((kLogWindowBytes + 2) / 3) * 4 + 256 + kReplyEnvelopeReserve <=
+                limits::managementBytes);
   if (max_bytes == 0 || max_bytes > kLogWindowBytes)
     return Error{ErrorCode::kInvalidRequest, "invalid log window"};
   FileHandle file;

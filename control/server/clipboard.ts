@@ -2,7 +2,7 @@ import { RemoteKitError } from '../shared/errors';
 import type { SnippetOrigin } from '../shared/file-library';
 import type { DomainContext, DomainServices } from './application';
 import type { ClipboardChangedEvent } from './endpoint/types';
-import { clipboardLimits, warnClipboardOversize } from './persistence/clipboards';
+import { warnClipboardOversize } from './persistence/clipboards';
 import type { ViewerAuthority } from './viewers/viewer-hub';
 
 export class ClipboardService {
@@ -21,7 +21,7 @@ export class ClipboardService {
     const user = this.context.store.accounts.userForTenant(tenant);
     if (!user) return;
     const value = this.context.store.clipboards.record(user.id, { text, html });
-    if (!value) return;
+    if (!value) throw new RemoteKitError('limit_exceeded', '剪贴板文本超过大小限制', { capacity: 'field' });
     if (!excludeFromHistory)
       await this.services.library.recordSnippet(tenant, text, origin, this.context.clock.wallMs());
     this.context.events.emit('clipboard', tenant, { type: 'clipboard', revision: value.revision, text });
@@ -54,6 +54,10 @@ export class ClipboardService {
         const concurrent = current !== event.baseRevision;
         if (!concurrent)
           clipboard = this.context.store.clipboards.record(user.id, { text: event.text, html: event.html });
+        if (!concurrent && !clipboard) {
+          commit('oversize');
+          return;
+        }
         if (concurrent || !event.excludeFromHistory)
           library = this.context.store.library.recordSnippet(
             event.tenantId,
@@ -77,8 +81,6 @@ export class ClipboardService {
     return this.context.tenants.serial(authority.tenantId, async () => {
       this.services.viewers.assertProductViewer(authority.tenantId, authority.leaseId, authority.epoch);
       if (typeof params.text !== 'string') throw new RemoteKitError('invalid_request', '无效的剪贴板文本');
-      if (Buffer.byteLength(params.text, 'utf8') > clipboardLimits.text)
-        throw new RemoteKitError('limit_exceeded', '剪贴板文本超过大小限制', { capacity: 'field' });
       const value = await this.accept(authority.tenantId, params.text, '', { kind: 'device' }, false);
       if (!value) throw new RemoteKitError('not_found', '账号不存在');
       this.context.endpoint.invalidate(authority.tenantId);

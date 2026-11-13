@@ -188,7 +188,9 @@ Session::Session(media::Sdk& api,
   presentation.SetFirstPresented(
       [this](const std::string& view, int64_t at) { browser.Presented(view, at); });
 }
-Result<void> Session::StageDesired(const Json& document) {
+Result<void> Session::StageDesired(const Json& document,
+                                   const PlacementClipboard& delivered_clipboard) {
+  RK_ASSIGN_OR_RETURN(value, delivered_clipboard.Resolve(document.at("clipboard").at("revision")));
   auto key = cluster::DecodeKey(document.at("profileKey").get<std::string>());
   if (!key)
     return key.error();
@@ -204,8 +206,6 @@ Result<void> Session::StageDesired(const Json& document) {
   auto policy = pipeline.ApplyMediaPolicy(document.at("mediaPolicy"));
   if (!policy)
     return policy.error();
-  Json value = document.at("clipboard").at("value");
-  value["revision"] = document.at("clipboard").at("revision");
   RK_RETURN_IF_ERROR(clipboard.Write(value));
   return views.StageDesired(document);
 }

@@ -1,4 +1,5 @@
 import { publishAndObserve } from './coordination-fixture';
+import limits from '../../protocol/limits.json';
 import { installDesiredSource } from './coordination-fixture';
 import type { LibrarySnapshot } from '../shared/file-library';
 import { registerUser } from './server-fixture';
@@ -17,6 +18,7 @@ import { endpointDefaults, testNode } from './node-fixture';
 import { EndpointGateway } from '../server/endpoint/gateway';
 import type { EndpointSnapshot } from '../server/endpoint/types';
 import { ControlDatabase } from '../server/persistence/database';
+import { OBJECT_GRACE_MS, tenantObjects } from '../server/persistence/object-references';
 import { emptyWorkspace } from '../server/persistence/workspaces';
 import { FakeNode, fakeMetrics } from './fake-node';
 import { TestClock, requestViewer } from './server-fixture';
@@ -57,7 +59,7 @@ test('offline dirty copies wait until transfer restores a complete version and f
   }
 });
 
-test('running versions retain four checkpoints and restore the newest complete version', async () => {
+test('running versions retain the current checkpoint and newest complete fallback', async () => {
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
@@ -68,7 +70,11 @@ test('running versions retain four checkpoints and restore the newest complete v
       await h.commit(alpha, 'tenant', id(n));
       h.placement.commitCheckpoint(placed, id(n), [id(n)], 'dev', { kind: 'running', takenAt: n * 1000 });
     }
-    assert.equal(h.placement.checkpoints('tenant').count, 4);
+    assert.equal(h.placement.checkpoints('tenant').count, 2);
+    assert.deepEqual(h.store.db.prepare('SELECT id FROM checkpoints ORDER BY id').all(), [
+      { id: 5n },
+      { id: 6n },
+    ]);
     assert.equal(h.placement.peek('tenant')!.dataState, 'dirty');
     assert.equal(h.placement.peek('tenant')!.runState, 'running');
     assert.equal(h.placement.newestComplete('tenant')!.manifestId, id(6));
@@ -87,8 +93,8 @@ test('running versions retain four checkpoints and restore the newest complete v
   }
 });
 
-test('equal manifests at different snapshot times are distinct versions and repeated reports are idempotent', async () => {
-  const h = await harness();
+test('single-node commits prune superseded versions even with equal manifests and remain idempotent', async () => {
+  const h = await harness(4096, {}, ['alpha']);
   try {
     const alpha = await h.connect('alpha');
     await publishAndObserve(h.gateway, 'tenant');
@@ -97,7 +103,11 @@ test('equal manifests at different snapshot times are distinct versions and repe
     h.placement.commitCheckpoint(placed, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 1000 });
     h.placement.commitCheckpoint(placed, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 2000 });
     h.placement.commitCheckpoint(placed, id(1), [id(1)], 'dev', { kind: 'running', takenAt: 2000 });
-    assert.equal(h.placement.checkpoints('tenant').count, 2);
+    assert.equal(h.placement.checkpoints('tenant').count, 1);
+    assert.deepEqual(h.store.db.prepare('SELECT id FROM checkpoints').all(), [{ id: 2n }]);
+    assert.deepEqual(h.store.db.prepare('SELECT count(*) AS count FROM checkpoint_objects').get(), {
+      count: 1n,
+    });
     assert.equal(h.placement.newestComplete('tenant')!.takenAt, 2000);
   } finally {
     await h.close();
@@ -108,6 +118,7 @@ test('a version with a missing data chunk falls back even when its manifest is a
   const h = await harness();
   try {
     const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.6);
     await publishAndObserve(h.gateway, 'tenant');
     const placed = h.placement.peek('tenant')!;
     for (const n of [1, 2, 3]) await h.commit(alpha, 'tenant', id(n));
@@ -119,6 +130,129 @@ test('a version with a missing data chunk falls back even when its manifest is a
     alpha.close();
     await offline;
     assert.equal(h.placement.newestComplete('tenant'), null);
+  } finally {
+    await h.close();
+  }
+});
+
+test('replication releases the fallback only after every current object reaches the replica target', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.6);
+    await publishAndObserve(h.gateway, 'tenant');
+    const placed = h.placement.peek('tenant')!;
+    for (const n of [1, 4]) await h.commit(alpha, 'tenant', id(n));
+    h.placement.commitCheckpoint(placed, id(1), [id(1), id(4)], 'dev', { kind: 'running', takenAt: 1000 });
+    await h.control.objects.replicate();
+    await h.commit(alpha, 'tenant', id(2));
+    await h.control.objects.replicate();
+    await h.commit(alpha, 'tenant', id(3));
+    h.placement.commitCheckpoint(placed, id(2), [id(2), id(3), id(4)], 'dev', {
+      kind: 'running',
+      takenAt: 2000,
+    });
+    assert.equal(h.placement.checkpoints('tenant').count, 2);
+    assert.deepEqual(h.store.db.prepare('SELECT count(*) AS count FROM checkpoints').get(), { count: 2n });
+    assert.ok(tenantObjects(h.store.db, false).get('tenant')!.has(id(1)));
+    await h.control.objects.replicate();
+    assert.equal(h.placement.checkpoints('tenant').count, 1);
+    assert.deepEqual(h.store.db.prepare('SELECT manifest_id FROM checkpoints').all(), [
+      { manifest_id: id(2) },
+    ]);
+    assert.equal(tenantObjects(h.store.db, false).get('tenant')!.has(id(1)), false);
+    assert.ok(tenantObjects(h.store.db, false).get('tenant')!.has(id(4)));
+    const offline = once(h.nodes.get('alpha')!, 'offline');
+    alpha.close();
+    await offline;
+    assert.equal(h.placement.newestComplete('tenant')!.manifestId, id(2));
+  } finally {
+    await h.close();
+  }
+});
+
+test('maintenance prunes four existing checkpoints without a commit and collects old-only objects after grace', async (t) => {
+  const h = await harness(4096, {}, ['alpha']);
+  try {
+    const alpha = await h.connect('alpha');
+    await publishAndObserve(h.gateway, 'tenant');
+    for (let n = 1; n <= 5; n++) await h.commit(alpha, 'tenant', id(n));
+    for (let n = 1; n <= 4; n++) {
+      h.store.db
+        .prepare('INSERT INTO checkpoints VALUES (?,?,?,?,?,?)')
+        .run('tenant', n, 1, id(n), 'dev', n * 1000);
+      for (const objectId of [id(n), id(5)])
+        h.store.db.prepare('INSERT INTO checkpoint_objects VALUES (?,?,?)').run('tenant', id(n), objectId);
+    }
+    h.store.db.exec('UPDATE object_claims SET claimed_at=0; UPDATE objects SET created_at=0');
+    assert.deepEqual(tenantObjects(h.store.db, false).get('tenant'), new Set([id(4), id(5)]));
+    assert.equal(h.placement.checkpoints('tenant').count, 1);
+    assert.equal(h.control.objects.tenantUsage('tenant').objects, 2);
+    assert.equal(h.control.objects.tenantUsage('tenant').bytes, 20);
+    const now = Date.now();
+    t.mock.timers.enable({ apis: ['Date'], now });
+    await h.control.objects.tick();
+    assert.deepEqual(h.store.db.prepare('SELECT id FROM checkpoints').all(), [{ id: 4n }]);
+    assert.deepEqual(h.store.db.prepare('SELECT id FROM checkpoint_objects ORDER BY id').all(), [
+      { id: id(4) },
+      { id: id(5) },
+    ]);
+    for (const n of [1, 2, 3]) {
+      assert.ok(alpha.objects.has(id(n)));
+      assert.deepEqual(h.store.db.prepare('SELECT unreferenced_at FROM object_gc WHERE id=?').get(id(n)), {
+        unreferenced_at: BigInt(now),
+      });
+    }
+    t.mock.timers.tick(OBJECT_GRACE_MS - 1);
+    await h.control.objects.tick();
+    for (const n of [1, 2, 3]) assert.ok(alpha.objects.has(id(n)));
+    t.mock.timers.tick(2);
+    await h.control.objects.tick();
+    for (const n of [1, 2, 3]) {
+      assert.equal(alpha.objects.has(id(n)), false);
+      assert.equal(h.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(id(n)), undefined);
+      assert.ok(
+        alpha.requests.some(
+          (request) => request.method === 'object.delete' && request.params.ids.includes(id(n)),
+        ),
+      );
+    }
+    for (const n of [4, 5]) assert.ok(alpha.objects.has(id(n)));
+  } finally {
+    t.mock.timers.reset();
+    await h.close();
+  }
+});
+
+test('replication prioritizes current objects and skips superseded objects while preserving claims', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    const beta = await h.connect('beta', 0.6);
+    await publishAndObserve(h.gateway, 'tenant');
+    const placed = h.placement.peek('tenant')!;
+    for (const n of [1, 2, 3]) {
+      await h.commit(alpha, 'tenant', id(n));
+      h.placement.commitCheckpoint(placed, id(n), [id(n)], 'dev', {
+        kind: 'running',
+        takenAt: n * 1000,
+      });
+    }
+    h.store.db.prepare('UPDATE object_claims SET claimed_at=0').run();
+    await h.commit(alpha, 'tenant', id(4));
+    const before = beta.requests.length;
+    await h.control.objects.replicate();
+    const fetched = beta.requests
+      .slice(before)
+      .filter((request) => request.method === 'object.fetch')
+      .flatMap((request) => request.params.ids);
+    assert.deepEqual(fetched, [id(3), id(4), id(2)]);
+    assert.equal(beta.objects.has(id(1)), false);
+    assert.equal(h.placement.checkpoints('tenant').count, 1);
+    assert.equal(
+      h.store.db.prepare('SELECT 1 FROM object_replicas WHERE id=? AND node_id=?').get(id(1), 'beta'),
+      undefined,
+    );
   } finally {
     await h.close();
   }
@@ -393,8 +527,14 @@ test('object commit batches are atomic, idempotent, bounded and repair replica r
         .prepare('SELECT 1 FROM object_replicas WHERE id=? AND node_id=?')
         .get(objects[0].objectId, 'alpha'),
     );
-    const located = await alpha.request('object.locate', 'tenant', { ids: objects.map((o) => o.objectId) });
-    assert.equal(Object.keys(located.sources).length, 1024);
+    const locatedIds = new Set<string>();
+    for (let offset = 0; offset < objects.length; offset += limits.objectLocateIds) {
+      const located = await alpha.request('object.locate', 'tenant', {
+        ids: objects.slice(offset, offset + limits.objectLocateIds).map((o) => o.objectId),
+      });
+      for (const id of Object.keys(located.sources)) locatedIds.add(id);
+    }
+    assert.equal(locatedIds.size, objects.length);
     await beta.request('object.locate', 'tenant', { ids: [] }).then(
       () => assert.fail('unplaced node was authorized'),
       (error) => assert.equal(error.code, 'forbidden'),
@@ -531,7 +671,11 @@ const clearSnapshot = (): EndpointSnapshot => ({
     lifecycleUncertain: false,
   },
 });
-async function harness(quota: number | null = 4096, nodeLimits: Partial<NodeLimits> = {}) {
+async function harness(
+  quota: number | null = 4096,
+  nodeLimits: Partial<NodeLimits> = {},
+  nodeIds: string[] = ['alpha', 'beta'],
+) {
   const key = randomBytes(32);
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
   const nodes = new NodeRegistry({
@@ -539,7 +683,7 @@ async function harness(quota: number | null = 4096, nodeLimits: Partial<NodeLimi
     buildId: 'dev',
     requestTimeoutMs: 1000,
     nodes: Object.fromEntries(
-      ['alpha', 'beta'].map((nodeId) => [
+      nodeIds.map((nodeId) => [
         nodeId,
         {
           ...testNode(nodeId),
@@ -1072,8 +1216,8 @@ test('inventory pages restore matching replicas, drop missing or corrupt copies 
   }
 });
 
-test('GC follows library and selection references, derivatives and the latest four checkpoints', async () => {
-  const h = await harness();
+test('GC follows library and selection references, derivatives and the retained checkpoint', async () => {
+  const h = await harness(4096, {}, ['alpha']);
   try {
     const alpha = await h.connect('alpha');
     await publishAndObserve(h.gateway, 'tenant');
@@ -1130,8 +1274,8 @@ test('GC follows library and selection references, derivatives and the latest fo
       'UPDATE objects SET created_at=0; UPDATE object_claims SET claimed_at=0; DELETE FROM object_gc',
     );
     await h.control.objects.gc();
-    for (const n of [1, 2, 3, 4, 5, 6]) assert.ok(alpha.objects.has(id(n)));
-    for (const n of [7]) assert.equal(alpha.objects.has(id(n)), false);
+    for (const n of [1, 2, 3, 6]) assert.ok(alpha.objects.has(id(n)));
+    for (const n of [4, 5, 7]) assert.equal(alpha.objects.has(id(n)), false);
     h.store.library.save('tenant', {
       revision: 1,
       entries: [],

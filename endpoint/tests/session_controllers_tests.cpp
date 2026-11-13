@@ -3,6 +3,7 @@
 #include "rtc/outbox.hpp"
 #include "rtc/authorization.hpp"
 #include "rtc/peer.hpp"
+#include "rtc/service_peer.hpp"
 #include "session/presentation.hpp"
 #include "input/input.hpp"
 #include "input/wire_validation.hpp"
@@ -741,6 +742,24 @@ void PeerFailureCleanup() {
   CHECK(!fixture.av_sync && fixture.audio && !controller.AvSync());
   controller.Close();
   CHECK(fixture.closes == 11 && fixture.stops_with_handle == 11);
+  for (size_t count : {limits::rtcSignalQueue, limits::rtcSignalQueue + 1}) {
+    signals.clear();
+    CHECK(controller.Offer(offer, 3, 60, 0, false, false));
+    for (size_t i = 0; i < count; ++i)
+      fixture.config.event(fixture.config.context, 17, REMOTEKIT_RTC_ICE_COMPLETE, nullptr, 0,
+                           nullptr, 0);
+    controller.FlushSignals();
+    if (count == limits::rtcSignalQueue) {
+      CHECK(signals.size() == count && signals.back().second.at("type") == "complete");
+      signals.clear();
+      CHECK(controller.ReplaySignals("connection", 4));
+      controller.FlushSignals();
+      CHECK(signals.size() == count);
+    } else {
+      CHECK(signals.size() == 1 && signals.front().second.at("type") == "error");
+    }
+    controller.Close();
+  }
   sdk.remotekit_rtc_get_receive_level = [](uint64_t, uint32_t* level) {
     *level = 0;
     return 0;
@@ -765,6 +784,37 @@ void PeerFailureCleanup() {
   CHECK(fixture.config.encoder.create(fixture.config.context, service.Handle(), 1) ==
         REMOTEKIT_SDK_INVALID_STATE);
   service.Close();
+
+  class Link final : public ManagementLink {
+   public:
+    bool Next(std::string&, uint64_t&, bool&) override { return false; }
+    bool Current(uint64_t) override { return true; }
+    bool SendReply(uint64_t, const Json&) override { return true; }
+    bool SendEvent(const Json&, uint64_t, DeliveryFlag = {}) override { return true; }
+    void OnDisconnect(Disconnect) override {}
+    Result<Json> Request(const std::string&, Json) override { return Json::object(); }
+  } link;
+  const auto directory = fs::path(__FILE__).parent_path().parent_path().parent_path() /
+                         "develop/tmp" / ("service-offer-" + std::to_string(GetCurrentProcessId()));
+  struct Cleanup {
+    fs::path directory;
+    ~Cleanup() { fs::remove_all(directory); }
+  } cleanup{directory};
+  const auto service_options = RuntimeOptions::FromConfig(TestConfig(), directory, "dev", "test");
+  CHECK(service_options);
+  objects::ObjectService objects(service_options.value().data, link, {}, "test", "dev");
+  sdk.remotekit_rtc_set_media_authorized = [](uint64_t, int) { return 0; };
+  ServicePeer service_peer(sdk, service_options.value(), link, objects, "tenant", "lease");
+  Json request{{"leaseId", "lease"},
+               {"connectionId", "service"},
+               {"epoch", uint64_t(1)},
+               {"unlocked", false},
+               {"sdp", std::string(limits::serviceOfferSdpBytes, 'x')}};
+  CHECK(service_peer.Command("service.offer", request, 3));
+  request["sdp"] = std::string(limits::serviceOfferSdpBytes + 1, 'x');
+  const auto oversized_offer = service_peer.Command("service.offer", request, 3);
+  CHECK(!oversized_offer && oversized_offer.error().code == ErrorCode::kInvalidRequest &&
+        oversized_offer.error().message.find("serviceOfferSdpBytes") != std::string::npos);
 }
 
 void OrderedTouchInput() {

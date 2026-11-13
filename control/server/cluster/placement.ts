@@ -4,7 +4,14 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type { ControlDatabase } from '../persistence/database';
 import { retiringObjects } from './objects';
-import { tenantObjects, syncObjectReferences } from '../persistence/object-references';
+import {
+  tenantObjects,
+  syncObjectReferences,
+  checkpointVersions,
+  retainedCheckpoints,
+  pruneCheckpoints,
+  setCheckpointReplicaNodes,
+} from '../persistence/object-references';
 import { tenantKeys } from './keys';
 import type { NodeRegistry } from './node-link';
 
@@ -25,6 +32,12 @@ export class Placement {
     private readonly store: ControlDatabase,
     private readonly nodes: NodeRegistry,
   ) {
+    setCheckpointReplicaNodes(store.db, () =>
+      nodes
+        .all()
+        .filter((node) => !nodes.isRemoved(node.nodeId))
+        .map((node) => node.nodeId),
+    );
     nodes.fencing = (nodeId) =>
       (
         store.db
@@ -86,20 +99,8 @@ export class Placement {
       .all()
       .filter((node) => node.state.state === 'ready' && !this.nodes.isRemoved(node.nodeId))
       .map((node) => node.nodeId);
-    const row = this.store.db
-      .prepare(
-        `SELECT c.id,c.manifest_id AS manifestId,c.created_at AS takenAt FROM checkpoints c
-        WHERE c.tenant=?
-          AND EXISTS (SELECT 1 FROM checkpoint_objects co
-            WHERE co.tenant=c.tenant AND co.manifest_id=c.manifest_id AND co.id=c.manifest_id)
-          AND NOT EXISTS (SELECT 1 FROM checkpoint_objects co
-            WHERE co.tenant=c.tenant AND co.manifest_id=c.manifest_id
-              AND NOT EXISTS (SELECT 1 FROM object_replicas r, json_each(?) n
-                WHERE r.id=co.id AND r.node_id=n.value))
-        ORDER BY c.id DESC LIMIT 1`,
-      )
-      .get(tenant, JSON.stringify(ready)) as { id: bigint; manifestId: string; takenAt: bigint } | undefined;
-    return row ? { id: Number(row.id), manifestId: row.manifestId, takenAt: Number(row.takenAt) } : null;
+    const version = checkpointVersions(this.store.db, ready, tenant).find((version) => version.replicas >= 1);
+    return version ? { id: version.id, manifestId: version.manifestId, takenAt: version.takenAt } : null;
   }
   // Moves a stopped Session to its newest complete version (none: blank browser data) and fences the
   // old copy. A source that is online must have been stopped and committed first.
@@ -145,18 +146,16 @@ export class Placement {
     return sessionId;
   }
   checkpoints(tenant: string) {
+    const retained = retainedCheckpoints(this.store.db, tenant);
     const row = this.store.db
       .prepare(
-        `SELECT count(*) AS count, max(created_at) AS latest,
-        (SELECT coalesce(sum(o.stored_size),0) FROM checkpoint_objects c JOIN objects o
-          ON o.id=c.id
-          WHERE c.tenant=? AND c.manifest_id=(SELECT manifest_id FROM checkpoints WHERE tenant=? ORDER BY id DESC LIMIT 1)) AS bytes
-        FROM checkpoints WHERE tenant=?`,
+        `SELECT coalesce(sum(o.stored_size),0) AS bytes FROM checkpoint_objects c JOIN objects o
+          ON o.id=c.id WHERE c.tenant=? AND c.manifest_id=?`,
       )
-      .get(tenant, tenant, tenant) as { count: bigint; latest: bigint | null; bytes: bigint };
+      .get(tenant, retained[0]?.manifestId ?? null) as { bytes: bigint };
     return {
-      count: Number(row.count),
-      latestAt: row.latest === null ? null : Number(row.latest),
+      count: retained.length,
+      latestAt: retained.length ? retained[0].takenAt : null,
       latestBytes: Number(row.bytes),
     };
   }
@@ -359,18 +358,7 @@ export class Placement {
         this.store.db
           .prepare('INSERT OR IGNORE INTO checkpoint_objects VALUES (?,?,?)')
           .run(placement.tenant, manifestId, objectId);
-      this.store.db
-        .prepare(
-          `DELETE FROM checkpoint_objects WHERE tenant=? AND manifest_id NOT IN
-        (SELECT manifest_id FROM checkpoints WHERE tenant=? ORDER BY id DESC LIMIT 4)`,
-        )
-        .run(placement.tenant, placement.tenant);
-      this.store.db
-        .prepare(
-          `DELETE FROM checkpoints WHERE tenant=? AND id NOT IN
-        (SELECT id FROM checkpoints WHERE tenant=? ORDER BY id DESC LIMIT 4)`,
-        )
-        .run(placement.tenant, placement.tenant);
+      pruneCheckpoints(this.store.db, placement.tenant);
       if (version.kind === 'running') {
         this.store.db
           .prepare('UPDATE session_placements SET checkpoint_id=? WHERE tenant=?')

@@ -29,7 +29,7 @@ class Session {
           std::shared_ptr<objects::SessionObjects> access = {});
   ~Session();
   Result<void> Initialize();
-  Result<void> StageDesired(const Json& document);
+  Result<void> StageDesired(const Json& document, const PlacementClipboard& delivered_clipboard);
   Result<void> AuthorizeDesired(const Json& document, uint64_t generation);
   Result<Json> EventState() { return store.Events().State(); }
   Result<Json> PendingEvents(uint64_t after = 0) { return store.Events().Load(after); }

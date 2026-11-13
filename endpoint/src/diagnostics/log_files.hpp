@@ -1,11 +1,12 @@
 #pragma once
 #include "util/common.hpp"
 #include "util/error.hpp"
+#include "protocol/limits.hpp"
 #include <cstdint>
 #include <optional>
 #include <vector>
 namespace remotekit {
-inline constexpr uint64_t kLogWindowBytes = 512 * 1024;
+inline constexpr uint64_t kLogWindowBytes = limits::logWindowBytes;
 Result<Json> SearchErrorLogs(const fs::path& node_root, const std::string& error_id);
 Result<Json> ReadSessionLog(const fs::path& node_root,
                             const std::string& session_id,

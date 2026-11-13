@@ -1,4 +1,5 @@
 import { decodeJson, encodeJson } from '../persistence/codec';
+import limits from '../../../protocol/limits.json';
 import { archiveMetadata, diagnosticManifest } from './formats';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readdir, readFile, rm, stat } from 'node:fs/promises';
@@ -26,7 +27,7 @@ const logBudgets = {
   dump: 16 * 1024 * 1024,
   dumpCount: 3,
 } as const;
-const logWindowBytes = 512 * 1024;
+const logWindowBytes = limits.logWindowBytes;
 const logDeadlineMs = 15000;
 const shutdownLogDeadlineMs = 3000;
 const maxRecent = 1024;

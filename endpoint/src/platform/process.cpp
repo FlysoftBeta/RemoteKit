@@ -1,5 +1,6 @@
 #include "util/log.hpp"
 #include "platform/process.hpp"
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
 #include <vector>
@@ -15,6 +16,20 @@ Error ProcessError(const char* message) {
   return WithOsError(ErrorCode::kUnavailable,
                      std::string(message) + " Windows " + std::to_string(code),
                      OsError::Kind::kWin32, code);
+}
+std::vector<ULONG_PTR> JobProcessIds(HANDLE job) {
+  if (!job)
+    return {};
+  std::vector<ULONG_PTR> memory(16);
+  for (;;) {
+    auto* ids = reinterpret_cast<JOBOBJECT_BASIC_PROCESS_ID_LIST*>(memory.data());
+    if (QueryInformationJobObject(job, JobObjectBasicProcessIdList, ids,
+                                  static_cast<DWORD>(memory.size() * sizeof(ULONG_PTR)), nullptr))
+      return {ids->ProcessIdList, ids->ProcessIdList + ids->NumberOfProcessIdsInList};
+    if (GetLastError() != ERROR_MORE_DATA)
+      return {};
+    memory.resize(ids->NumberOfAssignedProcesses + 2);
+  }
 }
 }  // namespace
 std::string DescribeExitCode(DWORD code) {
@@ -46,6 +61,8 @@ std::string DescribeExitCode(DWORD code) {
   return detail.str();
 }
 BrowserProcess::~BrowserProcess() {
+  if (Present())
+    (void)Terminate();
   if (job_)
     CloseHandle(job_);
   if (process_)
@@ -180,6 +197,22 @@ Result<void> BrowserProcess::Terminate() {
     return {};
   }
   state_ = State::kStopping;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  struct Processes {
+    std::vector<HANDLE> handles;
+    ~Processes() {
+      for (const auto handle : handles)
+        CloseHandle(handle);
+    }
+    size_t Remaining() const {
+      return std::count_if(handles.begin(), handles.end(), [](HANDLE handle) {
+        return WaitForSingleObject(handle, 0) != WAIT_OBJECT_0;
+      });
+    }
+  } processes;
+  for (const auto pid : JobProcessIds(job_))
+    if (auto handle = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid)))
+      processes.handles.push_back(handle);
   if (job_ && !TerminateJobObject(job_, 0))
     LogError(LogLevel::kWarn, "process.job_termination_failed",
              WithOsError(ErrorCode::kUnavailable, "producer termination failed",
@@ -189,16 +222,30 @@ Result<void> BrowserProcess::Terminate() {
       LogError(LogLevel::kWarn, "process.termination_failed",
                WithOsError(ErrorCode::kUnavailable, "producer termination failed",
                            OsError::Kind::kWin32, GetLastError()));
-    if (WaitForSingleObject(process_, 5000) != WAIT_OBJECT_0)
+  }
+  // Job accounting can reach zero before process handle and file cleanup completes.
+  while ((!Exited() && process_) || !JobEmpty() || processes.Remaining()) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+      const bool queried =
+          job_ && QueryInformationJobObject(job_, JobObjectBasicAccountingInformation, &accounting,
+                                            sizeof(accounting), nullptr);
+      LogEvent(LogLevel::kWarn, "browser.job_not_empty",
+               {{"pid", Pid()},
+                {"remaining",
+                 queried ? Json(std::max<size_t>(accounting.ActiveProcesses, processes.Remaining()))
+                         : Json(nullptr)}});
       return Error{ErrorCode::kOutcomeUnknown,
                    "producer termination not confirmed; process retained"};
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
   state_ = State::kExited;
   return {};
 }
 bool BrowserProcess::JobEmpty() const {
   if (!job_)
-    return !process_;
+    return !process_ || Exited();
   JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
   return QueryInformationJobObject(job_, JobObjectBasicAccountingInformation, &accounting,
                                    sizeof(accounting), nullptr) &&
@@ -212,14 +259,8 @@ bool BrowserProcess::WaitCleanExit(uint32_t timeout_ms, Json* timing) {
   auto sample = [&] {
     if (!timing || !job_)
       return;
-    std::vector<ULONG_PTR> memory(1026);
-    auto* ids = reinterpret_cast<JOBOBJECT_BASIC_PROCESS_ID_LIST*>(memory.data());
-    if (!QueryInformationJobObject(job_, JobObjectBasicProcessIdList, ids,
-                                   static_cast<DWORD>(memory.size() * sizeof(ULONG_PTR)), nullptr))
-      return;
-    std::set<ULONG_PTR> current;
-    for (DWORD i = 0; i < ids->NumberOfProcessIdsInList; ++i)
-      current.insert(ids->ProcessIdList[i]);
+    const auto ids = JobProcessIds(job_);
+    const std::set<ULONG_PTR> current(ids.begin(), ids.end());
     observed.insert(current.begin(), current.end());
     observed.insert(Pid());
     for (const auto pid : observed)

@@ -6,7 +6,8 @@ import { log } from '../server/log';
 import { ControlDatabase } from '../server/persistence/database';
 import { emptyWorkspace } from '../server/persistence/workspaces';
 import { requestViewer } from './server-fixture';
-import { clipboardLimits } from '../server/persistence/clipboards';
+import { clipboardLimits, clipboardDocumentBytes } from '../server/persistence/clipboards';
+import limits from '../../protocol/limits.json';
 import type { ClipboardChangedEvent } from '../server/endpoint/types';
 import { diagnosticEndpointSnapshot } from '../server/diagnostics/projection';
 import { decodeFrame, encodeJson } from '../server/cluster/frames';
@@ -79,11 +80,19 @@ test('clipboard limits count UTF-8 bytes and rejected writes log only sizes', (t
       [
         [
           'clipboard.write_exceeds_limits',
-          { textBytes: clipboardLimits.text + 2, htmlBytes: clipboardLimits.html },
+          {
+            textBytes: clipboardLimits.text + 2,
+            htmlBytes: clipboardLimits.html,
+            encodedBytes: clipboardDocumentBytes({ ...value, text: value.text + 'é' }),
+          },
         ],
         [
           'clipboard.write_exceeds_limits',
-          { textBytes: clipboardLimits.text, htmlBytes: clipboardLimits.html + 4 },
+          {
+            textBytes: clipboardLimits.text,
+            htmlBytes: clipboardLimits.html + 4,
+            encodedBytes: clipboardDocumentBytes({ ...value, html: value.html + '😀' }),
+          },
         ],
       ],
     );
@@ -92,12 +101,61 @@ test('clipboard limits count UTF-8 bytes and rejected writes log only sizes', (t
   }
 });
 
-test('desired documents seed and update the current clipboard', async () => {
+test('clipboard admission counts encoded bytes without changing the persisted value', () => {
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  try {
+    addUser(store, 'one');
+    const value = { text: '\u0000'.repeat(600000), html: '' };
+    value.html = 'x'.repeat(
+      limits.documentBytes - limits.managementEnvelopeBytes - clipboardDocumentBytes(value),
+    );
+    assert.equal(store.clipboards.record('one', value)?.revision, '1');
+    assert.equal(store.clipboards.record('one', { ...value, html: value.html + 'x' }), undefined);
+    assert.deepEqual(store.clipboards.latest('one'), { ...value, revision: '1' });
+    assert.equal(
+      store.clipboards.record('one', { text: '\u0000'.repeat(clipboardLimits.text), html: '' }),
+      undefined,
+    );
+  } finally {
+    store.db.close();
+  }
+});
+
+test('Viewer writes and snippet copies reject encoded overflow as a field limit', async (t) => {
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  addUser(store, 'one');
+  const control = createApplication(store, testGateway({ request: async () => ({}) }));
+  t.mock.method(control.viewers, 'assertProductViewer', () => {});
+  const authority = { tenantId: 'one', leaseId: 'lease', epoch: 1 };
+  try {
+    store.clipboards.record('one', { text: 'retained', html: '' });
+    const text = '\u0000'.repeat(clipboardLimits.text);
+    await assert.rejects(control.clipboard.set(authority, { text }), {
+      code: 'limit_exceeded',
+      capacity: 'field',
+    });
+    const snippet = store.library.recordSnippet('one', text, { kind: 'device' }, 1)!.entries[0];
+    await assert.rejects(control.clipboard.copySnippet(authority, snippet.id), {
+      code: 'limit_exceeded',
+      capacity: 'field',
+    });
+    assert.deepEqual(store.clipboards.latest('one'), { revision: '1', text: 'retained', html: '' });
+  } finally {
+    await control.close();
+    store.db.close();
+  }
+});
+
+test('clipboard delivery precedes desired and repeats only after a revision or connection change', async () => {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
   addUser(store, 'one');
   addUser(store, 'empty');
   const requests: { method: string; args: any }[] = [];
+  let connectionEpoch = 'first';
   const gateway = testGateway({
+    get state() {
+      return { state: 'ready' as const, incarnation: 'fixture', connectionEpoch };
+    },
     request: async (method, _tenant, args) => {
       requests.push({ method, args });
       return {};
@@ -107,22 +165,30 @@ test('desired documents seed and update the current clipboard', async () => {
   try {
     store.clipboards.record('one', { text: 'copy', html: '<p>copy</p>' });
     await publishAndObserve(gateway, 'one');
-    assert.deepEqual(requests[requests.length - 1]?.args.clipboard, {
-      revision: '1',
-      value: { text: 'copy', html: '<p>copy</p>' },
-    });
+    assert.deepEqual(
+      requests.map((request) => request.method),
+      ['session.clipboard', 'session.desired'],
+    );
+    assert.deepEqual(requests[0].args.value, { text: 'copy', html: '<p>copy</p>' });
+    assert.deepEqual(requests[1].args.clipboard, { revision: '1' });
+    await publishAndObserve(gateway, 'one');
+    assert.equal(requests.length, 2);
+    connectionEpoch = 'reconnected';
+    await publishAndObserve(gateway, 'one');
+    assert.deepEqual(
+      requests.slice(2).map((request) => request.method),
+      ['session.clipboard', 'session.desired'],
+    );
     await publishAndObserve(gateway, 'empty');
     assert.deepEqual(requests[requests.length - 1]?.args.clipboard, {
       revision: '0',
-      value: { text: '', html: '' },
     });
     store.clipboards.record('one', { text: 'new', html: '' });
     await publishAndObserve(gateway, 'one');
     assert.deepEqual(requests[requests.length - 1]?.args.clipboard, {
       revision: '2',
-      value: { text: 'new', html: '' },
     });
-    assert.ok(requests.every((request) => request.method === 'session.desired'));
+    assert.deepEqual(requests[requests.length - 2]?.args.value, { text: 'new', html: '' });
   } finally {
     await control.close();
     store.db.close();
@@ -150,17 +216,16 @@ test('diagnostics exclude clipboard and HTML subtrees even when values resemble 
 
 test('clipboard frames enforce the transport bound including JSON escaping', () => {
   const clipboard = {
-    revision: '1',
     text: 'a'.repeat(clipboardLimits.text),
     html: 'b'.repeat(clipboardLimits.html),
   };
-  const message = { method: 'session.desired', clipboard: { revision: '1', value: clipboard } };
+  const message = { method: 'session.clipboard', revision: '1', value: clipboard };
   assert.deepEqual(decodeFrame(encodeJson(message)), { kind: 'json', message });
   assert.throws(
     () =>
       encodeJson({
-        method: 'session.desired',
-        clipboard: { text: '\\0'.repeat(clipboardLimits.text), html: '\\0'.repeat(clipboardLimits.html) },
+        method: 'session.clipboard',
+        value: { text: '\\0'.repeat(clipboardLimits.text), html: '\\0'.repeat(clipboardLimits.html) },
       }),
     { code: 'limit_exceeded' },
   );

@@ -1,6 +1,7 @@
 #include "rtc/service_peer.hpp"
 #include "util/result_macros.hpp"
 #include "util/log.hpp"
+#include "protocol/limits.hpp"
 
 namespace remotekit {
 ServicePeer::ServicePeer(media::Sdk& sdk,
@@ -66,8 +67,15 @@ Result<Json> ServicePeer::Command(const std::string& method,
     return Error{ErrorCode::kUnavailable, "Management is disconnected"};
   if (method == "service.offer") {
     const auto sdp = Required(request, "sdp");
-    if (sdp.size() > 900000 || sdp.find("m=video ") != std::string::npos ||
-        sdp.find("m=audio ") != std::string::npos)
+    if (sdp.size() > limits::serviceOfferSdpBytes) {
+      LogEvent(LogLevel::kWarn, "rtc.service_offer_limit",
+               {{"tenantId", tenant_},
+                {"leaseId", lease_},
+                {"bytes", sdp.size()},
+                {"limit", limits::serviceOfferSdpBytes}});
+      return Error{ErrorCode::kInvalidRequest, "Service offer SDP exceeds serviceOfferSdpBytes"};
+    }
+    if (sdp.find("m=video ") != std::string::npos || sdp.find("m=audio ") != std::string::npos)
       return Error{ErrorCode::kInvalidRequest, "Service peer requires data channels only"};
     if (!worker_.joinable()) {
       RK_RETURN_IF_ERROR(files_.Start());

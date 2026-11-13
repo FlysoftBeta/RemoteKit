@@ -76,6 +76,68 @@ inline Result<void> ValidateNodeDesired(const Json& value) {
   }
   return {};
 }
+inline size_t WireNumberBytes(double number) {
+  // Control serializes numbers with JSON.stringify, including its exponent thresholds.
+  if (number == 0)
+    return 1;
+  char buffer[64];
+  const auto encoded = std::to_chars(buffer, buffer + sizeof(buffer), number);
+  const std::string text(buffer, encoded.ptr);
+  const auto exponent_at = text.find('e');
+  const auto mantissa = text.substr(0, exponent_at);
+  const int exponent =
+      exponent_at == std::string::npos ? 0 : std::stoi(text.substr(exponent_at + 1));
+  const bool negative = number < 0;
+  const auto decimal_at = mantissa.find('.');
+  const int decimal_position =
+      static_cast<int>(decimal_at == std::string::npos ? mantissa.size() : decimal_at) - negative;
+  const int digits =
+      static_cast<int>(mantissa.size()) - negative - (decimal_at != std::string::npos);
+  const int position = decimal_position + exponent;
+  if (position > 0 && position <= 21)
+    return negative + std::max(digits, position) + (position < digits);
+  if (position <= 0 && position > -6)
+    return negative + 2 - position + digits;
+  const int scientific_exponent = position - 1;
+  return negative + digits + (digits > 1) + 2 +
+         std::to_string(std::abs(scientific_exponent)).size();
+}
+inline std::ptrdiff_t WireNumberAdjustment(const Json& value) {
+  std::ptrdiff_t bytes = 0;
+  if (value.is_number_float())
+    return static_cast<std::ptrdiff_t>(WireNumberBytes(value.get<double>())) -
+           static_cast<std::ptrdiff_t>(value.dump().size());
+  if (value.is_structured())
+    for (const auto& child : value)
+      bytes += WireNumberAdjustment(child);
+  return bytes;
+}
+inline size_t DocumentBytes(Json value) {
+  value.erase("id");
+  value.erase("opId");
+  return value.dump().size() + WireNumberAdjustment(value);
+}
+inline Result<void> ValidateClipboard(const Json& value) {
+  if (!Keys(value,
+            {"method", "tenantId", "sessionId", "placementEpoch", "connectionEpoch", "revision",
+             "value"},
+            {"id"}) ||
+      value["method"] != "session.clipboard" || !value["connectionEpoch"].is_string() ||
+      value["connectionEpoch"].get_ref<const std::string&>().empty() ||
+      value["connectionEpoch"].get_ref<const std::string&>().size() > limits::identityBytes ||
+      !Counter(value["revision"]) || !Keys(value["value"], {"text", "html"}) ||
+      !value["value"]["text"].is_string() || !value["value"]["html"].is_string() ||
+      value["value"]["text"].get_ref<const std::string&>().size() > limits::textBytes ||
+      value["value"]["html"].get_ref<const std::string&>().size() > limits::htmlBytes ||
+      (value["revision"] == "0" && (value["value"]["text"] != "" || value["value"]["html"] != "")))
+    return Error{ErrorCode::kInvalidRequest, "invalid session.clipboard"};
+  RK_RETURN_IF_ERROR(ValidateTarget(value));
+  if (value["tenantId"].get_ref<const std::string&>().size() > limits::identityBytes)
+    return Error{ErrorCode::kInvalidRequest, "invalid clipboard tenant"};
+  if (DocumentBytes(value) + limits::managementEnvelopeBytes > limits::documentBytes)
+    return Error{ErrorCode::kLimitExceeded, "clipboard document exceeds bound"};
+  return {};
+}
 inline Result<void> ValidateDesired(const Json& value) {
   if (!Keys(value,
             {"method", "connectionEpoch", "tenantId", "sessionId", "placementEpoch", "revision",
@@ -95,11 +157,7 @@ inline Result<void> ValidateDesired(const Json& value) {
       (!value["checkpoint"].is_null() && !Hex(value["checkpoint"], 64)))
     return Error{ErrorCode::kInvalidRequest, "invalid desired run or checkpoint"};
   const auto& clipboard = value["clipboard"];
-  if (!Keys(clipboard, {"revision", "value"}) || !Counter(clipboard["revision"]) ||
-      !Keys(clipboard["value"], {"text", "html"}) || !clipboard["value"]["text"].is_string() ||
-      !clipboard["value"]["html"].is_string() ||
-      clipboard["value"]["text"].get_ref<const std::string&>().size() > limits::textBytes ||
-      clipboard["value"]["html"].get_ref<const std::string&>().size() > limits::htmlBytes)
+  if (!Keys(clipboard, {"revision"}) || !Counter(clipboard["revision"]))
     return Error{ErrorCode::kInvalidRequest, "invalid desired clipboard"};
   if (!Keys(value["quality"], {"effectiveDpr"}) || !value["quality"]["effectiveDpr"].is_number() ||
       !std::isfinite(value["quality"]["effectiveDpr"].get<double>()) ||
@@ -171,10 +229,7 @@ inline Result<void> ValidateDesired(const Json& value) {
       if (!Counter(binding[field], true))
         return Error{ErrorCode::kInvalidRequest, "invalid desired file binding"};
   }
-  auto configuration = value;
-  configuration.erase("clipboard");
-  if (configuration.dump().size() > limits::configurationBytes ||
-      value.dump().size() > kMaxDocumentBytes)
+  if (DocumentBytes(value) + limits::managementEnvelopeBytes > limits::configurationBytes)
     return Error{ErrorCode::kLimitExceeded, "desired document exceeds bound"};
   return {};
 }

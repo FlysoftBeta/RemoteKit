@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { RemoteKitError } from '../shared/errors';
 import { readBuildId } from './cluster/build-id';
 import { publicKey } from './cluster/noise';
+import { validateNodeReadySizes } from './cluster/ready';
 import {
   configDocument,
   controlKey,
@@ -359,6 +360,11 @@ export function parseConfig(
         : resolve(directory, 'nodes', nodeId, 'node.json'),
       ...(local ? { local } : { remote }),
     });
+  }
+  try {
+    validateNodeReadySizes(nodes, buildId);
+  } catch (error) {
+    invalid((error as Error).message);
   }
   return Object.freeze({
     sessionImport,

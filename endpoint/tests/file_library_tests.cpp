@@ -57,6 +57,8 @@ class Control final : public remotekit::ManagementLink {
   std::string address;
   std::vector<remotekit::Json> committed;
   unsigned located = 0;
+  remotekit::Json locate_sources;
+  std::vector<size_t> locate_batches;
   std::mutex mutex;
   std::map<std::string, std::string> documents;
   bool Next(std::string&, uint64_t&, bool&) override { return false; }
@@ -100,13 +102,16 @@ class Control final : public remotekit::ManagementLink {
     }
     CHECK(name == "object.locate");
     ++located;
+    locate_batches.push_back(fields["ids"].size());
     if (fields["tenantId"] == "other-tenant")
       return remotekit::Error{remotekit::ErrorCode::kForbidden, "no tenant claim"};
     remotekit::Json sources = remotekit::Json::object();
     for (const auto& id : fields["ids"])
       sources[id.get<std::string>()] =
-          address.empty() ? remotekit::Json::array()
-                          : remotekit::Json::array({{{"nodeId", "source"}, {"address", address}}});
+          !locate_sources.is_null() ? locate_sources
+          : address.empty()
+              ? remotekit::Json::array()
+              : remotekit::Json::array({{{"nodeId", "source"}, {"address", address}}});
     return remotekit::Json{{"sources", sources}};
   }
 };
@@ -262,6 +267,7 @@ void Documents(const fs::path& root) {
 }
 
 void Puts(const fs::path& root) {
+  using namespace remotekit;
   Control control;
   remotekit::objects::ObjectService objects(root, control, remotekit::cluster::Key{}, "put", "dev");
   Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
@@ -282,11 +288,16 @@ void Puts(const fs::path& root) {
   CHECK(Take(objects.Dispatch({{"method", "object.put.end"}, {"putId", first}}))["objectId"] == id);
   CHECK(control.last_commit["tenantId"] == "second");
   CHECK(Take(objects.Store().Inventory(nullptr))["objects"].size() == 1);
+  Take(objects.Dispatch({{"method", "object.put.begin"},
+                         {"tenantId", "first"},
+                         {"putId", first},
+                         {"sizeHint", limits::objectPutBytes}}));
+  Take(objects.Dispatch({{"method", "object.put.cancel"}, {"putId", first}}));
   CHECK(!objects.Dispatch({{"method", "object.put.begin"},
                            {"tenantId", "first"},
                            {"putId", first},
-                           {"sizeHint", 268435457}}));
-  for (int n = 1; n <= 4; ++n)
+                           {"sizeHint", limits::objectPutBytes + 1}}));
+  for (size_t n = 1; n <= limits::objectPutsPerNode; ++n)
     Take(begin("00000000-0000-4000-8000-00000000000" + std::to_string(n), "first"));
   CHECK(!begin("00000000-0000-4000-8000-000000000005", "first"));
   CHECK(!objects.PutChunk({{"putId", first}, {"offset", 1}}, std::vector<uint8_t>{'x'}));
@@ -296,6 +307,45 @@ void Puts(const fs::path& root) {
   CHECK(!fs::exists(root / "object-puts" / second));
   objects.CancelPuts();
   CHECK(fs::is_empty(root / "object-puts"));
+  Take(begin(first, "first"));
+  std::vector<uint8_t> chunk(limits::objectChunkBytes, 'x');
+  for (size_t offset = 0; offset < limits::objectPutBytes; offset += chunk.size())
+    Take(objects.PutChunk({{"putId", first}, {"offset", offset}}, chunk));
+  CHECK(!objects.PutChunk({{"putId", first}, {"offset", limits::objectPutBytes}},
+                          std::vector<uint8_t>{'x'}));
+  objects.CancelPuts();
+  Take(begin(first, "first"));
+  chunk.push_back('x');
+  CHECK(!objects.PutChunk({{"putId", first}, {"offset", 0}}, chunk));
+  objects.CancelPuts();
+  std::vector<std::string> ids;
+  for (size_t i = 0; i < limits::objectLocateIds; ++i) {
+    const auto suffix = std::to_string(i);
+    ids.push_back(std::string(64 - suffix.size(), '0') + suffix);
+  }
+  Take(objects.LocateBatch(ids, {}));
+  CHECK(control.locate_batches.back() == limits::objectLocateIds);
+  auto overflow_ids = ids;
+  overflow_ids.push_back(std::string(64, 'e'));
+  const auto before = control.locate_batches.size();
+  Take(objects.LocateBatch(overflow_ids, {}));
+  CHECK(control.locate_batches.size() == before + 2 &&
+        control.locate_batches[before] == limits::objectLocateIds &&
+        control.locate_batches.back() == 1);
+  const Json source{{"nodeId", std::string(limits::objectSourceNodeIdBytes, 'n')},
+                    {"address", std::string(limits::objectSourceAddressBytes, 'a')}};
+  control.locate_sources = Json::array();
+  for (size_t i = 0; i < limits::objectLocateSources; ++i)
+    control.locate_sources.push_back(source);
+  Take(objects.LocateBatch({ids.front()}, {}));
+  control.locate_sources.push_back(source);
+  CHECK(!objects.LocateBatch({ids.front()}, {}));
+  control.locate_sources = Json::array({source});
+  control.locate_sources[0]["nodeId"] = std::string(limits::objectSourceNodeIdBytes + 1, 'n');
+  CHECK(!objects.LocateBatch({ids.front()}, {}));
+  control.locate_sources = Json::array({source});
+  control.locate_sources[0]["address"] = std::string(limits::objectSourceAddressBytes + 1, 'a');
+  CHECK(!objects.LocateBatch({ids.front()}, {}));
   remotekit::objects::SessionObjects forbidden(objects, "other-tenant");
   CHECK(!forbidden.Ensure(id));
   CHECK(objects.Store().Inspect(id));

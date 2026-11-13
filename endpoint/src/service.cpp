@@ -3,6 +3,7 @@
 #include "diagnostics/log_files.hpp"
 #include "management/coordination.hpp"
 #include "management/methods.hpp"
+#include "management/reply.hpp"
 #include "persistence/checkpoint.hpp"
 #include "persistence/versions.hpp"
 #include <stop_token>
@@ -160,6 +161,8 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
   }
   if (method == "session.desired")
     return coordinator->Publish(request, generation);
+  if (method == "session.clipboard")
+    return coordinator->DeliverClipboard(request, generation);
   if (method == "session.events.ack")
     return coordinator->Acknowledge(request, generation);
   if (method != "session.logs.read" && !ManagementMethods::Find(method))
@@ -337,9 +340,6 @@ Result<Json> Service::DeleteCold(bool expired_only) {
 bool Service::HandleRequest(Json request, uint64_t generation) {
   if (!link_.Current(generation))
     return false;
-  Json response = {{"id", request.is_object() ? request.value("id", Json()) : Json()}};
-  if (request.is_object() && request.contains("opId"))
-    response["opId"] = request["opId"];
   Result<Json> result = Error{ErrorCode::kInvalidRequest, "invalid request"};
   try {
     result = Dispatch(request, generation);
@@ -359,13 +359,10 @@ bool Service::HandleRequest(Json request, uint64_t generation) {
     SecureZeroMemory(key.data(), key.size());
     request.erase("profileKey");
   }
-  response["ok"] = bool(result);
-  if (result)
-    response["result"] = std::move(result).value();
-  else
-    response["error"] = WireError(result.error(), "mgmt.request_failed", RequestLogFields(request));
-  link_.SendReply(generation, response);
-  return result && request.value("method", std::string()) == "shutdown";
+  const bool shutdown = result && request.value("method", std::string()) == "shutdown";
+  link_.SendReply(generation, ManagementReply(request, std::move(result), "mgmt.request_failed",
+                                              RequestLogFields(request)));
+  return shutdown;
 }
 void Service::Versions() {
   SnapshotClient client(options_.node_id);
@@ -506,19 +503,18 @@ int Service::Run() {
       const auto method = envelope.is_object() && envelope.value("method", Json()).is_string()
                               ? envelope["method"].get<std::string>()
                               : std::string();
-      if (method == "node.desired" || method == "session.desired" || method == "session.delete" ||
+      if (method == "node.desired" || method == "session.desired" ||
+          method == "session.clipboard" || method == "session.delete" ||
           method == "session.cold.delete" || method == "shutdown") {
         if (HandleRequest(std::move(envelope), generation))
           break;
       } else {
-        const auto request_id = envelope.is_object() ? envelope.value("id", Json()) : Json();
+        const auto busy =
+            ManagementReply(envelope, Error{ErrorCode::kBusy, "management workers busy"});
         if (!object_workers_.Submit([this, request = std::move(envelope), generation]() mutable {
               HandleRequest(std::move(request), generation);
             }))
-          link_.SendReply(generation,
-                          {{"id", request_id},
-                           {"ok", false},
-                           {"error", {{"code", "busy"}, {"message", "management workers busy"}}}});
+          link_.SendReply(generation, busy);
       }
     }
     if (PhaseClock::now() >= next_sweep) {

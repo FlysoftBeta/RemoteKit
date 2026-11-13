@@ -1,4 +1,5 @@
 import { log } from '../log';
+import limits from '../../../protocol/limits.json';
 import { errorHandling, retryDelay } from '../../shared/error-policy';
 import { diskFloor } from './disk';
 import { createHmac, randomUUID } from 'node:crypto';
@@ -10,6 +11,8 @@ import { clusterObjectKeys } from './keys';
 import {
   tenantObjects,
   syncObjectReferences,
+  retainedCheckpoints,
+  pruneCheckpoints,
   OBJECT_GRACE_MS as GRACE_MS,
 } from '../persistence/object-references';
 
@@ -482,7 +485,7 @@ export class ObjectIndex {
       });
     if (
       !Array.isArray(message.ids) ||
-      message.ids.length > 4096 ||
+      message.ids.length > limits.objectLocateIds ||
       message.ids.some((id: unknown) => !objectId(id))
     )
       throw new RemoteKitError('invalid_request', '文件标识格式无效', { detail: 'Invalid object ids' });
@@ -503,7 +506,7 @@ export class ObjectIndex {
     this.readFetches.set(node.nodeId, expected);
     const sources: Record<string, { nodeId: string; address: string }[]> = {};
     for (const id of message.ids) {
-      sources[id] = this.sources(id);
+      sources[id] = this.locateSources(id);
       expected.add(id);
     }
     return { sources };
@@ -573,6 +576,25 @@ export class ObjectIndex {
         : [];
     });
   }
+  private locateSources(id: string) {
+    const sources = this.sources(id)
+      .sort(
+        (a, b) =>
+          (this.nodes.get(a.nodeId)!.metrics.latest()?.pressure ?? 1) -
+            (this.nodes.get(b.nodeId)!.metrics.latest()?.pressure ?? 1) || a.nodeId.localeCompare(b.nodeId),
+      )
+      .slice(0, limits.objectLocateSources);
+    for (const source of sources) {
+      if (
+        Buffer.byteLength(source.nodeId) > limits.objectSourceNodeIdBytes ||
+        Buffer.byteLength(source.address) > limits.objectSourceAddressBytes
+      )
+        throw new RemoteKitError('limit_exceeded', '对象来源超过大小上限', {
+          detail: 'Object source exceeds objectSourceNodeIdBytes or objectSourceAddressBytes',
+        });
+    }
+    return sources;
+  }
   async put(
     tenant: string,
     chunks: AsyncIterable<Uint8Array>,
@@ -600,7 +622,7 @@ export class ObjectIndex {
           !n.diskDraining &&
           !this.nodes.isRemoved(n.nodeId) &&
           n.metrics.latest() &&
-          [...this.puts.values()].filter((p) => p.node === n).length < 4,
+          [...this.puts.values()].filter((p) => p.node === n).length < limits.objectPutsPerNode,
       )
       .sort((a, b) => {
         const x = a.metrics.latest()!.value.disk,
@@ -663,14 +685,14 @@ export class ObjectIndex {
         const bytes = next.value;
         digest.update(bytes);
         check();
-        if (offset + bytes.byteLength > Math.min(options.maxBytes, 256 * 1024 * 1024))
+        if (offset + bytes.byteLength > Math.min(options.maxBytes, limits.objectPutBytes))
           throw new RemoteKitError('limit_exceeded', '文件超过大小上限', { detail: 'Object too large' });
-        for (let start = 0; start < bytes.byteLength; start += 1024 * 1024) {
+        for (let start = 0; start < bytes.byteLength; start += limits.objectChunkBytes) {
           check();
           const data = Buffer.from(
             bytes.buffer,
             bytes.byteOffset + start,
-            Math.min(1024 * 1024, bytes.byteLength - start),
+            Math.min(limits.objectChunkBytes, bytes.byteLength - start),
           );
           await Promise.race([node.sendBinary({ putId, offset }, data, epoch), interrupted]);
           offset += data.length;
@@ -870,7 +892,7 @@ export class ObjectIndex {
     try {
       await node.request('object.fetch', '', {
         ids: [object.id],
-        sources: { [object.id]: this.sources(object.id) },
+        sources: { [object.id]: this.locateSources(object.id) },
       });
       return !!this.store.db
         .prepare('SELECT 1 FROM object_replicas WHERE id=? AND node_id=?')
@@ -887,15 +909,23 @@ export class ObjectIndex {
       .all()
       .filter((node) => node.state.state === 'ready' && !this.nodes.isRemoved(node.nodeId));
     const target = Math.min(2, ready.length);
+    const referenced = new Set([...tenantObjects(this.store.db).values()].flatMap((ids) => [...ids]));
+    const retained = retainedCheckpoints(this.store.db);
+    const current = retained.filter((version, index) => version.tenant !== retained[index - 1]?.tenant);
     const jobs: Promise<unknown>[] = [];
     for (const object of this.store.db
       .prepare(
-        `SELECT o.* FROM objects o ORDER BY EXISTS (
-        SELECT 1 FROM checkpoint_objects co JOIN checkpoints c ON c.tenant=co.tenant AND c.manifest_id=co.manifest_id
-        WHERE co.id=o.id AND c.id=(SELECT max(newest.id) FROM checkpoints newest WHERE newest.tenant=c.tenant)
+        `SELECT o.* FROM json_each(@referenced) ref JOIN objects o ON o.id=ref.value ORDER BY EXISTS (
+        SELECT 1 FROM json_each(@current) c JOIN checkpoint_objects co
+          ON co.tenant=json_extract(c.value,'$.tenant') AND co.manifest_id=json_extract(c.value,'$.manifestId')
+        WHERE co.id=o.id
       ) DESC,o.created_at DESC,o.id`,
       )
-      .all() as IndexedObject[]) {
+      .all({
+        referenced: JSON.stringify([...referenced]),
+        current: JSON.stringify(current),
+      }) as IndexedObject[]) {
+      if (this.retired.has(object.id)) continue;
       const sources = this.sources(object.id);
       if (!sources.length) continue;
       let missing =
@@ -936,6 +966,7 @@ export class ObjectIndex {
       }
     }
     await Promise.allSettled(jobs);
+    pruneCheckpoints(this.store.db);
   }
   private async diskPressure() {
     for (const node of this.nodes.all()) {
@@ -996,6 +1027,7 @@ export class ObjectIndex {
     if (this.closed) return Promise.resolve();
     if (this.maintenance) return this.maintenance;
     this.maintenance = (async () => {
+      pruneCheckpoints(this.store.db);
       await this.gc();
       await this.diskPressure();
       await this.replicate();

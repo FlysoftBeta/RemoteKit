@@ -214,7 +214,7 @@ test('Viewer HTTP distinguishes encoding defects, read cancellation and uncertai
   await assert.rejects(request('/fixture', {}), { code: 'outcome_unknown' });
 });
 
-test('a NodeLink write deadline closes the unwritten queue and encoding defects stay internal', async (t) => {
+test('a NodeLink write deadline keeps the unwritten queue and encoding defects stay internal', async (t) => {
   const { Carrier, NodeRegistry } = await import('../server/cluster/node-link');
   const { CipherState } = await import('../server/cluster/noise');
   const { endpointDefaults, testNode } = await import('./node-fixture');
@@ -259,12 +259,12 @@ test('a NodeLink write deadline closes the unwritten queue and encoding defects 
   cyclic.self = cyclic;
   await assert.rejects(link.request('fixture', 'tenant', cyclic), { code: 'internal' });
   assert.equal(carrier.sends, 0);
-  const pending = assert.rejects(link.request('fixture', 'tenant', {}, 10), { code: 'unavailable' });
+  const pending = assert.rejects(link.request('fixture', 'tenant', {}, 10), { code: 'outcome_unknown' });
   await new Promise((resolve) => setImmediate(resolve));
   t.mock.timers.tick(10);
   await pending;
-  assert.equal(carrier.closed, true);
-  assert.equal(link.state.state, 'offline');
+  assert.equal(carrier.closed, false);
+  assert.equal(link.state.state, 'ready');
 });
 
 test('provider cancellation before dispatch is canceled and an aborted POST after dispatch is unknown', async () => {

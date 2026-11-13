@@ -135,7 +135,13 @@ export function createApplication(
   services.objects.onAvailabilityChanged = (ids) => services.library.objectsChanged(ids);
   services.learning = new LearningService(context, services);
   services.clipboard = new ClipboardService(context, services);
-  endpoint.setDesiredSource((tenant) => compileDesired(context, services, tenant));
+  endpoint.setDesiredSource(
+    (tenant) => compileDesired(context, services, tenant),
+    (tenant) => {
+      const user = store.accounts.userForTenant(tenant);
+      return (user && store.clipboards.latest(user.id)) || { revision: '0', text: '', html: '' };
+    },
+  );
   const sessionFault = ({ target }: { target: { tenantId: string } }) => {
     endpoint.invalidate(target.tenantId);
     services.viewers.push(target.tenantId);

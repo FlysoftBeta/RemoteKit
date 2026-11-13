@@ -123,7 +123,7 @@ export function applyDesiredViews(views: Map<string, any>, desired: SessionDesir
         canDiscard: true,
       };
       views.set(config.viewId, current);
-      changes.push({ method: 'view.created', args: { ...config } });
+      changes.push({ method: config.adopt ? 'view.adopted' : 'view.created', args: { ...config } });
     }
     const geometry = {
       width: config.width,
@@ -149,33 +149,36 @@ import type { EndpointGateway } from '../server/endpoint/gateway';
 import { canonical } from '../server/endpoint/coordination';
 export function installDesiredSource(gateway: EndpointGateway) {
   const revisions = new Map<string, { key: string; revision: bigint }>();
-  gateway.setDesiredSource((tenant) => {
-    const current = gateway.placement.peek(tenant);
-    const placement = current?.pendingCommit ? current : gateway.placement.resolve(tenant);
-    const node = gateway.nodes.get(placement.nodeId)!;
-    if (node.state.state !== 'ready') throw new Error('Node offline');
-    const document = JSON.parse(
-      readFileSync(new URL('../../protocol/coordination.fixture.json', import.meta.url), 'utf8'),
-    ) as SessionDesired;
-    Object.assign(document, {
-      tenantId: tenant,
-      sessionId: placement.sessionId,
-      placementEpoch: placement.placementEpoch,
-      run: placement.runState,
-      commit: placement.pendingCommit,
-      checkpoint: placement.checkpoint,
-      views: [],
-      connectionEpoch: node.state.connectionEpoch,
-      profileKey: gateway.placement.keys(placement).profileKey,
-    });
-    const { revision, connectionEpoch, ...content } = document;
-    const key = canonical(content);
-    const previous = revisions.get(tenant);
-    const next = previous?.key === key ? previous.revision : (previous?.revision ?? 0n) + 1n;
-    revisions.set(tenant, { key, revision: next });
-    document.revision = String(next);
-    return document;
-  });
+  gateway.setDesiredSource(
+    (tenant) => {
+      const current = gateway.placement.peek(tenant);
+      const placement = current?.pendingCommit ? current : gateway.placement.resolve(tenant);
+      const node = gateway.nodes.get(placement.nodeId)!;
+      if (node.state.state !== 'ready') throw new Error('Node offline');
+      const document = JSON.parse(
+        readFileSync(new URL('../../protocol/coordination.fixture.json', import.meta.url), 'utf8'),
+      ) as SessionDesired;
+      Object.assign(document, {
+        tenantId: tenant,
+        sessionId: placement.sessionId,
+        placementEpoch: placement.placementEpoch,
+        run: placement.runState,
+        commit: placement.pendingCommit,
+        checkpoint: placement.checkpoint,
+        views: [],
+        connectionEpoch: node.state.connectionEpoch,
+        profileKey: gateway.placement.keys(placement).profileKey,
+      });
+      const { revision, connectionEpoch, ...content } = document;
+      const key = canonical(content);
+      const previous = revisions.get(tenant);
+      const next = previous?.key === key ? previous.revision : (previous?.revision ?? 0n) + 1n;
+      revisions.set(tenant, { key, revision: next });
+      document.revision = String(next);
+      return document;
+    },
+    () => ({ revision: '0', text: '', html: '' }),
+  );
 }
 
 export async function publishAndObserve(gateway: EndpointGateway, tenant: string) {

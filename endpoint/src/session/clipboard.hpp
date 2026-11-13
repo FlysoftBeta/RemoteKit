@@ -9,6 +9,34 @@
 #include <optional>
 
 namespace remotekit {
+class PlacementClipboard {
+ public:
+  Result<void> Deliver(const Json& document) {
+    std::lock_guard lock(mutex_);
+    const auto revision = std::stoull(document.at("revision").get<std::string>());
+    if (revision < revision_ || (revision == revision_ && document.at("value") != value_))
+      return Error{ErrorCode::kConflict, "clipboard revision conflicts"};
+    revision_ = revision;
+    value_ = document.at("value");
+    return {};
+  }
+  Result<Json> Resolve(const Json& revision) const {
+    std::lock_guard lock(mutex_);
+    if (revision == "0")
+      return Json{{"revision", "0"}, {"text", ""}, {"html", ""}};
+    if (std::stoull(revision.get<std::string>()) != revision_)
+      return Error{ErrorCode::kConflict, "clipboard revision not delivered"};
+    auto value = value_;
+    value["revision"] = revision;
+    return value;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  uint64_t revision_ = 0;
+  Json value_{{"text", ""}, {"html", ""}};
+};
+
 class ClipboardController {
  public:
   struct Hooks {

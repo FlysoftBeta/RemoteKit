@@ -20,6 +20,7 @@ export class FakeNode extends EventEmitter {
   readonly observations = new Map<string, ReturnType<typeof observedSession>>();
   readonly results = new RpcResults();
   fenceGate?: Promise<void>;
+  clipboardHandler?: (document: Record<string, any>) => void | Promise<void>;
   desiredHandler?: (
     document: SessionDesired,
     value: ReturnType<typeof observedSession>,
@@ -158,6 +159,10 @@ export class FakeNode extends EventEmitter {
       this.observations.set(message.tenantId, value);
       this.send(value);
       this.publishMetrics();
+      return { accepted: true, revision: message.revision };
+    }
+    if (message.method === 'session.clipboard') {
+      await this.clipboardHandler?.(message);
       return { accepted: true, revision: message.revision };
     }
     if (message.method === 'session.events.ack') return { accepted: true, upTo: message.upTo };

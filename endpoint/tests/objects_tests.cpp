@@ -4,6 +4,7 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <iomanip>
 #include <sstream>
 #include <set>
 #include <stdexcept>
@@ -47,6 +48,11 @@ void Store(ObjectStore& store, const Keys& keys, const std::string& plain, Objec
                            {reinterpret_cast<const uint8_t*>(plain.data()), plain.size()})),
         "keyed object identity");
   Check(Read(store, keys, info.id) == plain, "segmented round trip");
+  Check(Take(store.ReadRange(keys, info.id, 0, limits::objectChunkBytes)).size() ==
+            limits::objectChunkBytes,
+        "object range at chunk limit accepted");
+  Check(!store.ReadRange(keys, info.id, 0, limits::objectChunkBytes + 1),
+        "object range one byte over chunk limit rejected");
   std::istringstream duplicate(plain);
   Check(Take(store.Write(keys, duplicate)).stored_sha256 == info.stored_sha256,
         "deterministic stored bytes");
@@ -103,20 +109,44 @@ void Store(ObjectStore& store, const Keys& keys, const std::string& plain, Objec
   Take(store.Delete(zero.id));
   Check(!store.Inspect(zero.id), "delete");
   Check(!store.StoredPath(std::string(64, 'G')), "object id validated");
-  for (int index = 0; index < 258; ++index) {
+  for (size_t index = 0; index < limits::objectInventoryPage - 1; ++index) {
     std::istringstream value("inventory-" + std::to_string(index));
     Take(store.Write(keys, value));
   }
+  const auto full = Take(store.Inventory(nullptr));
+  Check(full["objects"].size() == limits::objectInventoryPage && full["next"].is_null(),
+        "inventory at page limit needs no continuation");
+  std::istringstream extra("inventory-overflow");
+  Take(store.Write(keys, extra));
   const auto first = Take(store.Inventory(nullptr));
-  Check(first["objects"].size() == 256 && first["next"].is_string(), "bounded inventory page");
+  Check(first["objects"].size() == limits::objectInventoryPage && first["next"].is_string(),
+        "bounded inventory page");
   const auto next = Take(store.Inventory(first["next"]));
-  Check(next["objects"].size() == 3 && next["next"].is_null(), "inventory continuation");
+  Check(next["objects"].size() == 1 && next["next"].is_null(), "inventory one over is continued");
   std::set<std::string> identities;
   for (const auto& page : {first, next})
     for (const auto& object : page["objects"])
       Check(identities.insert(object["id"].get<std::string>()).second,
             "inventory pages do not repeat");
-  Check(identities.size() == 259, "complete inventory");
+  Check(identities.size() == limits::objectInventoryPage + 1, "complete inventory");
+}
+void LocateReplyBudget() {
+  Json sources = Json::object();
+  const Json source{{"nodeId", std::string(limits::objectSourceNodeIdBytes, '\x01')},
+                    {"address", std::string(limits::objectSourceAddressBytes, '\x01')}};
+  for (size_t i = 0; i < limits::objectLocateIds; ++i) {
+    std::ostringstream id;
+    id << std::hex << std::setw(64) << std::setfill('0') << i;
+    sources[id.str()] = Json::array();
+    for (size_t j = 0; j < limits::objectLocateSources; ++j)
+      sources[id.str()].push_back(source);
+  }
+  const Json reply{{"id", std::string(limits::identityBytes, '\x01')},
+                   {"opId", std::string(limits::identityBytes, '\x01')},
+                   {"ok", true},
+                   {"result", {{"sources", sources}}}};
+  Check(reply.dump().size() < limits::managementBytes / 2,
+        "worst escaped locate reply retains half the management budget");
 }
 void Peer(ObjectStore& source,
           ObjectStore& target,
@@ -210,6 +240,7 @@ int main(int argc, char** argv) {
     plain += std::string(1000, 'z');
     ObjectInfo info;
     Store(source, keys, plain, info);
+    LocateReplyBudget();
     Peer(source, target, keys, info, plain);
     return 0;
   } catch (const std::exception& error) {

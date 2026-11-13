@@ -74,6 +74,19 @@ Result<Json> SessionCoordinator::Publish(const Json& desired, uint64_t generatio
   wake_.notify_one();
   return Json{{"accepted", true}, {"revision", desired["revision"]}};
 }
+Result<Json> SessionCoordinator::DeliverClipboard(const Json& document, uint64_t generation) {
+  RK_RETURN_IF_ERROR(coordination::ValidateClipboard(document));
+  std::lock_guard lock(mutex_);
+  if (!scope_.active || scope_.generation != generation ||
+      document["connectionEpoch"] != scope_.connection)
+    return Error{ErrorCode::kConflict, "stale management connection"};
+  for (const auto* name : {"tenantId", "sessionId", "placementEpoch"})
+    if (document[name] != target_[name])
+      return Error{ErrorCode::kConflict, "Session placement is fenced"};
+  RK_RETURN_IF_ERROR(hooks_.clipboard(document));
+  wake_.notify_one();
+  return Json{{"accepted", true}, {"revision", document["revision"]}};
+}
 Result<Json> SessionCoordinator::Execute(const std::function<Result<Json>()>& action) {
   auto promise = std::make_shared<std::promise<Result<Json>>>();
   auto future = promise->get_future();

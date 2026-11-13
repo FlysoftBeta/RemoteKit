@@ -42,13 +42,47 @@ import {
   MAX_JSON,
   StdioDecoder,
 } from './frames';
-import { MAX_CIPHERTEXT, NoiseHandshake, type Transport } from './noise';
+import { MAX_CIPHERTEXT, MAX_HANDSHAKE_PAYLOAD, NoiseHandshake, type Transport } from './noise';
+import { encodeNodeReady } from './ready';
 import type { NodeRelease } from './release';
 
 export abstract class Carrier extends EventEmitter {
+  nodeId?: string;
+  private closing = false;
+  private closeRequested = false;
+  get isClosing() {
+    return this.closing;
+  }
+  recordClose(reason: string, detail: string) {
+    if (this.closing) return false;
+    this.closing = true;
+    log.warn('node.link_closed', { nodeId: this.nodeId ?? null, reason, detail });
+    this.emit('closing');
+    return true;
+  }
+  closeWithCause(reason: string, detail: string) {
+    this.recordClose(reason, detail);
+    if (this.closeRequested) return;
+    this.closeRequested = true;
+    this.close();
+  }
+  async write(message: Buffer) {
+    try {
+      await this.send(message);
+    } catch (error) {
+      this.closeWithCause('write_error', errorDetail(error));
+      throw error;
+    }
+  }
   abstract readonly bufferedAmount: number;
   abstract send(message: Buffer): Promise<void>;
   abstract close(): void;
+}
+function errorDetail(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  const value = error as { message?: unknown } | undefined;
+  const message = typeof value?.message === 'string' ? value.message : String(error);
+  return code ? `${code}: ${message}` : message;
 }
 export class WebSocketCarrier extends Carrier {
   get bufferedAmount() {
@@ -57,11 +91,14 @@ export class WebSocketCarrier extends Carrier {
   constructor(readonly socket: WebSocket) {
     super();
     socket.on('message', (bytes, binary) => {
-      if (!binary) return this.close();
+      if (!binary) return this.closeWithCause('protocol_violation', 'Expected binary WebSocket message');
       this.emit('message', Buffer.from(bytes as Buffer));
     });
-    socket.on('error', () => this.close());
-    socket.once('close', () => this.emit('close'));
+    socket.on('error', (error) => this.closeWithCause('carrier_error', errorDetail(error)));
+    socket.once('close', (code, reason) => {
+      this.recordClose('carrier_closed', `WebSocket closed: ${code} ${reason.toString()}`);
+      this.emit('close');
+    });
   }
   send(message: Buffer) {
     return new Promise<void>((resolve, reject) => {
@@ -79,28 +116,37 @@ export class StdioCarrier extends Carrier {
   }
   constructor(
     readonly child: ChildProcessWithoutNullStreams,
-    log: EndpointLog,
+    endpointLog: EndpointLog,
   ) {
     super();
     const decoder = new StdioDecoder();
     child.stdout.on('data', (bytes: Buffer) => {
       try {
         for (const frame of decoder.push(bytes)) this.emit('message', frame);
-      } catch {
-        this.close();
+      } catch (error) {
+        this.closeWithCause('frame_decode_error', errorDetail(error));
       }
     });
     child.stdout.on('end', () => {
       try {
         decoder.end();
-      } catch {}
-      this.close();
+      } catch (error) {
+        this.closeWithCause('frame_decode_error', errorDetail(error));
+        return;
+      }
+      this.closeWithCause('stdout_end', 'Endpoint stdout ended');
     });
-    child.stderr.on('data', (bytes: Buffer) => log.write(bytes));
-    child.stdin.on('error', () => this.close());
-    child.stdout.on('error', () => this.close());
-    child.on('error', () => this.emit('close'));
-    child.once('exit', () => this.emit('close'));
+    child.stderr.on('data', (bytes: Buffer) => endpointLog.write(bytes));
+    child.stdin.on('error', (error) => this.closeWithCause('write_error', errorDetail(error)));
+    child.stdout.on('error', (error) => this.closeWithCause('stdout_error', errorDetail(error)));
+    child.on('error', (error) => {
+      this.recordClose('child_error', errorDetail(error));
+      this.emit('close');
+    });
+    child.once('exit', (code, signal) => {
+      this.recordClose('child_exit', `Endpoint exited: code=${code}, signal=${signal}`);
+      this.emit('close');
+    });
   }
   send(message: Buffer) {
     return new Promise<void>((resolve, reject) => {
@@ -168,6 +214,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   private current?: Connection;
   private incarnation?: string;
   private readonly pending = new Map<string, Pending>();
+  private readonly timedOut = new Set<string>();
   private child?: ChildProcessWithoutNullStreams;
   private retry?: NodeJS.Timeout;
   private stopped = false;
@@ -223,6 +270,8 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     return pending;
   }
   publish(message: object): Promise<any> {
+    if ((message as { method?: string }).method === 'session.clipboard')
+      return this.coordinate().then(() => this.exchange(message));
     return this.coordinate().then(
       () =>
         new Promise<void>((resolve, reject) => {
@@ -248,6 +297,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       if (finished) return;
       finished = true;
       this.child = undefined;
+      log.warn('node.exited', { nodeId: this.nodeId, code });
       this.events = { ...this.events, exited: { code, at: Date.now() } };
       if (!this.current) this.state = { state: 'offline' };
       if (this.healthySince !== undefined && Date.now() - this.healthySince >= 60_000)
@@ -301,17 +351,18 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   }
 
   attach(connection: Connection, incarnation: string) {
+    connection.carrier.nodeId = this.nodeId;
     if (this.stopped) {
-      connection.carrier.close();
+      connection.carrier.closeWithCause('stopped', 'Node stopped before attachment');
       return;
     }
     if (this.current) {
       const previous = this.current;
-      this.disconnect(previous);
-      previous.carrier.close();
+      previous.carrier.closeWithCause('replaced', `New connection epoch ${connection.epoch}`);
     }
     const transition = readyTransition(this.incarnation, incarnation, connection.epoch);
     this.current = connection;
+    connection.carrier.once('closing', () => this.disconnect(connection));
     this.coordination = Promise.resolve();
     this.fenceKey = '';
     this.fenceRevision = 0n;
@@ -329,8 +380,8 @@ export class NodeLink extends EventEmitter implements EndpointLink {
           this.emit('ready', { incarnation, processChanged: transition.processChanged });
       },
       (error) => {
-        log.warn('node.fencing_failed', { nodeId: this.nodeId, err: error });
-        if (this.current === connection) connection.carrier.close();
+        if (this.current === connection)
+          connection.carrier.closeWithCause('fencing_failed', errorDetail(error));
       },
     );
   }
@@ -358,17 +409,12 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         } catch {
           bytes = encodeJson({
             id: message.id,
+            opId: message.opId,
             ok: false,
             error: { code: 'outcome_unknown', message: 'Node reply could not be encoded after execution' },
           });
         }
-        try {
-          void connection.carrier
-            .send(connection.transport.send.encrypt(bytes))
-            .catch(() => connection.carrier.close());
-        } catch {
-          connection.carrier.close();
-        }
+        this.sendFrame(connection, bytes);
       };
       if (
         this.incoming >= coordinationLimits.pendingRequests ||
@@ -464,21 +510,31 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     }
     if (typeof message.id !== 'string') throw new Error('Invalid node reply');
     const pending = this.pending.get(message.id);
-    if (!pending || pending.epoch !== connection.epoch) return;
+    // A late reply to a request that timed out or was abandoned is harmless; it must not end
+    // the link (for a local node that ends the Endpoint process and every Session).
+    if (!pending || pending.epoch !== connection.epoch) {
+      if (!this.timedOut.delete(message.id))
+        log.warn('node.reply_unmatched', { nodeId: this.nodeId, id: message.id });
+      return;
+    }
     clearTimeout(pending.timer);
     this.pending.delete(message.id);
-    const invalidReply =
-      typeof message.ok !== 'boolean' ||
-      (pending.opId && message.opId !== pending.opId) ||
-      (message.ok === true
-        ? !Object.prototype.hasOwnProperty.call(message, 'result') ||
-          (!!pending.target &&
-            (!message.result || typeof message.result !== 'object' || Array.isArray(message.result)))
-        : !parseWireError(message.error));
+    let invalidReply: string | undefined;
+    if (typeof message.ok !== 'boolean') invalidReply = 'Invalid node reply: missing or invalid ok';
+    else if (pending.opId && message.opId !== pending.opId)
+      invalidReply = 'Invalid node reply: missing or mismatched opId';
+    else if (message.ok) {
+      if (
+        !Object.prototype.hasOwnProperty.call(message, 'result') ||
+        (pending.target &&
+          (!message.result || typeof message.result !== 'object' || Array.isArray(message.result)))
+      )
+        invalidReply = 'Invalid node reply: invalid result';
+    } else if (!parseWireError(message.error)) invalidReply = 'Invalid node reply: invalid error';
     if (invalidReply) {
       if (!pending.target) {
-        pending.reject(new RemoteKitError('outcome_unknown', 'Invalid node reply'));
-        throw new Error('Invalid node reply');
+        pending.reject(new RemoteKitError('outcome_unknown', invalidReply));
+        throw new Error(invalidReply);
       }
       const placed = this.registry
         .fencing(this.nodeId)
@@ -494,7 +550,11 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       );
       return;
     }
-    if (pending.target && pending.method !== 'session.desired' && this.faults.get(pending.target)) {
+    if (
+      pending.target &&
+      !['session.desired', 'session.clipboard'].includes(pending.method ?? '') &&
+      this.faults.get(pending.target)
+    ) {
       pending.reject(this.faults.get(pending.target));
       return;
     }
@@ -510,12 +570,13 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   send(message: object) {
     const connection = this.current;
     if (!connection) return;
+    this.sendFrame(connection, encodeJson(message));
+  }
+  private sendFrame(connection: Connection, bytes: Buffer) {
     try {
-      void connection.carrier
-        .send(connection.transport.send.encrypt(encodeJson(message)))
-        .catch(() => connection.carrier.close());
-    } catch {
-      connection.carrier.close();
+      void connection.carrier.write(connection.transport.send.encrypt(bytes)).catch(() => {});
+    } catch (error) {
+      connection.carrier.closeWithCause('encrypt_failed', errorDetail(error));
     }
   }
   async sendBinary(header: object, bytes: Buffer, epoch: string) {
@@ -532,10 +593,8 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         : new RemoteKitError('internal', '文件数据编码失败', { detail: String(error) });
     }
     try {
-      await connection.carrier.send(encrypted);
+      await connection.carrier.write(encrypted);
     } catch {
-      this.disconnect(connection);
-      connection.carrier.close();
       throw new RemoteKitError('unavailable', '文件数据发送失败', { detail: 'Object chunk delivery failed' });
     }
   }
@@ -604,12 +663,9 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       const timer = setTimeout(
         () => {
           this.pending.delete(id);
-          if (!pending.delivered) {
-            this.disconnect(connection);
-            connection.carrier.close();
-          }
+          this.timedOut.add(id);
           reject(
-            new RemoteKitError(pending.delivered ? 'outcome_unknown' : 'unavailable', '节点请求未获确认', {
+            new RemoteKitError('outcome_unknown', '节点请求未获确认', {
               detail: String((envelope as { method?: string }).method ?? ''),
             }),
           );
@@ -618,23 +674,19 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       );
       pending.timer = timer;
       this.pending.set(id, pending);
-      const failed = () => {
-        this.disconnect(connection);
-        connection.carrier.close();
-      };
-      try {
-        void connection.carrier.send(encrypted).then(() => {
+      void connection.carrier.write(encrypted).then(
+        () => {
           pending.delivered = true;
           delivered?.();
-        }, failed);
-      } catch {
-        failed();
-      }
+        },
+        () => {},
+      );
     });
   }
   disconnect(connection: Connection) {
     if (this.current !== connection) return;
     this.current = undefined;
+    this.timedOut.clear();
     this.faults.disconnected();
     log.warn('node.offline', { nodeId: this.nodeId });
     this.state = { state: 'offline' };
@@ -660,8 +712,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   evict() {
     if (this.current) {
       const connection = this.current;
-      this.disconnect(connection);
-      connection.carrier.close();
+      connection.carrier.closeWithCause('evicted', 'Node evicted');
     }
   }
   stop() {
@@ -670,8 +721,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     clearTimeout(this.retry);
     if (this.current) {
       const connection = this.current;
-      this.disconnect(connection);
-      connection.carrier.close();
+      connection.carrier.closeWithCause('stopped', 'Node stopped');
     }
     this.child?.kill();
     this.state = { state: 'offline' };
@@ -741,8 +791,9 @@ export class NodeRegistry extends EventEmitter {
     return true;
   }
   accept(carrier: Carrier, expectedNodeId?: string) {
+    carrier.nodeId = expectedNodeId;
     if (this.stopped) {
-      carrier.close();
+      carrier.closeWithCause('stopped', 'Registry stopped');
       return;
     }
     this.carriers.add(carrier);
@@ -753,28 +804,39 @@ export class NodeRegistry extends EventEmitter {
     let handshaking = false;
     let downloading = false;
     let lastReceived = Date.now();
-    const deadline = setTimeout(() => carrier.close(), this.options.handshakeTimeoutMs ?? 5000);
+    const deadline = setTimeout(
+      () => carrier.closeWithCause('handshake_timeout', 'Node hello not completed before handshake deadline'),
+      this.options.handshakeTimeoutMs ?? 5000,
+    );
     deadline.unref();
     const heartbeat = setInterval(
       () => {
-        if (Date.now() - lastReceived >= (this.options.heartbeatTimeoutMs ?? 45000)) carrier.close();
+        if (Date.now() - lastReceived < (this.options.heartbeatTimeoutMs ?? 45000)) return;
+        log.warn('node.heartbeat_timeout', {
+          nodeId: link?.nodeId ?? null,
+          silentMs: Date.now() - lastReceived,
+        });
+        carrier.closeWithCause('heartbeat_timeout', `No message for ${Date.now() - lastReceived} ms`);
       },
       Math.min(1000, this.options.heartbeatTimeoutMs ?? 45000),
     );
     heartbeat.unref();
+    carrier.once('closing', () => clearInterval(heartbeat));
     carrier.once('close', () => {
       clearTimeout(deadline);
-      clearInterval(heartbeat);
       this.carriers.delete(carrier);
-      if (connection) link?.disconnect(connection);
+      carrier.recordClose('carrier_closed', 'Carrier closed');
     });
     carrier.on('message', (bytes: Buffer) => {
+      if (carrier.isClosing) return;
+      let failureReason = connection ? 'protocol_violation' : 'handshake_failed';
       try {
         lastReceived = Date.now();
         if (!connection) {
           if (handshaking) throw new Error('Unexpected handshake message');
           handshaking = true;
           const hello = jsonObject(handshake.readMessage(bytes));
+          if (typeof hello.nodeId === 'string') carrier.nodeId = expectedNodeId ?? hello.nodeId;
           if (
             hello.type !== 'node.hello' ||
             !['endpoint', 'updater'].includes(hello.role) ||
@@ -786,13 +848,15 @@ export class NodeRegistry extends EventEmitter {
             throw new Error('Invalid node hello');
           role = hello.role;
           link = this.links.get(hello.nodeId);
-          if (
-            !link ||
-            this.isRemoved(hello.nodeId) ||
-            (expectedNodeId && expectedNodeId !== hello.nodeId) ||
-            (!expectedNodeId && link.configured.local) ||
-            !handshake.remotePublicKey.equals(Buffer.from(link.configured.publicKey, 'base64'))
-          ) {
+          let identityFailure: string | undefined;
+          if (!link) identityFailure = 'unknown node ID';
+          else if (this.isRemoved(hello.nodeId)) identityFailure = 'node removed';
+          else if (expectedNodeId && expectedNodeId !== hello.nodeId)
+            identityFailure = `expected stdio node ${expectedNodeId}, received ${hello.nodeId}`;
+          else if (!expectedNodeId && link.configured.local) identityFailure = 'local node on remote carrier';
+          else if (!handshake.remotePublicKey.equals(Buffer.from(link.configured.publicKey, 'base64')))
+            identityFailure = 'public key mismatch';
+          if (identityFailure) {
             if (expectedNodeId) this.links.get(expectedNodeId)?.rejected('identity_mismatch', hello.buildId);
             else {
               this.unknownIdentityRejection = {
@@ -802,47 +866,67 @@ export class NodeRegistry extends EventEmitter {
               };
               log.warn('node.unknown_identity_rejected', this.unknownIdentityRejection);
             }
-            throw new Error('Node identity mismatch');
+            throw new Error(`Node identity mismatch: ${identityFailure}`);
           }
           let reject: string | undefined;
           if (role === 'endpoint' && hello.buildId !== this.options.buildId) reject = 'build_mismatch';
           else if (role === 'updater' && !this.options.release) reject = 'no_release';
           const epoch = randomUUID();
-          const reply = reject
-            ? { type: 'node.reject', code: reject, message: reject, buildId: this.options.buildId }
-            : role === 'updater'
-              ? { type: 'node.release', release: this.options.release!.descriptor }
-              : {
-                  type: 'node.ready',
-                  peers: this.peers(hello.nodeId),
-                  ...this.objectKeys,
-                  connectionEpoch: epoch,
-                  buildId: this.options.buildId,
-                  config: link!.config,
-                  configHash: link!.configured.configHash,
-                };
-          const response = handshake.writeMessage(Buffer.from(JSON.stringify(reply)));
+          const payload =
+            !reject && role === 'endpoint'
+              ? encodeNodeReady(
+                  link!.configured,
+                  this.peers(hello.nodeId),
+                  this.options.buildId,
+                  epoch,
+                  this.objectKeys,
+                )
+              : Buffer.from(
+                  JSON.stringify(
+                    reject
+                      ? { type: 'node.reject', code: reject, message: reject, buildId: this.options.buildId }
+                      : { type: 'node.release', release: this.options.release!.descriptor },
+                  ),
+                );
+          if (!reject && role === 'endpoint' && payload.length > MAX_HANDSHAKE_PAYLOAD) {
+            log.warn('node.ready_oversize', {
+              nodeId: link!.nodeId,
+              bytes: payload.length,
+              limit: MAX_HANDSHAKE_PAYLOAD,
+            });
+            carrier.closeWithCause(
+              'ready_oversize',
+              `node.ready is ${payload.length} bytes; limit ${MAX_HANDSHAKE_PAYLOAD}`,
+            );
+            return;
+          }
+          const response = handshake.writeMessage(payload);
           if (reject) {
             link?.rejected(reject, hello.buildId);
+            carrier.recordClose('handshake_failed', reject);
             void carrier
-              .send(response)
-              .finally(() => carrier.close())
+              .write(response)
+              .finally(() => carrier.closeWithCause('handshake_failed', reject!))
               .catch(() => {});
             return;
           }
           connection = { carrier, transport: handshake.split(), epoch };
-          void carrier.send(response).catch(() => carrier.close());
+          void carrier.write(response).catch(() => {});
           clearTimeout(deadline);
           if (role === 'endpoint') link!.attach(connection, hello.incarnation);
           return;
         }
-        const frame = decodeFrame(connection.transport.receive.decrypt(bytes));
+        failureReason = 'decrypt_failed';
+        const plaintext = connection.transport.receive.decrypt(bytes);
+        failureReason = 'frame_decode_error';
+        const frame = decodeFrame(plaintext);
+        failureReason = 'protocol_violation';
         if (frame.kind !== 'json') throw new Error('Unexpected binary message');
         const message = frame.message;
         if (message.type === 'node.ping') {
           void carrier
-            .send(connection.transport.send.encrypt(encodeJson({ type: 'node.pong' })))
-            .catch(() => carrier.close());
+            .write(connection.transport.send.encrypt(encodeJson({ type: 'node.pong' })))
+            .catch(() => {});
         } else if (message.type === 'node.pong') {
           return;
         } else if (role === 'updater') {
@@ -864,12 +948,12 @@ export class NodeRegistry extends EventEmitter {
               downloading ? 'Package transfer is active' : 'Release request cannot be served',
             );
             void carrier
-              .send(
+              .write(
                 connection.transport.send.encrypt(
                   encodeJson({ type: 'package.error', error: wireError(error) }),
                 ),
               )
-              .catch(() => carrier.close());
+              .catch(() => {});
             return;
           }
           downloading = true;
@@ -880,19 +964,19 @@ export class NodeRegistry extends EventEmitter {
                   ? error
                   : new RemoteKitError('unavailable', '无法读取发布包', { detail: String(error) });
               await carrier
-                .send(
+                .write(
                   connection!.transport.send.encrypt(
                     encodeJson({ type: 'package.error', error: wireError(failure) }),
                   ),
                 )
-                .catch(() => carrier.close());
+                .catch(() => {});
             })
             .finally(() => {
               downloading = false;
             });
         } else link!.receive(connection, message);
-      } catch {
-        carrier.close();
+      } catch (error) {
+        carrier.closeWithCause(failureReason, errorDetail(error));
       }
     });
   }
@@ -913,7 +997,7 @@ export class NodeRegistry extends EventEmitter {
     const release = this.options.release!;
     const file = await open(release.archive, 'r');
     try {
-      const buffer = Buffer.alloc(1024 * 1024);
+      const buffer = Buffer.alloc(coordinationLimits.objectChunkBytes);
       while (offset < release.descriptor.size) {
         const { bytesRead } = await file.read(
           buffer,
@@ -923,14 +1007,14 @@ export class NodeRegistry extends EventEmitter {
         );
         if (!bytesRead)
           throw new RemoteKitError('internal', '发布包不完整', { detail: 'Release package is truncated' });
-        await connection.carrier.send(
+        await connection.carrier.write(
           connection.transport.send.encrypt(
             encodeBinary({ type: 'package.chunk', offset }, buffer.subarray(0, bytesRead)),
           ),
         );
         offset += bytesRead;
       }
-      await connection.carrier.send(
+      await connection.carrier.write(
         connection.transport.send.encrypt(encodeJson({ type: 'package.end', size: release.descriptor.size })),
       );
     } finally {
@@ -942,7 +1026,7 @@ export class NodeRegistry extends EventEmitter {
     this.stopped = true;
     this.emit('stopped');
     for (const link of this.links.values()) link.stop();
-    for (const carrier of this.carriers) carrier.close();
+    for (const carrier of this.carriers) carrier.closeWithCause('stopped', 'Registry stopped');
     this.sockets.close();
   }
 }

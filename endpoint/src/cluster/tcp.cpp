@@ -63,6 +63,7 @@ class TcpCarrier final : public Carrier {
   }
   ~TcpCarrier() override { Close(); }
   void Close() override {
+    RecordClose("local_close");
     const auto socket = socket_.exchange(INVALID_SOCKET);
     if (socket != INVALID_SOCKET) {
       shutdown(socket, SD_BOTH);
@@ -74,21 +75,26 @@ class TcpCarrier final : public Carrier {
     if (bytes.empty() || bytes.size() > kMaxCiphertext)
       return Closed();
     auto length = EncodeLength(static_cast<uint32_t>(bytes.size()));
-    const auto deadline = Clock::now() + 20s;
     for (auto part : {std::span<const uint8_t>(length), bytes}) {
       while (!part.empty()) {
         const auto socket = socket_.load();
-        if (socket == INVALID_SOCKET || Clock::now() >= deadline ||
-            Ready(socket, true,
-                  std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now())) <=
-                0)
+        if (socket == INVALID_SOCKET)
           return Closed();
+        const auto ready = Ready(socket, true, 100ms);
+        if (ready < 0) {
+          RecordClose("write_error", {{"win32", WSAGetLastError()}});
+          return Closed();
+        }
+        if (!ready)
+          continue;
         const auto count = send(socket, reinterpret_cast<const char*>(part.data()),
                                 static_cast<int>(part.size()), 0);
         if (count == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK)
           continue;
-        if (count <= 0)
+        if (count <= 0) {
+          RecordClose("write_error", {{"win32", WSAGetLastError()}});
           return Closed();
+        }
         part = part.subspan(count);
       }
     }
@@ -100,6 +106,7 @@ class TcpCarrier final : public Carrier {
       if (buffer_.size() >= 4) {
         const auto length = DecodeLength(std::span<const uint8_t, 4>(buffer_.data(), 4));
         if (!length || length > kMaxCiphertext) {
+          RecordClose("invalid_frame", {{"length", length}});
           Close();
           return Closed();
         }
@@ -115,8 +122,10 @@ class TcpCarrier final : public Carrier {
       const auto ready =
           Ready(socket, false,
                 std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()));
-      if (ready < 0)
+      if (ready < 0) {
+        RecordClose("read_error", {{"win32", WSAGetLastError()}});
         return Closed();
+      }
       if (!ready)
         return Busy();
       const size_t needed =
@@ -131,8 +140,11 @@ class TcpCarrier final : public Carrier {
           return Busy();
         continue;
       }
-      if (count <= 0)
+      if (count <= 0) {
+        RecordClose(count == 0 ? "read_eof" : "read_error",
+                    count == 0 ? Json::object() : Json{{"win32", WSAGetLastError()}});
         return Closed();
+      }
       buffer_.insert(buffer_.end(), chunk.begin(), chunk.begin() + count);
     }
   }

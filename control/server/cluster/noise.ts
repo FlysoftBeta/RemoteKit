@@ -13,6 +13,8 @@ import {
 import limits from '../../../protocol/limits.json';
 export const MAX_TRANSPORT = limits.transportBytes;
 export const MAX_CIPHERTEXT = MAX_TRANSPORT + 16;
+const RESPONDER_OVERHEAD = 48;
+export const MAX_HANDSHAKE_PAYLOAD = limits.handshakeBytes - RESPONDER_OVERHEAD;
 const EMPTY = Buffer.alloc(0);
 const PROTOCOL = 'Noise_IK_25519_AESGCM_SHA256';
 const PRIVATE_PREFIX = Buffer.from('302e020100300506032b656e04220420', 'hex');
@@ -153,7 +155,7 @@ export class NoiseHandshake {
   writeMessage(payload: Buffer): Buffer {
     this.check(true);
     try {
-      const overhead = this.step === 0 ? 96 : 48;
+      const overhead = this.step === 0 ? 96 : RESPONDER_OVERHEAD;
       if (payload.length + overhead > limits.handshakeBytes) throw new Error('Noise handshake too large');
       this.mixHash(this.ephemeralPublic);
       const parts = [this.ephemeralPublic];
@@ -179,7 +181,10 @@ export class NoiseHandshake {
   readMessage(message: Buffer): Buffer {
     this.check(false);
     try {
-      if (message.length < (this.step === 0 ? 96 : 48) || message.length > limits.handshakeBytes)
+      if (
+        message.length < (this.step === 0 ? 96 : RESPONDER_OVERHEAD) ||
+        message.length > limits.handshakeBytes
+      )
         throw new Error('Invalid Noise handshake size');
       this.remoteEphemeral = Buffer.from(message.subarray(0, 32));
       this.mixHash(this.remoteEphemeral);

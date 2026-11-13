@@ -1,5 +1,6 @@
 #include "persistence/checkpoint.hpp"
 #include "persistence/checkpoint_formats.hpp"
+#include "protocol/limits.hpp"
 #include "util/file_io.hpp"
 #include "persistence/session_db.hpp"
 #include "util/result_macros.hpp"
@@ -677,7 +678,8 @@ Result<void> Checkpoints::Restore(const fs::path& raw_directory,
     RK_ASSIGN_OR_RETURN(located, access_->Prepare({ids.begin(), ids.end()}));
     sources = std::move(located);
     AddPhase(phases_, "locate", "ms", PhaseMs(locate_start));
-    AddPhase(phases_, "locate", "requests", double((ids.size() + 1023) / 1024));
+    AddPhase(phases_, "locate", "requests",
+             double((ids.size() + limits::objectLocateIds - 1) / limits::objectLocateIds));
     AddPhase(phases_, "locate", "ids", double(ids.size()));
   }
   const auto materialize_start = PhaseClock::now();

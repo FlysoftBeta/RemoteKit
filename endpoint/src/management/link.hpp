@@ -1,6 +1,7 @@
 #pragma once
 #include "util/common.hpp"
 #include "util/error.hpp"
+#include "protocol/limits.hpp"
 #include <mutex>
 #include <functional>
 #include <memory>
@@ -12,25 +13,27 @@ class DeliveryState {
  public:
   template <class Send>
   std::optional<bool> Dispatch(Send send) {
-    std::lock_guard lock(mutex_);
-    if (canceled_)
-      return std::nullopt;
-    written_ = send();
-    return written_;
+    {
+      std::lock_guard lock(mutex_);
+      if (canceled_)
+        return std::nullopt;
+      dispatched_ = true;
+    }
+    return send();
   }
-  bool CancelAndWasWritten() {
+  bool CancelAndWasDispatched() {
     std::lock_guard lock(mutex_);
-    canceled_ = !written_;
-    return written_;
+    canceled_ = !dispatched_;
+    return dispatched_;
   }
   void MarkWritten() {
     std::lock_guard lock(mutex_);
-    written_ = true;
+    dispatched_ = true;
   }
 
  private:
   std::mutex mutex_;
-  bool canceled_ = false, written_ = false;
+  bool canceled_ = false, dispatched_ = false;
 };
 using DeliveryFlag = std::shared_ptr<DeliveryState>;
 class ManagementLink {
@@ -41,6 +44,12 @@ class ManagementLink {
   virtual bool Current(uint64_t generation) = 0;
   virtual bool SendReply(uint64_t generation, const Json& reply) = 0;
   virtual bool SendEvent(const Json& event, uint64_t generation, DeliveryFlag delivery = {}) = 0;
+  struct QueueBudget {
+    size_t messages, bytes;
+  };
+  virtual QueueBudget EventBudget() {
+    return {limits::managementQueueMessages, limits::managementQueueBytes};
+  }
   virtual void OnDisconnect(Disconnect callback) = 0;
   using Peers = std::function<Result<void>(const Json&)>;
   virtual void OnPeers(Peers) {}

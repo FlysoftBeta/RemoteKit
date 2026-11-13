@@ -21,6 +21,12 @@ Error Closed() {
 Error Timeout() {
   return {ErrorCode::kBusy, "cluster receive timeout"};
 }
+Json IoDetail(const Error& error) {
+  Json detail{{"error", error.message}};
+  if (error.os)
+    detail[error.os->kind == OsError::Kind::kWin32 ? "win32" : "hresult"] = error.os->value;
+  return detail;
+}
 class BufferedCarrier : public Carrier {
  public:
   Result<Bytes> Receive(std::chrono::milliseconds timeout) override {
@@ -32,6 +38,7 @@ class BufferedCarrier : public Carrier {
     auto bytes = std::move(queue_.front());
     queue_.pop_front();
     queued_ -= bytes.size();
+    wake_.notify_all();
     return bytes;
   }
 
@@ -48,9 +55,12 @@ class BufferedCarrier : public Carrier {
         auto message = Read();
         if (!message)
           break;
-        std::lock_guard lock(mutex_);
-        if (queue_.size() >= limits::queuedMessages ||
-            queued_ + message.value().size() > 16 * kMaxCiphertext)
+        std::unique_lock lock(mutex_);
+        wake_.wait(lock, [&] {
+          return closed_ || (queue_.size() < limits::managementQueueMessages &&
+                             queued_ + message.value().size() <= limits::managementQueueBytes);
+        });
+        if (closed_)
           break;
         queued_ += message.value().size();
         queue_.push_back(std::move(message).value());
@@ -68,16 +78,19 @@ class Pipes final : public BufferedCarrier {
   ~Pipes() override { Close(); }
   void Close() override {
     std::lock_guard close_lock(close_mutex_);
+    RecordClose("local_close");
     closed_ = true;
     wake_.notify_all();
     if (reader_.joinable())
       CancelSynchronousIo(reader_.native_handle());
     // Cancel any synchronous send without waiting on the send lock.
     {
-      std::lock_guard lock(writer_mutex_);
-      if (writer_)
+      std::unique_lock lock(writer_mutex_);
+      // Cancellation can race the start of WriteFile. Repeat until the writer exits.
+      while (writer_) {
         CancelSynchronousIo(writer_);
-      writer_wake_.notify_all();
+        writer_wake_.wait_for(lock, 10ms, [&] { return !writer_; });
+      }
     }
     if (reader_.joinable())
       reader_.join();
@@ -94,35 +107,18 @@ class Pipes final : public BufferedCarrier {
     {
       std::lock_guard writer_lock(writer_mutex_);
       if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &writer_,
-                           0, FALSE, DUPLICATE_SAME_ACCESS))
+                           0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        RecordClose("write_error", {{"win32", GetLastError()}});
         return Closed();
-      writing_finished_ = false;
+      }
     }
-    std::thread deadline([&] {
-      std::unique_lock lock(writer_mutex_);
-      if (!writer_wake_.wait_for(lock, 5s, [&] { return writing_finished_ || closed_; })) {
-        closed_ = true;
-        wake_.notify_all();
-      }
-      // Cancellation can race the start of a synchronous WriteFile. Repeat until
-      // the sender acknowledges completion, so Close also covers that race.
-      while (!writing_finished_) {
-        CancelSynchronousIo(writer_);
-        writer_wake_.wait_for(lock, 10ms, [&] { return writing_finished_; });
-      }
-    });
     auto n = EncodeLength(static_cast<uint32_t>(bytes.size()));
     bool ok = WriteAll(n) && WriteAll(bytes);
     {
       std::lock_guard writer_lock(writer_mutex_);
-      writing_finished_ = true;
-      writer_wake_.notify_all();
-    }
-    deadline.join();
-    {
-      std::lock_guard writer_lock(writer_mutex_);
       CloseHandle(writer_);
       writer_ = nullptr;
+      writer_wake_.notify_all();
     }
     if (!ok)
       return Closed();
@@ -133,12 +129,13 @@ class Pipes final : public BufferedCarrier {
   HANDLE read_, write_, writer_ = nullptr;
   std::mutex writer_mutex_, close_mutex_;
   std::condition_variable writer_wake_;
-  bool writing_finished_ = true;
   bool WriteAll(std::span<const uint8_t> bytes) {
     while (!bytes.empty() && !closed_) {
       DWORD n = 0;
-      if (!WriteFile(write_, bytes.data(), static_cast<DWORD>(bytes.size()), &n, nullptr) || !n)
+      if (!WriteFile(write_, bytes.data(), static_cast<DWORD>(bytes.size()), &n, nullptr) || !n) {
+        RecordClose("write_error", {{"win32", GetLastError()}});
         return false;
+      }
       bytes = bytes.subspan(n);
     }
     return bytes.empty();
@@ -146,16 +143,24 @@ class Pipes final : public BufferedCarrier {
   bool ReadAll(std::span<uint8_t> bytes) {
     while (!bytes.empty() && !closed_) {
       DWORD n = 0, available = 0;
-      if (!PeekNamedPipe(read_, nullptr, 0, nullptr, &available, nullptr))
+      if (!PeekNamedPipe(read_, nullptr, 0, nullptr, &available, nullptr)) {
+        const auto error = GetLastError();
+        RecordClose(error == ERROR_BROKEN_PIPE ? "read_eof" : "read_error", {{"win32", error}});
         return false;
+      }
       if (!available) {
         Sleep(10);
         continue;
       }
-      if (!ReadFile(read_, bytes.data(),
-                    static_cast<DWORD>(std::min<size_t>(bytes.size(), available)), &n, nullptr) ||
-          !n)
+      const bool read = ReadFile(read_, bytes.data(),
+                                 static_cast<DWORD>(std::min<size_t>(bytes.size(), available)), &n,
+                                 nullptr) != FALSE;
+      if (!read || !n) {
+        const auto error = GetLastError();
+        RecordClose(error == ERROR_BROKEN_PIPE || (read && !n) ? "read_eof" : "read_error",
+                    {{"win32", error}});
         return false;
+      }
       bytes = bytes.subspan(n);
     }
     return bytes.empty();
@@ -165,8 +170,10 @@ class Pipes final : public BufferedCarrier {
     if (!ReadAll(prefix))
       return Closed();
     uint32_t n = DecodeLength(prefix);
-    if (n < 16 || n > kMaxCiphertext)
+    if (n < 16 || n > kMaxCiphertext) {
+      RecordClose("invalid_frame", {{"length", n}});
       return Closed();
+    }
     Bytes bytes(n);
     if (!ReadAll(bytes))
       return Closed();
@@ -203,6 +210,7 @@ class WebSocket final : public BufferedCarrier {
   }
   void Open() { Start(); }
   void Close() override {
+    RecordClose("local_close");
     closed_ = true;
     wake_.notify_all();
     if (stream)
@@ -232,13 +240,18 @@ class WebSocket final : public BufferedCarrier {
         frame.push_back(static_cast<uint8_t>(static_cast<uint64_t>(payload.size()) >> shift));
     }
     std::array<uint8_t, 4> mask;
-    if (!RandomBytes(mask))
+    if (!RandomBytes(mask)) {
+      RecordClose("write_error", {{"stage", "websocket mask"}});
       return Closed();
+    }
     frame.insert(frame.end(), mask.begin(), mask.end());
     for (size_t i = 0; i < payload.size(); ++i)
       frame.push_back(payload[i] ^ mask[i % 4]);
-    if (!stream->WriteAll(frame))
+    auto written = stream->WriteAll(frame);
+    if (!written) {
+      RecordClose("write_error", IoDetail(written.error()));
       return Closed();
+    }
     return {};
   }
   bool ReadExact(std::span<uint8_t> out) {
@@ -251,8 +264,13 @@ class WebSocket final : public BufferedCarrier {
         continue;
       }
       auto n = stream->Read(out);
-      if (!n)
+      if (!n) {
+        RecordClose(n.error().message == "read EOF"      ? "read_eof"
+                    : n.error().message == "peer closed" ? "peer_closed"
+                                                         : "read_error",
+                    IoDetail(n.error()));
         return false;
+      }
       out = out.subspan(n.value());
     }
     return true;
@@ -267,8 +285,10 @@ class WebSocket final : public BufferedCarrier {
       bool fin = head[0] & 0x80;
       uint8_t opcode = head[0] & 0x0F;
       uint64_t length = head[1] & 0x7F;
-      if ((head[0] & 0x70) || (head[1] & 0x80))
+      if ((head[0] & 0x70) || (head[1] & 0x80)) {
+        RecordClose("invalid_frame", {{"stage", "websocket flags"}});
         return Closed();
+      }
       int extension = length == 126 ? 2 : length == 127 ? 8 : 0;
       if (extension) {
         std::array<uint8_t, 8> size{};
@@ -278,8 +298,10 @@ class WebSocket final : public BufferedCarrier {
         for (int i = 0; i < extension; ++i)
           length = length << 8 | size[i];
       }
-      if (length > kMaxCiphertext)
+      if (length > kMaxCiphertext) {
+        RecordClose("invalid_frame", {{"length", length}});
         return Closed();
+      }
       Bytes payload(static_cast<size_t>(length));
       if (!ReadExact(payload))
         return Closed();
@@ -290,13 +312,19 @@ class WebSocket final : public BufferedCarrier {
       }
       if (opcode == 0xA)
         continue;
-      if (opcode != 0x2 && opcode != 0x0)
+      if (opcode == 0x8) {
+        RecordClose("peer_closed");
         return Closed();
-      if ((opcode == 0x2) == started)
+      }
+      if ((opcode != 0x2 && opcode != 0x0) || (opcode == 0x2) == started) {
+        RecordClose("invalid_frame", {{"opcode", opcode}});
         return Closed();
+      }
       started = true;
-      if (message.size() + payload.size() > kMaxCiphertext)
+      if (message.size() + payload.size() > kMaxCiphertext) {
+        RecordClose("invalid_frame", {{"length", message.size() + payload.size()}});
         return Closed();
+      }
       message.insert(message.end(), payload.begin(), payload.end());
       if (fin)
         return message;
@@ -312,13 +340,18 @@ class EncryptedChannel final : public Channel {
         receive_(keys.receive),
         initiator_(initiator) {
     worker_ = std::thread([this] { Loop(); });
+    heartbeat_ = std::thread([this] { HeartbeatLoop(); });
   }
   ~EncryptedChannel() override {
     Close();
     if (worker_.joinable())
       worker_.join();
+    if (heartbeat_.joinable())
+      heartbeat_.join();
   }
   void Close() override {
+    const auto cause = carrier_->Cause();
+    RecordClose(cause.reason.empty() ? "local_close" : cause.reason, cause.detail);
     closed_ = true;
     carrier_->Close();
     wake_.notify_all();
@@ -336,6 +369,7 @@ class EncryptedChannel final : public Channel {
     auto result = std::move(queue_.front());
     queue_.pop_front();
     queued_ -= result.bytes.size() + result.json.dump().size();
+    wake_.notify_all();
     return result;
   }
 
@@ -348,7 +382,8 @@ class EncryptedChannel final : public Channel {
   std::condition_variable wake_;
   std::deque<Message> queue_;
   size_t queued_ = 0;
-  std::thread worker_;
+  std::thread worker_, heartbeat_;
+  bool pong_pending_ = false;
   Result<void> SendFrame(Result<Bytes> frame) {
     if (!frame)
       return frame.error();
@@ -357,37 +392,68 @@ class EncryptedChannel final : public Channel {
       return Closed();
     auto wire = send_.Encrypt(frame.value());
     if (!wire) {
+      RecordClose("encrypt_failure", {{"error", wire.error().message}});
       Close();
       return wire.error();
     }
     auto sent = carrier_->Send(wire.value());
-    if (!sent)
+    if (!sent) {
+      const auto cause = carrier_->Cause();
+      RecordClose(cause.reason.empty() ? "write_error" : cause.reason,
+                  cause.reason.empty() ? Json{{"error", sent.error().message}} : cause.detail);
       Close();
+    }
     return sent;
   }
-  void Loop() {
-    auto last_receive = Clock::now(), last_ping = last_receive;
+  void HeartbeatLoop() {
+    auto next_ping = Clock::now() + 15s;
+    std::unique_lock lock(mutex_);
     while (!closed_) {
-      auto now = Clock::now();
-      if (now - last_receive >= 45s)
+      if (initiator_)
+        wake_.wait_until(lock, next_ping, [&] { return closed_ || pong_pending_; });
+      else
+        wake_.wait(lock, [&] { return closed_ || pong_pending_; });
+      if (closed_)
+        return;
+      const bool pong = std::exchange(pong_pending_, false);
+      const bool ping = initiator_ && Clock::now() >= next_ping;
+      if (ping)
+        next_ping = Clock::now() + 15s;
+      lock.unlock();
+      if ((pong && !Send({{"type", "node.pong"}})) || (ping && !Send({{"type", "node.ping"}})))
+        return;
+      lock.lock();
+    }
+  }
+  void Loop() {
+    auto last_receive = Clock::now();
+    while (!closed_) {
+      const auto silent = Clock::now() - last_receive;
+      if (silent >= 45s) {
+        RecordClose(
+            "heartbeat_silence",
+            {{"silentMs", std::chrono::duration_cast<std::chrono::milliseconds>(silent).count()}});
         break;
-      if (initiator_ && now - last_ping >= 15s) {
-        if (!Send({{"type", "node.ping"}}))
-          break;
-        last_ping = now;
       }
       auto wire = carrier_->Receive(100ms);
       if (!wire) {
         if (wire.error().code == ErrorCode::kBusy)
           continue;
+        const auto cause = carrier_->Cause();
+        RecordClose(cause.reason.empty() ? "peer_closed" : cause.reason,
+                    cause.reason.empty() ? Json{{"error", wire.error().message}} : cause.detail);
         break;
       }
       auto plain = receive_.Decrypt(wire.value());
-      if (!plain)
+      if (!plain) {
+        RecordClose("decrypt_failure", {{"error", plain.error().message}});
         break;
+      }
       auto frame = DecodeFrame(plain.value());
-      if (!frame)
+      if (!frame) {
+        RecordClose("invalid_frame", {{"error", frame.error().message}});
         break;
+      }
       last_receive = Clock::now();
       auto message = std::move(frame).value();
       if (message.kind == Message::Kind::kJson) {
@@ -395,14 +461,23 @@ class EncryptedChannel final : public Channel {
         if (type != message.json.end() && *type == "node.pong")
           continue;
         if (type != message.json.end() && *type == "node.ping") {
-          if (!Send({{"type", "node.pong"}}))
-            break;
+          std::lock_guard lock(mutex_);
+          pong_pending_ = true;
+          wake_.notify_all();
           continue;
         }
       }
-      std::lock_guard lock(mutex_);
+      std::unique_lock lock(mutex_);
       size_t size = message.bytes.size() + message.json.dump().size();
-      if (queue_.size() >= limits::queuedMessages || queued_ + size > 16 * kMaxPlaintext)
+      if (queue_.size() >= limits::managementQueueMessages ||
+          queued_ + size > limits::managementQueueBytes) {
+        wake_.wait(lock, [&] {
+          return closed_ || (queue_.size() < limits::managementQueueMessages &&
+                             queued_ + size <= limits::managementQueueBytes);
+        });
+        last_receive = Clock::now();
+      }
+      if (closed_)
         break;
       queued_ += size;
       queue_.push_back(std::move(message));
@@ -426,8 +501,10 @@ Result<Established> Handshake(std::unique_ptr<Carrier> carrier,
     Carrier* pending = carrier.get();
     std::jthread watchdog([&] {
       std::unique_lock lock(deadline_mutex);
-      if (!deadline_wake.wait_until(lock, deadline, [&] { return finished; }))
+      if (!deadline_wake.wait_until(lock, deadline, [&] { return finished; })) {
+        pending->RecordClose("handshake_timeout", {{"timeoutMs", 5000}});
         pending->Close();
+      }
     });
     struct FinishDeadline {
       std::mutex& mutex;
@@ -528,8 +605,10 @@ Result<Established> Handshake(std::unique_ptr<Carrier> carrier,
     watchdog.join();
     auto channel = std::make_unique<EncryptedChannel>(std::move(carrier), keys.value(),
                                                       role == Role::kInitiator);
-    if (reply["type"] == "node.reject")
+    if (reply["type"] == "node.reject") {
+      channel->RecordClose("peer_rejected", {{"code", reply.value("code", Json())}});
       channel->Close();
+    }
     return Established{std::move(channel), std::move(reply)};
   } catch (const std::exception& error) {
     if (carrier)
@@ -613,7 +692,7 @@ Result<Established> ConnectWebSocket(const std::string& url,
                      " instead of a 101 upgrade"};
   auto ws = std::make_unique<WebSocket>();
   ws->pending.assign(response.begin() + end + 4, response.end());
-  stream.value()->SetReceiveTimeout(60s);
+  stream.value()->SetReceiveTimeout(0ms);
   ws->stream = std::move(stream).value();
   ws->Open();
   auto established = ConnectCarrier(std::move(ws), key, responder_public_key, hello);

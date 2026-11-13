@@ -13,6 +13,7 @@ class SessionCoordinator {
   struct Hooks {
     std::function<Result<void>(const Json&, uint64_t)> authorization;
     std::function<Result<void>(const Json&)> prepare;
+    std::function<Result<void>(const Json&)> clipboard;
     std::function<Result<void>()> start;
     std::function<Result<void>(const Json&)> views;
     std::function<Result<Json>(const Json&)> stop;
@@ -36,6 +37,7 @@ class SessionCoordinator {
   SessionCoordinator(const SessionCoordinator&) = delete;
   void Activate(std::string connection, std::string node_revision, uint64_t generation);
   Result<Json> Publish(const Json& desired, uint64_t generation);
+  Result<Json> DeliverClipboard(const Json& document, uint64_t generation);
   Result<Json> Request(const Json& request, uint64_t generation);
   Result<Json> Acknowledge(const Json& request, uint64_t generation);
   void ManagementLost(uint64_t generation);

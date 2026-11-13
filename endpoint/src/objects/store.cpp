@@ -516,18 +516,19 @@ Result<Json> ObjectStore::Inventory(const Json& cursor) const {
     if (!ValidId(id) || id <= after || entry.path() != root_ / id.substr(0, 2) / (id + ".rko"))
       continue;
     page.insert(id);
-    if (page.size() > 257)
+    if (page.size() > limits::objectInventoryPage + 1)
       page.erase(std::prev(page.end()));
   }
   Json objects = Json::array();
   std::string last;
   for (const auto& id : page) {
-    if (objects.size() == 256)
+    if (objects.size() == limits::objectInventoryPage)
       break;
     RK_ASSIGN_OR_RETURN(info, Inspect(id));
     objects.push_back(info.Inventory());
     last = id;
   }
-  return Json{{"objects", objects}, {"next", page.size() > 256 ? Json(last) : Json(nullptr)}};
+  return Json{{"objects", objects},
+              {"next", page.size() > limits::objectInventoryPage ? Json(last) : Json(nullptr)}};
 }
 }  // namespace remotekit::objects

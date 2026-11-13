@@ -103,7 +103,7 @@ class Link : public ManagementLink {
     }
     Check(name == "object.locate", "unexpected request");
     ++locate_requests;
-    Check(fields["ids"].size() <= 1024, "bounded locate batch");
+    Check(fields["ids"].size() <= limits::objectLocateIds, "bounded locate batch");
     Json result = Json::object();
     for (const auto& id : fields["ids"])
       result[id.get<std::string>()] = sources.value(id.get<std::string>(), Json::array());
@@ -412,7 +412,9 @@ void BatchesAndPipeline(const fs::path& root) {
   Check(source_link.commit_requests == 3, "commit list streams in bounded batches");
   objects::SessionObjects access(source, "tenant");
   Take(access.Prepare(ids));
-  Check(source_link.locate_requests == 3, "locate grants a complete list in bounded batches");
+  Check(source_link.locate_requests ==
+            (ids.size() + limits::objectLocateIds - 1) / limits::objectLocateIds,
+        "locate grants a complete list in bounded batches");
   const auto directory = root / "pipeline-profile";
   for (int i = 0; i < 64; ++i)
     Write(directory / (std::to_string(i) + "/file"), std::string(2048, char(i)));
@@ -438,7 +440,9 @@ void BatchesAndPipeline(const fs::path& root) {
   for (int i = 0; i < 64; ++i)
     Check(Read(restored / (std::to_string(i) + "/file")) == std::string(2048, char(i)),
           "parallel restore materializes every file through a failing source");
-  Check(phases["fetch"]["concurrency"] == 8 && target_link.locate_requests == 2 &&
+  const auto restore_locates =
+      1 + (first["objects"].size() - 1 + limits::objectLocateIds - 1) / limits::objectLocateIds;
+  Check(phases["fetch"]["concurrency"] == 8 && target_link.locate_requests == restore_locates &&
             target_link.commit_requests == 2,
         "parallel restore batches grants and new replicas");
   CheckpointCache cache;

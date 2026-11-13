@@ -6,6 +6,20 @@
 #include <windows.h>
 #include "cluster/node_files.hpp"
 namespace remotekit::objects {
+namespace {
+Result<void> ValidateSources(const Json& sources) {
+  if (!sources.is_array() || sources.size() > limits::objectLocateSources)
+    return Error{ErrorCode::kInvalidRequest, "invalid object sources"};
+  for (const auto& source : sources) {
+    if (!source.is_object() || !source.contains("nodeId") || !source["nodeId"].is_string() ||
+        !source.contains("address") || !source["address"].is_string() ||
+        source["nodeId"].get_ref<const std::string&>().size() > limits::objectSourceNodeIdBytes ||
+        source["address"].get_ref<const std::string&>().size() > limits::objectSourceAddressBytes)
+      return Error{ErrorCode::kInvalidRequest, "invalid object source"};
+  }
+  return {};
+}
+}  // namespace
 ObjectService::ObjectService(std::filesystem::path data,
                              ManagementLink& control,
                              const Key& key,
@@ -111,14 +125,10 @@ Result<void> ObjectService::CommittedBatch(const std::vector<ObjectInfo>& object
   return send();
 }
 Result<ObjectInfo> ObjectService::Fetch(const std::string& id, const Json& sources) {
-  if (!sources.is_array() || sources.size() > 256)
-    return Error{ErrorCode::kInvalidRequest, "invalid object sources"};
+  RK_RETURN_IF_ERROR(ValidateSources(sources));
   Error last{ErrorCode::kUnavailable, "no object source available"};
   for (size_t i = 0; i < sources.size(); ++i) {
     const auto& source = sources[(std::hash<std::string>{}(id) + i) % sources.size()];
-    if (!source.is_object() || !source.contains("nodeId") || !source["nodeId"].is_string() ||
-        !source.contains("address") || !source["address"].is_string())
-      return Error{ErrorCode::kInvalidRequest, "invalid object source"};
     const auto address = source["address"].get<std::string>();
     std::shared_ptr<std::counting_semaphore<4>> limit;
     {
@@ -191,17 +201,17 @@ Result<Json> ObjectService::Locate(const std::string& id, const Json& reference)
 Result<Json> ObjectService::LocateBatch(const std::vector<std::string>& ids,
                                         const Json& reference) {
   Json sources = Json::object();
-  for (size_t offset = 0; offset < ids.size(); offset += 1024) {
+  for (size_t offset = 0; offset < ids.size(); offset += limits::objectLocateIds) {
     auto fields = reference;
     fields["ids"] = Json::array();
-    const auto end = std::min(ids.size(), offset + 1024);
+    const auto end = std::min(ids.size(), offset + limits::objectLocateIds);
     for (size_t i = offset; i < end; ++i)
       fields["ids"].push_back(ids[i]);
     RK_ASSIGN_OR_RETURN(located, control_.Request("object.locate", std::move(fields)));
     if (!located.is_object() || !located.contains("sources") || !located["sources"].is_object())
       return Error{ErrorCode::kOutcomeUnknown, "invalid object.locate reply"};
     for (size_t i = offset; i < end; ++i) {
-      if (!located["sources"].contains(ids[i]) || !located["sources"][ids[i]].is_array())
+      if (!located["sources"].contains(ids[i]) || !ValidateSources(located["sources"][ids[i]]))
         return Error{ErrorCode::kOutcomeUnknown, "invalid object.locate reply"};
       sources[ids[i]] = std::move(located["sources"][ids[i]]);
     }
@@ -378,11 +388,11 @@ Result<Json> ObjectService::DispatchPut(const Json& request) {
       return Error{ErrorCode::kInvalidRequest, "invalid tenant identity"};
     if (request.contains("sizeHint") &&
         (!request["sizeHint"].is_number_integer() || request["sizeHint"].get<int64_t>() < 0 ||
-         request["sizeHint"].get<uint64_t>() > 256ull * kSegmentSize))
+         request["sizeHint"].get<uint64_t>() > limits::objectPutBytes))
       return Error{ErrorCode::kLimitExceeded, "invalid object size hint"};
     if (puts_.contains(id))
       return Error{ErrorCode::kConflict, "put already exists"};
-    if (puts_.size() >= 4)
+    if (puts_.size() >= limits::objectPutsPerNode)
       return Error{ErrorCode::kBusy, "too many object puts"};
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file)
@@ -457,7 +467,7 @@ Result<void> ObjectService::PutChunk(const Json& header, std::span<const uint8_t
       header["offset"].get<int64_t>() < 0 || header["offset"].get<uint64_t>() != put.offset ||
       bytes.empty() || bytes.size() > kSegmentSize)
     return fail(ErrorCode::kInvalidRequest, "invalid object put chunk");
-  if (put.offset + bytes.size() > 256ull * kSegmentSize)
+  if (put.offset + bytes.size() > limits::objectPutBytes)
     return fail(ErrorCode::kLimitExceeded, "object too large");
   std::ofstream file(put_root_ / id, std::ios::binary | std::ios::app);
   file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());

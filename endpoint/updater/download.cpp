@@ -3,6 +3,7 @@
 #include "replacement.hpp"
 #include "util/wire_error.hpp"
 #include "cluster/channel.hpp"
+#include "protocol/limits.hpp"
 #include <fstream>
 
 namespace remotekit::updater {
@@ -62,7 +63,7 @@ Result<void> Download(cluster::Channel& channel,
         json.value("type", "") == "package.chunk") {
       if (!json.contains("offset") || !json["offset"].is_number_unsigned() ||
           json["offset"].get<uint64_t>() != offset || frame.bytes.empty() ||
-          frame.bytes.size() > 1024 * 1024 || frame.bytes.size() > expected - offset)
+          frame.bytes.size() > limits::objectChunkBytes || frame.bytes.size() > expected - offset)
         return Error{ErrorCode::kInternal, "invalid package chunk"};
       if (!file.write(reinterpret_cast<const char*>(frame.bytes.data()), frame.bytes.size()))
         return Retry("package write failed");

@@ -9,6 +9,8 @@ import { configureLog, FileLogSink, log, logFiles, reportError } from '../server
 import { RemoteKitError, nativeError, wireError } from '../shared/errors';
 import { formatError } from '../client/util/format-error';
 import { controlLogTail } from '../server/diagnostics/control-log';
+import { findError } from '../server/diagnostics/error-search';
+import limits from '../../protocol/limits.json';
 import { dispatchViewerRequest } from '../server/http/viewer-socket';
 import { createHttp } from '../server/http/server';
 import type { DomainServices } from '../server/application';
@@ -22,6 +24,23 @@ const capture = () => {
   configureLog({ write: (line) => records.push(JSON.parse(line)) }, 'debug');
   return records;
 };
+
+test('node log search accepts the line limit and omits the next line', async () => {
+  for (const count of [limits.logSearchLines, limits.logSearchLines + 1]) {
+    const nodes = {
+      all: () => [
+        {
+          nodeId: 'node',
+          state: { state: 'ready' },
+          request: async () => ({ lines: Array.from({ length: count }, (_, i) => String(i)) }),
+        },
+      ],
+    } as unknown as Pick<NodeRegistry, 'all'>;
+    const result = await findError('e-1234567890', undefined, nodes);
+    assert.equal(result.records.length, limits.logSearchLines);
+    assert.equal(result.records[result.records.length - 1].line, String(limits.logSearchLines - 1));
+  }
+});
 
 test('file sink rotates four backups and the diagnostic tail uses the newest combined bytes', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'rk-control-log-'));

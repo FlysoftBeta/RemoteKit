@@ -1,4 +1,4 @@
-import { applyDesiredViews } from './coordination-fixture';
+import { applyDesiredViews, publishAndObserve } from './coordination-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -62,6 +62,7 @@ async function fixture() {
     { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: origin },
     'lease',
   );
+  await publishAndObserve(control.endpoint, tenant);
   const show = async (request: Record<string, unknown>) => {
     endpoint.view.pageRequests = { pending: [{ request: randomUUID(), origin, ...request }] };
     await control.reconciler.tick();

@@ -60,6 +60,7 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   const fs::path directory_;
   std::atomic<std::shared_ptr<Session>> runtime_;
   std::atomic<std::shared_ptr<const Json>> desired_;
+  PlacementClipboard clipboard_;
   std::atomic<uint64_t> generation_{0};
   std::atomic<bool> running_{false};
   std::mutex scope_mutex_, authorization_mutex_;

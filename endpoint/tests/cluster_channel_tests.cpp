@@ -1,16 +1,20 @@
 #include "cluster/channel.hpp"
 #include "cluster/node_files.hpp"
 #include <windows.h>
+#include <atomic>
 #include <future>
 #include <iostream>
 #include <stdexcept>
+#include <source_location>
+#include <thread>
 using namespace remotekit;
 using namespace remotekit::cluster;
 using namespace std::chrono_literals;
 namespace {
-void Check(bool value) {
+void Check(bool value, const std::source_location location = std::source_location::current()) {
   if (!value)
-    throw std::runtime_error("cluster channel assertion failed");
+    throw std::runtime_error("cluster channel assertion failed at line " +
+                             std::to_string(location.line()));
 }
 template <class T>
 T Take(Result<T> result) {
@@ -44,7 +48,10 @@ class Tamper final : public Carrier {
  public:
   explicit Tamper(std::unique_ptr<Carrier> inner) : inner_(std::move(inner)) {}
   bool tamper = false;
+  std::atomic<bool> drop{false};
   Result<void> Send(std::span<const uint8_t> bytes) override {
+    if (drop)
+      return {};
     Bytes copy(bytes.begin(), bytes.end());
     if (tamper)
       copy.back() ^= 1;
@@ -114,6 +121,7 @@ void NativeTests() {
   Take(init.channel->Send({{"tampered", true}}));
   auto closed = resp.channel->Receive(2s);
   Check(!closed && closed.error().code == ErrorCode::kUnavailable);
+  Check(resp.channel->Cause().reason == "decrypt_failure");
   init.channel->Close();
   resp.channel->Close();
   auto [c, d] = Pair();
@@ -150,18 +158,108 @@ void NativeTests() {
   auto blocked = HandleCarrier(read, write);
   auto send =
       std::async(std::launch::async, [&] { return blocked->Send(Bytes(kMaxPlaintext, 1)); });
-  Sleep(50);
+  Check(send.wait_for(5500ms) == std::future_status::timeout);
+  Check(blocked->Cause().reason.empty());
   blocked->Close();
   Check(send.wait_for(1s) == std::future_status::ready);
   Check(!send.get());
+  Check(blocked->Cause().reason == "local_close");
   CloseHandle(remote_read);
   CloseHandle(remote_write);
+  auto [eof_reader, eof_peer] = Pair();
+  eof_peer->Close();
+  Check(!eof_reader->Receive(2s));
+  Check(eof_reader->Cause().reason == "read_eof");
+  eof_reader->Close();
+  Check(eof_reader->Cause().reason == "read_eof");
+  Check(CreatePipe(&read, &remote_write, nullptr, 0) != FALSE);
+  Check(CreatePipe(&remote_read, &write, nullptr, 0) != FALSE);
+  auto broken_write = HandleCarrier(read, write);
+  CloseHandle(remote_read);
+  Check(!broken_write->Send(Bytes(32, 1)));
+  Check(broken_write->Cause().reason == "write_error");
+  const auto write_error = broken_write->Cause().detail.at("win32");
+  Check(write_error == ERROR_BROKEN_PIPE || write_error == ERROR_NO_DATA);
+  broken_write->Close();
+  CloseHandle(remote_write);
+}
+void CarrierBackpressure(bool bytes) {
+  auto [sender, receiver] = Pair();
+  const size_t payload = bytes ? kMaxCiphertext : 4096;
+  const size_t count =
+      bytes ? limits::managementQueueBytes / payload + 3 : limits::managementQueueMessages + 64;
+  auto sending = std::async(std::launch::async, [&] {
+    for (size_t i = 0; i < count; ++i)
+      Take(sender->Send(Bytes(payload, static_cast<uint8_t>(i))));
+  });
+  Check(sending.wait_for(500ms) == std::future_status::timeout);
+  Check(receiver->Cause().reason.empty());
+  for (size_t i = 0; i < count; ++i) {
+    const auto received = Take(receiver->Receive(5s));
+    Check(received.size() == payload && received.front() == static_cast<uint8_t>(i));
+  }
+  sending.get();
+  Check(receiver->Cause().reason.empty());
+}
+void ChannelBackpressure(bool bytes) {
+  auto [a, b] = Pair();
+  auto responder = std::async(std::launch::async, [&] {
+    return AcceptCarrier(std::move(b), TestKey(), [](const Json&, const Key&) -> Result<Json> {
+      return Json{{"type", "node.ready"}};
+    });
+  });
+  auto init = Take(ConnectCarrier(std::move(a), TestKey(), PublicKey(TestKey()),
+                                  {"endpoint", "test-node", "dev", std::string(32, '1')}));
+  auto resp = Take(responder.get());
+  Json message{{"event", "session.event"}, {"padding", ""}};
+  if (bytes)
+    message["padding"] = std::string(limits::documentBytes - message.dump().size(), 'x');
+  const size_t count = bytes ? 2 * limits::managementQueueBytes / message.dump().size() + 4
+                             : limits::managementQueueMessages + 2;
+  auto sending = std::async(std::launch::async, [&] {
+    for (size_t i = 0; i < count; ++i)
+      Take(resp.channel->Send(message));
+  });
+  // The initiator must continue pinging while its downstream consumer is paused.
+  std::this_thread::sleep_for(bytes ? 66s : 46s);
+  if (bytes)
+    Check(sending.wait_for(0ms) == std::future_status::timeout);
+  Check(init.channel->Cause().reason.empty() && resp.channel->Cause().reason.empty());
+  for (size_t i = 0; i < count; ++i)
+    Check(Take(init.channel->Receive(5s)).json == message);
+  sending.get();
+  Take(resp.channel->Send({{"resumed", true}}));
+  Check(Take(init.channel->Receive(5s)).json["resumed"] == true);
+}
+void HeartbeatSilence() {
+  auto [a, b] = Pair();
+  auto dropping = std::make_unique<Tamper>(std::move(a));
+  auto* dropper = dropping.get();
+  auto responder = std::async(std::launch::async, [&] {
+    return AcceptCarrier(std::move(b), TestKey(), [](const Json&, const Key&) -> Result<Json> {
+      return Json{{"type", "node.ready"}};
+    });
+  });
+  auto init = Take(ConnectCarrier(std::move(dropping), TestKey(), PublicKey(TestKey()),
+                                  {"endpoint", "test-node", "dev", std::string(32, '1')}));
+  auto resp = Take(responder.get());
+  dropper->drop = true;
+  Check(!resp.channel->Receive(47s));
+  const auto cause = resp.channel->Cause();
+  Check(cause.reason == "heartbeat_silence" && cause.detail.at("silentMs") >= 45000);
 }
 }  // namespace
 int main(int argc, char** argv) {
   try {
     if (argc == 1) {
       NativeTests();
+      CarrierBackpressure(false);
+      CarrierBackpressure(true);
+      auto byte_pressure = std::async(std::launch::async, [] { ChannelBackpressure(true); });
+      auto silence = std::async(std::launch::async, HeartbeatSilence);
+      ChannelBackpressure(false);
+      byte_pressure.get();
+      silence.get();
       return 0;
     }
     Result<Established> connection = Error{ErrorCode::kInternal, "not connected"};

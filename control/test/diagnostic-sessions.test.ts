@@ -12,6 +12,7 @@ import { zstdDecompressSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import { createHttp } from '../server/http/server';
 import { DiagnosticSessions } from '../server/diagnostics/sessions';
+import limits from '../../protocol/limits.json';
 import { createApplication, type DomainServices } from '../server/application';
 import { collectionInputSample, collectionRtcSample } from '../client/media/media-diagnostics';
 import type { DiagnosticReply } from '../shared/diagnostics';
@@ -267,6 +268,8 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
     ['browser', 'browser', 'endpoint', 'endpoint.1', 'crashes'],
   );
   const manifest = JSON.parse(files.get('manifest.json')!);
+  assert.equal((logReads[0] as { maxBytes: number }).maxBytes, limits.logWindowBytes);
+  assert.ok(logReads.every((read) => (read as { maxBytes: number }).maxBytes <= limits.logWindowBytes));
   assert.deepEqual(decodeJson(files.get('manifest.json')!, diagnosticManifest, 'manifest'), manifest);
   for (const value of [
     { ...manifest, id: undefined },

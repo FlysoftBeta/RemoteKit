@@ -74,7 +74,7 @@ export function compileDesired(
     });
   }
   const user = context.store.accounts.userForTenant(tenant);
-  const clipboard = user && context.store.clipboards.latest(user.id);
+  const clipboardRevision = user && context.store.clipboards.revision(user.id);
   const files = unlocked
     ? (runtime.pageRequests.files ?? [])
         .slice(0, coordinationLimits.fileRequests)
@@ -94,8 +94,7 @@ export function compileDesired(
     mediaPolicy: quality.requested,
     quality: { effectiveDpr: quality.effectiveDpr },
     clipboard: {
-      revision: clipboard?.revision ?? '0',
-      value: { text: clipboard?.text ?? '', html: clipboard?.html ?? '' },
+      revision: clipboardRevision || '0',
     },
     views,
     authorization: {

@@ -16,22 +16,71 @@ void Check(bool value, const char* message) {
 int main(int argc, char** argv) {
   try {
     Check(argc == 2, "fixture required");
+    Json contract;
+    std::ifstream(std::filesystem::path(argv[1]).parent_path() / "limits.json") >> contract;
+    Check(contract.at("managementQueueMessages") == limits::managementQueueMessages &&
+              contract.at("managementQueueBytes") == limits::managementQueueBytes &&
+              contract.at("managementWorkerQueue") == limits::managementWorkerQueue,
+          "generated queue limits match JSON contract");
+    Check(limits::managementQueueMessages == 256 && limits::managementQueueBytes == 67108864 &&
+              limits::managementWorkerQueue == 64,
+          "management queue contract values");
     std::ifstream input(argv[1]);
     Json desired;
     input >> desired;
     Check(bool(coordination::ValidateDesired(desired)), "valid desired fixture");
+    for (const auto& [number, bytes] : std::vector<std::pair<double, size_t>>{
+             {1.0, 1}, {1e-6, 8}, {1e-7, 4}, {1e20, 21}, {1e21, 5}, {1.25, 4}})
+      Check(coordination::DocumentBytes(Json{{"value", number}}) == bytes + 10,
+            "document numbers use JSON.stringify byte lengths");
     for (const auto& [field, bound] : std::vector<std::pair<std::string, size_t>>{
              {"text", limits::textBytes}, {"html", limits::htmlBytes}}) {
-      auto boundary = desired;
-      boundary["clipboard"]["value"][field] = std::string(bound, 'x');
-      Check(bool(coordination::ValidateDesired(boundary)), "clipboard bound accepted");
-      auto body = boundary["clipboard"]["value"];
+      Json boundary{{"method", "session.clipboard"},
+                    {"tenantId", desired["tenantId"]},
+                    {"sessionId", desired["sessionId"]},
+                    {"placementEpoch", desired["placementEpoch"]},
+                    {"connectionEpoch", desired["connectionEpoch"]},
+                    {"revision", "1"},
+                    {"value", {{"text", ""}, {"html", ""}}}};
+      boundary["value"][field] = std::string(bound, 'x');
+      Check(bool(coordination::ValidateClipboard(boundary)), "clipboard bound accepted");
+      auto body = boundary["value"];
       Check(coordination::EventBodyFits("clipboard.changed", body), "event bound accepted");
-      boundary["clipboard"]["value"][field] = std::string(bound + 1, 'x');
-      Check(!coordination::ValidateDesired(boundary), "clipboard overflow rejected");
+      boundary["value"][field] = std::string(bound + 1, 'x');
+      Check(!coordination::ValidateClipboard(boundary), "clipboard overflow rejected");
       body[field] = std::string(bound + 1, 'x');
       Check(!coordination::EventBodyFits("clipboard.changed", body), "event overflow rejected");
     }
+    auto configuration = desired;
+    configuration["views"][0]["url"] = "";
+    configuration["views"][0]["url"] =
+        std::string(limits::configurationBytes - limits::managementEnvelopeBytes -
+                        coordination::DocumentBytes(configuration),
+                    'x');
+    Check(bool(coordination::ValidateDesired(configuration)),
+          "configuration byte boundary accepted");
+    configuration["id"] = std::string(36, 'f');
+    Check(bool(coordination::ValidateDesired(configuration)),
+          "wire id excluded from document measurement");
+    configuration["views"][0]["url"] = configuration["views"][0]["url"].get<std::string>() + "x";
+    Check(!coordination::ValidateDesired(configuration), "configuration byte overflow rejected");
+    Json clipboard{{"method", "session.clipboard"},
+                   {"tenantId", desired["tenantId"]},
+                   {"sessionId", desired["sessionId"]},
+                   {"placementEpoch", desired["placementEpoch"]},
+                   {"connectionEpoch", desired["connectionEpoch"]},
+                   {"revision", "1"},
+                   {"value", {{"text", std::string(600000, '\0')}, {"html", ""}}}};
+    clipboard["value"]["html"] =
+        std::string(limits::documentBytes - limits::managementEnvelopeBytes -
+                        coordination::DocumentBytes(clipboard),
+                    'x');
+    Check(bool(coordination::ValidateClipboard(clipboard)),
+          "encoded clipboard byte boundary accepted");
+    clipboard["id"] = std::string(36, 'f');
+    Check(bool(coordination::ValidateClipboard(clipboard)), "clipboard wire id excluded");
+    clipboard["value"]["html"] = clipboard["value"]["html"].get<std::string>() + "x";
+    Check(!coordination::ValidateClipboard(clipboard), "encoded clipboard overflow rejected");
     Json body{{"viewId", "1"}, {"reason", "script"}, {"padding", ""}};
     body["padding"] = std::string(limits::eventBytes - body.dump().size(), 'x');
     Check(coordination::EventBodyFits("view.closed", body), "encoded event bound accepted");

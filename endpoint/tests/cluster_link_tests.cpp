@@ -8,6 +8,7 @@
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
+#include <source_location>
 #include <thread>
 using namespace remotekit;
 using namespace remotekit::cluster;
@@ -28,10 +29,13 @@ void Take(Result<void> result) {
     throw std::runtime_error(result.error().message);
 }
 template <class Predicate>
-void Await(Predicate predicate) {
-  auto deadline = std::chrono::steady_clock::now() + 5s;
+void Await(Predicate predicate,
+           std::chrono::milliseconds timeout = 5s,
+           const std::source_location location = std::source_location::current()) {
+  auto deadline = std::chrono::steady_clock::now() + timeout;
   while (!predicate()) {
-    Check(std::chrono::steady_clock::now() < deadline, "condition timed out");
+    if (std::chrono::steady_clock::now() >= deadline)
+      throw std::runtime_error("condition timed out at line " + std::to_string(location.line()));
     std::this_thread::sleep_for(10ms);
   }
 }
@@ -267,9 +271,18 @@ void LimitsAndRetry() {
     Check(responder.attempts == 3, "retry failed connections");
     auto server = responder.At(0);
     auto generation = Request(link, *server, 1);
-    Check(!link.SendReply(generation, {{"large", std::string(kMaxJson, 'x')}}),
-          "oversized reply rejected without sending");
-    Check(!link.Current(generation), "overload retires dispatch admission");
+    Check(link.SendReply(generation, {{"id", 1},
+                                      {"opId", "operation"},
+                                      {"ok", true},
+                                      {"result", {{"large", std::string(kMaxJson, 'x')}}}}),
+          "oversized reply replaced");
+    const auto rejected = Take(server->Receive(5s)).json;
+    Check(rejected["id"] == 1 && rejected["opId"] == "operation" &&
+              rejected["error"]["code"] == "limit_exceeded",
+          "bounded reply preserves identity");
+    Check(link.Current(generation), "oversized reply leaves link current");
+    Check(link.SendEvent({{"event", "rtc.signal"}}, generation), "link remains writable");
+    Take(server->Receive(5s));
   }
   {
     Responder responder({Ready()});
@@ -285,7 +298,7 @@ void LimitsAndRetry() {
       return {};
     });
     received_boundary = false;
-    for (size_t i = 0; i < limits::queuedMessages; ++i) {
+    for (size_t i = 0; i < limits::managementQueueMessages; ++i) {
       Take(server->Send({{"id", i}}));
       // Fill the management queue without overflowing the carrier's own queue.
       std::this_thread::sleep_for(1ms);
@@ -293,10 +306,16 @@ void LimitsAndRetry() {
     Take(server->Send({{"type", "node.peers"}, {"peers", Json::array()}}));
     Await([&] { return received_boundary.load(); });
     Check(!lost, "incoming queue accepts its exact bound");
-    Take(server->Send({{"id", limits::queuedMessages}}));
-    Await([&] { return lost.load(); });
-    Await([&] { return link.ExitCode() == 1; });
-    Check(link.ExitCode() == 1, "bounded incoming queue fails local carrier");
+    Take(server->Send({{"id", limits::managementQueueMessages}}));
+    std::this_thread::sleep_for(100ms);
+    Check(!lost && link.Current(1), "full incoming queue keeps link alive");
+    for (size_t i = 0; i <= limits::managementQueueMessages; ++i) {
+      std::string text;
+      uint64_t generation;
+      bool eof = false;
+      Await([&] { return link.Next(text, generation, eof); });
+      Check(!eof && Json::parse(text)["id"] == i, "incoming queue resumes in order");
+    }
     link.OnDisconnect({});
     link.OnPeers({});
   }
@@ -330,6 +349,184 @@ void SupervisorEof() {
     return eof;
   });
   Check(link.ExitCode() == 0 && !link.Current(generation), "supervisor EOF requests graceful stop");
+}
+void IncomingByteBoundary() {
+  Responder responder({Ready()});
+  ClusterLink link([&] { return responder.Connect(); }, true, "dev", std::string(32, 'a'),
+                   Validate);
+  Take(link.WaitReady());
+  auto server = responder.At(0);
+  std::atomic<unsigned> markers{0};
+  link.OnPeers([&](const Json&) -> Result<void> {
+    ++markers;
+    return {};
+  });
+  const auto send_marker = [&] {
+    const auto expected = markers.load() + 1;
+    Take(server->Send({{"type", "node.peers"}, {"peers", Json::array()}}));
+    Await([&] { return markers.load() == expected; }, 20s);
+  };
+  size_t remaining = limits::managementQueueBytes;
+  size_t count = 0;
+  while (remaining) {
+    const auto size = std::min(remaining, limits::documentBytes);
+    Json message{{"method", "session.desired"}, {"padding", ""}};
+    if (size < message.dump().size())
+      message = {{"padding", ""}};
+    Check(size >= message.dump().size(), "incoming boundary fixture has envelope space");
+    message["padding"] = std::string(size - message.dump().size(), 'x');
+    Take(server->Send(message));
+    remaining -= size;
+    ++count;
+  }
+  send_marker();
+  Take(server->Send({{"method", "after-full"}}));
+  std::this_thread::sleep_for(100ms);
+  std::string text;
+  uint64_t generation = 0;
+  bool eof = false;
+  Check(link.Current(1), "exact incoming byte bound does not close link");
+  for (size_t i = 0; i <= count; ++i) {
+    Await([&] { return link.Next(text, generation, eof); });
+    Check(!eof, "incoming byte pressure resumes");
+  }
+  Check(Json::parse(text).at("method") == "after-full",
+        "message beyond byte budget delivered after drain");
+  link.OnPeers({});
+}
+struct GatedState {
+  std::mutex mutex;
+  std::condition_variable wake;
+  bool hold = true, entered = false, closed = false, request = true;
+  std::vector<Json> sent;
+};
+class GatedChannel final : public Channel {
+ public:
+  explicit GatedChannel(std::shared_ptr<GatedState> state) : state_(std::move(state)) {}
+  Result<void> Send(const Json& json) override {
+    std::unique_lock lock(state_->mutex);
+    state_->entered = true;
+    state_->wake.notify_all();
+    state_->wake.wait(lock, [&] { return !state_->hold || state_->closed; });
+    if (state_->closed)
+      return Error{ErrorCode::kUnavailable, "closed"};
+    state_->sent.push_back(json);
+    return {};
+  }
+  Result<void> SendBinary(const Json&, std::span<const uint8_t>) override { return {}; }
+  Result<Message> Receive(std::chrono::milliseconds timeout) override {
+    std::unique_lock lock(state_->mutex);
+    if (state_->request) {
+      state_->request = false;
+      return Message{Message::Kind::kJson, {{"method", "test"}, {"id", 1}}, {}};
+    }
+    state_->wake.wait_for(lock, timeout, [&] { return state_->closed; });
+    return Error{state_->closed ? ErrorCode::kUnavailable : ErrorCode::kBusy, "gated"};
+  }
+  void Close() override {
+    RecordClose("local_close");
+    std::lock_guard lock(state_->mutex);
+    state_->closed = true;
+    state_->wake.notify_all();
+  }
+
+ private:
+  std::shared_ptr<GatedState> state_;
+};
+void OutgoingPressure(bool byte_bound) {
+  const auto state = std::make_shared<GatedState>();
+  ClusterLink link(
+      [&]() -> Result<Established> {
+        return Established{std::make_unique<GatedChannel>(state), Ready()};
+      },
+      true, "dev", std::string(32, 'a'), Validate);
+  Take(link.WaitReady());
+  uint64_t generation = 0;
+  bool eof = false;
+  std::string text;
+  Await([&] { return link.Next(text, generation, eof); });
+  Check(link.SendEvent({{"event", "blocker"}}, generation), "stall sender");
+  {
+    std::unique_lock lock(state->mutex);
+    Check(state->wake.wait_for(lock, 5s, [&] { return state->entered; }), "sender entered");
+  }
+  Json observed{{"event", "session.observed"},
+                {"tenantId", "tenant"},
+                {"sessionId", "session"},
+                {"seq", "1"},
+                {"padding", std::string(200, 'x')}};
+  Check(link.SendEvent(observed, generation), "initial observation queued");
+  observed["seq"] = "2";
+  observed["padding"] = "latest";
+  Check(link.SendEvent(observed, generation), "new observation coalesces");
+  Check(link.EventBudget().messages == limits::managementQueueMessages - 1 &&
+            link.EventBudget().bytes == limits::managementQueueBytes - observed.dump().size(),
+        "coalescing updates count and bytes");
+  Json event{{"event", "session.event"}, {"padding", ""}};
+  if (byte_bound) {
+    event["padding"] = std::string(limits::documentBytes - event.dump().size(), 'x');
+    while (link.EventBudget().bytes >= event.dump().size())
+      Check(link.SendEvent(event, generation), "large event fits remaining bytes");
+    event["padding"] = "";
+    const auto remaining = link.EventBudget().bytes;
+    event["padding"] = std::string(remaining - event.dump().size(), 'x');
+    Check(link.SendEvent(event, generation), "exact outgoing byte budget accepted");
+    Check(link.EventBudget().bytes == 0, "byte accounting reaches bound");
+  } else {
+    while (link.EventBudget().messages)
+      Check(link.SendEvent(event, generation), "exact outgoing count accepted");
+  }
+  Check(!link.SendEvent({{"event", "extra"}}, generation), "message past queue budget refused");
+  observed["seq"] = "3";
+  Check(link.SendEvent(observed, generation), "observation replaces at full queue");
+  Check(link.SendReply(generation, {{"id", 1}, {"opId", "reply"}, {"ok", true}}),
+        "reply accepted above queue budget");
+  Check(link.Current(generation), "queue pressure leaves link alive");
+  {
+    std::lock_guard lock(state->mutex);
+    state->hold = false;
+    state->wake.notify_all();
+  }
+  Await(
+      [&] {
+        std::lock_guard lock(state->mutex);
+        return !state->sent.empty() && state->sent.back().value("opId", Json()) == "reply";
+      },
+      20s);
+  {
+    std::lock_guard lock(state->mutex);
+    Check(state->sent.size() >= 3 && state->sent[1] == observed,
+          "only latest observation sent in place");
+    Check(state->sent.back()["opId"] == "reply", "reply delivered after saturation");
+  }
+  Check(link.SendEvent({{"event", "resumed"}}, generation), "queue admission resumes");
+}
+void StalledRequestDeadline() {
+  const auto state = std::make_shared<GatedState>();
+  ClusterLink link(
+      [&]() -> Result<Established> {
+        return Established{std::make_unique<GatedChannel>(state), Ready()};
+      },
+      true, "dev", std::string(32, 'a'), Validate);
+  Take(link.WaitReady());
+  auto request = std::async(std::launch::async, [&] {
+    return link.RequestUntil("test", Json::object(), std::chrono::steady_clock::now() + 100ms);
+  });
+  {
+    std::unique_lock lock(state->mutex);
+    Check(state->wake.wait_for(lock, 5s, [&] { return state->entered; }), "request write started");
+  }
+  Check(request.wait_for(1s) == std::future_status::ready,
+        "RPC deadline survives blocked transport write");
+  const auto result = request.get();
+  Check(!result && result.error().code == ErrorCode::kOutcomeUnknown && link.Current(1),
+        "started write times out without ending link");
+  {
+    std::lock_guard lock(state->mutex);
+    state->hold = false;
+    state->wake.notify_all();
+  }
+  link.Flush();
 }
 void OutboundRequests() {
   Responder responder({Ready()});
@@ -443,6 +640,10 @@ int main() {
     MediaAndPeers();
     ExitRules();
     LimitsAndRetry();
+    IncomingByteBoundary();
+    OutgoingPressure(false);
+    OutgoingPressure(true);
+    StalledRequestDeadline();
     SupervisorEof();
     OutboundRequests();
     PendingRequestLimit();

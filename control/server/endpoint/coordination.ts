@@ -40,7 +40,7 @@ export interface SessionDesired extends SessionTarget {
   sitePreferences: SessionSitePreferencesRequest;
   mediaPolicy: MediaPolicy;
   quality: { effectiveDpr: number };
-  clipboard: { revision: string; value: { text: string; html: string } };
+  clipboard: { revision: string };
   views: DesiredView[];
   authorization: {
     connectionId: string | null;
@@ -291,6 +291,52 @@ export interface EventsAck extends SessionTarget {
   streamId: string;
   upTo: string;
 }
+export interface SessionClipboard extends SessionTarget {
+  method: 'session.clipboard';
+  connectionEpoch: string;
+  revision: string;
+  value: { text: string; html: string };
+}
+
+export function managementDocumentBytes(value: object): number {
+  const { id, opId, ...document } = value as Record<string, unknown>;
+  return Buffer.byteLength(JSON.stringify(document));
+}
+
+export function validateClipboard(value: SessionClipboard): void {
+  if (
+    value.method !== 'session.clipboard' ||
+    !boundedString(value.tenantId, coordinationLimits.identityBytes) ||
+    !boundedString(value.connectionEpoch, coordinationLimits.identityBytes) ||
+    !/^[0-9a-f]{32}$/.test(value.sessionId) ||
+    !Number.isSafeInteger(value.placementEpoch) ||
+    value.placementEpoch < 1 ||
+    !counter(value.revision) ||
+    !record(value.value) ||
+    Object.keys(value.value).some((key) => !['text', 'html'].includes(key)) ||
+    !boundedString(value.value.text, coordinationLimits.textBytes, false) ||
+    !boundedString(value.value.html, coordinationLimits.htmlBytes, false) ||
+    (value.revision === '0' && (value.value.text !== '' || value.value.html !== '')) ||
+    Object.keys(value).some(
+      (key) =>
+        ![
+          'method',
+          'tenantId',
+          'sessionId',
+          'placementEpoch',
+          'connectionEpoch',
+          'revision',
+          'value',
+        ].includes(key),
+    )
+  )
+    throw new RemoteKitError('invalid_request', 'Invalid session.clipboard');
+  if (
+    managementDocumentBytes(value) + coordinationLimits.managementEnvelopeBytes >
+    coordinationLimits.documentBytes
+  )
+    throw new RemoteKitError('limit_exceeded', 'Clipboard document exceeds bound');
+}
 export interface OneShotRequest {
   method: string;
   opId: string;
@@ -375,8 +421,7 @@ export function validateDesired(value: SessionDesired): void {
   invalid(value.checkpoint !== null && !/^[0-9a-f]{64}$/.test(value.checkpoint), 'checkpoint');
   invalid(!counter(value.clipboard.revision), 'clipboard.revision');
   invalid(
-    Buffer.byteLength(value.clipboard.value.text) > coordinationLimits.textBytes ||
-      Buffer.byteLength(value.clipboard.value.html) > coordinationLimits.htmlBytes,
+    Object.keys(value.clipboard).some((key) => key !== 'revision'),
     'clipboard',
   );
   invalid(
@@ -431,10 +476,9 @@ export function validateDesired(value: SessionDesired): void {
         (value.authorization.epoch !== 0 || value.authorization.unlocked)),
     'authorization.epoch',
   );
-  const { clipboard, ...configuration } = value;
   invalid(
-    Buffer.byteLength(JSON.stringify(configuration)) > coordinationLimits.configurationBytes ||
-      Buffer.byteLength(JSON.stringify(value)) > coordinationLimits.documentBytes,
+    managementDocumentBytes(value) + coordinationLimits.managementEnvelopeBytes >
+      coordinationLimits.configurationBytes,
     'size',
   );
 }

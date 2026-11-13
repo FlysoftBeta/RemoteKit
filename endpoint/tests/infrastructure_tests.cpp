@@ -2,6 +2,8 @@
 #include "runtime_config_fixture.hpp"
 #include "cluster/noise.hpp"
 #include "management/link.hpp"
+#include "management/reply.hpp"
+#include "objects/work_queue.hpp"
 #include "options.hpp"
 #include "persistence/durable_json.hpp"
 #include "persistence/checkpoint.hpp"
@@ -209,13 +211,36 @@ void ProcessOwnership() {
   Check(!inherited, "unrelated inheritable event was excluded");
   Check(process.ExitCode() == 0, "only the key handle is inherited, with exactly 32 key bytes");
   Check(process.Present(), "retain exact process identity");
-  Check(bool(process.Terminate()) && process.state() == BrowserProcess::State::kExited,
+  Check(bool(process.Terminate()) && process.JobEmpty() &&
+            process.state() == BrowserProcess::State::kExited,
         "stop confirms process exit");
   process.ReleaseExited();
   Check(!process.Present() && process.state() == BrowserProcess::State::kStopped,
         "release confirmed process");
+  TemporaryDirectory directory;
+  const auto locked_path = directory.path / "browser-file";
+  const auto ready_name = L"Local\\RemoteKitJob-" + std::to_wstring(GetCurrentProcessId());
+  const auto ready = CreateEventW(nullptr, TRUE, FALSE, ready_name.c_str());
+  Check(ready != nullptr, "job child readiness event");
+  Check(bool(process.Launch(executable,
+                            BrowserProcess::Quote(executable.wstring()) + L" --spawn-job-child " +
+                                BrowserProcess::Quote(locked_path.wstring()) + L" " +
+                                BrowserProcess::Quote(ready_name),
+                            key)),
+        "launch browser tree fixture");
+  Check(WaitForSingleObject(ready, 5000) == WAIT_OBJECT_0, "job child holds session file");
+  CloseHandle(ready);
+  const auto tree_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (process.Alive() && std::chrono::steady_clock::now() < tree_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  Check(process.Exited() && !process.JobEmpty(), "child outlives root browser process");
+  Check(bool(process.Terminate()) && process.JobEmpty(), "termination drains descendant job");
+  if (!DeleteFileW(locked_path.c_str()))
+    throw std::logic_error("session file released before stop returns: Win32 " +
+                           std::to_string(GetLastError()));
+  process.ReleaseExited();
 }
-class FixtureLink final : public ManagementLink {
+class FixtureLink : public ManagementLink {
  public:
   std::vector<Json> requests, replies, events;
   std::mutex mutex;
@@ -301,8 +326,151 @@ void ManagementDispatch() {
   Check(!link.events.empty() && link.events[0]["event"] == "session.observed",
         "initial observed replaces copy report");
 }
+void WorkerQueueBoundary() {
+  objects::WorkQueue queue(0);
+  for (size_t i = 0; i < limits::managementWorkerQueue; ++i)
+    Check(queue.Submit([] {}), "worker queue accepts exact count bound");
+  Check(!queue.Submit([] {}), "worker queue rejects one past bound");
+}
+class SaturatedLink final : public ManagementLink {
+ public:
+  std::mutex mutex;
+  std::condition_variable wake;
+  size_t next = 0, blocked = 0;
+  bool release = false;
+  Json busy;
+  bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
+    std::unique_lock lock(mutex);
+    if (next == 4)
+      Check(wake.wait_for(lock, std::chrono::seconds(5), [&] { return blocked == 4; }),
+            "all management workers occupied");
+    eof = next == 4 + limits::managementWorkerQueue + 1;
+    if (eof) {
+      release = true;
+      wake.notify_all();
+      return false;
+    }
+    auto request =
+        test::Rpc("node.logs.search", {{"errorId", "e-0123456789"}}, "op-" + std::to_string(next));
+    request.update(
+        {{"id", next}, {"tenantId", ""}, {"sessionId", nullptr}, {"placementEpoch", nullptr}});
+    bytes = request.dump();
+    generation = 1;
+    ++next;
+    return true;
+  }
+  bool Current(uint64_t generation) override { return generation == 1; }
+  bool SendReply(uint64_t, const Json& reply) override {
+    std::unique_lock lock(mutex);
+    if (reply.value("ok", true) == false && reply.at("error").at("code") == "busy") {
+      busy = reply;
+      return true;
+    }
+    ++blocked;
+    wake.notify_all();
+    wake.wait(lock, [&] { return release; });
+    return true;
+  }
+  bool SendEvent(const Json&, uint64_t, DeliveryFlag = {}) override { return true; }
+  void OnDisconnect(Disconnect) override {}
+  Result<Json> Request(const std::string&, Json) override { return Json::object(); }
+};
+void WorkerBusyReply() {
+  TemporaryDirectory directory;
+  const auto options = RuntimeOptions::FromConfig(TestConfig(), directory.path, "dev", "test");
+  Check(bool(options), "worker saturation options");
+  SaturatedLink link;
+  media::Sdk sdk;
+  Service service(sdk, options.value(), link, {}, "endpoint");
+  Check(service.Run() == 0, "worker saturation keeps service alive");
+  const auto id = 4 + limits::managementWorkerQueue;
+  Check(link.busy.value("id", size_t(-1)) == id &&
+            link.busy.value("opId", "") == "op-" + std::to_string(id) &&
+            link.busy.at("error").at("code") == "busy",
+        "busy reply preserves id and opId");
+}
+class EventPressureLink final : public FixtureLink {
+ public:
+  QueueBudget budget{1, limits::managementQueueBytes};
+  bool refuse = false;
+  QueueBudget EventBudget() override { return budget; }
+  bool SendEvent(const Json& event, uint64_t, DeliveryFlag = {}) override {
+    if (refuse)
+      return false;
+    events.push_back(event);
+    return true;
+  }
+};
+void EventReplayPressure() {
+  TemporaryDirectory directory;
+  const auto options = RuntimeOptions::FromConfig(TestConfig(), directory.path, "dev", "test");
+  Check(bool(options), "event replay options");
+  const auto session_id = std::string(32, 'a');
+  SessionDb database(options.value().data / "sessions" / session_id);
+  Check(bool(database.Open()), "event replay database");
+  for (int i = 1; i <= 3; ++i)
+    Check(bool(database.Events().Append("view.closed",
+                                        {{"viewId", std::to_string(i)}, {"reason", "script"}},
+                                        "event-" + std::to_string(i), "browser")),
+          "persistent replay event");
+  const auto state = database.Events().State();
+  Check(bool(state) && bool(database.Close()), "close replay database");
+  EventPressureLink link;
+  media::Sdk sdk;
+  objects::ObjectService objects(options.value().data, link, {}, "test", "dev");
+  media::FrameAdmission admission;
+  const auto execution = std::make_shared<SessionExecution>(
+      sdk, options.value(), link, objects, admission,
+      Json{{"tenantId", "tenant"}, {"sessionId", session_id}, {"placementEpoch", uint64_t(1)}},
+      "endpoint");
+  execution->Activate("connection", 7);
+  const auto hooks = execution->Hooks();
+  const auto stream = state.value().at("streamId").get<std::string>();
+  hooks.maintain();
+  Check(link.events.size() == 1 && link.events.back().at("seq") == "1",
+        "replay pass respects queue credit");
+  Check(!hooks.acknowledge(stream, 2), "unsent event cannot be acknowledged");
+  Check(bool(hooks.acknowledge(stream, 1)), "sent prefix can be acknowledged");
+  link.budget.messages = 2;
+  link.refuse = true;
+  hooks.maintain();
+  Check(!hooks.acknowledge(stream, 2), "failed enqueue does not advance sent cursor");
+  link.refuse = false;
+  std::this_thread::sleep_for(std::chrono::milliseconds(510));
+  hooks.maintain();
+  Check(
+      link.events.size() == 3 && link.events[1].at("seq") == "2" && link.events[2].at("seq") == "3",
+      "refused events replay from durable stream");
+  Check(bool(hooks.acknowledge(stream, 3)), "replayed prefix can be acknowledged");
+}
 }  // namespace
 int main(int argc, char** argv) {
+  if (argc >= 4 && std::string_view(argv[1]) == "--spawn-job-child") {
+    wchar_t self[32768]{};
+    GetModuleFileNameW(nullptr, self, 32768);
+    std::wstring command = BrowserProcess::Quote(self) + L" --hold-job-file " +
+                           BrowserProcess::Quote(fs::path(argv[2]).wstring()) + L" " +
+                           BrowserProcess::Quote(fs::path(argv[3]).wstring());
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION child{};
+    if (!CreateProcessW(self, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                        nullptr, &startup, &child))
+      return 1;
+    CloseHandle(child.hThread);
+    CloseHandle(child.hProcess);
+    return 0;
+  }
+  if (argc >= 4 && std::string_view(argv[1]) == "--hold-job-file") {
+    const auto file = CreateFileW(fs::path(argv[2]).c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                                  nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const auto ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, fs::path(argv[3]).c_str());
+    if (file == INVALID_HANDLE_VALUE || !ready)
+      return 1;
+    SetEvent(ready);
+    CloseHandle(ready);
+    Sleep(INFINITE);
+    return 0;
+  }
   if (argc > 1 && std::string_view(argv[1]) == "--check-profile-key") {
     HANDLE reader = nullptr, unrelated = nullptr;
     for (int i = 2; i < argc; ++i) {
@@ -332,6 +500,9 @@ int main(int argc, char** argv) {
     ThreadFailure();
     ProcessOwnership();
     ManagementDispatch();
+    WorkerQueueBoundary();
+    WorkerBusyReply();
+    EventReplayPressure();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

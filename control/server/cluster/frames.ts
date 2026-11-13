@@ -6,6 +6,7 @@ export const MAX_JSON = limits.managementBytes;
 function jsonLimit(value: Record<string, unknown>) {
   if (
     value.method === 'session.desired' ||
+    value.method === 'session.clipboard' ||
     value.event === 'session.observed' ||
     value.event === 'session.event'
   )

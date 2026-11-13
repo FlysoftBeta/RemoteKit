@@ -1,5 +1,6 @@
 #include "util/log.hpp"
 #include "management/cluster_link.hpp"
+#include "management/reply.hpp"
 #include "cluster/node_files.hpp"
 #include "util/thread.hpp"
 #include "util/wire_error.hpp"
@@ -15,7 +16,19 @@
 namespace remotekit {
 namespace {
 using namespace std::chrono_literals;
-constexpr size_t kMaxQueuedBytes = cluster::kMaxPlaintext;
+std::string MessageKind(const Json& message) {
+  for (const auto* field : {"method", "request", "event", "type"})
+    if (message.is_object() && message.contains(field) && message[field].is_string())
+      return message[field].get<std::string>();
+  return message.is_object() && message.contains("id") ? "reply" : "unknown";
+}
+void EndLink(cluster::Channel* channel) {
+  channel->Close();
+  auto cause = channel->Cause();
+  LogEvent(LogLevel::kError, "cluster.link_lost",
+           {{"reason", cause.reason.empty() ? "local_close" : cause.reason},
+            {"detail", std::move(cause.detail)}});
+}
 bool ValidEpoch(const Json& value) {
   if (!value.is_string())
     return false;
@@ -37,6 +50,7 @@ struct ClusterLink::Impl {
     uint64_t generation;
     std::string bytes;
     DeliveryFlag delivery;
+    std::string observation;
   };
   Connector connect;
   ValidateConfig validate;
@@ -55,7 +69,7 @@ struct ClusterLink::Impl {
   std::map<std::string, Pending> pending;
   size_t incoming_bytes = 0, outgoing_bytes = 0;
   uint64_t serial = 0, active = 0;
-  bool stopping = false, overload = false, ready = false, sending = false;
+  bool stopping = false, queue_full = false, ready = false, sending = false;
   int exit_code = 1;
   Disconnect disconnected;
   Binary binary;
@@ -77,6 +91,12 @@ struct ClusterLink::Impl {
     DWORD available = 0;
     if (PeekNamedPipe(GetStdHandle(STD_INPUT_HANDLE), nullptr, 0, nullptr, &available, nullptr))
       return false;
+    const auto error = GetLastError();
+    {
+      std::lock_guard lock(mutex);
+      if (channel)
+        channel->RecordClose("read_eof", {{"source", "supervisor stdin"}, {"win32", error}});
+    }
     Finish(0);
     return true;
   }
@@ -89,7 +109,7 @@ struct ClusterLink::Impl {
       std::lock_guard lock(mutex);
       generation = active;
       active = 0;
-      overload = false;
+      queue_full = false;
       incoming.clear();
       outgoing.clear();
       incoming_bytes = outgoing_bytes = 0;
@@ -97,18 +117,23 @@ struct ClusterLink::Impl {
       callback = disconnected;
     }
     if (closing)
-      closing->Close();
+      EndLink(closing.get());
     wake.notify_all();
     if (generation && callback)
       callback(generation);
   }
   bool Accept(cluster::Established established) {
+    std::unique_ptr<cluster::Channel, decltype(&EndLink)> end(established.channel.get(), EndLink);
     const auto& reply = established.reply;
+    const auto reject = [&](const char* reason, int code, Json detail = Json::object()) {
+      established.channel->RecordClose(reason, detail);
+      Finish(code);
+      return false;
+    };
     if (reply.value("type", Json()) == "node.reject") {
       const auto code = reply.value("code", Json());
       LogEvent(LogLevel::kError, "cluster.rejected", {{"code", code}});
-      Finish(code == "build_mismatch" ? 3 : 1);
-      return false;
+      return reject("peer_rejected", code == "build_mismatch" ? 3 : 1, {{"code", code}});
     }
     if (reply.value("type", Json()) != "node.ready" || !reply.contains("connectionEpoch") ||
         !ValidEpoch(reply["connectionEpoch"]) || reply.value("buildId", Json()) != build_id ||
@@ -119,26 +144,24 @@ struct ClusterLink::Impl {
         !reply["objectIdKey"].is_string() ||
         !cluster::DecodeKey(reply["objectKey"].get<std::string>()) ||
         !cluster::DecodeKey(reply["objectIdKey"].get<std::string>())) {
-      Finish(1);
-      return false;
+      return reject("invalid_ready", 1);
     }
     if (!reply["config"].is_object() || !reply["config"].contains("peer") ||
         !reply["config"].contains("rtc") || !reply.contains("peers") ||
         !reply["peers"].is_array()) {
-      Finish(1);
-      return false;
+      return reject("invalid_config", 1);
     }
     const auto text =
         Json{{"peer", reply["config"]["peer"]}, {"rtc", reply["config"]["rtc"]}}.dump();
     const auto hash =
         cluster::Hex(cluster::Sha256({reinterpret_cast<const uint8_t*>(text.data()), text.size()}));
     if (hash != reply["configHash"].get<std::string>()) {
-      Finish(1);
-      return false;
+      return reject("invalid_config", 1, {{"error", "config hash differs"}});
     }
     {
       std::lock_guard lock(mutex);
       if (ready && config_hash != hash) {
+        established.channel->RecordClose("config_changed");
         stopping = true;
         exit_code = 4;
         wake.notify_all();
@@ -146,13 +169,11 @@ struct ClusterLink::Impl {
       }
     }
     if (!validate(reply["config"])) {
-      Finish(1);
-      return false;
+      return reject("invalid_config", 1);
     }
     std::lock_guard callback_lock(callback_mutex);
     if (peer_callback && !peer_callback(reply["peers"])) {
-      Finish(1);
-      return false;
+      return reject("invalid_peers", 1);
     }
     std::lock_guard lock(mutex);
     if (stopping)
@@ -164,6 +185,7 @@ struct ClusterLink::Impl {
                    {"objectIdKey", reply.value("objectIdKey", Json())}};
     config_hash = hash;
     ready = true;
+    end.release();
     channel = std::move(established.channel);
     active = ++serial;
     wake.notify_all();
@@ -181,26 +203,30 @@ struct ClusterLink::Impl {
         accepted = Accept(std::move(established).value());
         if (accepted) {
           backoff = 250;
+          const auto lost = [&](const char* reason, Json fields = Json::object()) {
+            std::lock_guard lock(mutex);
+            channel->RecordClose(reason, std::move(fields));
+          };
           while (!Stopping() && !SupervisorStopped()) {
             std::shared_ptr<cluster::Channel> current;
             {
               std::lock_guard lock(mutex);
-              if (overload) {
-                protocol_error = true;
-                break;
-              }
               current = channel;
             }
             auto received = current->Receive(20ms);
             if (!received) {
               if (received.error().code == ErrorCode::kBusy)
                 continue;
+              const auto cause = current->Cause();
+              if (cause.reason.empty())
+                current->RecordClose("peer_closed", {{"error", received.error().message}});
               break;
             }
             if (received.value().kind == cluster::Message::Kind::kBinary) {
               std::lock_guard callback_lock(callback_mutex);
               if (!binary) {
                 protocol_error = true;
+                lost("unexpected_binary");
                 break;
               }
               binary(received.value().json, received.value().bytes);
@@ -212,6 +238,7 @@ struct ClusterLink::Impl {
               if (!json.contains("peers") || !json["peers"].is_array() ||
                   (peer_callback && !peer_callback(json["peers"]))) {
                 protocol_error = true;
+                lost("invalid_peers");
                 break;
               }
               std::lock_guard lock(mutex);
@@ -222,6 +249,7 @@ struct ClusterLink::Impl {
               if (!json.contains("config") || !json["config"].is_object() ||
                   !json["config"].contains("peer") || !json["config"].contains("rtc")) {
                 protocol_error = true;
+                lost("invalid_config");
                 break;
               }
               const auto text =
@@ -230,9 +258,11 @@ struct ClusterLink::Impl {
                   cluster::Sha256({reinterpret_cast<const uint8_t*>(text.data()), text.size()}));
               if (json.value("configHash", Json()) != hash || !validate(json["config"])) {
                 protocol_error = true;
+                lost("invalid_config");
                 break;
               }
               if (hash != config_hash) {
+                lost("config_changed");
                 Finish(4);
                 break;
               }
@@ -252,12 +282,17 @@ struct ClusterLink::Impl {
               continue;
             }
             auto bytes = json.dump();
-            std::lock_guard lock(mutex);
-            if (incoming.size() >= limits::queuedMessages ||
-                incoming_bytes + bytes.size() > kMaxQueuedBytes) {
-              protocol_error = true;
-              break;
+            std::unique_lock lock(mutex);
+            while (!stopping && current->Cause().reason.empty() &&
+                   (incoming.size() >= limits::managementQueueMessages ||
+                    incoming_bytes + bytes.size() > limits::managementQueueBytes)) {
+              wake.wait_for(lock, 20ms);
+              lock.unlock();
+              SupervisorStopped();
+              lock.lock();
             }
+            if (stopping || !current->Cause().reason.empty())
+              break;
             incoming_bytes += bytes.size();
             incoming.push_back({active, std::move(bytes)});
             wake.notify_all();
@@ -292,6 +327,10 @@ struct ClusterLink::Impl {
         message = std::move(outgoing.front());
         outgoing.pop_front();
         outgoing_bytes -= message.bytes.size();
+        if (outgoing.size() < limits::managementQueueMessages &&
+            outgoing_bytes < limits::managementQueueBytes)
+          queue_full = false;
+        wake.notify_all();
         if (message.generation != active)
           continue;
         current = channel;
@@ -303,8 +342,10 @@ struct ClusterLink::Impl {
       {
         std::lock_guard lock(mutex);
         sending = false;
-        if (sent && !*sent && message.generation == active)
-          overload = true;
+        if (sent && !*sent && message.generation == active) {
+          current->RecordClose("write_error", {{"bytes", message.bytes.size()}});
+          current->Close();
+        }
         wake.notify_all();
       }
     }
@@ -371,29 +412,56 @@ bool ClusterLink::Next(std::string& bytes, uint64_t& generation, bool& eof) {
   auto next = std::move(impl_->incoming.front());
   impl_->incoming.pop_front();
   impl_->incoming_bytes -= next.bytes.size();
+  impl_->wake.notify_all();
   bytes = std::move(next.bytes);
   generation = next.generation;
   return true;
 }
 bool ClusterLink::Current(uint64_t generation) {
   std::lock_guard lock(impl_->mutex);
-  return generation && generation == impl_->active && !impl_->stopping && !impl_->overload;
+  return generation && generation == impl_->active && !impl_->stopping;
 }
 std::optional<ManagementLink::ReadyState> ClusterLink::ReadyConfiguration() {
   std::lock_guard lock(impl_->mutex);
-  if (!impl_->active || impl_->stopping || impl_->overload)
+  if (!impl_->active || impl_->stopping)
     return {};
   return ReadyState{impl_->active, impl_->object_keys, impl_->connection_epoch};
 }
 bool ClusterLink::Queue(const Json& message, uint64_t generation, DeliveryFlag delivery) {
   auto bytes = message.dump();
   std::lock_guard lock(impl_->mutex);
-  if (!generation || generation != impl_->active || impl_->stopping || impl_->overload)
+  if (!generation || generation != impl_->active || impl_->stopping)
     return false;
-  if (bytes.size() > cluster::JsonLimit(message) ||
-      impl_->outgoing.size() >= limits::queuedMessages ||
-      impl_->outgoing_bytes + bytes.size() > kMaxQueuedBytes) {
-    impl_->overload = true;
+  if (bytes.size() > cluster::JsonLimit(message)) {
+    LogEvent(LogLevel::kWarn, "cluster.message_rejected",
+             {{"kind", MessageKind(message)},
+              {"bytes", bytes.size()},
+              {"limit", cluster::JsonLimit(message)}});
+    return false;
+  }
+  std::string observation;
+  if (message.value("event", Json()) == "session.observed")
+    observation = Json::array({message.at("tenantId"), message.at("sessionId")}).dump();
+  auto replaced = impl_->outgoing.end();
+  if (!observation.empty())
+    replaced = std::find_if(impl_->outgoing.begin(), impl_->outgoing.end(),
+                            [&](const auto& queued) { return queued.observation == observation; });
+  const auto replaced_bytes = replaced == impl_->outgoing.end() ? 0 : replaced->bytes.size();
+  // Replies are bounded by Control's in-flight requests and RTC signals by each peer's signal
+  // queue; refusing either would lose them without retry.
+  const bool reply = (message.contains("id") && message.contains("ok")) ||
+                     message.value("event", Json()) == "rtc.signal";
+  const auto queued_messages = impl_->outgoing.size() + (replaced == impl_->outgoing.end() ? 1 : 0);
+  const auto queued_bytes = impl_->outgoing_bytes - replaced_bytes + bytes.size();
+  if (!reply &&
+      ((replaced == impl_->outgoing.end() && queued_messages > limits::managementQueueMessages) ||
+       queued_bytes > limits::managementQueueBytes)) {
+    if (!impl_->queue_full)
+      LogEvent(LogLevel::kWarn, "cluster.queue_full",
+               {{"kind", MessageKind(message)},
+                {"queuedMessages", impl_->outgoing.size()},
+                {"queuedBytes", impl_->outgoing_bytes}});
+    impl_->queue_full = true;
     return false;
   }
   if (message.contains("request")) {
@@ -402,13 +470,37 @@ bool ClusterLink::Queue(const Json& message, uint64_t generation, DeliveryFlag d
       return false;
     delivery = found->second.delivery;
   }
-  impl_->outgoing_bytes += bytes.size();
-  impl_->outgoing.push_back({generation, std::move(bytes), std::move(delivery)});
+  impl_->outgoing_bytes = queued_bytes;
+  Impl::Message queued{generation, std::move(bytes), std::move(delivery), std::move(observation)};
+  if (replaced != impl_->outgoing.end()) {
+    *replaced = std::move(queued);
+    if (queued_bytes < limits::managementQueueBytes &&
+        queued_messages < limits::managementQueueMessages)
+      impl_->queue_full = false;
+  } else {
+    impl_->outgoing.push_back(std::move(queued));
+  }
   impl_->wake.notify_all();
   return true;
 }
 bool ClusterLink::SendReply(uint64_t generation, const Json& reply) {
+  const auto bytes = reply.dump().size();
+  const auto limit = cluster::JsonLimit(reply);
+  if (bytes > limit) {
+    LogEvent(LogLevel::kWarn, "cluster.message_rejected",
+             {{"kind", MessageKind(reply)}, {"bytes", bytes}, {"limit", limit}});
+    return Queue(ManagementReply(reply, Error{ErrorCode::kLimitExceeded,
+                                              "management reply exceeds encoded size limit"}),
+                 generation);
+  }
   return Queue(reply, generation);
+}
+ManagementLink::QueueBudget ClusterLink::EventBudget() {
+  std::lock_guard lock(impl_->mutex);
+  return {
+      limits::managementQueueMessages -
+          std::min(limits::managementQueueMessages, impl_->outgoing.size()),
+      limits::managementQueueBytes - std::min(limits::managementQueueBytes, impl_->outgoing_bytes)};
 }
 bool ClusterLink::SendEvent(const Json& event, uint64_t generation, DeliveryFlag delivery) {
   return Queue(event, generation, std::move(delivery));
@@ -431,8 +523,14 @@ void ClusterLink::OnPeers(Peers callback) {
       return;
     peers = impl_->peers;
   }
-  if (impl_->peer_callback && !impl_->peer_callback(peers))
+  if (impl_->peer_callback && !impl_->peer_callback(peers)) {
+    {
+      std::lock_guard lock(impl_->mutex);
+      if (impl_->channel)
+        impl_->channel->RecordClose("invalid_peers");
+    }
     impl_->Finish(1);
+  }
 }
 Result<Json> ClusterLink::Request(const std::string& name, Json fields) {
   return RequestUntil(name, std::move(fields), std::chrono::steady_clock::now() + 20s);
@@ -454,7 +552,7 @@ Result<Json> ClusterLink::RequestUntil(const std::string& name,
   uint64_t generation;
   {
     std::lock_guard lock(impl_->mutex);
-    if (!impl_->active || impl_->stopping || impl_->overload)
+    if (!impl_->active || impl_->stopping)
       return Error{ErrorCode::kUnavailable, "Control disconnected"};
     if (impl_->pending.size() >= limits::pendingRequests)
       return Error{ErrorCode::kBusy, "too many in-flight requests"};
@@ -486,7 +584,7 @@ Result<Json> ClusterLink::RequestUntil(const std::string& name,
   auto reply = std::move(impl_->pending.at(id).reply);
   impl_->pending.erase(id);
   lock.unlock();
-  const bool dispatched = delivery->CancelAndWasWritten();
+  const bool dispatched = delivery->CancelAndWasDispatched();
   if (!reply)
     return Error{
         dispatched ? ErrorCode::kOutcomeUnknown : ErrorCode::kUnavailable,

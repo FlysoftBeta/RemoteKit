@@ -1,5 +1,5 @@
 import { defaultFilesWindowState, updateFilesLibraryTab } from '../client/files/files-app-state';
-import { applyDesiredViews } from './coordination-fixture';
+import { applyDesiredViews, publishAndObserve } from './coordination-fixture';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -91,7 +91,11 @@ async function fixture() {
     }
     return requestViewer(control, user.tenantId, 'lease', method, params);
   };
-  const action = (value: ProductAction) => control.operations.productAction(user.tenantId, value, 'lease');
+  const action = async (value: ProductAction) => {
+    const result = await control.operations.productAction(user.tenantId, value, 'lease');
+    await publishAndObserve(control.endpoint, user.tenantId);
+    return result;
+  };
   const close = async () => {
     await control.close();
     store.db.close();

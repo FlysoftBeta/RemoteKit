@@ -14,7 +14,8 @@ import {
   encodeConfigFile,
 } from '../server/config-formats';
 import { configMigrations } from '../server/config-migrations';
-import { publicKey } from '../server/cluster/noise';
+import { publicKey, MAX_HANDSHAKE_PAYLOAD } from '../server/cluster/noise';
+import { encodeNodeReady } from '../server/cluster/ready';
 import { readBuildId } from '../server/cluster/build-id';
 import { loadRelease } from '../server/cluster/release';
 import { NodeRegistry } from '../server/cluster/node-link';
@@ -33,6 +34,59 @@ async function fixture(t: any) {
   const parse = () => parseConfig({ REMOTEKIT_CONTROL_CONFIG: configPath }, [], join(directory, 'control'));
   return { directory, configPath, save, load, parse };
 }
+
+test('configuration rejects a worst-case node.ready above limits.handshakeBytes', async (t) => {
+  const h = await fixture(t);
+  const value = defaultConfig('dev');
+  h.save(value);
+  const parsed = h.parse();
+  const node = parsed.nodes.local;
+  const key = Buffer.alloc(32).toString('base64');
+  const base = encodeNodeReady(node, [], parsed.buildId, '0'.repeat(36), {
+    objectKey: key,
+    objectIdKey: key,
+  }).length;
+  const padding = MAX_HANDSHAKE_PAYLOAD - base;
+  const listenPadding = Math.floor(padding / 2);
+  value.nodes.local.peer.listen = 'x'.repeat(listenPadding) + value.nodes.local.peer.listen;
+  value.nodes.local.peer.address = 'x'.repeat(padding - listenPadding) + value.nodes.local.peer.address;
+  h.save(value);
+  h.parse();
+  value.nodes.local.peer.address = 'x' + value.nodes.local.peer.address;
+  h.save(value);
+  assert.throws(h.parse, (error: any) => {
+    assert.equal(error.reason, 'corrupt_state');
+    assert.match(
+      error.detail,
+      /nodes\.local node\.ready is 65488 bytes; limits\.handshakeBytes allows 65487 payload bytes/,
+    );
+    return true;
+  });
+  assert.equal(existsSync(join(h.directory, 'config/control.key')), false);
+});
+
+test('configuration budgets the complete peer array before provisioning identities', async (t) => {
+  const h = await fixture(t);
+  const value = defaultConfig('dev');
+  (value as any).nodes = Object.fromEntries(
+    Array.from({ length: 700 }, (_, index) => [
+      `gpu-${index}`,
+      {
+        remote: { control: 'ws://127.0.0.1:3001/api/node' },
+        peer: { listen: '127.0.0.1:3101', address: '127.0.0.1:3101' },
+        rtc: { ports: null, address: null },
+        limits: { maxSessions: null, diskReserveBytes: null, sessionMemoryBytes: null },
+      },
+    ]),
+  );
+  h.save(value);
+  assert.throws(h.parse, (error: any) => {
+    assert.equal(error.reason, 'corrupt_state');
+    assert.match(error.detail, /nodes\.gpu-0 node\.ready.*limits\.handshakeBytes/);
+    return true;
+  });
+  assert.equal(existsSync(join(h.directory, 'config/control.key')), false);
+});
 test('new configuration and identity files are versioned and stable', async (t) => {
   const h = await fixture(t);
   h.parse();

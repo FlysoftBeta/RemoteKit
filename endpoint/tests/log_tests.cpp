@@ -3,6 +3,8 @@
 #include "util/wire_error.hpp"
 #include "util/file_io.hpp"
 #include "diagnostics/log_files.hpp"
+#include "management/reply.hpp"
+#include "protocol/limits.hpp"
 #include "rtc/data_router.hpp"
 #include "input/input.hpp"
 #include "service.hpp"
@@ -104,16 +106,69 @@ void Search(const fs::path& root) {
   std::ofstream(logs / "endpoint.log") << line(2) << '\n';
   const auto found = Take(SearchErrorLogs(root, id)).at("lines");
   Check(found == Json::array({line(0), line(1, true), line(2)}), "rotated matches oldest first");
+  for (const auto& entry : fs::directory_iterator(logs))
+    fs::remove(entry.path());
+  {
+    std::ofstream file(logs / "endpoint.log");
+    for (size_t index = 0; index < limits::logSearchLines; ++index)
+      file << line(static_cast<int>(index)) << '\n';
+  }
+  auto boundary = Take(SearchErrorLogs(root, id));
+  Check(boundary.at("lines").size() == limits::logSearchLines && !boundary.contains("truncated"),
+        "search line count at limit accepted");
+  std::ofstream(logs / "endpoint.log", std::ios::app) << line(50) << '\n';
+  boundary = Take(SearchErrorLogs(root, id));
+  Check(boundary.at("lines").size() == limits::logSearchLines && boundary.at("truncated") == true,
+        "search line one over omitted");
   {
     std::ofstream file(logs / "endpoint.log");
     for (int index = 0; index < 70; ++index)
       file << line(index) << '\n';
   }
   const auto capped = Take(SearchErrorLogs(root, id)).at("lines");
-  Check(capped.size() == 50 && Json::parse(capped.front().get<std::string>()).at("index") == 20 &&
+  Check(capped.size() == limits::logSearchLines &&
+            Json::parse(capped.front().get<std::string>()).at("index") == 20 &&
             Json::parse(capped.back().get<std::string>()).at("index") == 69,
         "newest fifty returned in chronological order");
   Check(!SearchErrorLogs(root, "e-BAD"), "malformed id rejected");
+}
+void SearchSizeBoundary(const fs::path& root) {
+  fs::create_directories(root / "logs");
+  const std::string id = "e-0123456789";
+  const auto path = root / "logs/endpoint.log";
+  Json line{{"errorId", id}, {"padding", std::string(100, '\x01')}};
+  const auto encoded = [&] {
+    return Json{{"lines", Json::array({line.dump()})}, {"truncated", true}}.dump().size();
+  };
+  constexpr auto budget = limits::managementBytes - kReplyEnvelopeReserve;
+  line["padding"] = line["padding"].get<std::string>() + std::string(budget - encoded(), 'x');
+  Check(encoded() == budget, "encoded search fixture reaches exact budget");
+  const Json too_large{{"errorId", id}, {"padding", std::string(limits::managementBytes, 'y')}};
+  {
+    std::ofstream file(path);
+    file << too_large.dump() << '\n' << line.dump() << '\n';
+  }
+  auto result = Take(SearchErrorLogs(root, id));
+  Check(result.at("lines").size() == 1 && result.at("truncated") == true &&
+            result.dump().size() == budget,
+        "exact encoded log search budget accepted with truncation marker");
+  const Json request{{"id", std::string(limits::identityBytes, 'i')},
+                     {"opId", std::string(limits::identityBytes, 'o')}};
+  Check(ManagementReply(request, result).dump().size() <= limits::managementBytes,
+        "log search plus envelope stays within management limit");
+  line["padding"] = line["padding"].get<std::string>() + "x";
+  std::ofstream(path) << line.dump() << '\n';
+  result = Take(SearchErrorLogs(root, id));
+  Check(result.at("lines").empty() && result.at("truncated") == true,
+        "one byte beyond encoded search budget dropped");
+  std::ofstream(path, std::ios::binary) << std::string(kLogWindowBytes, '\xff');
+  result = Take(ReadLogWindow(path, {}, kLogWindowBytes));
+  Check(result.at("end") == kLogWindowBytes &&
+            result.at("data").get<std::string>().size() == ((kLogWindowBytes + 2) / 3) * 4,
+        "maximum log window uses expected base64 expansion");
+  Check(ManagementReply(request, result).dump().size() <= limits::managementBytes,
+        "maximum base64 log window fits with reply envelope");
+  Check(!ReadLogWindow(path, {}, kLogWindowBytes + 1), "log window one byte past bound rejected");
 }
 class Link final : public ManagementLink {
  public:
@@ -269,6 +324,7 @@ int wmain(int argc, wchar_t** argv) {
     fs::create_directories(root);
     Writer(root);
     Search(root / "search");
+    SearchSizeBoundary(root / "search-boundary");
     Boundaries(root / "boundaries");
     fs::remove_all(root);
     return 0;

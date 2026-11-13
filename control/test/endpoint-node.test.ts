@@ -291,7 +291,10 @@ test('stop and reopen on the same node and epoch accepts the new coordinator obs
   try {
     const endpoint = await h.connect();
     let desired = await publishAndObserve(h.gateway, 'returning');
-    h.gateway.setDesiredSource(() => desired);
+    h.gateway.setDesiredSource(
+      () => desired,
+      () => ({ revision: '0', text: '', html: '' }),
+    );
     endpoint.desiredHandler = (_document, observation) => {
       observation.checkpoint = null;
       observation.data = null;
@@ -344,7 +347,10 @@ test('clipboard management events cross the encrypted link and reject stale node
     await publishAndObserve(h.gateway, 'one');
     assert.deepEqual(alpha.requests.find((request) => request.method === 'session.desired')?.clipboard, {
       revision: '1',
-      value: { text: 'seed', html: '' },
+    });
+    assert.deepEqual(alpha.requests.find((request) => request.method === 'session.clipboard')?.value, {
+      text: 'seed',
+      html: '',
     });
     alpha.event('one', '1', 'clipboard.changed', {
       browserSequence: '1',
@@ -549,6 +555,52 @@ test('fresh lifecycle decisions get new opIds while generation-bound retries ret
     const guarded = node.requests.filter((request) => request.method === 'view.lifecycle').slice(-2);
     assert.equal(guarded[0].opId, guarded[1].opId);
   } finally {
+    await h.close();
+  }
+});
+
+test('clipboard acknowledgment gates desired publication and delivery repeats after reconnect', async () => {
+  const h = await harness();
+  const warn = test.mock.method(log, 'warn', () => {});
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  try {
+    const alpha = await h.connect();
+    let fail = true;
+    alpha.clipboardHandler = async () => {
+      if (fail) {
+        fail = false;
+        throw { code: 'busy', message: 'clipboard busy' };
+      }
+      await gate;
+    };
+    await assert.rejects(h.gateway.published('one'));
+    assert.equal(
+      alpha.requests.some((request) => request.method === 'session.desired'),
+      false,
+    );
+    assert.ok(warn.mock.calls.some((call) => call.arguments[0] === 'session.publication_failed'));
+    const received = once(alpha, 'request');
+    await received;
+    assert.equal(
+      alpha.requests.some((request) => request.method === 'session.desired'),
+      false,
+    );
+    release();
+    await h.gateway.waitObserved('one', (value) => value.browser === 'running');
+    assert.equal(alpha.requests.filter((request) => request.method === 'session.clipboard').length, 2);
+    const offline = once(h.registry.get('alpha')!, 'offline');
+    alpha.close();
+    await offline;
+    const next = await h.connect({ incarnation: alpha.incarnation });
+    await h.gateway.waitObserved('one', (value) => value.browser === 'running');
+    const methods = next.requests.map((request) => request.method);
+    assert.ok(methods.indexOf('session.clipboard') < methods.indexOf('session.desired'));
+  } finally {
+    release();
+    warn.mock.restore();
     await h.close();
   }
 });

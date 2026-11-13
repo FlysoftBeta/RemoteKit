@@ -4,6 +4,7 @@
 #include "rtc/data_router.hpp"
 #include "media/server_trace.hpp"
 #include "rtc/candidate_address.hpp"
+#include "protocol/limits.hpp"
 #include <cstdio>
 namespace remotekit {
 PeerController::~PeerController() {
@@ -201,9 +202,9 @@ void PeerController::OnEvent(uint64_t peer,
       type == REMOTEKIT_RTC_ICE_COMPLETE || type == REMOTEKIT_RTC_ERROR) {
     std::lock_guard lock(self.mutex_);
     if (!self.signal_overflow_) {
-      if (self.signals_.size() < 256) {
+      if (self.signals_.size() < limits::rtcSignalQueue) {
         self.signals_.push_back(event);
-        if (self.retained_signals_.size() < 256)
+        if (self.retained_signals_.size() < limits::rtcSignalQueue)
           self.retained_signals_.push_back(event);
       } else {
         self.signals_.clear();

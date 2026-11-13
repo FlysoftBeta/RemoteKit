@@ -2,8 +2,29 @@
 #include "cluster/frames.hpp"
 #include <chrono>
 #include <functional>
+#include <mutex>
 namespace remotekit::cluster {
-class Channel {
+struct CloseCause {
+  std::string reason;
+  Json detail = Json::object();
+};
+class CloseState {
+ public:
+  CloseCause Cause() const {
+    std::lock_guard lock(cause_mutex_);
+    return cause_;
+  }
+  void RecordClose(std::string reason, Json detail = Json::object()) {
+    std::lock_guard lock(cause_mutex_);
+    if (cause_.reason.empty())
+      cause_ = {std::move(reason), std::move(detail)};
+  }
+
+ private:
+  mutable std::mutex cause_mutex_;
+  CloseCause cause_;
+};
+class Channel : public CloseState {
  public:
   virtual ~Channel() = default;
   virtual Result<void> Send(const Json& message) = 0;
@@ -19,7 +40,7 @@ struct Established {
   Json reply;
 };
 // Each carrier message is one Noise message. Receive timeout is kBusy; EOF is kUnavailable.
-class Carrier {
+class Carrier : public CloseState {
  public:
   virtual ~Carrier() = default;
   virtual Result<void> Send(std::span<const uint8_t> message) = 0;

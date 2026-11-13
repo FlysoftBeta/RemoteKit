@@ -154,7 +154,7 @@ export function testGateway(
   };
   node.observations.get = (tenant: string) => refresh(tenant);
   node.publish = async (message: any) => {
-    if (message.method === 'session.events.ack')
+    if (message.method === 'session.events.ack' || message.method === 'session.clipboard')
       return link.request(message.method, message.tenantId, message);
     documents.set(message.tenantId, message);
     void (async () => {

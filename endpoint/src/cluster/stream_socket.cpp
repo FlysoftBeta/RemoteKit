@@ -35,7 +35,7 @@ bool InitializeWinsock() {
 }
 
 void SetTimeouts(SOCKET socket, std::chrono::milliseconds receive) {
-  DWORD send = 5000, recv = static_cast<DWORD>(receive.count());
+  DWORD send = 0, recv = static_cast<DWORD>(receive.count());
   setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&send), sizeof(send));
   setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recv), sizeof(recv));
 }
@@ -56,11 +56,11 @@ class Stream final : public StreamSocket {
     tls_ = true;
     SCHANNEL_CRED credential{};
     credential.dwVersion = SCHANNEL_CRED_VERSION;
-    credential.dwFlags = SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS |
-                         SCH_USE_STRONG_CRYPTO;
-    SECURITY_STATUS status = AcquireCredentialsHandleW(
-        nullptr, const_cast<wchar_t*>(UNISP_NAME_W), SECPKG_CRED_OUTBOUND, nullptr, &credential,
-        nullptr, nullptr, &credentials_, nullptr);
+    credential.dwFlags =
+        SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS | SCH_USE_STRONG_CRYPTO;
+    SECURITY_STATUS status =
+        AcquireCredentialsHandleW(nullptr, const_cast<wchar_t*>(UNISP_NAME_W), SECPKG_CRED_OUTBOUND,
+                                  nullptr, &credential, nullptr, nullptr, &credentials_, nullptr);
     if (status != SEC_E_OK)
       return Failure("TLS credentials", status);
     have_credentials_ = true;
@@ -88,8 +88,9 @@ class Stream final : public StreamSocket {
       if (status != SEC_E_INVALID_HANDLE && status != SEC_E_INVALID_TOKEN)
         have_context_ = true;
       if (out_buffer.pvBuffer) {
-        bool sent = !out_buffer.cbBuffer ||
-                    SendRaw({static_cast<const uint8_t*>(out_buffer.pvBuffer), out_buffer.cbBuffer});
+        bool sent =
+            !out_buffer.cbBuffer ||
+            SendRaw({static_cast<const uint8_t*>(out_buffer.pvBuffer), out_buffer.cbBuffer});
         FreeContextBuffer(out_buffer.pvBuffer);
         if (!sent)
           return Failure("TLS handshake send", WSAGetLastError());
@@ -125,7 +126,8 @@ class Stream final : public StreamSocket {
     if (!tls_) {
       int n = recv(socket_, reinterpret_cast<char*>(out.data()), static_cast<int>(out.size()), 0);
       if (n <= 0)
-        return Closed();
+        return n == 0 ? Error{ErrorCode::kUnavailable, "read EOF"}
+                      : Failure("read", WSAGetLastError());
       return static_cast<size_t>(n);
     }
     while (plain_at_ == plain_.size()) {
@@ -138,11 +140,14 @@ class Stream final : public StreamSocket {
           case Decrypted::kNeedMore:
             break;
           case Decrypted::kFailed:
-            return Closed();
+            return decrypt_error_ == SEC_I_CONTEXT_EXPIRED
+                       ? Error{ErrorCode::kUnavailable, "peer closed"}
+                       : Failure("TLS decrypt", decrypt_error_);
         }
       }
-      if (!ReceiveRaw(encrypted_))
-        return Closed();
+      auto received = ReceiveRaw(encrypted_);
+      if (!received)
+        return received.error();
     }
     size_t n = std::min(out.size(), plain_.size() - plain_at_);
     std::copy_n(plain_.begin() + plain_at_, n, out.begin());
@@ -152,7 +157,7 @@ class Stream final : public StreamSocket {
 
   Result<void> WriteAll(std::span<const uint8_t> bytes) override {
     if (!tls_)
-      return SendRaw(bytes) ? Result<void>{} : Result<void>{Closed()};
+      return SendRaw(bytes);
     while (!bytes.empty()) {
       size_t n = std::min<size_t>(bytes.size(), sizes_.cbMaximumMessage);
       Buffer record(sizes_.cbHeader + n + sizes_.cbTrailer);
@@ -169,10 +174,11 @@ class Stream final : public StreamSocket {
         status = EncryptMessage(&context_, 0, &desc, 0);
       }
       if (status != SEC_E_OK)
-        return Closed();
+        return Failure("TLS encrypt", status);
       size_t total = buffers[0].cbBuffer + buffers[1].cbBuffer + buffers[2].cbBuffer;
-      if (!SendRaw({record.data(), total}))
-        return Closed();
+      auto sent = SendRaw({record.data(), total});
+      if (!sent)
+        return sent.error();
       bytes = bytes.subspan(n);
     }
     return {};
@@ -188,32 +194,31 @@ class Stream final : public StreamSocket {
 
  private:
   enum class Decrypted { kData, kNeedMore, kFailed };
-  static Error Closed() { return {ErrorCode::kUnavailable, "cluster channel closed"}; }
-
-  bool SendRaw(std::span<const uint8_t> bytes) {
+  Result<void> SendRaw(std::span<const uint8_t> bytes) {
     while (!bytes.empty()) {
       int n = send(socket_, reinterpret_cast<const char*>(bytes.data()),
                    static_cast<int>(std::min<size_t>(bytes.size(), 1 << 20)), 0);
       if (n <= 0)
-        return false;
+        return Failure("write", WSAGetLastError());
       bytes = bytes.subspan(static_cast<size_t>(n));
     }
-    return true;
+    return {};
   }
-  bool ReceiveRaw(Buffer& into) {
+  Result<void> ReceiveRaw(Buffer& into) {
     uint8_t chunk[16384];
     int n = recv(socket_, reinterpret_cast<char*>(chunk), sizeof(chunk), 0);
     if (n <= 0)
-      return false;
+      return n == 0 ? Error{ErrorCode::kUnavailable, "read EOF"}
+                    : Failure("read", WSAGetLastError());
     into.insert(into.end(), chunk, chunk + n);
-    return true;
+    return {};
   }
   Decrypted Decrypt() {
-    SecBuffer buffers[4] = {{static_cast<ULONG>(encrypted_.size()), SECBUFFER_DATA,
-                             encrypted_.data()},
-                            {0, SECBUFFER_EMPTY, nullptr},
-                            {0, SECBUFFER_EMPTY, nullptr},
-                            {0, SECBUFFER_EMPTY, nullptr}};
+    SecBuffer buffers[4] = {
+        {static_cast<ULONG>(encrypted_.size()), SECBUFFER_DATA, encrypted_.data()},
+        {0, SECBUFFER_EMPTY, nullptr},
+        {0, SECBUFFER_EMPTY, nullptr},
+        {0, SECBUFFER_EMPTY, nullptr}};
     SecBufferDesc desc{SECBUFFER_VERSION, 4, buffers};
     SECURITY_STATUS status;
     {
@@ -222,8 +227,10 @@ class Stream final : public StreamSocket {
     }
     if (status == SEC_E_INCOMPLETE_MESSAGE)
       return Decrypted::kNeedMore;
-    if (status != SEC_E_OK)
+    if (status != SEC_E_OK) {
+      decrypt_error_ = status;
       return Decrypted::kFailed;
+    }
     size_t extra = 0;
     for (auto& buffer : buffers) {
       if (buffer.BufferType == SECBUFFER_DATA)
@@ -240,6 +247,7 @@ class Stream final : public StreamSocket {
   std::atomic<bool> shut_{false};
   bool tls_ = false, have_credentials_ = false, have_context_ = false;
   CredHandle credentials_{};
+  SECURITY_STATUS decrypt_error_ = SEC_E_OK;
   CtxtHandle context_{};
   SecPkgContext_StreamSizes sizes_{};
   std::mutex crypt_mutex_;

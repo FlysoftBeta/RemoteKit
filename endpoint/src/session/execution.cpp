@@ -29,6 +29,7 @@ SessionCoordinator::Hooks SessionExecution::Hooks() {
       .authorization = [self](const Json& value,
                               uint64_t generation) { return self->Authorize(value, generation); },
       .prepare = [self](const Json& value) { return self->Prepare(value); },
+      .clipboard = [self](const Json& value) { return self->clipboard_.Deliver(value); },
       .start = [self] { return self->Start(); },
       .views = [self](const Json& value) { return self->Views(value); },
       .stop = [self](const Json& value) { return self->Stop(value); },
@@ -83,6 +84,7 @@ Result<void> SessionExecution::Authorize(const Json& document, uint64_t generati
   return {};
 }
 Result<void> SessionExecution::Prepare(const Json& document) {
+  RK_RETURN_IF_ERROR(clipboard_.Resolve(document.at("clipboard").at("revision")));
   auto session = runtime_.load();
   if (!session) {
     reader_.reset();
@@ -138,7 +140,7 @@ Result<void> SessionExecution::Prepare(const Json& document) {
       RK_RETURN_IF_ERROR(session->AcknowledgeEvents(stream, known->second));
   }
   starting_ = !session->Running();
-  RK_RETURN_IF_ERROR(session->StageDesired(document));
+  RK_RETURN_IF_ERROR(session->StageDesired(document, clipboard_));
   staged_revision_ = document.at("revision").get<std::string>();
   return {};
 }
@@ -167,7 +169,7 @@ Result<Json> SessionExecution::Stop(const Json& commit,
   if (auto session = runtime_.load()) {
     if (const auto document = desired_.load();
         document && document->at("revision").get<std::string>() != staged_revision_) {
-      RK_RETURN_IF_ERROR(session->StageDesired(*document));
+      RK_RETURN_IF_ERROR(session->StageDesired(*document, clipboard_));
       staged_revision_ = document->at("revision").get<std::string>();
     }
     auto stopped = session->StopAndCommit(commit, check_blockers, deadline, deferred);
@@ -432,18 +434,26 @@ void SessionExecution::Maintain() {
     sent_stream_ = stream;
     sent_through_ = 0;
   }
+  auto budget = management_.EventBudget();
+  last_events_sent_ = now;
   for (auto event : events.value()) {
+    if (!budget.messages)
+      break;
     event.update({{"event", "session.event"},
                   {"connectionEpoch", connection},
                   {"tenantId", tenant_},
                   {"sessionId", id_},
                   {"placementEpoch", epoch_},
                   {"streamId", stream}});
+    const auto bytes = event.dump().size();
+    if (bytes > budget.bytes)
+      break;
     if (!management_.SendEvent(event, generation))
-      return;
+      break;
+    --budget.messages;
+    budget.bytes -= bytes;
     sent_through_ = std::max(sent_through_, std::stoull(event.at("seq").get<std::string>()));
   }
-  last_events_sent_ = now;
 }
 Result<void> SessionExecution::Admit(const Json& request, uint64_t generation) {
   if (!management_.Current(generation) || !request.value("params", Json()).is_object())

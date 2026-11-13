@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import limits from '../../../protocol/limits.json';
 import { RemoteKitError } from '../../shared/errors';
 import type { DomainContext, DomainServices } from '../application';
 import type { NodeLink } from '../cluster/node-link';
@@ -106,7 +107,7 @@ export class ServicePeers {
       params.type !== 'offer' ||
       typeof params.sdp !== 'string' ||
       !params.sdp.startsWith('v=0') ||
-      params.sdp.length > 900000 ||
+      Buffer.byteLength(params.sdp) > limits.serviceOfferSdpBytes ||
       /(?:^|\r?\n)m=(?:audio|video) /.test(params.sdp) ||
       typeof params.attemptId !== 'string' ||
       !/^[a-zA-Z0-9_-]{1,100}$/.test(params.attemptId)

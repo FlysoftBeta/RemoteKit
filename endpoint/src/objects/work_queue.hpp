@@ -1,4 +1,5 @@
 #pragma once
+#include "protocol/limits.hpp"
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -38,7 +39,7 @@ class WorkQueue {
   }
   bool Submit(std::function<void()> work) {
     std::lock_guard lock(mutex_);
-    if (stopping_ || queue_.size() >= 64)
+    if (stopping_ || queue_.size() >= limits::managementWorkerQueue)
       return false;
     queue_.push_back(std::move(work));
     wake_.notify_one();

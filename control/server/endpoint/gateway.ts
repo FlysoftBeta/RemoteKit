@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import {
   canonical,
   validateDesired,
+  validateClipboard,
+  type SessionClipboard,
   type SessionDesired,
   type SessionObserved,
   type EventsAck,
@@ -48,7 +50,9 @@ export class EndpointSnapshotError extends RemoteKitError {
 }
 export class EndpointGateway {
   private desiredSource?: (tenant: string) => SessionDesired;
+  private clipboardSource?: (tenant: string) => SessionClipboard['value'] & { revision: string };
   private readonly sent = new Map<string, string>();
+  private readonly clipboardSent = new Map<string, string>();
   private readonly stale = new Set<string>();
   private readonly publishing = new Map<string, Promise<SessionDesired | undefined>>();
   private readonly publicationFailures = new Set<string>();
@@ -79,8 +83,13 @@ export class EndpointGateway {
     nodes.on(
       'publication.failed',
       ({ message, error }: { message: Partial<SessionDesired>; error: unknown }) => {
-        if (this.desiredSource && message.method === 'session.desired' && message.tenantId) {
+        if (
+          this.desiredSource &&
+          ['session.desired', 'session.clipboard'].includes(message.method ?? '') &&
+          message.tenantId
+        ) {
           this.sent.delete(message.tenantId);
+          this.clipboardSent.delete(message.tenantId);
           this.publicationFailed(message.tenantId, error);
         }
       },
@@ -148,8 +157,12 @@ export class EndpointGateway {
       this.invalidate(tenant);
     }
   }
-  setDesiredSource(source?: (tenant: string) => SessionDesired) {
+  setDesiredSource(
+    source?: (tenant: string) => SessionDesired,
+    clipboardSource?: (tenant: string) => SessionClipboard['value'] & { revision: string },
+  ) {
     this.desiredSource = source;
+    this.clipboardSource = clipboardSource;
     if (!source) {
       clearTimeout(this.retry);
       this.stale.clear();
@@ -205,6 +218,30 @@ export class EndpointGateway {
           if (!this.desiredSource) return;
           desired = this.desiredSource(tenant);
           validateDesired(desired);
+          const clipboardKey = canonical([
+            node.nodeId,
+            desired.connectionEpoch,
+            desired.sessionId,
+            desired.placementEpoch,
+            desired.clipboard.revision,
+          ]);
+          if (this.clipboardSent.get(tenant) !== clipboardKey) {
+            const clipboard = this.clipboardSource?.(tenant);
+            if (!clipboard || clipboard.revision !== desired.clipboard.revision)
+              throw new RemoteKitError('conflict', 'Clipboard changed before publication');
+            const document: SessionClipboard = {
+              method: 'session.clipboard',
+              tenantId: tenant,
+              sessionId: desired.sessionId,
+              placementEpoch: desired.placementEpoch,
+              connectionEpoch: desired.connectionEpoch,
+              revision: clipboard.revision,
+              value: { text: clipboard.text, html: clipboard.html },
+            };
+            validateClipboard(document);
+            await node.publish(document);
+            this.clipboardSent.set(tenant, clipboardKey);
+          }
           const key = canonical([
             node.nodeId,
             desired.connectionEpoch,
@@ -310,6 +347,7 @@ export class EndpointGateway {
   }
   forget(tenant: string) {
     this.sent.delete(tenant);
+    this.clipboardSent.delete(tenant);
   }
   isPlacedOn(tenant: string, nodeId: string) {
     return this.placement.peek(tenant)?.nodeId === nodeId;

@@ -7,6 +7,7 @@ Error Invalid() {
 }  // namespace
 size_t JsonLimit(const Json& message) {
   if (message.value("method", Json()) == "session.desired" ||
+      message.value("method", Json()) == "session.clipboard" ||
       message.value("event", Json()) == "session.observed" ||
       message.value("event", Json()) == "session.event")
     return limits::documentBytes;
