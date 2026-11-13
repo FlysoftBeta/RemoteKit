@@ -127,7 +127,11 @@ try {
       90000,
     );
     const start = Date.now();
-    const opened = await first.call('document.open', { requestId: 'library', assetId: docx.assetId }, true);
+    const opened = await first.call(
+      'document.open',
+      { requestId: 'library', assetId: docx.assetId, type: docx.type },
+      true,
+    );
     assert.equal(opened.state, 'ready', JSON.stringify(opened));
     results.push({ name: 'pre-render-open', durationMs: Date.now() - start });
     if (process.env.E2E_POINTER === 'touch')

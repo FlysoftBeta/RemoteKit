@@ -1,6 +1,7 @@
 import { checkBrowserLaunchPolicy } from './kit/browser-launch-policy.mjs';
 import { waitForLogonBudget } from './kit/browser.mjs';
 import { execFileSync, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -112,7 +113,11 @@ async function run(item, slot) {
   const { scenario, browser, pointer, viewport } = item;
   const port = basePort + slot * 20;
   if (port + 19 > 65535) throw Error('Port allocation exceeds 65535');
-  const evidence = join(out, `${scenario.name.replaceAll('/', '-')}-${browser}-${pointer}-${viewport}`);
+  // Native package installation needs room for its staging tree within Windows path limits.
+  const evidence =
+    scenario.kind === 'package'
+      ? join(repository, 'develop/tmp/e2e', `package-${randomUUID().slice(0, 8)}`)
+      : join(out, `${scenario.name.replaceAll('/', '-')}-${browser}-${pointer}-${viewport}`);
   mkdirSync(evidence, { recursive: true });
   const viewer =
     browser === 'chrome89'
