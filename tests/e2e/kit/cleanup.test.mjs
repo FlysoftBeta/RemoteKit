@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -157,4 +158,66 @@ test('nested stack roots share the scenario manifest', async (t) => {
   assert.equal(report.bytes, 7);
   assert.equal(report.directories[0].path, join('stack', 'node', 'data'));
   assert.equal(existsSync(join(run, 'stack/node/data')), false);
+});
+
+test('standalone browser helpers clean up successful and failed scripts, and honor keep-profiles', async () => {
+  for (const [code, keep] of [
+    [0, false],
+    [1, false],
+    [0, true],
+  ]) {
+    const run = fixture();
+    const source = `
+      import childProcess from 'node:child_process';
+      import { launchTestBrowser } from ${JSON.stringify(new URL('./browser.mjs', import.meta.url).href)};
+      childProcess.execFileSync = () => '0';
+      await launchTestBrowser({ browserType: {
+        launchPersistentContext: async () => ({
+          browser: () => ({ newBrowserCDPSession: async () => ({
+            send: async () => ({ processInfo: [{ type: 'browser', id: process.pid }] }),
+            detach: async () => {},
+          }) }),
+        }),
+      } });
+      process.exitCode = ${code};
+    `;
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: { ...process.env, E2E_RUN: run, E2E_KEEP_PROFILES: keep ? '1' : '0' },
+    });
+    assert.equal(child.status, code, child.stderr);
+    const report = JSON.parse(readFileSync(join(run, 'cleanup.json'), 'utf8'));
+    assert.equal(report.directories.length, 1);
+    assert.equal(report.directories[0].status, keep ? 'kept' : 'deleted');
+    assert.equal(existsSync(join(run, report.directories[0].path, 'Local State')), keep);
+    await cleanupRun(run);
+  }
+});
+
+test('an explicit process exit in a standalone script schedules cleanup after exit', async () => {
+  const run = fixture();
+  const source = `
+    import { createTrackedDirectory } from ${JSON.stringify(import.meta.url.replace('cleanup.test.mjs', 'cleanup.mjs'))};
+    import { writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    const run = ${JSON.stringify(run)};
+    createTrackedDirectory(run, join(run, 'viewer'), 'viewer-profile');
+    writeFileSync(join(run, 'viewer/Local State'), '{}');
+    process.exit(1);
+  `;
+  const env = { ...process.env, E2E_KEEP_PROFILES: '0' };
+  delete env.E2E_RUN;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+    encoding: 'utf8',
+    windowsHide: true,
+    env,
+  });
+  assert.equal(child.status, 1, child.stderr);
+  const deadline = Date.now() + 10000;
+  while (!existsSync(join(run, 'cleanup.json')) && Date.now() < deadline)
+    await new Promise((done) => setTimeout(done, 50));
+  const report = JSON.parse(readFileSync(join(run, 'cleanup.json'), 'utf8'));
+  assert.equal(report.directories[0].status, 'deleted');
+  assert.equal(existsSync(join(run, 'viewer/Local State')), false);
 });
