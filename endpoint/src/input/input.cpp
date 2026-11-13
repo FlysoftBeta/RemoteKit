@@ -92,6 +92,7 @@ void InputController::HandleData(const Event& event) {
     RejectInput(ErrorCode::kConflict, "stale_layout_epoch", request, event);
     return;
   }
+  command.erase("authEpoch");
   command.erase("layoutEpoch");
   command.erase("focusRequestId");
   if (command.value("session", std::string()) != session_id_) {
