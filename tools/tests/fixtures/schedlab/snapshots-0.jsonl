@@ -1,0 +1,2 @@
+{"epochMs":1000,"engine":{"targetFps":60},"encoder":{"senderRtcStats":{"outbound":[{"kind":"video","packetsSent":10,"totalPacketSendDelay":0.01,"retransmittedPacketsSent":0,"targetBitrate":24000000}]}}}
+{"epochMs":3000,"engine":{"targetFps":60},"encoder":{"senderRtcStats":{"outbound":[{"kind":"video","packetsSent":20,"totalPacketSendDelay":0.03,"retransmittedPacketsSent":1,"targetBitrate":24000000}]}}}

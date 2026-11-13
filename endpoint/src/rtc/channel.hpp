@@ -4,7 +4,7 @@
 #include "rtc/authorization.hpp"
 #include "rtc/outbox.hpp"
 #include "input/input.hpp"
-#include "media/presentation.hpp"
+#include "session/presentation.hpp"
 #include "session/context.hpp"
 namespace remotekit {
 class PeerController;

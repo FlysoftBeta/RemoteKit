@@ -1,5 +1,5 @@
 #include "util/log.hpp"
-#include "media/audio.hpp"
+#include "session/audio.hpp"
 #include "diagnostics/timing.hpp"
 #include "rtc/authorization.hpp"
 #include "rtc/peer.hpp"

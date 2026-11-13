@@ -128,8 +128,9 @@ WebRTC 在 BALANCED（质量"自动"）下可以立即降低分辨率（启动�
 
 - 节拍、深度、Begin 调度：`endpoint/src/media/comp_pacing.hpp`
 - Slot 状态与 Fence 观察：`endpoint/src/media/render_slots.*`
-- 跨租户 GPU 准入：`endpoint/src/media/frame_admission.*`（Service 持有）；输入到达时间由 `rtc/channel.cpp` 交给 `MediaPipeline::InputReceived`
+- 跨租户 GPU 准入：`endpoint/src/media/frame_admission.*`（Service 持有）；输入到达时间由 `rtc/channel.cpp` 经 `MediaPipeline::InputReceived` 交给 `CompEngine::InputReceived`
 - 静止保活：`endpoint/src/media/idle_keepalive.hpp`
 - 尾 IDR：`endpoint/src/media/idle_idr.hpp`、`tail_refresh.hpp`
 - 呈现刷新：`endpoint/src/media/presentation_refresh.hpp`
-- 媒体循环：`endpoint/src/media/pipeline.*`（MediaPipeline），输出生命周期 `output.*`
+- Comp 循环：`endpoint/src/media/comp_engine.*`（CompEngine），由 `endpoint/src/session/pipeline.*`（MediaPipeline）驱动；输出生命周期 `session/output.*`
+- 多租户调度测量：`tools/measure/schedlab/`，见[诊断与测量](diagnostics.md#调度实验台-schedlab)

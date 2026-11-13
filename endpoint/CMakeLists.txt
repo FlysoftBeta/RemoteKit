@@ -227,40 +227,61 @@ if(BUILD_TESTING)
   add_test(NAME endpoint_comp_pacing COMMAND endpoint_comp_pacing_tests)
 endif()
 if(WIN32)
-  add_library(remotekit_media STATIC src/media/gpu_device.cpp src/media/qsv_encoder.cpp
+  add_library(endpoint_media STATIC src/media/gpu_device.cpp src/media/qsv_encoder.cpp
     src/media/qsv_rate_controller.cpp
     src/media/nvenc_encoder.cpp src/media/render_slots.cpp src/media/encoder_worker.cpp
-    src/media/frame_admission.cpp)
-  target_include_directories(remotekit_media PUBLIC src ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/sdk/include
+    src/media/frame_admission.cpp src/media/adapter.cpp src/media/encoder_set.cpp
+    src/media/comp_engine.cpp)
+  target_include_directories(endpoint_media PUBLIC src ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/sdk/include
     ${RK_DEPS} ${RK_DEPS}/libvpl-2.17.0/api)
-  target_compile_definitions(remotekit_media PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN
+  target_compile_definitions(endpoint_media PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN
     _WIN32_WINNT=0x0A00 WINVER=0x0A00 MFX_DEPRECATED_OFF)
-  target_compile_options(remotekit_media PRIVATE /W4 /utf-8)
-  target_link_libraries(remotekit_media PUBLIC VPL d3d11 dxgi)
+  target_compile_features(endpoint_media PUBLIC cxx_std_20)
+  target_compile_options(endpoint_media PRIVATE /W4 /utf-8)
+  target_link_libraries(endpoint_media PUBLIC VPL d3d11 dxgi)
+  add_subdirectory("${PROJECT_SOURCE_DIR}/tools/measure/schedlab/native" "${CMAKE_CURRENT_BINARY_DIR}/schedlab")
   if(BUILD_TESTING)
-    add_executable(endpoint_frame_admission_tests tests/frame_admission_tests.cpp src/media/frame_admission.cpp)
+    foreach(RK_MEDIA_TEST endpoint_tests endpoint_render_event_queue_tests endpoint_audio_ring_tests
+      endpoint_presentation_barrier_tests endpoint_capture_clock_tests endpoint_comp_pacing_tests)
+      if(TARGET ${RK_MEDIA_TEST})
+        target_link_libraries(${RK_MEDIA_TEST} PRIVATE endpoint_media)
+      endif()
+    endforeach()
+    add_executable(endpoint_media_core_tests tests/media_core_tests.cpp)
+    target_link_libraries(endpoint_media_core_tests PRIVATE endpoint_media)
+    add_test(NAME endpoint_media_core COMMAND endpoint_media_core_tests)
+    add_test(NAME endpoint_media_layer COMMAND ${CMAKE_COMMAND}
+      -DMEDIA_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/src/media
+      -DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/src
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/media_layer.cmake)
+  endif()
+  if(BUILD_TESTING)
+    add_executable(endpoint_frame_admission_tests tests/frame_admission_tests.cpp)
+    target_link_libraries(endpoint_frame_admission_tests PRIVATE endpoint_media)
     target_include_directories(endpoint_frame_admission_tests PRIVATE src ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/sdk/include)
     target_compile_definitions(endpoint_frame_admission_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_compile_features(endpoint_frame_admission_tests PRIVATE cxx_std_20)
     target_compile_options(endpoint_frame_admission_tests PRIVATE /W4 /utf-8)
     add_test(NAME endpoint_frame_admission COMMAND endpoint_frame_admission_tests)
     add_executable(endpoint_nvenc_completion_tests tests/nvenc_completion_tests.cpp)
-    target_link_libraries(endpoint_nvenc_completion_tests PRIVATE remotekit_media)
+    target_link_libraries(endpoint_nvenc_completion_tests PRIVATE endpoint_media)
     target_compile_options(endpoint_nvenc_completion_tests PRIVATE /W4 /utf-8)
     add_custom_command(TARGET endpoint_nvenc_completion_tests POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_nvenc_completion_tests>)
     add_test(NAME endpoint_nvenc_completion COMMAND endpoint_nvenc_completion_tests)
     add_executable(endpoint_media_feedback_tests tests/media_feedback_tests.cpp)
+    target_link_libraries(endpoint_media_feedback_tests PRIVATE endpoint_media)
     target_include_directories(endpoint_media_feedback_tests PRIVATE src ${PROJECT_SOURCE_DIR} ${RK_DEPS})
     target_compile_options(endpoint_media_feedback_tests PRIVATE /W4 /utf-8)
     add_test(NAME endpoint_media_feedback COMMAND endpoint_media_feedback_tests)
     add_executable(endpoint_encoder_stats_tests tests/encoder_stats_tests.cpp)
-    target_link_libraries(endpoint_encoder_stats_tests PRIVATE remotekit_media)
+    target_link_libraries(endpoint_encoder_stats_tests PRIVATE endpoint_media)
     target_compile_options(endpoint_encoder_stats_tests PRIVATE /W4 /utf-8)
     add_custom_command(TARGET endpoint_encoder_stats_tests POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_encoder_stats_tests>)
     add_test(NAME endpoint_encoder_stats COMMAND endpoint_encoder_stats_tests)
-    add_executable(endpoint_qsv_rate_controller_tests tests/qsv_rate_controller_tests.cpp src/media/qsv_rate_controller.cpp)
+    add_executable(endpoint_qsv_rate_controller_tests tests/qsv_rate_controller_tests.cpp)
+    target_link_libraries(endpoint_qsv_rate_controller_tests PRIVATE endpoint_media)
     target_include_directories(endpoint_qsv_rate_controller_tests PRIVATE src)
     target_compile_features(endpoint_qsv_rate_controller_tests PRIVATE cxx_std_20)
     target_compile_options(endpoint_qsv_rate_controller_tests PRIVATE /W4 /utf-8)
@@ -375,7 +396,6 @@ if(WIN32)
     src/management/methods.cpp
     src/management/cluster_link.cpp
     src/platform/process.cpp
-    src/media/adapter.cpp
     src/session/browser.cpp
     src/session/browser_rpc.cpp
     src/session/navigation_recovery.cpp
@@ -386,10 +406,10 @@ if(WIN32)
     src/session/execution.cpp
     src/session/views.cpp
     src/session/site_preferences.cpp
-    src/media/output.cpp
-    src/media/pipeline.cpp
-    src/media/encoders.cpp
-    src/media/audio.cpp
+    src/session/output.cpp
+    src/session/pipeline.cpp
+    src/session/encoders.cpp
+    src/session/audio.cpp
     src/auth/face.cpp
     src/files/files.cpp
     src/files/object_files.cpp
@@ -404,10 +424,10 @@ if(WIN32)
     src/rtc/authorization.cpp
     src/rtc/data_router.cpp
     src/rtc/outbox.cpp
-    src/media/presentation.cpp
+    src/session/presentation.cpp
     src/input/input.cpp)
 
-  target_link_libraries(remotekit_runtime PUBLIC remotekit_cluster remotekit_media remotekit_endpoint remotekit_face remotekit_file_library winmm crypt32 ole32 winhttp pdh)
+  target_link_libraries(remotekit_runtime PUBLIC remotekit_cluster endpoint_media remotekit_endpoint remotekit_face remotekit_file_library winmm crypt32 ole32 winhttp pdh)
   if(BUILD_TESTING)
     target_link_libraries(endpoint_coordination_tests PRIVATE remotekit_runtime)
   endif()
@@ -457,7 +477,7 @@ if(WIN32)
       COMMAND ${CMAKE_COMMAND} -E copy_directory "${RK_DEPS}/face-auth/models" $<TARGET_FILE_DIR:endpoint_service>/models)
   endif()
   add_executable(endpoint_encoder_smoke EXCLUDE_FROM_ALL src/encoder_smoke.cpp)
-  target_link_libraries(endpoint_encoder_smoke PRIVATE remotekit_media)
+  target_link_libraries(endpoint_encoder_smoke PRIVATE endpoint_media)
   add_custom_command(TARGET endpoint_encoder_smoke POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_encoder_smoke>)
 endif()

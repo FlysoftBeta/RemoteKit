@@ -1,0 +1,21 @@
+{
+  "schema": "schedlab-v1",
+  "label": "synthetic",
+  "options": {
+    "geometry": "F"
+  },
+  "count": 2,
+  "adapter": "0,123",
+  "measurementStart": 1000,
+  "measurementEnd": 3000,
+  "tenants": [
+    {
+      "tenant": 0,
+      "kind": "S4"
+    },
+    {
+      "tenant": 1,
+      "kind": "V"
+    }
+  ]
+}

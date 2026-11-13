@@ -1,7 +1,8 @@
 #pragma once
-#include "options.hpp"
+
 #include "media/sdk_loader.hpp"
 #include "media/gpu_device.hpp"
+#include "media/hardware_encoder.hpp"
 namespace remotekit {
 using namespace media;
 struct StreamingAdapter {
@@ -11,5 +12,10 @@ struct StreamingAdapter {
   ComPtr<ID3D11DeviceContext4> context;
 };
 std::string AdapterLuid(LUID luid);
-Result<StreamingAdapter> SelectStreamingAdapter(Sdk& sdk, const RuntimeOptions& options);
+struct AdapterConfig {
+  std::string encoder;
+  EncoderSettings encoding;
+  uint32_t max_encode_width, max_encode_height;
+};
+Result<StreamingAdapter> SelectStreamingAdapter(Sdk& sdk, const AdapterConfig& options);
 }  // namespace remotekit

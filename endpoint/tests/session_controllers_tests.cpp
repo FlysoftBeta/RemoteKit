@@ -3,7 +3,7 @@
 #include "rtc/outbox.hpp"
 #include "rtc/authorization.hpp"
 #include "rtc/peer.hpp"
-#include "media/presentation.hpp"
+#include "session/presentation.hpp"
 #include "input/input.hpp"
 #include "input/wire_validation.hpp"
 #include "session/session.hpp"

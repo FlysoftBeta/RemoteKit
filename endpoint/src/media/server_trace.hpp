@@ -43,14 +43,18 @@ struct TraceRecord {
            focus = 0;
   uint32_t producer_pid = 0, bitrate_bps = 0, fps = 0;
   int status = 0, pending = -1, leased = -1, queue = -1, inflight = -1, slot = -1, refs = -1;
-  int consistent = -1, high_resolution = -1;
+  int consistent = -1, high_resolution = -1, qp = -1;
 };
 // Opt-in diagnostics. The ring is fixed-size; frame-path records contain only
 // numbers/literal strings. JSON serialization and disk I/O happen on Flush.
 class ServerTrace {
  public:
+  // kSnapshot rewrites the ring on every Flush; kAppend writes only records added since the last
+  // Flush and fails if the ring overwrote any of them first.
+  enum class FlushMode { kSnapshot, kAppend };
   static std::shared_ptr<ServerTrace> Create(const std::string& tenant,
-                                             const std::string& session) {
+                                             const std::string& session,
+                                             FlushMode mode = FlushMode::kSnapshot) {
     wchar_t path[32768]{};
     const DWORD count = GetEnvironmentVariableW(L"REMOTEKIT_SERVER_TRACE", path, 32768);
     if (!count || count >= 32768)
@@ -63,7 +67,7 @@ class ServerTrace {
       fprintf(stderr, "server trace: %s\n", created.error().message.c_str());
       return {};
     }
-    return std::shared_ptr<ServerTrace>(new ServerTrace(root, tenant, session));
+    return std::shared_ptr<ServerTrace>(new ServerTrace(root, tenant, session, mode));
   }
   ~ServerTrace() {
     auto flushed = Flush();
@@ -106,33 +110,40 @@ class ServerTrace {
     Add(record);
   }
   Result<void> Flush() {
+    std::lock_guard file_lock(file_mutex_);
     std::vector<TraceRecord> copy;
     uint64_t total;
     {
       std::lock_guard lock(mutex_);
       total = written_;
-      const auto count = std::min<uint64_t>(total, records_.size());
+      const auto oldest = total - std::min<uint64_t>(total, records_.size());
+      if (mode_ == FlushMode::kAppend && flushed_ < oldest)
+        return Error{ErrorCode::kUnavailable, "trace records overwritten before append flush"};
+      const auto first = mode_ == FlushMode::kAppend ? flushed_ : oldest;
+      const auto count = total - first;
       copy.reserve(static_cast<size_t>(count));
       for (uint64_t i = total - count; i < total; ++i)
         copy.push_back(records_[i % records_.size()]);
     }
-    std::lock_guard file_lock(file_mutex_);
-    std::ofstream out(path_, std::ios::trunc);
+    std::ofstream out(
+        path_, mode_ == FlushMode::kAppend && file_started_ ? std::ios::app : std::ios::trunc);
     if (!out)
       return Error{ErrorCode::kUnavailable, "cannot open trace output"};
-    out << nlohmann::json{{"event", "trace_header"},
-                          {"schema", "trace-v1"},
-                          {"pid", GetCurrentProcessId()},
-                          {"tenant", tenant_},
-                          {"session", session_},
-                          {"qpc_frequency", frequency_},
-                          {"records_total", total},
-                          {"records_overwritten", total - copy.size()},
-                          {"capacity", records_.size()},
-                          {"gpu_completion_semantics",
-                           "CPU observation after real fence/SyncOperation; not GPU timestamp"}}
-               .dump()
-        << '\n';
+    if (mode_ == FlushMode::kSnapshot || !file_started_)
+      out << nlohmann::json{{"event", "trace_header"},
+                            {"schema", "trace-v1"},
+                            {"pid", GetCurrentProcessId()},
+                            {"tenant", tenant_},
+                            {"session", session_},
+                            {"qpc_frequency", frequency_},
+                            {"records_total", total},
+                            {"records_overwritten", total - copy.size()},
+                            {"capacity", records_.size()},
+                            {"gpu_completion_semantics",
+                             "CPU observation after real fence/SyncOperation; "
+                             "not GPU timestamp"}}
+                 .dump()
+          << '\n';
     for (const auto& r : copy) {
       nlohmann::json value = {{"event", r.event},  {"pid", GetCurrentProcessId()},
                               {"tenant", tenant_}, {"session", session_},
@@ -170,6 +181,8 @@ class ServerTrace {
       add("fence", r.fence);
       add("completed_fence", r.completed_fence);
       add("bytes", r.bytes);
+      if (r.qp >= 0)
+        value["qp"] = r.qp;
       if (r.reason)
         value["reason"] = r.reason;
       if (r.admission_class) {
@@ -226,12 +239,17 @@ class ServerTrace {
     out.flush();
     if (!out)
       return Error{ErrorCode::kUnavailable, "cannot write trace output"};
+    flushed_ = total;
+    file_started_ = true;
     return {};
   }
 
  private:
-  ServerTrace(const std::filesystem::path& root, std::string tenant, std::string session)
-      : tenant_(std::move(tenant)), session_(std::move(session)), records_(65536) {
+  ServerTrace(const std::filesystem::path& root,
+              std::string tenant,
+              std::string session,
+              FlushMode mode)
+      : tenant_(std::move(tenant)), session_(std::move(session)), records_(65536), mode_(mode) {
     LARGE_INTEGER frequency;
     QueryPerformanceFrequency(&frequency);
     frequency_ = frequency.QuadPart;
@@ -245,6 +263,9 @@ class ServerTrace {
   std::mutex mutex_, file_mutex_;
   std::vector<TraceRecord> records_;
   uint64_t written_ = 0;
+  uint64_t flushed_ = 0;
+  FlushMode mode_;
+  bool file_started_ = false;
 };
 }  // namespace remotekit::media
 #define RK_SERVER_TRACE(sink, trace_event, trace_ids, ...) \

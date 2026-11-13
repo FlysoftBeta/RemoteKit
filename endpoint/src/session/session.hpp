@@ -1,8 +1,8 @@
 #pragma once
-#include "media/output.hpp"
-#include "media/pipeline.hpp"
-#include "media/encoders.hpp"
-#include "media/audio.hpp"
+#include "session/output.hpp"
+#include "session/pipeline.hpp"
+#include "session/encoders.hpp"
+#include "session/audio.hpp"
 #include "auth/face.hpp"
 #include "files/files.hpp"
 #include "session/navigation_recovery.hpp"
@@ -107,8 +107,8 @@ class Session {
   PresentationController presentation;
   PeerController peer_controller;
   OutputController output;
-  MediaPipeline pipeline;
   EncoderRegistry registry;
+  MediaPipeline pipeline;
   AudioOutput audio;
   FileController files;
   NavigationRecovery navigation;

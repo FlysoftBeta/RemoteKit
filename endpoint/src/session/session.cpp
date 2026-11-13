@@ -128,38 +128,11 @@ Session::Session(media::Sdk& api,
                                               {"signal", signal}},
                                          generation);
                   },
-              .create_encoder =
-                  [this](uint64_t peer, uint64_t encoder) {
-                    return EncoderRegistry::CreateEncoder(&registry, peer, encoder);
-                  },
-              .configure_encoder =
-                  [this](uint64_t encoder, const remotekit_rtc_encoder_config* config) {
-                    return EncoderRegistry::ConfigureEncoder(&registry, encoder, config);
-                  },
-              .encode =
-                  [this](uint64_t encoder, const remotekit_rtc_frame* frame, int key) {
-                    return EncoderRegistry::Encode(&registry, encoder, frame, key);
-                  },
-              .rates =
-                  [this](uint64_t encoder, uint32_t bitrate, uint32_t fps) {
-                    EncoderRegistry::Rates(&registry, encoder, bitrate, fps);
-                  },
-              .keyframe =
-                  [this](uint64_t encoder) { EncoderRegistry::Keyframe(&registry, encoder); },
-              .destroy_encoder =
-                  [this](uint64_t encoder) { EncoderRegistry::DestroyEncoder(&registry, encoder); },
+              .encoders = [this]() -> media::EncoderSet* { return &registry; },
               .log_fields = {{"tenantId", config.tenant},
                              {"version", 1},
                              {"sessionId", config.id}}}),
       output(context, peer_controller, authorization, presentation, registry, pipeline, timing),
-      pipeline(context,
-               peer_controller,
-               authorization,
-               presentation,
-               output,
-               registry,
-               timing,
-               diagnostics),
       registry(context,
                peer_controller,
                authorization,
@@ -168,6 +141,14 @@ Session::Session(media::Sdk& api,
                pipeline,
                channel,
                timing),
+      pipeline(context,
+               peer_controller,
+               authorization,
+               presentation,
+               output,
+               registry,
+               timing,
+               diagnostics),
       audio({sdk, config.options, config.tenant, BrowserRuntime::kSessionId, config.directory,
              browser, store, management, trace, objects, config.object_access, frame_admission},
             peer_controller,

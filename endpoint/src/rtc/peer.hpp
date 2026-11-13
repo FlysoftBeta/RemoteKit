@@ -2,6 +2,7 @@
 #include "util/common.hpp"
 #include "rtc/event.hpp"
 #include "media/sdk_loader.hpp"
+#include "media/encoder_set.hpp"
 #include "options.hpp"
 #include <atomic>
 #include <deque>
@@ -18,11 +19,7 @@ class PeerController {
     std::function<void()> stopping, drained;
     std::function<void(const RtcEvent&)> event;
     std::function<void(uint64_t, const Json&)> signal;
-    std::function<int(uint64_t, uint64_t)> create_encoder;
-    std::function<int(uint64_t, const remotekit_rtc_encoder_config*)> configure_encoder;
-    std::function<int(uint64_t, const remotekit_rtc_frame*, int)> encode;
-    std::function<void(uint64_t, uint32_t, uint32_t)> rates;
-    std::function<void(uint64_t)> keyframe, destroy_encoder;
+    std::function<media::EncoderSet*()> encoders;
     Json log_fields = Json::object();
   };
   PeerController(media::Sdk& sdk,

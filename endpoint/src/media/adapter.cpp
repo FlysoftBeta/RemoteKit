@@ -5,7 +5,7 @@ std::string AdapterLuid(LUID luid) {
   return std::to_string(luid.HighPart) + "," + std::to_string(luid.LowPart);
 }
 
-Result<StreamingAdapter> SelectStreamingAdapter(Sdk& sdk, const RuntimeOptions& options) {
+Result<StreamingAdapter> SelectStreamingAdapter(Sdk& sdk, const AdapterConfig& options) {
   ComPtr<IDXGIFactory1> factory;
   if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
     return Error{ErrorCode::kUnavailable, "streaming DXGI factory unavailable"};
@@ -49,8 +49,9 @@ Result<StreamingAdapter> SelectStreamingAdapter(Sdk& sdk, const RuntimeOptions& 
       failures += "; " + candidate.encoder + " " + AdapterLuid(candidate.luid) + ": " + error;
     }
   }
-  return Error{ErrorCode::kUnavailable,
-               "当前会话没有可用的硬件 GPU 编码器（RDP 会话默认使用 Microsoft Basic Render Driver）；" +
-                   options.encoder + failures};
+  return Error{
+      ErrorCode::kUnavailable,
+      "当前会话没有可用的硬件 GPU 编码器（RDP 会话默认使用 Microsoft Basic Render Driver）；" +
+          options.encoder + failures};
 }
 }  // namespace remotekit

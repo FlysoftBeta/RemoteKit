@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Schedlab fixture</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: #edf0ed;
+        color: #263b36;
+      }
+      body {
+        font:
+          20px/1.7 Georgia,
+          serif;
+      }
+      video {
+        position: fixed;
+        width: 100vw;
+        height: 100vh;
+        object-fit: cover;
+      }
+      article {
+        width: min(100% - 100px, 1180px);
+        margin: auto;
+        padding: 50px 0;
+      }
+      h1 {
+        font:
+          bold 64px/1.05 Georgia,
+          serif;
+        max-width: 900px;
+      }
+      h2 {
+        font-size: 38px;
+        line-height: 1.2;
+      }
+      p {
+        max-width: 850px;
+      }
+      img {
+        width: 100%;
+        height: 460px;
+        object-fit: cover;
+        border-radius: 12px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        background: white;
+      }
+      th,
+      td {
+        padding: 16px 24px;
+        border-bottom: 1px solid #ccd8d2;
+        text-align: left;
+      }
+      .banner {
+        height: 360px;
+        background: linear-gradient(120deg, #174d58, #89b694 65%, #e7d2a3);
+        border-radius: 12px;
+      }
+      .eyebrow {
+        font: bold 15px system-ui;
+        letter-spacing: 3px;
+        text-transform: uppercase;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="module" src="/fixture.mjs"></script>
+  </body>
+</html>

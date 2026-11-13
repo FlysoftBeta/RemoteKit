@@ -2,7 +2,7 @@
 #include "media/render_slots.hpp"
 #include "rtc/authorization.hpp"
 #include "rtc/peer.hpp"
-#include "media/presentation.hpp"
+#include "session/presentation.hpp"
 #include "session/context.hpp"
 namespace remotekit {
 class PeerController;

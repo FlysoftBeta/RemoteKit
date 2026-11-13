@@ -44,7 +44,7 @@
 
 身份关联：Browser PID + generation + slot + value；Endpoint frame cookie（跨代唯一）与源内容身份；发布回调返回的实际 wire RTP；输入用 peer + client sequence + browser sequence。Endpoint 的 QPC、SDK TimeTicks 与 UTC 通过括号式校准关联；客户端↔Endpoint 的时钟估计与客户端↔Control 的时钟估计是两件事（媒体和触控直接对 Endpoint 做 `clock.ping`，Control 的时钟只用于产品新鲜度）。
 
-`tools/measure/` 下是当前的性能测量工具：OSR 视频 profile（隔离的服务 + 固定测试页 + marker + 原生输入）、汇总脚本、服务端 trace 分析、资源采样（按 LUID/物理适配器/引擎分组的 PDH GPU 计数）、ETW 录制、显示状态探测、画质对比（CRC 校验后的 RGB 误差/PSNR）。
+`tools/measure/` 下是当前的性能测量工具：多租户调度实验台 schedlab（见下文）、OSR 视频 profile（隔离的服务 + 固定测试页 + marker + 原生输入）、汇总脚本、服务端 trace 分析、资源采样（按 LUID/物理适配器/引擎分组的 PDH GPU 计数）、ETW 录制、显示状态探测、画质对比（CRC 校验后的 RGB 误差/PSNR）。
 
 ## 测量方法
 
@@ -79,3 +79,31 @@
 ## Pixel marker
 
 为了观察"远端页面实际改变的那个像素"何时到达客户端，而不是从输入 ACK、编码回调或 rVFC 到达去推断：测试页在固定区域绘制带 CRC 的 marker，客户端在精确的呈现身份（RTP、layout epoch、绘制时间）上读取该 ROI 并解码。采样和后续处理不能悄悄换成更新的帧。读回前先清空离屏画布：透明像素会保留旧 marker，产生错误的帧身份。把 CRC 计算移到 Worker 后主线程开销约 1ms p95，Worker 内核仍约 25–29ms——这是转移了工作，不是让它免费。marker 读回只在显式测量时启用，正常 video 呈现不做逐帧拷贝。
+
+## 调度实验台 schedlab
+
+`tools/measure/schedlab/` 在一台机器上用真实的媒体核心跑 N 个租户，测多租户下的帧调度、准入与码控，不经过 Control、Viewer 或 Endpoint 的 Session 层。
+
+**结构**：原生的 `schedlab.exe`（随 Endpoint 构建，不进发布包）只链接 `endpoint_media`。每个租户由它直接经 SDK 启动 Browser、建 view 与单视图 atlas 输出、建 RTC peer，再用产品同一份 `CompEngine`、`EncoderSet`、`RenderSlots` 驱动；所有租户共享一个按适配器的 `FrameAdmission`。实验台自己的 `CompHost` 只做最少的事：atlas 元数据变化时递增 layout epoch，刷新作用域取 peer，失效只记录。因此要比较的方案就是工作树里的代码改动，实验台本身没有实验开关；`run.json` 记录 commit、dirty 状态、二进制与实际加载的 DLL 的 hash，用来确认比较的是哪两个版本。
+
+**负载**：夹具页按统一的 t0 开始，每个租户一种：`S<周期秒>` 平滑滚动、`U<次/秒>` 内容更新、`V` 播放视频、`static`。滚动开始时运行器向实验台发 `activity`，走 `CompEngine::InputReceived`，所以准入的交互优先级与产品同一路径，只是没有真实输入链路。视频由 `schedlab.exe make-video` 用 Windows Media Foundation 的系统 H264 编码器按帧号确定性生成（1920×1080、60fps、60 秒、约 20Mbps、High、GOP 2 秒；画面是平移的纹理地形、运动物体、细节滚动带与帧号），缺失时自动生成到 `develop/tmp/schedlab/assets/video.mp4`，不入库。
+
+**接收端**：同机的一个无头 Edge（或 Chrome 89），每租户一页，经 `kit/browser.mjs` 启动，关闭硬件视频解码，避免与被测的编码争用视频引擎。Worker 里的 encoded transform（Chrome 89 用 encoded insertable streams）记录每个编码帧的到达时间与 RTP。
+
+**指标**（`summarize.mjs`）：
+- 延迟 = 接收端编码帧到达 − Comp Begin，按 wire RTP 关联同一帧；同机同一时钟，不含解码与显示。分全部、滚动、视频、更新给 L50/95/99/max。
+- 滚动起点：每次滚动开始后第一个 Begin 的帧的延迟；滚动期间的运动 FPS；视频 FPS；更新内容延迟。
+- 卡顿：到达间隔超过当时帧间隔 1.5 倍的次数、延迟相对 1 秒滚动中位数突增的次数，均为每分钟。
+- 编码字节与 QP、GPU 各引擎占用（PDH，按所选适配器 LUID）、准入按类别的授予/拒绝与等待 p50/p95、发送端 RTC 统计与接收端抖动/解码。
+
+**运行**：
+
+```
+node tools/measure/schedlab/run.mjs --geometry F --mix S4,V,V,U10,static --duration 60
+node tools/measure/schedlab/matrix.mjs --geometries F,T --tenants 1,5
+node tools/measure/schedlab/compare.mjs <run 或 matrix 目录> <run 或 matrix 目录>
+```
+
+`--geometry` 取 `F`（1920×1080@1）、`T`（1280×800@2）或 `<宽>x<高>@<DPR>`；`--tenants N` 用默认组合；默认预热 10 秒。开始前等所选适配器空闲（3D < 0.5%、视频解码/处理 < 0.1%，连续 3 个 1 秒样本；计数缺失不算空闲），所以一次运行的总时长是空闲门禁、启动、预热、测量、收尾与汇总之和，明显长于 `--duration`。输出在 `develop/tmp/schedlab/<UTC 时间>-<标签>/`（`run.json`、`summary.json`、`summary.md`）；结束时无论成败都关闭自己启动的进程、删除接收端 Profile 与各 Browser 数据目录，原始 trace 在汇总后删除（`--keep-traces` 保留）。计时测量独占 GPU，不与构建或其他实验并行。
+
+**局限**：没有 Viewer 解码与呈现、没有网络整形、接收端与被测服务同机；跨机器的结论仍要用真实栈确认。

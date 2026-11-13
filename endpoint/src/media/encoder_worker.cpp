@@ -364,8 +364,8 @@ void EncoderWorker::Complete(AccessUnit& unit) {
   RK_SERVER_TRACE(
       trace_, "encoded_return", TraceIds::Frame(job.frame, true), rk_record.cookie = job.cookie;
       rk_record.encoder = encoder_; rk_record.peer = trace_peer_; rk_record.status = status;
-      rk_record.bytes = unit.bytes.size(); rk_record.ids.wire_known = status == 0;
-      rk_record.ids.wire_rtp_timestamp = wire_timestamp;);
+      rk_record.bytes = unit.bytes.size(); rk_record.qp = unit.qp;
+      rk_record.ids.wire_known = status == 0; rk_record.ids.wire_rtp_timestamp = wire_timestamp;);
   if (status == 0 && completed_)
     completed_(wire_timestamp, job.frame.layout_epoch, unit.bytes.size(), unit.keyframe, job.frame);
   if (permitted && status != 0 && status != REMOTEKIT_SDK_INVALID_STATE)

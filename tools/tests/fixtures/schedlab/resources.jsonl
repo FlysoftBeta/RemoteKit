@@ -1,0 +1,1 @@
+{"epochMs":1500,"gpuValid":true,"gpu":[{"engine":"VideoEncode","instance":"pid_42_luid_0x00000000_0x0000007b_engtype_VideoEncode","percent":12.5}],"cpu":[{"group":"bench","cores":0.5,"privateBytes":1024,"workingSetBytes":2048}]}

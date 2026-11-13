@@ -14,6 +14,7 @@
 #include "util/thread.hpp"
 #include <windows.h>
 #include <array>
+#include <condition_variable>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -218,6 +219,7 @@ class FixtureLink final : public ManagementLink {
  public:
   std::vector<Json> requests, replies, events;
   std::mutex mutex;
+  std::condition_variable replied;
   size_t index = 0;
   std::optional<ReadyState> ReadyConfiguration() override {
     return ReadyState{7,
@@ -226,6 +228,10 @@ class FixtureLink final : public ManagementLink {
                       "connection"};
   }
   bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
+    // Replay assertions require the preceding RPC result to have been retained.
+    std::unique_lock lock(mutex);
+    Check(replied.wait_for(lock, std::chrono::seconds(5), [&] { return replies.size() == index; }),
+          "fixture reply deadline");
     generation = 7;
     eof = index == requests.size();
     if (eof)
@@ -239,6 +245,7 @@ class FixtureLink final : public ManagementLink {
   bool SendReply(uint64_t, const Json& reply) override {
     std::lock_guard lock(mutex);
     replies.push_back(reply);
+    replied.notify_all();
     return true;
   }
   bool SendEvent(const Json& event, uint64_t, DeliveryFlag = {}) override {

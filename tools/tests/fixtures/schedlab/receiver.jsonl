@@ -1,0 +1,6 @@
+{"tenant":0,"type":"frames","frames":[{"rtpTimestamp":0,"arrival":1110,"bytes":999},{"rtpTimestamp":7,"arrival":1170,"bytes":110},{"rtpTimestamp":9,"arrival":1640,"bytes":120},{"rtpTimestamp":11,"arrival":2180,"bytes":130}]}
+{"tenant":0,"type":"stats","epochMs":1000,"records":[{"type":"inbound-rtp","kind":"video","framesDecoded":10,"totalDecodeTime":0.01,"jitterBufferDelay":0.02,"jitterBufferEmittedCount":10,"jitter":0.001}]}
+{"tenant":0,"type":"stats","epochMs":3000,"records":[{"type":"inbound-rtp","kind":"video","framesDecoded":20,"totalDecodeTime":0.02,"jitterBufferDelay":0.04,"jitterBufferEmittedCount":20,"jitter":0.001}]}
+{"tenant":1,"type":"frames","frames":[{"rtpTimestamp":13,"arrival":1230,"bytes":100},{"rtpTimestamp":15,"arrival":2250,"bytes":110}]}
+{"tenant":1,"type":"stats","epochMs":1000,"records":[{"type":"inbound-rtp","kind":"video","framesDecoded":10,"totalDecodeTime":0.01,"jitterBufferDelay":0.02,"jitterBufferEmittedCount":10,"jitter":0.001}]}
+{"tenant":1,"type":"stats","epochMs":3000,"records":[{"type":"inbound-rtp","kind":"video","framesDecoded":20,"totalDecodeTime":0.02,"jitterBufferDelay":0.04,"jitterBufferEmittedCount":20,"jitter":0.001}]}

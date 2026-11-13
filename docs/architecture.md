@@ -178,9 +178,11 @@ endpoint/
     objects/       加密对象存储、节点间传输（PeerServer/PeerClient）
     platform/      Windows 作业与进程
     persistence/   Session 存储（session.db、SQLite 封装、格式定义与迁移）、checkpoint 与增量扫描、运行中的版本与快照客户端
-    session/       Session（组装）、BrowserRuntime/BrowserRpc、ViewController、导航恢复
+    session/       Session（组装）、BrowserRuntime/BrowserRpc、ViewController、导航恢复；
+                   MediaPipeline（媒体线程与会话状态）、输出生命周期、呈现、音频、编码器的会话侧接线
     rtc/           PeerController、授权、DataChannel 路由与通道、发件箱、service peer
-    media/         Comp 节拍、Slot、输出、媒体管线、呈现屏障、编码器（QSV/NVENC）、适配器、音频、追踪
+    media/         媒体核心（endpoint_media 静态库）：CompEngine、Slot、跨租户准入、EncoderSet 与
+                   编码器（QSV/NVENC）、适配器、节拍与刷新策略、呈现屏障、追踪
     input/         InputController、序号、校验
     auth/          人脸推理、原始相机帧
     files/         文件库、暂存、照片处理、文件服务（service peer 上的对象文件与 Session 上的原生选择）
@@ -202,9 +204,11 @@ android/           会话导入 App（Kotlin、Compose）
 protocol/          跨组件契约：控制版本与错误码、渲染线格式、Slot 与音频共享内存、触控时钟、atlas 规划与 fixture、集群 Noise 测试向量
 sdk/               公共 C 头与独立的 SDK 消费者 smoke
 patches/           有序的 Chromium 补丁与 manifest
-tools/             构建、补丁、SDK 导出、打包；tools/measure/ 性能测量；tools/tests/ 工具自身的测试
+tools/             构建、补丁、SDK 导出、打包；tools/measure/ 性能测量（含调度实验台 schedlab）；tools/tests/ 工具自身的测试
 tests/             e2e/（真实栈产品场景）、integration/（原生 Endpoint/Browser 集成）
 ```
+
+**媒体核心与会话层**：`endpoint/src/media/` 只依赖 `media/`、`platform/`、`util/`、`protocol/` 与 SDK 头，不知道 Session、授权、RTC 控制器或 `RuntimeOptions`；配置经媒体自己的结构（`CompConfig`、`AdapterConfig`、`EncoderSettings`）传入。CTest `endpoint_media_layer` 扫描该目录的 include，越界即失败。`media::CompEngine` 是每个租户流的 Comp 循环：节拍与源限制、Begin 决策（尾 IDR、呈现刷新、保活、恢复采样、准入优先级）、Poll、AdaptFrame、H264 采样、提交与节拍等待。宿主每轮给它一个不可变的 `CompStream`（peer、接收 level、流作用域、输出是否打开），它经窄接口 `CompHost` 回调布局观察、刷新作用域、失效与首帧里程碑；致命失败以 `CompFailure`（错误 + 呈现失效原因）返回，由宿主处理。`media::EncoderSet` 持有 RTC 编码器回调与编码统计。产品里宿主是 `session/` 的 `MediaPipeline`（授权切换、输出开闭、剪贴板、RTC 事件、统计发布），调度实验台 schedlab 是另一个宿主，两者跑同一份媒体核心代码。
 
 ### Viewer 外壳约定
 

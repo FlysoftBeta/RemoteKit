@@ -1,0 +1,10 @@
+{"event":"trace_header","records_overwritten":0}
+{"event":"clock_wall","qpc":1000,"qpc_frequency":1000,"unix_time_us":1000000,"bracket_uncertainty_us":0}
+{"event":"admission_grant","qpc":1199,"qpc_frequency":1000,"admission_class":"normal","permit_wait_us":0,"generation":1,"slot":0,"fence":1}
+{"event":"render_begin","qpc":1200,"qpc_frequency":1000,"generation":1,"slot":0,"fence":1}
+{"event":"slot_ready_observed","qpc":1202,"qpc_frequency":1000,"frame_id":1,"generation":1,"slot":0,"fence":1}
+{"event":"encoded_return","qpc":1205,"qpc_frequency":1000,"frame_id":1,"wire_rtp_timestamp":13,"bytes":100,"qp":28,"status":0}
+{"event":"admission_grant","qpc":2199,"qpc_frequency":1000,"admission_class":"normal","permit_wait_us":1000,"generation":1,"slot":1,"fence":2}
+{"event":"render_begin","qpc":2200,"qpc_frequency":1000,"generation":1,"slot":1,"fence":2}
+{"event":"slot_ready_observed","qpc":2202,"qpc_frequency":1000,"frame_id":2,"generation":1,"slot":1,"fence":2}
+{"event":"encoded_return","qpc":2205,"qpc_frequency":1000,"frame_id":2,"wire_rtp_timestamp":15,"bytes":110,"qp":30,"status":0}

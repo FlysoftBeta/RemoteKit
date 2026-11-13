@@ -34,29 +34,10 @@ Result<Json> PeerController::Offer(const Json& request,
   config.auth_required = 1;
   config.context = this;
   config.event = EventCallback;
-  config.encoder.struct_size = sizeof(config.encoder);
-  config.encoder.create = [](void* p, uint64_t peer, uint64_t encoder) -> int {
+  media::EncoderSet::BindCallbacks<[](void* p) -> media::EncoderSet* {
     auto& self = *static_cast<PeerController*>(p);
-    if (self.role_ == Role::kService)
-      return REMOTEKIT_SDK_INVALID_STATE;
-    return self.hooks_.create_encoder(peer, encoder);
-  };
-  config.encoder.configure = [](void* p, uint64_t encoder,
-                                const remotekit_rtc_encoder_config* value) {
-    return static_cast<PeerController*>(p)->hooks_.configure_encoder(encoder, value);
-  };
-  config.encoder.encode = [](void* p, uint64_t encoder, const remotekit_rtc_frame* frame, int key) {
-    return static_cast<PeerController*>(p)->hooks_.encode(encoder, frame, key);
-  };
-  config.encoder.set_rates = [](void* p, uint64_t encoder, uint32_t bitrate, uint32_t fps) {
-    static_cast<PeerController*>(p)->hooks_.rates(encoder, bitrate, fps);
-  };
-  config.encoder.request_keyframe = [](void* p, uint64_t encoder) {
-    static_cast<PeerController*>(p)->hooks_.keyframe(encoder);
-  };
-  config.encoder.destroy = [](void* p, uint64_t encoder) {
-    static_cast<PeerController*>(p)->hooks_.destroy_encoder(encoder);
-  };
+    return self.role_ == Role::kBrowser && self.hooks_.encoders ? self.hooks_.encoders() : nullptr;
+  }>(config.encoder);
   config.min_bitrate_bps = 500000;
   config.start_bitrate_bps = options_.encoding.bitrate;
   config.max_bitrate_bps = options_.encoding.max_bitrate;
