@@ -25,6 +25,7 @@ class Session {
           const cluster::Key& profile_key,
           ManagementLink&,
           objects::ObjectService&,
+          media::FrameAdmission&,
           std::shared_ptr<objects::SessionObjects> access = {});
   ~Session();
   Result<void> Initialize();

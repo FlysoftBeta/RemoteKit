@@ -4,6 +4,7 @@
 #include "diagnostics/timing.hpp"
 #include "media/encoders.hpp"
 #include "media/comp_recovery.hpp"
+#include "media/idle_keepalive.hpp"
 #include "media/output.hpp"
 #include "media/presentation.hpp"
 #include "media/render_slots.hpp"
@@ -64,6 +65,7 @@ void MediaPipeline::MediaLoop() {
   uint64_t previous_encoded = registry.Completed(), previous_bytes = registry.Bytes();
   uint64_t previous_delivered = output.Slots().delivered_frames();
   remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
+  remotekit::IdleKeepalive keepalive(QpcFrequency());
   bool has_current_view = false;
 
   bool first_source = true, first_submit = true;
@@ -241,6 +243,7 @@ void MediaPipeline::MediaLoop() {
         LogEvent(LogLevel::kDebug, "rtc.event", {{"sessionId", id}, {"detail", event.bytes}});
     }
     if (!peer_controller.Connected() || !authorization.Current(active_authorization)) {
+      output.Slots().WithdrawAdmission();
       std::unique_lock lock(event_mutex);
       event_wake.wait_for(lock, std::chrono::milliseconds(20),
                           [&] { return state != State::kRunning || !events.empty(); });
@@ -303,15 +306,33 @@ void MediaPipeline::MediaLoop() {
     }
     const bool tail_ready = idle.TailDue(now_ms) && !tail_attempt &&
                             now_ms >= next_tail_attempt_ms && !presentation_refresh.Pending();
-    if (!output.Suspended() && comp_bitrate.load() && sampling_fps && begin_schedule.Due(now)) {
+    const bool force_tail = tail_ready && tail_begins < 3;
+    const bool force_refresh =
+        result != RenderSlots::Result::ready && presentation_refresh.CanForce(now_ms);
+    const bool force_keepalive =
+        output.Slots().Stats().idle && !force_tail && !force_refresh && !recovery.active() &&
+        !presentation_refresh.Pending() &&
+        keepalive.Due(now, registry.LastEncodedQpc(), tail_attempt || idle.TailDue(now_ms));
+    const bool begin_allowed =
+        state == State::kRunning && !output.Suspended() && peer_controller.Connected() &&
+        authorization.Current(active_authorization) && comp_bitrate.load() && sampling_fps;
+    if (!begin_allowed) {
+      output.Slots().WithdrawAdmission();
+    } else {
+      const auto last_input = last_input_qpc.load();
+      output.Slots().SetAdmissionPriority(last_input && now - last_input < QpcFrequency() / 2
+                                              ? FrameAdmission::Priority::interactive
+                                              : FrameAdmission::Priority::normal);
+    }
+    if (begin_allowed && output.Slots().CanAttemptAdmission() &&
+        (begin_schedule.Due(now) || output.Slots().AdmissionPending() || force_keepalive)) {
       const auto interval = static_cast<uint32_t>((1000000ull + sampling_fps - 1) / sampling_fps);
-      output.Slots().Pressure(registry.Pending() > 1);
+      if (begin_schedule.Due(now) && !force_keepalive)
+        output.Slots().Pressure(registry.Pending() > 1);
       bool sent = false;
-      const bool force_tail = tail_ready && tail_begins < 3;
-      const bool force_refresh =
-          result != RenderSlots::Result::ready && presentation_refresh.CanForce(now_ms);
-      if (!output.Slots().Begin(interval, force_tail || force_refresh || recovery.active(), error,
-                                &sent)) {
+      if (!output.Slots().Begin(interval,
+                                force_tail || force_refresh || recovery.active() || force_keepalive,
+                                error, &sent, force_keepalive)) {
         if (frame.release)
           frame.release(frame.release_context, frame.frame_id);
         {
@@ -320,13 +341,19 @@ void MediaPipeline::MediaLoop() {
         presentation.InvalidateLayout("render-begin-failed");
         break;
       }
+      if (sent && force_keepalive)
+        keepalive.Sent(now);
       if (sent && force_tail)
         ++tail_begins;
       if (sent && force_refresh)
         presentation_refresh.Forced(now_ms);
       // Begin can drain a Wake queued after Poll. A sent Begin satisfies it.
       observe_wake();
-      begin_schedule.Attempted(now, std::max<int64_t>(1, QpcFrequency() / sampling_fps), sent);
+      // Pending admission is independent of the cadence deadline. Its event can
+      // retry immediately while restriction reads and pressure keep their cadence.
+      if (!force_keepalive &&
+          (begin_schedule.Due(now) || sent || !output.Slots().AdmissionPending()))
+        begin_schedule.Attempted(now, std::max<int64_t>(1, QpcFrequency() / sampling_fps), sent);
     }
     if (result == RenderSlots::Result::ready) {
       const bool fresh =
@@ -508,10 +535,22 @@ void MediaPipeline::MediaLoop() {
         1000, remaining ? std::max<int64_t>(1, remaining * 1000000 / QpcFrequency()) : 1000);
     LARGE_INTEGER due{};
     due.QuadPart = -wait_us * 10;
-    const HANDLE wait_handles[] = {pace_timer,
-                                   output.Suspended() ? nullptr : output.Slots().EventHandle()};
-    if (!SetWaitableTimerEx(pace_timer, &due, 0, nullptr, nullptr, nullptr, 0) ||
-        WaitForMultipleObjects(wait_handles[1] ? 2 : 1, wait_handles, FALSE, 2) == WAIT_FAILED) {
+    HANDLE wait_handles[] = {pace_timer, nullptr, nullptr};
+    DWORD wait_count = 1, admission_index = 0;
+    if (!output.Suspended()) {
+      if (const auto event = output.Slots().EventHandle())
+        wait_handles[wait_count++] = event;
+      if (const auto event = output.Slots().AdmissionEventHandle()) {
+        admission_index = wait_count;
+        wait_handles[wait_count++] = event;
+      }
+    }
+    const auto wait = SetWaitableTimerEx(pace_timer, &due, 0, nullptr, nullptr, nullptr, 0)
+                          ? WaitForMultipleObjects(wait_count, wait_handles, FALSE, 2)
+                          : WAIT_FAILED;
+    if (admission_index && wait == WAIT_OBJECT_0 + admission_index)
+      output.Slots().AdmissionWoken();
+    if (wait == WAIT_FAILED) {
       presentation.InvalidateLayout("comp-pacing-failed");
       registry.SetError("Comp pacing wait failed");
       break;
@@ -591,6 +630,12 @@ bool MediaPipeline::Join() {
 }
 void MediaPipeline::Wake() {
   event_wake.notify_all();
+}
+void MediaPipeline::InputReceived(int64_t qpc) {
+  auto previous = last_input_qpc.load();
+  while (previous < qpc && !last_input_qpc.compare_exchange_weak(previous, qpc)) {
+  }
+  Wake();
 }
 void MediaPipeline::Queue(const RtcEvent& event) {
   {

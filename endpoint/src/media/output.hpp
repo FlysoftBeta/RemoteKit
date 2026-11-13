@@ -26,7 +26,8 @@ class OutputController : private ControllerContext {
         presentation(presentation),
         registry(registry),
         pipeline(pipeline),
-        timing(timing) {}
+        timing(timing),
+        pool(context.frame_admission) {}
   RenderSlots& Slots() { return pool; }
   bool Suspended() const { return output_suspended; }
   bool Visible() const { return has_visible_output; }

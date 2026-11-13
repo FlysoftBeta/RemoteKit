@@ -14,9 +14,9 @@
 int main() {
   remotekit::media::EncoderStats stats;
   auto zero = stats.Snapshot();
-  for (const char* key :
-       {"encodePending", "encodeInflight", "queueFullDrops", "hardwareBusy", "pausedDrops",
-        "errorDrops", "inactiveDrops", "cancelledDrops", "queueWaitUs", "queueWaitSamples"})
+  for (const char* key : {"encodePending", "encodeInflight", "queueFullDrops", "hardwareBusy",
+                          "pausedDrops", "errorDrops", "inactiveDrops", "cancelledDrops",
+                          "queueWaitUs", "queueWaitSamples", "brcRecodes", "brcCapHits"})
     CHECK(zero[key] == 0);
   CHECK(zero["lastEncodeMs"].is_null());
   CHECK(zero["gccTargetBitrate"] == 0 && zero["gccTargetFps"] == 0);
@@ -37,6 +37,8 @@ int main() {
   CHECK(!stats.Snapshot().contains("qsvRateControl"));
   stats.requested_target_usage = 7;
   stats.applied_target_usage = 6;
+  stats.brc_recodes = 2;
+  stats.brc_cap_hits = 3;
   stats.pending = 1;
   stats.inflight = 4;
   stats.queue_full_drops = 2;
@@ -49,6 +51,7 @@ int main() {
   stats.queue_wait_samples = 9;
   auto sample = stats.Snapshot();
   CHECK(sample["requestedTargetUsage"] == 7 && sample["appliedTargetUsage"] == 6);
+  CHECK(sample["brcRecodes"] == 2 && sample["brcCapHits"] == 3);
   CHECK(sample["encodePending"] == 1 && sample["encodeInflight"] == 4);
   CHECK(sample["queueFullDrops"] == 2 && sample["hardwareBusy"] == 3);
   CHECK(sample["pausedDrops"] == 5 && sample["errorDrops"] == 6 && sample["inactiveDrops"] == 7 &&

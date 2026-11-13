@@ -3,6 +3,7 @@
 #include "encoder_worker.hpp"
 #include "media/sampling.hpp"
 #include "media/tail_refresh.hpp"
+#include "media/render_slots.hpp"
 #include <chrono>
 #include <utility>
 namespace remotekit::media {
@@ -39,6 +40,8 @@ nlohmann::json EncoderStats::Snapshot() {
       {"queueWaitUs", queue_wait_us.load()},
       {"queueWaitSamples", queue_wait_samples.load()},
       {"rateUpdates", rate_updates.load()},
+      {"brcRecodes", brc_recodes.load()},
+      {"brcCapHits", brc_cap_hits.load()},
       {"keyframeRequests", keyframe_requests.load()},
       {"keyframesSubmitted", keyframes_submitted.load()},
       {"keyframesEncoded", keyframes_encoded.load()},
@@ -317,6 +320,9 @@ void EncoderWorker::Complete(AccessUnit& unit) {
     Error("unknown hardware frame completion cookie");
     return;
   }
+  stats_->last_encoded_qpc = QpcNow();
+  stats_->brc_recodes += unit.brc_recodes;
+  stats_->brc_cap_hits += unit.brc_cap_hits;
   auto job = found->second;
   inflight_.erase(found);
   free_.push_back(job.surface);
@@ -382,7 +388,6 @@ void EncoderWorker::Run() {
       if (!stopping_ && queue_.empty() && inflight_.empty())
         wake_.wait_for(lock, std::chrono::milliseconds(5));
       if (stopping_ || failed_) {
-        hardware_->CancelPendingRateUpdate();
         break;
       }
     }
@@ -392,7 +397,6 @@ void EncoderWorker::Run() {
       if (inflight_.empty())
         rates = std::exchange(pending_rates_, std::nullopt);
       if (paused_) {
-        hardware_->CancelPendingRateUpdate();
         for (auto& job : queue_) {
           remotekit::TailRefreshLease::Finish(job.frame, false);
           if (sdk_.encoder_drop)
@@ -407,14 +411,9 @@ void EncoderWorker::Run() {
         queue_.clear();
       }
     }
-    const auto deadline = hardware_->RateUpdateDeadline();
-    const bool deferred_rate_due =
-        !paused_ && inflight_.empty() && deadline && std::chrono::steady_clock::now() >= *deadline;
-    if (deferred_rate_due && !rates)
-      rates = RateUpdate{settings_.bitrate, settings_.fps};
     if (rates && rates->bitrate && rates->fps &&
         (std::min(rates->bitrate, rate_limit_) != settings_.bitrate ||
-         std::min(rates->fps, fps_limit_) != settings_.fps || deferred_rate_due)) {
+         std::min(rates->fps, fps_limit_) != settings_.fps)) {
       std::string error;
       const auto effective_rate = std::min(rates->bitrate, rate_limit_);
       const auto effective_fps = std::min(rates->fps, fps_limit_);
@@ -435,8 +434,6 @@ void EncoderWorker::Run() {
         break;
       }
       ++stats_->rate_updates;
-      if (hardware_->TakeKeyframeRequest())
-        keyframe_ = true;
       settings_.bitrate = effective_rate;
       settings_.fps = effective_fps;
       {
@@ -502,7 +499,9 @@ void EncoderWorker::Run() {
       const bool requested_key = keyframe_.exchange(false);
       const bool key = job.key || requested_key;
       auto* input = surfaces_[job.surface].Get();
-      auto status = hardware_->Submit(input, key, job.cookie, error);
+      const FrameContext context{RenderSlots::BeginQpc(job.frame),
+                                 RenderSlots::IsKeepalive(job.frame)};
+      auto status = hardware_->Submit(input, key, job.cookie, error, context);
       RK_SERVER_TRACE(trace_, "hardware_submit", TraceIds::Frame(job.frame, true),
                       rk_record.cookie = job.cookie;
                       rk_record.encoder = encoder_; rk_record.peer = trace_peer_;

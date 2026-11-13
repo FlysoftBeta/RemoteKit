@@ -1,4 +1,5 @@
 #include "media/comp_pacing.hpp"
+#include "media/idle_keepalive.hpp"
 #include "media/comp_recovery.hpp"
 #include "browser/osr/cache_policy.h"
 #include "browser/osr_wake_state.h"
@@ -12,6 +13,15 @@ void Require(bool value, const char* message) {
   }
 }
 int main() {
+  remotekit::IdleKeepalive keepalive(1000);
+  Require(!keepalive.Due(10000, 0, false), "keepalive waits for first encode");
+  Require(!keepalive.Due(3499, 1000, false), "keepalive waits 2.5 seconds");
+  Require(!keepalive.Due(3500, 1000, true), "tail demand suppresses keepalive");
+  Require(keepalive.Due(3500, 1000, false), "idle keepalive becomes due");
+  keepalive.Sent(3500);
+  Require(!keepalive.Due(5999, 1000, false), "sent keepalive throttles forced Begins");
+  Require(!keepalive.Due(6000, 4000, false), "new encode postpones keepalive");
+  Require(keepalive.Due(6500, 4000, false), "keepalive resumes after encoded silence");
   remotekit::CompRecoverySampling recovery;
   CompPacing recovery_slots;
   recovery_slots.Reset(100);

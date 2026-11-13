@@ -409,8 +409,9 @@ void SessionManagementRequests() {
   CHECK(parsed);
   media::Sdk sdk;
   objects::ObjectService objects(parsed.value().data, link, cluster::Key{}, "test", "dev");
+  media::FrameAdmission frame_admission;
   Session session(sdk, parsed.value(), "tenant", "0123456789abcdef0123456789abcdef", 1,
-                  cluster::Key{}, link, objects);
+                  cluster::Key{}, link, objects, frame_admission);
   const auto session_directory = parsed.value().data / "sessions" / session.Id();
   fs::create_directories(session_directory);
   CHECK(session.Initialize());

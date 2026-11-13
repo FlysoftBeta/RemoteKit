@@ -20,6 +20,26 @@ Json Diagnostics::Stats() {
   value["mediaPolicy"] = pipeline_state.at("mediaPolicy");
   const auto slots = output.Slots().Stats();
   const auto comp = pipeline.DiagnosticsSnapshot();
+  const auto& admission = slots.admission;
+  value["frameAdmission"] = {{"adapterBudget", admission.budget},
+                             {"adapterInflight", admission.inflight},
+                             {"adapterWaitingTenants", admission.waiting},
+                             {"tenantInflight", admission.tenant_inflight},
+                             {"tenantWaiting", admission.tenant_waiting},
+                             {"tenantRequestsTotal", admission.requests},
+                             {"tenantDenialsTotal", admission.denials},
+                             {"tenantGrantsTotal", admission.grants},
+                             {"tenantReturnsTotal", admission.returns},
+                             {"tenantWaitUsTotal", admission.wait_us},
+                             {"tenantCurrentWaitUs", admission.current_wait_us},
+                             {"interactive",
+                              {{"grants", admission.interactive.grants},
+                               {"denials", admission.interactive.denials},
+                               {"waitUs", admission.interactive.wait_us}}},
+                             {"normal",
+                              {{"grants", admission.normal.grants},
+                               {"denials", admission.normal.denials},
+                               {"waitUs", admission.normal.wait_us}}}};
   value["comp"] = {{"idle", slots.idle},
                    {"idleEntries", slots.idleEntries},
                    {"wakes", slots.wakes},

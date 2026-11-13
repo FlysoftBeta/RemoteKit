@@ -11,6 +11,7 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
                    const RuntimeOptions&,
                    ManagementLink&,
                    objects::ObjectService&,
+                   media::FrameAdmission&,
                    Json target,
                    std::string incarnation);
   SessionCoordinator::Hooks Hooks();
@@ -50,6 +51,7 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   const RuntimeOptions& options_;
   ManagementLink& management_;
   objects::ObjectService& objects_;
+  media::FrameAdmission& frame_admission_;
   const std::string tenant_, id_, incarnation_;
   const uint64_t epoch_;
   const fs::path directory_;

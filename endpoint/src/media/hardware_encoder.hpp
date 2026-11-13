@@ -1,7 +1,6 @@
 #pragma once
 #include <d3d11_4.h>
 #include <cstdint>
-#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -23,11 +22,16 @@ struct QsvRateControlInfo {
   uint32_t low_delay_brc = 0, max_frame_size = 0, max_frame_size_i = 0, max_frame_size_p = 0;
   uint32_t buffer_size_kb = 0, initial_delay_kb = 0;
 };
+struct FrameContext {
+  int64_t begin_qpc = 0;
+  bool keepalive = false;
+};
 struct AccessUnit {
   uint64_t frame_cookie = 0;
   std::vector<uint8_t> bytes;
   bool keyframe = false;
   int qp = -1;
+  uint32_t brc_recodes = 0, brc_cap_hits = 0;
 };
 enum class CodecResult { accepted, busy, ready, pending, error };
 // One worker owns each backend. Input texture is immutable and GPU-ready.
@@ -48,18 +52,13 @@ class HardwareEncoder {
   virtual CodecResult Submit(ID3D11Texture2D*,
                              bool keyframe,
                              uint64_t frame_cookie,
-                             std::string& error) = 0;
+                             std::string& error,
+                             FrameContext context) = 0;
   virtual CodecResult Poll(uint32_t timeout_ms, AccessUnit&, std::string& error) = 0;
   virtual bool SetRates(uint32_t bitrate,
                         uint32_t fps,
                         std::string& error,
                         uint32_t maximum = 0) = 0;
-  // A backend may defer an observed cadence change. The owner replays its
-  // last valid rates at this deadline, only after all encode jobs drain.
-  virtual std::optional<std::chrono::steady_clock::time_point> RateUpdateDeadline() const {
-    return {};
-  }
-  virtual void CancelPendingRateUpdate() {}
   virtual bool Drain(std::vector<AccessUnit>&, std::string& error) = 0;
   // A failed asynchronous backend may have no bounded cancellation primitive.
   // The worker transfers every unresolved source/pool lease before destruction;
@@ -69,7 +68,6 @@ class HardwareEncoder {
   virtual const char* Name() const = 0;
   virtual std::optional<QsvLowPowerInfo> LowPowerInfo() const { return {}; }
   virtual std::optional<QsvRateControlInfo> RateControlInfo() const { return {}; }
-  virtual bool TakeKeyframeRequest() { return false; }
   virtual EncoderSettings ActualSettings() const {
     EncoderSettings value;
     value.bitrate = value.max_bitrate = value.fps = value.level_idc = 0;

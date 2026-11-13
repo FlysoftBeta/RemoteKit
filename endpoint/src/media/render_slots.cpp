@@ -27,6 +27,8 @@ struct RenderSlots::State {
     ComPtr<ID3D11Fence> ready, consumed;
     std::atomic<uint32_t> refs{0};
     uint64_t cookie = 0;
+    int64_t begin_qpc = 0;
+    bool keepalive = false;
     SharedAtlasFrame metadata{};
   };
   remotekit_sdk_render_setup setup{};
@@ -37,6 +39,8 @@ struct RenderSlots::State {
   ComPtr<ID3D11DeviceContext4> context;
   std::array<Slot, 4> slots;
   CompPacing pacing;
+  std::shared_ptr<FrameAdmission::Client> admission;
+  uint64_t incarnation = 0;
   uint32_t producer_pid = 0;
   RenderEventQueue events;
   StatsSnapshot* counters = nullptr;
@@ -55,6 +59,30 @@ struct RenderSlots::State {
   }
   std::optional<double> capture_ready_ms;
   remotekit_rtc_clock_sample clock{};
+  FrameAdmission::Identity AdmissionIdentity(CompPacing::Identity id) const {
+    return {incarnation, id.generation, id.value, id.slot};
+  }
+  void TraceAdmission(const char* event, CompPacing::Identity id, const char* reason = nullptr) {
+    if (!trace)
+      return;
+    const auto stats = admission->Stats();
+    RK_SERVER_TRACE(trace, event, (TraceIds{0, 0, id.generation, 0, 0}), rk_record.slot = id.slot;
+                    rk_record.fence = id.value; rk_record.cookie = incarnation;
+                    rk_record.producer_pid = producer_pid;
+                    rk_record.inflight = static_cast<int>(stats.inflight);
+                    rk_record.pending = static_cast<int>(stats.waiting); rk_record.reason = reason;
+                    rk_record.admission_class =
+                        (stats.tenant_waiting ? stats.pending_priority : stats.last_priority) ==
+                                FrameAdmission::Priority::interactive
+                            ? "interactive"
+                            : "normal";
+                    rk_record.admission_wait_us =
+                        stats.tenant_waiting ? stats.current_wait_us : stats.last_wait_us;);
+  }
+  void ReturnAdmission(CompPacing::Identity id, const char* reason) {
+    if (admission->Return(AdmissionIdentity(id)))
+      TraceAdmission("admission_return", id, reason);
+  }
   static void Event(void* ptr, const remotekit_sdk_render_event* event) {
     static_cast<State*>(ptr)->events.Push(*event);
   }
@@ -76,6 +104,8 @@ struct RenderSlots::State {
   }
   void RequestStop() {
     closing = true;
+    if (admission)
+      admission->Withdraw();
     pacing.Stop();
     if (!channel || stop_requested)
       return;
@@ -100,6 +130,9 @@ struct RenderSlots::State {
           fatal = true;
           failure = "render Reject identity mismatch";
         } else {
+          // Reject ends this atlas request, not residual plane GPU work. The
+          // producer's existing plane fences and retirement remain authoritative.
+          ReturnAdmission({e.generation, e.value, e.slot}, "reject");
           if (e.reason == REMOTEKIT_SDK_RENDER_IDLE) {
             ++counters->rejectIdle;
             if (pacing.IdleRejected({e.generation, e.value, e.slot}))
@@ -157,6 +190,7 @@ struct RenderSlots::State {
         }
         if (done >= record.id.value) {
           pacing.Reusable(record.id);
+          ReturnAdmission(record.id, "consumed_fence");
           ++counters->consumedCompleted;
           RK_SERVER_TRACE(trace, "slot_reusable", Ids(slot), rk_record.slot = i;
                           rk_record.fence = record.id.value; rk_record.completed_fence = done;);
@@ -182,7 +216,7 @@ struct RenderSlots::State {
     }
   }
 };
-RenderSlots::RenderSlots() = default;
+RenderSlots::RenderSlots(FrameAdmission& admission) : admission_(admission) {}
 RenderSlots::~RenderSlots() {
   std::string error;
   Close(error);
@@ -208,6 +242,7 @@ void RenderSlots::PublishStats() {
   value.activeDepth = state_ ? state_->pacing.depth() : 0;
   value.retiredGenerations = retired_.size();
   value.unknownGpuRetainedGenerations = 0;
+  value.admission = admission_client_ ? admission_client_->Stats() : FrameAdmission::Snapshot{};
   auto observe = [&](State& s) {
     for (auto& slot : s.slots)
       value.heldSlots += slot.refs.load() != 0;
@@ -269,6 +304,7 @@ bool RenderSlots::Open(remotekit_sdk_render_setup setup,
                        std::string& error) {
   PublishGuard publish{*this};
   Reap();
+  WithdrawAdmission();
   clipboard_state_.store(nullptr);
   if (state_) {
     state_->RequestStop();
@@ -281,6 +317,14 @@ bool RenderSlots::Open(remotekit_sdk_render_setup setup,
   s->counters = &counters_;
   s->clock = clock_;
   s->trace = trace_;
+  const auto adapter_key =
+      (uint64_t(static_cast<uint32_t>(adapter.HighPart)) << 32) | adapter.LowPart;
+  if (!admission_client_ || admission_adapter_ != adapter_key) {
+    admission_client_ = admission_.Register(adapter);
+    admission_adapter_ = adapter_key;
+  }
+  s->admission = admission_client_;
+  s->incarnation = ++next_incarnation_;
   state_ = s;
   if (!s->events.handle()) {
     error = "render event creation failed";
@@ -334,39 +378,70 @@ bool RenderSlots::Open(remotekit_sdk_render_setup setup,
   clipboard_state_.store(s);
   return true;
 }
-bool RenderSlots::Begin(uint32_t interval, bool force, std::string& error, bool* sent) {
+bool RenderSlots::Begin(uint32_t interval,
+                        bool force,
+                        std::string& error,
+                        bool* sent,
+                        bool keepalive) {
   PublishGuard publish{*this};
   if (sent)
     *sent = false;
-  if (!state_ || state_->closing)
+  if (!state_ || state_->closing) {
+    WithdrawAdmission();
     return true;
+  }
   auto& s = *state_;
-  if (!s.Advance(error))
+  if (!s.Advance(error)) {
+    WithdrawAdmission();
     return false;
+  }
   if (s.fatal) {
+    WithdrawAdmission();
     error = s.failure;
     return false;
   }
-  auto id = s.pacing.Reserve(force);
-  if (!id)
+  if (!CanAttemptAdmission())
     return true;
+  admission_woken_ = false;
+  auto id = s.pacing.Reserve(force);
+  if (!id) {
+    WithdrawAdmission();
+    return true;
+  }
+  const bool was_pending = admission_pending_;
+  const bool acquired = s.admission->TryAcquire(s.AdmissionIdentity(*id), admission_priority_);
+  if (!was_pending)
+    s.TraceAdmission("admission_request", *id);
+  if (!acquired) {
+    s.pacing.Reject(*id);
+    admission_pending_ = true;
+    if (!was_pending)
+      s.TraceAdmission("admission_wait", *id);
+    return true;
+  }
+  admission_pending_ = false;
+  s.TraceAdmission("admission_grant", *id);
   remotekit_sdk_render_request begin{id->generation, id->value, id->slot, interval,
                                      force ? 1u : 0u};
-  const auto begin_qpc = s.trace ? QpcNow() : 0;
+  const auto begin_qpc = QpcNow();
   auto result = s.sdk->remotekit_sdk_render_begin(s.channel, &begin);
   if (result != 0) {
     s.pacing.Reject(*id);
+    s.ReturnAdmission(*id, "send_rollback");
     if (result != REMOTEKIT_SDK_BUSY) {
       error = "render Begin send failed " + std::to_string(result);
       return false;
     }
   } else {
+    s.slots[id->slot].begin_qpc = begin_qpc;
+    s.slots[id->slot].keepalive = keepalive;
     ++counters_.begins;
     if (sent)
       *sent = true;
     RK_SERVER_TRACE(s.trace, "render_begin", (TraceIds{0, 0, id->generation, 0, 0}),
                     rk_record.slot = id->slot;
-                    rk_record.fence = id->value; rk_record.reason = force ? "force" : "cadence";
+                    rk_record.fence = id->value;
+                    rk_record.reason = keepalive ? "keepalive" : (force ? "force" : "cadence");
                     rk_record.qpc = begin_qpc; rk_record.producer_pid = s.producer_pid;
                     rk_record.leased = static_cast<int>(s.pacing.occupied()););
   }
@@ -374,6 +449,24 @@ bool RenderSlots::Begin(uint32_t interval, bool force, std::string& error, bool*
 }
 bool RenderSlots::HasCapacity() const {
   return state_ && state_->pacing.occupied() < state_->pacing.depth();
+}
+void RenderSlots::WithdrawAdmission() {
+  admission_woken_ = false;
+  if (!admission_pending_)
+    return;
+  admission_client_->Withdraw();
+  admission_pending_ = false;
+  PublishStats();
+}
+void RenderSlots::SetAdmissionPriority(FrameAdmission::Priority priority) {
+  if (priority == admission_priority_)
+    return;
+  admission_priority_ = priority;
+  if (admission_pending_)
+    admission_client_->Upgrade(priority);
+}
+HANDLE RenderSlots::AdmissionEventHandle() const {
+  return admission_client_ ? admission_client_->event() : nullptr;
 }
 HANDLE RenderSlots::EventHandle() const {
   return state_ ? state_->events.handle() : nullptr;
@@ -496,6 +589,24 @@ SharedAtlasFrame RenderSlots::Metadata(const remotekit_rtc_frame& frame) {
   const auto* slot = static_cast<const State::Slot*>(source->release_context);
   return slot && slot->cookie == source->frame_id ? slot->metadata : SharedAtlasFrame{};
 }
+bool RenderSlots::IsKeepalive(const remotekit_rtc_frame& frame) {
+  const auto* source = &frame;
+  while (auto* wrapped = TailRefreshLease::From(*source))
+    source = &wrapped->Source();
+  if (source->release != State::Release)
+    return false;
+  const auto* slot = static_cast<const State::Slot*>(source->release_context);
+  return slot && slot->cookie == source->frame_id ? slot->keepalive : false;
+}
+int64_t RenderSlots::BeginQpc(const remotekit_rtc_frame& frame) {
+  const auto* source = &frame;
+  while (auto* wrapped = TailRefreshLease::From(*source))
+    source = &wrapped->Source();
+  if (source->release != State::Release)
+    return 0;
+  const auto* slot = static_cast<const State::Slot*>(source->release_context);
+  return slot && slot->cookie == source->frame_id ? slot->begin_qpc : 0;
+}
 uint64_t RenderSlots::Generation() const {
   const auto state = clipboard_state_.load();
   return state ? state->setup.generation : 0;
@@ -505,6 +616,7 @@ SharedAtlasFrame RenderSlots::LatestMetadata() const {
 }
 bool RenderSlots::Close(std::string& error) {
   PublishGuard publish{*this};
+  WithdrawAdmission();
   clipboard_state_.store(nullptr);
   if (state_) {
     state_->RequestStop();

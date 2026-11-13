@@ -4,6 +4,7 @@
 #include "management/link.hpp"
 #include "media/adapter.hpp"
 #include "media/server_trace.hpp"
+#include "media/frame_admission.hpp"
 #include "persistence/session_db.hpp"
 #include "session/browser.hpp"
 #include "util/thread.hpp"
@@ -40,5 +41,6 @@ struct ControllerContext {
   const std::shared_ptr<media::ServerTrace> trace;
   objects::ObjectService& objects;
   std::shared_ptr<objects::SessionObjects> object_access;
+  media::FrameAdmission& frame_admission;
 };
 }  // namespace remotekit

@@ -14,6 +14,8 @@ namespace remotekit::media {
 struct EncoderStats {
   std::atomic<uint64_t> submitted{0}, completed{0}, bytes{0}, dropped{0};
   std::atomic<double> last_encode_ms{0};
+  std::atomic<int64_t> last_encoded_qpc{0};
+  std::atomic<uint64_t> brc_recodes{0}, brc_cap_hits{0};
   std::atomic<uint64_t> rate_updates{0}, keyframe_requests{0}, keyframes_submitted{0},
       keyframes_encoded{0};
   std::atomic<uint64_t> pending{0}, inflight{0}, queue_full_drops{0}, hardware_busy{0};
