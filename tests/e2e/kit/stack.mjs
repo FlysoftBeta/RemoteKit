@@ -21,6 +21,13 @@ import { promisify } from 'node:util';
 import { stageRuntime } from '../../integration/stage-runtime.mjs';
 import { startFixture } from './fixtures.mjs';
 import { fakeLearningProvider } from './learning-provider.mjs';
+import {
+  cleanupRun,
+  registerCleanup,
+  trackCleanupPid,
+  trackCleanupProcess,
+  trackNodeData,
+} from './cleanup.mjs';
 
 export const repository = fileURLToPath(new URL('../../../', import.meta.url));
 const root = repository;
@@ -142,6 +149,7 @@ export async function startStack({
 } = {}) {
   run = resolve(run);
   mkdirSync(run, { recursive: true });
+  registerCleanup(run);
   if (browser === defaultBrowser && browserBuild === 'dev')
     browser = 'C:/src/chromium/src/out/dev/remotekit_browser.exe';
   if (!['rel', 'dev'].includes(browserBuild)) throw Error('Expected browserBuild rel|dev');
@@ -213,6 +221,7 @@ export async function startStack({
   function record(child, log) {
     writeFileSync(log, '');
     children.push(child);
+    trackCleanupProcess(run, child);
     appendFileSync(join(run, 'pids.jsonl'), JSON.stringify({ pid: child.pid, log }) + '\n');
     for (const stream of ['stdout', 'stderr'])
       child[stream]?.on('data', (chunk) => appendFileSync(log, chunk));
@@ -235,6 +244,8 @@ export async function startStack({
       if (child.exitCode === null) {
         await Promise.race([new Promise((done) => child.once('exit', done)), pause(8000)]);
         stopTree(child);
+        if (child.exitCode === null)
+          await Promise.race([new Promise((done) => child.once('exit', done)), pause(10000)]);
       }
     }
     for (const server of servers) {
@@ -280,6 +291,14 @@ export async function startStack({
     for (const [key, value] of Object.entries(configOverrides))
       config[key] = value && typeof value === 'object' ? { ...config[key], ...value } : value;
     config = createControlConfig(config);
+    for (const node of Object.values(config.nodes)) {
+      if (node.local) {
+        const nodeRoot = node.local.root.startsWith(runtimeRoot)
+          ? join(run, relative(runtimeRoot, node.local.root))
+          : node.local.root;
+        trackNodeData(run, nodeRoot);
+      }
+    }
     writeFileSync(configPath, JSON.stringify(config, null, 2));
     const server =
       control === 'release'
@@ -308,8 +327,13 @@ export async function startStack({
     );
     const pending = new Map();
     const events = [];
+    const endpointPids = new Set();
     child.on('message', (message) => {
       if (message.event) {
+        if (message.event === 'node.ready' && message.pid && !endpointPids.has(message.pid)) {
+          endpointPids.add(message.pid);
+          trackCleanupPid(run, message.pid);
+        }
         events.push(message);
         appendFileSync(join(run, 'control-events.jsonl'), JSON.stringify(message) + '\n');
       }
@@ -377,6 +401,7 @@ export async function startStack({
       advance: (ms) => call('advance', { ms }),
       readLog: (name) => readFileSync(logs[name], 'utf8'),
       async startRemote(id, nodeRoot = join(run, id, 'root')) {
+        trackNodeData(run, nodeRoot);
         nodeRoot = join(runtimeRoot, relative(run, nodeRoot));
         await until(() => existsSync(join(run, 'nodes', id, 'node.json')), 'remote bootstrap');
         mkdirSync(nodeRoot, { recursive: true });
@@ -424,6 +449,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   );
   const close = async () => {
     await stack.stop();
+    await cleanupRun(stack.run);
     process.exit();
   };
   process.once('SIGINT', close);

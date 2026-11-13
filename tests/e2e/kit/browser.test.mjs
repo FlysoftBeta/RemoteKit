@@ -10,13 +10,24 @@ import { checkBrowserLaunchPolicy } from './browser-launch-policy.mjs';
 const evidence = fileURLToPath(new URL('../../../develop/tmp/e2e/', import.meta.url));
 mkdirSync(evidence, { recursive: true });
 
+function mockContext() {
+  return {
+    browser: () => ({
+      newBrowserCDPSession: async () => ({
+        send: async () => ({ processInfo: [{ type: 'browser', id: 987654 }] }),
+        detach: async () => {},
+      }),
+    }),
+  };
+}
+
 test('all test and tool browser launch sites use the seeded launcher', checkBrowserLaunchPolicy);
 
 test('fresh profile directories are seeded before browser startup', async (t) => {
   t.mock.method(childProcess, 'execFileSync', () => '0');
   const profile = join(mkdtempSync(join(evidence, 'profile-fresh-unit-')), 'viewer');
   assert.equal(existsSync(profile), false);
-  const context = {};
+  const context = mockContext();
   const browserType = {
     launchPersistentContext(path) {
       assert.equal(path, profile);
@@ -43,7 +54,7 @@ test('persistent and raw launches receive the seeded Local State before starting
     const currentChromiumTime = (BigInt(Date.now()) + 11644473600000n) * 1000n;
     assert(BigInt(passwordLastChanged) > currentChromiumTime);
   }
-  const context = {};
+  const context = mockContext();
   const browserType = {
     launchPersistentContext(path, options) {
       checkSeed(path);

@@ -53,6 +53,7 @@ nodes.on('ready', (identity) =>
     event: 'node.ready',
     ...identity,
     buildId: nodes.get(identity.nodeId)?.buildId,
+    pid: (nodes.get(identity.nodeId) as any)?.child?.pid,
   }),
 );
 nodes.on('offline', (nodeId) => notify({ event: 'node.offline', nodeId }));
