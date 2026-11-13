@@ -95,6 +95,38 @@ function killOwned(child) {
   if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
   spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
 }
+// Browsers relaunch themselves (the spawned msedge.exe can exit after starting the real
+// browser), so the spawned PID does not identify what this run owns. Its profile directories
+// do: kill every process tree whose command line names one of them.
+export function killByDirectories(paths) {
+  const needles = paths.map((path) => resolve(path).toLowerCase());
+  const listed = spawnSync(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      'Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | ' +
+        'ForEach-Object { "$($_.ProcessId)`t$($_.CommandLine)" }',
+    ],
+    { encoding: 'utf8', windowsHide: true, timeout: 30000 },
+  );
+  if (listed.status !== 0) throw Error('Cannot list processes for cleanup: ' + listed.stderr);
+  const owned = new Set();
+  for (const line of listed.stdout.split(/\r?\n/)) {
+    const tab = line.indexOf('\t');
+    if (tab < 0) continue;
+    const command = line
+      .slice(tab + 1)
+      .toLowerCase()
+      .replaceAll('/', '\\');
+    const pid = line.slice(0, tab);
+    if (pid !== String(process.pid) && needles.some((needle) => command.includes(needle))) owned.add(pid);
+  }
+  for (const pid of owned)
+    spawnSync('taskkill', ['/PID', pid, '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 30000 });
+  return owned.size;
+}
 function gateSample(sample, adapter) {
   const [high, low] = adapter.split(',').map(Number);
   const luid = `luid_0x${(high >>> 0).toString(16).padStart(8, '0')}_0x${(low >>> 0).toString(16).padStart(8, '0')}`;
@@ -251,6 +283,21 @@ export async function run(options = {}) {
   const onSignal = () => fail('Run interrupted');
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
+  const ownedDirectories = () => [
+    join(out, 'receiver-profile'),
+    ...kinds.map((_, i) => join(out, `browser-${i}`)),
+  ];
+  // Every wait below is bounded, but a hung native call or a handle left open by a crashed
+  // child must not keep this run alive: past its own budget it kills what it owns and exits.
+  const budgetMs = (warmup + duration) * 1000 + 15 * 60 * 1000;
+  const watchdog = setTimeout(() => {
+    console.error(`schedlab: run exceeded its ${budgetMs} ms budget; killing owned processes`);
+    killOwned(bench);
+    killOwned(receiver);
+    killByDirectories(ownedDirectories());
+    process.exit(2);
+  }, budgetMs);
+  watchdog.unref();
   const metadata = {
     schema: 'schedlab-v1',
     label,
@@ -541,13 +588,16 @@ export async function run(options = {}) {
     killOwned(bench);
     killOwned(receiver);
     await cleanup(async () => {
+      const relaunched = killByDirectories(ownedDirectories());
+      if (relaunched) metadata.orphansKilled = relaunched;
+    });
+    await cleanup(async () => {
       if (bench) await until(() => bench.exitCode !== null || bench.signalCode !== null, 10000, 'bench exit');
       if (receiver)
         await until(() => receiver.exitCode !== null || receiver.signalCode !== null, 10000, 'receiver exit');
     });
     await cleanup(async () => {
-      for (const path of [join(out, 'receiver-profile'), ...kinds.map((_, i) => join(out, `browser-${i}`))])
-        await removeProfile(out, path);
+      for (const path of ownedDirectories()) await removeProfile(out, path);
     });
     for (const client of wss.clients) client.terminate();
     await new Promise((done) => wss.close(done));
@@ -576,6 +626,7 @@ export async function run(options = {}) {
     save();
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
+    clearTimeout(watchdog);
   }
   const summary = await finishRun(out, metadata, options, failure);
   console.log(JSON.stringify(summary.aggregate));
@@ -599,8 +650,12 @@ export async function finishRun(out, metadata, options, failure) {
   return summary;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  run(argsOf(process.argv.slice(2))).catch((error) => {
-    console.error(error.stack ?? error);
-    process.exitCode = 1;
-  });
+  // Exit explicitly: a handle a child left open must not keep a finished run alive.
+  run(argsOf(process.argv.slice(2))).then(
+    () => process.exit(0),
+    (error) => {
+      console.error(error.stack ?? error);
+      process.exit(1);
+    },
+  );
 }
