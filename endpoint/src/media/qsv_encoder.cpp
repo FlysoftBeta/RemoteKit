@@ -1,5 +1,5 @@
 #include "util/log.hpp"
-#include "hardware_encoder.hpp"
+#include "qsv_encoder.hpp"
 #include "gpu_device.hpp"
 #include "qsv_rate_controller.hpp"
 #include <vpl/mfxbrc.h>
@@ -20,6 +20,24 @@
 #include <thread>
 #include <utility>
 namespace remotekit::media {
+remotekit::Result<void> ValidateQsvGeometry(const EncoderSettings& requested,
+                                            uint32_t width,
+                                            uint32_t height,
+                                            uint32_t crop_width,
+                                            uint32_t crop_height) {
+  const auto aligned_width = (requested.width + 15) & ~15u;
+  const auto aligned_height = (requested.height + 15) & ~15u;
+  if (width == aligned_width && height == aligned_height && crop_width == requested.width &&
+      crop_height == requested.height)
+    return {};
+  return remotekit::Error{remotekit::ErrorCode::kUnavailable,
+                          "QSV unavailable: requested geometry " + std::to_string(aligned_width) +
+                              "x" + std::to_string(aligned_height) + " crop " +
+                              std::to_string(requested.width) + "x" +
+                              std::to_string(requested.height) + "; actual " +
+                              std::to_string(width) + "x" + std::to_string(height) + " crop " +
+                              std::to_string(crop_width) + "x" + std::to_string(crop_height)};
+}
 namespace {
 using Microsoft::WRL::ComPtr;
 struct Memory {
@@ -258,14 +276,6 @@ class Qsv final : public HardwareEncoder {
   }
 
  public:
-  State GetState() const override {
-    if (!deferred_error_.empty())
-      return State::kFailed;
-    if (flush_packet_)
-      return State::kDraining;
-    return initialized_ ? State::kReady : State::kStopped;
-  }
-
   std::optional<QsvLowPowerInfo> LowPowerInfo() const override { return low_power_; }
   std::optional<QsvRateControlInfo> RateControlInfo() const override { return rate_control_; }
   ~Qsv() override {
@@ -522,6 +532,13 @@ class Qsv final : public HardwareEncoder {
              {{"lowPower", low_power_.initialized.value_or(-1)}, {"status", get_status}});
     if (!Status(get_status, "MFX GetVideoParam", error))
       return false;
+    const auto& actual_frame = params_.mfx.FrameInfo;
+    auto geometry = ValidateQsvGeometry(settings, actual_frame.Width, actual_frame.Height,
+                                        actual_frame.CropW, actual_frame.CropH);
+    if (!geometry) {
+      error = geometry.error().message;
+      return false;
+    }
     ReadRateControl();
     if (!MatchesFrameRate(params_.mfx.FrameInfo, 60)) {
       error = "QSV initialization did not apply configured frame rate";

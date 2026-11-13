@@ -1,4 +1,5 @@
 #include "media/qsv_rate_controller.hpp"
+#include "media/qsv_encoder.hpp"
 #include <algorithm>
 #include <cmath>
 #include <thread>
@@ -12,6 +13,26 @@ void Require(bool condition, const char* message) {
 
 int main() {
   try {
+    remotekit::media::EncoderSettings geometry;
+    geometry.width = 1938;
+    geometry.height = 1082;
+    Require(bool(remotekit::media::ValidateQsvGeometry(geometry, 1952, 1088, 1938, 1082)),
+            "requested aligned geometry rejected");
+    for (size_t field = 0; field < 4; ++field) {
+      uint32_t actual[] = {1952, 1088, 1938, 1082};
+      actual[field] += 16;
+      auto result = remotekit::media::ValidateQsvGeometry(geometry, actual[0], actual[1], actual[2],
+                                                          actual[3]);
+      Require(!result && result.error().code == remotekit::ErrorCode::kUnavailable,
+              "driver geometry adjustment accepted");
+      Require(result.error().message.find("requested geometry 1952x1088 crop 1938x1082") !=
+                      std::string::npos &&
+                  result.error().message.find("actual " + std::to_string(actual[0]) + "x" +
+                                              std::to_string(actual[1]) + " crop " +
+                                              std::to_string(actual[2]) + "x" +
+                                              std::to_string(actual[3])) != std::string::npos,
+              "geometry failure omitted requested/actual dimensions");
+    }
     remotekit::media::QsvRateController model(1200000, 2400000);
     double final_error = 1;
     for (uint32_t frame = 0; frame < 100; ++frame) {

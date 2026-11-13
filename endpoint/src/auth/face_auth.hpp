@@ -2,6 +2,10 @@
 
 #include "util/error.hpp"
 #include <array>
+#include <atomic>
+#include <functional>
+#include <mutex>
+#include <thread>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -66,6 +70,13 @@ class Faces {
   std::array<uint64_t, kFaceGateCount> GateFailures();
 
  private:
+  friend struct FaceWorkerTestAccess;
+  struct Worker {
+    enum class State { kNotStarted, kRunning, kExited };
+    std::atomic<State> state{State::kNotStarted};
+    std::jthread thread;
+    void Start(std::mutex&, std::function<void(std::stop_token)>, std::function<void()> failed);
+  };
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

@@ -12,6 +12,7 @@ struct StreamingAdapter {
   ComPtr<ID3D11DeviceContext4> context;
 };
 std::string AdapterLuid(LUID luid);
+EncoderSettings SelectedEncoderSettings(EncoderSettings, std::string_view backend);
 struct AdapterConfig {
   std::string encoder;
   EncoderSettings encoding;

@@ -163,9 +163,47 @@ void FramePolicyTests() {
 }
 }  // namespace
 
+namespace rk::auth {
+struct FaceWorkerTestAccess {
+  static void RestartAfterExit() {
+    std::mutex mutex;
+    Faces::Worker worker;
+    std::atomic<unsigned> attempts{0}, failures{0};
+    auto run = [&](std::stop_token) {
+      ++attempts;
+      throw std::runtime_error("inference failure");
+    };
+    auto failed = [&] { ++failures; };
+    auto wait_for_exit = [&] {
+      const auto deadline = std::chrono::steady_clock::now() + 2s;
+      while (worker.state != Faces::Worker::State::kExited &&
+             std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(1ms);
+      std::lock_guard lock(mutex);
+      Require(worker.state == Faces::Worker::State::kExited, "worker did not exit");
+    };
+    Require(worker.state == Faces::Worker::State::kNotStarted, "worker initial state");
+    {
+      std::lock_guard lock(mutex);
+      worker.Start(mutex, run, failed);
+    }
+    wait_for_exit();
+    Require(worker.thread.joinable(), "exited thread must still require join");
+    {
+      std::lock_guard lock(mutex);
+      worker.Start(mutex, run, failed);
+    }
+    wait_for_exit();
+    Require(attempts == 2 && failures == 2, "exited inference worker was not restarted");
+    worker.thread.join();
+  }
+};
+}  // namespace rk::auth
+
 int main(int argc, char** argv) {
   using namespace rk::auth;
   using namespace std::chrono_literals;
+  FaceWorkerTestAccess::RestartAfterExit();
   DetectionTests();
   FramePolicyTests();
   if (argc != 2)

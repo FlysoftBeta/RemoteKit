@@ -36,6 +36,16 @@ class Host : public CompHost {
 };
 }  // namespace
 int main() {
+  EncoderSettings defaults;
+  const auto qsv = SelectedEncoderSettings(defaults, "qsv");
+  const auto nvenc = SelectedEncoderSettings(defaults, "nvenc");
+  CHECK(qsv.target_usage == 7 && qsv.vbr);
+  CHECK(nvenc.target_usage == 4 && !nvenc.vbr);
+  defaults.target_usage = 2;
+  defaults.vbr = false;
+  defaults.target_usage_explicit = defaults.rate_control_explicit = true;
+  const auto explicit_qsv = SelectedEncoderSettings(defaults, "qsv");
+  CHECK(explicit_qsv.target_usage == 2 && !explicit_qsv.vbr);
   Sdk sdk;
   sdk.remotekit_rtc_get_source_restrictions = Restrictions;
   uint32_t observed_bitrate = 0, observed_fps = 0;

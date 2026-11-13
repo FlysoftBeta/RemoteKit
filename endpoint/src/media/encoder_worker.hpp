@@ -10,6 +10,7 @@
 #include <atomic>
 #include <map>
 #include <functional>
+#include <exception>
 namespace remotekit::media {
 struct EncoderStats {
   std::atomic<uint64_t> submitted{0}, completed{0}, bytes{0}, dropped{0};
@@ -48,7 +49,6 @@ class EncoderWorker {
           {});
   ~EncoderWorker();
   enum class State { kStopped, kRunning, kPaused, kStopping, kFailed };
-  State state();
   bool Configure(const remotekit_rtc_encoder_config&);
   bool Enqueue(const remotekit_rtc_frame&, bool keyframe);
   void Rates(uint32_t bitrate, uint32_t fps);
@@ -57,7 +57,19 @@ class EncoderWorker {
 
  private:
   friend struct EncoderWorkerTestAccess;
+  struct FrameLease {
+    FrameLease(const remotekit_rtc_frame&, std::shared_ptr<std::atomic<uint32_t>>);
+    ~FrameLease();
+    FrameLease(const FrameLease&) = delete;
+    FrameLease& operator=(const FrameLease&) = delete;
+    remotekit_rtc_frame frame;
+    ComPtr<ID3D11Texture2D> texture;
+    std::shared_ptr<std::atomic<uint32_t>> admission;
+  };
   struct Job {
+    enum class Stage { kSource, kConverted };
+    std::unique_ptr<FrameLease> lease;
+    Stage stage = Stage::kSource;
     remotekit_rtc_frame frame{};
     bool key = false;
     uint64_t cookie = 0;
@@ -65,9 +77,11 @@ class EncoderWorker {
     uint32_t surface = 0;
   };
   void Run();
+  void RunLoop();
+  void Shutdown(std::exception_ptr&);
   void Complete(AccessUnit&);
   void Error(const std::string&);
-  bool RetainUnsafeInputs(Job* additional = nullptr);
+  bool RetainUnsafeInputs();
   Sdk& sdk_;
   uint64_t encoder_;
   ComPtr<ID3D11Device> device_;
@@ -88,9 +102,8 @@ class EncoderWorker {
   std::mutex mutex_;
   std::condition_variable wake_;
   std::thread thread_;
-  bool stopping_ = false, configured_ = false;
-  std::atomic<bool> failed_{false};
-  std::atomic<bool> keyframe_{true}, paused_{false};
+  std::atomic<State> state_{State::kStopped};
+  std::atomic<bool> keyframe_{true};
   struct RateUpdate {
     uint32_t bitrate = 0, fps = 0;
   };
@@ -99,7 +112,8 @@ class EncoderWorker {
       hardware_factory_;  // Optional backend injection.
   uint32_t fps_limit_ = 0;
   uint32_t rate_limit_ = 0;  // Immutable configured/negotiated ceiling while running.
-  std::atomic<uint32_t> retained_frames_{0};
+  std::shared_ptr<std::atomic<uint32_t>> retained_frames_ =
+      std::make_shared<std::atomic<uint32_t>>(0);
   static constexpr uint32_t kFrameCapacity = 4;
 };
 }  // namespace remotekit::media

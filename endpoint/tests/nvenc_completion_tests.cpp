@@ -2,6 +2,7 @@
 #include "media/encoder_worker.hpp"
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 
 #define CHECK(x)                             \
   do {                                       \
@@ -13,6 +14,13 @@
 using namespace remotekit::media;
 using namespace std::chrono_literals;
 namespace {
+template <typename T>
+concept HasHardwareStateQuery = requires(T& encoder) { encoder.GetState(); };
+template <typename T>
+concept HasWorkerStateQuery = requires(T& worker) { worker.state(); };
+static_assert(!HasHardwareStateQuery<HardwareEncoder>);
+static_assert(!HasWorkerStateQuery<EncoderWorker>);
+
 // Only COM lifetime is exercised: none of these methods creates or uses a GPU.
 struct TrackedTexture final : ID3D11Texture2D {
   ULONG refs = 1;
@@ -51,7 +59,6 @@ struct RateState {
   }
 };
 class RateBackend final : public HardwareEncoder {
-  State GetState() const override { return State::kReady; }
   std::shared_ptr<RateState> state_;
   EncoderSettings settings_;
 
@@ -95,6 +102,20 @@ struct Driver {
   NVENCSTATUS unlock_status = NV_ENC_SUCCESS;
   unsigned waits = 0, locks = 0, unmaps = 0, unlocks = 0, destroys = 0;
   unsigned unregisters = 0, buffers_destroyed = 0, eos_submits = 0;
+  unsigned registrations = 0, fail_registration = 0;
+  std::vector<HANDLE> created_events, registered_events;
+  static NVENCSTATUS NVENCAPI Register(void* session, NV_ENC_EVENT_PARAMS* event) {
+    auto& self = Get(session);
+    self.created_events.push_back(event->completionEvent);
+    if (++self.registrations == self.fail_registration)
+      return NV_ENC_ERR_GENERIC;
+    self.registered_events.push_back(event->completionEvent);
+    return NV_ENC_SUCCESS;
+  }
+  static NVENCSTATUS NVENCAPI CreateBuffer(void*, NV_ENC_CREATE_BITSTREAM_BUFFER* output) {
+    output->bitstreamBuffer = reinterpret_cast<NV_ENC_OUTPUT_PTR>(1);
+    return NV_ENC_SUCCESS;
+  }
   DWORD last_wait = 0;
   static Driver& Get(void* session) { return *static_cast<Driver*>(session); }
   static NVENCSTATUS NVENCAPI Lock(void* session, NV_ENC_LOCK_BITSTREAM* bits) {
@@ -126,8 +147,12 @@ struct Driver {
     CHECK(self.eos);
     return NV_ENC_SUCCESS;
   }
-  static NVENCSTATUS NVENCAPI Unregister(void* session, NV_ENC_EVENT_PARAMS*) {
-    ++Get(session).unregisters;
+  static NVENCSTATUS NVENCAPI Unregister(void* session, NV_ENC_EVENT_PARAMS* event) {
+    auto& self = Get(session);
+    if (self.fail_registration)
+      CHECK(std::find(self.registered_events.begin(), self.registered_events.end(),
+                      event->completionEvent) != self.registered_events.end());
+    ++self.unregisters;
     return NV_ENC_SUCCESS;
   }
   static NVENCSTATUS NVENCAPI DestroyBuffer(void* session, NV_ENC_OUTPUT_PTR) {
@@ -140,6 +165,8 @@ struct Driver {
   }
   std::unique_ptr<HardwareEncoder> Make() {
     NV_ENCODE_API_FUNCTION_LIST api{};
+    api.nvEncRegisterAsyncEvent = Register;
+    api.nvEncCreateBitstreamBuffer = CreateBuffer;
     api.nvEncLockBitstream = Lock;
     api.nvEncUnlockBitstream = Unlock;
     api.nvEncUnmapInputResource = Unmap;
@@ -148,6 +175,8 @@ struct Driver {
     api.nvEncDestroyBitstreamBuffer = DestroyBuffer;
     api.nvEncDestroyEncoder = Destroy;
     NvencTestHooks hooks;
+    if (fail_registration)
+      hooks.stage = NvencTestHooks::Stage::kInitializeEvents;
     hooks.now = [this] { return time; };
     hooks.wait = [this](HANDLE event, DWORD timeout) {
       ++waits;
@@ -160,6 +189,63 @@ struct Driver {
     };
     return CreateNvencEncoderForTest(api, this, completion, reinterpret_cast<NV_ENC_OUTPUT_PTR>(1),
                                      reinterpret_cast<NV_ENC_INPUT_PTR>(2), 73, std::move(hooks));
+  }
+};
+void InitializationRollback() {
+  for (unsigned fail = 1; fail <= 5; ++fail) {
+    Driver driver;
+    driver.fail_registration = fail;
+    const auto before = GetNvencQuarantineInfo();
+    auto encoder = driver.Make();
+    encoder.reset();
+    CHECK(driver.eos_submits == 0 && driver.destroys == 1);
+    CHECK(driver.unregisters == fail - 1 && driver.buffers_destroyed == fail - 1);
+    for (auto event : driver.created_events) {
+      CHECK(WaitForSingleObject(event, 0) == WAIT_FAILED);
+      CHECK(GetLastError() == ERROR_INVALID_HANDLE);
+    }
+    CHECK(GetNvencQuarantineInfo().unavailable == before.unavailable);
+    CHECK(GetNvencQuarantineInfo().sessions == before.sessions);
+    CloseHandle(driver.completion);
+  }
+}
+struct WorkerBackend final : HardwareEncoder {
+  enum class Behavior { kBusy, kPublishThrows, kCompletionThrows, kPollThrows, kDrainThrows };
+  Behavior behavior;
+  struct Observed {
+    unsigned drains = 0, polls = 0;
+    std::vector<std::chrono::steady_clock::time_point> submissions;
+    std::vector<uint64_t> cookies;
+  };
+  std::shared_ptr<Observed> observed = std::make_shared<Observed>();
+  explicit WorkerBackend(Behavior value) : behavior(value) {}
+  bool Configure(ID3D11Device*, const EncoderSettings&, std::string&) override { return true; }
+  const char* Name() const override { return "worker-mock"; }
+  bool SetRates(uint32_t, uint32_t, std::string&, uint32_t) override { return true; }
+  CodecResult Submit(ID3D11Texture2D*, bool, uint64_t cookie, std::string&, FrameContext) override {
+    observed->submissions.push_back(std::chrono::steady_clock::now());
+    observed->cookies.push_back(cookie);
+    return observed->submissions.size() <= 3 ? CodecResult::busy : CodecResult::error;
+  }
+  CodecResult Poll(uint32_t, AccessUnit& unit, std::string&) override {
+    ++observed->polls;
+    if (behavior == Behavior::kPollThrows)
+      throw std::runtime_error("poll failure");
+    if (behavior == Behavior::kDrainThrows)
+      return CodecResult::error;
+    unit.frame_cookie = 1;
+    return CodecResult::ready;
+  }
+  bool Drain(std::vector<AccessUnit>& units, std::string&) override {
+    ++observed->drains;
+    if (behavior == Behavior::kDrainThrows)
+      throw std::runtime_error("drain failure");
+    if (behavior != Behavior::kBusy) {
+      AccessUnit unit;
+      unit.frame_cookie = 2;
+      units.push_back(std::move(unit));
+    }
+    return true;
   }
 };
 void PendingThenComplete() {
@@ -217,6 +303,8 @@ void TimeoutAndLateCompletion() {
   encoder->HoldInputsUntilProcessExit(owner);
   owner.reset();
   auto before = GetNvencQuarantineInfo().sessions;
+  EncoderSettings failed_settings;
+  CHECK(!encoder->Configure(nullptr, failed_settings, error) && error == fault);
   encoder.reset();
   CHECK(!weak.expired() && driver.destroys == 0 && driver.buffers_destroyed == 0 &&
         driver.unregisters == 0);
@@ -286,6 +374,83 @@ void EosMustActuallyComplete() {
 }  // namespace
 namespace remotekit::media {
 struct EncoderWorkerTestAccess {
+  static void OwnershipAndBusy() {
+    using Behavior = WorkerBackend::Behavior;
+    for (auto behavior : {Behavior::kBusy, Behavior::kPublishThrows, Behavior::kCompletionThrows,
+                          Behavior::kPollThrows, Behavior::kDrainThrows}) {
+      Sdk sdk;
+      sdk.remotekit_rtc_encoded = [](uint64_t, const remotekit_rtc_encoded_frame*, uint32_t*) {
+        return 0;
+      };
+      auto stats = std::make_shared<EncoderStats>();
+      TrackedTexture source, surface;
+      int leases = 0;
+      EncoderWorker worker(
+          sdk, 1, nullptr, "nvenc", {}, stats,
+          [](uint32_t, uint64_t, size_t, bool, const remotekit_rtc_frame&) {
+            throw std::runtime_error("completion failure");
+          },
+          {}, 0,
+          [behavior](const remotekit_rtc_frame&, bool, const std::function<bool()>& send) {
+            if (behavior == Behavior::kPublishThrows)
+              throw std::runtime_error("publish failure");
+            return send();
+          });
+      auto backend = std::make_unique<WorkerBackend>(behavior);
+      auto observed = backend->observed;
+      worker.hardware_ = std::move(backend);
+      worker.state_ = EncoderWorker::State::kRunning;
+      remotekit_rtc_frame frame{};
+      frame.d3d11_texture = &source;
+      frame.release_context = &leases;
+      frame.retain = [](void* p, uint64_t) { ++*static_cast<int*>(p); };
+      frame.release = [](void* p, uint64_t) { --*static_cast<int*>(p); };
+      const unsigned count = behavior == Behavior::kBusy ? 1 : 3;
+      for (unsigned id = 1; id <= count; ++id) {
+        frame.frame_id = id;
+        CHECK(worker.Enqueue(frame, false));
+        worker.queue_.back().stage = EncoderWorker::Job::Stage::kConverted;
+      }
+      if (behavior == Behavior::kBusy) {
+        worker.surfaces_.emplace_back(&surface);
+        worker.free_.push_back(0);
+      } else {
+        for (unsigned id = 1; id <= 2; ++id) {
+          worker.inflight_.emplace(id, std::move(worker.queue_.front()));
+          worker.queue_.pop_front();
+          --stats->pending;
+          ++stats->inflight;
+        }
+      }
+      worker.Run();
+      CHECK(observed->drains == 1);
+      CHECK(worker.queue_.empty() && worker.inflight_.empty());
+      CHECK(leases == 0 && source.refs == 1 && *worker.retained_frames_ == 0);
+      CHECK(stats->pending == 0 && stats->inflight == 0);
+      CHECK(worker.state_ == EncoderWorker::State::kFailed);
+      if (behavior == Behavior::kBusy) {
+        CHECK(observed->submissions.size() == 4 && observed->polls == 0);
+        for (size_t i = 1; i < observed->submissions.size(); ++i) {
+          CHECK(observed->submissions[i] - observed->submissions[i - 1] >= 3ms);
+          CHECK(observed->cookies[i] == observed->cookies[0]);
+        }
+      }
+      worker.Stop();
+      CHECK(worker.state_ == EncoderWorker::State::kStopped);
+      CHECK(surface.refs == 1);
+      worker.state_ = EncoderWorker::State::kRunning;
+      CHECK(worker.Enqueue(frame, false));
+      worker.hardware_factory_ = [] {
+        return std::make_unique<RateBackend>(std::make_shared<RateState>());
+      };
+      remotekit_rtc_encoder_config config{};
+      config.width = config.height = 16;
+      config.h264_level_idc = 51;
+      CHECK(!worker.Configure(config));
+      CHECK(leases == 0 && source.refs == 1 && *worker.retained_frames_ == 0);
+      CHECK(worker.queue_.empty() && worker.inflight_.empty());
+    }
+  }
   static void H264ConfigureAndGccRates() {
     Sdk sdk;
     auto stats = std::make_shared<EncoderStats>();
@@ -309,9 +474,7 @@ struct EncoderWorkerTestAccess {
     CHECK(stats->Snapshot()["error"] == "rate_mock_configuration_boundary");
     worker.hardware_ = std::make_unique<RateBackend>(state);
     worker.rate_limit_ = worker.settings_.max_bitrate;
-    worker.failed_ = false;
-    worker.stopping_ = false;
-    worker.configured_ = true;
+    worker.state_ = EncoderWorker::State::kRunning;
     worker.thread_ = std::thread([&] { worker.Run(); });
     worker.Rates(1234567, 120);
     state->Wait(1);
@@ -320,11 +483,12 @@ struct EncoderWorkerTestAccess {
     state->Wait(2);
     worker.keyframe_ = false;
     worker.Rates(0, 120);
-    CHECK(worker.paused_);
+    CHECK(worker.state_ == EncoderWorker::State::kPaused);
     worker.Rates(1234567, 120);
     CHECK(worker.keyframe_);
     state->Wait(3);
     worker.Stop();
+    CHECK(worker.state_ == EncoderWorker::State::kStopped);
     std::lock_guard lock(state->mutex);
     CHECK(state->rates.size() == 3);
     CHECK(state->rates[0].first == 1234567 && state->rates[0].second == 63);
@@ -335,7 +499,7 @@ struct EncoderWorkerTestAccess {
     Sdk sdk;
     auto stats = std::make_shared<EncoderStats>();
     EncoderWorker worker(sdk, 1, nullptr, "nvenc", {}, stats, {});
-    worker.configured_ = true;
+    worker.state_ = EncoderWorker::State::kRunning;
     TrackedTexture texture;
     int leases = 0;
     remotekit_rtc_frame frame{};
@@ -357,16 +521,16 @@ struct EncoderWorkerTestAccess {
     CHECK(worker.queue_[1].key && !worker.queue_[0].key);
     worker.keyframe_ = false;
     worker.Rates(0, 60);
-    CHECK(worker.paused_ && worker.pending_rates_->bitrate == 0);
+    CHECK(worker.state_ == EncoderWorker::State::kPaused && worker.pending_rates_->bitrate == 0);
     CHECK(!worker.Enqueue(frame, false) && stats->paused_drops == 1);
     worker.Rates(1234567, 27);
-    CHECK(!worker.paused_ && worker.keyframe_);
+    CHECK(worker.state_ == EncoderWorker::State::kRunning && worker.keyframe_);
     CHECK(worker.pending_rates_->bitrate == 1234567 && worker.pending_rates_->fps == 27);
     auto snapshot = stats->Snapshot();
     CHECK(snapshot["gccTargetBitrate"] == 1234567 && snapshot["gccTargetFps"] == 27);
     // Retire through production Run's never-submitted cleanup, without a GPU.
     worker.hardware_ = std::make_unique<RateBackend>(std::make_shared<RateState>());
-    worker.stopping_ = true;
+    worker.state_ = EncoderWorker::State::kStopping;
     worker.Run();
     worker.Stop();
     CHECK(leases == 0 && texture.refs == 1 && stats->pending == 0);
@@ -380,31 +544,38 @@ struct EncoderWorkerTestAccess {
     job.frame.release_context = &releases;
     job.frame.release = [](void* context, uint64_t) { ++*static_cast<int*>(context); };
     job.frame.d3d11_texture = first;
-    // Submit-error retirement includes the current job outside inflight_. A
-    // subsequent empty retirement must not replace this first source owner.
-    CHECK(worker.RetainUnsafeInputs(&job));
+    job.frame.retain = [](void*, uint64_t) {};
+    job.lease = std::make_unique<EncoderWorker::FrameLease>(job.frame, worker.retained_frames_);
+    first->Release();
+    worker.inflight_.emplace(73, std::move(job));
+    worker.stats_->inflight = 1;
     CHECK(worker.RetainUnsafeInputs());
-    CHECK(first->refs == 1 && first->releases == 0 && releases == 0);
+    CHECK(worker.RetainUnsafeInputs());
+    CHECK(first->refs == 1 && first->releases == 1 && releases == 0);
     auto* second = new TrackedTexture;
     job.frame.d3d11_texture = second;
-    worker.inflight_.emplace(74, job);
+    job.lease = std::make_unique<EncoderWorker::FrameLease>(job.frame, worker.retained_frames_);
+    second->Release();
+    worker.inflight_.emplace(74, std::move(job));
     worker.stats_->inflight = 1;
     CHECK(worker.RetainUnsafeInputs());
     CHECK(worker.RetainUnsafeInputs());
     CHECK(worker.inflight_.empty() && worker.stats_->inflight == 0);
-    CHECK(worker.stats_->error_drops == 1 && worker.stats_->dropped == 1);
-    CHECK(first->refs == 1 && first->releases == 0);
-    CHECK(second->refs == 1 && second->releases == 0 && releases == 0);
+    CHECK(worker.stats_->error_drops == 2 && worker.stats_->dropped == 2);
+    CHECK(first->refs == 1 && first->releases == 1);
+    CHECK(second->refs == 1 && second->releases == 1 && releases == 0);
     worker.hardware_.reset();
     CHECK(!worker.RetainUnsafeInputs());
     worker.Stop();
     worker.Stop();
-    CHECK(first->refs == 1 && first->releases == 0);
-    CHECK(second->refs == 1 && second->releases == 0 && releases == 0);
+    CHECK(first->refs == 1 && first->releases == 1);
+    CHECK(second->refs == 1 && second->releases == 1 && releases == 0);
   }
 };
 }  // namespace remotekit::media
 int main() {
+  InitializationRollback();
+  EncoderWorkerTestAccess::OwnershipAndBusy();
   PendingThenComplete();
   DrainCompletesOutstanding();
   TimeoutAndLateCompletion();

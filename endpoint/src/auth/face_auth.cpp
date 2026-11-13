@@ -47,7 +47,7 @@ bool ValidChallenge(FaceChallenge& challenge) {
 struct Faces::Impl {
   explicit Impl(std::filesystem::path path) : models(std::move(path)) {}
   ~Impl() {
-    worker.request_stop();
+    worker.thread.request_stop();
     changed.notify_all();
   }
 
@@ -173,8 +173,38 @@ struct Faces::Impl {
   FaceWindow samples;
   std::array<uint64_t, kFaceGateCount> gate_failures{};
   std::optional<uint64_t> last_presence_hash;
-  std::jthread worker;
+  Worker worker;
 };
+
+void Faces::Worker::Start(std::mutex& mutex,
+                          std::function<void(std::stop_token)> run,
+                          std::function<void()> failed) {
+  if (state == State::kRunning)
+    return;
+  if (state == State::kExited)
+    thread.join();
+  state = State::kRunning;
+  try {
+    thread = std::jthread(
+        [this, &mutex, run = std::move(run), failed = std::move(failed)](std::stop_token stop) {
+          remotekit::RunThread(
+              "face",
+              [&] {
+                run(stop);
+                std::lock_guard lock(mutex);
+                state = State::kExited;
+              },
+              [&] {
+                std::lock_guard lock(mutex);
+                state = State::kExited;
+                failed();
+              });
+        });
+  } catch (...) {
+    state = State::kNotStarted;
+    throw;
+  }
+}
 
 Faces::Faces(std::filesystem::path models) : impl_(std::make_unique<Impl>(std::move(models))) {}
 Faces::~Faces() = default;
@@ -210,19 +240,14 @@ bool Faces::Begin(FaceChallenge challenge) {
   impl_->last_match = now;
   impl_->last_submit = now - 1s;
   impl_->deadline = now + std::chrono::milliseconds(impl_->challenge.timeout_ms);
-  if (!impl_->worker.joinable()) {
-    impl_->worker = std::jthread([impl = impl_.get()](std::stop_token stop) {
-      remotekit::RunThread(
-          "face", [impl, stop] { impl->Run(stop); },
-          [impl] {
-            std::lock_guard lock(impl->mutex);
-            impl->Finish({FaceState::failed,
-                          {},
-                          FaceOutcome::none,
-                          remotekit::Error{remotekit::ErrorCode::kInternal, "Face worker failed"}});
-          });
-    });
-  }
+  impl_->worker.Start(
+      impl_->mutex, [impl = impl_.get()](std::stop_token stop) { impl->Run(stop); },
+      [impl = impl_.get()] {
+        impl->Finish({FaceState::failed,
+                      {},
+                      FaceOutcome::none,
+                      remotekit::Error{remotekit::ErrorCode::kInternal, "Face worker failed"}});
+      });
   impl_->changed.notify_one();
   return true;
 }

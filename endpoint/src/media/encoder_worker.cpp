@@ -5,6 +5,8 @@
 #include "media/tail_refresh.hpp"
 #include "media/render_slots.hpp"
 #include <chrono>
+#include <cassert>
+#include <exception>
 #include <utility>
 namespace remotekit::media {
 nlohmann::json EncoderStats::Snapshot() {
@@ -93,49 +95,61 @@ EncoderWorker::EncoderWorker(
 EncoderWorker::~EncoderWorker() {
   Stop();
 }
+EncoderWorker::FrameLease::FrameLease(const remotekit_rtc_frame& source,
+                                      std::shared_ptr<std::atomic<uint32_t>> count)
+    : frame(source),
+      texture(static_cast<ID3D11Texture2D*>(source.d3d11_texture)),
+      admission(std::move(count)) {
+  frame.retain(frame.release_context, frame.frame_id);
+  ++*admission;
+}
+EncoderWorker::FrameLease::~FrameLease() {
+  remotekit::TailRefreshLease::Finish(frame, false);
+  frame.release(frame.release_context, frame.frame_id);
+  --*admission;
+}
 void EncoderWorker::Error(const std::string& error) {
-  failed_ = true;
+  state_ = State::kFailed;
   std::lock_guard lock(stats_->mutex);
   stats_->error = error;
   LogError(LogLevel::kWarn, "encoder.failed", remotekit::Error{ErrorCode::kInternal, error},
            {{"encoder", encoder_}});
 }
-bool EncoderWorker::RetainUnsafeInputs(Job* additional) {
+bool EncoderWorker::RetainUnsafeInputs() {
   if (!hardware_ || hardware_->CanReleaseInputs())
     return false;
   // Frame callbacks represent pool leases, independently of COM lifetime.
   // This owner is transferred to the failed backend's process-lifetime store;
-  // no callback is invoked and no source/surface can be recycled on timeout.
+  // no release callback is invoked and no source/surface can be recycled on timeout.
   struct RetainedInputs {
     std::vector<Job> jobs;
-    std::vector<ComPtr<ID3D11Texture2D>> surfaces, sources;
+    std::vector<ComPtr<ID3D11Texture2D>> surfaces;
   };
   auto retained = std::make_shared<RetainedInputs>();
   retained->surfaces = surfaces_;
   for (auto& [cookie, job] : inflight_) {
-    retained->jobs.push_back(job);
-    ComPtr<ID3D11Texture2D> source;
-    source.Attach(static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture));
-    retained->sources.push_back(std::move(source));
     --stats_->inflight;
     ++stats_->error_drops;
     ++stats_->dropped;
-    remotekit::TailRefreshLease::Finish(job.frame, false);
-    if (sdk_.encoder_drop)
-      sdk_.encoder_drop(encoder_, job.frame.rtp_timestamp);
+    retained->jobs.push_back(std::move(job));
   }
   inflight_.clear();
-  if (additional) {
-    retained->jobs.push_back(*additional);
-    ComPtr<ID3D11Texture2D> source;
-    source.Attach(static_cast<ID3D11Texture2D*>(additional->frame.d3d11_texture));
-    retained->sources.push_back(std::move(source));
+  hardware_->HoldInputsUntilProcessExit(retained);
+  for (auto& job : retained->jobs) {
+    remotekit::RunThread(
+        "encoder.retire",
+        [&] {
+          remotekit::TailRefreshLease::Finish(job.frame, false);
+          if (sdk_.encoder_drop)
+            sdk_.encoder_drop(encoder_, job.frame.rtp_timestamp);
+        },
+        [this] { Error("encoder retirement callback failed"); });
   }
-  hardware_->HoldInputsUntilProcessExit(std::move(retained));
   return true;
 }
 bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
   Stop();  // WebRTC may configure an existing encoder after a size transition.
+  assert(queue_.empty() && inflight_.empty());
   {
     std::lock_guard lock(stats_->mutex);
     stats_->applied_target_usage.reset();
@@ -160,13 +174,6 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
     settings_.max_bitrate = std::min(settings_.max_bitrate, level_budget.bitrate_bps);
     settings_.bitrate = std::min(settings_.bitrate, settings_.max_bitrate);
   }
-  const auto requested_usage = settings_.target_usage;
-  const bool requested_vbr = settings_.vbr;
-  auto defaults = [&](bool qsv) {
-    settings_.target_usage = settings_.target_usage_explicit ? requested_usage : (qsv ? 7u : 4u);
-    settings_.vbr = settings_.rate_control_explicit ? requested_vbr : qsv;
-  };
-  defaults(mode_ != "nvenc");
   {
     std::lock_guard lock(stats_->mutex);
     stats_->requested_target_usage = settings_.target_usage;
@@ -183,20 +190,8 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
       stats_->qsv_rate_control = hardware_->RateControlInfo();
     }
     hardware_.reset();
-    if (mode_ != "auto" || (settings_.qsv_low_power && settings_.qsv_low_power_explicit)) {
-      Error(error);
-      return false;
-    }
-    const std::string qsv_error = error;
-    defaults(false);
-    settings_.qsv_low_power = 0;
-    hardware_ = CreateNvencEncoder();
-    hardware_->SetTrace(trace_, encoder_);
-    if (!hardware_->Configure(device_.Get(), settings_, error)) {
-      Error("QSV: " + qsv_error + "; NVENC: " + error);
-      hardware_.reset();
-      return false;
-    }
+    Error(error);
+    return false;
   }
   if (!converter_.Open(device_.Get(), settings_.width, settings_.height, settings_.fps, error)) {
     Error(error);
@@ -231,31 +226,21 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
   }
   rate_limit_ = settings_.max_bitrate;
   pending_rates_.reset();
-  retained_frames_ = 0;
-  paused_ = false;
+  retained_frames_ = std::make_shared<std::atomic<uint32_t>>(0);
   keyframe_ = true;
-  stopping_ = false;
-  failed_ = false;
-  configured_ = true;
-  thread_ = std::thread([this] {
-    remotekit::RunThread(
-        "encoder", [this] { Run(); },
-        [this] {
-          std::lock_guard lock(mutex_);
-          failed_ = true;
-        });
-  });
+  state_ = State::kRunning;
+  thread_ = std::thread([this] { Run(); });
   return true;
 }
 bool EncoderWorker::Enqueue(const remotekit_rtc_frame& frame, bool keyframe) {
   std::lock_guard lock(mutex_);
-  if (!configured_ || stopping_ || failed_ || paused_) {
+  if (state_ != State::kRunning) {
     RK_SERVER_TRACE(trace_, "worker_drop", TraceIds::Frame(frame, true),
                     rk_record.reason = "not_running_or_paused";
                     rk_record.encoder = encoder_; rk_record.peer = trace_peer_;);
-    if (failed_)
+    if (state_ == State::kFailed)
       ++stats_->error_drops;
-    else if (!configured_ || stopping_)
+    else if (state_ != State::kPaused)
       ++stats_->inactive_drops;
     else
       ++stats_->paused_drops;
@@ -264,7 +249,7 @@ bool EncoderWorker::Enqueue(const remotekit_rtc_frame& frame, bool keyframe) {
   }
   // Slots bound the entire accepted FIFO, including GPU work in flight.
   // Refuse overload; replacing an older frame would conceal producer backlog.
-  if (retained_frames_ >= kFrameCapacity) {
+  if (*retained_frames_ >= kFrameCapacity) {
     ++stats_->queue_full_drops;
     ++stats_->dropped;
     RK_SERVER_TRACE(trace_, "worker_drop", TraceIds::Frame(frame, true),
@@ -277,14 +262,11 @@ bool EncoderWorker::Enqueue(const remotekit_rtc_frame& frame, bool keyframe) {
   job.key = keyframe;
   job.cookie = ++cookie_;
   job.enqueued_qpc = QpcNow();
-  // Hold both COM lifetime and the distinct atlas-pool slot lease.
-  static_cast<ID3D11Texture2D*>(frame.d3d11_texture)->AddRef();
-  frame.retain(frame.release_context, frame.frame_id);
-  queue_.push_back(job);
+  job.lease = std::make_unique<FrameLease>(frame, retained_frames_);
+  const auto cookie = job.cookie;
+  queue_.push_back(std::move(job));
   ++stats_->pending;
-  ++retained_frames_;
-  RK_SERVER_TRACE(trace_, "worker_enqueue", TraceIds::Frame(frame, true),
-                  rk_record.cookie = job.cookie;
+  RK_SERVER_TRACE(trace_, "worker_enqueue", TraceIds::Frame(frame, true), rk_record.cookie = cookie;
                   rk_record.encoder = encoder_; rk_record.peer = trace_peer_;
                   rk_record.queue = static_cast<int>(queue_.size()););
   wake_.notify_one();
@@ -298,14 +280,18 @@ void EncoderWorker::Rates(uint32_t bitrate, uint32_t fps) {
     stats_->gcc_target_fps = fps;
   }
   const bool paused = !bitrate || !fps;
-  if (paused_.exchange(paused) && !paused)
-    keyframe_ = true;
+  if (state_ == State::kRunning || state_ == State::kPaused) {
+    if (state_ == State::kPaused && !paused)
+      keyframe_ = true;
+    state_ = paused ? State::kPaused : State::kRunning;
+  }
   // Preserve GCC's target pair. Only the configured/negotiated ceiling is
   // applied by Run; a zero target pauses rather than inventing a minimum rate.
   pending_rates_ = RateUpdate{bitrate, fps};
   RK_SERVER_TRACE(trace_, "worker_rates_requested", TraceIds{}, rk_record.encoder = encoder_;
                   rk_record.peer = trace_peer_; rk_record.bitrate_bps = bitrate;
-                  rk_record.fps = fps; rk_record.inflight = stats_->inflight.load();
+                  rk_record.fps = fps;
+                  rk_record.inflight = static_cast<int>(stats_->inflight.load());
                   rk_record.queue = static_cast<int>(queue_.size()););
   wake_.notify_one();
 }
@@ -323,7 +309,7 @@ void EncoderWorker::Complete(AccessUnit& unit) {
   stats_->last_encoded_qpc = QpcNow();
   stats_->brc_recodes += unit.brc_recodes;
   stats_->brc_cap_hits += unit.brc_cap_hits;
-  auto job = found->second;
+  auto job = std::move(found->second);
   inflight_.erase(found);
   free_.push_back(job.surface);
   --stats_->inflight;
@@ -377,17 +363,30 @@ void EncoderWorker::Complete(AccessUnit& unit) {
       ++stats_->keyframes_encoded;
   }
   stats_->last_encode_ms = 1000.0 * (QpcNow() - job.submitted_qpc) / QpcFrequency();
-  job.frame.release(job.frame.release_context, job.frame.frame_id);
-  static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();
-  --retained_frames_;
 }
 void EncoderWorker::Run() {
+  std::exception_ptr failure;
+  try {
+    RunLoop();
+  } catch (...) {
+    failure = std::current_exception();
+    std::lock_guard lock(mutex_);
+    state_ = State::kStopping;
+  }
+  Shutdown(failure);
+  if (failure) {
+    remotekit::RunThread(
+        "encoder", [failure] { std::rethrow_exception(failure); },
+        [this] { Error("encoder worker failed"); });
+  }
+}
+void EncoderWorker::RunLoop() {
   while (true) {
     {
       std::unique_lock lock(mutex_);
-      if (!stopping_ && queue_.empty() && inflight_.empty())
+      if (state_ != State::kStopping && queue_.empty() && inflight_.empty())
         wake_.wait_for(lock, std::chrono::milliseconds(5));
-      if (stopping_ || failed_) {
+      if (state_ == State::kStopping || state_ == State::kFailed) {
         break;
       }
     }
@@ -396,19 +395,17 @@ void EncoderWorker::Run() {
       std::lock_guard lock(mutex_);
       if (inflight_.empty())
         rates = std::exchange(pending_rates_, std::nullopt);
-      if (paused_) {
-        for (auto& job : queue_) {
+      if (state_ == State::kPaused) {
+        while (!queue_.empty()) {
+          auto job = std::move(queue_.front());
+          queue_.pop_front();
+          --stats_->pending;
+          ++stats_->paused_drops;
+          ++stats_->dropped;
           remotekit::TailRefreshLease::Finish(job.frame, false);
           if (sdk_.encoder_drop)
             sdk_.encoder_drop(encoder_, job.frame.rtp_timestamp);
-          job.frame.release(job.frame.release_context, job.frame.frame_id);
-          static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();
-          --stats_->pending;
-          --retained_frames_;
-          ++stats_->paused_drops;
-          ++stats_->dropped;
         }
-        queue_.clear();
       }
     }
     if (rates && rates->bitrate && rates->fps &&
@@ -419,7 +416,8 @@ void EncoderWorker::Run() {
       const auto effective_fps = std::min(rates->fps, fps_limit_);
       RK_SERVER_TRACE(trace_, "worker_set_rates_begin", TraceIds{}, rk_record.encoder = encoder_;
                       rk_record.peer = trace_peer_; rk_record.bitrate_bps = effective_rate;
-                      rk_record.fps = effective_fps; rk_record.queue = stats_->pending.load(););
+                      rk_record.fps = effective_fps;
+                      rk_record.queue = static_cast<int>(stats_->pending.load()););
       const bool applied = hardware_->SetRates(effective_rate, effective_fps, error, rate_limit_);
       RK_SERVER_TRACE(trace_, "worker_set_rates_return", TraceIds{}, rk_record.encoder = encoder_;
                       rk_record.peer = trace_peer_; rk_record.status = applied ? 0 : 1;);
@@ -452,13 +450,13 @@ void EncoderWorker::Run() {
     }
     // Fill the hardware queue before waiting for completion, preserving real
     // async_depth 2/4 behavior. A bounded host queue drops rather than growing.
-    while (!free_.empty() && !paused_) {
+    while (!free_.empty() && state_ == State::kRunning) {
       Job job;
       {
         std::lock_guard lock(mutex_);
-        if (queue_.empty() || stopping_ || paused_ || pending_rates_)
+        if (queue_.empty() || state_ != State::kRunning || pending_rates_)
           break;
-        job = queue_.front();
+        job = std::move(queue_.front());
         queue_.pop_front();
         --stats_->pending;
       }
@@ -474,79 +472,69 @@ void EncoderWorker::Run() {
       std::string error;
       if (trace_)
         converter_.SetTraceFrame(TraceIds::Frame(job.frame, true));
-      if (!converter_.Convert(static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture),
+      if (job.stage == Job::Stage::kSource &&
+          !converter_.Convert(static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture),
                               surfaces_[job.surface].Get(), error)) {
         ++stats_->error_drops;
-        remotekit::TailRefreshLease::Finish(job.frame, false);
-        if (sdk_.encoder_drop)
-          sdk_.encoder_drop(encoder_, job.frame.rtp_timestamp);
         ++stats_->dropped;
+        const auto frame = job.frame;
         if (!converter_.SafeToRelease()) {
-          // An unconfirmed VP read cannot return a surface lease to the producer.
-          // RenderSlots then retains its state until process/device teardown.
-          auto* retained = new Job(job);
+          struct RetainedConversion {
+            Job job;
+            ComPtr<ID3D11Texture2D> surface;
+          };
+          const auto surface = job.surface;
+          auto* retained = new RetainedConversion{std::move(job), surfaces_[surface]};
           (void)retained;
-          surfaces_[job.surface]->AddRef();
           error += "; GPU leases retained until process exit";
-        } else {
-          job.frame.release(job.frame.release_context, job.frame.frame_id);
-          static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();
         }
+        remotekit::TailRefreshLease::Finish(frame, false);
+        if (sdk_.encoder_drop)
+          sdk_.encoder_drop(encoder_, frame.rtp_timestamp);
         Error(error);
         break;
       }
+      job.stage = Job::Stage::kConverted;
       job.submitted_qpc = QpcNow();
       const bool requested_key = keyframe_.exchange(false);
       const bool key = job.key || requested_key;
       auto* input = surfaces_[job.surface].Get();
       const FrameContext context{RenderSlots::BeginQpc(job.frame),
                                  RenderSlots::IsKeepalive(job.frame)};
-      auto status = hardware_->Submit(input, key, job.cookie, error, context);
-      RK_SERVER_TRACE(trace_, "hardware_submit", TraceIds::Frame(job.frame, true),
-                      rk_record.cookie = job.cookie;
+      const auto cookie = job.cookie;
+      auto entry = inflight_.emplace(cookie, std::move(job)).first;
+      auto& submitted = entry->second;
+      ++stats_->inflight;
+      free_.pop_front();
+      auto status = hardware_->Submit(input, key, cookie, error, context);
+      RK_SERVER_TRACE(trace_, "hardware_submit", TraceIds::Frame(submitted.frame, true),
+                      rk_record.cookie = cookie;
                       rk_record.encoder = encoder_; rk_record.peer = trace_peer_;
                       rk_record.status = static_cast<int>(status););
       if (status == CodecResult::busy) {
         ++stats_->hardware_busy;
         if (key)
           keyframe_ = true;
-        // BUSY did not consume the input. Retry this same oldest job before
-        // later frames, retaining its original queue age and GPU lease.
-        {
-          std::lock_guard lock(mutex_);
-          queue_.push_front(job);
-          ++stats_->pending;
-        }
+        std::unique_lock lock(mutex_);
+        free_.push_front(submitted.surface);
+        queue_.push_front(std::move(submitted));
+        inflight_.erase(entry);
+        --stats_->inflight;
+        ++stats_->pending;
+        if (inflight_.empty())
+          wake_.wait_for(lock, std::chrono::milliseconds(5),
+                         [this] { return state_ != State::kRunning; });
         break;
       }
       if (status != CodecResult::accepted) {
-        // Submit errors may follow partial driver submission. Close the backend
-        // before releasing this job, just as Run's inflight cancellation does.
-        const bool retained = RetainUnsafeInputs(&job);
-        hardware_.reset();
-        ++stats_->error_drops;
-        remotekit::TailRefreshLease::Finish(job.frame, false);
-        RK_SERVER_TRACE(trace_, "worker_drop", TraceIds::Frame(job.frame, true),
-                        rk_record.reason = "hardware_submit_error";
-                        rk_record.cookie = job.cookie; rk_record.encoder = encoder_;);
-        if (sdk_.encoder_drop)
-          sdk_.encoder_drop(encoder_, job.frame.rtp_timestamp);
-        ++stats_->dropped;
-        if (!retained) {
-          job.frame.release(job.frame.release_context, job.frame.frame_id);
-          static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();
-        }
         Error(error);
         break;
       }
-      free_.pop_front();
-      inflight_.emplace(job.cookie, job);
-      ++stats_->inflight;
       ++stats_->submitted;
       if (key)
         ++stats_->keyframes_submitted;
     }
-    if (failed_)
+    if (state_ == State::kFailed)
       break;
     if (!inflight_.empty()) {
       AccessUnit unit;
@@ -560,77 +548,69 @@ void EncoderWorker::Run() {
       }
     }
   }
+}
+void EncoderWorker::Shutdown(std::exception_ptr& failure) {
+  auto retire = [&](auto&& action) {
+    try {
+      action();
+    } catch (...) {
+      if (!failure)
+        failure = std::current_exception();
+    }
+  };
   std::vector<AccessUnit> completed;
   std::string error;
   if (hardware_) {
-    const bool drained = hardware_->Drain(completed, error);
+    retire([&] {
+      if (!hardware_->Drain(completed, error) && !error.empty())
+        Error(error);
+    });
     for (auto& unit : completed)
-      Complete(unit);
-    if (!drained && !error.empty())
-      Error(error);
+      retire([&] { Complete(unit); });
   }
-  // A backend without a proven cancellation boundary keeps unresolved leases
-  // with the quarantined session. Healthy backends close before lease release.
+  // Unresolved GPU work stays owned by the backend's quarantine.
   RetainUnsafeInputs();
   hardware_.reset();
-  for (auto& [cookie, job] : inflight_) {
-    --stats_->inflight;
-    if (failed_)
+  auto drop = [&](Job& job) {
+    if (failure || state_ == State::kFailed)
       ++stats_->error_drops;
     else
       ++stats_->cancelled_drops;
-    remotekit::TailRefreshLease::Finish(job.frame, false);
-    RK_SERVER_TRACE(trace_, "worker_drop", TraceIds::Frame(job.frame, true),
-                    rk_record.reason = "close_inflight";
-                    rk_record.cookie = cookie; rk_record.encoder = encoder_;);
-    if (sdk_.encoder_drop)
-      sdk_.encoder_drop(encoder_, job.frame.rtp_timestamp);
     ++stats_->dropped;
-    job.frame.release(job.frame.release_context, job.frame.frame_id);
-    static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();
+    retire([&] {
+      remotekit::TailRefreshLease::Finish(job.frame, false);
+      if (sdk_.encoder_drop)
+        sdk_.encoder_drop(encoder_, job.frame.rtp_timestamp);
+    });
+  };
+  for (auto& [cookie, job] : inflight_) {
+    --stats_->inflight;
+    drop(job);
   }
   inflight_.clear();
   std::lock_guard lock(mutex_);
   for (auto& job : queue_) {
     --stats_->pending;
-    if (failed_)
-      ++stats_->error_drops;
-    else
-      ++stats_->cancelled_drops;
-    remotekit::TailRefreshLease::Finish(job.frame, false);
-    RK_SERVER_TRACE(trace_, "worker_drop", TraceIds::Frame(job.frame, true),
-                    rk_record.reason = "close_pending";
-                    rk_record.cookie = job.cookie; rk_record.encoder = encoder_;);
-    if (sdk_.encoder_drop)
-      sdk_.encoder_drop(encoder_, job.frame.rtp_timestamp);
-    ++stats_->dropped;
-    job.frame.release(job.frame.release_context, job.frame.frame_id);
-    static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();
+    drop(job);
   }
   queue_.clear();
-}
-EncoderWorker::State EncoderWorker::state() {
-  std::lock_guard lock(mutex_);
-  if (failed_)
-    return State::kFailed;
-  if (stopping_)
-    return State::kStopping;
-  if (!configured_)
-    return State::kStopped;
-  return paused_ ? State::kPaused : State::kRunning;
 }
 void EncoderWorker::Stop() {
   {
     std::lock_guard lock(mutex_);
-    stopping_ = true;
+    if (state_ != State::kStopped && state_ != State::kFailed)
+      state_ = State::kStopping;
   }
   wake_.notify_all();
   if (thread_.joinable())
     thread_.join();
-  configured_ = false;
+  std::exception_ptr failure;
+  if (!queue_.empty() || !inflight_.empty())
+    Shutdown(failure);
+  state_ = State::kStopped;
   hardware_.reset();
   surfaces_.clear();
   free_.clear();
-  retained_frames_ = 0;
+  assert(queue_.empty() && inflight_.empty());
 }
 }  // namespace remotekit::media

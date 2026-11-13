@@ -37,13 +37,16 @@ class Nvenc final : public HardwareEncoder {
     ComPtr<ID3D11Texture2D> texture;
     NV_ENC_REGISTERED_PTR handle = nullptr;
   };
+  enum class EventStage { kNone, kCreated, kRegistered };
+  enum class State { kStopped, kInitializing, kReady, kDraining, kDrained, kFailed };
   struct Task {
+    enum class Stage { kIdle, kPending, kSignalled };
+    Stage stage = Stage::kIdle;
+    EventStage event_stage = EventStage::kNone;
     NV_ENC_OUTPUT_PTR output = nullptr;
     NV_ENC_INPUT_PTR mapped = nullptr;
     HANDLE event = nullptr;
     uint64_t cookie = 0;
-    bool busy = false;
-    bool signalled = false;
     std::chrono::steady_clock::time_point accepted{};
   };
   HMODULE module_ = nullptr;
@@ -56,9 +59,9 @@ class Nvenc final : public HardwareEncoder {
   std::map<ID3D11Texture2D*, Registration> registrations_;
   std::vector<Task> tasks_;
   std::deque<size_t> pending_;
-  bool eos_ = false;
+  State state_ = State::kStopped;
   HANDLE eos_event_ = nullptr;
-  bool eos_registered_ = false, eos_completed_ = false, initialized_ = false;
+  EventStage eos_stage_ = EventStage::kNone;
   std::chrono::steady_clock::time_point eos_accepted_{};
   bool admitted_ = false;
   std::string terminal_error_;
@@ -68,8 +71,9 @@ class Nvenc final : public HardwareEncoder {
       [](HANDLE event, DWORD timeout) { return WaitForSingleObject(event, timeout); }};
 
   CodecResult Fail(std::string message, std::string& error) {
-    if (terminal_error_.empty())
+    if (state_ != State::kFailed)
       terminal_error_ = std::move(message);
+    state_ = State::kFailed;
     error = terminal_error_;
     // Stop reconfiguration immediately, even before worker retirement.
     auto& registry = Quarantine();
@@ -118,13 +122,58 @@ class Nvenc final : public HardwareEncoder {
     }
     return false;
   }
+  bool CreateEvents(std::string& error) {
+    eos_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!eos_event_) {
+      error = "NVENC EOS CreateEvent failed";
+      return false;
+    }
+    eos_stage_ = EventStage::kCreated;
+    NV_ENC_EVENT_PARAMS eos_event{NV_ENC_EVENT_PARAMS_VER};
+    eos_event.completionEvent = eos_event_;
+    if (!Check(api_.nvEncRegisterAsyncEvent(encoder_, &eos_event), "RegisterAsyncEvent(EOS)",
+               error))
+      return false;
+    eos_stage_ = EventStage::kRegistered;
+    // NVENC requires four buffers; async_depth bounds accepted work.
+    tasks_.resize(std::max(4u, settings_.async_depth));
+    for (auto& task : tasks_) {
+      NV_ENC_CREATE_BITSTREAM_BUFFER output{NV_ENC_CREATE_BITSTREAM_BUFFER_VER};
+      if (!Check(api_.nvEncCreateBitstreamBuffer(encoder_, &output), "CreateBitstreamBuffer",
+                 error))
+        return false;
+      task.output = output.bitstreamBuffer;
+      task.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+      if (!task.event) {
+        error = "NVENC CreateEvent failed";
+        return false;
+      }
+      task.event_stage = EventStage::kCreated;
+      NV_ENC_EVENT_PARAMS event{NV_ENC_EVENT_PARAMS_VER};
+      event.completionEvent = task.event;
+      if (!Check(api_.nvEncRegisterAsyncEvent(encoder_, &event), "RegisterAsyncEvent", error))
+        return false;
+      task.event_stage = EventStage::kRegistered;
+    }
+    return true;
+  }
+  bool CloseCheck(NVENCSTATUS status, const char* operation, std::string& error) {
+    if (Check(status, operation, error))
+      return true;
+    if (state_ != State::kInitializing)
+      return false;
+    LogError(LogLevel::kWarn, "nvenc.rollback_failed", Error{ErrorCode::kUnavailable, error});
+    return true;
+  }
   void Cleanup() {
+    if (state_ == State::kFailed && !encoder_)
+      return;
     if (encoder_) {
       std::vector<AccessUnit> ignored;
       std::string error;
-      if (initialized_)
+      if (state_ == State::kReady || state_ == State::kDraining)
         Drain(ignored, error);
-      if (!terminal_error_.empty()) {
+      if (state_ == State::kFailed) {
         // DestroyEncoder is not a timeout/cancellation API. Calling it with
         // unflushed work violates its contract and may wait indefinitely.
         PreserveFailedSession();
@@ -133,27 +182,28 @@ class Nvenc final : public HardwareEncoder {
       for (auto& task : tasks_) {
         if (encoder_) {
           if (task.mapped) {
-            if (!Check(api_.nvEncUnmapInputResource(encoder_, task.mapped),
-                       "UnmapInputResource(close)", error)) {
+            if (!CloseCheck(api_.nvEncUnmapInputResource(encoder_, task.mapped),
+                            "UnmapInputResource(close)", error)) {
               Fail(error, error);
               PreserveFailedSession();
               return;
             }
             task.mapped = nullptr;
           }
-          if (task.event) {
+          if (task.event_stage == EventStage::kRegistered) {
             NV_ENC_EVENT_PARAMS event{NV_ENC_EVENT_PARAMS_VER};
             event.completionEvent = task.event;
-            if (!Check(api_.nvEncUnregisterAsyncEvent(encoder_, &event),
-                       "UnregisterAsyncEvent(close)", error)) {
+            if (!CloseCheck(api_.nvEncUnregisterAsyncEvent(encoder_, &event),
+                            "UnregisterAsyncEvent(close)", error)) {
               Fail(error, error);
               PreserveFailedSession();
               return;
             }
+            task.event_stage = EventStage::kCreated;
           }
           if (task.output) {
-            if (!Check(api_.nvEncDestroyBitstreamBuffer(encoder_, task.output),
-                       "DestroyBitstreamBuffer(close)", error)) {
+            if (!CloseCheck(api_.nvEncDestroyBitstreamBuffer(encoder_, task.output),
+                            "DestroyBitstreamBuffer(close)", error)) {
               Fail(error, error);
               PreserveFailedSession();
               return;
@@ -164,28 +214,29 @@ class Nvenc final : public HardwareEncoder {
         if (task.event) {
           CloseHandle(task.event);
           task.event = nullptr;
+          task.event_stage = EventStage::kNone;
         }
       }
       if (encoder_) {
-        if (eos_registered_) {
+        if (eos_stage_ == EventStage::kRegistered) {
           NV_ENC_EVENT_PARAMS event{NV_ENC_EVENT_PARAMS_VER};
           event.completionEvent = eos_event_;
-          if (!Check(api_.nvEncUnregisterAsyncEvent(encoder_, &event),
-                     "UnregisterAsyncEvent(EOS close)", error)) {
+          if (!CloseCheck(api_.nvEncUnregisterAsyncEvent(encoder_, &event),
+                          "UnregisterAsyncEvent(EOS close)", error)) {
             Fail(error, error);
             PreserveFailedSession();
             return;
           }
-          eos_registered_ = false;
+          eos_stage_ = EventStage::kCreated;
         }
         for (auto& [texture, registration] : registrations_)
-          if (!Check(api_.nvEncUnregisterResource(encoder_, registration.handle),
-                     "UnregisterResource(close)", error)) {
+          if (!CloseCheck(api_.nvEncUnregisterResource(encoder_, registration.handle),
+                          "UnregisterResource(close)", error)) {
             Fail(error, error);
             PreserveFailedSession();
             return;
           }
-        if (!Check(api_.nvEncDestroyEncoder(encoder_), "DestroyEncoder(close)", error)) {
+        if (!CloseCheck(api_.nvEncDestroyEncoder(encoder_), "DestroyEncoder(close)", error)) {
           Fail(error, error);
           PreserveFailedSession();
           return;
@@ -205,8 +256,8 @@ class Nvenc final : public HardwareEncoder {
       FreeLibrary(module_);
       module_ = nullptr;
     }
-    eos_ = false;
-    initialized_ = eos_registered_ = eos_completed_ = false;
+    state_ = State::kStopped;
+    eos_stage_ = EventStage::kNone;
     if (admitted_) {
       auto& registry = Quarantine();
       std::lock_guard lock(registry.mutex);
@@ -216,16 +267,6 @@ class Nvenc final : public HardwareEncoder {
   }
 
  public:
-  State GetState() const override {
-    if (!terminal_error_.empty())
-      return State::kFailed;
-    if (eos_completed_)
-      return State::kDrained;
-    if (eos_)
-      return State::kDraining;
-    return initialized_ ? State::kReady : State::kStopped;
-  }
-
   Nvenc() = default;
   Nvenc(const NV_ENCODE_API_FUNCTION_LIST& api,
         void* session,
@@ -243,21 +284,31 @@ class Nvenc final : public HardwareEncoder {
       std::terminate();
     ++registry.admitted;
     admitted_ = true;
+    if (hooks_.stage == NvencTestHooks::Stage::kInitializeEvents) {
+      state_ = State::kInitializing;
+      std::string error;
+      if (!CreateEvents(error))
+        return;
+      state_ = State::kReady;
+      return;
+    }
     Task task;
     task.event = event;
+    task.event_stage = EventStage::kRegistered;
     task.output = output;
     task.mapped = input;
     task.cookie = cookie;
-    task.busy = true;
+    task.stage = Task::Stage::kPending;
     task.accepted = hooks_.now();
     tasks_.push_back(task);
     pending_.push_back(0);
     settings_.async_depth = 1;
     eos_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    eos_registered_ = initialized_ = true;
+    eos_stage_ = EventStage::kRegistered;
+    state_ = State::kReady;
   }
   ~Nvenc() override { Cleanup(); }
-  bool CanReleaseInputs() const override { return terminal_error_.empty(); }
+  bool CanReleaseInputs() const override { return state_ != State::kFailed; }
   void HoldInputsUntilProcessExit(std::shared_ptr<void> owner) override {
     // Multiple retirement batches may reach the same failed session. None of
     // them may replace an earlier batch's source references or pool leases.
@@ -270,7 +321,7 @@ class Nvenc final : public HardwareEncoder {
                  const EncoderSettings& settings,
                  std::string& error) override {
     Cleanup();
-    if (!terminal_error_.empty()) {
+    if (state_ == State::kFailed) {
       error = terminal_error_;
       return false;
     }
@@ -280,6 +331,7 @@ class Nvenc final : public HardwareEncoder {
       error = "NVENC invalid encoder settings";
       return false;
     }
+    state_ = State::kInitializing;
     settings_ = settings;
     {
       auto& registry = Quarantine();
@@ -381,40 +433,9 @@ class Nvenc final : public HardwareEncoder {
     init_.encodeConfig = &config_;
     if (!Check(api_.nvEncInitializeEncoder(encoder_, &init_), "InitializeEncoder", error))
       return false;
-    initialized_ = true;
-    eos_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!eos_event_) {
-      Fail("NVENC EOS CreateEvent failed", error);
+    if (!CreateEvents(error))
       return false;
-    }
-    NV_ENC_EVENT_PARAMS eos_event{NV_ENC_EVENT_PARAMS_VER};
-    eos_event.completionEvent = eos_event_;
-    if (!Check(api_.nvEncRegisterAsyncEvent(encoder_, &eos_event), "RegisterAsyncEvent(EOS)",
-               error)) {
-      Fail(error, error);
-      return false;
-    }
-    eos_registered_ = true;
-    // NVIDIA recommends at least four I/O buffers. Logical in-flight depth is
-    // still controlled by settings.async_depth, so latency experiments compare
-    // actual outstanding pictures rather than allocation count.
-    tasks_.resize(std::max(4u, settings.async_depth));
-    for (auto& task : tasks_) {
-      NV_ENC_CREATE_BITSTREAM_BUFFER output{NV_ENC_CREATE_BITSTREAM_BUFFER_VER};
-      if (!Check(api_.nvEncCreateBitstreamBuffer(encoder_, &output), "CreateBitstreamBuffer",
-                 error))
-        return false;
-      task.output = output.bitstreamBuffer;
-      task.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-      if (!task.event) {
-        error = "NVENC CreateEvent failed";
-        return false;
-      }
-      NV_ENC_EVENT_PARAMS event{NV_ENC_EVENT_PARAMS_VER};
-      event.completionEvent = task.event;
-      if (!Check(api_.nvEncRegisterAsyncEvent(encoder_, &event), "RegisterAsyncEvent", error))
-        return false;
-    }
+    state_ = State::kReady;
     return true;
   }
   CodecResult Submit(ID3D11Texture2D* texture,
@@ -422,11 +443,11 @@ class Nvenc final : public HardwareEncoder {
                      uint64_t cookie,
                      std::string& error,
                      FrameContext) override {
-    if (!terminal_error_.empty()) {
+    if (state_ == State::kFailed) {
       error = terminal_error_;
       return CodecResult::error;
     }
-    if (!encoder_ || eos_ || !texture) {
+    if (!encoder_ || state_ != State::kReady || !texture) {
       error = "NVENC encoder is not accepting frames";
       return CodecResult::error;
     }
@@ -442,7 +463,8 @@ class Nvenc final : public HardwareEncoder {
       error = "NVENC requires same-device, single-surface NV12 input";
       return CodecResult::error;
     }
-    auto slot = std::find_if(tasks_.begin(), tasks_.end(), [](const Task& t) { return !t.busy; });
+    auto slot = std::find_if(tasks_.begin(), tasks_.end(),
+                             [](const Task& t) { return t.stage == Task::Stage::kIdle; });
     if (slot == tasks_.end())
       return CodecResult::busy;
     auto [it, inserted] = registrations_.try_emplace(texture);
@@ -491,15 +513,14 @@ class Nvenc final : public HardwareEncoder {
       Check(status, "EncodePicture", error);
       return Fail(error, error);  // Unknown partial acceptance: retain the map/session.
     }
-    slot->busy = true;
+    slot->stage = Task::Stage::kPending;
     slot->cookie = cookie;
-    slot->signalled = false;
     slot->accepted = hooks_.now();
     pending_.push_back(static_cast<size_t>(slot - tasks_.begin()));
     return CodecResult::accepted;
   }
   CodecResult Poll(uint32_t timeout_ms, AccessUnit& output, std::string& error) override {
-    if (!terminal_error_.empty()) {
+    if (state_ == State::kFailed) {
       error = terminal_error_;
       return CodecResult::error;
     }
@@ -522,7 +543,7 @@ class Nvenc final : public HardwareEncoder {
     const auto remaining =
         std::chrono::ceil<std::chrono::milliseconds>(deadline - hooks_.now()).count();
     const DWORD wait =
-        task.signalled
+        task.stage == Task::Stage::kSignalled
             ? WAIT_OBJECT_0
             : hooks_.wait(
                   task.event,
@@ -533,7 +554,7 @@ class Nvenc final : public HardwareEncoder {
       return CodecResult::pending;
     if (wait != WAIT_OBJECT_0)
       return Fail("NVENC completion event wait failed", error);
-    task.signalled = true;
+    task.stage = Task::Stage::kSignalled;
     NV_ENC_LOCK_BITSTREAM bitstream{NV_ENC_LOCK_BITSTREAM_VER};
     bitstream.outputBitstream = task.output;
     bitstream.doNotWait = 1;
@@ -562,16 +583,16 @@ class Nvenc final : public HardwareEncoder {
     if (!Check(unlock, "UnlockBitstream", error) || !Check(unmap, "UnmapInputResource", error))
       return Fail(error, error);
     task.mapped = nullptr;
-    task.busy = false;
+    task.stage = Task::Stage::kIdle;
     pending_.pop_front();
     return CodecResult::ready;
   }
   bool SetRates(uint32_t bitrate, uint32_t fps, std::string& error, uint32_t maximum = 0) override {
-    if (!terminal_error_.empty()) {
+    if (state_ == State::kFailed) {
       error = terminal_error_;
       return false;
     }
-    if (!encoder_ || eos_ || !bitrate || !fps) {
+    if (!encoder_ || state_ != State::kReady || !bitrate || !fps) {
       error = "NVENC invalid rate update";
       return false;
     }
@@ -597,13 +618,13 @@ class Nvenc final : public HardwareEncoder {
     return true;
   }
   bool Drain(std::vector<AccessUnit>& output, std::string& error) override {
-    if (!terminal_error_.empty()) {
+    if (state_ == State::kFailed) {
       error = terminal_error_;
       return false;
     }
-    if (!encoder_)
+    if (!encoder_ || state_ == State::kInitializing || state_ == State::kStopped)
       return true;
-    if (!eos_) {
+    if (state_ == State::kReady) {
       NV_ENC_PIC_PARAMS eos{NV_ENC_PIC_PARAMS_VER};
       eos.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
       eos.completionEvent = eos_event_;
@@ -611,7 +632,7 @@ class Nvenc final : public HardwareEncoder {
         Fail(error, error);
         return false;
       }
-      eos_ = true;
+      state_ = State::kDraining;
       eos_accepted_ = hooks_.now();
     }
     while (!pending_.empty()) {
@@ -624,7 +645,7 @@ class Nvenc final : public HardwareEncoder {
     }
     // Asynchronous EOS acceptance alone is not a flush completion proof.
     const auto deadline = eos_accepted_ + std::chrono::seconds(5);
-    while (!eos_completed_) {
+    while (state_ != State::kDrained) {
       if (hooks_.now() >= deadline) {
         Fail("NVENC EOS completion timed out; session retained until Endpoint exit", error);
         return false;
@@ -638,7 +659,7 @@ class Nvenc final : public HardwareEncoder {
         return false;
       }
       if (wait == WAIT_OBJECT_0)
-        eos_completed_ = true;
+        state_ = State::kDrained;
       else if (wait != WAIT_TIMEOUT) {
         Fail("NVENC EOS completion event wait failed", error);
         return false;

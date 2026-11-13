@@ -5,6 +5,14 @@ std::string AdapterLuid(LUID luid) {
   return std::to_string(luid.HighPart) + "," + std::to_string(luid.LowPart);
 }
 
+EncoderSettings SelectedEncoderSettings(EncoderSettings settings, std::string_view backend) {
+  if (!settings.target_usage_explicit)
+    settings.target_usage = backend == "qsv" ? 7u : 4u;
+  if (!settings.rate_control_explicit)
+    settings.vbr = backend == "qsv";
+  return settings;
+}
+
 Result<StreamingAdapter> SelectStreamingAdapter(Sdk& sdk, const AdapterConfig& options) {
   ComPtr<IDXGIFactory1> factory;
   if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
@@ -35,8 +43,9 @@ Result<StreamingAdapter> SelectStreamingAdapter(Sdk& sdk, const AdapterConfig& o
       if (CreateDevice(&candidate.luid, candidate.device, candidate.context, error)) {
         const auto probe_stats = std::make_shared<EncoderStats>();
         // Exercise the same hardware initialization and input-surface setup as RTC.
-        EncoderWorker probe(sdk, 0, candidate.device.Get(), candidate.encoder, options.encoding,
-                            probe_stats, {}, {}, 0, {});
+        EncoderWorker probe(sdk, 0, candidate.device.Get(), candidate.encoder,
+                            SelectedEncoderSettings(options.encoding, backend), probe_stats, {}, {},
+                            0, {});
         remotekit_rtc_encoder_config config{};
         config.struct_size = sizeof(config);
         config.width = std::min(1280u, options.max_encode_width) & ~1u;

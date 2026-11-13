@@ -11,7 +11,8 @@ int EncoderSet::CreateEncoder(void* context, uint64_t encoder_peer, uint64_t enc
   self->encoders.emplace(
       encoder,
       std::make_unique<EncoderWorker>(
-          self->sdk, encoder, adapter.device.Get(), adapter.encoder, self->settings, self->stats,
+          self->sdk, encoder, adapter.device.Get(), adapter.encoder,
+          SelectedEncoderSettings(self->settings, adapter.encoder), self->stats,
           self->host.completed ? self->host.completed(encoder_peer) : Completion{}, self->trace,
           encoder_peer, self->host.publish ? self->host.publish(encoder_peer) : Publish{}));
   return 0;

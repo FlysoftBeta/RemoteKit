@@ -41,8 +41,6 @@ enum class CodecResult { accepted, busy, ready, pending, error };
 // Worker fills up to async_depth, then polls. Never sync immediately per Submit.
 class HardwareEncoder {
  public:
-  enum class State { kStopped, kReady, kDraining, kDrained, kFailed };
-  virtual State GetState() const = 0;
   void SetTrace(std::shared_ptr<ServerTrace> trace, uint64_t encoder) {
     trace_ = std::move(trace);
     trace_encoder_ = encoder;
