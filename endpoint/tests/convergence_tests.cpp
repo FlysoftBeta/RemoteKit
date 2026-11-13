@@ -71,6 +71,7 @@ int main(int argc, char** argv) {
                       {"browserIncarnation", running ? Json("browser") : Json()}};
         },
         .maintain = [] {},
+        .signals = [] {},
         .admit = [&](const Json&, uint64_t) -> Result<void> {
           if (!authorized)
             return Error{ErrorCode::kLocked, "authorization revoked"};

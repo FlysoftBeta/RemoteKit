@@ -328,7 +328,16 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
     latest_ = std::move(observation);
   }
 }
+void SessionCoordinator::Signal() {
+  {
+    std::lock_guard lock(mutex_);
+    signaled_ = true;
+  }
+  wake_.notify_one();
+}
 void SessionCoordinator::Run() {
+  constexpr auto kMaintenanceInterval = std::chrono::milliseconds(100);
+  auto next_maintenance = std::chrono::steady_clock::now();
   for (;;) {
     Scope scope;
     Json desired;
@@ -336,15 +345,29 @@ void SessionCoordinator::Run() {
     bool force = false;
     {
       std::unique_lock lock(mutex_);
-      wake_.wait_for(lock, std::chrono::milliseconds(100),
-                     [&] { return stopping_ || !jobs_.empty() || force_observation_; });
+      wake_.wait_until(lock, next_maintenance, [&] {
+        return stopping_ || !jobs_.empty() || force_observation_ || signaled_;
+      });
       if (stopping_ && jobs_.empty())
         return;
+      const bool signals_only = std::exchange(signaled_, false) && jobs_.empty() &&
+                                !force_observation_ &&
+                                std::chrono::steady_clock::now() < next_maintenance;
+      if (signals_only) {
+        lock.unlock();
+        try {
+          hooks_.signals();
+        } catch (...) {
+          error_ = Error{ErrorCode::kInternal, "Session signal flush failed"};
+        }
+        continue;
+      }
       scope = scope_;
       desired = desired_;
       jobs.swap(jobs_);
       force = std::exchange(force_observation_, false);
     }
+    next_maintenance = std::chrono::steady_clock::now() + kMaintenanceInterval;
     try {
       if (desired.is_object() && scope.active) {
         auto converged = Converge(desired, scope);

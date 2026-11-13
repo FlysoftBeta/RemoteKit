@@ -74,6 +74,7 @@ class Session {
     checkpoint_cache.MaybeStage(context.objects, config.tenant);
   }
   void FlushSignals() { channel.FlushSignals(); }
+  void SetSignal(std::function<void()> signal) { channel.SetSignal(std::move(signal)); }
   ViewController& Views() { return views; }
   FileController& Files() { return files; }
   MediaPipeline& Media() { return pipeline; }

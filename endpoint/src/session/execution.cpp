@@ -34,6 +34,7 @@ SessionCoordinator::Hooks SessionExecution::Hooks() {
       .stop = [self](const Json& value) { return self->Stop(value); },
       .observe = [self] { return self->Observe(); },
       .maintain = [self] { self->Maintain(); },
+      .signals = [self] { self->FlushSignals(); },
       .admit = [self](const Json& value,
                       uint64_t generation) { return self->Admit(value, generation); },
       .request = [self](const Json& value,
@@ -124,6 +125,7 @@ Result<void> SessionExecution::Prepare(const Json& document) {
     }
     session = std::make_shared<Session>(sdk_, options_, tenant_, id_, epoch_, key.value(),
                                         management_, objects_, frame_admission_, access);
+    session->SetSignal(signal_);
     RK_RETURN_IF_ERROR(session->Initialize());
     session->BeginManagementRequest(generation_.load());
     phases["restoreTotal"] = PhaseMs(start);
@@ -393,6 +395,12 @@ Result<Json> SessionExecution::Observe() {
               {"blockers", blockers},
               {"events", events},
               {"stats", snapshot.at("stats")}};
+}
+void SessionExecution::FlushSignals() {
+  if (retired_)
+    return;
+  if (auto session = runtime_.load())
+    session->FlushSignals();
 }
 void SessionExecution::Maintain() {
   if (retired_)

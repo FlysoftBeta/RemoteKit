@@ -330,6 +330,7 @@ void DraftCheckpoint(const fs::path& root) {
   {
     media::FrameAdmission frame_admission;
     Session session(sdk, options, "tenant", session_id, 1, {}, link, objects, frame_admission);
+    session.SetSignal([] {});
     Take(session.Initialize());
     checkpoint = Take(Commit(session));
   }
@@ -519,6 +520,7 @@ void Blockers(const fs::path& root) {
   media::FrameAdmission frame_admission;
   Session session(sdk, options, "tenant", std::string(32, 'b'), 1, cluster::Key{}, link, objects,
                   frame_admission);
+  session.SetSignal([] {});
   Take(session.Initialize());
   Take(session.Views().RecordClosed("1", "closed"));
   const auto snapshot = Take(session.Snapshot());
@@ -699,6 +701,7 @@ void DeferredCommit(const fs::path& root) {
     media::FrameAdmission frame_admission;
     Session session(sdk, options, "tenant", offline.session, 1, {}, offline, objects,
                     frame_admission);
+    session.SetSignal([] {});
     Take(session.Initialize());
     Write(options.data / "sessions" / offline.session / "payload", "offline state");
     committed =
@@ -719,6 +722,7 @@ void DeferredCommit(const fs::path& root) {
   media::FrameAdmission frame_admission;
   Session session(sdk, limited, "tenant", offline.session, 1, {}, offline, objects,
                   frame_admission);
+  session.SetSignal([] {});
   Take(session.Initialize());
   const auto stopped = Take(session.StopAndCommit("budget", false, PhaseClock::now()));
   const auto copy = Take(Checkpoints::Copy(limited.data / "sessions" / offline.session));

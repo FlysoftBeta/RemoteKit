@@ -15,6 +15,8 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
                    Json target,
                    std::string incarnation);
   SessionCoordinator::Hooks Hooks();
+  // The coordinator's Signal(); bound once, before the first Start.
+  void BindSignal(std::function<void()> signal) { signal_ = std::move(signal); }
   void Activate(std::string connection, uint64_t generation);
   Result<Json> Stop(const Json& commit,
                     bool check_blockers = true,
@@ -42,6 +44,7 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   Result<void> Views(const Json&);
   Result<Json> Observe();
   void Maintain();
+  void FlushSignals();
   Result<void> Admit(const Json&, uint64_t);
   Result<Json> Request(const Json&, uint64_t);
   Result<void> Acknowledge(const std::string&, uint64_t);
@@ -68,5 +71,6 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   std::string sent_stream_, staged_revision_;
   bool starting_ = false, retired_ = false;
   uint64_t runtime_generation_ = 0;
+  std::function<void()> signal_;
 };
 }  // namespace remotekit

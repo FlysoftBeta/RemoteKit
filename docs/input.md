@@ -37,7 +37,9 @@ DataChannel 上的 `input` 消息携带全部身份、连接内 `sequence` 和�
 
 **BUSY 重试**：Browser 在解析目标或收尾期间对所有输入返回 `ok:false, code:busy`（受理之前）。Endpoint 以同一个 browser sequence 和 token 串行重试，间隔 5ms，最多 50 次 / 250ms；peer 或 epoch 变化立即停止。受理之后的异步失败从不重放。旧实现的 RPC 包装把所有 `ok:false` 都转成异常，导致 BUSY 重试逻辑在真实服务里根本走不到，这是"传输失败"与"应用拒绝"必须分开表示的直接原因。
 
-**队列**：Endpoint 普通队列上限 256，只合并相邻、同 peer/授权/view 的鼠标 move；键盘、IME、touch start/end/cancel 严格保序。输入与媒体在不同线程，输入 RPC 不会阻塞媒体循环。客户端队列为终止事件保留容量：普通 112 / 总计 128，DataChannel `bufferedAmount` 超过 256KiB 暂停发送、低于 64KiB 恢复，实际发送时再查一次身份。
+**队列**：Endpoint 普通队列上限 256，只合并相邻、同 peer/授权/view 的鼠标 move；键盘、IME、touch start/end/cancel 严格保序。输入与媒体在不同线程，输入 RPC 不会阻塞媒体循环。
+
+**排空**：RTC 线程只把 DataChannel 消息放进 `DataRouter` 队列，由该 Session 的协调线程排空。每次入队（DataChannel 消息、通道状态、待转发事件）都通过 `SessionCoordinator::Signal` 立即唤醒协调线程，只执行通道排空，不跑收敛和维护；收敛、维护与观察仍按约 100ms 的周期运行，周期里也会排空一次。曾经排空只挂在这个 100ms 维护周期上，输入在 Endpoint 平均等 63ms、p95 115ms，Browser 每约 100ms 收到一批合并后的滚动。页面因此一会儿有新帧、一会儿 Idle，触控滚动和惯性只有约 22FPS 的新内容，画面一顿一顿。改为入队即唤醒后，DataChannel→Browser 派发 p50 约 0.6ms、p95 5–9ms，拖动与惯性 57–58FPS。客户端队列为终止事件保留容量：普通 112 / 总计 128，DataChannel `bufferedAmount` 超过 256KiB 暂停发送、低于 64KiB 恢复，实际发送时再查一次身份。
 
 ## 鼠标、滚轮、键盘
 
@@ -152,7 +154,7 @@ layoutEpoch 变化时，旧 move/end 仍按过期坐标拒绝。客户端丢弃�
 ## 代码位置
 
 - 客户端：`control/client/input/`（`input-pipeline.ts` 焦点与队列、`touch-session.ts` 本地触控视图、`client-gestures.ts`、`coordinates.ts`、`keys.ts`）、`control/client/editing/`
-- Endpoint：`endpoint/src/input/`（InputController、序号、校验）、`endpoint/src/session/control_reliability.hpp`（受理前 BUSY 重试）、`protocol/touch_clock.hpp`
+- Endpoint：`endpoint/src/input/`（InputController、序号、校验）、`endpoint/src/session/control_reliability.hpp`（受理前 BUSY 重试）、`endpoint/src/rtc/data_router.*` 与 `session/coordinator.*`（入队与排空）、`protocol/touch_clock.hpp`
 - Browser：`browser/control_input.cc`、`control_input_codec.*`、`webview_input.*`、`webview_touch.*`、`client_gesture_*`、`service_input_policy.h`
 - 补丁：0010（客户端手势仲裁、惯性期间保持 touch-action）。只接受 `client-v1` 触控；早期基于 TouchEmulator 的服务端手势识别路径及其配套补丁已删除。
 

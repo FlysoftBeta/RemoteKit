@@ -46,6 +46,9 @@ class ChannelController : private ControllerContext {
         timing(timing),
         direct_services({{"tenantId", tenant}, {"sessionId", id}}),
         data_router(MakeRouterHooks(), {{"tenantId", tenant}, {"sessionId", id}}) {}
+  // Called from producer threads after queuing work for FlushSignals(). Set
+  // once, before the peer exists.
+  void SetSignal(std::function<void()> signal) { signal_ = std::move(signal); }
   void QueueMessage(Json message);
   DataRouter::Hooks MakeRouterHooks();
   void Bind(uint64_t handle);
@@ -87,5 +90,6 @@ class ChannelController : private ControllerContext {
   DataRouter data_router;
   uint64_t request_generation_ = 0;
   std::string peer_lease_;
+  std::function<void()> signal_;
 };
 }  // namespace remotekit

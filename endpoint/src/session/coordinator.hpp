@@ -18,6 +18,9 @@ class SessionCoordinator {
     std::function<Result<Json>(const Json&)> stop;
     std::function<Result<Json>()> observe;
     std::function<void()> maintain;
+    // Drains queued Viewer channel traffic. Runs on Signal() without the full
+    // convergence and maintenance pass; maintain() covers it on its cadence.
+    std::function<void()> signals;
     std::function<Result<void>(const Json&, uint64_t)> admit;
     std::function<Result<Json>(const Json&, uint64_t)> request;
     std::function<Result<void>(const Json&, uint64_t)> replay;
@@ -36,6 +39,9 @@ class SessionCoordinator {
   Result<Json> Request(const Json& request, uint64_t generation);
   Result<Json> Acknowledge(const Json& request, uint64_t generation);
   void ManagementLost(uint64_t generation);
+  // Thread-safe. Viewer input and channel events wait on this, not on the
+  // maintenance cadence.
+  void Signal();
   Result<Json> Execute(const std::function<Result<Json>()>& action);
   Result<Json> Version(const std::function<Result<void>()>& capture,
                        const std::function<Result<void>()>& build,
@@ -65,7 +71,7 @@ class SessionCoordinator {
   Json desired_;
   Json latest_ = Json::object();
   std::deque<std::function<void()>> jobs_;
-  bool stopping_ = false, force_observation_ = true;
+  bool stopping_ = false, force_observation_ = true, signaled_ = false;
   std::string prepared_revision_, started_revision_, views_revision_, stopped_revision_;
   std::string browser_incarnation_, applied_clipboard_revision_ = "0";
   std::atomic<uint64_t>& observation_sequence_;

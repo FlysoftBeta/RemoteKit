@@ -36,10 +36,12 @@ void ChannelController::HandlePeerEvent(const RtcEvent& event) {
     auto routed = data_router.Receive(event);
     if (!routed)
       LogError(LogLevel::kWarn, "dc.receive_failed", routed.error());
+    signal_();
     return;
   }
   if (event.type == REMOTEKIT_RTC_DATA_STATE) {
     data_router.DataState(event);
+    signal_();
     return;
   }
   if (event.type == REMOTEKIT_RTC_STATS) {
@@ -252,9 +254,12 @@ DataRouter::Hooks ChannelController::MakeRouterHooks() {
       .send = [this](const Json& message, uint64_t stamp) { Send(message, stamp); }};
 }
 void ChannelController::Queue(const RtcEvent& event) {
-  std::lock_guard lock(event_mutex);
-  if (events.size() < 1024)
-    events.push_back(event);
+  {
+    std::lock_guard lock(event_mutex);
+    if (events.size() < 1024)
+      events.push_back(event);
+  }
+  signal_();
 }
 void ChannelController::QueueMessage(Json message) {
   Queue(RtcEvent{0x10000, message.dump(), "", 0, peer_controller.Handle(), authorization.Stamp()});

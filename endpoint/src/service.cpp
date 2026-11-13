@@ -257,6 +257,11 @@ Result<void> Service::Fence(const Json& desired, uint64_t generation) {
             sdk_, options_, link_, objects_, frame_admission_, target, incarnation_);
         entry.coordinator = std::make_shared<SessionCoordinator>(
             target, incarnation_, observation_sequence_, entry.execution->Hooks());
+        entry.execution->BindSignal(
+            [coordinator = std::weak_ptr<SessionCoordinator>(entry.coordinator)] {
+              if (const auto owner = coordinator.lock())
+                owner->Signal();
+            });
       }
       managed = entry;
     }
