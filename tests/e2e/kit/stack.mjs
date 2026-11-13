@@ -21,7 +21,13 @@ import { promisify } from 'node:util';
 import { stageRuntime } from '../../integration/stage-runtime.mjs';
 import { startFixture } from './fixtures.mjs';
 import { fakeLearningProvider } from './learning-provider.mjs';
-import { cleanupRun, registerCleanup, trackCleanupProcess, trackNodeData } from './cleanup.mjs';
+import {
+  cleanupRun,
+  registerCleanup,
+  trackCleanupPid,
+  trackCleanupProcess,
+  trackNodeData,
+} from './cleanup.mjs';
 
 export const repository = fileURLToPath(new URL('../../../', import.meta.url));
 const root = repository;
@@ -321,8 +327,13 @@ export async function startStack({
     );
     const pending = new Map();
     const events = [];
+    const endpointPids = new Set();
     child.on('message', (message) => {
       if (message.event) {
+        if (message.event === 'node.ready' && message.pid && !endpointPids.has(message.pid)) {
+          endpointPids.add(message.pid);
+          trackCleanupPid(run, message.pid);
+        }
         events.push(message);
         appendFileSync(join(run, 'control-events.jsonl'), JSON.stringify(message) + '\n');
       }
