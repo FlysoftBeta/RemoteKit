@@ -52,7 +52,7 @@ export async function makeNodeRelease(runtime, endpoint, generation, browser) {
   const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
   const buildId = hash(
     [...files]
-      .sort()
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([name, bytes]) => `${name}\t${hash(bytes)}\n`)
       .join(''),
   );
