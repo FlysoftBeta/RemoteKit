@@ -90,6 +90,8 @@ Control 只读一个环境变量 `REMOTEKIT_CONTROL_CONFIG`（默认 `control/da
 C:\src\depot_tools\python3.bat tools/release.py --publish
 ```
 
+`--full` 在 patch 之外强制附带 full 资产（见下文发布格式），只能与 `--publish` 一起用。
+
 `tools/release.py` 是唯一的发布入口：工作树有未提交改动时拒绝；依次执行 stage、Chromium `out/rel` 构建（Browser + SDK）、SDK 导出、Endpoint 打包构建（含 `remotekit_control`、`remotekit_node`、`remotekit_release`）、Control 构建，再运行 `package-runtime.py --smoke`，`--publish` 时最后执行 `publish-release.py`。任一步失败即停止。
 
 ### 版本树与 payload

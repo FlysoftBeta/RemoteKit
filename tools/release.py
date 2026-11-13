@@ -25,7 +25,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', choices=['dev', 'rel'], default='rel')
     parser.add_argument('--publish', action='store_true')
+    parser.add_argument('--full', action='store_true', help='publish a full asset as well as the patch')
     args = parser.parse_args()
+    if args.full and not args.publish:
+        raise ValueError('--full requires --publish')
     status = subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True)
     if status.strip():
         raise RuntimeError('Release requires a clean working tree:\n' + status.rstrip())
@@ -68,7 +71,8 @@ def main():
     print('> package-runtime.py --out ' + args.out + ' --smoke', flush=True)
     result = packager.main(['--out', args.out, '--smoke'])
     if args.publish:
-        run([sys.executable, 'tools/publish-release.py', '--package', result['directory']], env)
+        publish = [sys.executable, 'tools/publish-release.py', '--package', result['directory']]
+        run(publish + (['--full'] if args.full else []), env)
     print(json.dumps(result, indent=2), flush=True)
 
 
