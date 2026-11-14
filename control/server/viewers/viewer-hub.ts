@@ -143,15 +143,17 @@ export class ViewerHub {
     this.push(tenant);
     return security.locked ? undefined : this.productState(tenant);
   }
-  private contextServiceClose(tenant: string) {
-    return this.services.servicePeers.close(tenant);
+  private contextServiceClose(tenant: string, lease?: string) {
+    return this.services.servicePeers
+      .close(tenant, undefined, lease)
+      .catch((err) => log.warn('viewer.service_close_failed', { tenant, lease, err }));
   }
   async detachViewer(tenant: string, id: string) {
     const runtime = this.context.tenants.get(tenant);
     const viewer = runtime.viewer;
     if (viewer?.id !== id) return;
     this.context.store.reclaim.detach(tenant);
-    void this.services.servicePeers.close(tenant, undefined, id);
+    void this.contextServiceClose(tenant, id);
     delete runtime.viewer;
     runtime.viewerAbsentSince = this.context.clock.monotonicMs();
     delete runtime.pageRequests.fullscreen;

@@ -201,7 +201,9 @@ export function createApplication(
     unsubscribeSignals?.();
     await services.rtc.close();
     await services.reconciler.close();
-    await services.servicePeers.dispose();
+    await services.servicePeers
+      .dispose()
+      .catch((err) => log.warn('application.service_close_failed', { err }));
     await sessionEvents.close();
     await endpoint.close();
     await services.learning.stop();
