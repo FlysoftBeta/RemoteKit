@@ -25,6 +25,8 @@ Viewer 的 WebSocket 断开使 visible=false，并使页面获得回收资格；
 
 状态值：0 live、1 frozen、2 discarded、3 unloaded。每个 view 分别记录 desired、actual、pending、`lifecycle_generation`、`last_lifecycle{succeeded, detail}`、`lifecycle_uncertain`。actual 只在确认成功时改变；accepted 不能推断 renderer 已完成。生命周期请求使焦点失效；discard/unload 增加 instance 与 document 代次。
 
+普通冻结、丢弃和恢复使用当前页面的生命周期接口；观察到的代次只用于 Control 重试单元的输入身份。只有不确定状态恢复中的 unload/restore 才在线上携带 `lifecycleGeneration`，由 Browser 校验恢复代次与状态。
+
 **冻结 ACK**：每个 ACK 绑定请求序号、RVH 弱引用和 PageBroadcast 连接代次（patch 0015），旧响应不能证明新请求完成。50ms 轮询，10 秒期限。
 
 **冻结期间的竞争**：冻结过程中发生导航或保护条件变化时，先排空已发送且仍属于当前页面的冻结请求，再逐个 RVH 发解冻并等待新的精确 ACK。这次冻结以失败结束，但页面确定是 live，JS 堆保留。解冻不受"页面必须空闲"的冻结资格限制。旧实现把所有失败都标记为 uncertain，包括这种可恢复的竞争。

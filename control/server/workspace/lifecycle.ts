@@ -39,6 +39,7 @@ export class UncertainRecovery {
   private async applyLifecycle(
     tenant: string,
     request: Parameters<DomainContext['endpoint']['lifecycle']>[1],
+    generation?: string,
   ) {
     const key = tenant + '/' + request.viewId;
     let unit = this.ordinaryRetries.get(key);
@@ -46,7 +47,7 @@ export class UncertainRecovery {
       unit = new RetryUnit({ name: 'lifecycle.view', now: () => this.context.clock.monotonicMs() });
       this.ordinaryRetries.set(key, unit);
     }
-    const input = JSON.stringify([this.context.store.buildId, request]);
+    const input = JSON.stringify([this.context.store.buildId, request, generation]);
     if (!unit.ready(input)) return false;
     try {
       const result = await this.context.endpoint.lifecycle(tenant, request);
@@ -472,12 +473,15 @@ export class UncertainRecovery {
     if (!lifecycleBlocked && visible && actualState !== 0 && !current?.pending) {
       const attempt = runtime.transitions.get(key);
       if (!attempt || attempt.action !== 'restore' || this.context.clock.monotonicMs() - attempt.at > 12000) {
-        const applied = await this.applyLifecycle(tenant, {
-          viewId: viewId,
-          action: 'restore',
-          requireRunning: true,
-          lifecycleGeneration: current.lifecycle_generation,
-        });
+        const applied = await this.applyLifecycle(
+          tenant,
+          {
+            viewId: viewId,
+            action: 'restore',
+            requireRunning: true,
+          },
+          current.lifecycle_generation,
+        );
         if (!applied) return false;
         runtime.transitions.set(key, {
           action: 'restore',
@@ -780,13 +784,16 @@ export class UncertainRecovery {
     if (!action) return;
     const attempt = this.context.tenants.get(tenant).lifecycle.transitions.get(key);
     if (attempt?.action === action && this.context.clock.monotonicMs() - attempt.at <= 12000) return;
-    const applied = await this.applyLifecycle(tenant, {
-      viewId: tab.webviewId,
-      action,
-      requireRunning: true,
-      browserIncarnation: typeof browserIncarnation === 'string' ? browserIncarnation : undefined,
-      lifecycleGeneration: current.lifecycle_generation,
-    });
+    const applied = await this.applyLifecycle(
+      tenant,
+      {
+        viewId: tab.webviewId,
+        action,
+        requireRunning: true,
+        browserIncarnation: typeof browserIncarnation === 'string' ? browserIncarnation : undefined,
+      },
+      current.lifecycle_generation,
+    );
     if (!applied) return;
     if (tab.idleKeepAliveOutcome && exhaustion) {
       tab.idleKeepAliveOutcome.reason = 'exhaustion';
