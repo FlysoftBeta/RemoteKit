@@ -73,7 +73,11 @@ media::Sdk MakeSdk() {
 }  // namespace
 class NativeErrorStateProbe {
  public:
-  static void Launch(BrowserRuntime& browser, const wchar_t* mode = L" --hold") {
+  static void Launch(BrowserRuntime& browser, const fs::path& root,
+                     const wchar_t* mode = L" --hold") {
+    browser.crash_directory_ = root / "crashes";
+    browser.log_ = root / "browser.log";
+    fs::create_directories(browser.crash_directory_);
     wchar_t executable[32768]{};
     GetModuleFileNameW(nullptr, executable, 32768);
     Take(browser.process_.Launch(executable, BrowserProcess::Quote(executable) + mode,
@@ -81,11 +85,11 @@ class NativeErrorStateProbe {
     browser.incarnation_ = browser.process_incarnation_ = "browser";
     browser.shutdown_phase_ = BrowserRuntime::ShutdownPhase::kRunning;
   }
-  static void BrowserState() {
+  static void BrowserState(const fs::path& root) {
     auto sdk = MakeSdk();
     cluster::Key key{};
     BrowserRuntime browser(sdk, key);
-    Launch(browser);
+    Launch(browser, root);
     Take(browser.Rpc().Connect("fake"));
     unsigned requests = 0;
     dispatch = [&](const Json&) -> Result<Json> {
@@ -108,7 +112,7 @@ class NativeErrorStateProbe {
           "late control connection recovers retained process");
     Take(browser.Stop());
     browser.ReleaseExited();
-    Launch(browser, L" --exit");
+    Launch(browser, root, L" --exit");
     browser.shutdown_phase_ = BrowserRuntime::ShutdownPhase::kDispatched;
     Check(browser.process_.WaitCleanExit(2000), "observe a late clean process exit");
     Take(browser.Shutdown([&]() -> Result<void> {
@@ -125,7 +129,7 @@ class NativeErrorStateProbe {
     media::FrameAdmission admission;
     Session session(sdk, options, "tenant", std::string(32, 'a'), 1, {}, link, objects, admission);
     Take(session.Initialize());
-    Launch(session.browser);
+    Launch(session.browser, root);
     Take(session.browser.Rpc().Connect("fake"));
     session.views.desired["1"] = {{"url", "https://example.test/"}};
     using Phase = NavigationRecovery::Recovery::Phase;
@@ -418,7 +422,7 @@ int main(int argc, char** argv) {
     const auto root =
         fs::absolute(argv[1]) / ("error-path-state-" + std::to_string(GetCurrentProcessId()));
     fs::create_directories(root);
-    NativeErrorStateProbe::BrowserState();
+    NativeErrorStateProbe::BrowserState(root / "browser");
     NativeErrorStateProbe::ViewsAndOutput(root / "views");
     NativeErrorStateProbe::ShutdownOwnership(root / "shutdown");
     NativeErrorStateProbe::ReaderPublication(root / "reader");
