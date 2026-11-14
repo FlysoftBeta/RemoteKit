@@ -10,12 +10,18 @@ Result<bool> ReplaceExecutable(const fs::path& installed,
   auto running = ExecutablePath();
   if (!fs::exists(installed) || !fs::equivalent(running, installed))
     return false;
-  auto old_hash = cluster::Sha256File(installed), new_hash = cluster::Sha256File(replacement);
-  if (!old_hash)
-    return old_hash.error();
+  // The original path can name a different file after an atomic replacement.
+  static std::optional<cluster::Key> running_hash;
+  if (!running_hash) {
+    auto hash = cluster::Sha256File(running);
+    if (!hash)
+      return hash.error();
+    running_hash = hash.value();
+  }
+  auto new_hash = cluster::Sha256File(replacement);
   if (!new_hash)
     return new_hash.error();
-  if (old_hash.value() == new_hash.value())
+  if (*running_hash == new_hash.value())
     return false;
   const auto staged = fs::path(installed.wstring() + L".new");
   if (!CopyFileW(replacement.c_str(), staged.c_str(), FALSE))
@@ -29,19 +35,8 @@ Result<bool> ReplaceExecutable(const fs::path& installed,
   if (!flushed)
     return Error{ErrorCode::kUnavailable, "cannot flush staged supervisor"};
   const auto old = fs::path(installed.wstring() + L".old");
-  if (!MoveFileExW(installed.c_str(), old.c_str(),
-                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    return Error{ErrorCode::kUnavailable, "cannot rename installed supervisor"};
-  auto restore = [&] {
-    DeleteFileW(installed.c_str());
-    return MoveFileExW(old.c_str(), installed.c_str(),
-                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-  };
-  if (!MoveFileExW(staged.c_str(), installed.c_str(), MOVEFILE_WRITE_THROUGH)) {
-    const bool restored = restore() != FALSE;
-    return Error{ErrorCode::kUnavailable,
-                 restored ? "cannot install new supervisor" : "cannot restore supervisor"};
-  }
+  if (!ReplaceFileW(installed.c_str(), staged.c_str(), old.c_str(), 0, nullptr, nullptr))
+    return Error{ErrorCode::kUnavailable, "cannot install new supervisor"};
   if (!service) {
     auto command = Quote(installed.wstring()) + L" " + arguments;
     STARTUPINFOW startup{};
@@ -49,9 +44,9 @@ Result<bool> ReplaceExecutable(const fs::path& installed,
     PROCESS_INFORMATION process{};
     if (!CreateProcessW(installed.c_str(), command.data(), nullptr, nullptr, FALSE,
                         CREATE_NO_WINDOW, nullptr, root.c_str(), &startup, &process)) {
-      bool restored = restore() != FALSE;
-      return Error{ErrorCode::kUnavailable,
-                   restored ? "cannot start updated supervisor" : "cannot restore supervisor"};
+      if (!ReplaceFileW(installed.c_str(), old.c_str(), staged.c_str(), 0, nullptr, nullptr))
+        return Error{ErrorCode::kUnavailable, "cannot restore supervisor after launch failure"};
+      return Error{ErrorCode::kUnavailable, "cannot start updated supervisor"};
     }
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
@@ -67,5 +62,16 @@ void CleanupRuntime(const fs::path& root, const std::string& current, bool downl
   if (downloads && fs::exists(root / L"downloads"))
     for (auto& entry : fs::directory_iterator(root / L"downloads"))
       fs::remove_all(ExtendedPath(entry.path()));
+}
+void CleanupRuntimeBestEffort(const fs::path& root, const std::string& current, Log& log) noexcept {
+  try {
+    CleanupRuntime(root, current, true);
+  } catch (const std::exception& error) {
+    try {
+      log.Event(LogLevel::kWarn, "runtime.cleanup_failed", {{"message", error.what()}});
+    } catch (...) {
+      fputs("runtime.cleanup_failed\n", stderr);
+    }
+  }
 }
 }  // namespace remotekit::updater

@@ -73,11 +73,15 @@ Fetched Fetch(const std::string& url,
               const fs::path& base,
               const fs::path& work,
               const Key& key,
-              const Http& http) {
+              const Http& http,
+              RetryUnit& retry) {
   auto fetch = [&](const std::string& address) { return DecryptManifest(http.Get(address), key); };
   bool replanned = false;
   while (true) {
     auto plan = MakePlan(url, state, fetch);
+    retry.Input(plan.build_id);
+    if (!retry.Ready())
+      throw Failure(*retry.Failure());
     if (plan.steps.empty())
       return {plan.build_id, {}, base};
     try {

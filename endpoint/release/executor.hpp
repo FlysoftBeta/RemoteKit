@@ -1,6 +1,7 @@
 #pragma once
 #include "planner.hpp"
 #include "http.hpp"
+#include "util/retry_unit.hpp"
 namespace remotekit::release {
 struct Replan : Failure {
   std::string salt;
@@ -23,5 +24,6 @@ Fetched Fetch(const std::string& url,
               const fs::path& base,
               const fs::path& work,
               const Key& key,
-              const Http& http);
+              const Http& http,
+              RetryUnit& retry);
 }  // namespace remotekit::release

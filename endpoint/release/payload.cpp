@@ -1,4 +1,5 @@
 #include "payload.hpp"
+#include "current.hpp"
 #include "updater/archive.hpp"
 #include <zstd.h>
 #include <algorithm>
@@ -90,8 +91,17 @@ fs::path InstallPayload(const fs::path& root,
                         const std::string& expected,
                         PayloadSource source) {
   Require(cluster::ValidBuildId(expected), "invalid payload identity");
-  auto stage = root / L"work" / ("stage-" + expected);
   auto version = root / L"versions" / expected;
+  if (fs::exists(version)) {
+    auto valid = ValidateVersion(version, expected, kControlFiles);
+    if (!valid)
+      throw Failure(valid.error());
+    if (std::holds_alternative<NotInstalled>(valid.value()))
+      Fail(ErrorCode::kConflict, "existing version differs from payload or is incomplete");
+    Require(PayloadBuildId(tar) == expected, "payload build identity mismatch");
+    return version;
+  }
+  auto stage = root / L"work" / ("stage-" + expected);
   fs::create_directories(root / L"work");
   fs::create_directories(root / L"versions");
   if (fs::exists(stage))

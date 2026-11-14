@@ -3,16 +3,20 @@
 #include "process.hpp"
 #include "replacement.hpp"
 #include "snapshot.hpp"
-#include "util/error_policy.hpp"
+#include "util/retry_unit.hpp"
 #include <thread>
 
 namespace remotekit::updater {
 namespace {
-DWORD RunEndpoint(const fs::path& root,
-                  const std::string& id,
-                  HANDLE stop,
-                  Log& log,
-                  Log& endpoint_log) {
+struct Replaced {};
+using EndpointResult = std::variant<DWORD, Replaced>;
+EndpointResult RunEndpoint(const fs::path& root,
+                           const std::string& id,
+                           HANDLE stop,
+                           Log& log,
+                           Log& endpoint_log,
+                           bool service,
+                           RetryUnit& replacement_retry) {
   auto executable = root / L"runtime" / id / L"bin/endpoint_service.exe";
   auto config = cluster::LoadNodeFiles(root);
   if (!config)
@@ -23,7 +27,23 @@ DWORD RunEndpoint(const fs::path& root,
                      false);
   log.Event(LogLevel::kInfo, "endpoint.started");
   HANDLE waits[] = {stop, child.handle()};
-  DWORD result = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+  DWORD result = WAIT_TIMEOUT;
+  while ((result = WaitForMultipleObjects(2, waits, FALSE, 1000)) == WAIT_TIMEOUT) {
+    if (!replacement_retry.Ready())
+      continue;
+    auto replaced = ReplaceExecutable(root / L"remotekit_node.exe",
+                                      executable.parent_path() / L"remotekit_node.exe", root,
+                                      L"run --root=" + Quote(root.wstring()), service, log);
+    if (!replaced)
+      replacement_retry.Fail(replaced.error());
+    else {
+      replacement_retry.Success();
+      if (replaced.value()) {
+        child.Stop(30000);
+        return Replaced{};
+      }
+    }
+  }
   if (result == WAIT_OBJECT_0 || result == WAIT_FAILED)
     child.Stop(30000);
   DWORD code = child.ExitCode();
@@ -42,60 +62,103 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
     log.Event(LogLevel::kError, "supervisor.config_failed", LogErrorFields(config.error()));
     return 1;
   }
-  CleanupRuntime(root, ReadCurrent(root), true);
-  unsigned backoff = 1;
-  unsigned update_attempt = 0;
-  bool update = ReadCurrent(root).empty();
+  enum class Phase { kStartup, kRun, kUpdate };
+  Phase phase = Phase::kStartup;
+  RetryUnit update_retry("updater"), process_retry("endpoint"),
+      replacement_retry("updater.replacement");
+  update_retry.Input(config.value().node_id);
+  UpdateStage update_stage = DiscoverRelease{};
+  std::optional<std::string> observed_current;
+  std::optional<std::string> reported_invalid;
   while (!Stopping(stop)) {
-    if (update) {
-      auto result = Update(root, stop, log, service);
-      if (!result) {
-        log.Event(LogLevel::kError, "supervisor.update_failed", LogErrorFields(result.error()));
-        const auto delay = result.error().code == ErrorCode::kUnavailable ||
-                                   result.error().code == ErrorCode::kBusy
-                               ? RetryDelay(result.error(), update_attempt++)
-                               : std::nullopt;
-        if (!delay) {
-          if (result.error().code != ErrorCode::kRejected &&
-              result.error().code != ErrorCode::kInternal)
-            return 1;
-        }
-        if (Delay(stop, delay ? static_cast<DWORD>(delay->count()) : 30000))
+    auto current = ReadCurrent(root);
+    if (!current) {
+      log.Event(LogLevel::kError, "supervisor.current_failed", LogErrorFields(current.error()));
+      if (Delay(stop, 1000))
+        break;
+      continue;
+    }
+    const auto* missing = std::get_if<release::NotInstalled>(&current.value());
+    const auto invalid = missing ? missing->invalid : std::nullopt;
+    if (invalid && !reported_invalid) {
+      log.Event(LogLevel::kWarn, "current.invalid", {{"message", *invalid}});
+      update_retry.Input(config.value().node_id + ":" + *invalid);
+      phase = Phase::kStartup;
+    }
+    reported_invalid = invalid;
+    auto id = release::InstalledId(current.value());
+    if (observed_current && *observed_current != id) {
+      update_retry.Input(id.empty() ? config.value().node_id : id);
+    }
+    observed_current = id;
+    if (phase == Phase::kStartup) {
+      CleanupRuntimeBestEffort(root, id, log);
+      update_stage = DiscoverRelease{};
+      phase = Phase::kRun;
+    }
+    replacement_retry.Input(id);
+    if (!id.empty() && replacement_retry.Ready()) {
+      auto replaced = ReplaceExecutable(root / L"remotekit_node.exe",
+                                        root / L"runtime" / id / L"bin/remotekit_node.exe", root,
+                                        L"run --root=" + Quote(root.wstring()), service, log);
+      if (!replaced)
+        replacement_retry.Fail(replaced.error());
+      else {
+        replacement_retry.Success();
+        if (replaced.value())
+          return service ? 1 : 0;
+      }
+    }
+    if (id.empty())
+      phase = Phase::kUpdate;
+    if (phase == Phase::kUpdate) {
+      if (!update_retry.Ready()) {
+        if (Delay(stop, update_retry.Status() == RetryUnit::State::kWaiting ? 100 : 1000))
           break;
         continue;
       }
+      auto result = Update(root, stop, log, service, update_retry, update_stage);
+      if (!result) {
+        const auto previous_status = update_retry.Status();
+        update_retry.Fail(result.error());
+        if (previous_status == RetryUnit::State::kIdle)
+          log.Event(LogLevel::kError, "supervisor.update_failed", LogErrorFields(result.error()));
+        continue;
+      }
+      update_retry.Success();
       if (result.value())
         return service ? 1 : 0;
-      update_attempt = 0;
-      update = false;
-    }
-    auto id = ReadCurrent(root);
-    if (id.empty()) {
-      update = true;
+      phase = Phase::kRun;
       continue;
     }
-    auto started = GetTickCount64();
+    process_retry.Input(id);
+    if (!process_retry.Ready()) {
+      if (Delay(stop, 100))
+        break;
+      continue;
+    }
+    const auto started = GetTickCount64();
     DWORD code = 1;
     try {
-      code = RunEndpoint(root, id, stop, log, endpoint_log);
+      auto result = RunEndpoint(root, id, stop, log, endpoint_log, service, replacement_retry);
+      if (std::holds_alternative<Replaced>(result))
+        return service ? 1 : 0;
+      code = std::get<DWORD>(result);
     } catch (const std::exception& error) {
-      log.Event(LogLevel::kError, "supervisor.failed",
-                LogErrorFields(Error{ErrorCode::kInternal, error.what()}));
+      process_retry.Fail({ErrorCode::kUnavailable, error.what()});
+      continue;
     }
     if (Stopping(stop))
       break;
     if (GetTickCount64() - started >= 60000)
-      backoff = 1;
+      process_retry.Success();
     if (code == 3) {
-      update = true;
+      phase = Phase::kUpdate;
       continue;
     }
     if (code == 4)
       continue;
-    log.Event(LogLevel::kInfo, "supervisor.restart_delayed", {{"seconds", backoff}});
-    if (Delay(stop, backoff * 1000))
-      break;
-    backoff = std::min(backoff * 2, 30u);
+    process_retry.Fail({ErrorCode::kUnavailable, "endpoint process exited"});
   }
   log.Event(LogLevel::kInfo, "supervisor.stopped");
   return 0;

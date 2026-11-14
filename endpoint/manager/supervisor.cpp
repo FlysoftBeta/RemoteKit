@@ -1,4 +1,5 @@
 #include "supervisor.hpp"
+#include "snapshots.hpp"
 #include "persistence/config_formats.hpp"
 #include "release/executor.hpp"
 #include "release/payload.hpp"
@@ -6,7 +7,7 @@
 #include "updater/process.hpp"
 #include "updater/snapshot.hpp"
 #include "updater/replacement.hpp"
-#include "util/error_policy.hpp"
+#include "util/retry_unit.hpp"
 #include <atomic>
 #include <thread>
 
@@ -74,25 +75,8 @@ updater::Handle Lock(const fs::path& root, HANDLE stop, DWORD timeout) {
       Fail(ErrorCode::kCanceled, "manager stopped while waiting for lock");
   }
 }
-std::string Current(const fs::path& root) {
-  try {
-    auto bytes = Read(root / L"current", 66);
-    std::string id(bytes.begin(), bytes.end());
-    while (!id.empty() && (id.back() == '\r' || id.back() == '\n'))
-      id.pop_back();
-    if (!cluster::ValidBuildId(id))
-      return {};
-    auto version = root / L"versions" / id;
-    if (Take(cluster::ReadBuildId(version)) != id)
-      return {};
-    for (auto required : {L"bin/node.exe", L"bin/remotekit_control.exe", L"bin/remotekit_node.exe",
-                          L"control/dist/server.mjs"})
-      if (!fs::is_regular_file(version / required))
-        return {};
-    return id;
-  } catch (...) {
-    return {};
-  }
+Result<release::CurrentState> Current(const fs::path& root) {
+  return release::ReadCurrent(root, L"versions", release::kControlFiles);
 }
 void Cleanup(const fs::path& root, const std::string& current) {
   std::error_code ec;
@@ -114,14 +98,19 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
   updater::Log log(root / L"logs/manager.log"), control_log(root / L"logs/control.stdout.log");
   auto config = LoadConfig(root);
   auto key = LoadKey(root / L"config/release.key");
-  auto id = Current(root);
-  Cleanup(root, id);
-  State state{id, !id.empty() && BaseUsable(root / L"versions" / id), {}};
+  std::string id;
+  State state{};
   Http http(config.proxy, stop, &log);
   std::unique_ptr<updater::ChildProcess> child;
-  std::vector<std::unique_ptr<updater::SnapshotSupervisor>> snapshots;
-  ULONGLONG started = 0, restart_at = 0, check_at = 0, snapshot_check_at = 0;
-  unsigned backoff = 1, attempt = 0;
+  std::map<std::string, std::unique_ptr<updater::SnapshotSupervisor>> snapshots;
+  std::map<std::string, RetryUnit> snapshot_retries;
+  ULONGLONG started = 0, check_at = 0, snapshot_check_at = 0, current_check_at = 0,
+            replacement_check_at = 0;
+  enum class Startup { kPending, kReady };
+  auto startup = Startup::kPending;
+  std::optional<std::string> reported_invalid;
+  RetryUnit update_retry("manager.update"), process_retry("control"),
+      replacement_retry("manager.replacement");
   std::atomic<bool> done = false;
   std::optional<std::string> installed;
   std::optional<Error> error;
@@ -137,85 +126,143 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
   try {
     while (!updater::Stopping(stop)) {
       auto now = GetTickCount64();
-      if (worker.joinable() && done.load()) {
-        worker.join();
-        if (error) {
-          log.Event(LogLevel::kWarn, "manager.update_failed", LogErrorFields(*error));
-          auto delay = RetryDelay(*error, attempt++);
-          check_at = now + (delay ? delay->count() : config.interval);
-        } else {
-          attempt = 0;
-          check_at = now + config.interval;
-          if (installed && *installed != id) {
+      if (!worker.joinable() && (startup == Startup::kPending || now >= current_check_at)) {
+        current_check_at = now + config.interval;
+        auto current = Current(root);
+        if (!current) {
+          log.Event(LogLevel::kError, "manager.current_failed", LogErrorFields(current.error()));
+          // A running Control keeps running: only a successful read may replace or stop it.
+          if (startup == Startup::kPending) {
+            if (updater::Delay(stop, 1000))
+              break;
+            continue;
+          }
+        }
+        if (current) {
+          const auto* missing = std::get_if<NotInstalled>(&current.value());
+          const auto invalid = missing ? missing->invalid : std::nullopt;
+          if (invalid && invalid != reported_invalid)
+            log.Event(LogLevel::kWarn, "current.invalid", {{"message", *invalid}});
+          reported_invalid = invalid;
+          auto current_id = InstalledId(current.value());
+          if (startup == Startup::kPending || current_id != id) {
             stop_child();
-            id = *installed;
-            AtomicText(root / L"current", id);
-            state.current = id;
-            state.base_usable = true;
+            id = current_id;
             Cleanup(root, id);
-            auto replaced = updater::ReplaceExecutable(
-                root / L"remotekit_control.exe",
-                root / L"versions" / id / L"bin/remotekit_control.exe", root,
-                L"run --root=" + updater::Quote(root.wstring()), service, log);
-            if (!replaced)
-              log.Event(LogLevel::kError, "manager.replacement_failed",
-                        LogErrorFields(replaced.error()));
-            else if (replaced.value()) {
-              SecureZeroMemory(key.data(), key.size());
-              return service ? 1 : 0;
-            }
-            restart_at = 0;
-            backoff = 1;
+            state.current = id;
+            state.base_usable = !id.empty() && BaseUsable(root / L"versions" / id);
+            startup = Startup::kReady;
+            replacement_check_at = 0;
           }
         }
       }
+      if (worker.joinable() && done.load()) {
+        worker.join();
+        if (error) {
+          check_at = update_retry.Status() == RetryUnit::State::kWaiting
+                         ? now + static_cast<ULONGLONG>(std::max<int64_t>(
+                                     0, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            update_retry.Until() - RetryUnit::Clock::now())
+                                            .count()))
+                         : now + config.interval;
+        } else {
+          check_at = now + config.interval;
+          if (installed && *installed != id) {
+            stop_child();
+            AtomicText(root / L"current", *installed);
+            id = *installed;
+            state.current = id;
+            state.base_usable = true;
+            try {
+              Cleanup(root, id);
+            } catch (const std::exception& failure) {
+              log.Event(LogLevel::kWarn, "runtime.cleanup_failed", {{"message", failure.what()}});
+            }
+            replacement_check_at = 0;
+            process_retry.Input(id);
+          }
+        }
+      }
+      replacement_retry.Input(id);
+      if (!id.empty() && now >= replacement_check_at && replacement_retry.Ready()) {
+        auto replaced = updater::ReplaceExecutable(
+            root / L"remotekit_control.exe", root / L"versions" / id / L"bin/remotekit_control.exe",
+            root, L"run --root=" + updater::Quote(root.wstring()), service, log);
+        if (!replaced)
+          replacement_retry.Fail(replaced.error());
+        else {
+          replacement_retry.Success();
+          replacement_check_at = now + config.interval;
+          if (replaced.value()) {
+            stop_child();
+            if (worker.joinable())
+              worker.join();
+            SecureZeroMemory(key.data(), key.size());
+            return service ? 1 : 0;
+          }
+        }
+      }
+      process_retry.Input(id);
       if (child && WaitForSingleObject(child->handle(), 0) == WAIT_OBJECT_0) {
         log.Event(LogLevel::kWarn, "control.exited", {{"exitCode", child->ExitCode()}});
         child.reset();
         if (now - started >= 60000)
-          backoff = 1;
-        restart_at = now + backoff * 1000;
-        backoff = std::min(30u, backoff * 2);
+          process_retry.Success();
+        process_retry.Fail({ErrorCode::kUnavailable, "control process exited"});
       }
-      if (!child && !id.empty() && now >= restart_at) {
+      if (!child && !id.empty() && process_retry.Ready()) {
         try {
           child = StartControl(root, id, log, control_log);
           started = GetTickCount64();
-        } catch (const std::exception&) {
-          log.Event(LogLevel::kError, "control.start_failed");
-          restart_at = now + backoff * 1000;
-          backoff = std::min(30u, backoff * 2);
+        } catch (const std::exception& failure) {
+          process_retry.Fail({ErrorCode::kUnavailable, failure.what()});
         }
       }
-      if (child && snapshots.empty() && now >= snapshot_check_at) {
+      if (child && now >= snapshot_check_at) {
         snapshot_check_at = now + 1000;
         try {
-          snapshots.clear();
           auto bytes = Read(root / L"config/control.json", 1024 * 1024);
           auto control = Take(
               config_formats::Decode({reinterpret_cast<const char*>(bytes.data()), bytes.size()},
                                      config_formats::Control, persisted::Store::kControl));
-          for (const auto& [node_id, node] : control.at("nodes").items()) {
-            if (!node.contains("local"))
-              continue;
-            const auto local_text = node.at("local").at("root").get<std::string>();
-            auto local = fs::path(std::u8string(local_text.begin(), local_text.end()));
-            if (local.is_relative())
-              local = root / L"config" / local;
-            auto executable = local / L"runtime" / id / L"bin/remotekit_snapshot.exe";
-            if (node.at("local").contains("executable")) {
-              const auto text = node.at("local").at("executable").get<std::string>();
-              auto endpoint = fs::path(std::u8string(text.begin(), text.end()));
-              if (endpoint.is_relative())
-                endpoint = root / L"config" / endpoint;
-              executable = endpoint.parent_path() / L"remotekit_snapshot.exe";
-            }
-            snapshots.push_back(std::make_unique<updater::SnapshotSupervisor>(
-                fs::absolute(executable).lexically_normal(), fs::absolute(local).lexically_normal(),
-                node_id));
-          }
-        } catch (const std::exception&) {
-          snapshots.clear();
+          ReconcileSnapshots(
+              control.at("nodes"), snapshots,
+              [&](const std::string& node_id,
+                  const Json& local_config) -> std::unique_ptr<updater::SnapshotSupervisor> {
+                auto& retry =
+                    snapshot_retries.try_emplace(node_id, "manager.snapshot").first->second;
+                retry.Input(node_id);
+                if (!retry.Ready())
+                  return {};
+                const auto local_text = local_config.at("root").get<std::string>();
+                auto local = fs::path(std::u8string(local_text.begin(), local_text.end()));
+                if (local.is_relative())
+                  local = root / L"config" / local;
+                auto executable = local / L"runtime" / id / L"bin/remotekit_snapshot.exe";
+                if (local_config.contains("executable")) {
+                  const auto text = local_config.at("executable").get<std::string>();
+                  auto endpoint = fs::path(std::u8string(text.begin(), text.end()));
+                  if (endpoint.is_relative())
+                    endpoint = root / L"config" / endpoint;
+                  executable = endpoint.parent_path() / L"remotekit_snapshot.exe";
+                }
+                auto supervisor = std::make_unique<updater::SnapshotSupervisor>(
+                    fs::absolute(executable).lexically_normal(),
+                    fs::absolute(local).lexically_normal(), node_id);
+                retry.Success();
+                return supervisor;
+              },
+              [&](const std::string& node_id, const std::exception& failure) {
+                auto& retry = snapshot_retries.at(node_id);
+                Error error{ErrorCode::kUnavailable, failure.what()};
+                if (!retry.Failure())
+                  log.Event(LogLevel::kWarn, "manager.snapshot_failed",
+                            LogErrorFields(error, {{"nodeId", node_id}}));
+                retry.Fail(error);
+              });
+        } catch (const std::exception& failure) {
+          log.Event(LogLevel::kWarn, "manager.snapshot_config_failed",
+                    {{"message", failure.what()}});
         }
       }
       if (!worker.joinable() && now >= check_at) {
@@ -225,17 +272,25 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
         worker = std::thread([&] {
           try {
             auto base = id.empty() ? fs::path() : root / L"versions" / id / L"payload.tar";
-            auto result = Fetch(config.manifest, state, base, root / L"work", key, http);
+            auto result =
+                Fetch(config.manifest, state, base, root / L"work", key, http, update_retry);
             if (result.build_id != id) {
               InstallPayload(root, result.path, result.build_id, PayloadSource::kMove);
               installed = result.build_id;
             }
+            update_retry.Success();
           } catch (const Failure& failure) {
             error = failure.error;
           } catch (const fs::filesystem_error&) {
             error = Error{ErrorCode::kUnavailable, "release filesystem operation failed"};
           } catch (...) {
             error = Error{ErrorCode::kInternal, "release check failed"};
+          }
+          if (error) {
+            const auto previous_status = update_retry.Status();
+            update_retry.Fail(*error);
+            if (previous_status == RetryUnit::State::kIdle)
+              log.Event(LogLevel::kWarn, "manager.update_failed", LogErrorFields(*error));
           }
           done.store(true);
         });

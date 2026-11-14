@@ -4,17 +4,24 @@
 #include <iostream>
 namespace {
 bool fail_install = false;
-BOOL WINAPI ReplacementMove(LPCWSTR from, LPCWSTR to, DWORD flags) {
-  if (fail_install && std::wstring_view(from).ends_with(L".new")) {
+BOOL WINAPI ReplacementReplace(LPCWSTR installed,
+                               LPCWSTR staged,
+                               LPCWSTR backup,
+                               DWORD flags,
+                               LPVOID exclude,
+                               LPVOID reserved) {
+  if (!std::filesystem::is_regular_file(installed))
+    throw std::runtime_error("installed path missing before atomic replacement");
+  if (fail_install) {
     SetLastError(ERROR_ACCESS_DENIED);
     return FALSE;
   }
-  return MoveFileExW(from, to, flags);
+  return ReplaceFileW(installed, staged, backup, flags, exclude, reserved);
 }
 }  // namespace
-#define MoveFileExW ReplacementMove
+#define ReplaceFileW ReplacementReplace
 #include "../updater/replacement.cpp"
-#undef MoveFileExW
+#undef ReplaceFileW
 using namespace remotekit;
 using namespace remotekit::updater;
 namespace {
@@ -37,6 +44,11 @@ int Child() {
         "old executable restored");
   Check(!fs::exists(installed.wstring() + L".old"), "rollback consumes old path");
   Check(fs::exists(installed.wstring() + L".new"), "new executable was staged before renaming");
+  fail_install = false;
+  auto retried = ReplaceExecutable(installed, replacement, root, L"", true, log);
+  Check(retried && retried.value(), "same release replacement retried after transient failure");
+  Check(cluster::Sha256File(installed).value() == cluster::Sha256File(replacement).value(),
+        "atomic replacement installed promised bytes");
   return 0;
 }
 }  // namespace

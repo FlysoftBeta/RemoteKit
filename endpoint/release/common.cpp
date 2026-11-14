@@ -13,53 +13,6 @@ Bytes Read(const fs::path& path, uint64_t limit) {
      "cannot read release file");
   return bytes;
 }
-void Write(const fs::path& path, std::span<const uint8_t> bytes) {
-  std::ofstream file(path, std::ios::binary | std::ios::trunc);
-  Io(static_cast<bool>(file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size())),
-     "cannot write release file");
-  file.close();
-  Io(!file.fail(), "cannot close release file");
-}
-void WriteText(const fs::path& path, const std::string& text) {
-  Write(path, {reinterpret_cast<const uint8_t*>(text.data()), text.size()});
-}
-Json ParseJson(std::string_view text) {
-  std::vector<std::set<std::string>> objects;
-  bool duplicate = false;
-  auto callback = [&](int, Json::parse_event_t event, Json& parsed) {
-    if (event == Json::parse_event_t::object_start)
-      objects.emplace_back();
-    if (event == Json::parse_event_t::key &&
-        !objects.back().insert(parsed.get<std::string>()).second)
-      duplicate = true;
-    if (event == Json::parse_event_t::object_end)
-      objects.pop_back();
-    return true;
-  };
-  auto json = Json::parse(text, callback, false);
-  Require(!json.is_discarded() && !duplicate, "invalid release JSON");
-  return json;
-}
-void Keys(const Json& json,
-          std::initializer_list<std::string_view> required,
-          std::initializer_list<std::string_view> optional) {
-  Require(json.is_object(), "expected JSON object");
-  for (auto key : required)
-    Require(json.contains(key), "missing JSON field");
-  for (auto it = json.begin(); it != json.end(); ++it)
-    Require(std::find(required.begin(), required.end(), it.key()) != required.end() ||
-                std::find(optional.begin(), optional.end(), it.key()) != optional.end(),
-            "unknown JSON field");
-}
-uint64_t Unsigned(const Json& json) {
-  Require(json.is_number_unsigned(), "expected unsigned integer");
-  return json.get<uint64_t>();
-}
-std::string HexString(const Json& json) {
-  Require(json.is_string() && cluster::ValidBuildId(json.get_ref<const std::string&>()),
-          "expected lowercase 64 hex digits");
-  return json.get<std::string>();
-}
 Key Unhex(const std::string& hex) {
   Require(cluster::ValidBuildId(hex), "invalid hex key");
   auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
@@ -70,21 +23,6 @@ Key Unhex(const std::string& hex) {
 }
 std::string HashFile(const fs::path& path) {
   return cluster::Hex(Take(cluster::Sha256File(path)));
-}
-void AtomicText(const fs::path& path, const std::string& text) {
-  auto temporary = fs::path(path.wstring() + L".tmp");
-  WriteText(temporary, text);
-  // Scanners and indexers briefly open fresh files without FILE_SHARE_DELETE.
-  for (int attempt = 1;; ++attempt) {
-    if (MoveFileExW(temporary.c_str(), path.c_str(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-      return;
-    const DWORD error = GetLastError();
-    if ((error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION) || attempt == 50)
-      Fail(ErrorCode::kUnavailable,
-           "cannot activate release file (Windows error " + std::to_string(error) + ")");
-    Sleep(20);
-  }
 }
 Mapping::Mapping(const fs::path& path, std::optional<uint64_t> output_size) {
   file_.value = CreateFileW(path.c_str(), output_size ? GENERIC_READ | GENERIC_WRITE : GENERIC_READ,

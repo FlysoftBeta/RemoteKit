@@ -150,10 +150,11 @@ void FetchCommand(const Options& options) {
     state.base_usable = true;
   }
   Http http;
+  RetryUnit retry("release.fetch");
   unsigned attempt = 0;
   while (true) {
     try {
-      auto result = Fetch(options.Text(L"manifest"), state, base, work, key, http);
+      auto result = Fetch(options.Text(L"manifest"), state, base, work, key, http, retry);
       if (result.path != output)
         fs::copy_file(result.path, output, fs::copy_options::overwrite_existing);
       std::cout << Json{{"buildId", result.build_id},

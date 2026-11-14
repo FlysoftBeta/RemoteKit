@@ -1,4 +1,6 @@
-#include "persistence/snapshot_protocol.hpp"
+#include "request.hpp"
+#include "workers.hpp"
+#include "util/wire_error.hpp"
 #include "persistence/config_formats.hpp"
 #include "persistence/snapshot_leases.hpp"
 #include <vss.h>
@@ -84,6 +86,7 @@ class Service {
     journal_ = root_ / L"snapshot-owner.json";
     Cleanup();
   }
+  ~Service() { CloseHandle(root_lock_); }
   void Disconnect(uint64_t owner) {
     std::lock_guard lock(mutex_);
     leases_.Disconnect(owner);
@@ -95,7 +98,6 @@ class Service {
   void Request(HANDLE pipe, uint64_t owner, const Json& request) {
     std::unique_lock lock(mutex_);
     try {
-      Require(request.is_object() && request.contains("method"));
       const auto method = request.at("method").get<std::string>();
       if (method == "snapshot.take") {
         Require(Path(request.at("root").get<std::string>()).lexically_normal() == root_);
@@ -115,7 +117,7 @@ class Service {
         GUID token{};
         Check(CoCreateGuid(&token));
         const auto id = Id(token);
-        Lease<Shadow> lease{shadow, Clock::now(), owner, {}};
+        Lease<Shadow> lease{shadow, {}, owner, {}};
         Json files = Json::array();
         for (const auto& name : paths) {
           auto path = Map(*shadow, name);
@@ -131,7 +133,7 @@ class Service {
             AddFile(lease, files, name, path);
           }
         }
-        leases_.emplace(id, std::move(lease));
+        PublishLease(leases_, id, std::move(lease));
         lock.unlock();
         SendJson(pipe, {{"ok", true},
                         {"result",
@@ -155,8 +157,7 @@ class Service {
       Require(request.at("offset").is_number_unsigned() &&
               request.at("length").is_number_unsigned());
       const auto offset = request.at("offset").get<uint64_t>();
-      const auto length = request.at("length").get<uint32_t>();
-      Require(length <= kMaxRead);
+      const auto length = ReadLength(request.at("length"));
       auto path = Map(*lease.shadow, name);
       HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
@@ -179,6 +180,10 @@ class Service {
       if (lock.owns_lock())
         lock.unlock();
       ErrorReply(pipe, error);
+    } catch (const release::Failure& failure) {
+      if (lock.owns_lock())
+        lock.unlock();
+      SendJson(pipe, {{"ok", false}, {"error", WireError(failure.error)}});
     } catch (const Json::exception&) {
       if (lock.owns_lock())
         lock.unlock();
@@ -293,16 +298,7 @@ class Service {
       ReportError(encoded.error(), "snapshot.owner_corrupt");
       throw Failure{E_FAIL};
     }
-    const auto bytes = std::move(encoded).value();
-    HANDLE file = CreateFileW(journal_.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
-    Check(file == INVALID_HANDLE_VALUE ? HRESULT_FROM_WIN32(GetLastError()) : S_OK);
-    DWORD written = 0;
-    const bool ok =
-        WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) &&
-        written == bytes.size() && FlushFileBuffers(file);
-    CloseHandle(file);
-    Check(ok ? S_OK : E_FAIL);
+    release::AtomicText(journal_, std::move(encoded).value());
   }
   std::shared_ptr<Shadow> Take() {
     Cleanup();
@@ -393,36 +389,45 @@ int Run(int argc, wchar_t** argv) {
             ? S_OK
             : HRESULT_FROM_WIN32(GetLastError()));
   SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
-  std::thread([&service] {
+  Workers workers([&service](std::stop_token stop) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    for (;;) {
-      Sleep(1000);
+    while (!stop.stop_requested()) {
+      Sleep(100);
       service.Expire();
     }
-  }).detach();
+    CoUninitialize();
+  });
   uint64_t owner = 0;
   for (;;) {
-    HANDLE pipe = CreateNamedPipeW(
+    updater::Handle listener(CreateNamedPipeW(
         PipeName(node).c_str(), PIPE_ACCESS_DUPLEX,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-        PIPE_UNLIMITED_INSTANCES, kMaxRead + 4096, kMaxRead + 4096, 0, &security);
+        PIPE_UNLIMITED_INSTANCES, kMaxRead + 4096, kMaxRead + 4096, 0, &security));
+    HANDLE pipe = listener.value;
     Check(pipe == INVALID_HANDLE_VALUE ? HRESULT_FROM_WIN32(GetLastError()) : S_OK);
     if (!ConnectNamedPipe(pipe, nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) {
-      CloseHandle(pipe);
       continue;
     }
-    std::thread([&service, pipe, connection = ++owner] {
+    workers.Connect(std::move(listener), [&service, connection = ++owner](std::stop_token stop,
+                                                                          HANDLE pipe) {
       CoInitializeEx(nullptr, COINIT_MULTITHREADED);
       std::vector<uint8_t> bytes;
-      while (Receive(pipe, bytes)) {
-        const auto request = Json::parse(bytes, nullptr, false);
-        service.Request(pipe, connection, request);
+      while (!stop.stop_requested() && Receive(pipe, bytes)) {
+        try {
+          const auto request =
+              DecodeRequest({reinterpret_cast<const char*>(bytes.data()), bytes.size()});
+          service.Request(pipe, connection, request);
+        } catch (const release::Failure&) {
+          SendJson(
+              pipe,
+              {{"ok", false},
+               {"error", {{"code", "invalid_request"}, {"message", "invalid snapshot request"}}}});
+        }
       }
       service.Disconnect(connection);
       DisconnectNamedPipe(pipe);
-      CloseHandle(pipe);
       CoUninitialize();
-    }).detach();
+    });
   }
 }
 }  // namespace remotekit::snapshot

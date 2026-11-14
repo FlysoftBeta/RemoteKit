@@ -85,14 +85,24 @@ ChildProcess::ChildProcess(const fs::path& executable,
   CloseHandle(output_write.Release());
   try {
     forwarding_ = std::thread([this, &log] {
-      try {
-        std::array<uint8_t, 16384> bytes;
-        DWORD count = 0;
-        while (ReadFile(output_.value, bytes.data(), static_cast<DWORD>(bytes.size()), &count,
-                        nullptr) &&
-               count)
+      enum class Output { kLogging, kDiscarding };
+      auto output = Output::kLogging;
+      std::array<uint8_t, 16384> bytes;
+      DWORD count = 0;
+      while (ReadFile(output_.value, bytes.data(), static_cast<DWORD>(bytes.size()), &count,
+                      nullptr) &&
+             count) {
+        if (output == Output::kDiscarding)
+          continue;
+        try {
           log.Write(std::span(bytes).first(count));
-      } catch (...) {
+        } catch (const std::exception& error) {
+          fprintf(stderr, "child log forwarding failed: %s\n", error.what());
+          output = Output::kDiscarding;
+        } catch (...) {
+          fputs("child log forwarding failed\n", stderr);
+          output = Output::kDiscarding;
+        }
       }
     });
   } catch (...) {

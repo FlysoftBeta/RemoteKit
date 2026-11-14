@@ -19,47 +19,59 @@ int wmain(int argc, wchar_t** argv) {
   try {
     const Service service{L"RemoteKitNode", L"RemoteKit Node", L"remotekit_node.exe", Supervise};
     if (argc < 2)
-      throw std::runtime_error(
+      throw remotekit::InvalidRequest(
           "expected run, install, service, service-install or service-uninstall");
     std::wstring command = argv[1];
     if (command == L"service-uninstall" && argc == 2) {
       auto result = UninstallService(service);
       if (!result)
-        throw std::runtime_error(result.error().message);
+        throw remotekit::release::Failure(result.error());
       return 0;
     }
     if (argc < 3 || !std::wstring_view(argv[2]).starts_with(L"--root=") || !argv[2][7])
-      throw std::runtime_error("expected --root=<directory>");
+      throw remotekit::InvalidRequest("expected --root=<directory>");
     auto root = fs::absolute(fs::path(argv[2] + 7)).lexically_normal();
     if (command == L"install") {
       if (argc != 4 || !std::wstring_view(argv[3]).starts_with(L"--package=") || !argv[3][10])
-        throw std::runtime_error("expected --package=<Control package directory>");
+        throw remotekit::InvalidRequest("expected --package=<Control package directory>");
       auto result = InstallBundled(root, fs::absolute(fs::path(argv[3] + 10)));
       if (!result)
-        throw std::runtime_error(result.error().message);
+        throw remotekit::release::Failure(result.error());
       return 0;
     }
     if (argc != 3)
-      throw std::runtime_error("unexpected node command arguments");
+      throw remotekit::InvalidRequest("unexpected node command arguments");
     if (command == L"service-install") {
       auto result = InstallService(root, service);
       if (!result)
-        throw std::runtime_error(result.error().message);
+        throw remotekit::release::Failure(result.error());
       return 0;
     }
     if (command == L"service")
       return RunService(root, service);
     if (command != L"run")
-      throw std::runtime_error("unknown node command");
+      throw remotekit::InvalidRequest("unknown node command");
     Handle stop(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!stop.value)
-      throw std::runtime_error("cannot create stop event");
+      throw remotekit::release::Failure(
+          {remotekit::ErrorCode::kUnavailable, "cannot create stop event"});
     stop_event = stop.value;
     SetConsoleCtrlHandler(Stop, TRUE);
     int code = Supervise(root, stop.value, false);
     SetConsoleCtrlHandler(Stop, FALSE);
     stop_event = nullptr;
     return code;
+  } catch (const remotekit::release::Failure& failure) {
+    remotekit::LogError(remotekit::LogLevel::kError, "supervisor.failed", failure.error);
+    return 1;
+  } catch (const remotekit::InvalidRequest& error) {
+    remotekit::LogError(remotekit::LogLevel::kError, "supervisor.failed",
+                        {remotekit::ErrorCode::kInvalidRequest, error.what()});
+    return 1;
+  } catch (const std::filesystem::filesystem_error& error) {
+    remotekit::LogError(remotekit::LogLevel::kError, "supervisor.failed",
+                        {remotekit::ErrorCode::kUnavailable, error.what()});
+    return 1;
   } catch (const std::exception& error) {
     remotekit::LogError(remotekit::LogLevel::kError, "supervisor.failed",
                         remotekit::Error{remotekit::ErrorCode::kInternal, error.what()});

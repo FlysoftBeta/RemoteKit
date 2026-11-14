@@ -12,25 +12,6 @@ using namespace std::chrono_literals;
 Error Retry(const char* message) {
   return {ErrorCode::kUnavailable, message};
 }
-Result<void> SetCurrent(const fs::path& root, const std::string& id) {
-  if (id.empty()) {
-    std::error_code ec;
-    fs::remove(root / L"current", ec);
-    if (ec)
-      return Retry("cannot clear current");
-    return {};
-  }
-  auto temporary = root / L"current.tmp";
-  {
-    std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
-    if (!file.write(id.data(), id.size()))
-      return Retry("cannot write current");
-  }
-  if (!MoveFileExW(temporary.c_str(), (root / L"current").c_str(),
-                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    return Retry("cannot activate runtime");
-  return {};
-}
 Result<void> Download(cluster::Channel& channel,
                       const Json& release,
                       const fs::path& partial,
@@ -52,7 +33,9 @@ Result<void> Download(cluster::Channel& channel,
   while (!Stopping(stop)) {
     auto message = channel.Receive(100ms);
     if (!message) {
-      if (message.error().code == ErrorCode::kBusy && std::chrono::steady_clock::now() < deadline)
+      if (message.error().code != ErrorCode::kBusy)
+        return message.error();
+      if (std::chrono::steady_clock::now() < deadline)
         continue;
       return Retry("package download interrupted");
     }
@@ -108,8 +91,9 @@ Result<void> InstallRuntime(const fs::path& root, const fs::path& archive, const
     return Retry("cannot create extraction directory");
   auto extracted = ExtractArchive(archive, temporary);
   std::error_code error;
-  if (extracted && RuntimeInstalled(temporary / L"node", id))
-    fs::rename(temporary / L"node", runtime, error);
+  if (extracted && RuntimeInstalled(temporary / L"node", id) &&
+      !MoveFileExW((temporary / L"node").c_str(), runtime.c_str(), MOVEFILE_WRITE_THROUGH))
+    error = std::error_code(GetLastError(), std::system_category());
   std::error_code cleanup_error;
   fs::remove_all(ExtendedPath(temporary), cleanup_error);
   if (!extracted)
@@ -121,20 +105,16 @@ Result<void> InstallRuntime(const fs::path& root, const fs::path& archive, const
   return {};
 }
 }  // namespace
-std::string ReadCurrent(const fs::path& root) {
-  std::ifstream file(root / L"current", std::ios::binary);
-  std::string id((std::istreambuf_iterator<char>(file)), {});
-  while (!id.empty() && (id.back() == '\r' || id.back() == '\n'))
-    id.pop_back();
-  if (!cluster::ValidBuildId(id))
-    return {};
-  auto runtime = root / L"runtime" / id;
-  auto build = cluster::ReadBuildId(runtime);
-  if (!build || build.value() != id ||
-      !fs::is_regular_file(runtime / L"bin/endpoint_service.exe") ||
-      !fs::is_regular_file(runtime / L"bin/remotekit_snapshot.exe"))
-    return {};
-  return id;
+Result<release::CurrentState> ReadCurrent(const fs::path& root) {
+  return release::ReadCurrent(root, L"runtime", release::kNodeFiles);
+}
+Json DecodeNodeRelease(std::string_view text) {
+  auto value = release::ParseJson(text);
+  release::Keys(value, {"buildId", "sha256", "size"});
+  release::HexString(value.at("buildId"));
+  release::HexString(value.at("sha256"));
+  release::Require(release::Unsigned(value.at("size")) > 0, "invalid node release size");
+  return value;
 }
 Result<void> InstallBundled(const fs::path& root, const fs::path& package) {
   auto build = cluster::ReadBuildId(package);
@@ -143,18 +123,25 @@ Result<void> InstallBundled(const fs::path& root, const fs::path& package) {
   const auto& id = build.value();
   if (!cluster::ValidBuildId(id))
     return Error{ErrorCode::kInternal, "invalid bundled build identity"};
+  auto archive = package / L"release/node.tar.zst";
+  std::ifstream descriptor(package / L"release/node.json", std::ios::binary);
+  if (!descriptor.is_open())
+    return Retry("cannot open bundled node release");
+  const std::string text((std::istreambuf_iterator<char>(descriptor)), {});
+  if (descriptor.bad())
+    return Retry("cannot read bundled node release");
+  Json release;
+  try {
+    release = DecodeNodeRelease(text);
+  } catch (const release::Failure& failure) {
+    return failure.error;
+  }
+  if (release["buildId"] != id || fs::file_size(archive) != release["size"].get<uint64_t>())
+    return Error{ErrorCode::kRejected, "invalid bundled node release"};
   if (RuntimeInstalled(root / L"runtime" / id, id)) {
     CleanupRuntime(root, id, false);
     return {};
   }
-  auto archive = package / L"release/node.tar.zst";
-  std::ifstream descriptor(package / L"release/node.json", std::ios::binary);
-  auto release = Json::parse(descriptor, nullptr, false);
-  if (!release.is_object() || !release.contains("buildId") || release["buildId"] != id ||
-      !release.contains("sha256") || !release["sha256"].is_string() || !release.contains("size") ||
-      !release["size"].is_number_unsigned() ||
-      fs::file_size(archive) != release["size"].get<uint64_t>())
-    return Error{ErrorCode::kInternal, "invalid bundled node release"};
   auto hash = cluster::Sha256File(archive);
   if (!hash)
     return hash.error();
@@ -165,72 +152,72 @@ Result<void> InstallBundled(const fs::path& root, const fs::path& package) {
     CleanupRuntime(root, id, false);
   return installed;
 }
-Result<bool> Update(const fs::path& root, HANDLE stop, Log& log, bool service) {
-  static std::string failed_release;
+Result<bool> Update(const fs::path& root,
+                    HANDLE stop,
+                    Log& log,
+                    bool service,
+                    RetryUnit& retry,
+                    UpdateStage& stage) {
   try {
     auto files = cluster::LoadNodeFiles(root);
     if (!files)
       return files.error();
-    std::string previous = ReadCurrent(root);
-    auto connection = cluster::ConnectWebSocket(
-        files.value().control, files.value().private_key, files.value().control_public_key,
-        {"updater", files.value().node_id, previous.empty() ? "dev" : previous, {}});
-    if (!connection)
-      return connection.error();
-    auto& reply = connection.value().reply;
-    if (reply.value("type", "") != "node.release" || !reply.contains("release") ||
-        reply["release"].is_null())
-      return Retry("Control has no node release");
-    auto release = reply["release"];
-    if (!release.is_object() || !release.contains("buildId") || !release["buildId"].is_string() ||
-        !cluster::ValidBuildId(release["buildId"].get<std::string>()) ||
-        !release.contains("sha256") || !release["sha256"].is_string() ||
-        !cluster::ValidBuildId(release["sha256"].get<std::string>()) || !release.contains("size") ||
-        !release["size"].is_number_unsigned() || release["size"].get<uint64_t>() == 0)
-      return Error{ErrorCode::kInternal, "invalid node release"};
-    std::string id = release["buildId"].get<std::string>();
-    if (id == failed_release)
-      return Retry("Waiting for a different Control release");
-    if (id == previous)
-      return Retry("Control release equals current runtime");
-    fs::create_directories(root / L"downloads");
-    fs::create_directories(root / L"runtime");
-    auto partial = root / L"downloads" / (id + ".tar.zst.partial");
-    auto archive = root / L"downloads" / (id + ".tar.zst");
-    auto downloaded = Download(*connection.value().channel, release, partial, stop);
-    connection.value().channel->Close();
-    if (!downloaded) {
-      if (downloaded.error().code == ErrorCode::kRejected ||
-          downloaded.error().code == ErrorCode::kInternal)
-        failed_release = id;
-      return downloaded.error();
+    auto current = ReadCurrent(root);
+    if (!current)
+      return current.error();
+    const auto previous = release::InstalledId(current.value());
+    if (std::holds_alternative<DiscoverRelease>(stage)) {
+      auto connection = cluster::ConnectWebSocket(
+          files.value().control, files.value().private_key, files.value().control_public_key,
+          {"updater", files.value().node_id, previous.empty() ? "dev" : previous, {}});
+      if (!connection)
+        return connection.error();
+      auto& reply = connection.value().reply;
+      if (reply.value("type", "") != "node.release" || !reply.contains("release") ||
+          reply["release"].is_null())
+        return Retry("Control has no node release");
+      auto release = DecodeNodeRelease(reply["release"].dump());
+      std::string id = release["buildId"].get<std::string>();
+      retry.Input(release.dump());
+      if (!retry.Ready())
+        return *retry.Failure();
+      if (id == previous)
+        return ReplaceExecutable(root / L"remotekit_node.exe",
+                                 root / L"runtime" / id / L"bin/remotekit_node.exe", root,
+                                 L"run --root=" + Quote(root.wstring()), service, log);
+      fs::create_directories(root / L"downloads");
+      fs::create_directories(root / L"runtime");
+      auto partial = root / L"downloads" / (id + ".tar.zst.partial");
+      auto archive = root / L"downloads" / (id + ".tar.zst");
+      auto downloaded = Download(*connection.value().channel, release, partial, stop);
+      connection.value().channel->Close();
+      if (!downloaded) {
+        return downloaded.error();
+      }
+      if (!MoveFileExW(partial.c_str(), archive.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        return Retry("cannot finish archive download");
+      stage = DownloadedRelease{std::move(release), std::move(archive)};
     }
-    if (!MoveFileExW(partial.c_str(), archive.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-      return Retry("cannot finish archive download");
-    auto installed = InstallRuntime(root, archive, id);
+    const auto& downloaded = std::get<DownloadedRelease>(stage);
+    const auto id = downloaded.descriptor["buildId"].get<std::string>();
+    auto installed = InstallRuntime(root, downloaded.archive, id);
     if (!installed) {
-      if (installed.error().code == ErrorCode::kRejected ||
-          installed.error().code == ErrorCode::kInternal)
-        failed_release = id;
       return installed.error();
     }
     auto runtime = root / L"runtime" / id;
-    auto activated = SetCurrent(root, id);
-    if (!activated)
-      return activated.error();
+    release::AtomicText(root / L"current", id);
     log.Event(LogLevel::kInfo, "runtime.activated", {{"buildId", id}});
     auto replaced =
         ReplaceExecutable(root / L"remotekit_node.exe", runtime / L"bin/remotekit_node.exe", root,
                           L"run --root=" + Quote(root.wstring()), service, log);
-    if (!replaced) {
-      auto rolled_back = SetCurrent(root, previous);
-      if (!rolled_back)
-        return rolled_back.error();
+    if (!replaced)
       return replaced.error();
-    }
-    CleanupRuntime(root, id, true);
+    CleanupRuntimeBestEffort(root, id, log);
+    stage = DiscoverRelease{};
     return replaced;
+  } catch (const release::Failure& failure) {
+    return failure.error;
   } catch (const fs::filesystem_error& error) {
     return Error{ErrorCode::kUnavailable, error.what()};
   } catch (const std::exception& error) {

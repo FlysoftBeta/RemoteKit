@@ -1,5 +1,5 @@
 #pragma once
-#include "updater/platform.hpp"
+#include "../updater/platform.hpp"
 #include <fstream>
 #include <algorithm>
 #include <set>
@@ -36,17 +36,75 @@ inline void Take(Result<void> result) {
     throw Failure(result.error());
 }
 Bytes Read(const fs::path& path, uint64_t limit = UINT64_MAX);
-void Write(const fs::path& path, std::span<const uint8_t> bytes);
-void WriteText(const fs::path& path, const std::string& text);
-Json ParseJson(std::string_view text);
-void Keys(const Json& json,
-          std::initializer_list<std::string_view> required,
-          std::initializer_list<std::string_view> optional = {});
-uint64_t Unsigned(const Json& json);
-std::string HexString(const Json& json);
 Key Unhex(const std::string& hex);
 std::string HashFile(const fs::path& path);
-void AtomicText(const fs::path& path, const std::string& text);
+inline void Write(const fs::path& path, std::span<const uint8_t> bytes) {
+  std::ofstream file(path, std::ios::binary | std::ios::trunc);
+  Io(static_cast<bool>(file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size())),
+     "cannot write release file");
+  file.close();
+  Io(!file.fail(), "cannot close release file");
+}
+inline void WriteText(const fs::path& path, const std::string& text) {
+  Write(path, {reinterpret_cast<const uint8_t*>(text.data()), text.size()});
+}
+inline Json ParseJson(std::string_view text) {
+  std::vector<std::set<std::string>> objects;
+  bool duplicate = false;
+  auto callback = [&](int, Json::parse_event_t event, Json& parsed) {
+    if (event == Json::parse_event_t::object_start)
+      objects.emplace_back();
+    if (event == Json::parse_event_t::key &&
+        !objects.back().insert(parsed.get<std::string>()).second)
+      duplicate = true;
+    if (event == Json::parse_event_t::object_end)
+      objects.pop_back();
+    return true;
+  };
+  auto json = Json::parse(text, callback, false);
+  Require(!json.is_discarded() && !duplicate, "invalid release JSON");
+  return json;
+}
+inline void Keys(const Json& json,
+                 std::initializer_list<std::string_view> required,
+                 std::initializer_list<std::string_view> optional = {}) {
+  Require(json.is_object(), "expected JSON object");
+  for (auto key : required)
+    Require(json.contains(key), "missing JSON field");
+  for (auto it = json.begin(); it != json.end(); ++it)
+    Require(std::find(required.begin(), required.end(), it.key()) != required.end() ||
+                std::find(optional.begin(), optional.end(), it.key()) != optional.end(),
+            "unknown JSON field");
+}
+inline uint64_t Unsigned(const Json& json) {
+  Require(json.is_number_unsigned(), "expected unsigned integer");
+  return json.get<uint64_t>();
+}
+inline std::string HexString(const Json& json) {
+  Require(json.is_string() && cluster::ValidBuildId(json.get_ref<const std::string&>()),
+          "expected lowercase 64 hex digits");
+  return json.get<std::string>();
+}
+inline void AtomicText(const fs::path& path, const std::string& text) {
+  auto temporary = fs::path(path.wstring() + L".tmp");
+  WriteText(temporary, text);
+  updater::Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+  Io(file.value != INVALID_HANDLE_VALUE && FlushFileBuffers(file.value),
+     "cannot flush release file");
+  Io(CloseHandle(file.Release()) != FALSE, "cannot close flushed release file");
+  // Scanners and indexers briefly open fresh files without FILE_SHARE_DELETE.
+  for (int attempt = 1;; ++attempt) {
+    if (MoveFileExW(temporary.c_str(), path.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+      return;
+    const DWORD error = GetLastError();
+    if ((error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION) || attempt == 50)
+      Fail(ErrorCode::kUnavailable,
+           "cannot activate release file (Windows error " + std::to_string(error) + ")");
+    Sleep(20);
+  }
+}
 class Mapping {
  public:
   explicit Mapping(const fs::path& path, std::optional<uint64_t> output_size = {});
