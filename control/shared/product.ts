@@ -485,6 +485,7 @@ export interface SocketMethods
     SessionImportSocketMethods {
   'clipboard.set': { params: { text: string }; result: { revision: string } };
   'clipboard.get': { params: Record<string, never>; result: { revision: string; text: string } };
+  'clipboard.applied': { params: { revision: string }; result: { revision: string } };
   'operation.status': {
     params: { operationId: string; operationGeneration: string };
     result: OperationReceipt;

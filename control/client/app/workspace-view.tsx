@@ -41,6 +41,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
       showShell && status === 'online' ? auth.user.id : undefined,
       state?.workspace.settings.workspace.clipboardSync ?? false,
       set,
+      (revision) => media.control.request('clipboard.applied', { revision }),
     );
     return () => deviceClipboard.configure(undefined, false, set);
   }, [media, showShell, status, auth?.user.id, state?.workspace.settings.workspace.clipboardSync]);

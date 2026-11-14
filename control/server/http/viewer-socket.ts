@@ -47,6 +47,9 @@ const library: Handler = product(({ services, authority }, params) =>
 const handlers: Record<string, Handler> = {
   'clipboard.set': product(({ services, authority }, params) => services.clipboard.set(authority, params)),
   'clipboard.get': product(({ services, authority }) => services.clipboard.get(authority)),
+  'clipboard.applied': product(({ services, authority }, params) =>
+    services.clipboard.applied(authority, params),
+  ),
   'library.copySnippet': product(({ services, authority }, params) =>
     services.clipboard.copySnippet(authority, params.id),
   ),

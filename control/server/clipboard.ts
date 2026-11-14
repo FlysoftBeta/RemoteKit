@@ -4,6 +4,7 @@ import type { DomainContext, DomainServices } from './application';
 import type { ClipboardChangedEvent } from './endpoint/types';
 import { warnClipboardOversize } from './persistence/clipboards';
 import type { ViewerAuthority } from './viewers/viewer-hub';
+import { counter } from './endpoint/coordination';
 
 export class ClipboardService {
   constructor(
@@ -94,6 +95,25 @@ export class ClipboardService {
     if (!user) throw new RemoteKitError('not_found', '账号不存在');
     const value = this.context.store.clipboards.latest(user.id);
     return { revision: value?.revision ?? '0', text: value?.text ?? '' };
+  }
+
+  async applied(authority: ViewerAuthority, params: { revision: string }) {
+    if (!counter(params.revision)) throw new RemoteKitError('invalid_request', '无效的剪贴板修订号');
+    const tenant = authority.tenantId;
+    const assertCurrent = () => {
+      this.services.viewers.assertProductViewer(tenant, authority.leaseId, authority.epoch);
+      if (this.get(authority).revision !== params.revision)
+        throw new RemoteKitError('conflict', '剪贴板内容已改变');
+    };
+    assertCurrent();
+    await this.context.endpoint.published(tenant);
+    await this.context.endpoint.waitObserved(
+      tenant,
+      (value) =>
+        value.browser === 'running' && BigInt(value.applied.clipboardRevision) >= BigInt(params.revision),
+    );
+    assertCurrent();
+    return { revision: params.revision };
   }
 
   copySnippet(authority: ViewerAuthority, entryId: string) {

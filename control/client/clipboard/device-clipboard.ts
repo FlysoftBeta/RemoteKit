@@ -41,6 +41,7 @@ export class DeviceClipboardSync {
   private flushing?: Promise<void>;
   private sending: Promise<void> = Promise.resolve();
   private set?: (text: string) => Promise<{ revision: string }>;
+  private applied?: (revision: string) => Promise<unknown>;
 
   constructor(private readonly port: DeviceClipboardPort) {}
 
@@ -48,6 +49,7 @@ export class DeviceClipboardSync {
     scope: string | undefined,
     enabled: boolean,
     set: (text: string) => Promise<{ revision: string }>,
+    applied?: (revision: string) => Promise<unknown>,
   ) {
     const activated = enabled && !!scope && (!this.enabled || scope !== this.scope);
     if (scope !== this.scope || enabled !== this.enabled) {
@@ -62,6 +64,7 @@ export class DeviceClipboardSync {
     this.scope = scope;
     this.enabled = enabled && !!scope;
     this.set = set;
+    this.applied = applied;
     if (activated) void this.focus();
   }
 
@@ -165,6 +168,15 @@ export class DeviceClipboardSync {
     }
     if (generation === this.generation) await this.send(text);
   }
+
+  async preparePaste(text?: string) {
+    if (!this.enabled) return;
+    const generation = this.generation;
+    if (text === undefined) await this.readForPaste();
+    else await this.send(text);
+    if (generation === this.generation && this.revision !== undefined)
+      await this.applied?.(String(this.revision));
+  }
 }
 
 export const deviceClipboard = new DeviceClipboardSync({
@@ -187,7 +199,7 @@ export function clipboardCommand(command: string, send: () => void) {
     send();
     return;
   }
-  void deviceClipboard.readForPaste().then(send, () => {
+  void deviceClipboard.preparePaste().then(send, () => {
     diagnostics.record('clipboard-sync', 'Clipboard operation unavailable');
   });
 }

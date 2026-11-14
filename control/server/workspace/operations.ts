@@ -246,7 +246,10 @@ export class OperationPipeline {
     });
     this.services.viewers.push(tenant);
     for (const effect of plan.effects) {
-      if (['navigate', 'command', 'replyClose', 'replyPage', 'exitFullscreen'].includes(effect.kind))
+      // Replies release pending Browser requests even when layout convergence
+      // reports a conflict while the page is closing. Their captured native
+      // identities remain the authority for accepting or rejecting the reply.
+      if (['navigate', 'command', 'exitFullscreen'].includes(effect.kind))
         requireBrowser(this.context, tenant, effect.kind === 'navigate');
       switch (effect.kind) {
         case 'navigate':

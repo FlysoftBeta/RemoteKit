@@ -31,6 +31,7 @@ const operations: Record<string, string> = {
   'usage.clear': '清除使用记录',
   'clipboard.get': '同步共享剪贴板',
   'clipboard.set': '同步剪贴板',
+  'clipboard.applied': '准备远端粘贴',
   'announcement.read': '保存公告已读状态',
   'library.get': '读取我的文件',
   'library.import': '导入文件',

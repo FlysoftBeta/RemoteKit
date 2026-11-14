@@ -6,7 +6,7 @@ import type { PresentationSession } from '../presentation/presentation-session';
 import { Store } from '../util/store';
 import { EditingInput, EDITOR_SENTINEL } from './editing-input';
 import type { EditingSession } from './editing-session';
-import { KeyboardSession } from './keyboard-session';
+import { EDITOR_BLUR_GRACE_MS, KeyboardSession } from './keyboard-session';
 import { DeferredEditingInput, editableInputMode } from './mobile-editing-state';
 const pointerMedia = new WeakMap<Window, { coarse: MediaQueryList; fine: MediaQueryList }>();
 function pointerQueries() {
@@ -51,6 +51,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     focusRevision: string;
     revision: string;
     confirmedOwner?: string;
+    inactiveUntil?: number;
   };
   private pointerSequence = 0;
   private readonly keyboardSession = new KeyboardSession();
@@ -186,18 +187,26 @@ export class EditingView extends Store<EditingViewSnapshot> {
   }
   observe = () => {
     clearTimeout(this.policyTimer);
+    const now = performance.now();
     const pointer = this.pointerFocus;
     const previous = this.previousEditing;
     const reconfiguring = this.resize.waiting || this.ports.editing.mobileEditing.layoutPending;
     let transferred = false;
     if (pointer) {
+      // Switching editable nodes reports NONE before the replacement target.
+      // Preserve the pointer's ordered character path during the same blur grace
+      // that keeps its local keyboard attached.
+      const inactive =
+        BigInt(this.ports.editing.mobileEditing.current?.revision ?? '0') > BigInt(pointer.revision) &&
+        this.ports.editing.mobileEditing.current?.editable.active === false;
+      if (inactive) pointer.inactiveUntil ??= now + EDITOR_BLUR_GRACE_MS;
+      else pointer.inactiveUntil = undefined;
       if (
         !this.keyboardEnabled ||
         pointer.document !== this.editingIdentity ||
         !this.surface ||
         pointer.identity !== this.ports.input.inputIdentity(this.surface) ||
-        (BigInt(this.ports.editing.mobileEditing.current?.revision ?? '0') > BigInt(pointer.revision) &&
-          this.ports.editing.mobileEditing.current?.editable.active === false) ||
+        (pointer.inactiveUntil !== undefined && now >= pointer.inactiveUntil) ||
         (this.remoteEditable &&
           BigInt(this.remoteEditable.editable.focusRevision) > BigInt(pointer.focusRevision) &&
           this.remoteEditable.editable.focusSource !== 'pointer')
@@ -258,7 +267,6 @@ export class EditingView extends Store<EditingViewSnapshot> {
       this.editor.inputMode = 'none';
       policy.systemDismissed();
     }
-    const now = performance.now();
     const command = policy.observe({
       document: this.editingIdentity,
       enabled: this.keyboardEnabled,
@@ -305,6 +313,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     const delay = Math.min(
       deadline === undefined ? Infinity : deadline - now,
       this.candidateDeadline === undefined ? Infinity : this.candidateDeadline - Date.now(),
+      this.pointerFocus?.inactiveUntil === undefined ? Infinity : this.pointerFocus.inactiveUntil - now,
     );
     if (!Number.isFinite(delay) || (delay <= 0 && deadline === undefined)) return;
     this.policyTimer = setTimeout(() => this.observe(), Math.max(1, Math.ceil(delay)));
@@ -562,7 +571,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     const sequence = this.pointerSequence;
     const document = this.editingIdentity;
     const text = event.clipboardData?.getData('text/plain');
-    const pending = text === undefined ? Promise.resolve() : deviceClipboard.send(text);
+    const pending = deviceClipboard.preparePaste(text);
     void pending
       .then(() => {
         if (
