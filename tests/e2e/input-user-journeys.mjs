@@ -26,6 +26,18 @@ try {
   });
   session = await launch({ browser: engine, pointer, stack, out: join(run, 'shots') });
   const { page, context } = session;
+  await page.evaluate(async () => {
+    const { deviceClipboard } = await import('/client/clipboard/device-clipboard.ts');
+    window.journeyClipboard = [];
+    for (const method of ['read', 'write']) {
+      const operation = deviceClipboard.port[method].bind(deviceClipboard.port);
+      deviceClipboard.port[method] = async (...args) => {
+        const result = await operation(...args);
+        window.journeyClipboard.push({ at: performance.now(), method, args, result });
+        return result;
+      };
+    }
+  });
   await page.evaluate(() => {
     window.journeyInput = [];
     for (const element of document.querySelectorAll('*')) {
@@ -99,6 +111,7 @@ try {
             html: document.querySelector('#root')?.innerHTML,
             state: window.__remotekitTest?.state(),
             input: window.journeyInput,
+            clipboard: window.journeyClipboard,
           })),
           null,
           2,

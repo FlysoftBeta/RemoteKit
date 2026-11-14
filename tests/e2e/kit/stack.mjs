@@ -387,7 +387,7 @@ export async function startStack({
             signal: AbortSignal.timeout(1000),
           })
         ).ok;
-      }, 'Control ready'),
+      }, 'Control ready', 120000),
     ]);
     await until(async () => (await fetch(origin, { signal: AbortSignal.timeout(1000) })).ok, 'Viewer ready');
     if (fixtures)

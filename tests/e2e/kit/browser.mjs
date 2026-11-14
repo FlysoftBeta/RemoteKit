@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { recordStrictDecodeRejections } from './strict-decode.mjs';
 import {
   createTrackedDirectory,
   currentCleanupRun,
@@ -106,6 +107,19 @@ export async function launchTestBrowser({
     if (!browserProcess) throw Error('Browser process ID is missing from CDP diagnostics');
     trackCleanupPid(run, browserProcess.id);
     await diagnostics.detach();
+    await recordStrictDecodeRejections(context, run);
+    const browser = context.browser();
+    const newContext = browser.newContext.bind(browser);
+    browser.newContext = async (...args) => {
+      const created = await newContext(...args);
+      try {
+        await recordStrictDecodeRejections(created, run);
+        return created;
+      } catch (error) {
+        await created.close();
+        throw error;
+      }
+    };
     return context;
   } catch (error) {
     await context.close();

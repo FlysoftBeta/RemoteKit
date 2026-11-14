@@ -149,6 +149,22 @@ const fixtureHandlers = {
         await appendFile(join(run, 'fixture-events.jsonl'), JSON.stringify(event) + '\n');
         return res.end('ok');
       }
+      if (path === '/focus-close/')
+        return res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(`<!doctype html>
+          <meta name="viewport" content="width=device-width,initial-scale=1"><title>Focus close</title>
+          <style>body{margin:0;background:#edf3fb}input{position:absolute;left:24px;width:260px;height:48px;font-size:20px}#a{top:24px}#b{top:112px}</style>
+          <input id="a"><input id="b"><script>
+          const fields=[document.querySelector('#a'),document.querySelector('#b')];
+          const documentId=crypto.randomUUID();
+          const report=type=>fetch('/event',{method:'POST',keepalive:true,body:JSON.stringify({
+            type,documentId,width:innerWidth,height:innerHeight,
+            values:fields.map(field=>field.value),focused:document.activeElement.id,
+            geometry:fields.map(field=>field.getBoundingClientRect().toJSON())
+          })});
+          for(const field of fields) for(const type of ['focus','blur','input']) field.addEventListener(type,()=>report(type));
+          addEventListener('beforeunload',event=>{report('beforeunload');event.preventDefault();event.returnValue='';});
+          report('ready');addEventListener('resize',()=>report('resize'));
+          </script>`);
       const label =
         path === '/fs/'
           ? 'File System regression'

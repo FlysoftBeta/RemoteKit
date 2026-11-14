@@ -551,6 +551,7 @@ try {
     await click(first, d.getByRole('button', { name: '创建', exact: true }), true);
     await d.locator('.failure-note').waitFor();
     await shot(first, 'duplicate-user-error');
+    assert.doesNotMatch(await d.innerText(), /[cev]-[a-f0-9]{10}/i);
     await click(first, d.getByRole('button', { name: '取消', exact: true }));
     const logs = (await readFile(join(run, 'logs/control.jsonl'), 'utf8'))
       .trim()
@@ -563,10 +564,24 @@ try {
         }
       });
     const tenant = placement(await control.call('inspect'), 'cluster-first').tenant;
-    errorId = logs.findLast(
+    const conflict = logs.findLast(
       (r) => r.ev === 'viewer.request_failed' && r.method === 'admin.createUser' && r.tenant === tenant,
-    )?.errorId;
-    assert(errorId);
+    );
+    assert.equal(conflict?.err.code, 'conflict');
+    assert.equal(conflict.errorId, undefined);
+    await focusApp(first, 'browser');
+    await click(first, button(first, '新建标签页'));
+    const start = await until(
+      async () => (await first.state()).workspace.tabs.find((tab) => tab.kind === 'start'),
+      'local start tab',
+    );
+    const reply = await first.page.evaluate(
+      (tabId) => clusterQA.call('app.inspect', { tabId }, false, crypto.randomUUID()),
+      start.id,
+    );
+    assert.equal(reply.error?.code, 'unavailable');
+    errorId = reply.error.errorId;
+    assert.match(errorId, /^c-[a-f0-9]{10}$/);
     await focusApp(first, 'settings');
     await click(first, button(first, '停止数据收集'));
     const result = first.page.getByRole('dialog', { name: '诊断已保存' });

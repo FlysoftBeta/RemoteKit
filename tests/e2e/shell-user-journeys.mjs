@@ -41,7 +41,7 @@ async function prepare(browser, phone, first = false) {
   const cdp = await context.newCDPSession(page);
   await cdp.send('Network.enable');
   await page.addInitScript(() => {
-    window.clusterQA = { peers: [], sockets: [], errors: [], wire: [] };
+    window.clusterQA = { peers: [], sockets: [], errors: [], wire: [], requests: {} };
     const Peer = RTCPeerConnection;
     window.RTCPeerConnection = class extends Peer {
       constructor(...args) {
@@ -67,9 +67,16 @@ async function prepare(browser, phone, first = false) {
         this.addEventListener('message', (event) => {
           try {
             const m = JSON.parse(event.data);
-            if (m.error) clusterQA.errors.push(m);
+            if (m.error) clusterQA.errors.push({ ...m, requestMethod: clusterQA.requests[m.id] });
           } catch {}
         });
+      }
+      send(raw) {
+        try {
+          const request = JSON.parse(raw);
+          if (request.id && request.method) clusterQA.requests[request.id] = request.method;
+        } catch {}
+        return super.send(raw);
       }
     };
   });
@@ -634,15 +641,58 @@ try {
       const d = r.page.getByRole('dialog', { name: '新建用户' });
       await r.type(d.getByLabel('用户名'), 'shell-member');
       await r.type(d.getByLabel('密码', { exact: true }), stack.password);
+      const conflictCursor = await r.page.evaluate(() => clusterQA.errors.length);
       await r.click(r.button('创建', d));
       await d.locator('.failure-note').waitFor();
       await r.shot('duplicate-user-error');
-      const errorText = await d.innerText();
-      const id =
-        errorText.match(/c-[a-f0-9]+/i)?.[0] ??
-        (await r.page.evaluate(() => clusterQA.errors.find((e) => e.error?.errorId)?.error.errorId));
-      assert(id, 'an error ID produced during the journey');
+      const conflict = await r.page.evaluate(
+        (cursor) =>
+          clusterQA.errors
+            .slice(cursor)
+            .find((reply) => reply.requestMethod === 'admin.createUser' && reply.error.code === 'conflict')
+            ?.error,
+        conflictCursor,
+      );
+      assert(conflict, 'duplicate username returns conflict');
+      assert.equal(conflict.errorId, undefined);
+      assert.doesNotMatch(await d.innerText(), /[cev]-[a-f0-9]{10}/i);
       await r.click(r.button('取消', d));
+      await r.open('浏览器');
+      const browser = await r.frame('browser');
+      await r.click(r.button('新建标签页', browser));
+      await r.waitState(
+        (state) => state.workspace.tabs.some((tab) => tab.kind === 'start'),
+        'local start tab',
+      );
+      const start = (await r.state()).workspace.tabs.find((tab) => tab.kind === 'start');
+      assert(start);
+      // A start tab has no Browser page. Its public inspection read returns an
+      // unavailable with an ID without changing the member's hibernation flow.
+      const reply = await r.page.evaluate(
+        (tabId) =>
+          new Promise((resolve, reject) => {
+            const id = 'error-lookup-' + crypto.randomUUID();
+            const socket = clusterQA.sockets.findLast((socket) => socket.readyState === WebSocket.OPEN);
+            const timer = setTimeout(() => {
+              socket.removeEventListener('message', receive);
+              reject(Error('Inspection reply timed out'));
+            }, 30000);
+            const receive = (event) => {
+              const reply = JSON.parse(event.data);
+              if (reply.id !== id) return;
+              clearTimeout(timer);
+              socket.removeEventListener('message', receive);
+              resolve(reply);
+            };
+            socket.addEventListener('message', receive);
+            socket.send(JSON.stringify({ id, method: 'app.inspect', params: { tabId } }));
+          }),
+        start.id,
+      );
+      assert.equal(reply.error?.code, 'unavailable');
+      const id = reply.error.errorId;
+      assert.match(id, /^c-[a-f0-9]{10}$/);
+      await r.open('管理');
       await r.section(af, '诊断');
       await r.type(af.getByLabel('错误 ID'), id);
       await r.click(r.button('查找', af));

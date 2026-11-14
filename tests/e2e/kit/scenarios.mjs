@@ -1,4 +1,5 @@
 const standard = [
+  'test-focus-close',
   'workspace-ui',
   'web-app-install',
   'failure-presentation',

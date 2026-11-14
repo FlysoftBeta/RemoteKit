@@ -507,10 +507,11 @@ export async function keyboardOcclusion(kind) {
         occlusionQA.armed = true;
         occlusionQA.measuring = true;
       });
+      const firstOwnerFrames = await page.evaluate(() => occlusionQA.frames.length);
       await session.pointer.move(views[1].box.x + 150, views[1].box.y + 48);
       await session.pointer.down();
       await session.pointer.up();
-      const checkOwners = async (owner) => {
+      const checkOwners = async (owner, start) => {
         await page.waitForFunction(
           ({ ids, owner, height }) => {
             return ids.every((id) => {
@@ -525,7 +526,6 @@ export async function keyboardOcclusion(kind) {
           { ids: views.map((view) => view.id), owner, height: Math.round(views[0].box.height) },
           { timeout: 15000 },
         );
-        const start = await page.evaluate(() => occlusionQA.frames.length);
         await page.waitForFunction(
           ({ ids, owner, height, start }) =>
             ids.every((id) =>
@@ -542,16 +542,17 @@ export async function keyboardOcclusion(kind) {
           { timeout: 15000 },
         );
       };
-      await checkOwners(views[1].id);
+      await checkOwners(views[1].id, firstOwnerFrames);
       assert.equal(
         events.filter((event) => event.path === '/page' && event.type === 'resize').length,
         neighbourResizes,
         'neighbour reflowed when keyboard opened',
       );
+      const nextOwnerFrames = await page.evaluate(() => occlusionQA.frames.length);
       await session.pointer.move(views[0].box.x + 150, views[0].box.y + 48);
       await session.pointer.down();
       await session.pointer.up();
-      await checkOwners(views[0].id);
+      await checkOwners(views[0].id, nextOwnerFrames);
       const ownerMove = await page.evaluate(
         ({ start, generation }) => {
           const wire = occlusionQA.wire.slice(start);

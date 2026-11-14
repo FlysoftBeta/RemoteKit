@@ -696,7 +696,7 @@ async function prepareGestures(host) {
     for (const field of ['counts', 'positions', 'pageScale', 'clicks']) {
       assert(
         JSON.stringify(after[field]) === JSON.stringify(before[field]),
-        `Invalidated input changed DOM ${field}`,
+        `Invalidated input changed DOM ${field}: ${JSON.stringify({ before: before[field], after: after[field], events: after.events.slice(-12) })}`,
       );
     }
   };
@@ -733,6 +733,13 @@ async function prepareGestures(host) {
     const viewport = base.page.viewportSize();
     await base.page.setViewportSize({ width: viewport.width + 37, height: viewport.height });
     await base.ready();
+    // Layout invalidation cancels the active raw touch asynchronously. Establish
+    // that cancellation before testing whether the stale terminal changes DOM.
+    await until(
+      async () => (await base.inspect()).telemetry[qa.case + ':root']?.counts.touchcancel === 1,
+      'Layout invalidation did not cancel the active touch exactly once',
+      5000,
+    );
     const beforeEnd = await inspectDom();
     await qa.touch('touchEnd', []);
     await base.page.waitForTimeout(400);
