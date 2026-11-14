@@ -54,15 +54,6 @@
   resize: none;
   pointer-events: none;
 }
-.input-notice {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  background: var(--camera-background);
-  color: var(--surface);
-  padding: 8px;
-  z-index: var(--z-stats);
-}
 
 .browser-unavailable {
   position: absolute;

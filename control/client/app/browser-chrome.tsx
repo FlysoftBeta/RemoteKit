@@ -1,5 +1,5 @@
 import './browser-chrome.css';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   BedtimeOutlined,
   TimelapseOutlined,
@@ -41,27 +41,46 @@ export function useBrowserNavigation({
   action: Action;
   report(error: unknown): void;
 }) {
-  const [address, setAddress] = useState(active && isLocalTab(active) ? '' : (active?.url ?? '')),
-    [busy, setBusy] = useState(false);
+  type AddressDraft = { phase: 'clean' | 'dirty'; value: string };
+  const drafts = useRef(new Map<string | undefined, AddressDraft>());
+  const [, redraw] = useState(0);
+  const [pending, setPending] = useState(0);
+  const busy = pending > 0;
   const input = useRef<HTMLInputElement>(null);
-  const addressDirty = useRef(false),
-    previousTab = useRef(active?.id),
-    composing = useRef(false);
+  const composing = useRef(false);
+  const latest = useRef({ activeId: active?.id, tabs: state.workspace.tabs });
+  latest.current = { activeId: active?.id, tabs: state.workspace.tabs };
+  const canonicalAddress = active && isLocalTab(active) ? '' : (active?.pendingUrl ?? active?.url ?? '');
+  const address = drafts.current.get(active?.id)?.value ?? canonicalAddress;
+  const setDraft = (tabId: string | undefined, draft: AddressDraft) => {
+    drafts.current.set(tabId, draft);
+    redraw((version) => version + 1);
+  };
+  const setAddress = (value: string) => setDraft(active?.id, { phase: 'dirty', value });
+  const resetAddress = () => setDraft(active?.id, { phase: 'clean', value: canonicalAddress });
+  const perform = async (command: Parameters<Action>[0]) => {
+    setPending((count) => count + 1);
+    try {
+      return await action(command);
+    } finally {
+      setPending((count) => count - 1);
+    }
+  };
   const moveTab = (tabId: string, windowId: string, index: number) =>
     run({ type: 'tab.move', tabId, windowId, index });
   const run = (command: Parameters<Action>[0]) => {
-    if (!online) return;
-    setBusy(true);
-    void action(command)
-      .catch(report)
-      .finally(() => setBusy(false));
+    if (online) void perform(command).catch(report);
   };
-  useEffect(() => {
-    if (previousTab.current !== active?.id) addressDirty.current = false;
-    previousTab.current = active?.id;
-    if (!addressDirty.current)
-      setAddress(active && isLocalTab(active) ? '' : (active?.pendingUrl ?? active?.url ?? ''));
-  }, [active?.id, active?.url, active?.pendingUrl, active?.kind]);
+  useLayoutEffect(() => {
+    if (drafts.current.get(active?.id)?.phase !== 'dirty')
+      setDraft(active?.id, { phase: 'clean', value: canonicalAddress });
+  }, [active?.id, canonicalAddress]);
+  useLayoutEffect(() => {
+    for (const tabId of drafts.current.keys()) {
+      if (tabId === undefined ? !!active : !state.workspace.tabs.some((tab) => tab.id === tabId))
+        drafts.current.delete(tabId);
+    }
+  }, [state.workspace.tabs, active?.id]);
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       if (
@@ -83,33 +102,36 @@ export function useBrowserNavigation({
   }, [focused, fullscreen]);
   const submit = async (value: string) => {
     if (!navigationReady || !value.trim()) return;
-    // Release the draft before dispatch so the pending projection and any WS
-    // snapshot arriving before the receipt can update the canonical address.
-    addressDirty.current = false;
-    setAddress(value.trim());
+    const tabId = active?.id;
+    const draft: AddressDraft = { phase: 'clean', value: value.trim() };
+    setDraft(tabId, draft);
     try {
-      await action(
-        active
-          ? { type: 'tab.navigate', tabId: active.id, url: value.trim() }
+      await perform(
+        tabId
+          ? { type: 'tab.navigate', tabId, url: value.trim() }
           : { type: 'tab.create', windowId: win.id, url: value.trim() },
       );
+      if (latest.current.activeId === tabId) input.current?.blur();
     } catch (failure) {
-      addressDirty.current = true;
+      if (
+        drafts.current.get(tabId) === draft &&
+        (tabId === undefined || latest.current.tabs.some((tab) => tab.id === tabId))
+      )
+        setDraft(tabId, { phase: 'dirty', value: value.trim() });
       throw failure;
     }
   };
   const createStartTab = () => {
     if (!online || busy) return;
-    setBusy(true);
-    void action({ type: 'tab.create', windowId: win.id })
+    const tabId = active?.id;
+    void perform({ type: 'tab.create', windowId: win.id })
       .then(() => {
-        if (window.matchMedia('(pointer: fine)').matches) {
+        if (latest.current.activeId === tabId && window.matchMedia('(pointer: fine)').matches) {
           input.current?.focus({ preventScroll: true });
           input.current?.select();
         }
       })
-      .catch(report)
-      .finally(() => setBusy(false));
+      .catch(report);
   };
   const favorite = state.workspace.favorites.find((favorite) => favorite.url === active?.url);
   const favorited = !!favorite;
@@ -121,9 +143,8 @@ export function useBrowserNavigation({
     address,
     setAddress,
     busy,
-    setBusy,
     input,
-    addressDirty,
+    resetAddress,
     composing,
     moveTab,
     run,
@@ -165,9 +186,8 @@ export function BrowserChrome({
     address,
     setAddress,
     busy,
-    setBusy,
     input,
-    addressDirty,
+    resetAddress,
     composing,
     moveTab,
     run,
@@ -250,11 +270,7 @@ export function BrowserChrome({
           onSubmit={(e) => {
             e.preventDefault();
             if (composing.current || busy || !navigationReady || !address.trim()) return;
-            setBusy(true);
-            void submit(address)
-              .then(() => input.current?.blur())
-              .catch(report)
-              .finally(() => setBusy(false));
+            void submit(address).catch(report);
           }}
         >
           <Language fontSize="small" />
@@ -270,7 +286,6 @@ export function BrowserChrome({
             value={address}
             disabled={!navigationReady || busy}
             onChange={(e) => {
-              addressDirty.current = true;
               setAddress(e.target.value);
             }}
             onCompositionStart={() => {
@@ -283,8 +298,7 @@ export function BrowserChrome({
               if (e.key === 'Enter' && (composing.current || e.nativeEvent.isComposing || e.keyCode === 229))
                 e.preventDefault();
               if (e.key === 'Escape') {
-                addressDirty.current = false;
-                setAddress(active && isLocalTab(active) ? '' : (active?.url ?? ''));
+                resetAddress();
                 input.current?.blur();
               }
             }}

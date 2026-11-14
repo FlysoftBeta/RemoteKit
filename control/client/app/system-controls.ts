@@ -4,7 +4,7 @@ import { useAuthCamera, type AuthRequest } from '../auth/auth-camera';
 import { useAutoLock } from '../auth/auth-idle';
 import type { OperationsSnapshot } from '../control/operations-store';
 import type { WorkspaceSnapshot } from '../control/workspace-session';
-import { failureError } from '../failures';
+import { failureError, notices, presentFailure } from '../failures';
 import type { AudioChannels } from '../media/audio-output';
 import { DiagnosticCollection, type DiagnosticState } from '../media/diagnostic-collection';
 import type { ViewerSession } from '../viewer-session';
@@ -49,8 +49,15 @@ export function useSystemControls({
   const [audioSaving, setAudioSaving] = useState(false);
   const [audioError, setAudioError] = useState<RemoteKitError>();
   const audioPending = useRef(false);
-  const [controlFailure, setControlFailure] = useState<RemoteKitError>();
-  const report = (error: unknown) => setControlFailure(failureError(error));
+  const report = (error: unknown) =>
+    notices.post(
+      'fullscreen:operation',
+      presentFailure(failureError(error), {
+        operation: '切换全屏',
+        scope: 'global',
+        consequence: '本次全屏切换未完成',
+      }),
+    );
   const authRequest: AuthRequest = media.workspace.request;
   const lock = media.workspace.lock;
   const idle = useAutoLock(auth, lock);
@@ -201,7 +208,6 @@ export function useSystemControls({
     floatingActions,
   );
   return {
-    controlFailure,
     authRequest,
     lock: () => lock('manual'),
     idle,

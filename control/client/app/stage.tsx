@@ -21,7 +21,6 @@ import './stage.css';
 import type { SystemControls } from './system-controls';
 import { deadZoneHeight, useTopInsetProbe } from './top-inset';
 import { setUiScale } from './ui-scale';
-import { useViewerSessionSelector } from './use-viewer-session';
 import { selectVisibility } from './visibility';
 import { WindowDivider } from './window-divider';
 import { useDropTarget, useWindowDragging } from './window-drag';
@@ -231,7 +230,6 @@ export function Stage({
   logout(): void;
   children: React.ReactNode;
 }) {
-  const rtcPhase = useViewerSessionSelector(media, (snapshot) => snapshot.rtc.phase);
   useLayoutEffect(() => {
     const keyboard = new ShellKeyboard(document, floatingActions);
     return () => keyboard.dispose();

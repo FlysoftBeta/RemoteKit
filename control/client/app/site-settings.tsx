@@ -1,16 +1,6 @@
 import { Close } from '@mui/icons-material';
-import {
-  Box,
-  Button,
-  Dialog,
-  DialogContent,
-  DialogTitle,
-  IconButton,
-  MenuItem,
-  Select,
-  Typography,
-} from '@mui/material';
-import { useId, useState } from 'react';
+import { Box, Button, Dialog, DialogContent, DialogTitle, IconButton, Typography } from '@mui/material';
+import { useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import { SITE_PERMISSIONS, type ProductAction, type ProductState } from '../../shared/product';
 import { failureError, FailureNote } from '../failures';
@@ -18,6 +8,7 @@ import { PERMISSION_LABELS, protocolName, siteHost } from './permission-prompt';
 import type { Action } from './product-dialogs';
 import { SettingSection, SettingSwitch } from './setting-layout';
 import './site-settings.css';
+import { ScaledSelect } from './scaled-select';
 
 interface SiteSettingsProps {
   origin: string;
@@ -59,7 +50,6 @@ export function SiteSettingsBody({
 }: SiteSettingsProps & { onClose?(): void }) {
   const [busy, setBusy] = useState(false),
     [error, setError] = useState<RemoteKitError | undefined>();
-  const permissionId = useId();
   const site = state.workspace.sites[origin];
   const run = async (command: ProductAction) => {
     setBusy(true);
@@ -89,25 +79,25 @@ export function SiteSettingsBody({
           return (
             <Box key={permission} className="site-settings-row">
               <Icon sx={{ fontSize: 20 }} />
-              <Typography id={`${permissionId}-${permission}`}>{label}</Typography>
-              <Select
-                size="small"
-                labelId={`${permissionId}-${permission}`}
+              <Typography>{label}</Typography>
+              <ScaledSelect
+                label={label}
                 value={site?.permissions?.[permission] ?? 'ask'}
                 disabled={busy || !online}
-                onChange={(event) =>
+                options={[
+                  { value: 'ask', label: '询问' },
+                  { value: 'allow', label: '允许' },
+                  { value: 'block', label: '阻止' },
+                ]}
+                onChange={(value) =>
                   void run({
                     type: 'site.permission',
                     origin,
                     permission,
-                    setting: event.target.value as 'ask' | 'allow' | 'block',
+                    setting: value as 'ask' | 'allow' | 'block',
                   })
                 }
-              >
-                <MenuItem value="ask">询问</MenuItem>
-                <MenuItem value="allow">允许</MenuItem>
-                <MenuItem value="block">阻止</MenuItem>
-              </Select>
+              />
             </Box>
           );
         })}

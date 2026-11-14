@@ -58,11 +58,6 @@
   font-size: 12px;
   text-align: center;
 }
-.start-page .start-page-error {
-  margin-top: 10px;
-  font-size: 14px;
-  overflow-wrap: anywhere;
-}
 .start-favorites {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));

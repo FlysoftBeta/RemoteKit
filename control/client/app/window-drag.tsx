@@ -220,6 +220,8 @@ export function WindowDragProvider({
       marker: boundaries[slot],
     };
   };
+  const latest = useRef({ workspace, active, targetAt, hitAt, openItem, action, report });
+  latest.current = { workspace, active, targetAt, hitAt, openItem, action, report };
   const begin = (event: React.PointerEvent<HTMLElement>, source: Source) => {
     if (!(event.buttons & 1)) return;
     event.preventDefault();
@@ -239,13 +241,42 @@ export function WindowDragProvider({
         ? workspace.spaces.find((space) => space.windowIds.includes(source.windowId))
         : undefined;
     if (shell && space) snapshots.capture(shell, space.windowIds);
-    const update = (x: number, y: number) => {
-      const target = targetAt(source, x, y);
-      setDrag({ source, x, y, target, hovered: hitAt(x, y) });
+    let previousTarget: Target | undefined;
+    let hovered: Registration | undefined;
+    const valid = (target = previousTarget) => {
+      const { workspace } = latest.current;
+      const hasWindow = (id: string) => workspace.windows.some((win) => win.id === id);
+      if ('windowId' in source && !hasWindow(source.windowId)) return false;
+      if (hovered && (!registry.current.has(hovered) || !hovered.element?.isConnected)) return false;
+      if (hovered?.kind === 'window' && !hasWindow(hovered.payload!)) return false;
+      if (hovered?.kind === 'group' && !workspace.spaces.some((space) => space.id === hovered?.payload))
+        return false;
+      const placement =
+        target?.placement ?? (target?.action?.type === 'window.place' ? target.action.placement : undefined);
+      if (placement?.mode === 'split' && !hasWindow(placement.besideWindowId)) return false;
+      if (placement?.mode === 'replace' && !hasWindow(placement.windowId)) return false;
+      return true;
     };
-    if (immediate) update(startX, startY);
+    const update = (x: number, y: number) => {
+      if (!valid()) {
+        cleanup();
+        return;
+      }
+      const target = latest.current.targetAt(source, x, y);
+      hovered = latest.current.hitAt(x, y);
+      if (!valid(target)) {
+        cleanup();
+        return;
+      }
+      previousTarget = target;
+      setDrag({ source, x, y, target, hovered });
+    };
     const move = (next: PointerEvent) => {
       if (next.pointerId !== pointerId) return;
+      if (!valid()) {
+        cleanup();
+        return;
+      }
       if (!moved && Math.hypot(next.clientX - startX, next.clientY - startY) / uiScale() > 4) moved = true;
       if (moved) {
         next.preventDefault();
@@ -261,8 +292,9 @@ export function WindowDragProvider({
     };
     const up = (next: PointerEvent) => {
       if (next.pointerId !== pointerId) return;
+      const canDrop = valid();
       cleanup();
-      if (moved) {
+      if (moved && canDrop) {
         next.preventDefault();
         next.stopPropagation();
         const suppress = (click: MouseEvent) => {
@@ -271,10 +303,11 @@ export function WindowDragProvider({
         };
         window.addEventListener('click', suppress, { capture: true, once: true });
         setTimeout(() => window.removeEventListener('click', suppress, true), 0);
-        const target = targetAt(source, next.clientX, next.clientY);
-        if (target?.action) void action(target.action).catch(report);
+        const target = latest.current.targetAt(source, next.clientX, next.clientY);
+        if (!valid(target)) return;
+        if (target?.action) void latest.current.action(target.action).catch(latest.current.report);
         else if (target?.placement && 'item' in source)
-          void openItem(source.item, target.placement).catch(report);
+          void latest.current.openItem(source.item, target.placement).catch(latest.current.report);
       }
     };
     const cancel = () => cleanup();
@@ -300,6 +333,7 @@ export function WindowDragProvider({
     window.addEventListener('pointercancel', cancel, true);
     window.addEventListener('keydown', key, true);
     stop.current = cleanup;
+    if (immediate) update(startX, startY);
   };
   const source = drag?.source;
   const id = source && 'windowId' in source ? source.windowId : undefined;

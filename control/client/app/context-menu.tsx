@@ -1,10 +1,9 @@
 import { Divider, Menu, MenuItem } from '@mui/material';
 import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
-import { RemoteKitError } from '../../shared/errors';
 import type { ProductTab, SearchEngine } from '../../shared/product';
 import { clipboardCommand } from '../clipboard/device-clipboard';
 import { sameEditingDocument } from '../editing/mobile-editing-state';
-import { failureError, FailureNote } from '../failures';
+import { failureError, notices, presentFailure } from '../failures';
 import type { Surface } from '../presentation/types';
 import type { ContextMenu as RemoteMenu } from '../rtc/protocol';
 import type { ViewerSession } from '../viewer-session';
@@ -34,7 +33,6 @@ export function ContextMenu({
   engine: SearchEngine;
   onClosed(): void;
 }) {
-  const [failure, setFailure] = useState<RemoteKitError>();
   const scale = useUiScale();
   const latest = useRef({ onClosed });
   latest.current = { onClosed };
@@ -53,7 +51,17 @@ export function ContextMenu({
             transport.input.sendInput(current, { type: 'context_command', menu: menu.id, command });
           }),
         product: (action) => {
-          void transport.operations.action(action).catch((error) => setFailure(failureError(error)));
+          void transport.operations.action(action).catch((error) =>
+            notices.post(
+              `context-menu:${tab.windowId}`,
+              presentFailure(failureError(error), {
+                operation: '打开所选内容',
+                scope: 'global',
+                targetId: tab.id,
+                consequence: '本次菜单操作未完成',
+              }),
+            ),
+          );
         },
         closed: () => latest.current.onClosed(),
       }),
@@ -95,7 +103,6 @@ export function ContextMenu({
         list: { dense: true, 'aria-label': '页面菜单' },
       }}
     >
-      <FailureNote error={failure} context={{ operation: '打开所选内容', scope: 'item' }} />
       {contextMenuItems(menu, tab, engine).flatMap((group, index) => [
         ...(index > 0 ? [<Divider key={`divider:${index}`} />] : []),
         ...group.map((item) => (

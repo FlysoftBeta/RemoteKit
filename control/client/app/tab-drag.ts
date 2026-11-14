@@ -22,6 +22,7 @@ const LONG_PRESS_MS = 400;
 const EDGE = 24;
 
 let current: TabDragState | null = null;
+let cancelGesture: (() => void) | undefined;
 const listeners = new Set<() => void>();
 const strips = new Map<string, { group: string; element: HTMLElement }>();
 
@@ -84,6 +85,7 @@ export function beginTabPointer({ event, tabId, windowId, title, index, move, lo
   if ((event.target as Element).closest('.tab-close')) return;
   const group = strips.get(windowId)?.group;
   if (!group) return;
+  cancelGesture?.();
   const element = event.currentTarget;
   const pointerId = event.pointerId;
   const touch = event.pointerType === 'touch';
@@ -93,6 +95,10 @@ export function beginTabPointer({ event, tabId, windowId, title, index, move, lo
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   const start = (x: number, y: number) => {
+    if (!element.isConnected) {
+      finish(false);
+      return;
+    }
     const rect = element.getBoundingClientRect();
     publish({
       tabId,
@@ -108,6 +114,8 @@ export function beginTabPointer({ event, tabId, windowId, title, index, move, lo
     });
   };
   const finish = (commit: boolean) => {
+    if (cancelGesture !== cancel) return;
+    cancelGesture = undefined;
     clearTimeout(timer);
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
@@ -172,6 +180,8 @@ export function beginTabPointer({ event, tabId, windowId, title, index, move, lo
   const onContextMenu = (e: Event) => {
     if (armed) e.preventDefault();
   };
+  const cancel = () => finish(false);
+  cancelGesture = cancel;
 
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
@@ -181,9 +191,14 @@ export function beginTabPointer({ event, tabId, windowId, title, index, move, lo
   window.addEventListener('contextmenu', onContextMenu, true);
   if (touch)
     timer = setTimeout(() => {
+      if (!element.isConnected) {
+        cancel();
+        return;
+      }
       armed = true;
       start(startX, startY);
     }, LONG_PRESS_MS);
+  return cancel;
 }
 
 // Horizontal shift (layout px) that opens the drop gap in a strip while a tab is dragged.

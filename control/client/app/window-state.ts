@@ -64,7 +64,6 @@ export async function waitForWorkspaceRevision(media: ViewerSession, revision: n
   const current = media.operations.getSnapshot().authoritative!.workspace;
   if (current.revision >= revision) return current;
   return new Promise<typeof current>((resolve, reject) => {
-    const abort = new AbortController();
     const timer = setTimeout(() => {
       remove();
       reject(new Error('工作区同步超时'));

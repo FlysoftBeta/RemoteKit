@@ -27,7 +27,11 @@ export function DiagnosticSettings({
     <SettingSection title="诊断">
       <span data-diagnostic-settings />
       <SettingRow description="收集连接、媒体与性能信息，停止后保存在服务端。" title="诊断数据收集">
-        <Button variant="outlined" onClick={start} disabled={!online || state.phase !== 'idle'}>
+        <Button
+          variant="outlined"
+          onClick={start}
+          disabled={!online || !['idle', 'start-error'].includes(state.phase)}
+        >
           {state.phase === 'starting' ? '正在开始…' : '开始诊断'}
         </Button>
       </SettingRow>

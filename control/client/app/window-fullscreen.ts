@@ -1,44 +1,63 @@
 import { useSyncExternalStore } from 'react';
 import { diagnostics } from '../media/diagnostics';
 
-// A window the user chose to show fullscreen from its More menu. It is a display mode of this
-// Viewer only: it lays the window out like a page that went fullscreen and, when the Viewer is not
-// fullscreen yet, also asks the browser for fullscreen. Leaving either one leaves both.
-let windowId: string | null = null;
-let ownsDocumentFullscreen = false;
+// Window fullscreen also requests document fullscreen when the browser supports it.
+type FullscreenState =
+  | { phase: 'idle' }
+  | { phase: 'requesting'; windowId: string; token: symbol }
+  | { phase: 'active'; windowId: string; document: 'owned' | 'external' };
+
+let state: FullscreenState = { phase: 'idle' };
 const listeners = new Set<() => void>();
 
-function publish(next: string | null) {
-  windowId = next;
+function publish(next: FullscreenState) {
+  document.removeEventListener('fullscreenchange', documentFullscreenChanged);
+  state = next;
+  if (state.phase !== 'idle') document.addEventListener('fullscreenchange', documentFullscreenChanged);
   for (const listener of listeners) listener();
 }
 
 function documentFullscreenChanged() {
-  if (document.fullscreenElement || !ownsDocumentFullscreen) return;
-  ownsDocumentFullscreen = false;
-  publish(null);
+  if (!document.fullscreenElement && state.phase === 'active' && state.document === 'owned')
+    publish({ phase: 'idle' });
 }
 
-export const currentWindowFullscreen = () => windowId;
+export const currentWindowFullscreen = () => (state.phase === 'idle' ? null : state.windowId);
 
 export function enterWindowFullscreen(id: string) {
-  publish(id);
   const target = document.documentElement;
-  if (document.fullscreenElement || !document.fullscreenEnabled || !target.requestFullscreen) return;
-  ownsDocumentFullscreen = true;
-  document.addEventListener('fullscreenchange', documentFullscreenChanged);
-  target.requestFullscreen().catch((error) => {
-    ownsDocumentFullscreen = false;
-    diagnostics.record('window-fullscreen', error);
-  });
+  if (document.fullscreenElement || !document.fullscreenEnabled || !target.requestFullscreen) {
+    const ownership = state.phase === 'active' ? state.document : 'external';
+    publish({ phase: 'active', windowId: id, document: ownership });
+    return;
+  }
+  const token = Symbol();
+  publish({ phase: 'requesting', windowId: id, token });
+  void target
+    .requestFullscreen()
+    .then(
+      async () => {
+        if (state.phase !== 'requesting' || state.token !== token) {
+          await document.exitFullscreen();
+          return;
+        }
+        publish({ phase: 'active', windowId: id, document: 'owned' });
+      },
+      (error) => {
+        if (state.phase === 'requesting' && state.token === token)
+          publish({ phase: 'active', windowId: id, document: 'external' });
+        diagnostics.record('window-fullscreen', error);
+      },
+    )
+    .catch((error) => diagnostics.record('window-fullscreen', error));
 }
 
 export function exitWindowFullscreen() {
-  if (!windowId) return;
-  const release = ownsDocumentFullscreen && !!document.fullscreenElement;
-  ownsDocumentFullscreen = false;
-  publish(null);
-  if (release) document.exitFullscreen().catch((error) => diagnostics.record('window-fullscreen', error));
+  if (state.phase === 'idle') return;
+  const release = state.phase === 'requesting' || state.document === 'owned';
+  publish({ phase: 'idle' });
+  if (release && document.fullscreenElement)
+    void document.exitFullscreen().catch((error) => diagnostics.record('window-fullscreen', error));
 }
 
 const subscribe = (listener: () => void) => {

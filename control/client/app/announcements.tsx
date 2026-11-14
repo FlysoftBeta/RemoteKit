@@ -28,15 +28,24 @@ export function AnnouncementDialog({
   const [failure, setFailure] = useState<RemoteKitError>();
   const abort = useRef(new AbortController());
   useEffect(() => () => abort.current.abort(), []);
-  const [dismissing, setDismissing] = useState<string>();
-  const unread = announcements.filter((item) => !item.read && item.id !== dismissing);
+  const [dismissing, setDismissing] = useState(() => new Set<string>());
+  const [completed, setCompleted] = useState(() => new Set<string>());
+  const unread = announcements.filter((item) => !item.read && !completed.has(item.id));
   const current = unread[unread.length - 1];
   if (!current) return null;
   const dismiss = () => {
-    setDismissing(current.id);
-    void recover(() => read(current.id), abort.current.signal, setFailure)
+    if (dismissing.has(current.id)) return;
+    setDismissing((ids) => new Set(ids).add(current.id));
+    void recover(() => read(current.id), abort.current.signal, setFailure, { identity: 'announcement:' + current.id })
+      .then(() => { setFailure(undefined); setCompleted((ids) => new Set(ids).add(current.id)); })
       .catch((error) => setFailure(failureError(error)))
-      .finally(() => setDismissing(undefined));
+      .finally(() =>
+        setDismissing((ids) => {
+          const next = new Set(ids);
+          next.delete(current.id);
+          return next;
+        }),
+      );
   };
   return (
     <Dialog open onClose={dismiss} fullWidth maxWidth="sm" aria-describedby="announcement-body">

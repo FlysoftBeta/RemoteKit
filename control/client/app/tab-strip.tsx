@@ -39,15 +39,27 @@ export function TabStrip({
   create(): void;
 }) {
   const strip = useRef<HTMLDivElement>(null);
+  const gesture = useRef<{ tabId: string; cancel(): void }>(undefined);
   const drag = useTabDrag();
   const scale = useUiScale();
   const stripRef = useCallback(
     (element: HTMLDivElement | null) => {
+      if (!element) {
+        gesture.current?.cancel();
+        gesture.current = undefined;
+      }
       strip.current = element;
       registerTabStrip(windowId, group, element);
     },
     [windowId, group],
   );
+  useEffect(() => {
+    if (gesture.current && !items.some((item) => item.id === gesture.current?.tabId)) {
+      gesture.current.cancel();
+      gesture.current = undefined;
+    }
+  }, [items]);
+  useEffect(() => () => gesture.current?.cancel(), []);
   useEffect(() => {
     const bar = strip.current;
     const selected = bar?.querySelector('[aria-selected="true"]')?.closest('.window-tab');
@@ -74,9 +86,10 @@ export function TabStrip({
             closeLabel={`关闭 ${item.title}`}
             dragSource={drag?.tabId === item.id}
             shift={tabShift(drag, windowId, item.id, index)}
-            onPointerDown={(event) =>
-              !disabled &&
-              beginTabPointer({
+            onPointerDown={(event) => {
+              if (disabled) return;
+              gesture.current?.cancel();
+              const cancel = beginTabPointer({
                 event,
                 tabId: item.id,
                 windowId,
@@ -84,8 +97,9 @@ export function TabStrip({
                 index,
                 move,
                 longPress: (anchor) => menu(anchor, item.id),
-              })
-            }
+              });
+              gesture.current = cancel ? { tabId: item.id, cancel } : undefined;
+            }}
             onContextMenu={(anchor) => menu(anchor, item.id)}
             onSelect={() => select(item.id)}
             onClose={() => close(item.id)}
