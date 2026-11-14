@@ -135,7 +135,9 @@ base::ListValue NavigationCoordinator::NavigationOperationSnapshot() const {
     if (!record.url.empty())
       value.Set("url", record.url);
     if (!record.error.empty())
-      value.Set("error", record.error);
+      value.Set("error", base::DictValue()
+                             .Set("code", std::string(protocol::ErrorCodeName(record.error_code)))
+                             .Set("message", record.error));
     result.Append(std::move(value));
   }
   return result;

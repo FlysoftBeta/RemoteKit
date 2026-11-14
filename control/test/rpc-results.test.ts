@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../shared/errors';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RpcResults, rpcId } from '../server/endpoint/rpc-results';
@@ -63,3 +64,33 @@ test('RPC result eviction never executes replay-only requests', async () => {
   assert.notEqual(rpcId('begin', 'identity'), rpcId('cancel', 'identity'));
   assert.equal(rpcId('begin', 'identity').length <= 64, true);
 });
+
+for (const code of [
+  'busy',
+  'rate_limited',
+  'unavailable',
+  'conflict',
+  'outcome_unknown',
+  'internal',
+] as const) {
+  test(`dedup ${code} retains only uncertain or completed execution`, async () => {
+    const results = new RpcResults();
+    const request = {
+      method: 'object.derivation',
+      opId: 'same-identity',
+      replay: false,
+      params: { id: 'source' },
+    };
+    let calls = 0;
+    const run = async () => {
+      calls++;
+      if (calls === 1) throw new RemoteKitError(code, 'injected');
+      return 'ready';
+    };
+    await assert.rejects(results.execute(request, run), { code });
+    if (code === 'outcome_unknown' || code === 'internal')
+      await assert.rejects(results.execute(request, run), { code });
+    else assert.equal(await results.execute(request, run), 'ready');
+    assert.equal(calls, code === 'outcome_unknown' || code === 'internal' ? 1 : 2);
+  });
+}

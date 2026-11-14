@@ -37,7 +37,14 @@ class CheckpointCacheProbe {
   }
   static void Wait(CheckpointCache& cache) {
     if (cache.staging_.valid())
-      cache.staging_.get();
+      cache.CompleteStaging(cache.staging_.get());
+  }
+  static auto Watermark(const CheckpointCache& cache) { return cache.last_flush_; }
+  static void Seed(CheckpointCache& cache,
+                   const fs::path& directory,
+                   const DirectoryChanges& changes) {
+    cache.directory_ = directory;
+    cache.watcher_.Merge(changes);
   }
 };
 }  // namespace remotekit
@@ -728,11 +735,11 @@ void DeferredCommit(const fs::path& root) {
                   frame_admission);
   session.SetSignal([] {});
   Take(session.Initialize());
-  const auto stopped = Take(session.StopAndCommit("budget", false, PhaseClock::now()));
+  const auto stopped = session.StopAndCommit("budget", false, PhaseClock::now());
   const auto copy = Take(Checkpoints::Copy(limited.data / "sessions" / offline.session));
-  Check(stopped["state"] == "dirty" && stopped["committed"].is_null() &&
-            copy["stoppedCleanly"] == true,
-        "exhausted commit budget leaves a cleanly stopped dirty copy");
+  Check(!stopped && stopped.error().code == ErrorCode::kUnavailable && copy["state"] == "dirty" &&
+            copy["lastCommit"].is_null() && copy["stoppedCleanly"] == true,
+        "exhausted commit budget fails and retains a cleanly stopped dirty copy");
 }
 void CopyRecovery(const fs::path& root) {
   const auto directory = LongPath(root / std::string(32, 'e'));
@@ -784,6 +791,112 @@ void CopyRecovery(const fs::path& root) {
   Take(Checkpoints::TruncateChanges(directory));
   Check(Read(directory.wstring() + L".changes").empty(), "commit truncates journal");
 }
+void JournalFailureState(const fs::path& root) {
+  const auto directory = LongPath(root / std::string(32, 'f'));
+  Write(directory / "value", "old");
+  const Json copy{{"version", 1},
+                  {"sessionId", directory.filename().string()},
+                  {"placementEpoch", uint64_t(1)},
+                  {"base", std::string(64, 'a')},
+                  {"state", "dirty"},
+                  {"stoppedCleanly", true},
+                  {"changesAt", 0},
+                  {"lastCommit", nullptr}};
+  Take(Checkpoints::WriteCopy(directory, copy));
+  Take(WriteDurableJson(
+      directory.wstring() + L".checkpoint-index.json",
+      Take(checkpoint_formats::EncodeIndex(Take(Checkpoints::Scan(directory, Json(), {}))))));
+  DirectoryChanges changes;
+  changes.continuous = true;
+  changes.paths["value"] = PhaseClock::now();
+  Take(Checkpoints::FlushChanges(directory, changes));
+  const auto journal_path = directory.wstring() + L".changes";
+  for (const auto suffix : {L".changes.new", L".changes", L".copy.json"}) {
+    const auto previous = Read(journal_path);
+    const auto path = directory.wstring() + suffix;
+    HANDLE held = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    Check(held != INVALID_HANDLE_VALUE, "inject journal publication failure");
+    CheckpointCache cache;
+    CheckpointCacheProbe::Seed(cache, directory, changes);
+    const auto watermark = CheckpointCacheProbe::Watermark(cache);
+    const auto result = cache.Version(
+        {{"manifestId", std::string(64, 'b')}, {"takenAt", VersionNow()}, {"kind", "running"}});
+    Check(!result && CheckpointCacheProbe::Watermark(cache) == watermark,
+          "failed version never advances the flush watermark");
+    Check(!cache.Changes().paths.empty(), "failed version retains watcher changes");
+    CloseHandle(held);
+    if (std::wstring_view(suffix) != L".copy.json")
+      Check(Read(journal_path) == previous,
+            "failed atomic journal replacement preserves old bytes");
+    Take(cache.Version(
+        {{"manifestId", std::string(64, 'b')}, {"takenAt", VersionNow()}, {"kind", "running"}}));
+    Check(CheckpointCacheProbe::Watermark(cache) != watermark,
+          "successful publication advances watermark");
+  }
+  Write(directory / "unflushed", "new");
+  std::ofstream(journal_path, std::ios::binary | std::ios::app) << "{\"partial\":";
+  const auto recovered = Take(Checkpoints::RecoverChanges(directory, 0, false));
+  Check(!recovered.continuous && recovered.paths.contains("unflushed"),
+        "interrupted tail forces a full scan");
+  const auto reopened = Take(Checkpoints::RecoverChanges(directory, 0, false));
+  Check(reopened.paths.contains("unflushed"),
+        "tail repair persists the discontinuity across reopen");
+  Take(Checkpoints::FlushChanges(directory, changes));
+  Take(Checkpoints::RecoverChanges(directory, 0, false));
+}
+void RestoreFailureState(const fs::path& root) {
+  Link link;
+  objects::ObjectService objects(root / "restore-state-objects", link, {}, "test", "dev");
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  for (int step = 0; step < 3; ++step) {
+    const auto directory = LongPath(root / (std::string(31, 'e') + std::to_string(step)));
+    Write(directory / "a", "old a");
+    Write(directory / "b", "old b");
+    const auto old = Take(Checkpoints(objects).Create(directory, "tenant", "dev"));
+    Write(directory / "a", "new a");
+    Write(directory / "b", "new b");
+    const auto next = Take(Checkpoints(objects).Create(directory, "tenant", "dev"));
+    Take(Checkpoints(objects).Restore(directory, "tenant", old.at("manifestId")));
+    Json copy{{"version", 1},
+              {"sessionId", directory.filename().string()},
+              {"placementEpoch", uint64_t(1)},
+              {"base", old.at("manifestId")},
+              {"state", "clean"},
+              {"stoppedCleanly", true},
+              {"changesAt", 0},
+              {"lastCommit", nullptr}};
+    Take(Checkpoints::WriteCopy(directory, copy));
+    const fs::path lock_path = step == 0 ? fs::path(directory.wstring() + L".copy.json")
+                               : step == 1
+                                   ? directory / "b"
+                                   : fs::path(directory.wstring() + L".checkpoint-index.json");
+    HANDLE held = CreateFileW(lock_path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Check(held != INVALID_HANDLE_VALUE, "inject restore publication failure");
+    const auto result = Checkpoints(objects).Restore(directory, "tenant", next.at("manifestId"));
+    CloseHandle(held);
+    Check(!result, "restore fails at the injected step");
+    const auto failed = Take(Checkpoints::Copy(directory));
+    if (step == 0) {
+      Check(failed.at("state") == "clean" && Read(directory / "a") == "old a",
+            "pre-publication failure preserves old state");
+    } else {
+      Check(failed.at("state") == "restoring" &&
+                !Checkpoints::ReuseCopy(failed, 1, old.at("manifestId")) &&
+                !Checkpoints::ReuseCopy(failed, 1, next.at("manifestId")),
+            "partial data and metadata publication cannot be reused");
+    }
+    Take(Checkpoints(objects).Restore(directory, "tenant", next.at("manifestId")));
+    Check(Read(directory / "a") == "new a" && Read(directory / "b") == "new b",
+          "restore reconciles every partial state");
+    copy["base"] = next.at("manifestId");
+    Take(Checkpoints::WriteCopy(directory, copy));
+    Check(Checkpoints::ReuseCopy(Take(Checkpoints::Copy(directory)), 1, next.at("manifestId")),
+          "complete restore publishes reusable identity");
+  }
+}
 void Fencing(const fs::path& root) {
   const auto options =
       Take(RuntimeOptions::FromConfig(TestConfig(), root / "fence", "dev", "test"));
@@ -824,6 +937,164 @@ void Fencing(const fs::path& root) {
   Check(find(3)["error"]["code"] == "conflict", "old Session request is fenced");
   Check(find(4)["result"]["deleted"] == 1, "node-wide cold delete");
 }
+void FenceReader(const fs::path& root) {
+  const auto options =
+      Take(RuntimeOptions::FromConfig(TestConfig(), root / "fence-reader", "dev", "test"));
+  class ReaderLink final : public CopyLink {
+   public:
+    fs::path directory;
+    Json checkpoint;
+    bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
+      if (step < 2)
+        return CopyLink::Next(bytes, generation, eof);
+      Json request;
+      if (step == 2) {
+        WaitRevision("1");
+        checkpoint = Take(Checkpoints::Copy(directory))["base"];
+        Write(directory / "uncommitted", "must never return");
+        auto copy = Take(Checkpoints::Copy(directory));
+        copy["state"] = "dirty";
+        copy["lastCommit"] = nullptr;
+        Take(Checkpoints::WriteCopy(directory, copy));
+        request = test::NodeDesired(Json::array({test::Placement(session, 2)}), "connection", "2");
+      } else if (step == 3) {
+        auto placement = test::Placement(session, 2);
+        placement["dataState"] = "clean";
+        request = test::NodeDesired(Json::array({placement}), "connection", "3");
+      } else if (step == 4) {
+        Check(fs::exists(directory / "uncommitted"), "fencing preserves the directory");
+        Check(Take(Checkpoints::Copy(directory)).is_null(), "fencing forgets dirty copy");
+        Check(!fs::exists(directory.wstring() + L".checkpoint-index.json"),
+              "fencing forgets index");
+        Check(Read(directory.wstring() + L".changes").empty(), "fencing truncates changes");
+        const fs::path renamed = directory.wstring() + L".renamed";
+        fs::rename(directory, renamed);
+        fs::rename(renamed, directory);
+        request = test::Desired(session, 2, "2");
+        request["checkpoint"] = checkpoint;
+        request["commit"] = "restored";
+      } else {
+        WaitRevision("2");
+        Check(!fs::exists(directory / "uncommitted"), "fenced dirty data is never restored");
+        const auto copy = Take(Checkpoints::Copy(directory));
+        Check(copy["placementEpoch"] == 2 && copy["state"] == "clean", "fresh copy committed");
+        request = test::Rpc("shutdown");
+        request.update({{"tenantId", ""}, {"sessionId", nullptr}, {"placementEpoch", nullptr}});
+      }
+      generation = 1;
+      eof = false;
+      request["id"] = step++;
+      bytes = request.dump();
+      return true;
+    }
+  } link;
+  link.directory = options.data / "sessions" / link.session;
+  media::Sdk sdk;
+  Service service(sdk, options, link, {}, "endpoint");
+  Check(service.Run() == 0, "reader fencing service");
+  for (const auto& reply : link.replies)
+    Check(reply["ok"].get<bool>(), "reader fencing and restoration accepted");
+}
+void FenceIsolation(const fs::path& root) {
+  const auto options =
+      Take(RuntimeOptions::FromConfig(TestConfig(), root / "fence-isolation", "dev", "test"));
+  class IsolationLink final : public CopyLink {
+   public:
+    HANDLE held = nullptr;
+    fs::path record;
+    bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
+      if (step == 4) {
+        WaitRevision("2");
+        CloseHandle(held);
+        held = nullptr;
+        fs::remove(record);
+        auto request =
+            test::NodeDesired(Json::array({test::Placement(session)}), "connection", "2");
+        request["id"] = step++;
+        generation = 1;
+        eof = false;
+        bytes = request.dump();
+        return true;
+      }
+      if (step != 0)
+        return CopyLink::Next(bytes, generation, eof);
+      auto bad = test::Placement(std::string(32, 'b'), 2);
+      bad["tenantId"] = "bad";
+      bad["dataState"] = "clean";
+      auto request = test::NodeDesired(Json::array({bad, test::Placement(session)}));
+      request["id"] = step++;
+      generation = 1;
+      eof = false;
+      bytes = request.dump();
+      return true;
+    }
+  } link;
+  const auto directory = options.data / "sessions" / std::string(32, 'b');
+  const fs::path record = directory.wstring() + L".copy.json";
+  Write(record, "locked copy record");
+  link.record = record;
+  link.held = CreateFileW(record.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                          FILE_ATTRIBUTE_NORMAL, nullptr);
+  Check(link.held != INVALID_HANDLE_VALUE, "hold bad placement record");
+  media::Sdk sdk;
+  {
+    Service service(sdk, options, link, {}, "endpoint");
+    Check(service.Run() == 0, "isolated fencing service");
+  }
+  if (link.held)
+    CloseHandle(link.held);
+  Check(link.replies[0]["ok"].get<bool>(), "one bad placement does not reject node.desired");
+  Check(std::any_of(link.events.begin(), link.events.end(),
+                    [](const Json& event) {
+                      return event["tenantId"] == "bad" &&
+                             event["lastError"]["code"] == "unavailable";
+                    }),
+        "bad placement reports its IO failure");
+  Check(std::any_of(link.events.begin(), link.events.end(),
+                    [](const Json& event) {
+                      return event["tenantId"] == "tenant" && event.value("converged", false) &&
+                             event["lastError"].is_null();
+                    }),
+        "healthy tenant converges alongside bad placement");
+}
+void RetainedSessionFence(const fs::path& root) {
+  Link link;
+  const auto options =
+      Take(RuntimeOptions::FromConfig(TestConfig(), root / "retained-fence", "dev", "test"));
+  objects::ObjectService objects(options.data, link, {}, "test", "dev");
+  media::Sdk sdk;
+  media::FrameAdmission admission;
+  auto session = std::make_shared<Session>(sdk, options, "tenant", std::string(32, 'a'), 1,
+                                           cluster::Key{}, link, objects, admission);
+  Take(session->Initialize());
+  Take(session->Fence());
+  const auto directory = options.data / "sessions" / std::string(32, 'a');
+  fs::remove_all(directory);
+  Check(!fs::exists(directory), "retained Session releases all directory resources on Fence");
+}
+void LockedSessionOpen(const fs::path& root) {
+  Link link;
+  const auto options =
+      Take(RuntimeOptions::FromConfig(TestConfig(), root / "locked-open", "dev", "test"));
+  objects::ObjectService objects(options.data, link, {}, "test", "dev");
+  media::Sdk sdk;
+  media::FrameAdmission admission;
+  const auto id = std::string(32, 'a');
+  const auto directory = options.data / "sessions" / id;
+  Write(directory / "locked", "orphaned directory");
+  HANDLE held = CreateFileW((directory / "locked").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  Check(held != INVALID_HANDLE_VALUE, "hold orphaned Session file");
+  auto execution = std::make_shared<SessionExecution>(sdk, options, link, objects, admission,
+                                                      test::Placement(id, 2), "endpoint");
+  const auto hooks = execution->Hooks();
+  const auto opened = hooks.prepare(test::Desired(id, 2));
+  CloseHandle(held);
+  Check(!opened && opened.error().code == ErrorCode::kUnavailable,
+        "directory sharing violation fails this Session open as unavailable");
+  Take(hooks.prepare(test::Desired(id, 2)));
+  Take(execution->Fence());
+}
 }  // namespace
 int main(int argc, char** argv) {
   try {
@@ -841,10 +1112,17 @@ int main(int argc, char** argv) {
     Blockers(root);
     Metrics(root);
     Fencing(root);
+    FenceReader(root);
+    FenceIsolation(root);
+    RetainedSessionFence(root);
+    LockedSessionOpen(root);
     CommitReplay(root);
     CopyRecovery(root);
+    JournalFailureState(root);
+    RestoreFailureState(root);
     GracefulCommit(root);
     DeferredCommit(root);
+    fs::remove_all(LongPath(root));
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;

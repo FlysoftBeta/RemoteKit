@@ -2,7 +2,9 @@ import type Database from 'better-sqlite3';
 import Sqlite from 'better-sqlite3';
 import { mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, type ErrorCode } from '../../shared/errors';
+import { RetryUnit } from '../../shared/retry-unit';
+import { log } from '../log';
 import { baseline } from './baseline';
 import { corruptState } from './codec';
 import type { AtRestKey } from '../auth/crypto';
@@ -15,9 +17,50 @@ export interface Migration {
   name: string;
   up(db: Database.Database, context: MigrationContext): void;
 }
-export const migrations: Migration[] = [];
+export const migrations: Migration[] = [
+  {
+    version: 24,
+    name: 'durable retry units',
+    up(db) {
+      db.exec(
+        'CREATE TABLE retry_units (owner TEXT NOT NULL, unit TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY(owner,unit))',
+      );
+      db.exec(`CREATE TABLE object_render_failures_next (
+      source_id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('failed','unknown')),
+      reason TEXT NOT NULL, message TEXT NOT NULL, failed_at INTEGER NOT NULL,
+      attempts INTEGER NOT NULL, retry_at INTEGER, node_id TEXT, build_id TEXT NOT NULL, display_reason TEXT);
+      INSERT INTO object_render_failures_next SELECT source_id, CASE WHEN reason='outcome_unknown' THEN 'unknown' ELSE state END,
+        reason,message,failed_at,attempts,retry_at,node_id,build_id,display_reason FROM object_render_failures;
+      DROP TABLE object_render_failures;
+      ALTER TABLE object_render_failures_next RENAME TO object_render_failures;`);
+      const save = db.prepare('INSERT INTO retry_units VALUES (?,?,?)');
+      for (const row of db.prepare('SELECT * FROM object_render_failures').all() as {
+        source_id: string;
+        reason: ErrorCode;
+        message: string;
+        display_reason: string | null;
+        failed_at: number | bigint;
+        attempts: number | bigint;
+        build_id: string;
+      }[]) {
+        const unit = new RetryUnit({
+          now: () => Number(row.failed_at),
+          failed: (error) =>
+            log.warn('render.failure_imported', { id: row.source_id, err: error, errorId: error.errorId }),
+        });
+        unit.ready(row.build_id);
+        for (let attempt = 0; attempt < Math.min(21, Math.max(1, Number(row.attempts))); attempt++)
+          unit.fail(new RemoteKitError(row.reason, row.message, { reason: row.display_reason ?? undefined }));
+        save.run('render', row.source_id, JSON.stringify(unit.record()));
+      }
+      db.exec(
+        "UPDATE learning_downloads SET state='unknown' WHERE json_valid(failure) AND json_extract(failure,'$.code')='outcome_unknown'",
+      );
+    },
+  },
+];
 
-export const currentVersion = 23;
+export const currentVersion = 24;
 export interface MigrationOptions extends MigrationContext {
   backupDirectory: string;
   buildId: string;

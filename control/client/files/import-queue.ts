@@ -3,11 +3,12 @@ import type { LibraryMethods, LibrarySnapshot } from '../../shared/file-library'
 import { FILE_LIMITS } from '../../shared/product';
 import { operationId } from '../control/product-operations';
 import { notices, presentFailure } from '../failures';
-import { recoveryDelay } from '../failures/recovery';
+import { RetryUnit } from '../../shared/retry-unit';
 import { Store } from '../util/store';
 import type { FileChannel } from './file-channel';
 
 interface ImportJob {
+  retry: RetryUnit;
   file: File;
   operationId: string;
   assetId?: string;
@@ -46,8 +47,7 @@ export class ImportQueue extends Store<ImportState> {
   private online = false;
   private scope?: string;
   private error?: RemoteKitError;
-  private retryTimer?: ReturnType<typeof setTimeout>;
-  private attempt = 0;
+  private capacityInput = 0;
   constructor(
     private readonly services: ImportServices,
     private readonly destination: 'library' | 'basket',
@@ -63,7 +63,7 @@ export class ImportQueue extends Store<ImportState> {
     else if (
       this.batches.length &&
       !this.controller &&
-      (!this.error || recoveryDelay(this.error, 0) !== undefined)
+      (!this.error || this.batches[0].jobs[0].retry.state.phase === 'waiting')
     )
       void this.upload();
   }
@@ -78,7 +78,7 @@ export class ImportQueue extends Store<ImportState> {
       throw new RemoteKitError('limit_exceeded', '单个文件不能超过 256 MiB', { capacity: 'file' });
     const empty = !this.batches.length;
     this.batches.push({
-      jobs: files.map((file) => ({ file, operationId: operationId() })),
+      jobs: files.map((file) => ({ file, operationId: operationId(), retry: new RetryUnit() })),
       origin: { ...origin },
       afterId,
     });
@@ -87,15 +87,20 @@ export class ImportQueue extends Store<ImportState> {
     return true;
   };
   capacityChanged = () => {
-    if (this.error?.code === 'limit_exceeded') void this.upload();
+    if (this.error?.code === 'limit_exceeded') {
+      this.capacityInput++;
+      void this.upload();
+    }
   };
   discard = () => {
     for (const batch of this.batches)
-      for (const job of batch.jobs) notices.resolve('task:upload:' + job.operationId);
+      for (const job of batch.jobs) {
+        job.retry.cancel();
+        notices.resolve('task:upload:' + job.operationId);
+      }
     this.controller?.abort();
     this.batches = [];
     this.error = undefined;
-    clearTimeout(this.retryTimer);
     this.emit();
   };
   dispose = () => {
@@ -104,16 +109,26 @@ export class ImportQueue extends Store<ImportState> {
   };
   upload = async () => {
     if (!this.batches.length || this.controller || !this.online) return;
+    const current = this.batches[0].jobs[0];
+    if (!current.retry.ready(JSON.stringify([this.scope, current.operationId, this.capacityInput]))) {
+      current.retry.schedule(() => {
+        void this.upload();
+      });
+      return;
+    }
     const abort = new AbortController();
     this.controller = abort;
     this.error = undefined;
-    clearTimeout(this.retryTimer);
     this.emit();
     let batch: ImportBatch | undefined;
     try {
       while (this.batches.length && !abort.signal.aborted) {
         batch = this.batches[0];
         const job = batch.jobs[0];
+        if (!job.retry.ready(JSON.stringify([this.scope, job.operationId, this.capacityInput]))) {
+          job.retry.schedule(() => void this.upload());
+          break;
+        }
         job.assetId ??= (
           await this.services.rpc.uploadAsset(job.file, job.operationId, abort.signal)
         ).assetId;
@@ -132,7 +147,7 @@ export class ImportQueue extends Store<ImportState> {
           const index = next.basket.indexOf(batch.afterId);
           if (index >= 0) batch.afterId = next.basket[index + 1] ?? batch.afterId;
         }
-        this.attempt = 0;
+        job.retry.succeed();
         notices.resolve('task:upload:' + job.operationId);
         if (!this.visible)
           notices.post('task:upload:' + job.operationId, { class: 'B', text: '文件已导入我的文件' });
@@ -143,8 +158,11 @@ export class ImportQueue extends Store<ImportState> {
     } catch (error) {
       if (!abort.signal.aborted && this.batches[0] === batch) {
         this.error = toRemoteKitError(error);
-        const delay = recoveryDelay(this.error, this.attempt++);
-        if (delay !== undefined) this.retryTimer = setTimeout(() => void this.upload(), delay);
+        const unit = batch!.jobs[0].retry;
+        unit.fail(this.error);
+        unit.schedule(() => {
+          void this.upload();
+        });
       }
     } finally {
       this.controller = undefined;

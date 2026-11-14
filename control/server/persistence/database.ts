@@ -20,6 +20,7 @@ export interface DatabaseOptions {
   buildId: string;
 }
 export class ControlDatabase {
+  readonly buildId: string;
   readonly coordination: CoordinationRepository;
   readonly reclaim: ReclaimStatistics;
   readonly integrity: IntegrityResult;
@@ -34,6 +35,7 @@ export class ControlDatabase {
   readonly announcements: AnnouncementsRepository;
   readonly clipboards: ClipboardsRepository;
   constructor(path: string, options: DatabaseOptions) {
+    this.buildId = options.buildId;
     const clock = options.clock ?? systemClock;
     this.db = new Sqlite(path);
     this.db.defaultSafeIntegers(true);
@@ -57,7 +59,7 @@ export class ControlDatabase {
     this.accounts = new AccountsRepository(this.db);
     this.operations = new OperationsRepository(this.db, this.workspaces);
     this.library = new LibraryRepository(this.db);
-    this.sessionImports = new SessionImportsRepository(this.db, this.atRestKey);
+    this.sessionImports = new SessionImportsRepository(this.db, this.atRestKey, options.buildId);
     this.announcements = new AnnouncementsRepository(this.db);
     this.clipboards = new ClipboardsRepository(this.db, clock);
     try {

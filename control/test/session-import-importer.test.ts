@@ -372,7 +372,7 @@ test('import lifecycle applies all chunk counts, repeats current state and clear
     await h.close();
   }
 });
-test('imports recover lost begin replies and missing jobs with the same persisted identity', async () => {
+test('imports recover lost begin replies with the same persisted identity', async () => {
   const h = await harness();
   try {
     await h.paired();
@@ -389,7 +389,7 @@ test('imports recover lost begin replies and missing jobs with the same persiste
     let polls = 0;
     h.gateway.storageImportStatus = async (_tenant, args) => {
       ids.push(args.importId);
-      if (++polls === 1) throw new RemoteKitError('not_found', 'Browser restarted');
+      polls++;
       return {
         state: 'done',
         cookies: { applied: 2, rejected: 0 },
@@ -399,7 +399,7 @@ test('imports recover lost begin replies and missing jobs with the same persiste
     await h.receive([event]);
     await h.importer.tick();
     assert.equal(h.record(event.id).state, 'applied');
-    assert.equal(begins, 3);
+    assert.equal(begins, 2);
     assert.deepEqual([...new Set(ids)], [`${event.id}:0`]);
   } finally {
     await h.close();
@@ -1040,4 +1040,23 @@ test('tenant hard-delete purges every row and sends the final revocation from me
   } finally {
     await h.close();
   }
+});
+
+test('the importer timer contains a dispatcher defect and faults only its job', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
+  const h = await harness();
+  t.after(() => h.close());
+  let calls = 0;
+  t.mock.method(h.importer, 'tick', async () => {
+    calls++;
+    throw new RemoteKitError('internal', 'injected dispatcher defect');
+  });
+  h.importer.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  const job = (h.importer as unknown as { dispatchJob: import('../server/background').BackgroundJob })
+    .dispatchJob;
+  assert.equal(job.retry.state.phase, 'faulted');
+  t.mock.timers.tick(15000);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
 });

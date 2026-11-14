@@ -69,35 +69,63 @@ Result<void> BrowserRuntime::AdmitLaunch() {
   return {};
 }
 Result<void> BrowserRuntime::HealthCheck() {
+  connection_retry_.Input(process_incarnation_);
+  if (!rpc_.Control() && process_.Alive() && !control_channel_.empty()) {
+    if (!connection_retry_.Ready())
+      return *connection_retry_.Failure();
+    auto connected = rpc_.Connect(control_channel_);
+    if (!connected) {
+      connection_retry_.Fail(connected.error());
+      startup_error_ = connected.error();
+      return connected.error();
+    }
+    connection_retry_.Success();
+    startup_error_.reset();
+  }
   if (startup_error_)
     return *startup_error_;
   if (!rpc_.Control())
     return Unavailable("Browser process is alive; control channel is not ready");
-  if (rpc_.NeedsHealthCheck()) {
-    // A bounded health check never authorizes killing a live connected Browser.
-    auto reply = rpc_.Request({{"method", "snapshot"}}, 0, 1000);
-    if (!reply)
-      return Unavailable("Browser health probe failed: " + reply.error().message);
-  }
-  const auto now = QpcNow();
-  if (now >= next_health_check_) {
-    next_health_check_ = now + QpcFrequency();
-    auto status = rpc_.Request({{"method", "output.status"}}, 0, 1000);
-    if (!status && status.error().code == ErrorCode::kOutcomeUnknown)
-      return Unavailable("Browser output health probe failed: " + status.error().message);
-    if (status && status.value().contains("output")) {
-      const auto& output = status.value()["output"];
-      if (!output.value("error", std::string()).empty()) {
-        startup_error_ = Error{ErrorCode::kUnavailable,
-                               output.value("message", output["error"].get<std::string>()),
-                               ErrorReason::kOutputFailed};
-        last_failure_ = startup_error_;
-        return *startup_error_;
-      }
+  health_retry_.Input(process_incarnation_);
+  if (!health_retry_.Ready())
+    return *health_retry_.Failure();
+  const auto probe = [&]() -> Result<void> {
+    if (rpc_.NeedsHealthCheck()) {
+      // A bounded health check never authorizes killing a live connected Browser.
+      auto reply = rpc_.Request({{"method", "snapshot"}}, 0, 1000);
+      if (!reply)
+        return reply.error();
     }
-  }
-  start_policy_.Healthy(double(now) / QpcFrequency());
-  return {};
+    const auto now = QpcNow();
+    if (now >= next_health_check_) {
+      auto status = rpc_.Request({{"method", "output.status"}}, 0, 1000);
+      // Any application reply (for example conflict/output_not_open before output is opened)
+      // proves the Browser answered. Only a probe whose outcome is unknown or whose channel is
+      // unusable is a health failure; output failures arrive in the success envelope below.
+      if (!status && (status.error().code == ErrorCode::kOutcomeUnknown ||
+                      status.error().code == ErrorCode::kUnavailable))
+        return status.error();
+      if (status && status.value().contains("output")) {
+        const auto& output = status.value()["output"];
+        if (!output.value("error", std::string()).empty()) {
+          auto error = Error{ErrorCode::kUnavailable,
+                             output.value("message", output["error"].get<std::string>()),
+                             ErrorReason::kOutputFailed};
+          last_failure_ = error;
+          return error;
+        }
+      }
+      next_health_check_ = now + QpcFrequency();
+    }
+    start_policy_.Healthy(double(now) / QpcFrequency());
+    return {};
+  };
+  auto result = probe();
+  if (result)
+    health_retry_.Success();
+  else
+    health_retry_.Fail(result.error());
+  return result;
 }
 Result<void> BrowserRuntime::NewIncarnation() {
   if (process_.Present())
@@ -129,14 +157,23 @@ Result<void> BrowserRuntime::Start(const fs::path& executable,
   auto launched = process_.Launch(executable, std::move(command), profile_key_);
   if (!launched)
     return launched.error();
-  clean_shutdown_ = false;
+  shutdown_phase_ = ShutdownPhase::kRunning;
+  control_channel_ = channel;
+  connection_retry_.Input(process_incarnation_);
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
   while (process_.Alive() && std::chrono::steady_clock::now() < deadline) {
-    auto connected = rpc_.Connect(channel);
-    if (connected) {
-      OpenPhase("browserLaunch", PhaseMs(started));
-      return {};
+    if (connection_retry_.Ready()) {
+      auto connected = rpc_.Connect(channel);
+      if (connected) {
+        connection_retry_.Success();
+        startup_error_.reset();
+        OpenPhase("browserLaunch", PhaseMs(started));
+        return {};
+      }
+      connection_retry_.Fail(connected.error());
     }
+    if (connection_retry_.Status() != RetryUnit::State::kWaiting)
+      return *connection_retry_.Failure();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
   if (!process_.Alive()) {
@@ -158,39 +195,44 @@ Result<void> BrowserRuntime::Start(const fs::path& executable,
 Result<void> BrowserRuntime::Stop() {
   RecordCrash();
   if (process_.Present())
-    clean_shutdown_ = false;
+    shutdown_phase_ = ShutdownPhase::kUnclean;
   incarnation_.clear();
   rpc_.Invalidate();
   return process_.Terminate();
 }
 Result<void> BrowserRuntime::Shutdown(const std::function<Result<void>()>& export_navigation) {
   shutdown_timing_ = Json::object();
-  if (!process_.Present()) {
-    if (!clean_shutdown_)
-      return Error{ErrorCode::kUnavailable, "unclean Browser shutdown"};
+  if (shutdown_phase_ == ShutdownPhase::kClean)
     return {};
-  }
+  if (!process_.Present())
+    return Error{ErrorCode::kUnavailable, "unclean Browser shutdown"};
   bool clean = false;
-  if (process_.Alive() && rpc_.Control()) {
+  if (shutdown_phase_ == ShutdownPhase::kRunning && process_.Alive() && rpc_.Control()) {
     auto start = PhaseClock::now();
     const auto exported = export_navigation();
     shutdown_timing_["navigationExport"] = PhaseMs(start);
+    if (!exported)
+      return exported.error();
     start = PhaseClock::now();
     const auto shutdown = rpc_.Request({{"method", "browser.shutdown"}}, 0, 1000);
     shutdown_timing_["shutdownRpc"] = PhaseMs(start);
-    start = PhaseClock::now();
-    clean = process_.WaitCleanExit(30000, &shutdown_timing_) && bool(exported) && bool(shutdown);
+    if (!shutdown && shutdown.error().code != ErrorCode::kOutcomeUnknown)
+      return shutdown.error();
+    shutdown_phase_ = ShutdownPhase::kDispatched;
+  }
+  if (shutdown_phase_ == ShutdownPhase::kDispatched) {
+    const auto start = PhaseClock::now();
+    clean = process_.WaitCleanExit(30000, &shutdown_timing_);
     shutdown_timing_["processExitWait"] = PhaseMs(start);
   }
   if (!clean) {
-    auto stopped = Stop();
-    if (!stopped)
-      return stopped.error();
-    return Error{ErrorCode::kUnavailable, "unclean Browser shutdown"};
+    return Error{shutdown_phase_ == ShutdownPhase::kDispatched ? ErrorCode::kOutcomeUnknown
+                                                               : ErrorCode::kUnavailable,
+                 "Browser shutdown has not completed"};
   }
   incarnation_.clear();
   rpc_.Invalidate();
-  clean_shutdown_ = true;
+  shutdown_phase_ = ShutdownPhase::kClean;
   return {};
 }
 void BrowserRuntime::RestoredView(const std::string& view) {

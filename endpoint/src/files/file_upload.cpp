@@ -135,7 +135,7 @@ Result<std::pair<std::uint64_t, std::uint64_t>> RetainedUsage(const std::filesys
 FileUploadStore::FileUploadStore(std::filesystem::path root)
     : FileUploadStore(std::move(root), Limits{}) {}
 FileUploadStore::FileUploadStore(std::filesystem::path root, Limits limits)
-    : root_(std::move(root)), limits_(limits) {}
+    : root_(std::move(root)), limits_(limits), remove_tree_(RemoveTree) {}
 Result<void> FileUploadStore::Initialize() {
   std::error_code absolute_error;
   root_ = std::filesystem::absolute(root_, absolute_error);
@@ -296,6 +296,8 @@ Result<FileUploadStore::Batch> FileUploadStore::Stage(const Binding& binding,
 }
 Result<void> FileUploadStore::MarkSubmitted(const std::string& id) {
   auto& batch = batches_.at(id);
+  if (batch.state != State::sealed && batch.state != State::submitted)
+    return Error{ErrorCode::kConflict, "upload is not sealed"};
   if (batch.state == State::sealed)
     batch.state = State::submitted;
 
@@ -305,7 +307,7 @@ Result<void> FileUploadStore::Erase(std::map<std::string, Batch>::iterator entry
   std::uint64_t bytes = 0;
   for (const auto& file : entry->second.files)
     bytes += file.size;
-  RK_RETURN_IF_ERROR(RemoveTree(root_ / entry->first));
+  RK_RETURN_IF_ERROR(remove_tree_(root_ / entry->first));
   reserved_bytes_ -= bytes;
   reserved_files_ -= entry->second.files.size();
   batches_.erase(entry);
@@ -320,16 +322,54 @@ Result<bool> FileUploadStore::Cancel(const std::string& id) {
     return true;
   if (found->second.state == State::submitted)
     return false;
-  RK_RETURN_IF_ERROR(Erase(found));
+  RK_RETURN_IF_ERROR(AbortSubmission(id));
   return true;
 }
+Result<void> FileUploadStore::AbortSubmission(const std::string& id) {
+  const std::string identity = id;
+  const auto found = batches_.find(identity);
+  if (found == batches_.end())
+    return {};
+  found->second.state = State::retiring;
+  auto& retry = cleanup_retries_.try_emplace(identity, "upload.cleanup").first->second;
+  retry.Input(identity + (confirmed_exits_.contains(found->second.binding.browser_incarnation)
+                              ? ":exited"
+                              : ":retiring"));
+  if (!retry.Ready())
+    return *retry.Failure();
+  auto erased = Erase(found);
+  if (!erased) {
+    retry.Fail(erased.error());
+    return erased.error();
+  }
+  retry.Success();
+  cleanup_retries_.erase(identity);
+  return {};
+}
+Result<void> FileUploadStore::Sweep() {
+  std::optional<Error> failure;
+  for (auto item = batches_.begin(); item != batches_.end();) {
+    const auto current = item++;
+    if (current->second.state != State::retiring)
+      continue;
+    auto erased = AbortSubmission(current->first);
+    if (!erased)
+      failure = erased.error();
+  }
+  return failure ? Result<void>{*failure} : Result<void>{};
+}
 Result<void> FileUploadStore::ConfirmBrowserStopped(const std::string& incarnation) {
+  confirmed_exits_.insert(incarnation);
+  std::optional<Error> failure;
   for (auto it = batches_.begin(); it != batches_.end();) {
     auto current = it++;
-    if (current->second.binding.browser_incarnation == incarnation)
-      RK_RETURN_IF_ERROR(Erase(current));
+    if (current->second.binding.browser_incarnation == incarnation) {
+      auto erased = AbortSubmission(current->first);
+      if (!erased)
+        failure = erased.error();
+    }
   }
 
-  return {};
+  return failure ? Result<void>{*failure} : Result<void>{};
 }
 }  // namespace remotekit

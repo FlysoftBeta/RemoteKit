@@ -2,6 +2,7 @@
 #include "util/wire_error.hpp"
 #include "media/gpu_device.hpp"
 #include "util/thread.hpp"
+#include "util/retry_unit.hpp"
 #include "rtc/authorization.hpp"
 namespace remotekit {
 using media::QpcFrequency;
@@ -34,15 +35,7 @@ void FaceController::CameraLoop() {
     return FacePending(epoch, challenge);
   };
   while (state == State::kRunning) {
-    {
-      if (auto message = raw_camera.Next(CameraNow(), pending)) {
-        if (sdk.remotekit_rtc_send_auth_data(message->peer, message->json.data(),
-                                             message->json.size(), 0) != 0)
-          raw_camera.Failed(*message);
-        else
-          raw_camera.Sent(*message, CameraNow());
-      }
-    }
+    DeliverCamera(pending, CameraNow());
     const bool active = raw_camera.Active();
     std::unique_lock lock(camera_mutex);
     const auto ready = [&] { return state != State::kRunning || camera_changed; };
@@ -51,6 +44,33 @@ void FaceController::CameraLoop() {
     else
       camera_wake.wait(lock, ready);
     camera_changed = false;
+  }
+}
+RetryUnit::Snapshot FaceController::CameraRetryStatus() const {
+  std::lock_guard lock(camera_retry_mutex_);
+  return camera_retry_;
+}
+void FaceController::DeliverCamera(const rk::auth::RawCamera::Pending& pending, int64_t now) {
+  std::lock_guard lock(camera_retry_mutex_);
+  if (delivery_ && !raw_camera.CurrentMessage(*delivery_, now, pending))
+    delivery_.reset();
+  if (!delivery_)
+    delivery_ = raw_camera.Next(now, pending);
+  if (!delivery_)
+    return;
+  const auto& message = *delivery_;
+  camera_retry_.Input(std::to_string(message.peer) + ":" + std::to_string(message.revision) + ":" +
+                      std::to_string(message.capture));
+  if (!camera_retry_.Ready())
+    return;
+  const auto status =
+      sdk.remotekit_rtc_send_auth_data(message.peer, message.json.data(), message.json.size(), 0);
+  if (status)
+    camera_retry_.Fail({SdkErrorCode(status), "camera data send failed"});
+  else {
+    camera_retry_.Success();
+    raw_camera.Sent(message, now);
+    delivery_.reset();
   }
 }
 

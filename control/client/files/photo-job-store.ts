@@ -1,3 +1,4 @@
+import { RetryUnit } from '../../shared/retry-unit';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type {
   Asset,
@@ -56,8 +57,6 @@ interface Task extends PhotoJob {
   rotationTimer?: ReturnType<typeof setTimeout>;
   resume?: () => Promise<void>;
   waiting?: () => Promise<void>;
-  recoveryTimer?: ReturnType<typeof setTimeout>;
-  attempts?: number;
 }
 
 export class PhotoJobStore extends Store<readonly PhotoJob[]> {
@@ -68,6 +67,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     this.emit();
   }
   private tasks = new Map<string, Task>();
+  private readonly retries = new Map<string, RetryUnit>();
   private chain = Promise.resolve();
   private available = false;
   private identity?: string;
@@ -82,7 +82,6 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     if (available)
       for (const task of this.tasks.values()) {
         if (task.state === 'error' && task.error && recoveryDelay(task.error, 0) !== undefined) {
-          clearTimeout(task.recoveryTimer);
           void this.execute(task, () =>
             task.resume ? this.commit(task) : task.process ? task.process() : this.upload(task),
           );
@@ -94,6 +93,8 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
       notices.resolve('task:photo:' + task.id);
       this.disposeTask(task);
     });
+    for (const unit of this.retries.values()) unit.cancel();
+    this.retries.clear();
     this.tasks.clear();
     this.chain = Promise.resolve();
     this.available = false;
@@ -115,18 +116,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     }
     this.publish(
       [...this.tasks.values()].map(
-        ({
-          controller,
-          burst,
-          process,
-          rotationTimer,
-          recoveryTimer,
-          attempts,
-          resume,
-          waiting,
-          uploads,
-          ...job
-        }) => ({
+        ({ controller, burst, process, rotationTimer, resume, waiting, uploads, ...job }) => ({
           ...job,
           origin: { ...job.origin },
           insertion: job.insertion && { ...job.insertion },
@@ -137,8 +127,9 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
   }
   private disposeTask(task: Task) {
     notices.resolve('task:photo:' + task.id);
+    this.retries.get(task.id)?.cancel();
+    this.retries.delete(task.id);
     clearTimeout(task.rotationTimer);
-    clearTimeout(task.recoveryTimer);
     task.process = undefined;
     task.burst = undefined;
     task.resume = undefined;
@@ -307,22 +298,31 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
 
   private async execute(task: Task, action: () => Promise<void>) {
     if (!this.valid(task)) return;
+    let unit = this.retries.get(task.id);
+    if (!unit) {
+      unit = new RetryUnit();
+      this.retries.set(task.id, unit);
+    }
+    if (!unit.ready(JSON.stringify([task.id, task.mode, task.rotationTurns]))) {
+      unit.schedule(() => {
+        if (this.valid(task)) void this.execute(task, action);
+      });
+      return;
+    }
     try {
       await action();
+      unit.succeed();
     } catch (failure) {
       if (!this.valid(task)) return;
       const error = toRemoteKitError(failure);
       this.update(task.id, { state: 'error', error });
-      const delay = recoveryDelay(error, task.attempts ?? 0);
-      if (delay !== undefined) {
-        task.attempts = (task.attempts ?? 0) + 1;
-        task.recoveryTimer = setTimeout(() => {
-          if (this.valid(task))
-            void this.execute(task, () =>
-              task.resume ? this.commit(task) : task.process ? task.process() : this.upload(task),
-            );
-        }, delay);
-      }
+      unit.fail(error);
+      unit.schedule(() => {
+        if (this.valid(task))
+          void this.execute(task, () =>
+            task.resume ? this.commit(task) : task.process ? task.process() : this.upload(task),
+          );
+      });
     }
   }
 
@@ -481,8 +481,10 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     const target = existing?.replace ?? entry;
     const rotationTurns = ((existing?.rotationTurns ?? 0) + 1) % 4;
     if (existing) {
+      const retry = this.retries.get(existing.id);
       this.disposeTask(existing);
       this.tasks.delete(existing.id);
+      if (retry) this.retries.set(existing.id, retry);
     }
     if (!rotationTurns) {
       this.emit();

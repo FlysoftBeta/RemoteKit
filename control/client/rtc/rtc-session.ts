@@ -8,7 +8,8 @@ import {
 } from '../media/receive-profile';
 import { type Diagnostics } from '../media/types';
 
-import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { errorHandling } from '../../shared/error-policy';
+import { RetryUnit } from '../../shared/retry-unit';
 import { RemoteKitError, parseWireError, toRemoteKitError } from '../../shared/errors';
 import { diagnostics } from '../media/diagnostics';
 import { Events } from '../util/store';
@@ -125,13 +126,14 @@ export class RtcSession {
   }
 
   private rtcRequest<T>(
-    method: 'rtc.offer' | 'rtc.ice' | 'rtc.close' | 'clock.ping' | 'feedback',
+    method: 'rtc.offer' | 'rtc.offerStatus' | 'rtc.ice' | 'rtc.close' | 'clock.ping' | 'feedback',
     params: unknown,
   ): Promise<T> {
     if (this.controlRpc)
       return this.controlRpc(
         this.role === 'service' && method.startsWith('rtc.')
-          ? (method.replace('rtc.', 'service.') as 'service.offer' | 'service.ice' | 'service.close')
+          ? (method.replace('rtc.', 'service.') as
+              'service.offer' | 'service.offerStatus' | 'service.ice' | 'service.close')
           : method,
         params,
       ) as Promise<T>;
@@ -158,42 +160,36 @@ export class RtcSession {
 
   private endpointGeneration: number | undefined;
 
-  private retryTimer: ReturnType<typeof setTimeout> | undefined;
-
   async connect() {
-    clearTimeout(this.retryTimer);
-    this.retryTimer = undefined;
-    this.retryCount = 0;
+    this.retryUnit.ready(String(++this.retryInput));
     await this.establish();
   }
 
   restart(reason: string) {
-    clearTimeout(this.retryTimer);
-    this.retryTimer = undefined;
+    this.retryUnit.ready(String(++this.retryInput));
     diagnostics.record('rtc-restart', reason);
     void this.establish();
   }
 
-  private retryCount = 0;
+  private readonly retryUnit = new RetryUnit({
+    failed: (error) => diagnostics.record('rtc_failed', error),
+    recovered: () => diagnostics.record('rtc_recovered', {}),
+  });
+  private retryInput = 0;
+  private offerAbort?: AbortController;
 
   private scheduleReconnect(error: RemoteKitError, attemptId: string) {
     if (this.state.phase === 'stopped' || this.state.phase === 'retryWait') return;
-    const handling = errorHandling(error.code);
-    if (retryDelay(error, this.retryCount) === undefined && handling !== 'reconcile') {
+    const { delay } = this.retryUnit.fail(error);
+    if (delay === undefined) {
       this.transition({ phase: 'exhausted', error });
       this.observe({ connection: '连接失败', error: error.message });
       return;
     }
-    const delay = Math.min(
-      60_000,
-      retryDelay(error, this.retryCount) ?? 1000 * 2 ** Math.min(this.retryCount, 6),
-    );
-    this.retryCount++;
     this.transition({ phase: 'retryWait', attemptId, dueAt: Date.now() + delay });
-    this.retryTimer = setTimeout(() => {
-      this.retryTimer = undefined;
+    this.retryUnit.schedule(() => {
       if (this.state.phase === 'retryWait') void this.establish();
-    }, delay);
+    });
   }
 
   connectionFailed(error: unknown) {
@@ -245,6 +241,7 @@ export class RtcSession {
   private async establish() {
     this.closeLocal();
     this.signaling = undefined;
+    this.offerAbort = new AbortController();
     const attempt = ++this.attemptNumber;
     this.signalAttemptId = `${this.role}-${Date.now()}-${attempt}`;
     this.transition({ phase: 'establishing', attemptId: this.signalAttemptId });
@@ -298,9 +295,7 @@ export class RtcSession {
         if (this.peer !== peer) return;
         if (peer.connectionState === 'connected') {
           this.markConnection('connected');
-          clearTimeout(this.retryTimer);
-          this.retryTimer = undefined;
-          this.retryCount = 0;
+          this.retryUnit.succeed();
           this.transition({ phase: 'connected', attemptId: this.signalAttemptId! });
         }
         if (
@@ -372,14 +367,14 @@ export class RtcSession {
         changes: effectiveOffer.changes,
       };
       this.markConnection('offerSent');
-      const answer = await this.rtcRequest<
+      const answer = await this.submitOffer<
         RTCSessionDescriptionInit & {
           connectionId: string;
           avSync: boolean;
           endpointGeneration?: number;
           signalingMode?: string;
         }
-      >('rtc.offer', {
+      >({
         type: 'offer',
         sdp: peer.localDescription?.sdp,
         attemptId: this.signalAttemptId,
@@ -421,14 +416,46 @@ export class RtcSession {
     }
   }
 
+  private async submitOffer<T>(params: { type: string; sdp?: string; attemptId?: string }): Promise<T> {
+    const signal = this.offerAbort!.signal;
+    const unit = new RetryUnit();
+    let query = false;
+    for (;;) {
+      if (signal.aborted) throw new RemoteKitError('canceled', '');
+      try {
+        if (query) {
+          const status = await this.rtcRequest<{ state: string; answer?: T }>('rtc.offerStatus', {
+            attemptId: params.attemptId,
+          });
+          if (status.state === 'ready' && status.answer) {
+            unit.succeed();
+            return status.answer;
+          }
+          if (status.state === 'retired') throw new RemoteKitError('conflict', '媒体尝试已结束');
+          throw new RemoteKitError('outcome_unknown', '正在确认媒体连接');
+        }
+        const answer = await this.rtcRequest<T>('rtc.offer', params);
+        unit.succeed();
+        return answer;
+      } catch (cause) {
+        const error = toRemoteKitError(cause);
+        if (!query && error.code !== 'outcome_unknown') throw error;
+        const failure = unit.fail(error);
+        if (failure.delay === undefined || error.code === 'conflict') throw error;
+        if (error.code === 'outcome_unknown') query = true;
+        await unit.wait(signal);
+      }
+    }
+  }
+
   disconnect() {
-    clearTimeout(this.retryTimer);
-    this.retryTimer = undefined;
+    this.retryUnit.cancel();
     this.transition({ phase: 'stopped' });
     this.closeLocal();
   }
 
   private closeLocal() {
+    this.offerAbort?.abort();
     this.events.emit({ type: 'closed' });
     this.confirmedAvSync = undefined;
     const connectionId = this.connectionId ?? this.remoteSignalConnection;

@@ -63,7 +63,7 @@ void CheckSelectionCancellationGrant() {
         current_after_revoke = services.Current(job);
         return ServiceJson{{"state", "cancelled"}};
       },
-      [] {});
+      []() -> Result<void> { return {}; });
   services.Bind(7, "connection");
   const FileUploadStore::Binding binding{"browser", "1", "1", "1", "1"};
   services.Authorize("connection", 99, {{"opaque", binding}}, false);
@@ -186,7 +186,7 @@ void CheckDocumentErrorReplies() {
       [&](const DcFileServices::Job&) -> Result<ServiceJson> {
         return Error{ErrorCode::kRejected, "Native conversion diagnosis", reasons.at(count++)};
       },
-      [] {});
+      []() -> Result<void> { return {}; });
   services.Bind(7, "connection");
   services.Authorize("connection", 99, {}, true);
   for (size_t i = 0; i < reasons.size(); ++i) {
@@ -215,7 +215,7 @@ void CheckValidationErrorReply() {
       [](const DcFileServices::Job&) -> Result<ServiceJson> {
         throw InvalidRequest("invalid_file_integer");
       },
-      [] {});
+      []() -> Result<void> { return {}; });
   services.Bind(7, "connection");
   Take(services.Authorize("connection", 99, {}, true));
   auto request = Request("00000000-0000-4000-8000-000000000001", "asset.read");
@@ -234,7 +234,67 @@ void CheckValidationErrorReply() {
   services.Stop();
 }
 
+void MaintenanceFailureIsolation() {
+  DcFileServices services;
+  std::atomic<unsigned> sweeps = 0, calls = 0;
+  services.Start(
+      [&](const auto&) -> Result<ServiceJson> {
+        ++calls;
+        return ServiceJson{{"accepted", true}};
+      },
+      [&]() -> Result<void> {
+        if (++sweeps == 1)
+          throw std::filesystem::filesystem_error("injected sweep failure",
+                                                  std::make_error_code(std::errc::io_error));
+        return {};
+      });
+  services.Bind(7, "connection");
+  Take(services.Authorize("connection", 99, {{"opaque", {"browser", "1", "1", "1", "1"}}}));
+  services.Admit(7, Request("maintenance-survivor"));
+  ServiceJson reply;
+  Until([&] {
+    services.Flush(7, [&](const auto& bytes) {
+      reply = ServiceJson::parse(bytes);
+      return 0;
+    });
+    return !reply.is_null();
+  });
+  CHECK(reply.at("ok") == true && calls == 1);
+  services.Stop();
+}
+void TransientReceiptAdmission() {
+  DcFileServices services;
+  std::atomic<unsigned> calls = 0;
+  services.Start(
+      [&](const auto&) -> Result<ServiceJson> {
+        if (++calls == 1)
+          return Error{ErrorCode::kBusy, "not admitted", {}, 0};
+        return ServiceJson{{"accepted", true}};
+      },
+      []() -> Result<void> { return {}; });
+  services.Bind(7, "connection");
+  Take(services.Authorize("connection", 99, {{"opaque", {"browser", "1", "1", "1", "1"}}}));
+  const auto request = Request("transient-admission");
+  ServiceJson reply;
+  const auto drain = [&] {
+    services.Flush(7, [&](const auto& bytes) {
+      reply = ServiceJson::parse(bytes);
+      return 0;
+    });
+    return !reply.is_null();
+  };
+  services.Admit(7, request);
+  Until(drain);
+  CHECK(reply.at("error").at("code") == "busy");
+  reply = nullptr;
+  services.Admit(7, request);
+  Until(drain);
+  CHECK(reply.at("ok") == true && calls == 2);
+  services.Stop();
+}
 int main() {
+  MaintenanceFailureIsolation();
+  TransientReceiptAdmission();
   CheckValidationErrorReply();
   CheckDocumentErrorReplies();
   CheckSelectionCancellationGrant();
@@ -285,15 +345,18 @@ int main() {
         CHECK(job.control == 99);
         return ServiceJson{{"state", "selected"}};
       },
-      [&] { ++sweeps; });
+      [&]() -> Result<void> {
+        ++sweeps;
+        return {};
+      });
   services.Bind(7, "connection");
   FileUploadStore::Binding binding{"browser", "1", "1", "1", "1"};
   services.Authorize("connection", 99, {{"opaque", binding}});
   std::vector<ServiceJson> replies;
   auto flush = [&](bool busy = false) {
-    services.Flush(7, [&](const std::string& text) {
+    services.Flush(7, [&](const std::string& text) -> int {
       if (busy)
-        return 1;
+        return REMOTEKIT_SDK_BUSY;
       replies.push_back(ServiceJson::parse(text));
       return 0;
     });
@@ -370,7 +433,7 @@ int main() {
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return ServiceJson{{"sequence", n}, {"current", library.Current(job)}};
       },
-      [] {});
+      []() -> Result<void> { return {}; });
   library.Bind(9, "library-peer");
   auto asset = Request("00000000-0000-4000-8000-000000000003", "photo.burst.sample");
   asset["params"]["requestId"] = "library";

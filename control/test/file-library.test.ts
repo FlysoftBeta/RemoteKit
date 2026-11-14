@@ -131,6 +131,10 @@ function fixture(assetType = 'image/jpeg') {
     });
   return {
     db,
+    endpoint,
+    get manager() {
+      return manager;
+    },
     calls,
     states,
     untypedAssets,
@@ -874,4 +878,91 @@ test('excluded request sources permit temporary basket imports and reject direct
   f.states.set(selection.selectionId, 'selected');
   const { snapshot } = await f.run<Finish>('finish', selection);
   assert.deepEqual(snapshot.entries, []);
+});
+
+for (const step of ['intent', 'prepare', 'prepared'] as const) {
+  test(`selection failure at ${step} preserves a defined state`, async (t) => {
+    const f = fixture();
+    t.after(() => f.db.close());
+    const snapshot = await f.add(ASSETS.photo);
+    const entryId = snapshot.basket[0];
+    if (step === 'intent')
+      f.db.exec(
+        "CREATE TRIGGER selection_fault BEFORE INSERT ON file_library_selections BEGIN SELECT RAISE(ABORT,'intent fault'); END",
+      );
+    if (step === 'prepared')
+      f.db.exec(
+        "CREATE TRIGGER selection_fault BEFORE UPDATE OF manifest ON file_library_selections BEGIN SELECT RAISE(ABORT,'prepared fault'); END",
+      );
+    const original = f.endpoint.request;
+    f.endpoint.request = async (method, tenant, args) => {
+      if (step === 'prepare' && method === 'session.library.prepare')
+        throw new RemoteKitError('rejected', 'injected');
+      return original(method, tenant, args);
+    };
+    await assert.rejects(
+      f.run('prepare', { operationId: 'failure', requestId: 'chooser', entryIds: [entryId] }),
+    );
+    const rows = f.db.prepare('SELECT terminal,manifest FROM file_library_selections').all() as {
+      terminal: string | null;
+      manifest: string;
+    }[];
+    if (step === 'intent') {
+      assert.equal(rows.length, 0);
+      assert.equal(f.calls.filter((call) => call.method === 'session.library.prepare').length, 0);
+    } else {
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].terminal, step === 'prepare' ? 'cancelled' : null);
+      assert.equal(JSON.parse(rows[0].manifest).prepared, false);
+      assert.equal(new LibraryRepository(f.db).pendingEntries('tenant').has(entryId), step !== 'prepare');
+    }
+  });
+}
+
+test('selection query errors retain their code and batches settle successful items', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const snapshot = await f.add(ASSETS.photo);
+  const first = await f.run<{ selectionId: string }>('prepare', {
+    operationId: 'first-select',
+    requestId: 'chooser',
+    entryIds: snapshot.basket,
+  });
+  const second = await f.run<{ selectionId: string }>('prepare', {
+    operationId: 'second-select',
+    requestId: 'chooser',
+    entryIds: snapshot.basket,
+  });
+  const original = f.endpoint.request;
+  f.endpoint.request = async (method, tenant, args) => {
+    if (method === 'session.library.selectionStatus') {
+      if (args.selectionId === first.selectionId) return { state: 'selected' };
+      throw new RemoteKitError('internal', 'query failed', { errorId: 'e-0123456789' });
+    }
+    return original(method, tenant, args);
+  };
+  await assert.rejects(f.run('get'), { code: 'internal', errorId: 'e-0123456789' });
+  const repository = new LibraryRepository(f.db);
+  assert.equal(repository.selection('tenant', first.selectionId).terminal, 'selected');
+  assert.equal(repository.selection('tenant', second.selectionId).terminal, null);
+  assert(repository.pendingEntries('tenant').has(snapshot.basket[0]));
+});
+
+test('availability timer contains corrupt-record failure in its tenant job', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  const f = fixture();
+  t.after(async () => {
+    await f.manager.close();
+    f.db.close();
+  });
+  await f.add(ASSETS.photo);
+  f.db.prepare("UPDATE library_entries SET data='invalid-json'").run();
+  f.manager.objectsChanged([ASSETS.photo]);
+  t.mock.timers.tick(250);
+  await new Promise((resolve) => setImmediate(resolve));
+  const jobs = (
+    f.manager as unknown as { availabilityJobs: Map<string, import('../server/background').BackgroundJob> }
+  ).availabilityJobs;
+  assert.equal(jobs.get('tenant')?.retry.state.phase, 'faulted');
+  assert.equal(jobs.get('tenant')?.retry.error?.code, 'internal');
 });

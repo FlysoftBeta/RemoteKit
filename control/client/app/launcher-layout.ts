@@ -198,7 +198,7 @@ export function originColor(url: string) {
   try {
     origin = new URL(url).origin;
   } catch {
-    /* An app without a URL uses its stable key. */
+    origin = url;
   }
   let hash = 0;
   for (const character of origin) hash = (Math.imul(hash, 31) + character.charCodeAt(0)) | 0;

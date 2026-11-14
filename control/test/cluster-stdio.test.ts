@@ -60,7 +60,7 @@ test('a swapped local bootstrap rejection belongs to the receiving stdio node', 
 
 for (const code of [1, 0, null, 99, 3, 4]) {
   test(`local Endpoint exit ${code} follows the restart policy`, (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
     const children: EventEmitter[] = [];
     t.mock.method(childProcess, 'spawn', () => {
       const child = Object.assign(new EventEmitter(), {
@@ -97,19 +97,15 @@ for (const code of [1, 0, null, 99, 3, 4]) {
       assert.equal(children.length, 1);
       return;
     }
-    if (code !== 4) {
-      t.mock.timers.tick(1499);
-      assert.equal(children.length, 1);
-    }
-    t.mock.timers.tick(code === 4 ? 0 : 1);
+    t.mock.timers.tick(999);
+    assert.equal(children.length, 1);
+    t.mock.timers.tick(1);
     assert.equal(children.length, 2);
     children[1].emit('exit', code);
-    t.mock.timers.tick(code === 4 ? 0 : 2999);
-    assert.equal(children.length, code === 4 ? 3 : 2);
-    if (code !== 4) {
-      t.mock.timers.tick(1);
-      assert.equal(children.length, 3);
-    }
+    t.mock.timers.tick(1999);
+    assert.equal(children.length, 2);
+    t.mock.timers.tick(1);
+    assert.equal(children.length, 3);
     registry.stop();
     t.mock.timers.tick(60_000);
     assert.equal(children.length, 3);
@@ -140,7 +136,7 @@ for (const outcome of ['success', 'failure', 'stopped', 'dev'] as const) {
       await rm(directory, { recursive: true, force: true });
     });
     const errors: unknown[][] = [];
-    t.mock.method(log, 'error', (...args: unknown[]) => {
+    t.mock.method(log, 'warn', (...args: unknown[]) => {
       errors.push(args);
     });
     const registry = new NodeRegistry({
@@ -179,7 +175,7 @@ for (const outcome of ['success', 'failure', 'stopped', 'dev'] as const) {
       assert.equal(calls.length, 1);
       if (outcome === 'failure') {
         assert.equal(registry.get('local')!.state.state, 'offline');
-        assert.equal(errors[0][0], 'node.install_failed');
+        assert.equal(errors[0][0], 'node.launch_failed');
         assert.equal((errors[0][1] as { nodeId: string }).nodeId, 'local');
       }
     }

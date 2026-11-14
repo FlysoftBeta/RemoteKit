@@ -15,9 +15,9 @@
 | Endpoint（CMake/Ninja） | `tools\build-endpoint.cmd`（构建 + CTest）；`build-only`；`package`（Release `endpoint_service`）；`fresh` | `build/endpoint`、`build/endpoint-package` |
 | Control（npm） | `npm ci`；`npm test`；`npm run build` | `control/dist` |
 
-三者可以并行构建；同一个 Chromium out 目录不要并发构建。Endpoint 不包含 Chromium 私有头，只依赖导出的 SDK；Endpoint 的依赖（nlohmann/json、oneVPL、NVENC 头、zstd 1.5.7 源码）由 `tools/fetch-media-deps.py` 按固定版本与 hash 获取；Endpoint 链接完整 zstd，updater 只链接解压部分，人脸与图像依赖（静态 OpenCV、静态 libwebp 1.5.0、YuNet/SFace/MiniFASNet 与文档方向模型 PP-LCNet_x1_0_doc_ori 及许可证）由 `tools/setup-face-auth.py` 按 `tools/face-auth-deps.json` 准备，必要时从官方权重转换 ONNX；模型运行时位于 `endpoint_service.exe` 旁的 `models/`。文档渲染依赖（裁剪后的 LibreOffice 与 pdfrender）由 `tools/fetch-document-deps.py` 准备到 `build/dependencies/documents/`，构建后复制到 `endpoint_service.exe` 旁的 `documents/`，并打进 Endpoint 运行时包（见[文件与相机 · 文档预览](files-and-camera.md#文档预览)）；pdfrender 的固定值指向一个 GitHub Actions 产物，过期前需要刷新。
+三者可以并行构建；同一个 Chromium out 目录不要并发构建。Endpoint 不包含 Chromium 私有头，只依赖导出的 SDK；Endpoint 的依赖（nlohmann/json、oneVPL、NVENC 头、zstd 1.5.7 源码）由 `tools/fetch-media-deps.py` 按固定版本与 hash 获取；Endpoint 链接完整 zstd，updater 只链接解压部分，人脸与图像依赖（静态 OpenCV、静态 libwebp 1.5.0、YuNet/SFace/MiniFASNet 与文档方向模型 PP-LCNet_x1_0_doc_ori 及许可证）由 `tools/setup-face-auth.py` 按 `tools/face-auth-deps.json` 准备，必要时从官方权重转换 ONNX；模型运行时位于 `endpoint_service.exe` 旁的 `models/`。文档渲染依赖（裁剪后的 LibreOffice 与 pdfrender）由 `tools/fetch-document-deps.py` 准备到 `build/dependencies/documents/`（三个依赖脚本共用 `tools/fetch_common.py`：流式 SHA-256、写临时文件、校验后替换；压缩包解压到暂存目录，验证后再改名为最终目录），构建后复制到 `endpoint_service.exe` 旁的 `documents/`，并打进 Endpoint 运行时包（见[文件与相机 · 文档预览](files-and-camera.md#文档预览)）；pdfrender 的固定值指向一个 GitHub Actions 产物，过期前需要刷新。
 
-**Chromium 叠加层**：`browser/` 不是 Chromium tracked 源码，由 `tools/chromium.py stage` 复制到 Chromium 树中（只更新变化文件的 mtime，带 hash 保护地清理已删除的文件）。**补丁**：对 Chromium tracked 源码的修改只能放在 `patches/` 的有序补丁里，由 `tools/patchset.py --chromium-root C:/src/chromium/src status|apply|revert` 管理；`patches/manifest.json` 记录顺序与每个补丁的 SHA-256。修改补丁后更新 hash，并验证可以完整撤回与重放。不要 reset 或 clean Chromium checkout（其中还有无关的分支与暂存）。
+**Chromium 叠加层**：`browser/` 不是 Chromium tracked 源码，由 `tools/chromium.py stage` 复制到 Chromium 树中（只更新变化文件的 mtime，带 hash 保护地清理已删除的文件）。**补丁**：对 Chromium tracked 源码的修改只能放在 `patches/` 的有序补丁里，由 `tools/patchset.py --chromium-root C:/src/chromium/src status|apply|revert` 管理；`patches/manifest.json` 记录顺序与每个补丁的 SHA-256；status/apply/revert 动手前核对 Chromium HEAD 等于清单的 `base_revision`，不符即退出，清单与每个补丁条目的字段集合固定，多余字段拒绝。修改补丁后更新 hash，并验证可以完整撤回与重放。不要 reset 或 clean Chromium checkout（其中还有无关的分支与暂存）。
 
 | 补丁 | 作用 |
 |---|---|
@@ -32,7 +32,7 @@
 | 0020 pointer-refocus-observation | 点按已聚焦元素时再次报告 pointer focus，脚本来源保持独立 |
 | 0021 occlusion-plane | 稳定 Viz target 与页面高度分离，每帧清理键盘下方空带 |
 
-**SDK 导出**：`tools/export-sdk.py --out C:/src/chromium/src/out/dev --destination sdk/dist/dev` 导出公共头、import lib、DLL 以及 GN 生成的 `remotekit_sdk.runtime_deps` 中的全部文件（component 构建需要整套依赖 DLL），并写 manifest（Chromium HEAD、args.gn hash、PE 架构、编译器、ABI 版本）。`tools\verify-sdk.cmd` 用独立的 CMake 消费者（`sdk/`）构建并运行 SDK smoke。Browser、SDK、Endpoint 的 ABI 与映射版本必须一起更新。
+**SDK 导出**：`tools/export-sdk.py --out C:/src/chromium/src/out/dev --destination sdk/dist/dev` 导出公共头、import lib、DLL 以及 GN 生成的 `remotekit_sdk.runtime_deps` 中的全部文件（component 构建需要整套依赖 DLL），并写 manifest（Chromium HEAD、args.gn hash、PE 架构、编译器、ABI 版本）。导出先在目的地旁的暂存目录生成完整 SDK，成功后整目录替换，目的地不残留上一版的文件。`tools\verify-sdk.cmd` 用独立的 CMake 消费者（`sdk/`）构建并运行 SDK smoke。Browser、SDK、Endpoint 的 ABI 与映射版本必须一起更新。
 
 ## Chromium 配置
 
@@ -96,7 +96,7 @@ C:\src\depot_tools\python3.bat tools/release.py --publish
 
 ### 版本树与 payload
 
-`tools/package-runtime.py`（默认 `--out rel`）在 `develop/tmp/<时间戳>/` 输出一个版本树和它的 payload。它先检查产物是否新鲜，任一项不满足就拒绝打包并指出是哪个组件：`tools/chromium.py stage --check` 有待同步的源码；Chromium out 目录对 `remotekit_browser remotekit_sdk` 还有待执行的构建（ninja 干跑）；Endpoint 打包构建目录还有待执行的构建；`control/dist` 比 `control/server`、`client`、`shared` 下最新的源文件旧。
+`tools/package-runtime.py`（默认 `--out rel`）在 `develop/tmp/<时间戳>/` 输出一个版本树和它的 payload。它先检查产物是否新鲜，任一项不满足就拒绝打包并指出是哪个组件：`tools/chromium.py stage --check` 有待同步的源码；Chromium out 目录对 `remotekit_browser remotekit_sdk` 还有待执行的构建（ninja 干跑）；Endpoint 打包构建目录还有待执行的构建；`control/dist` 比 `control/server`、`client`、`shared` 下最新的源文件，或 `control/index.html`、`vite.config.ts`、`package.json`、`package-lock.json`、`tools/build-control-server.mjs` 旧。
 
 ```
 build.json                 {buildId}
@@ -179,7 +179,7 @@ C:\RemoteKit\remotekit_control.exe install "--root=C:\RemoteKit" "--payload=D:\p
 
 `config/manager.json` 是 `{"manifest", "checkIntervalMinutes"?, "proxy"?}`：检查间隔默认 60 分钟（5–1440）；不设 `proxy` 时用系统自动代理。管理器启动时立即检查一次，之后按间隔检查；重启管理器（或服务）即强制检查。
 
-**规划**：取最新 manifest；与当前 buildId 相同则无事。否则沿 `patch.manifest` 回溯，累计 patch 大小：遇到 `from` 等于当前版本且本地 `payload.tar` 可用，得到"全 patch"方案；途中每个带 full 的 manifest 给出"full + 其后 patch"方案；累计已超过最便宜方案、链断（manifest 404、解密或校验失败、buildId 不连贯、重复）、回溯 64 级时停止。取下载量最小的方案；都没有则等下一次检查。一次查询暂时失败（`unavailable`、`rate_limited`、`busy`）按[错误模型](architecture.md#错误模型)退避，不当作链断。
+**规划**：取最新 manifest；与当前 buildId 相同则无事。否则沿 `patch.manifest` 回溯，累计 patch 大小：遇到 `from` 等于当前版本且本地 `payload.tar` 可用，得到"全 patch"方案；途中每个带 full 的 manifest 给出"full + 其后 patch"方案；累计已超过最便宜方案、链断（manifest 404、解密或校验失败、buildId 不连贯、重复）、回溯 64 级时停止。取下载量最小的方案；都没有则等下一次检查。一次查询暂时失败（`unavailable`、`rate_limited`、`busy`）按[错误模型](errors.md)退避，不当作链断。
 
 **执行**：逐片顺序下载到 `work/assets/<salt>/`，断点用 HTTP Range 续传（206 追加，200 从头）；边解密边解码。full 流式解压；patch 把基准 payload 和预先定长的输出文件都内存映射，`ZSTD_d_stableOutBuffer` 让解码器直接用输出作窗口，不分配与 payload 等大的缓冲。每一步的结果按该 manifest 的 `payload.size/sha256` 校验。片 404 或认证失败时删除该片、排除该资产并立即重新规划（通常改用 full）；基准 payload 校验不过时放弃增量重新规划。
 

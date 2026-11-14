@@ -13,6 +13,7 @@ import { ZhixueAuthClient } from './providers/changyan/zhixue-auth';
 import type { XinjiaoyuSession } from './providers/xinjiaoyu/client';
 import type { ProviderResult } from './providers/models';
 import { learningError } from './errors';
+import { RetryUnit } from '../../shared/retry-unit';
 
 export interface Sessions {
   changyan: AccountSession;
@@ -74,7 +75,7 @@ export class LearningAccounts {
   }
   session<P extends LearningProvider>(tenant: string, provider: P): Sessions[P] {
     const row = this.row(tenant, provider);
-    if (!row || row.status !== 'signed_in') throw new RemoteKitError('forbidden', '请先登录学习账号');
+    if (!row || row.status !== 'signed_in') throw new RemoteKitError('unauthenticated', '请先登录学习账号');
     return openLearningSession(this.key, tenant, provider, row.sealed);
   }
   save<P extends LearningProvider>(
@@ -107,11 +108,13 @@ export class LearningAccounts {
     read: (session: Sessions[P]) => Promise<ProviderResult<T, Sessions[P]>>,
   ): Promise<T> {
     const generation = this.generation(tenant, provider);
+    const retry = new RetryUnit({ name: 'learning.account_read' });
+    retry.ready('original');
     return this.queues.run(this.identity(tenant, provider), async () => {
       let session = this.session(tenant, provider);
       const current = () => {
         if (this.generation(tenant, provider) !== generation)
-          throw new RemoteKitError('forbidden', '学习账号已退出');
+          throw new RemoteKitError('unauthenticated', '学习账号已退出');
       };
       try {
         let result: ProviderResult<T, Sessions[P]>;
@@ -119,24 +122,32 @@ export class LearningAccounts {
           session = (await this.auth.ensureFresh(session as AccountSession)) as Sessions[P];
           session = (await this.zhixueAuth.ensureFresh(session as AccountSession)) as Sessions[P];
         }
-        try {
-          result = await read(session);
-        } catch (error) {
-          if (
-            !(error instanceof RemoteKitError) ||
-            error.code !== 'unauthenticated' ||
-            provider !== 'changyan'
-          )
-            throw error;
-          session = (await this.zhixueAuth.renew(
-            await this.auth.renew(session as AccountSession),
-          )) as Sessions[P];
-          result = await read(session);
+        let renewed = false;
+        for (;;) {
+          current();
+          try {
+            result = await read(session);
+            break;
+          } catch (error) {
+            const failure = retry.fail(error);
+            if (failure.error.code === 'unauthenticated' && provider === 'changyan' && !renewed) {
+              session = (await this.zhixueAuth.renew(
+                await this.auth.renew(session as AccountSession),
+              )) as Sessions[P];
+              renewed = true;
+              retry.ready('renewed');
+              continue;
+            }
+            if (failure.delay === undefined) throw failure.error;
+            await retry.wait();
+          }
         }
         current();
         this.save(tenant, provider, result.session);
+        retry.succeed();
         return result.data;
       } catch (error) {
+        if (retry.error !== error) retry.fail(error);
         current();
         if (error instanceof RemoteKitError && error.code === 'unauthenticated') {
           this.delete(tenant, provider);
@@ -146,11 +157,14 @@ export class LearningAccounts {
     });
   }
   delete(tenant: string, provider: LearningProvider) {
-    const key = this.identity(tenant, provider);
-    this.generations.set(key, this.generation(tenant, provider) + 1);
     this.store.db
       .prepare('DELETE FROM learning_accounts WHERE tenant=? AND provider=?')
       .run(tenant, provider);
+    this.forgetCached(tenant, provider);
+  }
+  forgetCached(tenant: string, provider: LearningProvider) {
+    const key = this.identity(tenant, provider);
+    this.generations.set(key, this.generation(tenant, provider) + 1);
     this.setState(tenant, provider);
   }
   signedInTenants(): string[] {

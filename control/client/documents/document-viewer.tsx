@@ -1,6 +1,6 @@
 import { useAutoFocus } from '../editing/local-autofocus';
 import { FailureNote, SurfaceState, failureError } from '../failures';
-import { recover } from '../failures/recovery';
+import { recoverRead as recover } from '../failures/recovery';
 // Page layout and controls adapted from FlysoftBeta/talos-ng packages/client/src/features/reader/view/viewer.tsx.
 import { ZoomInOutlined, ZoomOutOutlined } from '@mui/icons-material';
 import { Button, IconButton, LinearProgress, Skeleton, Tooltip } from '@mui/material';

@@ -73,7 +73,9 @@ function readRows(db: Sqlite.Database, table: string, warnings: string[]): Row[]
   for (const sql of [`SELECT max(rowid) AS n FROM ${table}`, `SELECT count(*) AS n FROM ${table}`])
     try {
       last = Math.max(last, Number((db.prepare(sql).get() as { n: unknown }).n ?? 0));
-    } catch {}
+    } catch (error) {
+      warnings.push(`${table}: 无法读取行数（${(error as Error).message}）`);
+    }
   const one = db.prepare(`SELECT rowid AS _rowid, * FROM ${table} WHERE rowid=?`);
   const rows: Row[] = [];
   let failed = 0;
@@ -98,7 +100,9 @@ function authSettings(value: unknown, faceKept: boolean): AuthSettings {
       'user_security.settings recovery',
     );
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) stored = parsed;
-  } catch {}
+  } catch {
+    return { ...defaults, faceEnabled: false };
+  }
   const settings = { ...defaults } as Record<keyof AuthSettings, unknown>;
   for (const key of Object.keys(defaults) as (keyof AuthSettings)[])
     if (typeof stored[key] === typeof defaults[key]) settings[key] = stored[key];

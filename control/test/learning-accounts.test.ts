@@ -86,10 +86,10 @@ test('failed renewal expires the account and pushes only public account state', 
       f.accounts.use('tenant', 'changyan', async () => {
         throw new RemoteKitError('unauthenticated', '登录已过期');
       }),
-      { code: 'forbidden', message: '学习账号登录已失效，请重新登录' },
+      { code: 'unauthenticated', message: '学习账号登录已失效，请重新登录' },
     );
     assert.deepEqual(f.accounts.state('tenant', 'changyan'), { status: 'signed_out' });
-    assert.throws(() => f.accounts.session('tenant', 'changyan'), { code: 'forbidden' });
+    assert.throws(() => f.accounts.session('tenant', 'changyan'), { code: 'unauthenticated' });
     assert.deepEqual(f.pushes, ['tenant']);
     assert.ok(
       !/token|private-username|private-tgt/.test(JSON.stringify(f.accounts.state('tenant', 'changyan'))),

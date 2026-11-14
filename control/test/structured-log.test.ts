@@ -76,10 +76,7 @@ test('reportError assigns once, keeps Endpoint IDs and serializes the diagnosis 
   reportError(endpoint, 'endpoint.failed');
   assert.equal(records[1].errorId, 'e-1234567890');
   assert.equal(wireError(endpoint).errorId, 'e-1234567890');
-  assert.match(
-    reportError(new RemoteKitError('invalid_request', ''), 'fixture.failed').errorId!,
-    /^c-[0-9a-f]{10}$/,
-  );
+  assert.equal(reportError(new RemoteKitError('invalid_request', ''), 'fixture.failed').errorId, undefined);
   log.debug('fixture.debug', { count: 1n });
   assert.equal(records[3].count, '1');
   log.error('fixture.native_failed', {

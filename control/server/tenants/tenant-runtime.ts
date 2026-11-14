@@ -1,4 +1,6 @@
+import { log } from '../log';
 import { RemoteKitError } from '../../shared/errors';
+import { RetryUnit } from '../../shared/retry-unit';
 import type { AppliedMediaPolicy, PageDialog, PageFullscreen, ViewerViewport } from '../../shared/product';
 import type { ViewerSecurityState } from '../auth/viewer-security';
 import type { PageIdentity } from '../endpoint/types';
@@ -26,15 +28,24 @@ export type SignalBinding = {
 export type RtcConnection =
   | { phase: 'idle' }
   | { phase: 'negotiating'; connectionId: string; attemptId: string; leaseId: string }
-  | { phase: 'active'; connectionId: string; leaseId: string };
+  | { phase: 'active'; connectionId: string; leaseId: string; attemptId?: string };
 export class TenantRuntime {
   reconciliation: {
     inflight?: Promise<void>;
-    key?: string;
-    retryAt?: number;
-    attempts?: number;
-    error?: RemoteKitError;
-  } = {};
+    retry: RetryUnit;
+  } = { retry: this.reconciliationRetry() };
+  private reconciliationRetry() {
+    return new RetryUnit({
+      failed: (error) =>
+        log.warn('reconciler.product_failed', {
+          tenant: this.tenantId,
+          code: error.code,
+          errorId: error.errorId,
+          err: error,
+        }),
+      recovered: () => log.info('reconciler.product_recovered', { tenant: this.tenantId }),
+    });
+  }
   viewer?: ViewerLease;
   viewerAbsentSince: number;
   lastViewport?: ViewerViewport;
@@ -50,7 +61,7 @@ export class TenantRuntime {
   rtc: {
     connection: RtcConnection;
     signal?: SignalBinding;
-    disconnectedPeer?: { connectionId: string; leaseId: string };
+    disconnectedPeer?: { connectionId: string; leaseId: string; attemptId?: string; retiring?: boolean };
   } = { connection: { phase: 'idle' } };
   policy: { actualMedia?: AppliedMediaPolicy } = {};
   quality = new QualityState();
@@ -77,12 +88,20 @@ export class TenantRuntime {
     this.rtc.connection = { phase: 'negotiating', connectionId, attemptId, leaseId };
   }
   activateRtc(connectionId: string, leaseId: string) {
-    this.rtc.connection = { phase: 'active', connectionId, leaseId };
+    const attemptId =
+      this.rtc.connection.phase !== 'idle' && this.rtc.connection.connectionId === connectionId
+        ? this.rtc.connection.attemptId
+        : this.rtc.disconnectedPeer?.attemptId;
+    this.rtc.connection = { phase: 'active', connectionId, leaseId, attemptId };
   }
   disconnectRtc() {
     const connection = this.rtc.connection;
     if (connection.phase !== 'idle')
-      this.rtc.disconnectedPeer = { connectionId: connection.connectionId, leaseId: connection.leaseId };
+      this.rtc.disconnectedPeer = {
+        connectionId: connection.connectionId,
+        leaseId: connection.leaseId,
+        attemptId: connection.attemptId,
+      };
     this.closeRtc();
   }
   clearSignal() {
@@ -103,10 +122,8 @@ export class TenantRuntime {
     return had;
   }
   resetEndpoint() {
-    this.reconciliation.error = undefined;
-    this.reconciliation.key = undefined;
-    this.reconciliation.retryAt = undefined;
-    this.reconciliation.attempts = 0;
+    this.reconciliation.retry.close();
+    this.reconciliation.retry = this.reconciliationRetry();
     this.closeRtc();
     this.rtc.disconnectedPeer = undefined;
     this.mediaGeneration = undefined;
@@ -120,7 +137,8 @@ export class TenantRuntime {
   }
   dispose() {
     this.resetEndpoint();
-    this.reconciliation = {};
+    this.reconciliation.retry.close();
+    delete this.reconciliation.inflight;
     this.snapshotSequence = 0;
     this.viewer = undefined;
     this.lastViewport = undefined;

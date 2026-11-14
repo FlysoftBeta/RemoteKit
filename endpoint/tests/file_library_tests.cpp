@@ -571,16 +571,44 @@ int main(int argc, char** argv) {
     conflict.files[0].name = "different";
     CHECK(Fails([&] { return library.Prepare(conflict); }));
     CHECK(Fails([&] { return library.Claim(selection.id, retired); }));
+    {
+      FileUploadStore staged(root / "claim-staging");
+      Take(staged.Initialize());
+      const auto sources = Take(library.SelectionSources(selection, live));
+      for (unsigned failure_step = 1; failure_step <= 3; ++failure_step) {
+        unsigned step = 0;
+        const auto check = [&]() -> remotekit::Result<void> {
+          if (++step == failure_step)
+            return remotekit::Error{remotekit::ErrorCode::kConflict,
+                                    "injected staging admission failure"};
+          return {};
+        };
+        CHECK(!staged.Stage(selection.binding, sources, check));
+        CHECK(staged.reserved_bytes() == 0 && staged.reserved_files() == 0);
+      }
+      const auto batch = Take(staged.Stage(selection.binding, sources, live));
+      CHECK(!library.Claim(selection.id, retired));
+      Take(staged.AbortSubmission(batch.id));
+      CHECK(staged.reserved_bytes() == 0 && staged.reserved_files() == 0);
+    }
     auto competing = selection;
     competing.id = "11111111111111111111111111111111";
     competing.request_id = "other-chooser-token";
     Take(library.Prepare(competing));
     CHECK(Take(library.Claim(selection.id, live)));
+    Take(library.ReleaseClaim(selection.id));
+    CHECK(library.FindSelection(selection.id)->state == FileLibrary::Selection::State::pending);
+    CHECK(Take(library.Database().Library().Load(remotekit::LibraryTable::kSelections))
+              .at(selection.id)
+              .at("state") == "pending");
+    CHECK(Take(library.Claim(selection.id, live)));
+    Take(library.Unknown(selection.id));
+    CHECK(!library.ReleaseClaim(selection.id));
     CHECK(!Take(library.Claim(selection.id, live)));
     using State = FileLibrary::Selection::State;
-    CHECK(Take(library.CancelPendingSelections(selection.binding, live)) == State::submitted);
+    CHECK(Take(library.CancelPendingSelections(selection.binding, live)) == State::unknown);
     CHECK(library.FindSelection("11111111111111111111111111111111")->state == State::pending);
-    CHECK(Take(library.Finish(selection.id, State::cancelled, State::pending)) == State::submitted);
+    CHECK(Take(library.Finish(selection.id, State::cancelled, State::pending)) == State::unknown);
     Take(library.Prepare(unsubmitted));
     auto wrong_binding = unsubmitted.binding;
     wrong_binding.document = "other";
@@ -617,7 +645,7 @@ int main(int argc, char** argv) {
     }
     CHECK(Take(library.Begin(1, "operation", spec, live))["offset"] == 3);
     CHECK(Take(library.Seal(1, upload, live)).id == hash);
-    CHECK(library.FindSelection(selection.id)->state == State::submitted);
+    CHECK(library.FindSelection(selection.id)->state == State::unknown);
     CHECK(library.FindSelection(unsubmitted.id)->state == State::cancelled);
     CHECK(!Take(library.Claim(selection.id, live)));
     Take(library.Finish(selection.id, State::selected));

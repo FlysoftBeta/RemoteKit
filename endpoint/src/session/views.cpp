@@ -29,6 +29,8 @@ Result<void> ViewController::StageDesired(const Json& document) {
   RK_RETURN_IF_ERROR(view_store.SaveDesired(document.at("views"),
                                             document.at("placementEpoch").get<uint64_t>(),
                                             document.at("revision").get<std::string>()));
+  downloads.SetInput(document.at("connectionEpoch").get<std::string>() + ":" +
+                     document.at("revision").get<std::string>());
   RK_ASSIGN_OR_RETURN(retired, view_store.Retired());
   for (const auto& view : retired)
     observed_closed.insert(view.get<std::string>());
@@ -136,7 +138,7 @@ Result<void> ViewController::Start() {
                 {"diagnostic", browser.Diagnostic()}});
     auto stopped = stop_runtime();
     if (!stopped)
-      return browser.Unavailable(stopped.error().message);
+      return stopped.error();
     const auto adapter_start = PhaseClock::now();
     auto prepared = registry.PrepareAdapter();
     browser.OpenPhase("adapter", PhaseMs(adapter_start));
@@ -251,6 +253,9 @@ Result<void> ViewController::RefitOutput() {
 }
 
 Result<void> ViewController::ReconcileOutput() {
+  output_retry_.Input(browser.Incarnation() + ":" + Json(desired).dump());
+  if (!output_retry_.Ready())
+    return *output_retry_.Failure();
   auto reconcile = [&]() -> Result<void> {
     auto geometry = DesiredGeometry();
     if (!geometry)
@@ -260,8 +265,10 @@ Result<void> ViewController::ReconcileOutput() {
   auto result = reconcile();
   reconciliation_pending = !result;
   if (!result) {
-    next_reconciliation = QpcNow() + QpcFrequency();
+    output_retry_.Fail(result.error());
     output.Suspend();
+  } else {
+    output_retry_.Success();
   }
   return result;
 }
@@ -370,8 +377,6 @@ Result<Json> ViewController::Snapshot(bool output_diagnostics) {
         browser.Incarnation(), download_events, id,
         [this](Json command) { return browser.Rpc().Request(std::move(command)); });
     download_reconciliation_failed = !imported;
-    if (!imported)
-      LogError(LogLevel::kWarn, "download.reconcile_failed", imported.error());
     Json views = Json::array(), closed_acks = Json::array();
     bool removed = false;
     for (auto& session : snapshot.at("sessions"))
@@ -603,7 +608,6 @@ Result<Json> ViewController::ManageViewClose(const Json& request) {
     return prepare_view_command_result_2.error();
   const auto view = std::move(prepare_view_command_result_2).value();
 
-  navigation.CancelRecovery(view);
   auto browser_snapshot_result = browser.Snapshot();
   if (!browser_snapshot_result)
     return browser_snapshot_result.error();
@@ -620,9 +624,13 @@ Result<Json> ViewController::ManageViewClose(const Json& request) {
                                                   {"session", id},
                                                   {"view", view},
                                                   {"force", request.value("force", false)}});
-  if (!view_close_result)
+  if (!view_close_result) {
+    if (view_close_result.error().code == ErrorCode::kOutcomeUnknown)
+      navigation.ReplacementUnknown(view);
     return view_close_result.error();
+  }
   auto result = std::move(view_close_result).value();
+  navigation.CancelRecovery(view);
   bool closed = result.value("completed", false);
   if (closed) {
     {
@@ -768,16 +776,20 @@ Result<Json> ViewController::ManageViewCommand(const Json& request) {
   const auto action = Required(request, "command");
   if (action != "back" && action != "forward" && action != "reload" && action != "stop")
     return Error{ErrorCode::kInvalidRequest, "unsupported page command"};
-  if (navigation.CancelRecovery(view)) {
+  if (navigation.NeedsReplacement(view)) {
     {
       auto view_recreate_result = browser.Rpc().Request(
           {{"method", "view.recreate"},
            {"session", id},
            {"view", view},
            {"url", desired.at(view).value("url", std::string("about:blank"))}});
-      if (!view_recreate_result)
+      if (!view_recreate_result) {
+        if (view_recreate_result.error().code == ErrorCode::kOutcomeUnknown)
+          navigation.ReplacementUnknown(view);
         return view_recreate_result.error();
+      }
     }
+    navigation.CancelRecovery(view);
     RK_RETURN_IF_ERROR(recovery_store.Erase(view));
     {
       auto reconcile_output_result = ReconcileOutput();
@@ -827,17 +839,21 @@ Result<Json> ViewController::ManageViewNavigate(const Json& request) {
     Json command = {{"method", "navigate"}, {"session", id}, {"view", view}, {"url", url}};
     return browser.Rpc().Request(std::move(command));
   }
-  const bool cancelled = navigation.CancelRecovery(view);
-  navigation.Forget(view);
+  const bool cancelled = navigation.NeedsReplacement(view);
   Json command = {{"method", cancelled ? "view.recreate" : "navigate"},
                   {"session", id},
                   {"view", view},
                   {"url", url}};
   NavigationOperation(command, request);
   auto rpc_result_2 = browser.Rpc().Request(command);
-  if (!rpc_result_2)
+  if (!rpc_result_2) {
+    if (rpc_result_2.error().code == ErrorCode::kOutcomeUnknown)
+      navigation.ReplacementUnknown(view);
     return rpc_result_2.error();
+  }
   auto result = std::move(rpc_result_2).value();
+  navigation.CancelRecovery(view);
+  navigation.Forget(view);
   RK_RETURN_IF_ERROR(recovery_store.Erase(view));
   navigation.EraseRevision(view);
   if (cancelled) {
@@ -882,23 +898,46 @@ void ViewController::Reset() {
 
 namespace remotekit {
 void ViewController::PollSignIn() {
-  if (!browser.Alive() || !browser.Rpc().Control() || browser.Stopping() ||
-      QpcNow() < next_sign_in_poll)
+  PollSignIn([this](const Json& body, const std::string& identity, const std::string& incarnation) {
+    return store.Events().Append("view.signIn", body, identity, incarnation);
+  });
+}
+Json ViewController::SignInFailures() const {
+  Json errors = Json::object();
+  if (sign_in_fetch_.Failure())
+    errors["fetch"] = WireError(*sign_in_fetch_.Failure());
+  for (const auto& [identity, retry] : sign_in_handoff_)
+    if (retry.Failure())
+      errors[identity] = WireError(*retry.Failure());
+  return errors;
+}
+void ViewController::PollSignIn(const SignInAppend& append) {
+  if (!browser.Alive() || !browser.Rpc().Control() || browser.Stopping())
     return;
-  next_sign_in_poll = QpcNow() + QpcFrequency() / 4;
   if (sign_in_incarnation != browser.Incarnation()) {
     sign_in_acknowledged = Json::array();
+    sign_in_pending_.clear();
+    sign_in_handoff_.clear();
+    next_sign_in_poll = {};
     sign_in_incarnation = browser.Incarnation();
   }
+  DeliverSignIn(append);
+  if (RetryClock::now() < next_sign_in_poll)
+    return;
   const bool has_sign_in = std::any_of(desired.begin(), desired.end(), [](const auto& item) {
     return item.second.contains("signIn");
   });
   if (!has_sign_in && sign_in_acknowledged.empty())
     return;
+  sign_in_fetch_.Input(browser.Incarnation() + ":" + Json(desired).dump());
+  if (!sign_in_fetch_.Ready())
+    return;
   auto reply =
       browser.Rpc().Request({{"method", "view.signIn.events"}, {"eventIds", sign_in_acknowledged}});
-  if (!reply)
+  if (!reply) {
+    sign_in_fetch_.Fail(reply.error());
     return;
+  }
   sign_in_acknowledged = Json::array();
   for (const auto& event : reply.value().value("events", Json::array())) {
     if (event.is_object() && event.value("result", Json()).is_object() &&
@@ -917,14 +956,57 @@ void ViewController::PollSignIn() {
     if (expected == desired.end() ||
         expected->second.value("signIn", std::string()) != event.at("provider").get<std::string>())
       continue;
+    const auto id = event.at("eventId").get<std::string>();
+    const auto previous = sign_in_pending_.find(id);
+    if (previous != sign_in_pending_.end() && previous->second != event) {
+      sign_in_fetch_.Fail({ErrorCode::kOutcomeUnknown, "sign-in event identity changed"});
+      return;
+    }
+    sign_in_pending_.insert_or_assign(id, event);
+  }
+  sign_in_fetch_.Success();
+  next_sign_in_poll = RetryClock::now() + std::chrono::milliseconds(250);
+  DeliverSignIn(append);
+}
+void ViewController::DeliverSignIn(const SignInAppend& append) {
+  for (auto item = sign_in_pending_.begin(); item != sign_in_pending_.end();) {
+    const auto& event = item->second;
+    const auto view = event.at("webviewId").get<std::string>();
+    const auto expected = desired.find(view);
+    if (expected == desired.end() ||
+        expected->second.value("signIn", Json()) != event.at("provider")) {
+      item = sign_in_pending_.erase(item);
+      continue;
+    }
     auto body = event;
     body.erase("type");
     body.erase("eventId");
     const auto identity =
         "signin-" + browser.Incarnation() + "-" + event.at("eventId").get<std::string>();
-    if (store.Events().Append("view.signIn", body, identity, browser.Incarnation())) {
+    auto& handoff = sign_in_handoff_.try_emplace(identity, "signin.handoff").first->second;
+    handoff.Input(identity + ":" + options.build_id + ":" + Json(desired).dump());
+    if (!handoff.Ready()) {
+      if (handoff.Status() == RetryUnit::State::kDropped) {
+        sign_in_acknowledged.push_back(event.at("eventId"));
+        item = sign_in_pending_.erase(item);
+      } else {
+        ++item;
+      }
+      continue;
+    }
+    auto appended = append(body, identity, browser.Incarnation());
+    if (appended) {
+      handoff.Success();
       sign_in_acknowledged.push_back(event.at("eventId"));
       LogEvent(LogLevel::kInfo, "signin.completed", {{"viewId", view}});
+      item = sign_in_pending_.erase(item);
+    } else {
+      handoff.Fail(appended.error());
+      if (handoff.Status() == RetryUnit::State::kDropped) {
+        sign_in_acknowledged.push_back(event.at("eventId"));
+        item = sign_in_pending_.erase(item);
+      } else
+        ++item;
     }
   }
 }

@@ -196,6 +196,15 @@ Result<Json> SessionCoordinator::Report() {
     return value;
   });
 }
+Result<Json> SessionCoordinator::SetFenceError(std::optional<Error> error) {
+  return Execute([this, error = std::move(error)]() -> Result<Json> {
+    fence_error_ = error;
+    error_ = error;
+    if (error)
+      converged_ = false;
+    return Json::object();
+  });
+}
 Result<void> SessionCoordinator::Converge(const Json& desired, const Scope& scope) {
   if (!Current(scope.generation) || !LatestRevision(desired) ||
       desired["connectionEpoch"] != scope.connection)
@@ -240,11 +249,15 @@ Result<void> SessionCoordinator::Converge(const Json& desired, const Scope& scop
 void SessionCoordinator::Observe(const Scope& scope, bool force) {
   if (!Current(scope.generation))
     return;
-  auto sampled = hooks_.observe();
+  auto sampled = fence_error_                 ? Result<Json>(*fence_error_)
+                 : observation_retry_.Ready() ? hooks_.observe()
+                                              : Result<Json>(*observation_retry_.Failure());
   Json observation;
   if (sampled) {
+    observation_retry_.Success();
     observation = std::move(sampled).value();
   } else {
+    observation_retry_.Fail(sampled.error());
     error_ = sampled.error();
     observation = {
         {"browser", "failed"},
@@ -310,8 +323,15 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
   const bool applied =
       desired.is_object() &&
       (desired["run"] == "running" ? views_revision_ == revision : stopped_revision_ == revision);
-  observation["converged"] = converged_ && !error_ && applied;
-  observation["lastError"] = error_ ? WireError(*error_) : Json();
+  auto failure = error_;
+  for (const auto* retry :
+       {&convergence_retry_, &maintenance_retry_, &observation_retry_, &signals_retry_})
+    if (retry->Failure()) {
+      failure = retry->Failure();
+      break;
+    }
+  observation["converged"] = converged_ && !failure && applied;
+  observation["lastError"] = failure ? WireError(*failure) : Json();
   observation["applied"] = {
       {"sitePreferencesRevision", started_revision_.empty() ? "0" : started_revision_},
       {"mediaPolicyRevision", prepared_revision_.empty() ? "0" : prepared_revision_},
@@ -348,6 +368,23 @@ void SessionCoordinator::Signal() {
   }
   wake_.notify_one();
 }
+void SessionCoordinator::FlushSignals(const std::string& input) {
+  signals_retry_.Input(input);
+  if (!signals_retry_.Ready())
+    return;
+  try {
+    auto result = hooks_.signals();
+    if (result)
+      signals_retry_.Success();
+    else {
+      error_ = result.error();
+      signals_retry_.Fail(*error_);
+    }
+  } catch (...) {
+    error_ = Error{ErrorCode::kInternal, "Session signal flush failed"};
+    signals_retry_.Fail(*error_);
+  }
+}
 void SessionCoordinator::Run() {
   constexpr auto kMaintenanceInterval = std::chrono::milliseconds(100);
   auto next_maintenance = std::chrono::steady_clock::now();
@@ -367,12 +404,9 @@ void SessionCoordinator::Run() {
                                 !force_observation_ &&
                                 std::chrono::steady_clock::now() < next_maintenance;
       if (signals_only) {
+        const auto input = desired_.dump() + ":" + std::to_string(scope_.generation);
         lock.unlock();
-        try {
-          hooks_.signals();
-        } catch (...) {
-          error_ = Error{ErrorCode::kInternal, "Session signal flush failed"};
-        }
+        FlushSignals(input);
         continue;
       }
       scope = scope_;
@@ -381,26 +415,48 @@ void SessionCoordinator::Run() {
       force = std::exchange(force_observation_, false);
     }
     next_maintenance = std::chrono::steady_clock::now() + kMaintenanceInterval;
+    const auto input = desired.dump() + ":" + std::to_string(scope.generation);
+    convergence_retry_.Input(input);
+    maintenance_retry_.Input(input);
+    observation_retry_.Input(input);
     try {
-      if (desired.is_object() && scope.active) {
+      if (desired.is_object() && scope.active && !fence_error_ && convergence_retry_.Ready()) {
         auto converged = Converge(desired, scope);
-        if (converged)
+        if (converged) {
+          convergence_retry_.Success();
           error_.reset();
-        else {
+        } else {
+          convergence_retry_.Fail(converged.error());
           error_ = converged.error();
           converged_ = false;
         }
       }
     } catch (...) {
       error_ = Error{ErrorCode::kInternal, "Session convergence failed"};
+      convergence_retry_.Fail(*error_);
     }
     for (auto& job : jobs)
       job();
     try {
-      hooks_.maintain();
-      Observe(scope, force);
+      if (!fence_error_ && maintenance_retry_.Ready()) {
+        auto result = hooks_.maintain();
+        if (result)
+          maintenance_retry_.Success();
+        else {
+          error_ = result.error();
+          maintenance_retry_.Fail(*error_);
+        }
+      }
+    } catch (...) {
+      error_ = Error{ErrorCode::kInternal, "Session maintenance failed"};
+      maintenance_retry_.Fail(*error_);
+    }
+    try {
+      if (observation_retry_.Ready())
+        Observe(scope, force);
     } catch (...) {
       error_ = Error{ErrorCode::kInternal, "Session observation failed"};
+      observation_retry_.Fail(*error_);
     }
   }
 }

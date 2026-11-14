@@ -139,7 +139,7 @@ test('basket mutations record file usage only after a successful addition in the
     }
     if (method === 'library.basket') {
       const ids = (params as { ids: string[] }).ids;
-      if (ids.includes('fail')) throw new RemoteKitError('conflict', 'changed');
+      if (ids.includes('fail')) throw new RemoteKitError('not_found', 'Entry missing');
       current = { ...current, revision: current.revision + 1, basket: ids };
     }
     return current;
@@ -288,7 +288,8 @@ test('window disposal cancels every batch and ignores late uploads', async () =>
   assert.equal(mutations, 0);
 });
 
-test('retry retains the failed job and destination when another batch is submitted', async () => {
+test('retry retains the failed job and destination when another batch is submitted', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
   const mutations: LibraryMethods['library.import']['params'][] = [];
   const queue = new ImportQueue(
     {
@@ -308,6 +309,8 @@ test('retry retains the failed job and destination when another batch is submitt
   queue.enqueue([new File(['b'], 'b.txt')], 0, { kind: 'files', channel: 'upload', partitionId: null });
   assert.equal(queue.getSnapshot().remaining, 2);
   assert.equal(queue.getSnapshot().error, error);
+  t.mock.timers.tick(1000);
+  await flush();
   await queue.upload();
   assert.equal(mutations[0].operationId, mutations[1].operationId);
   assert.deepEqual(mutations[0].origin, mutations[1].origin);
@@ -316,7 +319,8 @@ test('retry retains the failed job and destination when another batch is submitt
   queue.dispose();
 });
 
-test('import retry retains the sealed asset and operation identity after a lost mutation response', async () => {
+test('import retry retains the sealed asset and operation identity after a lost mutation response', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
   const uploads: string[] = [];
   const mutations: LibraryMethods['library.import']['params'][] = [];
   let loseReply = true;
@@ -349,6 +353,8 @@ test('import retry retains the sealed asset and operation identity after a lost 
   await flush();
   assert.equal(queue.getSnapshot().remaining, 2);
   assert.ok(queue.getSnapshot().error);
+  t.mock.timers.tick(1000);
+  await flush();
   await queue.upload();
   assert.equal(queue.getSnapshot().remaining, 0);
   assert.equal(uploads.length, 2);
@@ -413,7 +419,7 @@ const burst: CapturedBurst = {
 };
 
 test('photo retry commits the same mutation without reuploading captured frames', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
   let uploads = 0;
   const operations: string[] = [];
   const store = new PhotoJobStore({

@@ -1,4 +1,5 @@
-import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { randomUUID } from 'node:crypto';
+import { BackgroundJob } from '../background';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import { EndpointSnapshotError, endpointError } from '../endpoint/gateway';
 import { log } from '../log';
@@ -11,6 +12,22 @@ import { isLocalTab } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 
 export class Reconciler {
+  private closed = false;
+  private readonly pending = new Set<Promise<void>>();
+  async close() {
+    this.closed = true;
+    await this.reclaim.close();
+    await Promise.allSettled(this.pending);
+    await Promise.allSettled(
+      this.context.tenants
+        .values()
+        .flatMap((runtime) => (runtime.reconciliation.inflight ? [runtime.reconciliation.inflight] : [])),
+    );
+  }
+  get backgroundFailure() {
+    return this.reclaim.retry.error;
+  }
+  private readonly reclaim = new BackgroundJob('reclaim.statistics', {});
   private readonly writtenTitles = new WeakMap<object, Map<string, { page: string; title: string }>>();
 
   constructor(
@@ -30,8 +47,19 @@ export class Reconciler {
       | 'learning'
     >,
   ) {}
-  async tick() {
-    this.context.store.reclaim.tick();
+  tick(): Promise<void> {
+    if (this.closed || this.context.closed) return Promise.resolve();
+    const work = this.runTick();
+    this.pending.add(work);
+    const release = () => this.pending.delete(work);
+    void work.then(release, release);
+    return work;
+  }
+  private async runTick() {
+    const reclaim = this.reclaim.run(
+      async () => this.context.store.reclaim.tick(),
+      this.context.store.buildId,
+    );
     const relief = this.services.lifecycle.relieve();
     const active = this.context.store.db
       .prepare(
@@ -48,12 +76,14 @@ export class Reconciler {
           await this.services.rtc.checkReconnectedRtc(tenant);
         await this.context.tenants.serial(tenant, () => this.reconcileProduct(tenant));
       })()
-        .catch((err) => log.warn('reconciler.product_failed', { tenant, err }))
+        .catch((err) => {
+          this.context.tenants.get(tenant).lastError = toRemoteKitError(err);
+        })
         .finally(() => delete tracking.inflight);
       tracking.inflight = task;
       return task;
     });
-    await Promise.all([...work, relief]);
+    await Promise.all([...work, relief, reclaim]);
   }
   private runtimesForNode(nodeId?: string) {
     return this.context.tenants.values().filter((runtime) => {
@@ -62,11 +92,14 @@ export class Reconciler {
     });
   }
   async endpointReady(identity?: { processChanged: boolean; nodeId?: string }) {
+    if (this.closed || this.context.closed) return;
     if (identity?.processChanged !== false) return this.reconcileAll(identity?.nodeId);
     const runtimes = this.runtimesForNode(identity.nodeId);
     for (const runtime of runtimes) {
       this.services.policy.reset(runtime.tenantId);
-      runtime.reconciliation.error = undefined;
+      runtime.reconciliation.retry.ready(
+        JSON.stringify(['reconnected', this.context.endpoint.observation(runtime.tenantId)?.connectionEpoch]),
+      );
       if (runtime.connectionId || runtime.rtc.disconnectedPeer) runtime.pendingRtcCheck = true;
     }
     for (const runtime of runtimes.filter((runtime) => runtime.viewer || runtime.started)) {
@@ -85,6 +118,7 @@ export class Reconciler {
     }
   }
   async reconcileAll(nodeId?: string) {
+    if (this.closed || this.context.closed) return;
     const runtimes = this.runtimesForNode(nodeId);
     for (const runtime of runtimes) {
       if (runtime.viewer) this.services.security.forgetPeer(runtime.tenantId, runtime.viewer.security);
@@ -113,6 +147,7 @@ export class Reconciler {
     }
   }
   async reconcileProduct(tenant: string) {
+    if (this.closed || this.context.closed) return;
     const runtime = this.context.tenants.get(tenant);
     this.context.endpoint.invalidate(tenant);
     if (!this.context.endpoint.isReady(tenant) || this.context.endpoint.sessionFault(tenant)) {
@@ -142,26 +177,12 @@ export class Reconciler {
     }
     if (!(runtime.viewer !== undefined) && !runtime.started) return;
     const tracking = runtime.reconciliation;
-    const desiredKey = JSON.stringify([
-      this.context.store.workspaces.workspace(tenant).revision,
-      runtime.viewer?.id,
-      runtime.viewer?.viewport,
-      runtime.browserIncarnation,
-    ]);
-    if (
-      tracking.key === desiredKey &&
-      tracking.error &&
-      (tracking.retryAt ?? Infinity) > this.context.clock.monotonicMs()
-    )
-      throw tracking.error;
-    if (tracking.key !== desiredKey) {
-      tracking.attempts = 0;
-      tracking.error = undefined;
-    }
-    tracking.key = desiredKey;
+    const desiredKey = this.productInput(tenant);
+    if (!tracking.retry.ready(desiredKey)) return;
     try {
       if (!(runtime.viewer !== undefined)) {
         await this.observeOffline(tenant);
+        tracking.retry.succeed();
         return;
       }
       const desired = this.context.store.workspaces.workspace(tenant);
@@ -381,9 +402,23 @@ export class Reconciler {
         }
         if (t.pendingUaReloadOrigin && readyToShow) {
           const requestedOrigin = t.pendingUaReloadOrigin;
-          if (current && new URL(t.url).origin === requestedOrigin)
-            await this.context.endpoint.command(tenant, { viewId: t.webviewId, command: 'reload' });
+          if (current && new URL(t.url).origin === requestedOrigin) {
+            if (!t.pendingUaReloadIdentity) {
+              t.pendingUaReloadIdentity = {
+                operationId: randomUUID(),
+                operationGeneration: this.context.store.operations.operationGeneration(tenant),
+                browserIncarnation: snapshot.browserIncarnation!,
+              };
+              this.services.operations.saveWorkspace(state);
+            }
+            await this.context.endpoint.command(tenant, {
+              ...t.pendingUaReloadIdentity,
+              viewId: t.webviewId,
+              command: 'reload',
+            });
+          }
           delete t.pendingUaReloadOrigin;
+          delete t.pendingUaReloadIdentity;
           this.services.operations.saveWorkspace(state);
         }
         await this.services.lifecycle.maintainBackgroundTab(
@@ -401,8 +436,7 @@ export class Reconciler {
         runtime.lastError = new RemoteKitError('limit_exceeded', resourceLimitation, { capacity: 'windows' });
         if (changed) this.services.viewers.push(tenant);
       } else {
-        tracking.error = undefined;
-        tracking.attempts = 0;
+        tracking.retry.succeed();
         const previousError = runtime.clearError();
         if (previousError) this.services.viewers.push(tenant);
       }
@@ -410,21 +444,22 @@ export class Reconciler {
       this.services.pageRequests.clear(tenant);
       const failure = toRemoteKitError(error);
       if (error instanceof EndpointSnapshotError) runtime.browserRestart = error.browserRestart;
-      const wait = retryDelay(failure, tracking.attempts ?? 0);
-      const handling = errorHandling(failure.code);
-      tracking.attempts = (tracking.attempts ?? 0) + 1;
-      tracking.error = failure;
-      tracking.retryAt =
-        wait !== undefined
-          ? this.context.clock.monotonicMs() + wait
-          : handling === 'reconcile' || handling === 'refresh' || handling === 'drop'
-            ? 0
-            : Infinity;
+      tracking.retry.ready(this.productInput(tenant));
+      tracking.retry.fail(failure);
       runtime.lastErrorKey = 'endpoint';
       runtime.lastError = failure;
       this.services.viewers.push(tenant);
       throw error;
     }
+  }
+  private productInput(tenant: string) {
+    const runtime = this.context.tenants.get(tenant);
+    return JSON.stringify([
+      this.context.store.workspaces.workspace(tenant).revision,
+      runtime.viewer?.id,
+      runtime.viewer?.viewport,
+      runtime.browserIncarnation,
+    ]);
   }
   async observeOffline(tenant: string) {
     const runtime = this.context.tenants.get(tenant);

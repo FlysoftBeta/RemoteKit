@@ -59,7 +59,7 @@ const entry: LibraryFileEntry = {
 };
 
 function fixture(t: TestContext, target?: LibraryFileEntry) {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const snapshot: LibrarySnapshot = {
     revision: 7,
     entries: target ? [target] : [],

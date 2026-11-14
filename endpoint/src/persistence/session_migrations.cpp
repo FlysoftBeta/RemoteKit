@@ -7,8 +7,19 @@
 
 namespace remotekit {
 namespace {
-constexpr int64_t kVersion = 3;
-constexpr std::array<SessionMigration, 0> kMigrations{};
+constexpr int64_t kVersion = 4;
+// v4: download imports keep their retry-unit state, and a selection persisted as "submitted"
+// (dispatch possibly delivered) becomes "unknown", which reconciliation resolves.
+Result<void> UpgradeToVersion4(sqlite::Database& db) {
+  RK_RETURN_IF_ERROR(db.Execute("ALTER TABLE download_imports ADD COLUMN retry TEXT"));
+  return db.Execute(
+      "UPDATE library_selections SET state='unknown', "
+      "document=json_set(document,'$.state','unknown') WHERE state='submitted'");
+}
+// The baseline creates the latest schema directly; these steps upgrade existing stores.
+constexpr std::array<SessionMigration, 1> kMigrations{{
+    {4, "retry_state_and_uncertain_selections", UpgradeToVersion4},
+}};
 constexpr auto kBaseline = R"sql(
 CREATE TABLE views(view_id TEXT PRIMARY KEY, config TEXT NOT NULL,position INTEGER NOT NULL);
 CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,type TEXT NOT NULL,body TEXT NOT NULL);
@@ -16,7 +27,7 @@ CREATE TABLE event_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),stream
 INSERT INTO event_state VALUES(1,lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-4'||substr(lower(hex(randomblob(2))),2)||'-8'||substr(lower(hex(randomblob(2))),2)||'-'||lower(hex(randomblob(6))),0);
 CREATE TABLE retired_views(view_id TEXT PRIMARY KEY,event_id TEXT NOT NULL);
 CREATE TABLE download_imports(event_id TEXT PRIMARY KEY, incarnation TEXT NOT NULL, download TEXT NOT NULL,
- result TEXT, attempt INTEGER, error TEXT, retry_at INTEGER);
+ result TEXT, attempt INTEGER, error TEXT, retry_at INTEGER, retry TEXT);
 CREATE TABLE coordination_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),placement_epoch INTEGER NOT NULL,desired_revision TEXT NOT NULL);
 INSERT INTO coordination_state VALUES(1,0,'0');
 CREATE TABLE view_runtime(view_id TEXT PRIMARY KEY,resume_url TEXT,original_browser TEXT);
@@ -26,7 +37,7 @@ CREATE TABLE library_drafts(upload_id TEXT PRIMARY KEY, operation TEXT NOT NULL,
  size INTEGER NOT NULL, expires INTEGER NOT NULL, sealed TEXT NOT NULL);
 CREATE TABLE library_selections(selection_id TEXT PRIMARY KEY, state TEXT NOT NULL, document TEXT NOT NULL);
 CREATE TABLE library_derivatives(asset_id TEXT NOT NULL, format TEXT NOT NULL, derived_id TEXT NOT NULL, PRIMARY KEY(asset_id, format));
-PRAGMA user_version=3;
+PRAGMA user_version=4;
 )sql";
 Result<int64_t> Version(sqlite::Database& db) {
   RK_ASSIGN_OR_RETURN(query, db.Prepare("PRAGMA user_version"));

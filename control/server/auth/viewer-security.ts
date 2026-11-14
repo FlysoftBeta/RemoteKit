@@ -1,3 +1,4 @@
+import { RetryUnit } from '../../shared/retry-unit';
 import type { ServicePeers } from '../viewers/service-peers';
 import { log, reportError } from '../log';
 import { wireError } from '../../shared/errors';
@@ -18,6 +19,8 @@ interface Peer {
   epoch: number;
   appliedEpoch: number;
   requests: number;
+  authorizationInput?: string;
+  retry?: RetryUnit;
 }
 interface Challenge {
   id: string;
@@ -50,6 +53,18 @@ export interface ViewerSecurityState {
 }
 
 export class ViewerSecurity {
+  private closed = false;
+  private readonly capabilityJobs = new Set<RetryUnit>();
+  private readonly polls = new Map<ViewerSecurityState, Promise<void>>();
+  async close() {
+    this.closed = true;
+    for (const unit of this.capabilityJobs) unit.close();
+    this.capabilityJobs.clear();
+    await Promise.allSettled([...this.capabilityPending.values(), ...this.polls.values()]);
+  }
+  private readonly capabilityPending = new Map<ViewerSecurityState, Promise<void>>();
+  private readonly capabilityRetries = new WeakMap<ViewerSecurityState, RetryUnit>();
+  private readonly statusRetries = new WeakMap<Challenge, RetryUnit>();
   private readonly revocations = new Map<ViewerSecurityState, string>();
   constructor(
     private readonly store: ControlDatabase,
@@ -99,6 +114,7 @@ export class ViewerSecurity {
 
   private check(tenant: string, viewer: ViewerSecurityState, epoch: number, locked?: boolean) {
     if (
+      this.closed ||
       !this.valid(tenant, viewer) ||
       viewer.epoch !== epoch ||
       (locked !== undefined && viewer.locked !== locked)
@@ -106,10 +122,44 @@ export class ViewerSecurity {
       throw new RemoteKitError('conflict', '验证状态已改变');
   }
 
-  async capabilities(tenant: string, viewer: ViewerSecurityState) {
+  capabilities(tenant: string, viewer: ViewerSecurityState): Promise<void> {
+    const current = this.capabilityPending.get(viewer);
+    if (current) return current;
+    const work = this.readCapabilities(tenant, viewer).finally(() => {
+      this.capabilityPending.delete(viewer);
+    });
+    this.capabilityPending.set(viewer, work);
+    return work;
+  }
+  private async readCapabilities(tenant: string, viewer: ViewerSecurityState) {
+    if (this.closed) return;
     const peer = viewer.servicePeer;
-    const result = await this.service.faceCapabilities(tenant).catch(() => undefined);
-    if (!this.valid(tenant, viewer) || viewer.servicePeer !== peer) return;
+    let unit = this.capabilityRetries.get(viewer);
+    if (!unit) {
+      unit = new RetryUnit({
+        failed: (error) => log.warn('security.capabilities_failed', { tenant, err: error }),
+        recovered: () => log.info('security.capabilities_recovered', { tenant }),
+      });
+      this.capabilityRetries.set(viewer, unit);
+      this.capabilityJobs.add(unit);
+    }
+    if (!unit.ready(JSON.stringify([peer?.connectionId, peer?.epoch, viewer.epoch]))) return;
+    let result;
+    try {
+      result = await this.service.faceCapabilities(tenant);
+      unit.succeed();
+      delete viewer.face.error;
+    } catch (cause) {
+      const failure = unit.fail(endpointError(cause));
+      if (this.closed || !this.valid(tenant, viewer)) return;
+      viewer.face.error = wireError(failure.error);
+      this.changed(tenant, viewer, false);
+      unit.schedule(() => {
+        if (!this.closed && this.valid(tenant, viewer)) void this.capabilities(tenant, viewer);
+      });
+      return;
+    }
+    if (this.closed || !this.valid(tenant, viewer) || viewer.servicePeer !== peer) return;
     const available =
       result?.available === true &&
       typeof result.modelVersion === 'string' &&
@@ -134,6 +184,7 @@ export class ViewerSecurity {
 
   forgetServicePeer(tenant: string, viewer: ViewerSecurityState) {
     this.clearChallenge(tenant, viewer, false, false);
+    this.capabilityRetries.get(viewer)?.cancel();
     viewer.servicePeer = undefined;
     viewer.face = { available: false, reason: '文件和人脸服务暂无可用节点' };
   }
@@ -145,7 +196,7 @@ export class ViewerSecurity {
       this.forgetPeer(tenant, viewer);
       this.revocations.delete(viewer);
     } catch (err) {
-      log.error('security.revoke_failed', { tenant, connectionId: viewer.peer?.connectionId, err });
+      viewer.face.error = wireError(endpointError(err));
     }
   }
 
@@ -160,13 +211,13 @@ export class ViewerSecurity {
   async retryRevocations() {
     await Promise.all(
       [...this.revocations].map(async ([viewer, tenant]) => {
-        if (viewer.peer?.requests) return;
+        if (viewer.peer?.requests || (viewer.peer?.retry?.error && !viewer.peer.retry.ready())) return;
         try {
           await this.apply(tenant, viewer, false);
           this.forgetPeer(tenant, viewer);
           this.revocations.delete(viewer);
         } catch (err) {
-          log.error('security.revoke_failed', { tenant, connectionId: viewer.peer?.connectionId, err });
+          viewer.face.error = wireError(endpointError(err));
         }
       }),
     );
@@ -211,14 +262,22 @@ export class ViewerSecurity {
     const peer = viewer.peer;
     if (!peer) return;
     const { connectionId } = peer;
-    const epoch = ++peer.epoch;
-    peer.requests++;
-    peer.appliedEpoch = 0;
-    if (!this.endpoint.isReady(tenant) || this.endpoint.sessionFault(tenant)) {
-      peer.requests--;
-      return;
+    const input = JSON.stringify([connectionId, viewer.epoch, unlocked]);
+    peer.retry ??= new RetryUnit({
+      failed: (error) => log.warn('security.authorization_failed', { tenant, err: error }),
+      recovered: () => log.info('security.authorization_recovered', { tenant }),
+    });
+    if (!peer.retry.ready(input)) throw peer.retry.error;
+    if (peer.authorizationInput !== input) {
+      peer.authorizationInput = input;
+      peer.epoch++;
+      peer.appliedEpoch = 0;
     }
+    const epoch = peer.epoch;
+    peer.requests++;
     try {
+      if (!this.endpoint.isReady(tenant) || this.endpoint.sessionFault(tenant))
+        throw this.endpoint.sessionFault(tenant) ?? new RemoteKitError('unavailable', '授权目标尚未恢复');
       const desired = await this.endpoint.published(tenant);
       const observed = await this.endpoint.waitObserved(
         tenant,
@@ -234,15 +293,15 @@ export class ViewerSecurity {
           observed.authorization.epoch !== epoch ||
           observed.authorization.unlocked !== unlocked)
       )
-        throw new RemoteKitError('unavailable', observed.lastError.message);
+        throw endpointError(observed.lastError);
       const result = { applied: true, epoch: observed.authorization.epoch };
       if (result?.applied !== true || result.epoch !== epoch || viewer.peer !== peer || peer.epoch !== epoch)
         throw new RemoteKitError('outcome_unknown', 'Endpoint 授权结果未知');
       peer.appliedEpoch = epoch;
+      peer.retry.succeed();
       this.changed(tenant, viewer, false);
     } catch (err) {
-      if (!this.endpoint.isReady(tenant)) return;
-      if (!unlocked) log.warn('security.lock_failed', { tenant, connectionId, epoch, err });
+      peer.retry.fail(endpointError(err));
       throw err;
     } finally {
       peer.requests--;
@@ -348,32 +407,62 @@ export class ViewerSecurity {
       viewer.face = { ...viewer.face, challengeId: challenge.id, purpose, status: 'pending' };
       this.changed(tenant, viewer, false);
     } catch (error) {
-      if (viewer.challenge === challenge) this.clearChallenge(tenant, viewer);
+      if (viewer.challenge === challenge) {
+        if (endpointError(error).code === 'outcome_unknown') {
+          challenge.started = true;
+          viewer.face = {
+            ...viewer.face,
+            challengeId: challenge.id,
+            purpose,
+            status: 'pending',
+            error: wireError(endpointError(error)),
+          };
+          this.changed(tenant, viewer, false);
+        } else this.clearChallenge(tenant, viewer);
+      }
       throw error;
     }
   }
 
-  async poll(tenant: string, viewer: ViewerSecurityState) {
+  poll(tenant: string, viewer: ViewerSecurityState): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    const current = this.polls.get(viewer);
+    if (current) return current;
+    const work = this.pollStatus(tenant, viewer).finally(() => this.polls.delete(viewer));
+    this.polls.set(viewer, work);
+    return work;
+  }
+  private async pollStatus(tenant: string, viewer: ViewerSecurityState) {
     const challenge = viewer.challenge;
     if (!challenge?.started || viewer.polling || !this.valid(tenant, viewer)) return;
     viewer.polling = true;
     const generation = viewer.epoch;
     try {
-      const result = await this.service
-        .faceStatus(tenant, this.faceBinding(challenge))
-        .catch((error: unknown) => {
-          log.warn('security.face_status_failed', { tenant, challengeId: challenge.id, err: error });
-          return {
-            challengeId: challenge.id,
-            status: 'failed',
-            error: wireError(
-              reportError(endpointError(error), 'security.face_failed', { tenant, operation: challenge.id }),
-            ),
-            outcome: undefined,
-            template: undefined,
-          };
+      let unit = this.statusRetries.get(challenge);
+      if (!unit) {
+        unit = new RetryUnit({
+          failed: (error) =>
+            log.warn('security.face_status_failed', { tenant, challengeId: challenge.id, err: error }),
+          recovered: () => log.info('security.face_status_recovered', { tenant, challengeId: challenge.id }),
         });
+        this.statusRetries.set(challenge, unit);
+      }
+      if (!unit.ready(JSON.stringify([challenge.id, viewer.epoch, viewer.servicePeer?.epoch]))) return;
+      let result;
+      try {
+        result = await this.service.faceStatus(tenant, this.faceBinding(challenge));
+        unit.succeed();
+        delete viewer.face.error;
+      } catch (cause) {
+        const failure = unit.fail(endpointError(cause));
+        if (this.closed || !this.valid(tenant, viewer)) return;
+        viewer.face.error = wireError(failure.error);
+        this.changed(tenant, viewer, false);
+        return;
+      }
+
       if (
+        this.closed ||
         !this.valid(tenant, viewer) ||
         viewer.epoch !== generation ||
         viewer.challenge !== challenge ||

@@ -5,6 +5,7 @@
 #include "documents/object_documents.hpp"
 #include "files/dc_file_services.hpp"
 #include "persistence/durable_json.hpp"
+#include "util/file_io.hpp"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -26,7 +27,8 @@ ServiceJson FileLibrary::StopBlockers(const std::function<bool(uint64_t)>& curre
   const auto selections =
       std::count_if(selections_.begin(), selections_.end(), [](const auto& item) {
         return item.second.state == Selection::State::pending ||
-               item.second.state == Selection::State::submitted;
+               item.second.state == Selection::State::dispatching ||
+               item.second.state == Selection::State::unknown;
       });
   const auto uploads = std::count_if(drafts_.begin(), drafts_.end(), [&](const auto& item) {
     return item.second.sealed.empty() && current(item.second.grant);
@@ -113,7 +115,8 @@ FileLibrary::FileLibrary(fs::path root,
       objects_(objects),
       tenant_(std::move(tenant)),
       access_(access ? std::move(access)
-                     : std::make_shared<objects::SessionObjects>(objects, tenant_)) {}
+                     : std::make_shared<objects::SessionObjects>(objects, tenant_)),
+      remove_file_(RemoveFile) {}
 Result<void> FileLibrary::Initialize() {
   std::error_code absolute_error;
   root_ = fs::absolute(root_, absolute_error).make_preferred();
@@ -200,9 +203,13 @@ Result<void> FileLibrary::Initialize() {
 Result<void> FileLibrary::PrepareCheckpoint() {
   std::lock_guard lock(mutex_);
   RK_RETURN_IF_ERROR(store_.ClearDrafts());
+  for (const auto& [id, draft] : drafts_)
+    retiring_drafts_[id] = draft.sealed.empty() ? draft.spec.size : 0;
   drafts_.clear();
+  RK_RETURN_IF_ERROR(RemoveTree(root_ / "incoming"));
+  retiring_drafts_.clear();
   draft_bytes_ = 0;
-  return RemoveTree(root_ / "incoming");
+  return {};
 }
 fs::path FileLibrary::DraftData(const std::string& id) const {
   return root_ / "incoming" / id;
@@ -301,8 +308,8 @@ Result<ServiceJson> FileLibrary::Begin(std::uint64_t grant,
   }
   const auto active = std::count_if(drafts_.begin(), drafts_.end(),
                                     [](const auto& item) { return item.second.sealed.empty(); });
-  if (drafts_.size() >= kDrafts || static_cast<std::size_t>(active) >= kActiveDrafts ||
-      spec.size > kDraftBytes - draft_bytes_)
+  if (drafts_.size() + retiring_drafts_.size() >= kDrafts ||
+      static_cast<std::size_t>(active) >= kActiveDrafts || spec.size > kDraftBytes - draft_bytes_)
     return Error{ErrorCode::kLimitExceeded, "asset_draft_quota",
                  ErrorReason::kStorageQuotaExceeded};
   RK_ASSIGN_OR_RETURN(random, RandomId());
@@ -488,15 +495,32 @@ Result<FileLibrary::Asset> FileLibrary::ImportDownload(const fs::path& profile,
   }
   return Publish(path, {{}, spec.type, size}, []() -> Result<void> { return {}; });
 }
-bool FileLibrary::EraseDraft(std::map<std::string, Draft>::iterator draft) {
-  if (!store_.Erase(LibraryTable::kDrafts, draft->first))
-    return false;
-  if (!Remove(DraftData(draft->first)))
-    LogEvent(LogLevel::kWarn, "library.draft_cleanup_failed", {{"uploadId", draft->first}});
-  if (draft->second.sealed.empty())
-    draft_bytes_ -= draft->second.spec.size;
+Result<void> FileLibrary::EraseDraft(std::map<std::string, Draft>::iterator draft) {
+  RK_RETURN_IF_ERROR(store_.Erase(LibraryTable::kDrafts, draft->first));
+  const auto id = draft->first;
+  cleanup_grants_[id] = draft->second.grant;
+  retiring_drafts_[id] = draft->second.sealed.empty() ? draft->second.spec.size : 0;
   drafts_.erase(draft);
-  return true;
+  return RetireDraft(id);
+}
+Result<void> FileLibrary::RetireDraft(const std::string& id) {
+  const auto found = retiring_drafts_.find(id);
+  if (found == retiring_drafts_.end())
+    return {};
+  auto& retry = cleanup_retries_.try_emplace(id, "files.draft_cleanup").first->second;
+  retry.Input("retiring:" + id + ":" + std::to_string(cleanup_grants_[id]));
+  if (!retry.Ready())
+    return *retry.Failure();
+  auto removed = remove_file_(DraftData(id));
+  if (!removed) {
+    retry.Fail(removed.error());
+    return removed.error();
+  }
+  retry.Success();
+  draft_bytes_ -= found->second;
+  retiring_drafts_.erase(found);
+  cleanup_grants_.erase(id);
+  return {};
 }
 Result<void> FileLibrary::Cancel(std::uint64_t grant, const std::string& id, const Check& check) {
   std::lock_guard lock(mutex_);
@@ -504,10 +528,11 @@ Result<void> FileLibrary::Cancel(std::uint64_t grant, const std::string& id, con
   const auto found = drafts_.find(id);
   if (found != drafts_.end())
     RK_RETURN_IF_ERROR(RequireDraft(grant, id));
-  if (found != drafts_.end() && found->second.sealed.empty() && !EraseDraft(found))
-    return Error{ErrorCode::kUnavailable, "asset_cleanup_failed"};
-
-  return {};
+  if (found != drafts_.end() && found->second.sealed.empty())
+    return EraseDraft(found);
+  if (retiring_drafts_.contains(id))
+    cleanup_grants_[id] = grant;
+  return RetireDraft(id);
 }
 Result<FileLibrary::Asset> FileLibrary::Describe(const std::string& id) const {
   std::lock_guard lock(mutex_);
@@ -679,22 +704,66 @@ Result<FileLibrary::Asset> FileLibrary::CachedDerivative(const std::string& sour
   RK_ASSIGN_OR_RETURN(asset, CreateDerivative(render, check, format, source, key));
   return asset;
 }
+ServiceJson FileLibrary::CleanupFailures() const {
+  std::lock_guard lock(mutex_);
+  ServiceJson errors = ServiceJson::object();
+  for (const auto& [id, retry] : cleanup_retries_)
+    if (retry.Failure())
+      errors[id] = WireError(*retry.Failure());
+  return errors;
+}
 Result<void> FileLibrary::Sweep() {
   std::lock_guard lock(mutex_);
   const auto now = Now();
   if (now < sweep_after_)
     return {};
   sweep_after_ = now + 10;
+  std::optional<Error> failure;
   for (auto it = drafts_.begin(); it != drafts_.end();) {
     const auto current = it++;
-    if (current->second.expires <= now)
-      EraseDraft(current);
+    if (current->second.expires <= now) {
+      auto& retry =
+          cleanup_retries_.try_emplace(current->first, "files.draft_cleanup").first->second;
+      retry.Input("retiring:" + current->first + ":" + std::to_string(current->second.grant));
+      if (!retry.Ready())
+        continue;
+      const auto before = retry.Attempt();
+      auto erased = EraseDraft(current);
+      if (!erased) {
+        if (retry.Attempt() == before)
+          retry.Fail(erased.error());
+        failure = erased.error();
+      }
+    }
+  }
+  for (auto it = retiring_drafts_.begin(); it != retiring_drafts_.end();) {
+    const auto id = (it++)->first;
+    auto retired = RetireDraft(id);
+    if (!retired)
+      failure = retired.error();
   }
   for (const auto& entry : fs::directory_iterator(root_ / "staging")) {
-    if (fs::file_time_type::clock::now() - entry.last_write_time() > std::chrono::minutes(10))
-      Remove(entry.path());
+    if (fs::file_time_type::clock::now() - entry.last_write_time() > std::chrono::minutes(10)) {
+      auto retired = RetireStaging(entry);
+      if (!retired)
+        failure = retired.error();
+    }
   }
 
+  return failure ? Result<void>{*failure} : Result<void>{};
+}
+Result<void> FileLibrary::RetireStaging(const fs::directory_entry& entry) {
+  const auto name = entry.path().string();
+  auto& retry = cleanup_retries_.try_emplace(name, "files.staging_cleanup").first->second;
+  retry.Input(name + ":" + std::to_string(entry.last_write_time().time_since_epoch().count()));
+  if (!retry.Ready())
+    return *retry.Failure();
+  auto removed = remove_file_(entry.path());
+  if (!removed) {
+    retry.Fail(removed.error());
+    return removed.error();
+  }
+  retry.Success();
   return {};
 }
 Result<void> FileLibrary::Prepare(const Selection& selection) {
@@ -750,10 +819,32 @@ Result<bool> FileLibrary::Claim(const std::string& id, const Check& check) {
       return Error{ErrorCode::kConflict, "file_selection_already_submitted"};
   }
   auto submitted = selection;
-  submitted.state = State::submitted;
+  submitted.state = State::dispatching;
   RK_RETURN_IF_ERROR(SaveSelection(submitted, check));
-  selection.state = State::submitted;
+  selection.state = State::dispatching;
   return true;
+}
+Result<void> FileLibrary::ReleaseClaim(const std::string& id) {
+  std::lock_guard lock(mutex_);
+  auto& selection = selections_.at(id);
+  if (selection.state != State::dispatching)
+    return Error{ErrorCode::kConflict, "selection dispatch state changed"};
+  auto prepared = selection;
+  prepared.state = State::pending;
+  RK_RETURN_IF_ERROR(SaveSelection(prepared));
+  selection = std::move(prepared);
+  return {};
+}
+Result<void> FileLibrary::Unknown(const std::string& id) {
+  std::lock_guard lock(mutex_);
+  auto& selection = selections_.at(id);
+  if (selection.state != State::dispatching && selection.state != State::unknown)
+    return Error{ErrorCode::kConflict, "selection is not dispatching"};
+  auto unknown = selection;
+  unknown.state = State::unknown;
+  RK_RETURN_IF_ERROR(SaveSelection(unknown));
+  selection = std::move(unknown);
+  return {};
 }
 Result<std::optional<State>> FileLibrary::CancelPendingSelections(
     const FileUploadStore::Binding& binding,
@@ -764,7 +855,8 @@ Result<std::optional<State>> FileLibrary::CancelPendingSelections(
   for (const auto& [id, selection] : selections_) {
     if (selection.binding != binding)
       continue;
-    if (selection.state == State::submitted || selection.state == State::selected)
+    if (selection.state == State::dispatching || selection.state == State::unknown ||
+        selection.state == State::selected)
       return std::optional<State>{selection.state};
   }
   std::map<std::string, Json> cancelled;
@@ -794,7 +886,8 @@ Result<State> FileLibrary::Finish(const std::string& id,
       selection.state == State::cancelled || (expected && selection.state != *expected))
     return selection.state;
   if (state != State::cancelled &&
-      !(state == State::selected && selection.state == State::submitted))
+      !(state == State::selected &&
+        (selection.state == State::dispatching || selection.state == State::unknown)))
     return Error{ErrorCode::kInvalidRequest, "invalid_selection_state"};
   auto terminal = selection;
   terminal.state = state;

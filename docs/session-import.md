@@ -192,7 +192,7 @@ Control → 设备（`ref` 是所回复的设备事件 seq）：
 ## Control 写入
 
 - `SessionImporter` 只在 Session 运行时写入，不为导入启动已停止的 Session、不新建放置；新导入到达时、以及每 15 秒检查一次。同一 Tenant 的导入按接收顺序串行执行。
-- 写入把载荷切成若干块，每块 JSON ≤ 512 KiB；每块调用 Endpoint `session.storage.import` 得到 job，再以 200 ms 间隔调用 `session.storage.importStatus` 直到完成。写入按[错误码](architecture.md#错误模型)处理：`busy`、`rate_limited`、`unavailable` 保持 `pending`，按共享策略的等待后重试；每块的身份由 Control 指定（`importId` = 导入记录 ID + 块序号，随记录持久化），Browser 按 `importId` 去重：同一 `importId` 重复提交返回已有作业，载荷不同则 `conflict`，最近 64 个完成结果可重复查询；`outcome_unknown` 用同一 `importId` 查询或重新提交，Browser 换代后查不到则重写这一块（写入本身幂等）；其余错误码 → `failed`，错误码与说明存进记录，发出 `importFailed`——只有 `limit_exceeded`（用户可以腾出空间）的 `retryable` 为 true；完成 → `applied` 并发出 `importApplied`。`importFailed` 对 App 仍是 `{reason, retryable}`：App 只按 `retryable` 决定是否提供重试，`reason` 是显示给用户的说明。
+- 写入把载荷切成若干块，每块 JSON ≤ 512 KiB；每块调用 Endpoint `session.storage.import` 得到 job，再以 200 ms 间隔调用 `session.storage.importStatus` 直到完成。写入按[错误码](errors.md)处理：`busy`、`rate_limited`、`unavailable` 保持 `pending`，按共享策略的等待后重试；每块的身份由 Control 指定（`importId` = 导入记录 ID + 块序号，随记录持久化），Browser 按 `importId` 去重：同一 `importId` 重复提交返回已有作业，载荷不同则 `conflict`，最近 64 个完成结果可重复查询；`outcome_unknown` 用同一 `importId` 查询或重新提交，Browser 换代后查不到则重写这一块（写入本身幂等）；其余错误码 → `failed`，错误码与说明存进记录，发出 `importFailed`——只有 `limit_exceeded`（用户可以腾出空间）的 `retryable` 为 true；完成 → `applied` 并发出 `importApplied`。`importFailed` 对 App 仍是 `{reason, retryable}`：App 只按 `retryable` 决定是否提供重试，`reason` 是显示给用户的说明。
 - 已经打开的页面不会自动刷新；导入记录为每个站点提供一个入口，在新标签页打开对应的 `url`。
 
 ## Control 发件
@@ -234,15 +234,16 @@ WS 方法（均要求产品租约）：`sessionImport.state` → `{receiving, pa
 - **设备密钥**：首次启动用 BouncyCastle 生成 X25519 密钥对，私钥用 Android Keystore 中不可导出的 AES-GCM 密钥加密后存 App 私有目录。"解除配对并清除数据"删除全部本地数据并轮换设备密钥，Control 视之为新设备。
 - **配对**：未配对时首页是配对表单：服务器名（来自部署配置）、用户名、密码、5 个配对码单词（按词表自动补全，输入时校验）、设备名。提交生成 `pair` 事件入队。密码只存在于这个尚未确认的事件里，收到 `paired` 或 `pairRejected` 后随事件内容一起删除。
 - **授权门禁**：任何需要授权的操作（新建登录、重试、撤回）都要求已配对，或存在一个尚未被拒绝的在途 `pair` 事件。配对被拒绝后回到配对表单，原因显示在表单上方；失败的导入保留在 timeline 上，重新配对后可以重试。
-- **一次性浏览器**：新建登录打开一个全新的隔离 WebView Profile（androidx.webkit `ProfileStore`），UA/Client Hints 设为部署配置里的桌面 Chrome 元数据；设备不支持 `MULTI_PROFILE`、`USER_AGENT_METADATA` 或 `GET_COOKIE_INFO` 时提示更新 Android System WebView。起始页提供 Bing、百度、Google 入口和地址栏；没有历史记录、书签与会话恢复。点"完成登录"后从这次浏览推断出的站点里勾选、导出，生成 `import` 事件入队。无论导出还是放弃，这个 Profile 都立即销毁（清空 cookie 与 Web Storage 后删除；本进程已加载而不能删除时记下，下次启动在创建任何 WebView 之前删除）；App 被杀时同样在下次启动删除。
+- **一次性浏览器**：新建登录打开一个全新的隔离 WebView Profile（androidx.webkit `ProfileStore`），UA/Client Hints 设为部署配置里的桌面 Chrome 元数据；设备不支持 `MULTI_PROFILE`、`USER_AGENT_METADATA` 或 `GET_COOKIE_INFO` 时提示更新 Android System WebView。起始页提供 Bing、百度、Google 入口和地址栏；没有历史记录、书签与会话恢复。点"完成登录"后从这次浏览推断出的站点里勾选、导出，生成 `import` 事件入队。离开登录屏时（导出完成、返回或取消）这个 Profile 立即销毁（清空 cookie 与 Web Storage 后删除；本进程已加载而不能删除时记下，下次启动在创建任何 WebView 之前删除）；屏幕旋转等 Activity 重建只销毁 WebView，不清理 Profile。App 被杀时同样在下次启动删除。
 - **站点推断**：记录这次浏览的顶层导航（含 SPA 的 history 变化），按近似的可注册域名归并（两字母国家顶级域名前是 `com`/`edu`/`gov`/`ac`/`co` 等时取三段，否则取两段），每个站点保留最后访问的 URL、网页图标与名称。名称依次取页面声明的 `og:site_name`/`application-name`/`apple-mobile-web-app-title`、标题里含域名主标签的最短片段、多段标题的最后一段、较短的完整标题，最后退回域名主标签。搜索引擎排后，当前页所在站点默认勾选。
 - **导出**：所有站点走同一套通用导出，不按站点适配。登录浏览器把每个 http(s) 请求（`shouldInterceptRequest`，加上不发请求的 history 变化）按 origin 记下路径，每个 origin 最多 256 条。导出时取 host 归属所选站点的 origin：
   - cookies：在这些 URL 上逐个调用 `CookieManagerCompat.getCookieInfo`，拿到带完整属性的 cookie 行（WebView 用 `CanonicalCookie::BuildCookieAttributesLine` 生成：domain 带前导点即域 cookie，否则 host-only；expires 为 HTTP 日期；secure/httponly/samesite）。按请求 URL 查询，作用于子域或子路径的 cookie 在站点实际用过的地方都能取到。同 (name, domain, path) 去重。无名 cookie 契约无法表达，partitioned cookie 写回时会变成非分区，这两类都跳过。
-  - localStorage：用同一 Profile 的隐藏 WebView，对每个 origin 以 `loadDataWithBaseURL` 打开空文档，在该 origin 下枚举 `localStorage`。不发网络请求，也不执行站点脚本；空的 origin 不放进载荷。
+  - localStorage：用同一 Profile 的隐藏 WebView，对每个 origin 以 `loadDataWithBaseURL` 打开空文档，在该 origin 下枚举 `localStorage`。不发网络请求，也不执行站点脚本；空的 origin 不放进载荷。任一 origin 读取失败，本次导出失败并向用户显示原因，不当成空数据。
   - 结果交给载荷校验，超出契约上限时提示失败，不截断。
 - **请求与本地数据**：请求的载荷（cookies、localStorage）用 Keystore 密钥加密存盘，直到收到 `importApplied`/`importDiscarded` 或用户删除该请求，以便失败后重试；站点名、URL 与 64px 图标作为请求元数据保留供 timeline 显示。删除尚未写入的请求同时发出 `withdraw`。
+- **本地状态**：`state.json` 严格解码：版本必须等于当前版本，所有字段必需，未知字段拒绝；默认值只在创建新状态时给出。文件不存在时创建新状态；文件存在但读不了、版本不符或内容非法时不删除、不覆盖、不清理信封，App 显示"本地数据损坏"错误屏（带异常摘要，不提供自动重置），收发邮件的 Worker 不运行。
 - **timeline**：首页即 timeline，按 seq 倒序列出本设备的请求卡片（配对、导入、撤回），Control 的回复挂在卡片下方。卡片状态：待发送、已发送、已收到·等待写入、已导入、失败、已放弃；点开查看详情（站点、数量、各事件时间、原因）。失败（`importFailed` 且 `retryable`、配对被拒后未处理的导入、发信失败）的卡片有"重试"；顶部有"同步"。发信失败的事件留在队列里，由 WorkManager 按退避自动重发。
-- **收信**：App 在前台、timeline 可见且有未完成的请求时每 60 秒用 IMAP 收一次，打开 App 与下拉刷新时立即收；有未完成请求时另有 15 分钟周期的后台任务。收到的事件按 seq 应用；乱序到达的消息解密后加密暂存，等缺口补上再应用，所以处理过的信都直接删除，收信游标只需记最大 UID。超过 30 天的导入信每天最多清理一次。等待回信时界面不显示加载动画：Control 可能长时间不在线，回复可能要一天以上。
+- **收信**：App 在前台、timeline 可见且有未完成的请求时每 60 秒用 IMAP 收一次，打开 App 与下拉刷新时立即收；有未完成请求时另有 15 分钟周期的后台任务。收到的事件按 seq 应用；乱序到达的消息解密后加密暂存，等缺口补上再应用，所以处理过的信都直接删除，收信游标只需记最大 UID。确定无效的信（头不符、附件超限、解密认证失败、信封或消息格式非法）标记删除；IMAP 读取故障和本地密钥读取失败不删除邮件，本轮收信失败，交给 Worker 重试。超过 30 天的导入信每天最多清理一次。等待回信时界面不显示加载动画：Control 可能长时间不在线，回复可能要一天以上。
 - **发件**：发送方式在设置里选择（时间窗口或连续操作，见"合并与重传"）；时间窗口模式用 WorkManager 的唯一任务实现，需要网络时才运行。
 
 构建：`android/` 是独立 Gradle 工程（wrapper 自带），需要 `JAVA_HOME`（Android Studio 自带 JBR）与 `ANDROID_HOME`。内置邮箱账户写在不入库的 `android/mailbox.properties`（SMTP 与 IMAP 各自的主机、端口、用户名和密码，格式见 `mailbox.properties.example`），部署配置为不入库的 `android/deployment.json`（见 `deployment.json.example`）；缺失时仍可构建，但 App 提示未内置相应配置。

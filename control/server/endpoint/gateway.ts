@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { RetryUnit } from '../../shared/retry-unit';
 import {
   canonical,
   validateDesired,
@@ -42,6 +43,7 @@ export class EndpointSnapshotError extends RemoteKitError {
     super(error.code, error.message, {
       detail: error.detail,
       reason: error.reason,
+      capacity: error.capacity,
       retryAfterMs: error.retryAfterMs,
       errorId: error.errorId,
       cause: error,
@@ -55,9 +57,25 @@ export class EndpointGateway {
   private readonly clipboardSent = new Map<string, string>();
   private readonly stale = new Set<string>();
   private readonly publishing = new Map<string, Promise<SessionDesired | undefined>>();
-  private readonly publicationFailures = new Set<string>();
+  private readonly publicationRetries = new Map<string, RetryUnit>();
   private scheduled = false;
-  private retry?: NodeJS.Timeout;
+  private publicationRetry(tenant: string) {
+    let unit = this.publicationRetries.get(tenant);
+    if (!unit) {
+      unit = new RetryUnit({
+        failed: (error) =>
+          log.warn('session.publication_failed', {
+            tenant,
+            code: error.code,
+            errorId: error.errorId,
+            err: error,
+          }),
+        recovered: () => log.info('session.publication_recovered', { tenant }),
+      });
+      this.publicationRetries.set(tenant, unit);
+    }
+    return unit;
+  }
   constructor(
     readonly nodes: NodeRegistry,
     readonly placement: Pick<
@@ -164,9 +182,14 @@ export class EndpointGateway {
     this.desiredSource = source;
     this.clipboardSource = clipboardSource;
     if (!source) {
-      clearTimeout(this.retry);
+      for (const unit of this.publicationRetries.values()) unit.close();
+      this.publicationRetries.clear();
       this.stale.clear();
     }
+  }
+  async close() {
+    this.setDesiredSource();
+    await Promise.allSettled(this.publishing.values());
   }
   observation(tenant: string): SessionObserved | undefined {
     const placed = this.placement.peek(tenant);
@@ -206,8 +229,10 @@ export class EndpointGateway {
         let latest: SessionDesired | undefined;
         while (this.stale.has(tenant) && this.desiredSource) {
           if (!this.isReady(tenant)) return;
-          this.stale.delete(tenant);
           let desired = this.desiredSource(tenant);
+          const unit = this.publicationRetry(tenant);
+          if (!unit.ready(canonical(desired))) return;
+          this.stale.delete(tenant);
           const placed = this.placement.peek(tenant)!;
           const node = this.nodes.get(placed.nodeId);
           if (node?.state.state !== 'ready') {
@@ -253,7 +278,7 @@ export class EndpointGateway {
             await node.publish(desired);
             this.sent.set(tenant, key);
           }
-          if (this.publicationFailures.delete(tenant)) log.warn('session.publication_recovered', { tenant });
+          unit.succeed();
           latest = desired;
         }
         return latest;
@@ -264,7 +289,12 @@ export class EndpointGateway {
       })
       .finally(() => {
         this.publishing.delete(tenant);
-        if (this.desiredSource && !this.retry && this.stale.has(tenant) && this.isReady(tenant))
+        if (
+          this.desiredSource &&
+          this.publicationRetry(tenant).state.phase === 'idle' &&
+          this.stale.has(tenant) &&
+          this.isReady(tenant)
+        )
           this.invalidate(tenant);
       });
     this.publishing.set(tenant, work);
@@ -272,17 +302,11 @@ export class EndpointGateway {
   }
   private publicationFailed(tenant: string, err: unknown) {
     this.stale.add(tenant);
-    if (this.isReady(tenant) && !this.publicationFailures.has(tenant)) {
-      this.publicationFailures.add(tenant);
-      log.warn('session.publication_failed', { tenant, err });
-    }
-    if (!this.retry) {
-      this.retry = setTimeout(() => {
-        this.retry = undefined;
-        for (const tenant of this.stale) void this.publishTenant(tenant);
-      }, 1000);
-      this.retry.unref();
-    }
+    const unit = this.publicationRetry(tenant);
+    unit.fail(convertEndpointError(err));
+    unit.schedule(() => {
+      if (this.desiredSource) void this.publishTenant(tenant);
+    });
   }
   async published(tenant: string, timeoutMs = 20000): Promise<SessionDesired> {
     this.invalidate(tenant);
@@ -297,7 +321,7 @@ export class EndpointGateway {
           );
         }),
       ]);
-      if (!desired) throw this.unavailable(tenant);
+      if (!desired) throw this.publicationRetry(tenant).error ?? this.unavailable(tenant);
       return desired;
     } finally {
       clearTimeout(timer);
@@ -461,11 +485,7 @@ export class EndpointGateway {
     const value = this.observation(tenant);
     if (!value) throw new RemoteKitError('unavailable', 'Session has not been observed');
     const node = this.nodes.get(this.placement.peek(tenant)!.nodeId);
-    if (
-      node &&
-      value.lastError?.reason === 'output_failed' &&
-      /allocat|out of memory/i.test(value.lastError.message)
-    )
+    if (node && value.lastError?.code === 'unavailable' && value.stats.allocationPressure === true)
       node.allocationFailedAt ??= Date.now();
     return {
       running: value.browser === 'running',

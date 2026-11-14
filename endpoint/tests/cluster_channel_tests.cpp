@@ -2,6 +2,7 @@
 #include "cluster/node_files.hpp"
 #include <windows.h>
 #include <atomic>
+#include <condition_variable>
 #include <future>
 #include <iostream>
 #include <stdexcept>
@@ -43,6 +44,82 @@ std::pair<std::unique_ptr<Carrier>, std::unique_ptr<Carrier>> Pair() {
   Check(CreatePipe(&ar, &bw, nullptr, 65536) != FALSE);
   Check(CreatePipe(&br, &aw, nullptr, 65536) != FALSE);
   return {HandleCarrier(ar, aw), HandleCarrier(br, bw)};
+}
+std::span<const uint8_t> BytesOf(const std::string& text) {
+  return {reinterpret_cast<const uint8_t*>(text.data()), text.size()};
+}
+void DuplicateReleaseKeys() {
+  for (const auto& text : {R"({"type":"node.release","release":{"build":"a","build":"b"}})",
+                           R"({"type":"node.release","release":{"files":{"a":1,"\u0061":2}}})",
+                           R"({"items":[{"name":"a","name":"b"}]})"}) {
+    const std::string payload(text);
+    auto [a, b] = Pair();
+    auto responder = std::async(std::launch::async, [b = std::move(b), payload]() mutable {
+      Noise noise(Role::kResponder, TestKey());
+      Take(noise.Read(Take(b->Receive(2s))));
+      Take(b->Send(Take(noise.Write(BytesOf(payload)))));
+      return std::move(b);
+    });
+    auto connected = ConnectCarrier(std::move(a), TestKey(), PublicKey(TestKey()),
+                                    {"updater", "test-node", "dev", {}});
+    Check(!connected && connected.error().code == ErrorCode::kInternal);
+    auto peer = responder.get();
+    peer->Close();
+    Bytes frame{1};
+    frame.insert(frame.end(), payload.begin(), payload.end());
+    auto decoded = DecodeFrame(frame);
+    Check(!decoded && decoded.error().code == ErrorCode::kInvalidRequest);
+    auto header = EncodeLength(static_cast<uint32_t>(payload.size()));
+    Bytes binary{2};
+    binary.insert(binary.end(), header.begin(), header.end());
+    binary.insert(binary.end(), payload.begin(), payload.end());
+    Check(!DecodeFrame(binary));
+  }
+  const std::string distinct = R"({"items":[{"name":"a"},{"name":"b"}]})";
+  Check(bool(DecodeJson(BytesOf(distinct))));
+  auto [a, b] = Pair();
+  auto responder = std::async(std::launch::async, [b = std::move(b)]() mutable {
+    Noise noise(Role::kResponder, TestKey());
+    Take(noise.Read(Take(b->Receive(2s))));
+    const std::string ready = R"({"type":"node.ready"})";
+    Take(b->Send(Take(noise.Write(BytesOf(ready)))));
+    return std::pair{std::move(b), Take(noise.Split())};
+  });
+  auto connected = Take(ConnectCarrier(std::move(a), TestKey(), PublicKey(TestKey()),
+                                       {"updater", "test-node", "dev", {}}));
+  auto [peer, keys] = responder.get();
+  CipherState encrypt(keys.send);
+  const std::string payload = R"({"type":"node.release","release":{"build":1,"build":2}})";
+  Bytes frame{1};
+  frame.insert(frame.end(), payload.begin(), payload.end());
+  Take(peer->Send(Take(encrypt.Encrypt(frame))));
+  auto rejected = connected.channel->Receive(2s);
+  Check(!rejected && rejected.error().code == ErrorCode::kInvalidRequest);
+  connected.channel->Close();
+  peer->Close();
+}
+void CloseWakesReceiver() {
+  for (unsigned attempt = 0; attempt < 30; ++attempt) {
+    auto [a, b] = Pair();
+    auto responder = std::async(std::launch::async, [&] {
+      return AcceptCarrier(std::move(b), TestKey(), [](const Json&, const Key&) -> Result<Json> {
+        return Json{{"type", "node.ready"}};
+      });
+    });
+    auto connected = Take(ConnectCarrier(std::move(a), TestKey(), PublicKey(TestKey()),
+                                         {"updater", "test-node", "dev", {}}));
+    auto peer = Take(responder.get());
+    std::promise<void> receiving;
+    auto received = std::async(std::launch::async, [&] {
+      receiving.set_value();
+      return connected.channel->Receive(2s);
+    });
+    receiving.get_future().wait();
+    connected.channel->Close();
+    Check(received.wait_for(1s) == std::future_status::ready);
+    Check(!received.get());
+    peer.channel->Close();
+  }
 }
 class Tamper final : public Carrier {
  public:
@@ -244,6 +321,18 @@ void HeartbeatSilence() {
                                   {"endpoint", "test-node", "dev", std::string(32, '1')}));
   auto resp = Take(responder.get());
   dropper->drop = true;
+  // Keep the initiator's receive path alive so its own silence deadline cannot
+  // close the responder before the responder records its timeout.
+  std::jthread keepalive([&](std::stop_token stop) {
+    std::mutex mutex;
+    std::condition_variable_any wake;
+    std::unique_lock lock(mutex);
+    while (!stop.stop_requested()) {
+      if (!resp.channel->Send({{"type", "node.pong"}}))
+        return;
+      wake.wait_for(lock, stop, 5s, [] { return false; });
+    }
+  });
   Check(!resp.channel->Receive(47s));
   const auto cause = resp.channel->Cause();
   Check(cause.reason == "heartbeat_silence" && cause.detail.at("silentMs") >= 45000);
@@ -251,7 +340,14 @@ void HeartbeatSilence() {
 }  // namespace
 int main(int argc, char** argv) {
   try {
+    if (argc == 2 && std::string_view(argv[1]) == "review") {
+      DuplicateReleaseKeys();
+      CloseWakesReceiver();
+      return 0;
+    }
     if (argc == 1) {
+      DuplicateReleaseKeys();
+      CloseWakesReceiver();
       NativeTests();
       CarrierBackpressure(false);
       CarrierBackpressure(true);

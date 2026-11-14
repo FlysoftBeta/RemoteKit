@@ -18,10 +18,10 @@ class SessionCoordinator {
     std::function<Result<void>(const Json&)> views;
     std::function<Result<Json>(const Json&)> stop;
     std::function<Result<Json>()> observe;
-    std::function<void()> maintain;
+    std::function<Result<void>()> maintain;
     // Drains queued Viewer channel traffic. Runs on Signal() without the full
     // convergence and maintenance pass; maintain() covers it on its cadence.
-    std::function<void()> signals;
+    std::function<Result<void>()> signals;
     std::function<Result<void>(const Json&, uint64_t)> admit;
     std::function<Result<Json>(const Json&, uint64_t)> request;
     std::function<Result<void>(const Json&, uint64_t)> replay;
@@ -50,9 +50,12 @@ class SessionCoordinator {
                        const std::function<Result<Json>()>& commit);
   Json Latest() const;
   Result<Json> Report();
+  Result<Json> SetFenceError(std::optional<Error> error);
   const Json& Target() const { return target_; }
 
  private:
+  friend class NativeRetryOwnerProbe;
+  void FlushSignals(const std::string& input);
   struct Scope {
     std::string connection, node_revision;
     uint64_t generation = 0;
@@ -79,6 +82,11 @@ class SessionCoordinator {
   std::atomic<uint64_t>& observation_sequence_;
   bool converged_ = false, observation_oversize_ = false;
   std::optional<Error> error_;
+  std::optional<Error> fence_error_;
+  RetryUnit convergence_retry_{"session.convergence"};
+  RetryUnit maintenance_retry_{"session.maintenance"};
+  RetryUnit observation_retry_{"session.observation"};
+  RetryUnit signals_retry_{"session.signals"};
   std::chrono::steady_clock::time_point last_sent_{};
   std::string last_encoded_;
   std::thread worker_;

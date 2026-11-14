@@ -304,8 +304,9 @@ Result<Json> DownloadStore::Load() {
   std::lock_guard lock(db_.mutex_);
   RK_ASSIGN_OR_RETURN(
       statement,
-      db_.db_.Prepare("SELECT event_id,incarnation,download,result,attempt,error,retry_at FROM "
-                      "download_imports ORDER BY rowid"));
+      db_.db_.Prepare(
+          "SELECT event_id,incarnation,download,result,attempt,error,retry_at,retry FROM "
+          "download_imports ORDER BY rowid"));
   Json records = Json::array();
   for (;;) {
     RK_ASSIGN_OR_RETURN(row, statement.Step());
@@ -316,7 +317,7 @@ Result<Json> DownloadStore::Load() {
       return CorruptRecord("invalid download_imports.download");
     Json value = {
         {"eventId", statement.Text(0)}, {"incarnation", statement.Text(1)}, {"download", download}};
-    for (const auto [column, name] : {std::pair{3, "result"}, {5, "error"}}) {
+    for (const auto [column, name] : {std::pair{3, "result"}, {5, "error"}, {7, "retry"}}) {
       if (!statement.IsNull(column)) {
         auto document = Json::parse(statement.Text(column), nullptr, false);
         if (document.is_discarded())
@@ -340,11 +341,11 @@ Result<void> DownloadStore::Save(const Json& state) {
     RK_RETURN_IF_ERROR(db_.db_.Execute("DELETE FROM download_imports"));
     for (const auto& row : state.at("records")) {
       RK_ASSIGN_OR_RETURN(statement,
-                          db_.db_.Prepare("INSERT INTO download_imports VALUES(?,?,?,?,?,?,?)"));
+                          db_.db_.Prepare("INSERT INTO download_imports VALUES(?,?,?,?,?,?,?,?)"));
       RK_RETURN_IF_ERROR(statement.Bind(1, row.at("eventId").get<std::string>()));
       RK_RETURN_IF_ERROR(statement.Bind(2, row.at("incarnation").get<std::string>()));
       RK_RETURN_IF_ERROR(statement.Bind(3, row.at("download").dump()));
-      for (const auto [column, name] : {std::pair{4, "result"}, {6, "error"}}) {
+      for (const auto [column, name] : {std::pair{4, "result"}, {6, "error"}, {8, "retry"}}) {
         if (row.contains(name)) {
           RK_RETURN_IF_ERROR(statement.Bind(column, row.at(name).dump()));
         } else {
@@ -360,6 +361,19 @@ Result<void> DownloadStore::Save(const Json& state) {
       }
       RK_RETURN_IF_ERROR(Done(statement));
     }
+    return {};
+  });
+}
+Result<void> DownloadStore::SaveFailure(const Json& state,
+                                        const Json& failure,
+                                        const std::string& event_id,
+                                        const std::string& incarnation) {
+  return db_.Write([&]() -> Result<void> {
+    RK_RETURN_IF_ERROR(Save(state));
+    auto body = failure;
+    body.erase("type");
+    body.erase("eventId");
+    RK_ASSIGN_OR_RETURN(event, db_.Events().Append("download.failed", body, event_id, incarnation));
     return {};
   });
 }

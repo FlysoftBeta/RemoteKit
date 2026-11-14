@@ -7,10 +7,12 @@ export class ViewerErrorReports {
   private readonly reported = new WeakSet<Error>();
 
   identify(error: RemoteKitError, context: Record<string, unknown>) {
-    if (error.errorId) return error;
-    const bytes = new Uint8Array(5);
-    globalThis.crypto.getRandomValues(bytes);
-    error.errorId = 'v-' + Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    if (error.errorId && !error.errorId.startsWith('v-')) return error;
+    if (!error.errorId) {
+      const bytes = new Uint8Array(5);
+      globalThis.crypto.getRandomValues(bytes);
+      error.errorId = 'v-' + Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    }
     if (!this.reported.has(error)) {
       this.reported.add(error);
       const source = error.cause instanceof Error ? error.cause : error;

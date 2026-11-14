@@ -1,30 +1,12 @@
 #pragma once
 #include "remotekit_sdk.h"
-#include "util/error.hpp"
+#include "util/sdk_error.hpp"
+#include "util/log.hpp"
 #include "remotekit_rtc.h"
 #include <windows.h>
 #include <filesystem>
 #include <stdexcept>
 namespace remotekit::media {
-inline ErrorCode SdkErrorCode(int status) {
-  switch (status) {
-    case REMOTEKIT_SDK_INVALID_ARGUMENT:
-      return ErrorCode::kInternal;
-    case REMOTEKIT_SDK_INVALID_STATE:
-    case REMOTEKIT_SDK_MOJO_ERROR:
-    case REMOTEKIT_SDK_CHANNEL_CLOSED:
-      return ErrorCode::kUnavailable;
-    case REMOTEKIT_SDK_DATA_MISMATCH:
-    case REMOTEKIT_SDK_TIMEOUT:
-    case REMOTEKIT_SDK_LOST:
-    case REMOTEKIT_SDK_BUFFER_TOO_SMALL:
-      return ErrorCode::kOutcomeUnknown;
-    case REMOTEKIT_SDK_BUSY:
-      return ErrorCode::kBusy;
-    default:
-      return ErrorCode::kInternal;
-  }
-}
 inline Error SdkFailure(int status, const remotekit_sdk_failure& failure) {
   if (status != REMOTEKIT_SDK_REFUSED)
     return {SdkErrorCode(status), "Browser SDK status " + std::to_string(status)};
@@ -125,8 +107,17 @@ struct Sdk {
   }
   ~Sdk() {
     if (module) {
-      if (remotekit_sdk_shutdown)
-        remotekit_sdk_shutdown();
+      if (!remotekit_sdk_shutdown) {
+        LogError(LogLevel::kError, "sdk.shutdown_unknown",
+                 {ErrorCode::kInternal, "SDK shutdown unavailable; module retained"});
+        return;
+      }
+      const auto status = remotekit_sdk_shutdown();
+      if (status != 0) {
+        LogError(LogLevel::kError, "sdk.shutdown_unknown",
+                 {SdkErrorCode(status), "SDK shutdown incomplete; module retained"});
+        return;
+      }
       FreeLibrary(module);
     }
   }

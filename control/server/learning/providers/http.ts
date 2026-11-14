@@ -1,6 +1,6 @@
 import { log } from '../../log';
 import { createHash } from 'node:crypto';
-import { retryDelay } from '../../../shared/error-policy.js';
+import { RetryUnit } from '../../../shared/retry-unit.js';
 import { RemoteKitError } from '../../../shared/errors.js';
 import { providerEndpoint } from './endpoint.js';
 
@@ -8,7 +8,6 @@ export interface HttpOptions {
   fetch?: typeof globalThis.fetch;
   timeoutMs?: number;
   maxRetries?: number;
-  retryBaseMs?: number;
 }
 
 export const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -84,7 +83,6 @@ export function parseRetryAfter(value: string | null, now = Date.now()): number 
 export class HttpClient {
   private readonly fetchImpl: typeof globalThis.fetch;
   readonly maxRetries: number;
-  readonly retryBaseMs: number;
   readonly timeoutMs: number;
 
   constructor(
@@ -94,10 +92,10 @@ export class HttpClient {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.timeoutMs = options.timeoutMs ?? 20_000;
     this.maxRetries = options.maxRetries ?? 3;
-    this.retryBaseMs = options.retryBaseMs ?? 1000;
   }
 
   async response(url: string | URL, init: RequestInit = {}, retries = this.maxRetries): Promise<Response> {
+    const unit = new RetryUnit();
     for (let attempt = 0; ; attempt += 1) {
       if (init.signal?.aborted) throw new RemoteKitError('canceled', '');
       try {
@@ -111,7 +109,9 @@ export class HttpClient {
           try {
             const value = await response.clone().json();
             message = value.msg ?? value.message ?? value.errorInfo ?? response.statusText;
-          } catch {}
+          } catch {
+            message = response.statusText;
+          }
           this.logRejection(url, init, response.status, message);
         }
         if (response.status === 401) {
@@ -145,6 +145,7 @@ export class HttpClient {
             '学习服务请求失败',
           );
         }
+        unit.succeed();
         return response;
       } catch (error) {
         const read =
@@ -161,9 +162,10 @@ export class HttpClient {
             : new RemoteKitError(read ? 'unavailable' : 'outcome_unknown', '学习服务连接失败或超时', {
                 detail: String(error),
               });
-        const wait = retryDelay(failure, attempt);
+        if (!read || retries === 0) throw failure;
+        const wait = unit.fail(failure).delay;
         if (!read || wait === undefined || attempt >= retries) throw failure;
-        await delay(failure.retryAfterMs ?? (wait * this.retryBaseMs) / 1000);
+        await unit.wait(init.signal ?? undefined);
       }
     }
   }
@@ -216,7 +218,9 @@ export class HttpClient {
         const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
         collect(payload);
         if (typeof payload.sub === 'string') collect(JSON.parse(payload.sub));
-      } catch {}
+      } catch {
+        collect(token);
+      }
     }
     for (const value of address.searchParams.values()) collect(value);
     if (typeof init.body === 'string') {
@@ -244,17 +248,16 @@ export class HttpClient {
   }
 
   async retry<T>(run: () => Promise<T>, read = true): Promise<T> {
+    const unit = new RetryUnit();
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await run();
+        const result = await run();
+        unit.succeed();
+        return result;
       } catch (error) {
-        const wait = error instanceof RemoteKitError ? retryDelay(error, attempt) : undefined;
-        if (!read || wait === undefined || attempt >= this.maxRetries) throw error;
-        await delay(
-          error instanceof RemoteKitError && error.retryAfterMs !== undefined
-            ? wait
-            : (wait * this.retryBaseMs) / 1000,
-        );
+        const failure = unit.fail(error);
+        if (!read || failure.delay === undefined || attempt >= this.maxRetries) throw error;
+        await unit.wait();
       }
     }
   }

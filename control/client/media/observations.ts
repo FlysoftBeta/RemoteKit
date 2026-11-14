@@ -1,3 +1,4 @@
+import { RetryUnit } from '../../shared/retry-unit';
 import { endpointError } from '../../shared/errors';
 import { ViewerAudioOutput } from './audio-output';
 import { CaptureLatency } from './capture-latency';
@@ -27,6 +28,30 @@ import type { EndpointChannel } from '../rtc/endpoint-channel';
 import type { RtcSession } from '../rtc/rtc-session';
 
 export class MediaObservations {
+  failures() {
+    const peer = this.ports.rtc.peer;
+    return [
+      peer && this.statsRetries.get(peer)?.error,
+      peer && this.feedbackRetries.get(peer)?.error,
+      this.endpointClockProbe.failure,
+      this.controlClockProbe.failure,
+    ].filter((error) => !!error);
+  }
+  private readonly statsRetries = new WeakMap<RTCPeerConnection, RetryUnit>();
+  private readonly feedbackRetries = new WeakMap<RTCPeerConnection, RetryUnit>();
+  private readonly pendingFeedback = new WeakMap<
+    RTCPeerConnection,
+    NonNullable<ReturnType<CaptureLatency['report']>> & { displayHzEstimate?: number }
+  >();
+  private retryFor(units: WeakMap<RTCPeerConnection, RetryUnit>, peer: RTCPeerConnection) {
+    let unit = units.get(peer);
+    if (!unit) {
+      unit = new RetryUnit();
+      units.set(peer, unit);
+    }
+    return unit;
+  }
+
   constructor(
     private readonly ports: {
       rtc: Pick<RtcSession, 'peer' | 'controlRpc' | 'attempt'>;
@@ -275,6 +300,8 @@ export class MediaObservations {
 
   async readStats(peer: RTCPeerConnection) {
     if (peer !== this.ports.rtc.peer || this.statsReadingPeer === peer) return;
+    const retry = this.retryFor(this.statsRetries, peer);
+    if (!retry.ready()) return;
     this.statsReadingPeer = peer;
     const mediaRevision = this.mediaDiagnosticsRevision;
     try {
@@ -403,9 +430,10 @@ export class MediaObservations {
         )
           this.ports.endpoint.sendChannel(this.ports.endpoint.channel, feedback);
       }
+      retry.succeed();
       this.productionFeedback(peer);
     } catch (error) {
-      diagnostics.record('media-stats', error);
+      if (peer === this.ports.rtc.peer && mediaRevision === this.mediaDiagnosticsRevision) retry.fail(error);
     } finally {
       if (this.statsReadingPeer === peer) this.statsReadingPeer = undefined;
     }
@@ -430,20 +458,29 @@ export class MediaObservations {
               (value as { serverTime: number }).serverTime,
             );
         })
-        .catch((error) => diagnostics.record('control-clock', error));
+        .catch((error) => this.controlClockProbe.fail(ping.requestId, error));
     }
-    if (this.feedbackReading) return;
-    const report = this.latency.report(
-      now,
-      Date.now(),
-      document.visibilityState === 'visible',
-      this.controlClock,
-    );
+    const retry = this.retryFor(this.feedbackRetries, peer);
+    if (this.feedbackReading || !retry.ready()) return;
+    const retained = retry.error?.code === 'outcome_unknown' ? this.pendingFeedback.get(peer) : undefined;
+    const report =
+      retained ??
+      this.latency.report(now, Date.now(), document.visibilityState === 'visible', this.controlClock);
     if (!report) return;
     this.update({ presentationEstimate: report });
     this.feedbackReading = true;
-    void rpc('feedback', { ...report, displayHzEstimate: this.displayHzEstimate })
-      .catch((error) => diagnostics.record('media-feedback', error))
+    const payload = retained ?? { ...report, displayHzEstimate: this.displayHzEstimate };
+    this.pendingFeedback.set(peer, payload);
+    void rpc('feedback', payload)
+      .then(() => {
+        if (attempt !== this.ports.rtc.attempt || peer !== this.ports.rtc.peer) return;
+        this.pendingFeedback.delete(peer);
+        retry.succeed();
+      })
+      .catch((error) => {
+        if (attempt !== this.ports.rtc.attempt || peer !== this.ports.rtc.peer) return;
+        retry.fail(error);
+      })
       .finally(() => {
         if (attempt === this.ports.rtc.attempt) this.feedbackReading = false;
       });
@@ -457,7 +494,7 @@ export class MediaObservations {
       try {
         this.ports.endpoint.sendChannel(channel, ping);
       } catch (error) {
-        diagnostics.record('endpoint-clock', error);
+        this.endpointClockProbe.fail(ping.requestId, error);
       }
     }
   }

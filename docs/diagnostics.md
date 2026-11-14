@@ -16,7 +16,7 @@
 
 日志不在 Session 目录里，checkpoint 不需要排除它们；Session 被删除或冷副本被清理时，它在 `logs/browser/`、`logs/crashes/` 下的文件一起删除。
 
-**按错误 ID 查找**：`internal`、`outcome_unknown`、`unavailable` 离开产生它的进程时带一个错误 ID，记录完整诊断的那条日志带同一个 ID（见[架构 · 错误模型](architecture.md#错误模型)）。管理 App → 诊断输入 ID：`c-` 在 Control 的 `control.jsonl` 及轮转文件里找，`e-` 向每个就绪节点发 `node.logs.search`（5 秒期限，查不到的节点单独列出），最多各 50 条。
+**按错误 ID 查找**：`internal`、`outcome_unknown`、`unavailable` 离开产生它的进程时带一个错误 ID，记录完整诊断的那条日志带同一个 ID（见[错误模型](errors.md)）。管理 App → 诊断输入 ID：`c-` 在 Control 的 `control.jsonl` 及轮转文件里找，`e-` 向每个就绪节点发 `node.logs.search`（5 秒期限，查不到的节点单独列出），最多各 50 条。
 
 ## 用户侧诊断收集
 
@@ -44,7 +44,7 @@
 
 身份关联：Browser PID + generation + slot + value；Endpoint frame cookie（跨代唯一）与源内容身份；发布回调返回的实际 wire RTP；输入用 peer + client sequence + browser sequence。Endpoint 的 QPC、SDK TimeTicks 与 UTC 通过括号式校准关联；客户端↔Endpoint 的时钟估计与客户端↔Control 的时钟估计是两件事（媒体和触控直接对 Endpoint 做 `clock.ping`，Control 的时钟只用于产品新鲜度）。
 
-`tools/measure/` 下是当前的性能测量工具：多租户调度实验台 schedlab（见下文）、OSR 视频 profile（隔离的服务 + 固定测试页 + marker + 原生输入）、汇总脚本、服务端 trace 分析、资源采样（按 LUID/物理适配器/引擎分组的 PDH GPU 计数）、ETW 录制、显示状态探测、画质对比（CRC 校验后的 RGB 误差/PSNR）。
+`tools/measure/` 下是当前的性能测量工具：多租户调度实验台 schedlab（见下文）、OSR 视频 profile（隔离的服务 + 固定测试页 + marker + 原生输入）、汇总脚本、服务端 trace 分析、资源采样（按 LUID/物理适配器/引擎分组的 PDH GPU 计数；按 PID + 创建时间识别进程，退出的进程连同计数基线移除；采集脚本从 `service.json` 读 `controlPid`/`supervisorPid`）、ETW 录制（辅助清单只记录 PID、父 PID、可执行文件名与创建时间，不记录命令行）、显示状态探测、画质对比（CRC 校验后的 RGB 误差/PSNR）。
 
 ## 测量方法
 
@@ -86,7 +86,7 @@
 
 **结构**：原生的 `schedlab.exe`（随 Endpoint 构建，不进发布包）只链接 `endpoint_media`。每个租户由它直接经 SDK 启动 Browser、建 view 与单视图 atlas 输出、建 RTC peer，再用产品同一份 `CompEngine`、`EncoderSet`、`RenderSlots` 驱动；所有租户共享一个按适配器的 `FrameAdmission`。实验台自己的 `CompHost` 只做最少的事：atlas 元数据变化时递增 layout epoch，刷新作用域取 peer，失效只记录。因此要比较的方案就是工作树里的代码改动，实验台本身没有实验开关；`run.json` 记录 commit、dirty 状态、二进制与实际加载的 DLL 的 hash，用来确认比较的是哪两个版本。
 
-**负载**：夹具页按统一的 t0 开始，每个租户一种：`S<周期秒>` 平滑滚动、`U<次/秒>` 内容更新、`V` 播放视频、`static`。滚动开始时运行器向实验台发 `activity`，走 `CompEngine::InputReceived`，所以准入的交互优先级与产品同一路径，只是没有真实输入链路。视频由 `schedlab.exe make-video` 用 Windows Media Foundation 的系统 H264 编码器按帧号确定性生成（1920×1080、60fps、60 秒、约 20Mbps、High、GOP 2 秒；画面是平移的纹理地形、运动物体、细节滚动带与帧号），缺失时自动生成到 `develop/tmp/schedlab/assets/video.mp4`，不入库。
+**负载**：夹具页按统一的 t0 开始，每个租户一种：`S<周期秒>` 平滑滚动、`U<次/秒>` 内容更新、`V` 播放视频、`static`。滚动开始时运行器向实验台发 `activity`，走 `CompEngine::InputReceived`，所以准入的交互优先级与产品同一路径，只是没有真实输入链路。视频由 `schedlab.exe make-video` 用 Windows Media Foundation 的系统 H264 编码器按帧号确定性生成（1920×1080、60fps、60 秒、约 20Mbps、High、GOP 2 秒；画面是平移的纹理地形、运动物体、细节滚动带与帧号），缺失时自动生成到 `develop/tmp/schedlab/assets/video.mp4`，不入库。夹具的图片解码或视频播放失败经 `fixtureError` 使运行失败，`fixtureReady` 只在初始化成功后发出。
 
 **接收端**：同机的一个无头 Edge（或 Chrome 89），每租户一页，经 `kit/browser.mjs` 启动，关闭硬件视频解码，避免与被测的编码争用视频引擎。Worker 里的 encoded transform（Chrome 89 用 encoded insertable streams）记录每个编码帧的到达时间与 RTP。
 
@@ -104,6 +104,6 @@ node tools/measure/schedlab/matrix.mjs --geometries F,T --tenants 1,5
 node tools/measure/schedlab/compare.mjs <run 或 matrix 目录> <run 或 matrix 目录>
 ```
 
-`--geometry` 取 `F`（1920×1080@1）、`T`（1280×800@2）或 `<宽>x<高>@<DPR>`；`--tenants N` 用默认组合；默认预热 10 秒。开始前等所选适配器空闲（3D < 0.5%、视频解码/处理 < 0.1%，连续 3 个 1 秒样本；计数缺失不算空闲），所以一次运行的总时长是空闲门禁、启动、预热、测量、收尾与汇总之和，明显长于 `--duration`。输出在 `develop/tmp/schedlab/<UTC 时间>-<标签>/`（`run.json`、`summary.json`、`summary.md`）；结束时无论成败都关闭自己启动的进程、删除接收端 Profile 与各 Browser 数据目录，原始 trace 在汇总后删除（`--keep-traces` 保留）。计时测量独占 GPU，不与构建或其他实验并行。
+`--geometry` 取 `F`（1920×1080@1）、`T`（1280×800@2）或 `<宽>x<高>@<DPR>`；`--tenants N` 用默认组合；默认预热 10 秒。开始前等所选适配器空闲（3D < 0.5%、视频解码/处理 < 0.1%，连续 3 个 1 秒样本；计数缺失不算空闲），所以一次运行的总时长是空闲门禁、启动、预热、测量、收尾与汇总之和，明显长于 `--duration`。输出在 `develop/tmp/schedlab/<UTC 时间>-<标签>/`（`run.json`、`summary.json`、`summary.md`）；结束时无论成败都关闭自己启动的进程、删除接收端 Profile 与各 Browser 数据目录，运行与汇总都成功后才删除原始 trace（`--keep-traces` 保留），失败的运行保留全部原始记录。`compare.mjs` 只比较工况键（geometry、租户数、workload mix）一致的记录，找不到匹配的基线即报错。浏览器会自我重启（启动的 msedge.exe 拉起真正的浏览器后退出），所以清理按本次运行自己的 Profile 目录在命令行里找进程树并结束，不只按启动时的 PID；整个运行另有一个按预热与测量时长加 15 分钟算出的看门狗，超时即结束自己拥有的进程并以非零退出，结束后进程显式退出，不会因为子进程遗留的句柄一直挂着。计时测量独占 GPU，不与构建或其他实验并行。
 
 **局限**：没有 Viewer 解码与呈现、没有网络整形、接收端与被测服务同机；跨机器的结论仍要用真实栈确认。

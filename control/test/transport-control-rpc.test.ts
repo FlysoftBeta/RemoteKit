@@ -164,8 +164,8 @@ test('stopping an establishing peer closes a late answer and prevents retries', 
   assert.deepEqual(closed, [{ connectionId: 'connection' }]);
 });
 
-test('RTC continues automatically at a capped cadence and disconnect stops recovery', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+test('RTC uses shared availability backoff and disconnect stops recovery', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const { rtc } = environment(t);
   let offers = 0;
   const rpc: ControlRpc = async () => {
@@ -175,7 +175,7 @@ test('RTC continues automatically at a capped cadence and disconnect stops recov
   rtc.setControlRpc(rpc);
   await rtc.connect();
   assert.equal(rtc.getSnapshot().phase, 'retryWait');
-  for (const delay of [1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000]) {
+  for (const delay of [1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000]) {
     t.mock.timers.tick(delay);
     await flush();
   }
@@ -189,7 +189,7 @@ test('RTC continues automatically at a capped cadence and disconnect stops recov
 });
 
 test('connected peers reset the outage budget and stopped sessions ignore delayed recovery', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const { rtc, peers } = environment(t);
   let offers = 0;
   rtc.setControlRpc(async (method) => {

@@ -10,9 +10,8 @@ import { type Layout, type Surface, type VideoPresentation } from './types';
 import { VideoPlane } from './video-plane';
 import { barrierMatchesLayout, presentationBarrier, type PresentationBarrier } from './video-presentation';
 
-import { retryDelay } from '../../shared/error-policy';
-import { RemoteKitError, type ErrorCode } from '../../shared/errors';
-import { diagnostics } from '../media/diagnostics';
+import { RetryUnit } from '../../shared/retry-unit';
+import { RemoteKitError, toRemoteKitError, type ErrorCode } from '../../shared/errors';
 import { type Incoming } from '../rtc/protocol';
 import { Events } from '../util/store';
 import type { PlaneRenderer, VideoObservation, ViewportRegistration } from './types';
@@ -121,9 +120,12 @@ export class PresentationSession {
     if (reason) this.backendState = { phase: 'unavailable', reason };
   }
 
-  private recoveryTimer?: ReturnType<typeof setTimeout>;
-  private recoveryAttempt = 0;
+  private readonly recovery = new RetryUnit({ name: 'presentation' });
+  private readonly metadataRetry = new RetryUnit({ name: 'presentation_metadata' });
   private currentFailure?: RemoteKitError;
+  get failure() {
+    return this.presentationError ?? this.metadataRetry.error;
+  }
   get presentationError() {
     if (!this.presentationErrorCode) {
       this.currentFailure = undefined;
@@ -193,12 +195,20 @@ export class PresentationSession {
       this.presentationBackend !== 'video'
     )
       return;
+    if (
+      !this.metadataRetry.ready(
+        JSON.stringify([this.ports.rtc.attempt, this.ports.authorization.peerAuthEpoch, this.layout?.epoch]),
+      )
+    )
+      return;
     this.mediaRefreshAt = performance.now();
     try {
       this.ports.endpoint.sendChannel(channel, { type: 'media.refresh' });
       this.mediaRefreshRequests++;
+      this.metadataRetry.succeed();
     } catch (error) {
-      diagnostics.record('media-refresh', error);
+      this.metadataRetry.fail(error);
+      this.mediaRefreshAt = -Infinity;
     }
   }
 
@@ -367,6 +377,10 @@ export class PresentationSession {
 
   negotiatePresentation(channel: RTCDataChannel, restart = false) {
     if (this.ports.authorization.productLocked || this.ports.authorization.peerAuthEpoch === 0) return;
+    if (
+      !this.recovery.ready(JSON.stringify([this.ports.rtc.attempt, this.ports.authorization.peerAuthEpoch]))
+    )
+      return;
     if (restart) {
       this.presentationBackend = 'pending';
       this.presentationErrorCode = undefined;
@@ -394,12 +408,17 @@ export class PresentationSession {
       this.failPresentation('video-capability-unavailable');
       return;
     }
-    this.ports.endpoint.sendChannel(channel, {
-      type: 'media.presentation',
-      version: 1,
-      backend: 'video',
-      ...(restart ? { restart: true } : {}),
-    });
+    try {
+      this.ports.endpoint.sendChannel(channel, {
+        type: 'media.presentation',
+        version: 1,
+        backend: 'video',
+        ...(restart ? { restart: true } : {}),
+      });
+    } catch (cause) {
+      this.failPresentation('presentation-protocol-unavailable', toRemoteKitError(cause));
+      return;
+    }
     clearTimeout(this.presentationNegotiationTimer);
     this.presentationNegotiationTimer = setTimeout(() => {
       if (
@@ -411,10 +430,11 @@ export class PresentationSession {
     }, 1500);
   }
 
-  private failPresentation(reason: PresentationErrorCode) {
+  private failPresentation(reason: PresentationErrorCode, failure?: RemoteKitError) {
     if (this.presentationBackend === 'unavailable') return;
     this.presentationBackend = 'unavailable';
     this.presentationErrorCode = reason;
+    if (failure) this.currentFailure = failure;
     clearTimeout(this.presentationNegotiationTimer);
     this.presentationNegotiationTimer = undefined;
     this.cancelPresentationAck();
@@ -426,18 +446,14 @@ export class PresentationSession {
     this.viewPresentations.clear();
     this.notify();
     const error = this.presentationError;
-    const delay = error && retryDelay(error, this.recoveryAttempt++);
-    if (delay !== undefined)
-      this.recoveryTimer = setTimeout(
-        () => {
-          const channel = this.ports.endpoint.channel;
-          if (channel?.readyState === 'open' && !this.ports.authorization.productLocked) {
-            this.currentFailure = undefined;
-            this.negotiatePresentation(channel, true);
-          }
-        },
-        Math.min(60_000, delay),
-      );
+    if (error) this.recovery.fail(error);
+    this.recovery.schedule(() => {
+      const channel = this.ports.endpoint.channel;
+      if (channel?.readyState === 'open' && !this.ports.authorization.productLocked) {
+        this.currentFailure = undefined;
+        this.negotiatePresentation(channel, true);
+      }
+    });
   }
 
   private videoPlaneFor(viewId: string) {
@@ -829,6 +845,7 @@ export class PresentationSession {
         clearTimeout(this.presentationNegotiationTimer);
         this.presentationNegotiationTimer = undefined;
         this.presentationBackend = 'video';
+        this.recovery.succeed();
         for (const renderer of this.renderers) this.attachVideoPlane(renderer);
         this.notify();
       }
@@ -903,9 +920,9 @@ export class PresentationSession {
   }
 
   reset() {
-    clearTimeout(this.recoveryTimer);
     this.currentFailure = undefined;
-    this.recoveryAttempt = 0;
+    this.recovery.succeed();
+    this.metadataRetry.succeed();
     clearTimeout(this.videoMetadataRefreshTimer);
     this.videoMetadataRefreshTimer = undefined;
     clearTimeout(this.presentationNegotiationTimer);

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { retryDelay } from '../../shared/error-policy';
+import { RetryUnit } from '../../shared/retry-unit';
 import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import type { LearningProvider, LearningSocketMethods } from '../../shared/learning';
 import type { ProductWorkspace } from '../../shared/product';
@@ -96,28 +96,24 @@ export class SignIn {
     this.run(this.begin(flow).catch((error) => this.finish(flow, error)));
     return { started: true as const };
   }
-  private async step<T>(flow: Flow, work: () => Promise<T>): Promise<T> {
-    let attempt = 0;
+  private async step<T>(flow: Flow, work: () => Promise<T>, read = false): Promise<T> {
+    const unit = new RetryUnit({
+      failed: (error) => log.warn('learning.step_failed', { tenant: flow.tenant, err: error }),
+      recovered: () => log.info('learning.step_recovered', { tenant: flow.tenant }),
+    });
     while (this.active(flow)) {
       try {
-        return await work();
+        const result = await work();
+        unit.succeed();
+        return result;
       } catch (value) {
         const error = toRemoteKitError(value);
-        const delay = retryDelay(error, attempt++);
-        if (delay === undefined && error.code !== 'outcome_unknown') throw error;
+        const { delay } = unit.fail(error);
+        if (delay === undefined || (error.code === 'outcome_unknown' && !read)) throw error;
         const state = this.accounts.state(flow.tenant, flow.provider);
         if (state.status === 'signing_in')
           this.accounts.setState(flow.tenant, flow.provider, { ...state, error: wireError(error) });
-        await new Promise<void>((resolve) => {
-          const done = () => {
-            clearTimeout(timer);
-            flow.abort.signal.removeEventListener('abort', done);
-            resolve();
-          };
-          const timer = setTimeout(done, Math.min(60000, delay ?? 1000 * 2 ** Math.min(attempt, 6)));
-          flow.abort.signal.addEventListener('abort', done, { once: true });
-          if (flow.abort.signal.aborted) done();
-        });
+        await unit.wait(flow.abort.signal);
       }
     }
     throw new RemoteKitError('canceled', '');
@@ -125,7 +121,7 @@ export class SignIn {
   private async begin(flow: Flow) {
     let url = 'https://www.xinjiaoyu.com/auth/login';
     if (flow.provider === 'changyan') {
-      const policy = await this.step(flow, () => this.accounts.auth.captchaPolicy());
+      const policy = await this.step(flow, () => this.accounts.auth.captchaPolicy(), true);
       if (!this.active(flow)) return;
       if (!policy.required) return this.loginChangyan(flow);
       const query = new URLSearchParams({
@@ -237,7 +233,7 @@ export class SignIn {
             secChUaMobile: field('sec-ch-ua-mobile'),
             secChUaPlatform: field('sec-ch-ua-platform'),
           };
-          const validated = await this.step(flow, () => this.bank(tenant).subjects(session));
+          const validated = await this.step(flow, () => this.bank(tenant).subjects(session), true);
           if (!this.active(flow)) return;
           this.accounts.save(
             tenant,
@@ -271,7 +267,7 @@ export class SignIn {
       flow.provider,
       error
         ? {
-            status: 'failed',
+            status: learningError(error).code === 'outcome_unknown' ? 'unknown' : 'failed',
             failureKind,
             error: wireError(
               reportError(learningError(error), 'learning.sign_in_failed', { tenant: flow.tenant }),

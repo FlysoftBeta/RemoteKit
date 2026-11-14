@@ -279,7 +279,9 @@ class FixtureLink : public ManagementLink {
     return true;
   }
   void OnDisconnect(Disconnect) override {}
-  Result<Json> Request(const std::string&, Json) override { return Json::object(); }
+  Result<Json> Request(const std::string&, Json) override {
+    return Json{{"ok", true}};
+  }
 };
 void ManagementDispatch() {
   TemporaryDirectory directory;
@@ -415,6 +417,16 @@ void EventReplayPressure() {
           "persistent replay event");
   const auto state = database.Events().State();
   Check(bool(state) && bool(database.Close()), "close replay database");
+  Check(bool(Checkpoints::WriteCopy(options.value().data / "sessions" / session_id,
+                                    {{"version", 1},
+                                     {"sessionId", session_id},
+                                     {"placementEpoch", uint64_t(1)},
+                                     {"base", nullptr},
+                                     {"state", "dirty"},
+                                     {"stoppedCleanly", true},
+                                     {"changesAt", 0},
+                                     {"lastCommit", nullptr}})),
+        "replay database belongs to a local copy");
   EventPressureLink link;
   media::Sdk sdk;
   objects::ObjectService objects(options.value().data, link, {}, "test", "dev");

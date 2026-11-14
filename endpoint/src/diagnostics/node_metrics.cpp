@@ -124,15 +124,42 @@ Json NodeMetrics::Sample(size_t sessions) {
           {"sessions", sessions},
           {"objectBytes", object_bytes}};
 }
-void NodeMetrics::Start(std::function<size_t()> sessions, std::function<void(Json)> publish) {
-  worker_ = std::thread([this, sessions = std::move(sessions), publish = std::move(publish)] {
+RetryUnit::Snapshot NodeMetrics::RetryStatus() const {
+  std::lock_guard lock(retry_mutex_);
+  return retry_;
+}
+void NodeMetrics::Publish(const std::string& input,
+                          const std::function<Json()>& sample,
+                          const std::function<Result<void>(Json)>& publish) {
+  std::lock_guard lock(retry_mutex_);
+  retry_.Input(input);
+  if (!retry_.Ready())
+    return;
+  try {
+    auto result = publish(sample());
+    if (result)
+      retry_.Success();
+    else
+      retry_.Fail(result.error());
+  } catch (const std::filesystem::filesystem_error& error) {
+    retry_.Fail(WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                            error.code().value()));
+  } catch (const std::exception& error) {
+    retry_.Fail({ErrorCode::kInternal, error.what()});
+  }
+}
+void NodeMetrics::Start(std::function<size_t()> sessions,
+                        std::function<Result<void>(Json)> publish,
+                        std::function<std::string()> input) {
+  worker_ = std::thread([this, sessions = std::move(sessions), publish = std::move(publish),
+                         input = std::move(input)] {
     RunThread(
         "node metrics",
         [&] {
           std::unique_lock lock(mutex_);
           while (!stop_) {
             lock.unlock();
-            publish(Sample(sessions()));
+            Publish(input(), [&] { return Sample(sessions()); }, publish);
             lock.lock();
             wake_.wait_for(lock, std::chrono::seconds(5), [this] { return stop_; });
           }

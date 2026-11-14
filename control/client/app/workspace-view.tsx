@@ -2,12 +2,11 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState, useSyncExtern
 import { RemoteKitError } from '../../shared/errors';
 import { BlankScreen, RevealScreen } from '../auth/lock-screen';
 import { UnlockView } from '../auth/unlock-view';
-import { appClipboard } from '../clipboard/app-clipboard';
+import { useWorkspaceClipboard } from '../clipboard/workspace-clipboard';
 import { deviceClipboard } from '../clipboard/device-clipboard';
 import { KeyboardPreferenceContext } from '../editing/local-autofocus';
 import { failureError, notices, onFailureAction, presentFailure } from '../failures';
 import { useBackgroundNotices } from '../failures/background';
-import { recover } from '../failures/recovery';
 import { FileLibraryContext, useFileLibrary, type LibraryRequest } from '../files/file-library-state';
 import { ViewerSession } from '../viewer-session';
 import type { AdminCall } from './admin/shared';
@@ -35,41 +34,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
   if (auth?.user.id) identity.current = auth.user.id;
   const { state } = operationState;
   const showShell = !!state && !localLock && auth?.locked === false;
-  useEffect(() => {
-    const scope = showShell && status === 'online' ? auth.user.id : undefined;
-    const set = (text: string) => media.control.request('clipboard.set', { text });
-    appClipboard.configure(scope, set);
-    let active = true;
-    const abort = new AbortController();
-    if (scope)
-      void recover(
-        () => media.control.request('clipboard.get', {}),
-        abort.signal,
-        (error) =>
-          notices.post(
-            'clipboard:initial',
-            presentFailure(error, { operation: '同步共享剪贴板', scope: 'global' }),
-          ),
-      )
-        .then((value) => {
-          if (active) {
-            appClipboard.receive(value);
-            notices.resolve('clipboard:initial');
-          }
-        })
-        .catch((error) => {
-          if (active)
-            notices.post(
-              'clipboard:initial',
-              presentFailure(failureError(error), { operation: '同步共享剪贴板', scope: 'global' }),
-            );
-        });
-    return () => {
-      active = false;
-      abort.abort();
-      appClipboard.configure(undefined, set);
-    };
-  }, [media, showShell, status, auth?.user.id]);
+  useWorkspaceClipboard(showShell && status === 'online' ? auth.user.id : undefined, media.control);
   useEffect(() => {
     const set = (text: string) => media.control.request('clipboard.set', { text });
     deviceClipboard.configure(

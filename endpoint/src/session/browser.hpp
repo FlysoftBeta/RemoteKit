@@ -4,6 +4,7 @@
 #include "media/adapter.hpp"
 #include "session/browser_rpc.hpp"
 #include "cluster/noise.hpp"
+#include "util/retry_unit.hpp"
 #include <map>
 #include <mutex>
 
@@ -63,12 +64,19 @@ class BrowserRuntime {
   void RestoredView(const std::string& view);
   void Presented(const std::string& view, int64_t at);
   const Json& ShutdownTiming() const { return shutdown_timing_; }
-  void ReleaseExited() { process_.ReleaseExited(); }
+  void ReleaseExited() {
+    if (shutdown_phase_ == ShutdownPhase::kDispatched && process_.WaitCleanExit(0))
+      shutdown_phase_ = ShutdownPhase::kClean;
+    process_.ReleaseExited();
+  }
   bool Alive() const { return process_.Alive(); }
   bool Exited() const { return process_.Exited(); }
   bool Present() const { return process_.Present(); }
-  bool CheckpointReady() const { return clean_shutdown_; }
-  bool Stopping() const { return process_.state() == BrowserProcess::State::kStopping; }
+  bool CheckpointReady() const { return shutdown_phase_ == ShutdownPhase::kClean; }
+  bool Stopping() const {
+    return shutdown_phase_ == ShutdownPhase::kDispatched ||
+           process_.state() == BrowserProcess::State::kStopping;
+  }
   DWORD Pid() const { return process_.Pid(); }
   std::string Diagnostic() const { return process_.Diagnostic(); }
   const std::string& Incarnation() const { return incarnation_; }
@@ -78,6 +86,8 @@ class BrowserRuntime {
   Result<Json> Snapshot() { return rpc_.Request(Json{{"method", "snapshot"}}); }
 
  private:
+  friend class NativeErrorStateProbe;
+  friend class NativeRetryOwnerProbe;
   BrowserProcess process_;
   BrowserRpc rpc_;
   const cluster::Key& profile_key_;
@@ -87,9 +97,13 @@ class BrowserRuntime {
   BrowserStartPolicy start_policy_;
   std::optional<Error> startup_error_;
   std::optional<Error> last_failure_;
+  RetryUnit connection_retry_{"browser.connection"};
+  RetryUnit health_retry_{"browser.health"};
+  std::string control_channel_;
   int64_t next_health_check_ = 0;
   bool initialized_ = false;
-  bool clean_shutdown_ = true;
+  enum class ShutdownPhase { kClean, kRunning, kDispatched, kUnclean };
+  ShutdownPhase shutdown_phase_ = ShutdownPhase::kClean;
   bool crash_recorded_ = false;
   Json shutdown_timing_ = Json::object();
   Json open_timing_ = Json::object();

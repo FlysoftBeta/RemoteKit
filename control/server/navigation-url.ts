@@ -79,7 +79,7 @@ function resolveInput(value: unknown, engine: SearchEngine): string {
       if (!parsed.username && !parsed.password && (host === 'localhost' || host.startsWith('[') || domain))
         return parsed.href;
     } catch {
-      /* Search text, including malformed schemes. */
+      return searchUrl(text, engine);
     }
   }
   return searchUrl(text, engine);

@@ -197,7 +197,9 @@ class Link final : public ManagementLink {
   }
   bool SendEvent(const Json&, uint64_t, DeliveryFlag = {}) override { return true; }
   void OnDisconnect(Disconnect) override {}
-  Result<Json> Request(const std::string&, Json) override { return Json::object(); }
+  Result<Json> Request(const std::string&, Json) override {
+    return Json{{"ok", true}};
+  }
 };
 void Boundaries(const fs::path& root) {
   fs::create_directories(root / "logs");

@@ -74,7 +74,7 @@ Control  按已认证的 Viewer 租约与 Control 授权代次准入；每 Tenan
 
 所有产品操作（包括设置与窗口视图状态）走这一条路径，没有旁路。一条 WS 连接是有序的，相互依赖的操作保持先后；远端输入仍然靠焦点、布局与输出屏障与之对齐。需要 Browser 执行的操作（`tab.navigate`、`tab.command`、页面回复、退出页面全屏）照常先提交产品意图，Browser 不可用时以 `unavailable` + 放置 reason 失败，显示在对应窗口上；关闭含有远端标签的窗口时 Session 不可达，就只在产品状态里关闭，Session 下次运行时按期望的视图列表清理，此时没有 beforeunload。
 
-收据状态：`accepted → applying → committed | failed | unknown`。`failed` 带结构化 `error:{code, message}`，调用方按 code 处理（见[错误模型](architecture.md#错误模型)）；generation 已轮换的旧收据是 `failed` + `conflict`。
+收据状态：`accepted → applying → committed | failed | unknown`。`failed` 带结构化 `error:{code, message}`，调用方按 code 处理（见[错误模型](errors.md)）；generation 已轮换的旧收据是 `failed` + `conflict`。
 
 - **unknown** 表示可能已经执行。WS 在提交后断开、或 Native 调用超时，都是 unknown；把超时当作失败会让用户用新 ID 重做，造成重复副作用。unknown 通过 `operation.status` 查询收敛，从不用新 ID 重做。
 - 收据状态由错误码决定，不由异常类型决定：`outcome_unknown`（以及已受理变更的 `internal`）→ unknown；其余 code 都是确定没有执行 → failed，code 原样保存在收据里。

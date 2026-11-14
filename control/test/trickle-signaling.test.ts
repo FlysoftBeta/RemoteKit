@@ -109,6 +109,7 @@ test('pending trickle offers allow other tenants and bind early candidates to co
     assert.equal(events.length, 1);
   } finally {
     control.rtc.clearSignals();
+    await control.close();
     store.db.close();
   }
 });
@@ -189,7 +190,7 @@ test('close cancels a pending answer immediately and late answers are ignored', 
     await failed;
     endpoint.signal(a.tenantId, connection, { type: 'answer', sdp: 'v=0\r\n' });
   } finally {
-    control.rtc.clearSignals();
+    await control.close();
     store.db.close();
   }
 });

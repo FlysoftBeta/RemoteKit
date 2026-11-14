@@ -1,6 +1,7 @@
 #pragma once
 #include <json.hpp>
 #include "util/error.hpp"
+#include "util/retry_unit.hpp"
 #include "session/browser_rpc.hpp"
 
 namespace remotekit {
@@ -20,25 +21,31 @@ Result<ControlJson> RetryBrowserInput(const ControlJson& command,
     return reply;
   };
   auto reply = dispatch();
-  unsigned retries = 0;
+  RetryUnit unit{"input.admission"};
+  unit.Input(command.dump());
+  auto now = RetryUnit::Clock::now();
   while (!reply && reply.error().code == ErrorCode::kBusy) {
-    if (retries >= 50 || expired()) {
+    unit.Fail(reply.error(), now);
+    if (unit.Status() != RetryUnit::State::kWaiting || expired()) {
       exhausted();
       break;
     }
     if (!current())
       return Error{ErrorCode::kConflict, "input_identity_changed"};
-    wait();
+    const auto delay = std::chrono::duration_cast<std::chrono::milliseconds>(unit.Until() - now);
+    wait(delay);
+    now = unit.Until();
     if (!current())
       return Error{ErrorCode::kConflict, "input_identity_changed"};
     if (expired()) {
       exhausted();
       break;
     }
-    ++retries;
     retry();
     reply = dispatch();
   }
+  if (reply)
+    unit.Success();
   return reply;
 }
 

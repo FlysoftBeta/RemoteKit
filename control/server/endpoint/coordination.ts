@@ -250,7 +250,11 @@ export interface SessionObserved extends SessionTarget {
   rtc: { active: boolean; connectionId: string | null; avSync: boolean | null };
   blockers: StopBlockers;
   events: { streamId: string | null; ackedThrough: string; lastSeq: string };
-  stats: { mediaPolicy?: { applied: MediaPolicy | null }; [extension: string]: unknown };
+  stats: {
+    allocationPressure?: boolean;
+    mediaPolicy?: { applied: MediaPolicy | null };
+    [extension: string]: unknown;
+  };
   lastError: NativeError | null;
 }
 export type EventBodies = {
@@ -606,7 +610,8 @@ export function validateSessionObserved(value: unknown): asserts value is Sessio
     !record(value.lock) ||
     !record(value.rtc) ||
     !record(value.blockers) ||
-    !record(value.stats)
+    !record(value.stats) ||
+    (value.stats.allocationPressure !== undefined && typeof value.stats.allocationPressure !== 'boolean')
   )
     return invalid();
   if (

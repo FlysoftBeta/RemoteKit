@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ProductAction, ProductOperation } from '../shared/product';
-import { nativeError } from '../shared/errors';
+import { nativeError, toRemoteKitError, wireError } from '../shared/errors';
 import { createHash } from 'node:crypto';
 import { observedSession } from './coordination-fixture';
 import type { SessionDesired } from '../server/endpoint/coordination';
@@ -166,10 +166,7 @@ export function testGateway(
         }
       } catch (error: any) {
         if (documents.get(message.tenantId) === message)
-          failures.set(message.tenantId, {
-            code: error.code ?? 'internal',
-            message: error.message ?? String(error),
-          });
+          failures.set(message.tenantId, wireError(toRemoteKitError(error)));
       }
       const observation = refresh(message.tenantId)!;
       nodes.emit('session.observed', { nodeId: 'fixture', message: observation });

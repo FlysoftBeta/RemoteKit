@@ -37,6 +37,8 @@ class InputController {
  private:
   std::string session_id_;
   Hooks hooks_;
+  std::mutex lifecycle_mutex_;
+  void StopLocked();
   mutable std::mutex input_mutex;
   std::condition_variable input_wake;
   std::deque<Event> input_queue;

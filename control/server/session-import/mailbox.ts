@@ -1,6 +1,6 @@
 import { ImapFlow } from 'imapflow';
 import type { Readable } from 'node:stream';
-import { retryDelay } from '../../shared/error-policy';
+import { RetryUnit } from '../../shared/retry-unit';
 import { wireError } from '../../shared/errors';
 import type { MailboxStatus } from '../../shared/session-import';
 import type { SessionImportConfig } from '../config';
@@ -64,6 +64,9 @@ export interface MailCursor {
   uid: number | null;
 }
 export interface MailCursorStore {
+  retry: RetryUnit;
+  retryInput: string;
+  saveRetry(): void;
   /** Returns the saved cursor, creating one that starts at `now` on first use. */
   load(now: number): MailCursor;
   save(cursor: MailCursor): void;
@@ -76,8 +79,7 @@ export class ImportMailbox {
   private running?: Promise<void>;
   private client?: MailClient;
   private stopped = false;
-  private blocked = false;
-  private retryAt = 0;
+  private readonly retry: RetryUnit;
   private snapshot: Omit<MailboxStatus, 'outbox'>;
   constructor(
     private readonly config: SessionImportConfig | undefined,
@@ -94,7 +96,13 @@ export class ImportMailbox {
     }),
     private readonly now: () => number = Date.now,
   ) {
-    this.snapshot = { configured: !!config, lastSuccessAt: null, lastErrorAt: null, error: null };
+    this.retry = cursor.retry;
+    this.snapshot = {
+      configured: !!config,
+      lastSuccessAt: null,
+      lastErrorAt: null,
+      error: this.retry.record().error ?? null,
+    };
   }
   status(): MailboxStatus {
     return { ...this.snapshot, outbox: this.outboxStatus() };
@@ -103,7 +111,13 @@ export class ImportMailbox {
     if (!this.config || this.running || this.timer || this.stopped) return;
     const next = async () => {
       await this.poll();
-      if (!this.stopped && !this.blocked) {
+      if (!this.stopped && this.retry.state.phase === 'waiting') {
+        this.retry.schedule(() => {
+          void next();
+        });
+        return;
+      }
+      if (!this.stopped && this.retry.state.phase !== 'faulted' && this.retry.state.phase !== 'dropped') {
         this.timer = setTimeout(() => {
           this.timer = undefined;
           void next();
@@ -114,7 +128,12 @@ export class ImportMailbox {
     void next();
   }
   poll(): Promise<void> {
-    if (!this.config || this.stopped || this.blocked || this.now() < this.retryAt) return Promise.resolve();
+    if (
+      !this.config ||
+      this.stopped ||
+      !this.retry.ready(JSON.stringify([this.keyId(), this.cursor.retryInput]))
+    )
+      return Promise.resolve();
     if (this.running) return this.running;
     this.running = this.round().finally(() => {
       this.running = undefined;
@@ -222,29 +241,34 @@ export class ImportMailbox {
         uidValidity: validity,
         uid: kept.size ? Math.min(...kept.keys()) - 1 : highest,
       });
+      this.retry.succeed();
+      this.cursor.saveRetry();
       this.snapshot.lastSuccessAt = this.now();
       this.snapshot.error = null;
     } catch (error) {
       if (!this.stopped) {
         const failure = mailError(error, false);
-        const delay = retryDelay(failure, 0);
-        this.blocked = delay === undefined;
-        this.retryAt = delay === undefined ? Infinity : this.now() + delay;
-        const message = failure.message;
+        this.retry.fail(failure);
+        this.cursor.saveRetry();
         this.snapshot.lastErrorAt = this.now();
-        this.snapshot.error = wireError(reportError(failure, 'session_import.mailbox_failed'));
-        this.log(`Session import mailbox: ${message}`);
+        this.snapshot.error = wireError(failure);
       }
     } finally {
-      client?.close();
-      this.client = undefined;
+      if (this.client === client) {
+        this.client = undefined;
+        client?.close();
+      }
     }
   }
   async stop() {
     this.stopped = true;
+    this.retry.cancel();
     clearTimeout(this.timer);
     this.timer = undefined;
-    this.client?.close();
+    const client = this.client;
+    this.client = undefined;
+    client?.close();
     await this.running;
+    this.retry.close();
   }
 }

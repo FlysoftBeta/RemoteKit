@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { BackgroundJob } from '../background';
 import type { IncomingMessage, Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { RemoteKitError, httpStatus, toRemoteKitError, wireError } from '../../shared/errors';
@@ -67,12 +68,16 @@ const handlers: Record<string, Handler> = {
   }),
   'service.offer': ({ services, authority }, params) =>
     services.servicePeers.offer(authority.tenantId, params, authority.leaseId),
+  'service.offerStatus': ({ services, authority }, params) =>
+    services.servicePeers.offerStatus(authority.tenantId, params.attemptId, authority.leaseId),
   'service.ice': ({ services, authority }, params) =>
     services.servicePeers.ice(authority.tenantId, params, authority.leaseId),
   'service.close': ({ services, authority }, params) =>
     services.servicePeers.close(authority.tenantId, params.connectionId, authority.leaseId),
   'rtc.offer': ({ services, authority }, params) =>
     services.rtc.offer(authority.tenantId, params, authority.leaseId),
+  'rtc.offerStatus': ({ services, authority }, params) =>
+    services.rtc.offerStatus(authority.tenantId, params.attemptId, authority.leaseId),
   'rtc.ice': ({ services, authority }, params) => services.rtc.ice(authority.tenantId, params),
   'rtc.close': ({ services, authority }, params) =>
     services.rtc.closeRtc(authority.tenantId, params, authority.leaseId),
@@ -217,7 +222,7 @@ Object.assign(handlers, {
   }),
   'admin.announcements': admin(({ services }) => services.announcements.list()),
   'admin.publishAnnouncement': admin(({ services, authority }, params) =>
-    services.announcements.publish(authority.tenantId, params.title, params.body),
+    services.announcements.publish(authority.tenantId, params.id, params.title, params.body),
   ),
   'admin.updateAnnouncement': admin(({ services, authority }, params) =>
     services.announcements.update(authority.tenantId, params.id, params.title, params.body, params.republish),
@@ -323,7 +328,10 @@ export function attachViewerSocket(
     maxPayload: 6 * 1024 * 1024 + 65536,
     perMessageDeflate: false,
   });
-  const peers = new Map<WebSocket, { tenant: string; lease: string; token: string; alive: boolean }>();
+  const peers = new Map<
+    WebSocket,
+    { tenant: string; lease: string; token: string; alive: boolean; heartbeat: BackgroundJob }
+  >();
   const send = (ws: WebSocket, message: unknown) => {
     if (ws.readyState === WebSocket.OPEN) {
       if (ws.bufferedAmount > 2 * 1024 * 1024) {
@@ -375,7 +383,13 @@ export function attachViewerSocket(
       if (!identity || !token) throw new RemoteKitError('unauthenticated', '请先登录');
       sockets.handleUpgrade(req, socket, head, (ws) => {
         const lease = randomUUID(),
-          peer = { tenant: identity.tenantId, lease, token, alive: true };
+          peer = {
+            tenant: identity.tenantId,
+            lease,
+            token,
+            alive: true,
+            heartbeat: new BackgroundJob('viewer.authentication', { tenant: identity.tenantId, lease }),
+          };
         peers.set(ws, peer);
         const pending = new Set<string>();
         const hash = authenticationIdentity(token);
@@ -401,8 +415,9 @@ export function attachViewerSocket(
         ws.on('pong', () => {
           peer.alive = true;
         });
-        ws.on('error', () => {});
+        ws.on('error', (err) => log.warn('viewer.socket_failed', { tenant: peer.tenant, lease, err }));
         ws.on('close', () => {
+          void track(peer.heartbeat.close());
           diagnosticSessions?.detachViewer(peer.tenant, lease, 'disconnected');
           if (peers.delete(ws))
             void track(control.viewers.detachViewer(peer.tenant, lease)).catch((err) =>
@@ -545,13 +560,25 @@ export function attachViewerSocket(
       );
     }
   });
+  const faceJob = new BackgroundJob('viewer.face_poll', {});
   const facePoll = setInterval(() => {
-    if (!isClosing()) void track(control.viewers.pollFaceAuth());
+    if (!isClosing())
+      void track(
+        faceJob.run(
+          () => control.viewers.pollFaceAuth(),
+          JSON.stringify(
+            [...peers.values()].map((peer) => [
+              peer.lease,
+              control.viewers.productEpoch(peer.tenant, peer.lease),
+            ]),
+          ),
+        ),
+      );
   }, 500);
   facePoll.unref();
   const heartbeat = setInterval(() => {
     for (const [ws, peer] of peers) {
-      if (!peer.alive || !control.accounts.identity(peer.token)) {
+      if (!peer.alive) {
         log.warn('viewer.heartbeat_failed', {
           tenant: peer.tenant,
           lease: peer.lease,
@@ -560,16 +587,35 @@ export function attachViewerSocket(
         ws.terminate();
         continue;
       }
-      peer.alive = false;
-      ws.ping();
+      void track(
+        peer.heartbeat.run(
+          async () => {
+            if (!control.accounts.identity(peer.token))
+              throw new RemoteKitError('unauthenticated', 'Authentication expired');
+            peer.alive = false;
+            ws.ping();
+          },
+          String(control.viewers.productEpoch(peer.tenant, peer.lease)),
+        ),
+      ).then(() => {
+        const error = peer.heartbeat.retry.error;
+        if (!error) return;
+        send(ws, { type: 'error', id: '', error: wireError(error) });
+      });
     }
   }, 30000);
   heartbeat.unref();
 
   return {
+    failures() {
+      return [faceJob.retry.error, ...[...peers.values()].map((peer) => peer.heartbeat.retry.error)].filter(
+        (error) => error !== undefined,
+      );
+    },
     close() {
       clearInterval(heartbeat);
       clearInterval(facePoll);
+      void track(faceJob.close());
       control.events.off('auth', auth);
       control.events.off('state', push);
       control.events.off('library', library);

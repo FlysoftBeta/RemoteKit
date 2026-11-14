@@ -99,11 +99,17 @@ const reported = new WeakSet<RemoteKitError>();
 // quote; the record carrying the full cause chain is written once, here.
 export function reportError(error: RemoteKitError, event: string, fields?: LogFields) {
   if (['canceled', 'busy', 'rate_limited'].includes(error.code) && error.errorId === undefined) return error;
-  if (error.errorId === undefined) error.errorId = newErrorId();
+  identifyError(error);
   if (reported.has(error)) return error;
   reported.add(error);
   const level = error.code === 'internal' ? 'error' : 'warn';
   emit(level, event, { ...fields, errorId: error.errorId, err: error });
+  return error;
+}
+
+export function identifyError(error: RemoteKitError) {
+  if (['internal', 'unavailable', 'outcome_unknown'].includes(error.code) && !error.errorId)
+    error.errorId = newErrorId();
   return error;
 }
 

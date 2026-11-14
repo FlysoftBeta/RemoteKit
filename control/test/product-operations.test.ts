@@ -1065,7 +1065,7 @@ test('terminal receipt capacity rotates generation explicitly while unresolved o
     f.store.db.close();
   }
 });
-test('SQLite completion fault rolls back the workspace mutation and leaves a queryable rejection', async () => {
+test('SQLite completion fault rolls back the workspace mutation and leaves a queryable unknown outcome', async () => {
   const f = await fixture();
   try {
     f.store.db.exec(
@@ -1073,10 +1073,10 @@ test('SQLite completion fault rolls back the workspace mutation and leaves a que
     );
     const op = f.op({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
     const result = await observedOperation(f.control, f.tenant, op, 'lease');
-    assert.equal(result.status, 'failed');
+    assert.equal(result.status, 'unknown');
     assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);
-    assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'failed');
-    assert.equal((await observedOperation(f.control, f.tenant, op, 'lease')).status, 'failed');
+    assert.equal(f.control.operations.operationStatus(f.tenant, op).status, 'unknown');
+    assert.equal((await observedOperation(f.control, f.tenant, op, 'lease')).status, 'unknown');
   } finally {
     await f.control.close();
     f.store.db.close();

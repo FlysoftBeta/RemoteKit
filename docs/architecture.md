@@ -56,70 +56,16 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 
 ## 错误模型
 
-所有组件使用同一组错误码（`control/shared/errors.ts`、`endpoint/src/util/error.hpp`、`protocol/control.h` 中的 `ErrorCode`）。**错误码就是处理指令**：调用方只按 code 决定重试、对账、刷新、重新认证或放弃；`message` 只是给人看的文字（用户提示或运维诊断），任何代码都不按 message、`reason` 或 HTTP 状态文字分支。
-
-| code | 调用方怎么做 | 可能已执行 |
-|---|---|---|
-| `busy` | 短退避（抖动，秒级以内）后原样重试，次数有上限 | 否 |
-| `rate_limited` | 等 `retryAfterMs`（缺省用生产方默认值）后重试 | 否 |
-| `unavailable` | 指数退避，或等对端/能力恢复的事件后重试 | 否（未送达） |
-| `outcome_unknown` | 不重做；用同一操作身份查询或对账。只读请求重新读取即是查询；幂等请求可以用**同一身份**重新提交 | **可能** |
-| `conflict` | 刷新状态后重新决定 | 否 |
-| `not_found` | 刷新状态，放弃这个请求 | 否 |
-| `locked` | 等用户解锁后重试 | 否 |
-| `unauthenticated` | 重新登录 | 否 |
-| `forbidden` | 显示无权限，不重试 | 否 |
-| `limit_exceeded` | 需要用户释放空间/配额或缩小输入；不自动重试 | 否 |
-| `invalid_request` | 调用方缺陷：记录，不重试 | 否 |
-| `rejected` | 对这个输入、这个构建是最终结果；不重试 | 否 |
-| `canceled` | 调用方自己取消；不重试、不提示 | 否 |
-| `internal` | 记录并报告，不自动重试；带操作身份的变更按 `outcome_unknown` 对账 | — |
-
-**生产方按处理方式选 code，而不是按"出了什么事"。**
-- 暂时饱和（在途槽位、队列、KDF 并发、发送缓冲）是 `busy`；容量被别的租户占满、节点或工具缺失、IO 失败是 `unavailable`；只有用户能自己释放的配额和输入本身超出上限才是 `limit_exceeded`。
-- 输入本身无法处理（不支持的格式、损坏、加密文档、转换器在该输入上失败或超出计算预算）是 `rejected`；我们自己的协议/状态不变量被破坏是 `internal`；调用方请求的格式错误才是 `invalid_request`。
-- 过期的身份、代次、授权 epoch 是 `conflict`；被替换的授权要求解锁时是 `locked`，要求登录时是 `unauthenticated`。
-- **送达证据决定 `unavailable` 与 `outcome_unknown`**：每条传输记录请求是否已写出。写出前失败（连接已关、写失败、本地排队超时）是 `unavailable`；写出后超时、断开、回复格式错误或过大是 `outcome_unknown`。服务端处理已经执行后才发现回复无法编码，同样是 `outcome_unknown`。执行后才发现授权或目标已变化，结果是 `outcome_unknown`，披露另由授权门禁控制。健康探测超时不会成为被阻塞动作的结果：那个动作没有发出，是 `unavailable`。
-- 外部服务与工具在边界处按其类型化证据分类一次：HTTP 401 → `unauthenticated`，403 → `forbidden`，404 → `not_found`，429 → `rate_limited`（读取 Retry-After），408/5xx 与读请求的传输失败 → `unavailable`，变更请求发出后的传输失败 → `outcome_unknown`，无法归类的上游失败 → `internal`。
-
-**线上形状**：Native（Endpoint、Browser）与管理通道是 `error:{code, message, reason?, retryAfterMs?, errorId?}`；Control → Viewer 是 `error:{code, message, reason?, retryAfterMs?, errorId?}`（`reason` 只取协议里封闭的 Native 原因枚举，供 Viewer 区分例如 `browser_restarting` 与最终失败）。产品状态里的 Endpoint 错误、学习与会话导入的失败记录同样是带 code/reason/errorId 的结构，不是字符串。
-- `retryAfterMs` 只随 `busy`、`rate_limited`、`unavailable` 出现（0…86 400 000 的整数）；其他 code 带上它会在校验时被丢弃。提示只调整允许重试时的等待，永远不会让不可重试的 code 变得可以重试。HTTP 同时设置 `Retry-After` 头，但客户端只读 JSON。
-- Native（Endpoint、Browser）的 `message` 是英文运维诊断；需要向用户区分的情形（如加密文档与损坏文档、单文件过大与配额已满）带一个 `reason`，取自协议里封闭的枚举，只用于选择展示文字。Control 是展示边界：把 Native 错误转换成 Viewer 用的中文 `message`（按 `reason`，否则按 code 的通用句），原始诊断进日志和诊断包。Viewer 直接显示 `message`；code 的通用句只有 `shared/errors.ts` 一张表。Endpoint 经 DataChannel 直接回复 Viewer 的请求（文件服务、文档阅读）不经过 Control，回复里同样带 Native 的错误形状；这条路径的展示边界是 Viewer 的 DataChannel 解码处。两处用同一个转换（`control/shared/errors.ts` 的 `nativeError` 与原因文字表），英文诊断进 `detail`。
-- Browser 控制回复：`{version:1, id, ok:false, error:{code, message, reason?, retryAfterMs?}}`，code 用名称字符串。SDK 的类型化调用把 Browser 的应用错误原样交给调用方，不折叠成传输状态；SDK 传输状态区分"未发出"（通道已关、写失败）与"已发出、结果未知"（超时、发出后断开、回复无效）。
-- 操作收据的失败是 `status:'failed'` 加结构化 `error:{code, message}`；`expired`（generation 已轮换）是 `failed` + `conflict`。Viewer 按收据里的 code 处理，与直接回复的错误走同一套处理。
-- 每个边界只转换一次；中途转发保留 code、`reason`、`retryAfterMs` 与 `errorId`，包装时原始异常放进 `cause`，不替换。
-
-**错误 ID**：`internal`、`outcome_unknown`、`unavailable` 在第一次离开产生它的进程时获得一个 ID（Control `c-`、Endpoint `e-`、Viewer `v-`，后接 10 位十六进制），同时写一条带完整诊断（code、reason、英文诊断、OS 错误码、cause 链与栈）的结构化日志；之后各层原样转发，不再生成新 ID。Control 转发 Endpoint 错误时沿用 `e-` ID，并在自己的日志里记一条同 ID 的记录。只在浏览器里发生的失败（解码、页面挂载、摄像头、呈现协议）由 Viewer 自己生成 `v-` ID 并立即显示，再经 WS `client.error{errorId, context, error}` 报给 Control（内存队列最多 50 条，在线时发送），Control 用同一 ID 记一条 `viewer.error`。管理 App → 诊断按 ID 查找：`c-`/`v-` 查 Control 日志，`e-` 经 `node.logs.search` 查各节点的 `endpoint.log`。其余 code 是调用方能自己处理的结果，不分配 ID。
-
-**处理规则集中在一处**：`control/shared/error-policy.ts` 与 `endpoint/src/util/error_policy.hpp` 把 code 映射为处理方式和默认等待（`busy` 250ms 起翻倍、上限 5 秒；`unavailable` 1 秒起翻倍、上限 5 分钟；`rate_limited` 无提示时 30 秒）。后台调度（文档转换、学习附件下载、会话导入、下载导入、更新器）都从这里取策略：只有 `busy`、`rate_limited`、`unavailable` 自动重试，`outcome_unknown` 先对账，其余 code 记录为最终结果，等用户操作或构建、输入、配额变化后再评估。持久化的失败记录保存 code、诊断、`retry_at` 与构建 ID；`rejected`、`internal` 只对产生它的构建有效。
-
-- Endpoint 的 Session 状态错误用 `reason` 说明原因：`browser_crashed`（Browser 非正常退出）、`browser_restarting`（替换中）、`output_failed`（GPU 输出无法继续），错误码为 `unavailable`；在途操作仍按 `outcome_unknown` 处理。内部原因（例如 render generation 未决的 GPU 工作）只进日志和诊断。
-- 本地持久状态损坏（读得到但解不开）与读不到（IO 失败）是两件事：前者是 `internal` + `reason: corrupt_state`（Endpoint Session 数据）或 `corrupt_record`（Control 存储文档），不自动重试、不改写数据；后者是 `unavailable`，数据原样保留。"读不到"从不当作"不存在"。
-- 意外异常在请求边界和线程入口被捕获：请求返回 `internal`，线程入口把所属组件标记为失败，而不是终止进程。只在校验调用方请求时才把解析异常归为 `invalid_request`；解析对端回复或本地存储时的异常是 `internal`（已送达的请求则是 `outcome_unknown`）。
-- 不确定的 GPU 工作、编码任务和原生回调不靠超时"放弃"：资源保留到有证据为止，必要时保留到进程结束。
-- 控制 RPC 超时只使本次结果成为 `outcome_unknown`，不关闭 SDK 通道、不清除 Endpoint 的控制句柄。SDK 使用每通道请求 ID 匹配回复，丢弃迟到回复并释放其 Mojo 附件与本地资源句柄；后续健康检查有界等待。只有管道确实断开或进程退出才允许替换 Browser，连续失败最多启动三次，按 1/2/4 秒退避，健康运行一分钟后恢复额度。拒绝重启的错误附带最近一次真实失败（进程退出码及其含义、控制管道超时或 `output.status` 错误）和 Session 目录下 `browser.log` 的路径；Endpoint 自己终止的进程（退出码 0）不算失败。GPU 输出启动失败通过现有 Session 错误投影显示在标签页/工作区。
-
-### Viewer 怎样呈现失败
-
-按"谁能处理"而不是按错误码堆横幅，规则只在 `control/client/failures/` 一处（`presentFailure(error, context)`）：
-
-| 类 | 谁处理 | 典型 code / reason | 呈现 |
-|---|---|---|---|
-| 正在恢复 | 系统 | `busy`、`rate_limited`、`unavailable`、确认中的 `outcome_unknown`、`browser_restarting`/`browser_crashed`、连接中断 | 受影响的东西上显示进行中的状态（"正在重新连接…"），没有错误措辞、没有重试按钮；重试在后台自动进行，预算用完后放慢但不停止。1.5 秒内恢复的不显示；20 秒后改用"仍在…/暂时无法…，恢复后自动继续"；连接类 30 秒后进入平静的持续状态 |
-| 用户能处理 | 用户 | `unauthenticated`、`locked`、容量与输入超限、带文档/照片原因的 `rejected`、用户输入导致的 `invalid_request`、自己操作的目标已变化（`conflict`/`not_found`，先静默刷新） | 只给一个具体动作（登录、解锁、管理窗口、换一个文件、重新拍摄……）。"空间不足 / 打开我的文件"只用于真正的存储、目录与文件篮容量 |
-| 谁都处理不了 | 管理员 | `internal`、`forbidden`、`corrupt_record`/`corrupt_state`、非输入导致的 `invalid_request` | 说明什么没有发生、东西现在是什么状态，另起一行显示可复制的错误 ID；没有重试 |
-| 静默 | — | `canceled` | 不显示 |
-
-位置按作用域：输入框下（field）、出问题的那个条目上（item：文件卡、上传/拍照任务、附件行、标签页）、所在的窗口/面板（surface：活动内容上是顶部居中的浮动小条，只覆盖、不挤压——挤压会改变远端视口尺寸）、全局通知（只放不属于任何可见界面的事：Control 连接、窗口已关闭的后台任务；右下角，按 key 去重，最多 3 条）、全屏（登录、锁定、连接被接管）。错误一路保持类型化直到呈现处，只有 `presentFailure` 生成文字。
+三端共用一组错误码，错误码就是处理指令：生产方按调用方该做什么选 code，各边界只转换一次，消费方只按 code 决定重试、对账、刷新或放弃，并且失败之后不能留下非法的状态组合。完整规则——错误码表、生产方选择、线上形状、错误 ID、消费方契约与重试单元、错误路径上的状态、执法测试与 Viewer 呈现——见[错误模型](errors.md)。
 
 ## 持久化格式
 
 每种落盘格式属于一个存储，有显式版本和唯一一对解码器与编码器（同一份格式定义）。
 
-- **解码严格**：形状与类型精确，必需字段必须存在，未知字段拒绝，枚举封闭，范围检查。合法缺省的字段在格式定义里声明为可选，读取处不补默认值、不强制转换、不静默修复。单条记录违反为 `corrupt_record`，整个存储违反为 `corrupt_state`，按[错误模型](#错误模型)带错误 ID。编码器写之前用同一定义校验。
+- **解码严格**：形状与类型精确，必需字段必须存在，未知字段拒绝，枚举封闭，范围检查。合法缺省的字段在格式定义里声明为可选，读取处不补默认值、不强制转换、不静默修复。单条记录违反为 `corrupt_record`，整个存储违反为 `corrupt_state`，按[错误模型](errors.md)带错误 ID。编码器写之前用同一定义校验。
 - **默认值属于创建者**：新值（新账户的设置、新 Session 的副本记录）由创建它的代码给全，读取方从不代造缺失的记录或字段。
 - **唯一的缓存例外**：checkpoint 增量索引是按定义可重建的缓存，内容非法时按不存在处理并整体重建；其他格式都不这样处理。
-- **迁移集中在一处**：格式变化只通过该存储唯一的迁移模块，每一步把版本 N−1 的值变成 N；当前每个列表都是空的，也没有任何读取旧格式的代码。
+- **迁移集中在一处**：格式变化只通过该存储唯一的迁移模块，每一步把版本 N−1 的值变成 N；每个迁移步骤都带一个从上一版本记录升级的测试；除迁移模块外没有任何读取旧格式的代码。
 
 | 存储 | 版本所在 | 格式定义 | 迁移模块 |
 |---|---|---|---|
@@ -221,6 +167,7 @@ tests/             e2e/（真实栈产品场景）、integration/（原生 Endpo
 
 | 文档 | 内容 |
 |---|---|
+| [错误模型](errors.md) | 错误码与处理、生产方选择、线上形状、错误 ID、消费方契约与重试单元、错误路径上的状态、执法、Viewer 呈现 |
 | [多节点](cluster.md) | 配置文件、集群通道与握手、版本锁定与更新、放置与密钥、对象存储、Session 副本与提交、指标、节点移除 |
 | [工作区](workspace.md) | App、Window 与 Space 多任务、开始屏幕与 frecency、安装网页为 App、设置拆分、我的文件的来源与分区 |
 | [Control](control-plane.md) | 数据归属、连接、操作与收据、导航、对账、对话框/关闭/弹窗、站点身份、全屏、设置 |

@@ -1,5 +1,6 @@
 import { DEFAULT_IDLE_SECONDS, type AuthState } from '../../shared/security';
 import { diagnostics } from '../media/diagnostics';
+import { RetryUnit } from '../../shared/retry-unit';
 import { Store } from '../util/store';
 
 interface IdleMonitor extends EventTarget {
@@ -7,11 +8,13 @@ interface IdleMonitor extends EventTarget {
   screenState: 'locked' | 'unlocked' | null;
   start(options: { threshold: number; signal: AbortSignal }): Promise<void>;
 }
-const IdleDetector = (
-  globalThis as typeof globalThis & {
-    IdleDetector?: { new (): IdleMonitor; requestPermission(): Promise<PermissionState> };
-  }
-).IdleDetector;
+function idleDetector() {
+  return (
+    globalThis as typeof globalThis & {
+      IdleDetector?: { new (): IdleMonitor; requestPermission(): Promise<PermissionState> };
+    }
+  ).IdleDetector;
+}
 interface IdleState {
   systemSupported: boolean;
   system: boolean;
@@ -20,6 +23,11 @@ interface IdleState {
 }
 
 export class IdlePolicy extends Store<IdleState> {
+  get failure() {
+    return this.monitorRetry.error;
+  }
+  private readonly monitorRetry = new RetryUnit({ name: 'idle.monitor' });
+  private monitorInput = 0;
   private enabled = false;
   private locked = true;
   private lockOnHidden = false;
@@ -34,7 +42,7 @@ export class IdlePolicy extends Store<IdleState> {
   private readonly events = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'input'] as const;
 
   constructor(private readonly lock: (reason: string) => void) {
-    super({ systemSupported: !!IdleDetector, system: false, blocked: false });
+    super({ systemSupported: !!idleDetector(), system: false, blocked: false });
   }
   configure(auth: AuthState | null) {
     const enabled = auth?.settings.lockOnIdle === true;
@@ -54,7 +62,7 @@ export class IdlePolicy extends Store<IdleState> {
       this.timer = setInterval(this.poll, 1000);
       this.lastActivity = performance.now();
       const generation = this.generation;
-      if (IdleDetector)
+      if (idleDetector())
         void navigator.permissions
           ?.query({ name: 'idle-detection' as PermissionName })
           .then((status) => {
@@ -70,6 +78,8 @@ export class IdlePolicy extends Store<IdleState> {
     this.hidden();
   }
   requestSystem = async () => {
+    this.monitorInput++;
+    const IdleDetector = idleDetector();
     if (!IdleDetector) return;
     const generation = this.generation;
     const permission = await IdleDetector.requestPermission();
@@ -82,12 +92,24 @@ export class IdlePolicy extends Store<IdleState> {
     this.startMonitor();
   };
   private startMonitor() {
+    const IdleDetector = idleDetector();
     this.controller?.abort();
     this.removeMonitor?.();
     this.removeMonitor = undefined;
     this.publish({ ...this.getSnapshot(), system: false, blocked: false });
     this.activity();
-    if (!IdleDetector || !this.enabled || this.getSnapshot().permission !== 'granted') return;
+    if (!IdleDetector || !this.enabled || this.getSnapshot().permission !== 'granted') {
+      this.monitorRetry.cancel();
+      return;
+    }
+    if (
+      !this.monitorRetry.ready(
+        JSON.stringify([this.monitorInput, this.enabled, this.idleSeconds, this.getSnapshot().permission]),
+      )
+    ) {
+      this.monitorRetry.schedule(() => this.startMonitor());
+      return;
+    }
     const controller = new AbortController();
     this.controller = controller;
     const monitor = new IdleDetector();
@@ -103,11 +125,17 @@ export class IdlePolicy extends Store<IdleState> {
       .start({ threshold: Math.max(60, this.idleSeconds) * 1000, signal: controller.signal })
       .then(() => {
         if (controller.signal.aborted) return;
+        this.monitorRetry.succeed();
         this.publish({ ...this.getSnapshot(), system: true });
         change();
       })
       .catch((error) => {
-        if (!controller.signal.aborted) diagnostics.record('idle-monitor', error);
+        if (controller.signal.aborted) return;
+        this.monitorRetry.fail(error);
+        controller.abort();
+        this.removeMonitor?.();
+        this.removeMonitor = undefined;
+        this.monitorRetry.schedule(() => this.startMonitor());
       });
   }
   private activity = () => {
@@ -123,6 +151,7 @@ export class IdlePolicy extends Store<IdleState> {
   dispose = () => {
     this.generation++;
     this.started = false;
+    this.monitorRetry.cancel();
     clearInterval(this.timer);
     this.controller?.abort();
     this.removeMonitor?.();

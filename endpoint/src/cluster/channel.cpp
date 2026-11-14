@@ -1,6 +1,9 @@
 #include "cluster/channel.hpp"
 #include "cluster/node_files.hpp"
 #include "cluster/stream_socket.hpp"
+#include "util/http_error.hpp"
+#include <sstream>
+#include <cctype>
 #include <windows.h>
 #include <bcrypt.h>
 #include <fcntl.h>
@@ -49,6 +52,13 @@ class BufferedCarrier : public Carrier {
   size_t queued_ = 0;
   std::atomic<bool> closed_{false};
   std::thread reader_;
+  void MarkClosed() {
+    {
+      std::lock_guard lock(mutex_);
+      closed_ = true;
+    }
+    wake_.notify_all();
+  }
   void Start() {
     reader_ = std::thread([this] {
       while (!closed_) {
@@ -66,8 +76,7 @@ class BufferedCarrier : public Carrier {
         queue_.push_back(std::move(message).value());
         wake_.notify_all();
       }
-      closed_ = true;
-      wake_.notify_all();
+      MarkClosed();
     });
   }
   virtual Result<Bytes> Read() = 0;
@@ -79,8 +88,7 @@ class Pipes final : public BufferedCarrier {
   void Close() override {
     std::lock_guard close_lock(close_mutex_);
     RecordClose("local_close");
-    closed_ = true;
-    wake_.notify_all();
+    MarkClosed();
     if (reader_.joinable())
       CancelSynchronousIo(reader_.native_handle());
     // Cancel any synchronous send without waiting on the send lock.
@@ -211,8 +219,7 @@ class WebSocket final : public BufferedCarrier {
   void Open() { Start(); }
   void Close() override {
     RecordClose("local_close");
-    closed_ = true;
-    wake_.notify_all();
+    MarkClosed();
     if (stream)
       stream->Shutdown();
   }
@@ -352,7 +359,10 @@ class EncryptedChannel final : public Channel {
   void Close() override {
     const auto cause = carrier_->Cause();
     RecordClose(cause.reason.empty() ? "local_close" : cause.reason, cause.detail);
-    closed_ = true;
+    {
+      std::lock_guard lock(mutex_);
+      closed_ = true;
+    }
     carrier_->Close();
     wake_.notify_all();
   }
@@ -365,7 +375,7 @@ class EncryptedChannel final : public Channel {
     if (!wake_.wait_for(lock, timeout, [&] { return closed_ || !queue_.empty(); }))
       return Timeout();
     if (queue_.empty())
-      return Closed();
+      return failure_.value_or(Closed());
     auto result = std::move(queue_.front());
     queue_.pop_front();
     queued_ -= result.bytes.size() + result.json.dump().size();
@@ -384,6 +394,7 @@ class EncryptedChannel final : public Channel {
   size_t queued_ = 0;
   std::thread worker_, heartbeat_;
   bool pong_pending_ = false;
+  std::optional<Error> failure_;
   Result<void> SendFrame(Result<Bytes> frame) {
     if (!frame)
       return frame.error();
@@ -452,6 +463,8 @@ class EncryptedChannel final : public Channel {
       auto frame = DecodeFrame(plain.value());
       if (!frame) {
         RecordClose("invalid_frame", {{"error", frame.error().message}});
+        std::lock_guard lock(mutex_);
+        failure_ = frame.error();
         break;
       }
       last_receive = Clock::now();
@@ -546,7 +559,12 @@ Result<Established> Handshake(std::unique_ptr<Carrier> carrier,
         carrier->Close();
         return plain.error();
       }
-      reply = Json::parse(plain.value(), nullptr, false);
+      auto parsed = DecodeJson(plain.value());
+      if (!parsed) {
+        carrier->Close();
+        return Error{ErrorCode::kInternal, parsed.error().message};
+      }
+      reply = std::move(parsed).value();
     } else {
       auto wire = carrier->Receive(5s);
       if (!wire) {
@@ -558,12 +576,12 @@ Result<Established> Handshake(std::unique_ptr<Carrier> carrier,
         carrier->Close();
         return plain.error();
       }
-      auto parsed = Json::parse(plain.value(), nullptr, false);
-      if (!parsed.is_object()) {
+      auto parsed = DecodeJson(plain.value());
+      if (!parsed) {
         carrier->Close();
-        return Error{ErrorCode::kInvalidRequest, "invalid hello payload"};
+        return parsed.error();
       }
-      auto response = handler(parsed, noise.remote_public_key());
+      auto response = handler(parsed.value(), noise.remote_public_key());
       if (!response) {
         carrier->Close();
         return response.error();
@@ -686,20 +704,32 @@ Result<Established> ConnectWebSocket(const std::string& url,
                    "WebSocket upgrade (not a RemoteKit Control endpoint, or a proxy dropped it)"};
     response.append(reinterpret_cast<const char*>(chunk.data()), n.value());
   }
-  if (!response.starts_with("HTTP/1.1 101"))
-    return Error{ErrorCode::kUnavailable,
-                 "cluster connect: " + response.substr(0, response.find("\r\n")) +
-                     " instead of a 101 upgrade"};
+  std::istringstream headers(response);
+  std::string version;
+  unsigned status = 0;
+  headers >> version >> status;
+  if (status != 101) {
+    std::optional<uint32_t> retry_after;
+    std::string line;
+    while (std::getline(headers, line)) {
+      const auto colon = line.find(':');
+      if (colon == std::string::npos)
+        continue;
+      auto name = line.substr(0, colon);
+      std::transform(name.begin(), name.end(), name.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (name != "retry-after")
+        continue;
+      retry_after = HttpRetryAfter(line.substr(colon + 1));
+    }
+    return HttpError(status, retry_after);
+  }
   auto ws = std::make_unique<WebSocket>();
   ws->pending.assign(response.begin() + end + 4, response.end());
   stream.value()->SetReceiveTimeout(0ms);
   ws->stream = std::move(stream).value();
   ws->Open();
   auto established = ConnectCarrier(std::move(ws), key, responder_public_key, hello);
-  if (!established && established.error().message == "cluster channel closed")
-    return Error{ErrorCode::kUnavailable,
-                 "Control closed the connection during the cluster handshake "
-                 "(node identity mismatch with Control, or not a RemoteKit Control endpoint)"};
   return established;
 }
 }  // namespace remotekit::cluster

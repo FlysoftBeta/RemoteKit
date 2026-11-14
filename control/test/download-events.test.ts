@@ -45,7 +45,13 @@ function fixture() {
   });
   const consumer = new SessionEvents(
     {
-      store: { coordination, transaction: (fn: () => unknown) => db.transaction(fn)() },
+      store: {
+        db,
+        buildId: 'test',
+        library: repository,
+        coordination,
+        transaction: (fn: () => unknown) => db.transaction(fn)(),
+      },
       tenants: { get: () => runtime },
       endpoint: {
         nodes,
@@ -74,6 +80,12 @@ function fixture() {
     runtime,
     repository,
     acknowledgements,
+    reconcile: () => consumer.reconcileDownloads(),
+    close: async () => {
+      await consumer.close();
+      await library.close();
+      db.close();
+    },
     consume: async (events: DownloadEvent[]) => {
       for (const event of events) {
         let seq = sourceSequences.get(event.eventId);
@@ -106,7 +118,8 @@ function fixture() {
         () => {},
         () => undefined,
       ),
-    reopen: () => {
+    reopen: async () => {
+      await library.close();
       library = manager();
     },
   };
@@ -114,7 +127,7 @@ function fixture() {
 
 test('download entries use a separate collected source, host with port, and no partition or basket', async (t) => {
   const f = fixture();
-  t.after(() => f.db.close());
+  t.after(() => f.close());
   const before = Date.now();
   await f.consume([imported]);
   const snapshot = f.repository.snapshot('tenant');
@@ -138,7 +151,7 @@ test('download entries use a separate collected source, host with port, and no p
   );
   assert.ok(entry.createdAt >= before && entry.createdAt <= Date.now());
   assert.deepEqual(snapshot.basket, []);
-  f.reopen();
+  await f.reopen();
   await f.consume([imported]);
   assert.equal(f.repository.snapshot('tenant').entries.length, 1);
   assert.deepEqual(f.acknowledgements, [
@@ -150,7 +163,7 @@ test('download entries use a separate collected source, host with port, and no p
 test('download sources can be excluded through the library source API', async (t) => {
   for (const channel of ['', 'example.com:8443', 'example.com:443']) {
     const f = fixture();
-    t.after(() => f.db.close());
+    t.after(() => f.close());
     await f.exclude(channel);
     assert.deepEqual(f.repository.snapshot('tenant').excludedSources, [{ app: 'download', channel }]);
   }
@@ -158,7 +171,7 @@ test('download sources can be excluded through the library source API', async (t
 
 test('download source origin handles default ports, empty origins and opaque origins', async (t) => {
   const f = fixture();
-  t.after(() => f.db.close());
+  t.after(() => f.close());
   for (const [origin, channel] of [
     ['https://example.com:443', 'example.com'],
     ['', ''],
@@ -173,7 +186,7 @@ test('download source origin handles default ports, empty origins and opaque ori
 
 test('excluded sources omit entries and full catalogs retain the download until space is available', async (t) => {
   const f = fixture();
-  t.after(() => f.db.close());
+  t.after(() => f.close());
   const snapshot = f.repository.snapshot('tenant');
   snapshot.excludedSources = [{ app: 'download', channel: 'example.com:8443' }];
   f.repository.save('tenant', snapshot);
@@ -187,24 +200,23 @@ test('excluded sources omit entries and full catalogs retain the download until 
   const full = f.repository.snapshot('tenant');
   full.entries = Array.from({ length: 4096 }, (_, index) => ({ ...full.entries[0], id: String(index) }));
   f.repository.save('tenant', full);
-  await assert.rejects(
-    f.consume([{ ...imported, eventId: 'full' }]),
-    (error: RemoteKitError) => error.code === 'limit_exceeded',
-  );
-  assert.equal(f.repository.snapshot('tenant').entries.length, 4096);
-  assert.equal(f.acknowledgements[f.acknowledgements.length - 1]?.upTo, '2');
-  full.entries = [];
-  f.repository.save('tenant', full);
-  f.reopen();
   await f.consume([{ ...imported, eventId: 'full' }]);
+  assert.equal(f.repository.snapshot('tenant').entries.length, 4096);
+  assert.equal(f.acknowledgements[f.acknowledgements.length - 1]?.upTo, '3');
+  full.entries = [];
+  full.revision++;
+  f.repository.save('tenant', full);
+  await f.reopen();
+  await f.consume([{ ...imported, eventId: 'full' }]);
+  await f.reconcile();
   assert.equal(f.repository.snapshot('tenant').entries.length, 1);
   assert.equal(f.runtime.backgroundTasks.get('full').state, 'complete');
 });
 
-test('failed downloads only log and acknowledge; a failed catalog commit never acknowledges', async (t) => {
+test('failed downloads acknowledge ingestion and retain a failed catalog commit separately', async (t) => {
   const warn = t.mock.method(log, 'warn', () => {});
   const f = fixture();
-  t.after(() => f.db.close());
+  t.after(() => f.close());
   const failed: DownloadEvent = {
     type: 'download.failed',
     eventId: 'failed',
@@ -228,10 +240,17 @@ test('failed downloads only log and acknowledge; a failed catalog commit never a
   f.repository.save = () => {
     throw new Error('disk full');
   };
-  await assert.rejects(f.consume([imported]), /disk full/);
-  assert.deepEqual(f.acknowledgements, [{ streamId: 'stream', upTo: '1' }]);
+  await f.consume([imported]);
+  assert.deepEqual(f.acknowledgements, [
+    { streamId: 'stream', upTo: '1' },
+    { streamId: 'stream', upTo: '2' },
+  ]);
   assert.equal(f.repository.snapshot('tenant').entries.length, 0);
   f.repository.save = save;
+  const changed = f.repository.snapshot('tenant');
+  changed.revision++;
+  f.repository.save('tenant', changed);
   await f.consume([imported]);
+  await f.reconcile();
   assert.equal(f.repository.snapshot('tenant').entries.length, 1);
 });

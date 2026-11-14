@@ -1,4 +1,4 @@
-import { retryDelay } from '../../shared/error-policy';
+import { RetryUnit } from '../../shared/retry-unit';
 import { isDocumentOpenParams } from '../../../protocol/file_requests';
 import { RemoteKitError, nativeError } from '../../shared/errors';
 import type { Asset, AssetDescription, SelectionState } from '../../shared/file-library';
@@ -46,6 +46,7 @@ function checkAbort(signal: AbortSignal) {
 export class FileChannel {
   private readonly pending = new RequestTracker<unknown>();
   private binding?: Binding;
+  private scope = new AbortController();
   private photoBursts = new Map<string, Binding>();
   private assetChunksInFlight = 0;
   constructor(
@@ -61,12 +62,16 @@ export class FileChannel {
     return true;
   }
   disconnect() {
+    this.scope.abort();
+    this.scope = new AbortController();
     this.pending.clear();
     this.photoBursts.clear();
   }
   private syncScope() {
     const binding = this.currentBinding();
     if (binding.channel !== this.binding?.channel || binding.authEpoch !== this.binding?.authEpoch) {
+      this.scope.abort();
+      this.scope = new AbortController();
       this.binding = binding;
       this.pending.setScope(binding);
     }
@@ -84,6 +89,11 @@ export class FileChannel {
       throw new RemoteKitError('unavailable', '连接中断，请重新选择文件');
     }
     return channel;
+  }
+  private bindingCurrent({ channel, authEpoch }: Binding) {
+    return (
+      channel === this.getChannel() && authEpoch === this.getAuthEpoch() && channel?.readyState === 'open'
+    );
   }
   private request<T>(
     method: FileMethod,
@@ -138,7 +148,7 @@ export class FileChannel {
     const sent = this.request<T>(method, params, { ...options, binding });
     // Callers can retain the response while sending subsequent ordered chunks.
     void sent.response.catch(() => {
-      /* The caller observes this rejection after pipelined sends. */
+      /* error-guard: pipelined-response; the caller awaits the original response after its ordered sends. */
     });
     return sent;
   }
@@ -147,16 +157,47 @@ export class FileChannel {
     params: Record<string, unknown>,
     options?: RequestOptions,
   ): Promise<T> {
+    this.syncScope();
+    const scope = this.scope.signal;
+    const binding = options?.binding ?? this.currentBinding();
+    this.checkBinding(binding, options?.signal);
+    options = {
+      ...options,
+      binding,
+      signal: AbortSignal.any([scope, ...(options?.signal ? [options.signal] : [])]),
+    };
+    const unit = new RetryUnit({ name: 'file_request' });
+    const repeatable =
+      ['asset.describe', 'asset.read', 'document.page', 'document.resource', 'photo.thumbnail'].includes(
+        method,
+      ) ||
+      typeof params.operationId === 'string' ||
+      typeof params.uploadId === 'string' ||
+      typeof params.burstId === 'string' ||
+      method === 'selection.commit' ||
+      method === 'selection.cancel';
     for (let attempt = 0; ; attempt++) {
       try {
-        return await (
-          await this.send<T>(method, params, options)
-        ).response;
+        const result = await (await this.send<T>(method, params, options)).response;
+        unit.succeed();
+        return result;
       } catch (error) {
-        const delay = error instanceof RemoteKitError ? retryDelay(error, attempt) : undefined;
-        if (method === 'document.open' || options?.skipWhenBusy || delay === undefined || attempt >= 3)
+        if (scope.aborted || !this.bindingCurrent(binding)) throw error;
+        const failure = unit.fail(error);
+        if (
+          method === 'document.open' ||
+          options?.skipWhenBusy ||
+          failure.delay === undefined ||
+          (failure.error.code === 'outcome_unknown' && !repeatable) ||
+          (failure.error.code === 'conflict' && !repeatable)
+        )
           throw error;
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        try {
+          await unit.wait(options.signal);
+        } catch (waitingError) {
+          if (scope.aborted) throw error;
+          throw waitingError;
+        }
         if (options?.signal) checkAbort(options.signal);
       }
     }
@@ -181,7 +222,7 @@ export class FileChannel {
       abort = () => reject(new RemoteKitError('canceled', ''));
     });
     void aborted.catch(() => {
-      /* The upload races this signal when bytes are in flight. */
+      /* error-guard: upload-abort; the upload awaits this rejection through its in-flight race. */
     });
     signal.addEventListener('abort', abort, { once: true });
     try {
@@ -226,7 +267,7 @@ export class FileChannel {
             this.assetChunksInFlight--;
           });
         void ack.catch(() => {
-          /* The upload window awaits every chunk acknowledgment. */
+          /* error-guard: chunk-ack; the upload window awaits every original acknowledgment. */
         });
         window.push(ack);
         position = next;

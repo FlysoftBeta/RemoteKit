@@ -1,4 +1,5 @@
 import { diagnostics } from '../media/diagnostics';
+import { RetryUnit } from '../../shared/retry-unit';
 
 export function clipboardTextHash(text: string) {
   let a = 2166136261,
@@ -24,6 +25,13 @@ export interface DeviceClipboardPort {
 }
 
 export class DeviceClipboardSync {
+  get failure() {
+    return this.inbound.error ?? this.outbound.error ?? this.reading.error;
+  }
+  private readonly inbound = new RetryUnit({ name: 'clipboard.inbound' });
+  private readonly outbound = new RetryUnit({ name: 'clipboard.outbound' });
+  private readonly reading = new RetryUnit({ name: 'clipboard.read' });
+  private focusInput = 0;
   private enabled = false;
   private scope?: string;
   private generation = 0;
@@ -43,6 +51,9 @@ export class DeviceClipboardSync {
   ) {
     const activated = enabled && !!scope && (!this.enabled || scope !== this.scope);
     if (scope !== this.scope || enabled !== this.enabled) {
+      this.inbound.cancel();
+      this.outbound.cancel();
+      this.reading.cancel();
       this.generation++;
       this.pending = undefined;
       this.lastHash = undefined;
@@ -70,11 +81,15 @@ export class DeviceClipboardSync {
     this.flushing = (async () => {
       while (this.enabled && this.pending && this.port.focused()) {
         const value = this.pending;
-        this.pending = undefined;
+        if (!this.inbound.ready(JSON.stringify([this.generation, value.revision, this.focusInput]))) break;
         try {
           await this.port.write(value.text);
-        } catch {
+          this.inbound.succeed();
+          if (this.pending === value) this.pending = undefined;
+        } catch (cause) {
+          this.inbound.fail(cause);
           this.port.failed();
+          break;
         }
       }
     })().finally(() => {
@@ -90,31 +105,52 @@ export class DeviceClipboardSync {
       if (!this.enabled || generation !== this.generation) return;
       const hash = clipboardTextHash(text);
       if (hash === this.lastHash) return;
-      const value = await this.set!(text);
+      if (!this.outbound.ready(JSON.stringify([generation, hash, this.focusInput])))
+        throw this.outbound.error;
+      let value;
+      try {
+        value = await this.set!(text);
+        this.outbound.succeed();
+      } catch (cause) {
+        this.outbound.fail(cause);
+        throw cause;
+      }
       const revision = BigInt(value.revision);
       if (generation === this.generation && (this.revision === undefined || revision >= this.revision)) {
         this.revision = revision;
         this.lastHash = hash;
       }
     });
-    this.sending = work.catch(() => {});
+    this.sending = work.catch(() => this.port.failed());
     return work;
   }
 
   focus = async () => {
     if (!this.enabled || !this.port.focused()) return;
-    const generation = this.generation;
+    return this.readFocused(this.generation, ++this.focusInput);
+  };
+
+  private async readFocused(generation: number, input: number) {
+    if (!this.enabled || generation !== this.generation || input !== this.focusInput || !this.port.focused())
+      return;
+    if (!this.reading.ready(JSON.stringify([generation, input]))) return;
     try {
       await this.flush();
+      if (this.pending) return;
       if (!(await this.port.granted()) || generation !== this.generation || !this.port.focused()) return;
       const revision = this.revision;
       const text = await this.port.read();
+      this.reading.succeed();
       if (generation === this.generation && revision === this.revision && !this.pending)
         await this.send(text);
-    } catch {
+    } catch (cause) {
+      this.reading.fail(cause);
       this.port.failed();
+      this.reading.schedule(() => {
+        void this.readFocused(generation, input);
+      });
     }
-  };
+  }
 
   async readForPaste(allowPrompt = true) {
     if (!this.enabled) return;

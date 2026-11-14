@@ -2,6 +2,8 @@
 #include "protocol/shared_render_slots.h"
 #include "util/wire_error.hpp"
 #include "management/link.hpp"
+#include "util/retry_unit.hpp"
+#include "util/sdk_error.hpp"
 #include <json.hpp>
 #include <algorithm>
 #include <array>
@@ -23,6 +25,7 @@ inline bool BoundedServiceId(const ServiceJson& value, size_t maximum = 128) {
                      [](unsigned char c) { return c >= 33 && c <= 126; });
 }
 class DirectServices {
+  friend class NativeRetryOwnerProbe;
   const Json log_fields_;
   mutable std::mutex mutex_;
   uint64_t peer_ = 0;
@@ -33,6 +36,8 @@ class DirectServices {
   ServiceJson context_menu_identity_;
   uint64_t context_menu_ticket_ = 0;
   uint64_t context_menu_revision_ = 0;
+  RetryUnit context_menu_retry_{"context_menu.fetch"};
+  std::map<std::string, RetryUnit> delivery_retries_;
   std::string selection_;
   ServiceJson selection_value_;
   uint64_t selection_revision_ = 0;
@@ -44,9 +49,18 @@ class DirectServices {
 
  public:
   explicit DirectServices(Json log_fields = Json::object()) : log_fields_(std::move(log_fields)) {}
+  Json DeliveryFailures() const {
+    std::lock_guard lock(mutex_);
+    Json failures = Json::object();
+    for (const auto& [key, retry] : delivery_retries_)
+      if (retry.Failure())
+        failures[key] = WireError(*retry.Failure());
+    return failures;
+  }
   void Bind(uint64_t peer, std::string connection = {}) {
     std::lock_guard lock(mutex_);
     peer_ = peer;
+    delivery_retries_.clear();
     viewports_.clear();
     pending_viewports_.clear();
     connection_ = std::move(connection);
@@ -272,41 +286,70 @@ class DirectServices {
       std::lock_guard lock(mutex_);
       if (!peer || peer != peer_ || identity == context_menu_identity_)
         return;
-      context_menu_identity_ = identity;
+      context_menu_retry_.Input(std::to_string(peer) + ":" + identity.dump());
+      if (!context_menu_retry_.Ready())
+        return;
       ticket = ++context_menu_ticket_;
       context_menu_.clear();
     }
     auto value = identity;
     if (!identity["menu"].is_null()) {
-      value["menu"] = fetch(identity);
-      if (!value["menu"].is_object())
+      Result<ServiceJson> fetched = fetch(identity);
+      if (!fetched) {
+        std::lock_guard lock(mutex_);
+        if (peer == peer_ && ticket == context_menu_ticket_)
+          context_menu_retry_.Fail(fetched.error());
         return;
+      }
+      value["menu"] = std::move(fetched).value();
+      if (!value["menu"].is_object()) {
+        std::lock_guard lock(mutex_);
+        if (peer == peer_ && ticket == context_menu_ticket_)
+          context_menu_retry_.Fail({ErrorCode::kInternal, "context menu reply is invalid"});
+        return;
+      }
     }
     if (identity != latest())
       return;
     std::lock_guard lock(mutex_);
     if (peer != peer_ || ticket != context_menu_ticket_)
       return;
+    context_menu_identity_ = identity;
+    context_menu_retry_.Success();
     value["type"] = "input.contextMenu";
     value["version"] = 1;
     value["revision"] = std::to_string(++context_menu_revision_);
     context_menu_ = value.dump();
   }
   template <class Send>
-  void Flush(uint64_t peer, Send send) {
+  void Flush(uint64_t peer, Send send, RetryUnit::Clock::time_point now = RetryUnit::Clock::now()) {
     std::lock_guard lock(mutex_);
     if (!peer || peer != peer_)
       return;
+    const auto deliver = [&](const std::string& key, const std::string& bytes) {
+      auto& retry = delivery_retries_.try_emplace(key, "surface.delivery").first->second;
+      retry.Input(bytes);
+      if (!retry.Ready(now))
+        return retry.Status() != RetryUnit::State::kWaiting;
+      const auto status = send(bytes);
+      if (status) {
+        retry.Fail({SdkErrorCode(status), "surface data send failed"}, now);
+        return retry.Status() != RetryUnit::State::kWaiting;
+      }
+      retry.Success();
+      return true;
+    };
     for (auto it = pending_viewports_.begin(); it != pending_viewports_.end();) {
-      if (send(it->second) != 0)
-        return;
-      it = pending_viewports_.erase(it);
+      if (deliver("viewport:" + std::to_string(it->first), it->second))
+        it = pending_viewports_.erase(it);
+      else
+        ++it;
     }
-    if (!editable_.empty() && send(editable_) == 0)
+    if (!editable_.empty() && deliver("editable", editable_))
       editable_.clear();
-    if (!selection_.empty() && send(selection_) == 0)
+    if (!selection_.empty() && deliver("selection", selection_))
       selection_.clear();
-    if (!context_menu_.empty() && send(context_menu_) == 0)
+    if (!context_menu_.empty() && deliver("menu", context_menu_))
       context_menu_.clear();
   }
 };

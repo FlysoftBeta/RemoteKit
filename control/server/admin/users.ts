@@ -1,5 +1,4 @@
 import { log } from '../log';
-import { createLearningSettings } from '../persistence/learning-settings';
 import { RemoteKitError } from '../../shared/errors';
 import type { AdminSessionState, AdminStorage, AdminUser } from '../../shared/admin';
 import type { DomainContext, DomainServices } from '../application';
@@ -169,29 +168,31 @@ export class UserAdmin {
   }
   async resetSession(username: unknown) {
     const user = this.find(username);
-    const placement = this.context.endpoint.placement.peek(user.tenant);
-    if (!placement || placement.runState === 'stopped')
-      await this.services.learning.forgetTenant(user.tenant);
+    await this.services.learning.retireTenant(user.tenant);
     await this.context.tenants.serial(user.tenant, async () => {
       // A running Browser still owns live pages and RTC; reset only discards a stopped Session.
       const placement = this.context.endpoint.placement.peek(user.tenant);
       if (placement && placement.runState !== 'stopped') throw new RemoteKitError('conflict', '需先停止');
-      this.context.store.transaction(() => {
-        createLearningSettings(this.context.store.db, user.tenant);
-        this.context.store.clipboards.clear(user.id);
-        this.context.store.coordination.deleteTenant(user.tenant);
-        const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);
-        if (sessionId) this.services.sessionPurge.enqueue(sessionId);
-      });
+      this.services.learning.forgetTenantData(
+        user.tenant,
+        () => {
+          this.context.store.clipboards.clear(user.id);
+          this.context.store.coordination.deleteTenant(user.tenant);
+          const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);
+          if (sessionId) this.services.sessionPurge.enqueue(sessionId);
+          const workspace = this.context.store.workspaces.workspace(user.tenant);
+          for (const tab of workspace.tabs)
+            if (!isLocalTab(tab)) {
+              tab.residency = 'discarded';
+              tab.restoring = false;
+            }
+          this.context.store.workspaces.saveWorkspace(workspace);
+        },
+        true,
+      );
       this.context.endpoint.forget(user.tenant);
       this.context.tenants.get(user.tenant).resetEndpoint();
-      const workspace = this.context.store.workspaces.workspace(user.tenant);
-      for (const tab of workspace.tabs)
-        if (!isLocalTab(tab)) {
-          tab.residency = 'discarded';
-          tab.restoring = false;
-        }
-      this.services.operations.saveWorkspace(workspace);
+      this.services.viewers.push(user.tenant);
     });
     void this.services.sessionPurge.flush();
     return this.list();

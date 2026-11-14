@@ -31,7 +31,7 @@ class FileLibrary {
     std::string id, request_id;
     FileUploadStore::Binding binding;
     std::vector<SelectionFile> files;
-    enum class State { pending, submitted, selected, cancelled } state = State::pending;
+    enum class State { pending, dispatching, unknown, selected, cancelled } state = State::pending;
     std::vector<std::string> accept;
     FileUploadStore::Limits limits;
   };
@@ -79,6 +79,7 @@ class FileLibrary {
                                  const Render&,
                                  const Check&);
   Result<void> Sweep();
+  ServiceJson CleanupFailures() const;
   ServiceJson StopBlockers(const std::function<bool(uint64_t)>& current) const;
 
   Result<void> Prepare(const Selection&);
@@ -87,11 +88,14 @@ class FileLibrary {
   Result<std::optional<Selection::State>> CancelPendingSelections(const FileUploadStore::Binding&,
                                                                   const Check&);
   Result<bool> Claim(const std::string& id, const Check&);
+  Result<void> ReleaseClaim(const std::string& id);
+  Result<void> Unknown(const std::string& id);
   Result<Selection::State> Finish(const std::string& id,
                                   Selection::State,
                                   std::optional<Selection::State> expected = std::nullopt);
 
  private:
+  friend class NativeRetryOwnerProbe;
   struct Entry {
     Asset asset;
   };
@@ -110,6 +114,9 @@ class FileLibrary {
   std::mutex derivatives_mutex_;
   mutable std::map<std::string, Entry> entries_;
   std::map<std::string, Draft> drafts_;
+  std::map<std::string, uint64_t> retiring_drafts_;
+  std::map<std::string, uint64_t> cleanup_grants_;
+  std::function<Result<void>(const std::filesystem::path&)> remove_file_;
   std::map<std::string, Selection> selections_;
   std::set<std::string> documents_;
   std::uint64_t draft_bytes_{};
@@ -121,7 +128,10 @@ class FileLibrary {
   Result<void> SaveDraft(const Draft&, const Check&) const;
   Result<void> SaveEntry(const Entry&, const Check& = {}) const;
   Result<void> SaveSelection(const Selection&, const Check& = {}) const;
-  bool EraseDraft(std::map<std::string, Draft>::iterator);
+  Result<void> EraseDraft(std::map<std::string, Draft>::iterator);
+  Result<void> RetireDraft(const std::string& id);
+  Result<void> RetireStaging(const std::filesystem::directory_entry& entry);
+  std::map<std::string, RetryUnit> cleanup_retries_;
   Result<Asset> Publish(const std::filesystem::path&,
                         Asset,
                         const Check&,

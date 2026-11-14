@@ -28,7 +28,7 @@ const schema = (db: Sqlite.Database) =>
     )
     .all();
 
-test('release v23 opens with identical schema and records without a migration or backup', () => {
+test('release v23 migrates durable retry state and keeps a verified backup', () => {
   const directory = mkdtempSync(join(tmpdir(), 'rk-v23-'));
   const path = join(directory, 'control.db');
   const release = new Sqlite(path);
@@ -39,10 +39,11 @@ test('release v23 opens with identical schema and records without a migration or
   try {
     const store = new ControlDatabase(path, { buildId: 'test' });
     try {
-      assert.deepEqual(schema(store.db), before);
-      assert.equal(Number(store.db.pragma('schema_version', { simple: true })), version);
-      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 23n }]);
-      assert.equal(existsSync(join(directory, 'backups')), false);
+      assert(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='retry_units'").get());
+      assert.equal(schema(store.db).length, before.length + 1);
+      assert(Number(store.db.pragma('schema_version', { simple: true })) > Number(version));
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 24n }]);
+      assert.equal(existsSync(join(directory, 'backups')), true);
     } finally {
       store.db.close();
     }
@@ -66,7 +67,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
   }
   writeFileSync(join(backupDirectory, 'keep.txt'), 'keep');
   migrations.push({
-    version: 24,
+    version: 25,
     name: 'future-test',
     up(database) {
       database.exec('CREATE TABLE future_step(id TEXT)');
@@ -83,7 +84,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
     const copy = new Sqlite(
       join(
         backupDirectory,
-        readdirSync(backupDirectory).find((name) => /^control-v23-to-v24-test-.*T.*Z\.db$/.test(name))!,
+        readdirSync(backupDirectory).find((name) => /^control-v23-to-v25-test-.*T.*Z\.db$/.test(name))!,
       ),
       { readonly: true },
     );

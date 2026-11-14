@@ -1,4 +1,5 @@
-import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { errorHandling } from '../../shared/error-policy';
+import { RetryUnit } from '../../shared/retry-unit';
 import { RemoteKitError, toRemoteKitError, wireError, type WireError } from '../../shared/errors';
 import { endpointError } from '../endpoint/gateway';
 import type { EndpointSnapshot } from '../endpoint/types';
@@ -23,10 +24,43 @@ type StopReason = 'idle' | 'relief' | 'rebalance';
 type ReliefState = { waitingAfter?: number; inflight?: Promise<void> };
 
 export class UncertainRecovery {
-  private readonly recoveryRetries = new Map<
-    string,
-    { identity: string; retryAt: number; attempts: number }
-  >();
+  private readonly stopRetries = new Map<string, RetryUnit>();
+  private readonly ordinaryRetries = new Map<string, RetryUnit>();
+  failures() {
+    return [
+      ...this.stopRetries.values(),
+      ...this.ordinaryRetries.values(),
+      ...this.recoveryRetries.values(),
+      ...this.candidateRetries.values(),
+    ]
+      .map((unit) => unit.error)
+      .filter((error) => error !== undefined);
+  }
+  private async applyLifecycle(
+    tenant: string,
+    request: Parameters<DomainContext['endpoint']['lifecycle']>[1],
+  ) {
+    const key = tenant + '/' + request.viewId;
+    let unit = this.ordinaryRetries.get(key);
+    if (!unit) {
+      unit = new RetryUnit({ name: 'lifecycle.view', now: () => this.context.clock.monotonicMs() });
+      this.ordinaryRetries.set(key, unit);
+    }
+    const input = JSON.stringify([this.context.store.buildId, request]);
+    if (!unit.ready(input)) return false;
+    try {
+      const result = await this.context.endpoint.lifecycle(tenant, request);
+      if (!result?.accepted)
+        throw new RemoteKitError('outcome_unknown', 'Lifecycle admission was not confirmed');
+      unit.succeed();
+      return true;
+    } catch (cause) {
+      unit.fail(cause);
+      return false;
+    }
+  }
+  private readonly recoveryRetries = new Map<string, RetryUnit>();
+  private readonly candidateRetries = new Map<string, RetryUnit>();
   private readonly relief = new Map<string, ReliefState>();
   private readonly stoppingNodes = new Set<string>();
   private readonly sessionEligibility = new Map<
@@ -209,6 +243,25 @@ export class UncertainRecovery {
       .sort((a, b) => a.viewerAbsentSince - b.viewerAbsentSince || a.tenantId.localeCompare(b.tenantId));
     for (const runtime of candidates) {
       if (!this.needsRelief(node)) return;
+      let unit = this.candidateRetries.get(runtime.tenantId);
+      if (!unit) {
+        unit = new RetryUnit({
+          now: () => this.context.clock.monotonicMs(),
+          failed: (error) => log.warn('stop.candidate_failed', { tenant: runtime.tenantId, err: error }),
+          recovered: () => log.info('stop.candidate_recovered', { tenant: runtime.tenantId }),
+        });
+        this.candidateRetries.set(runtime.tenantId, unit);
+      }
+      if (
+        !unit.ready(
+          JSON.stringify([
+            node.state,
+            this.context.endpoint.placement.peek(runtime.tenantId),
+            runtime.viewer?.id,
+          ]),
+        )
+      )
+        continue;
       const stopped = await this.context.tenants
         .serial(runtime.tenantId, async () => {
           if (!this.context.endpoint.isPlacedOn(runtime.tenantId, node.nodeId)) return false;
@@ -217,10 +270,11 @@ export class UncertainRecovery {
           return this.stop(runtime.tenantId, snapshot, false, reason);
         })
         .catch((err) => {
-          log.warn('stop.candidate_failed', { tenant: runtime.tenantId, nodeId: node.nodeId, err });
+          unit.fail(err);
           return false;
         });
       if (stopped) {
+        unit.succeed();
         state.waitingAfter = Date.now();
         return;
       }
@@ -274,6 +328,32 @@ export class UncertainRecovery {
     snapshot: EndpointSnapshot,
     immediate = false,
     reason: StopReason = 'idle',
+  ): Promise<boolean> {
+    let unit = this.stopRetries.get(tenant);
+    if (!unit) {
+      unit = new RetryUnit({ name: 'stop.session', now: () => this.context.clock.monotonicMs() });
+      this.stopRetries.set(tenant, unit);
+    }
+    const placement = this.context.endpoint.placement.peek(tenant);
+    if (!unit.ready(JSON.stringify([this.context.store.buildId, placement, this.nodeFor(tenant)?.state]))) {
+      if (immediate) throw unit.error;
+      return false;
+    }
+    try {
+      const stopped = await this.stopOnce(tenant, snapshot, immediate, reason);
+      if (stopped) unit.succeed();
+      return stopped;
+    } catch (cause) {
+      unit.fail(cause);
+      if (immediate) throw cause;
+      return false;
+    }
+  }
+  private async stopOnce(
+    tenant: string,
+    snapshot: EndpointSnapshot,
+    immediate: boolean,
+    reason: StopReason,
   ): Promise<boolean> {
     const relief = reason !== 'idle';
     const placement = this.context.endpoint.placement.peek(tenant);
@@ -392,7 +472,13 @@ export class UncertainRecovery {
     if (!lifecycleBlocked && visible && actualState !== 0 && !current?.pending) {
       const attempt = runtime.transitions.get(key);
       if (!attempt || attempt.action !== 'restore' || this.context.clock.monotonicMs() - attempt.at > 12000) {
-        await this.context.endpoint.lifecycle(tenant, { viewId: viewId, action: 'restore' });
+        const applied = await this.applyLifecycle(tenant, {
+          viewId: viewId,
+          action: 'restore',
+          requireRunning: true,
+          lifecycleGeneration: current.lifecycle_generation,
+        });
+        if (!applied) return false;
         runtime.transitions.set(key, {
           action: 'restore',
           at: this.context.clock.monotonicMs(),
@@ -532,10 +618,28 @@ export class UncertainRecovery {
     )
       return;
     const previous = readRecovery(tab);
-    if (previous?.phase === 'failed') return;
-    const action = previous ? 'restore' : 'unload';
+    const retryKey = workspace.tenantId + '/' + tab.webviewId;
+    const retained = this.recoveryRetries.get(retryKey);
+    const changed =
+      previous &&
+      'attempt' in previous &&
+      previous.attempt &&
+      (previous.attempt.browserIncarnation !== browserIncarnation ||
+        previous.attempt.generation !== current.lifecycle_generation);
+    if (previous?.phase === 'failed' && !changed) return;
+    const resending =
+      retained?.error?.code === 'outcome_unknown' &&
+      (previous?.phase === 'restoring' ||
+        (previous?.phase === 'unloading' && previous.evidence === 'pending'));
+    const action = resending
+      ? previous.phase === 'restoring'
+        ? 'restore'
+        : 'unload'
+      : previous && !changed
+        ? 'restore'
+        : 'unload';
     if (
-      previous
+      previous && !changed && !resending
         ? previous.phase !== 'unloading' ||
           previous.evidence !== 'unloaded' ||
           !visible ||
@@ -561,10 +665,23 @@ export class UncertainRecovery {
       this.services.operations.saveWorkspace(workspace);
       return;
     }
-    const retryKey = workspace.tenantId + '/' + tab.webviewId;
     const identity = JSON.stringify([browserIncarnation, generation, action]);
-    const retry = this.recoveryRetries.get(retryKey);
-    if (retry?.identity === identity && retry.retryAt > this.context.clock.monotonicMs()) return;
+    let retry = this.recoveryRetries.get(retryKey);
+    if (!retry) {
+      retry = new RetryUnit({
+        now: () => this.context.clock.monotonicMs(),
+        failed: (error) =>
+          log.warn('lifecycle.recovery_failed', {
+            tenant: workspace.tenantId,
+            viewId: tab.webviewId,
+            err: error,
+          }),
+        recovered: () =>
+          log.info('lifecycle.recovery_recovered', { tenant: workspace.tenantId, viewId: tab.webviewId }),
+      });
+      this.recoveryRetries.set(retryKey, retry);
+    }
+    if (!retry.ready(identity)) return;
     const attempt: RecoveryAttempt =
       action === 'unload'
         ? {
@@ -587,17 +704,12 @@ export class UncertainRecovery {
         lifecycleGeneration: generation,
       });
       if (result?.accepted !== true) throw new RemoteKitError('outcome_unknown', 'Endpoint 未确认请求');
+      retry.succeed();
       this.recoveryRetries.delete(retryKey);
     } catch (error) {
       const failure = toRemoteKitError(error);
-      const attempts = retry?.identity === identity ? retry.attempts : 0;
-      const delay = retryDelay(failure, attempts);
-      if (delay !== undefined) {
-        this.recoveryRetries.set(retryKey, {
-          identity,
-          retryAt: this.context.clock.monotonicMs() + delay,
-          attempts: attempts + 1,
-        });
+      const { delay } = retry.fail(failure);
+      if (delay !== undefined && failure.code !== 'outcome_unknown') {
         transitionRecovery(tab, previous);
         tab.restoring = false;
         this.services.operations.saveWorkspace(workspace);
@@ -668,11 +780,14 @@ export class UncertainRecovery {
     if (!action) return;
     const attempt = this.context.tenants.get(tenant).lifecycle.transitions.get(key);
     if (attempt?.action === action && this.context.clock.monotonicMs() - attempt.at <= 12000) return;
-    await this.context.endpoint.lifecycle(tenant, {
+    const applied = await this.applyLifecycle(tenant, {
       viewId: tab.webviewId,
       action,
       requireRunning: true,
+      browserIncarnation: typeof browserIncarnation === 'string' ? browserIncarnation : undefined,
+      lifecycleGeneration: current.lifecycle_generation,
     });
+    if (!applied) return;
     if (tab.idleKeepAliveOutcome && exhaustion) {
       tab.idleKeepAliveOutcome.reason = 'exhaustion';
       this.services.operations.saveWorkspace(state);

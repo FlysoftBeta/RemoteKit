@@ -80,15 +80,17 @@ void ChannelController::FlushSignals() {
     const auto peer = peer_controller.Handle();
     direct_services.ContextMenu(
         peer, output.Slots().LatestMetadata(), output.Suspended(),
-        [&](const Json& identity) -> Json {
+        [&](const Json& identity) -> Result<Json> {
           if (!authorization.Current(stamp) || !browser.Alive() || !browser.Rpc().Control())
-            return nullptr;
+            return Error{ErrorCode::kConflict, "context menu authorization changed"};
           auto reply = browser.Rpc().Request({{"method", "page.contextMenu"},
                                               {"session", id},
                                               {"view", identity["view"]["id"]},
                                               {"menu", identity["menu"]}});
-          if (!reply || !authorization.Current(stamp))
-            return nullptr;
+          if (!reply)
+            return reply.error();
+          if (!authorization.Current(stamp))
+            return Error{ErrorCode::kConflict, "context menu authorization changed"};
           return reply.value().value("menu", Json());
         },
         [&] {

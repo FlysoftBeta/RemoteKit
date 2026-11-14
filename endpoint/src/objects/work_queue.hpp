@@ -1,5 +1,6 @@
 #pragma once
 #include "protocol/limits.hpp"
+#include "util/log.hpp"
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -22,7 +23,14 @@ class WorkQueue {
             work = std::move(queue_.front());
             queue_.pop_front();
           }
-          work();
+          try {
+            work();
+          } catch (const std::exception& error) {
+            LogError(LogLevel::kError, "worker.task_failed", {ErrorCode::kInternal, error.what()});
+          } catch (...) {
+            LogError(LogLevel::kError, "worker.task_failed",
+                     {ErrorCode::kInternal, "unknown worker exception"});
+          }
         }
       });
   }

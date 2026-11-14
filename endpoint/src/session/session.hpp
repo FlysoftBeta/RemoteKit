@@ -15,6 +15,9 @@
 #include "persistence/checkpoint.hpp"
 #include "persistence/snapshot_client.hpp"
 namespace remotekit {
+namespace retry_test {
+class SessionFixture;
+}
 class Session {
  public:
   Session(media::Sdk&,
@@ -37,11 +40,13 @@ class Session {
     return store.Events().Acknowledge(stream, up_to);
   }
   bool Running() const { return browser.Alive() && !browser.Stopping(); }
+  bool PersistenceClosed() const { return stop_phase_ >= StopPhase::kStoreClosed; }
   const std::string& BrowserIncarnation() const { return browser.Incarnation(); }
   Json AuthorizationSnapshot() const;
   Json LockSnapshot() const;
   void SetOpenTiming(Json phases) { browser.SetOpenTiming(std::move(phases)); }
   Result<void> Stop();
+  Result<void> Fence();
   Result<void> Shutdown();
   Result<Json> Snapshot(bool output_diagnostics = false);
   Result<Json> StopAndCommit(const Json& request_id,
@@ -82,7 +87,11 @@ class Session {
   ChannelController& Channel() { return channel; }
 
  private:
+  friend class NativeErrorStateProbe;
+  friend class NativeRetryOwnerProbe;
+  friend class retry_test::SessionFixture;
   Result<void> CloseRuntime(bool graceful);
+  Result<void> CleanupExitedBrowser(const std::function<Result<void>(const std::string&)>& cleanup);
   void BindPeerResources(uint64_t handle);
   Result<void> StartPeerResources(uint64_t handle, const std::string& sdp);
   void StopPeerResources();
@@ -93,6 +102,18 @@ class Session {
   BrowserRuntime browser;
   SessionDb store;
   CheckpointCache checkpoint_cache;
+  enum class StopPhase {
+    kRunning,
+    kBrowserStopped,
+    kFilesPrepared,
+    kStoreClosed,
+    kMarkedStopped,
+    kPublished
+  };
+  StopPhase stop_phase_ = StopPhase::kRunning;
+  std::optional<Json> stopped_checkpoint_;
+  std::optional<std::string> pending_exit_cleanup_;
+  RetryUnit exit_cleanup_retry_{"browser.exit_cleanup"};
   int64_t version_at_ = 0;
   const std::shared_ptr<media::ServerTrace> trace;
   ControllerContext context;

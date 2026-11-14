@@ -148,7 +148,7 @@ export interface AdminSocketMethods {
   'admin.deleteDiagnostic': { params: { id: string }; result: AdminDiagnostic[] };
   'admin.sessionImportDeployment': { params: Record<string, never>; result: ImportDeployment };
   'admin.announcements': { params: Record<string, never>; result: AdminAnnouncement[] };
-  'admin.publishAnnouncement': { params: AnnouncementDraft; result: AdminAnnouncement[] };
+  'admin.publishAnnouncement': { params: AnnouncementDraft & { id: string }; result: AdminAnnouncement[] };
   /** `republish` shows the edited announcement again to users who already dismissed it. */
   'admin.updateAnnouncement': {
     params: AnnouncementDraft & { id: string; republish: boolean };

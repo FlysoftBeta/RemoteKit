@@ -20,6 +20,7 @@ export interface IntegrityResult {
   problems: IntegrityProblem[];
 }
 const documents: [string, string, Codec<unknown>][] = [
+  ['retry_units', 'record', codecs.retryUnitRecord],
   ['workspace_tabs', 'data', codecs.tab],
   ['workspace_spaces', 'data', codecs.space],
   ['workspace_windows', 'state', codecs.windowState],

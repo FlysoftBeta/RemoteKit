@@ -140,7 +140,7 @@ test('an unavailable sample is counted and authorization loss halts capture unti
 });
 
 test('a lost stop reply keeps the ID and checks status automatically', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const requests: string[] = [];
   let state: DiagnosticState | undefined;
   const request: DiagnosticRequest = async (method) => {

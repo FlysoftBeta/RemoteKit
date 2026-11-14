@@ -1,6 +1,7 @@
 import type { SendMailOptions } from 'nodemailer';
 import nodemailer from 'nodemailer';
-import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { RetryLedger } from '../persistence/retry-units';
+import { createHash } from 'node:crypto';
 import { wireError, type WireError } from '../../shared/errors';
 import type { ControlEvent, ImportMessage, MailboxStatus } from '../../shared/session-import';
 import type { SessionImportConfig } from '../config';
@@ -73,8 +74,9 @@ export class ImportOutbox {
   private transport?: MailTransport;
   private running?: Promise<void>;
   private stopped = false;
-  private blocked = false;
-  private failures = new Map<string, { attempts: number; retryAt: number }>();
+  private readonly retries: RetryLedger;
+  private readonly retryInput: string;
+  private readonly failing = new Set<string>();
   private volatile: QueuedEvent[] = [];
   private lastErrorAt: number | null = null;
   private failure: WireError | null = null;
@@ -86,7 +88,15 @@ export class ImportOutbox {
     private readonly clock: Clock = systemClock,
     private readonly log: (message: string) => void = (message) =>
       structuredLog.warn('session_import.outbox_failed', { message }),
-  ) {}
+  ) {
+    this.retries = new RetryLedger(store, 'session_import.outbox', () => clock.wallMs());
+    this.retryInput = JSON.stringify([
+      store.buildId,
+      createHash('sha256')
+        .update(JSON.stringify(config ?? null))
+        .digest('hex'),
+    ]);
+  }
   reject(publicKey: Buffer, event: Extract<ControlEvent, { type: 'pairRejected' }>) {
     this.enqueue(publicKey, 0, [event]);
   }
@@ -97,11 +107,11 @@ export class ImportOutbox {
     return {
       pending: this.store.outgoing().length + this.volatile.length,
       lastErrorAt: this.lastErrorAt,
-      error: this.failure,
+      error: this.failure ?? this.retries.failures()[0]?.error ?? null,
     };
   }
   flush(): Promise<void> {
-    if (!this.config || this.stopped || this.blocked) return Promise.resolve();
+    if (!this.config || this.stopped) return Promise.resolve();
     if (this.running) return this.running;
     this.running = this.send().finally(() => {
       this.running = undefined;
@@ -132,7 +142,8 @@ export class ImportOutbox {
       const oldest = Math.min(...events.map((e) => e.at)),
         newest = Math.max(...events.map((e) => e.at));
       if (now - newest < this.config!.replyWindowSeconds * 1000 && now - oldest < 300000) continue;
-      if ((this.failures.get(keyId)?.retryAt ?? 0) > now) continue;
+      const unit = this.retries.unit(keyId);
+      if (!unit.ready(this.retryInput)) continue;
       try {
         this.transport ??= this.factory(this.config!);
         const device = this.store.device(keyId);
@@ -162,17 +173,16 @@ export class ImportOutbox {
           const sent = new Set(group.memory.filter((r) => envelope.events.includes(r.event)));
           this.volatile = this.volatile.filter((r) => !sent.has(r));
         }
-        this.failures.delete(keyId);
-        if (!this.failures.size) this.failure = null;
+        unit.succeed();
+        this.retries.remove(keyId);
+        this.failing.delete(keyId);
+        if (!this.failing.size) this.failure = null;
       } catch (error) {
-        const attempts = (this.failures.get(keyId)?.attempts ?? 0) + 1;
-        const failure = mailError(error, true);
-        const wait = retryDelay(failure, attempts - 1);
-        this.blocked = wait === undefined && errorHandling(failure.code) !== 'reconcile';
-        this.failures.set(keyId, { attempts, retryAt: now + (wait ?? 60_000) });
+        const failure = unit.fail(mailError(error, true)).error;
+        this.retries.save(keyId);
+        this.failing.add(keyId);
         this.lastErrorAt = this.clock.wallMs();
-        this.failure = wireError(reportError(failure, 'session_import.outbox_failed'));
-        this.log('Session import outbox: ' + failure.message);
+        this.failure = wireError(failure);
       }
     }
   }
@@ -180,5 +190,6 @@ export class ImportOutbox {
     this.stopped = true;
     this.transport?.close?.();
     await this.running;
+    this.retries.close();
   }
 }

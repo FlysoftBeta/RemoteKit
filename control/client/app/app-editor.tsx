@@ -16,7 +16,7 @@ import { useEffect, useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import type { AppDefinition, AppInspectResult, ProductState } from '../../shared/product';
 import { failureError, FailureNote } from '../failures';
-import { recover } from '../failures/recovery';
+import { recoverRead as recover } from '../failures/recovery';
 import './app-editor.css';
 import type { Action } from './product-dialogs';
 import { ScaledSelect } from './scaled-select';
@@ -93,7 +93,10 @@ export function InstallDialog({
     const abort = new AbortController();
     void recover(() => call('app.inspect', { tabId }), abort.signal, setError)
       .then((value) => {
-        if (!disposed) setValue(value);
+        if (!disposed) {
+          setValue(value);
+          setError(undefined);
+        }
       })
       .catch((error) => {
         if (!disposed) setError(failureError(error));
@@ -108,7 +111,7 @@ export function InstallDialog({
     const url = new URL(value?.startUrl ?? '');
     if (url.protocol === 'http:' || url.protocol === 'https:') origin = url.origin;
   } catch {
-    /* Editable URL. */
+    origin = '网址格式无效';
   }
   return (
     <Dialog open onClose={busy ? undefined : onClose} fullWidth maxWidth="sm">

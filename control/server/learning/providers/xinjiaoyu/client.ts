@@ -1,14 +1,6 @@
-import { retryDelay } from '../../../../shared/error-policy.js';
+import { RetryUnit } from '../../../../shared/retry-unit.js';
 import { RemoteKitError } from '../../../../shared/errors.js';
-import {
-  HttpClient,
-  type HttpOptions,
-  delay,
-  record,
-  malformed,
-  requiredText,
-  serviceError,
-} from '../http.js';
+import { HttpClient, type HttpOptions, record, malformed, requiredText, serviceError } from '../http.js';
 import type { ProviderResult } from '../models.js';
 import { CLIENT, createHandshakeEncrypt, createRequestEncrypt, decryptSafeCode } from './crypto.js';
 import { DEFAULT_RATE_LIMIT, RateLimiter } from './rate-limiter.js';
@@ -32,10 +24,9 @@ export interface RateLimitOptions {
   minIntervalMs: number;
   jitterMs: number;
   maxRetries: number;
-  retryBaseMs: number;
 }
 
-export interface XinjiaoyuOptions extends Omit<HttpOptions, 'maxRetries' | 'retryBaseMs'> {
+export interface XinjiaoyuOptions extends Omit<HttpOptions, 'maxRetries'> {
   stageId?: string;
   rateLimit?: Partial<RateLimitOptions>;
 }
@@ -56,7 +47,7 @@ export class APIClient {
       this.rateLimit.concurrency < 1 ||
       !Number.isInteger(this.rateLimit.maxRetries) ||
       this.rateLimit.maxRetries < 0 ||
-      [this.rateLimit.minIntervalMs, this.rateLimit.jitterMs, this.rateLimit.retryBaseMs].some(
+      [this.rateLimit.minIntervalMs, this.rateLimit.jitterMs].some(
         (value) => !Number.isFinite(value) || value < 0,
       )
     ) {
@@ -193,18 +184,16 @@ export class APIClient {
   }
 
   private async retry<T>(run: () => Promise<T>, read = true): Promise<T> {
+    const unit = new RetryUnit();
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await run();
+        const result = await run();
+        unit.succeed();
+        return result;
       } catch (error) {
-        if (
-          !read ||
-          !(error instanceof RemoteKitError) ||
-          retryDelay(error, attempt) === undefined ||
-          attempt >= this.rateLimit.maxRetries
-        )
-          throw error;
-        await delay(error.retryAfterMs ?? retryDelay(error, attempt)!);
+        const failure = unit.fail(error);
+        if (!read || failure.delay === undefined || attempt >= this.rateLimit.maxRetries) throw error;
+        await unit.wait();
       }
     }
   }

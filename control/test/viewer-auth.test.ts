@@ -13,6 +13,7 @@ import { createApplication, type DomainServices } from '../server/application';
 import type { EndpointLink } from '../server/endpoint/link';
 import { ControlDatabase } from '../server/persistence/database';
 import type { FaceStatus } from '../shared/security';
+import { RemoteKitError } from '../shared/errors';
 
 const password = 'password123';
 const template = Array.from({ length: 128 }, (_, i) => (i === 0 ? 1 : 0));
@@ -25,6 +26,7 @@ const defer = () => {
 };
 
 test('detaching a Viewer retains a failed peer revocation and retries it without an active Viewer', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
   const f = await fixture(t);
   await f.offer();
   const security = f.control.tenants.get(f.tenant).viewer!.security!;
@@ -35,7 +37,7 @@ test('detaching a Viewer retains a failed peer revocation and retries it without
     'request',
     async (method: string, tenant: string, params: Record<string, unknown> = {}) => {
       if (method === 'session.desired' && (params.authorization as any).unlocked === false && failing)
-        throw new Error('native revocation unavailable');
+        throw new RemoteKitError('unavailable', 'native revocation unavailable', { retryAfterMs: 10 });
       return request(method, tenant, params);
     },
   );
@@ -46,6 +48,7 @@ test('detaching a Viewer retains a failed peer revocation and retries it without
   await f.control.viewers.pollFaceAuth();
   assert.ok(security.peer);
   failing = false;
+  t.mock.timers.tick(10);
   await f.control.viewers.pollFaceAuth();
   assert.equal(security.peer, undefined);
 });

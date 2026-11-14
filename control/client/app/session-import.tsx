@@ -38,6 +38,7 @@ import type {
 } from '../../shared/session-import';
 import { failureError, FailureNote } from '../failures';
 import { recover } from '../failures/recovery';
+import { RetryUnit } from '../../shared/retry-unit';
 import { formatTime } from './admin/shared';
 import type { Action } from './product-dialogs';
 import './session-import.css';
@@ -203,18 +204,24 @@ function ImportDialog({
   const [removing, setRemoving] = useState<ImportDevice>();
   const mounted = useRef(true);
   const refreshing = useRef(false);
+  const retry = useRef(new RetryUnit());
+  const retryInput = useRef(0);
   const lifetime = useRef(new AbortController());
   useEffect(() => () => lifetime.current.abort(), []);
-  const refresh = async () => {
+  const refresh = async (manual = true) => {
     if (refreshing.current) return;
+    if (manual) retryInput.current++;
+    if (!retry.current.ready(String(retryInput.current))) return;
     refreshing.current = true;
     try {
       const value = await call('sessionImport.state', {});
+      retry.current.succeed();
       if (mounted.current) {
         setState(value);
         setError(undefined);
       }
     } catch (e) {
+      retry.current.fail(e);
       if (mounted.current) setError(failureError(e));
     } finally {
       refreshing.current = false;
@@ -225,7 +232,7 @@ function ImportDialog({
     if (online) void refresh();
     const timer = online
       ? setInterval(() => {
-          void refresh();
+          void refresh(false);
         }, 5000)
       : undefined;
     return () => {

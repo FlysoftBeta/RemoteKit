@@ -91,14 +91,14 @@ void DownloadImportTests(const fs::path& root,
     if (command.at("method") == "profile.downloads") {
       CHECK(command.at("command") == Json({{"action", "remove"}, {"guid", "guid"}}));
       if (fail_remove)
-        return Error{ErrorCode::kUnavailable, "transport failed"};
+        return Error{ErrorCode::kUnavailable, "transport failed", {}, 0};
       order.push_back("remove");
       fs::remove(target);
     } else {
       CHECK(command.at("method") == "view.closed.ack");
       CHECK(command.at("eventIds") == Json::array({"browser-event"}));
       if (fail_ack)
-        return Error{ErrorCode::kUnavailable, "ack reply lost"};
+        return Error{ErrorCode::kUnavailable, "ack admission unavailable", {}, 0};
       order.push_back("ack");
     }
     return Json{{"ok", true}};
@@ -150,9 +150,23 @@ void DownloadImportTests(const fs::path& root,
     Take(downloads.Observe("next-incarnation", Json::array({event}), "1", rpc));
     CHECK(imports == 2 && events().at(0).at("type") == "download.failed");
     CHECK(events().at(0).at("error").at("code") == "limit_exceeded");
-    CHECK(downloads.Pending() == 0 && !fs::exists(target));
+    CHECK(downloads.Pending() == 1 && fs::exists(target));
+    Take(downloads.Observe("next-incarnation", Json::array({event}), "1", rpc));
+    CHECK(imports == 2 && events().size() == 1);
+    {
+      DownloadImports reopened(store.Downloads());
+      Take(reopened.Initialize());
+      reopened.SetImport(import);
+      Take(reopened.Observe("next-incarnation", Json::array({event}), "1", rpc));
+      CHECK(imports == 2 && reopened.Pending() == 1 && events().size() == 1);
+    }
     acknowledge();
-    Take(downloads.Initialize());
+    control.reject_commit = false;
+    downloads.SetInput("quota-released");
+    Take(downloads.Observe("next-incarnation", Json::array({event}), "1", rpc));
+    CHECK(imports == 3 && downloads.Pending() == 0 && !fs::exists(target));
+    CHECK(events().at(0).at("type") == "download.imported");
+    acknowledge();
   }
   control.reject_commit = false;
   control.reject_code = ErrorCode::kUnavailable;
@@ -171,8 +185,13 @@ void DownloadImportTests(const fs::path& root,
     const auto result = events().at(0);
     CHECK(result.at("type") == "download.failed" && result.at("error").at("code") == reason);
     CHECK(result.size() == 5 && !result.contains("fileReference"));
-    CHECK(!fs::exists(target) && downloads.Pending() == 0);
+    const bool dropped = reason == "not_found";
+    CHECK(fs::exists(target) == !dropped && downloads.Pending() == (dropped ? 0 : 1));
+    const auto before = imports;
+    Take(downloads.Observe("failure-" + std::to_string(serial), Json::array(), "1", rpc));
+    CHECK(imports == before);
     acknowledge();
+    Take(store.Downloads().Save({{"records", Json::array()}}));
     Take(downloads.Initialize());
   }
   write();

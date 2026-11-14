@@ -31,10 +31,8 @@ const char* NavigationRecovery::Recovery::PhaseName() const {
       return "visible";
     case Phase::kComplete:
       return "complete";
-    case Phase::kFallback:
-      return "fallback";
-    case Phase::kFallbackStarted:
-      return "fallback_started";
+    case Phase::kReplacementUnknown:
+      return "replacement_unknown";
     case Phase::kFailed:
       return "failed";
   }
@@ -42,27 +40,23 @@ const char* NavigationRecovery::Recovery::PhaseName() const {
 }
 
 void NavigationRecovery::FailRecovery(const std::string& view, Recovery& task, const Error& error) {
-  LogError(LogLevel::kWarn, "navigation.recovery_failed", error,
-           {{"sessionId", id}, {"viewId", view}});
+  task.retry.Input(browser.Incarnation() + ":" + view);
+  task.retry.Fail(error);
   task.error = error;
-  if (auto delay = RetryDelay(error, task.attempts++)) {
-    task.next_poll = QpcNow() + delay->count() * QpcFrequency() / 1000;
+  if (task.retry.Status() == RetryUnit::State::kWaiting) {
+    task.reconcile = task.retry.Reconcile() || task.retry.Refresh();
     return;
   }
-  if (error.code == ErrorCode::kOutcomeUnknown && task.phase != Recovery::Phase::kWaiting) {
-    task.reconcile = true;
-    task.next_poll = QpcNow() + QpcFrequency() / 4;
-    return;
-  }
-  task.saved = nullptr;
-  task.buffer_bytes = 0;
-  task.phase = task.phase == Recovery::Phase::kFallback ? Recovery::Phase::kFailed
-                                                        : Recovery::Phase::kFallback;
+  task.phase = Recovery::Phase::kFailed;
 }
 
 bool NavigationRecovery::Recovering(const std::string& view) const {
   const auto found = recoveries.find(view);
   return found != recoveries.end() && found->second.Pending();
+}
+bool NavigationRecovery::NeedsReplacement(const std::string& view) const {
+  const auto found = recoveries.find(view);
+  return found != recoveries.end() && found->second.phase != Recovery::Phase::kComplete;
 }
 
 Json NavigationRecovery::RecoveryStatus(const Recovery& recovery) const {
@@ -72,7 +66,7 @@ Json NavigationRecovery::RecoveryStatus(const Recovery& recovery) const {
 }
 
 Json NavigationRecovery::RecoverySnapshot() const {
-  Json views = Json::object();
+  Json views = navigation_export.Failures();
   bool pending = false;
   for (const auto& [view, recovery] : recoveries) {
     views[view] = RecoveryStatus(recovery);
@@ -91,32 +85,23 @@ bool NavigationRecovery::CancelRecovery(const std::string& view) {
   const auto transfer = found->second.transfer;
   recoveries.erase(found);
   recovery_revisions.erase(view);
-  if (!transfer.empty() && browser.Rpc().Control()) {
-    {
-      {
-        auto navigation_transfer_cancel_result =
-            browser.Rpc().Request({{"method", "navigation.transfer.cancel"},
-                                   {"session", id},
-                                   {"view", view},
-                                   {"transfer", transfer}});
-        if (!navigation_transfer_cancel_result) {
-          const Error error = navigation_transfer_cancel_result.error();
-          LogError(LogLevel::kWarn, "navigation.cancel_failed", error);
-        }
-      }
-    }
-  }
+  navigation_export.RetireTransfer(browser.Incarnation(), view, transfer);
   return pending;
 }
 
 void NavigationRecovery::MaintainRecovery() {
+  scavenge_retry_.Input(browser.Incarnation());
   if (browser.Initialized() && browser.Alive() && !browser.Stopping() &&
-      scavenged_incarnation != browser.Incarnation() &&
+      scavenged_incarnation != browser.Incarnation() && scavenge_retry_.Ready() &&
       std::all_of(recoveries.begin(), recoveries.end(),
                   [](const auto& item) { return !item.second.Pending(); })) {
     auto scavenged = browser.Rpc().Request({{"method", "storage.scavenge"}});
-    if (scavenged)
+    if (scavenged) {
       scavenged_incarnation = browser.Incarnation();
+      scavenge_retry_.Success();
+    } else {
+      scavenge_retry_.Fail(scavenged.error());
+    }
   }
   // Alternate with restore/reconciliation so neither bulk direction starves
   // another Session or the normal JSONL dispatcher.
@@ -148,12 +133,13 @@ void NavigationRecovery::MaintainRecovery() {
   for (size_t count = 0; count < recoveries.size(); ++count) {
     if (selected == recoveries.end())
       selected = recoveries.begin();
-    if (selected->second.Pending() && selected->second.next_poll <= now)
+    if (selected->second.Pending() && selected->second.retry.Ready() &&
+        selected->second.next_poll <= now)
       break;
     ++selected;
   }
   if (selected == recoveries.end() || !selected->second.Pending() ||
-      selected->second.next_poll > now)
+      !selected->second.retry.Ready() || selected->second.next_poll > now)
     return;
   const auto view = selected->first;
   recovery_cursor = view;
@@ -171,18 +157,12 @@ void NavigationRecovery::MaintainRecovery() {
         auto status = browser.Rpc().Request(
             {{"method", "navigation.transfer.status"}, {"session", id}, {"view", view}});
         if (!status) {
-          if (status.error().code == ErrorCode::kNotFound) {
-            task.phase = Recovery::Phase::kFailed;
-            task.reconcile = false;
-          } else {
-            task.next_poll = now + QpcFrequency();
-          }
+          FailRecovery(view, task, status.error());
           return;
         }
         const auto& result = status.value();
         if (!result.value("importing", false) || result.at("size") != task.saved.at("size")) {
-          task.phase = Recovery::Phase::kFailed;
-          task.reconcile = false;
+          FailRecovery(view, task, {ErrorCode::kNotFound, "navigation import identity changed"});
           return;
         }
         const auto received = std::stoull(result.at("received").get<std::string>());
@@ -195,21 +175,28 @@ void NavigationRecovery::MaintainRecovery() {
             task.offset += bytes;
             ++task.chunk;
           } else if (received != task.offset) {
-            task.phase = Recovery::Phase::kFailed;
+            FailRecovery(view, task,
+                         {ErrorCode::kInternal, "navigation import offset is inconsistent"});
+            return;
+          } else {
+            task.reconcile = false;
+            return;
           }
         } else if (result.value("committed", false)) {
           task.phase = Recovery::Phase::kRestore;
           task.saved = nullptr;
           task.buffer_bytes = 0;
         } else {
-          task.phase = Recovery::Phase::kFailed;
+          task.reconcile = false;
+          return;
         }
       } else if (task.phase == Recovery::Phase::kUnload ||
                  task.phase == Recovery::Phase::kRestore ||
-                 task.phase == Recovery::Phase::kFallback) {
+                 task.phase == Recovery::Phase::kWaiting ||
+                 task.phase == Recovery::Phase::kReplacementUnknown) {
         auto snapshot = browser.Snapshot();
         if (!snapshot) {
-          task.next_poll = now + QpcFrequency();
+          FailRecovery(view, task, snapshot.error());
           return;
         }
         const Json* current = nullptr;
@@ -217,7 +204,11 @@ void NavigationRecovery::MaintainRecovery() {
           for (const auto& candidate : session.at("views"))
             if (candidate.value("view", std::string()) == view)
               current = &candidate;
-        if (!current || current->value("pending", false)) {
+        if (!current) {
+          FailRecovery(view, task, {ErrorCode::kNotFound, "navigation recovery view disappeared"});
+          return;
+        }
+        if (current->value("pending", false) || current->value("lifecycle_uncertain", false)) {
           task.next_poll = now + QpcFrequency() / 4;
           return;
         }
@@ -226,12 +217,28 @@ void NavigationRecovery::MaintainRecovery() {
         else if (task.phase == Recovery::Phase::kRestore && current->value("actual", -1) == 0) {
           task.phase = Recovery::Phase::kWaiting;
           task.deadline = now + QpcFrequency() * 11;
-        } else if (task.phase == Recovery::Phase::kFallback && current->value("actual", -1) == 0)
-          task.phase = Recovery::Phase::kFallbackStarted;
-        else
-          task.phase = Recovery::Phase::kFailed;
+        } else if (task.phase == Recovery::Phase::kWaiting && current->value("actual", -1) == 0) {
+          const auto last = current->value("last_lifecycle", Json::object());
+          if (!last.value("succeeded", false)) {
+            FailRecovery(view, task, ParseWireError(last.value("error", Json())));
+            return;
+          }
+          task.phase = Recovery::Phase::kVisible;
+        } else if (task.phase == Recovery::Phase::kReplacementUnknown &&
+                   current->value("actual", -1) == 0)
+          task.phase = Recovery::Phase::kComplete;
+        else {
+          if (task.retry.Refresh())
+            task.reconcile = false;
+          else
+            FailRecovery(
+                view, task,
+                {ErrorCode::kOutcomeUnknown, "navigation lifecycle completion is unknown"});
+          return;
+        }
       }
       task.reconcile = false;
+      task.retry.Success();
       return;
     }
     if (task.phase == Recovery::Phase::kLoad) {
@@ -371,47 +378,22 @@ void NavigationRecovery::MaintainRecovery() {
       task.phase = Recovery::Phase::kWaiting;
       task.deadline = now + QpcFrequency() * 11;
     } else if (task.phase == Recovery::Phase::kVisible) {
-      task.phase = Recovery::Phase::kComplete;
       {
         {
           auto reconcile_output_result_3 = views.ReconcileOutput();
           if (!reconcile_output_result_3) {
             const Error error = reconcile_output_result_3.error();
             task.error = error;
+            FailRecovery(view, task, error);
             return;
           }
         }
       }
 
-    } else if (task.phase == Recovery::Phase::kFallback) {
-      // Fresh GET of the product URL, never automatic replay of imported POST.
-      {
-        auto view_recreate_result = browser.Rpc().Request(
-            {{"method", "view.recreate"},
-             {"session", id},
-             {"view", view},
-             {"url", views.Desired(view).value("url", std::string("about:blank"))}});
-        if (!view_recreate_result) {
-          const Error error = view_recreate_result.error();
-          FailRecovery(view, task, error);
-          return;
-        }
-      }
-      task.saved = nullptr;
-      task.buffer_bytes = 0;
-      task.transfer.clear();
-      task.phase = Recovery::Phase::kFallbackStarted;
-      {
-        {
-          auto reconcile_output_result_4 = views.ReconcileOutput();
-          if (!reconcile_output_result_4) {
-            const Error error = reconcile_output_result_4.error();
-            task.error = error;
-            return;
-          }
-        }
-      }
+      task.phase = Recovery::Phase::kComplete;
     }
+    task.retry.Success();
+    task.error.reset();
   } catch (const std::exception& error) {
     FailRecovery(view, task,
                  CorruptState(std::string("invalid navigation recovery: ") + error.what()));
@@ -433,7 +415,7 @@ Result<void> NavigationRecovery::CaptureNavigation(const Json& browser_view) try
 void NavigationRecovery::MaintainNavigationExport() {
   auto saved = ExportTick();
   if (!saved)
-    LogError(LogLevel::kWarn, "navigation.save_failed", saved.error());
+    return;
 }
 Result<void> NavigationRecovery::ExportTick(uint32_t timeout_ms) try {
   const auto start = PhaseClock::now();
@@ -498,6 +480,8 @@ Result<void> NavigationRecovery::FinalExport() try {
       RK_RETURN_IF_ERROR(CaptureNavigation(view));
     }
   while (navigation_export.Pending()) {
+    if (const auto error = navigation_export.TerminalFailure())
+      return *error;
     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                                deadline - std::chrono::steady_clock::now())
                                .count();
@@ -506,7 +490,10 @@ Result<void> NavigationRecovery::FinalExport() try {
     auto saved = ExportTick(static_cast<uint32_t>(std::min<int64_t>(remaining / 3 + 1, 1000)));
     if (!saved)
       return saved.error();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
+  if (const auto error = navigation_export.TerminalFailure())
+    return *error;
   return {};
 } catch (const std::exception& error) {
   return CorruptState(std::string("invalid final navigation export: ") + error.what());
@@ -524,6 +511,14 @@ void NavigationRecovery::Reset() {
 }
 void NavigationRecovery::Begin(const std::string& view) {
   recoveries[view] = Recovery{};
+}
+void NavigationRecovery::ReplacementUnknown(const std::string& view) {
+  const auto found = recoveries.find(view);
+  if (found == recoveries.end())
+    return;
+  auto& task = found->second;
+  task.phase = Recovery::Phase::kReplacementUnknown;
+  FailRecovery(view, task, {ErrorCode::kOutcomeUnknown, "view replacement completion is unknown"});
 }
 void NavigationRecovery::Forget(const std::string& view) {
   navigation_export.Forget(view);

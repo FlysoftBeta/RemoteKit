@@ -4,7 +4,7 @@ import { RemoteKitError } from '../../../shared/errors';
 import type { LibraryEntry } from '../../../shared/file-library';
 import type { ClassMaterial, StudyAttachment } from '../../../shared/learning';
 import { failureError, FailureNote } from '../../failures';
-import { recover } from '../../failures/recovery';
+import { recover, recoverRead } from '../../failures/recovery';
 import { formatFileSize } from '../../files/file-format';
 import { useLibrary } from '../../files/file-library-state';
 import { fileTypeColor, FileTypeIcon } from '../../files/file-thumbnail';
@@ -56,7 +56,12 @@ function FileRow({
         </span>
       </ButtonBase>
       <FailureNote
-        error={error ?? (attachment.save.state === 'failed' ? attachment.save.error : undefined)}
+        error={
+          error ??
+          (attachment.save.state === 'failed' || attachment.save.state === 'unknown'
+            ? attachment.save.error
+            : undefined)
+        }
         context={{ operation: '保存附件', scope: 'item', credential: 'changyan', targetId: attachment.key }}
       />
     </div>
@@ -118,7 +123,7 @@ export function AttachmentRow({
           )
         ).entryId;
       setSaved(id);
-      const entry = await recover(
+      const entry = await recoverRead(
         async () => {
           const snapshot = await library.refresh();
           const entry = snapshot.entries.find((item) => item.id === id);

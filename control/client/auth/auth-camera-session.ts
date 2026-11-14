@@ -1,4 +1,4 @@
-import { retryDelay } from '../../shared/error-policy';
+import { RetryUnit } from '../../shared/retry-unit';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type { AuthSocketMethods, AuthState, FacePurpose } from '../../shared/security';
 import { diagnostics } from '../media/diagnostics';
@@ -81,6 +81,9 @@ function cameraError(error: unknown) {
 type CameraPort = Pick<AuthorizationScope, 'authCameraReady' | 'setAuthCamera' | 'recentAuthCameraFrame'>;
 
 export class AuthCameraSession extends Store<CameraState> {
+  get failure() {
+    return this.retry.error;
+  }
   private options?: CameraOptions;
   private active?: MediaStream;
   private explicit?: FacePurpose;
@@ -89,7 +92,8 @@ export class AuthCameraSession extends Store<CameraState> {
   private manualPresence?: string;
   private departureReported?: string;
   private automaticPending = false;
-  private retryAt = 0;
+  private readonly retry: RetryUnit;
+  private retryInput = 0;
   private timer?: ReturnType<typeof setInterval>;
   private unwatch?: () => void;
   constructor(
@@ -98,6 +102,11 @@ export class AuthCameraSession extends Store<CameraState> {
     private readonly environment: CameraEnvironment = browserCamera,
   ) {
     super({});
+    this.retry = new RetryUnit({
+      now: () => environment.now(),
+      failed: (error) => diagnostics.record('auth_camera_failed', error),
+      recovered: () => diagnostics.record('auth_camera_recovered', {}),
+    });
   }
 
   configure(options: CameraOptions) {
@@ -128,8 +137,7 @@ export class AuthCameraSession extends Store<CameraState> {
         face.challengeId !== previous.auth.face.challengeId ||
         face.error?.code !== previous.auth.face.error?.code)
     ) {
-      const delay = face.error ? retryDelay(face.error, 0) : undefined;
-      this.retryAt = delay === undefined ? Infinity : this.environment.now() + delay;
+      if (face.error) this.retry.fail(face.error);
     }
     if (
       options.manualLock &&
@@ -219,7 +227,7 @@ export class AuthCameraSession extends Store<CameraState> {
   start = async (purpose: 'verify' | 'enroll', currentPassword?: string) => {
     if (!this.options?.online || !this.port.authCameraReady)
       throw new RemoteKitError('unavailable', '人脸验证通道尚未就绪');
-    this.retryAt = 0;
+    this.retry.ready(String(++this.retryInput));
     const current = ++this.generation;
     const old = this.challenge;
     this.challenge = undefined;
@@ -279,7 +287,13 @@ export class AuthCameraSession extends Store<CameraState> {
       if (this.active) this.stop();
       return;
     }
-    if (!this.port.authCameraReady || this.environment.now() < this.retryAt) return;
+    if (
+      !this.port.authCameraReady ||
+      !this.retry.ready(
+        JSON.stringify([this.retryInput, this.options.auth?.epoch, this.options.auth?.serviceEpoch, desired]),
+      )
+    )
+      return;
     const face = this.options.auth?.face;
     if (face?.challengeId && face.purpose === desired && face.status === 'pending' && this.active) return;
     this.automaticPending = true;
@@ -297,14 +311,13 @@ export class AuthCameraSession extends Store<CameraState> {
         this.cancelChallenge(next.face.challengeId);
         return;
       }
+      this.retry.succeed();
       this.challenge = next.face.challengeId;
       if (this.options?.manualLock && desired === 'presence') this.manualPresence = next.face.challengeId;
       this.syncSource();
     } catch (error) {
       const failure = cameraError(error);
-      diagnostics.record('auth-camera', failure);
-      const delay = retryDelay(failure, 0);
-      this.retryAt = delay === undefined ? Infinity : this.environment.now() + delay;
+      this.retry.fail(failure);
     } finally {
       this.automaticPending = false;
     }

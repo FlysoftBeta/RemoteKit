@@ -1,9 +1,11 @@
 #pragma once
 #include "util/error.hpp"
+#include "util/retry_unit.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -35,7 +37,7 @@ class FileUploadStore {
     std::uint64_t size{};
     std::filesystem::path path;
   };
-  enum class State { uploading, sealed, submitted };
+  enum class State { uploading, sealed, submitted, retiring };
   struct Batch {
     std::string id;
     Binding binding;
@@ -51,18 +53,24 @@ class FileUploadStore {
                       const std::vector<Source>&,
                       const std::function<Result<void>()>& check);
   Result<void> MarkSubmitted(const std::string& id);
+  Result<void> AbortSubmission(const std::string& id);
+  Result<void> Sweep();
   Result<bool> Cancel(const std::string& id);
   Result<void> ConfirmBrowserStopped(const std::string& incarnation);
   std::uint64_t reserved_bytes() const { return reserved_bytes_; }
   std::uint64_t reserved_files() const { return reserved_files_; }
 
  private:
+  friend class NativeRetryOwnerProbe;
   Result<Batch> Begin(const Binding&, const std::vector<Spec>&);
   Result<Batch> Seal(const std::string& id, const Binding&);
   Result<void> Erase(std::map<std::string, Batch>::iterator);
   std::filesystem::path root_;
   Limits limits_;
   std::map<std::string, Batch> batches_;
+  std::map<std::string, RetryUnit> cleanup_retries_;
+  std::set<std::string> confirmed_exits_;
+  std::function<Result<void>(const std::filesystem::path&)> remove_tree_;
   std::uint64_t reserved_bytes_{};
   std::uint64_t reserved_files_{};
 };

@@ -4,6 +4,7 @@
 #include "cluster/node_files.hpp"
 #include "util/thread.hpp"
 #include "util/wire_error.hpp"
+#include "util/retry_unit.hpp"
 #include <windows.h>
 #include <bcrypt.h>
 #include <condition_variable>
@@ -75,6 +76,7 @@ struct ClusterLink::Impl {
   Binary binary;
   std::shared_ptr<cluster::Channel> channel;
   std::thread receiver, sender;
+  RetryUnit reconnect{"cluster.reconnect"};
   bool Stopping() {
     std::lock_guard lock(mutex);
     return stopping;
@@ -192,17 +194,32 @@ struct ClusterLink::Impl {
     return true;
   }
   void ReceiveLoop() {
-    unsigned backoff = 250;
+    {
+      std::lock_guard lock(mutex);
+      reconnect.Input(build_id);
+    }
     while (!Stopping() && !SupervisorStopped()) {
+      {
+        std::unique_lock lock(mutex);
+        if (!reconnect.Ready()) {
+          wake.wait_for(lock, 20ms, [&] { return stopping; });
+          continue;
+        }
+      }
       auto established = connect();
       bool accepted = false;
       bool protocol_error = false;
-      if (!established)
-        LogError(LogLevel::kWarn, "cluster.connect_failed", established.error());
+      if (!established) {
+        std::lock_guard lock(mutex);
+        reconnect.Fail(established.error());
+      }
       if (established) {
         accepted = Accept(std::move(established).value());
         if (accepted) {
-          backoff = 250;
+          {
+            std::lock_guard lock(mutex);
+            reconnect.Success();
+          }
           const auto lost = [&](const char* reason, Json fields = Json::object()) {
             std::lock_guard lock(mutex);
             channel->RecordClose(reason, std::move(fields));
@@ -304,14 +321,19 @@ struct ClusterLink::Impl {
         Finish(accepted && !protocol_error ? 0 : 1);
       if (Stopping())
         break;
-      const unsigned delay =
-          std::min(backoff + static_cast<unsigned>(GetTickCount() % 251), 15000u);
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(delay);
-      while (!Stopping() && !SupervisorStopped() && std::chrono::steady_clock::now() < deadline) {
-        std::unique_lock lock(mutex);
-        wake.wait_for(lock, 20ms, [&] { return stopping; });
+      bool finished;
+      {
+        std::lock_guard lock(mutex);
+        if (accepted)
+          reconnect.Fail({protocol_error ? ErrorCode::kInternal : ErrorCode::kUnavailable,
+                          "cluster connection ended"});
+        finished = reconnect.Status() == RetryUnit::State::kFaulted ||
+                   reconnect.Status() == RetryUnit::State::kDropped;
       }
-      backoff = std::min(backoff * 2, 15000u);
+      if (finished) {
+        Finish(1);
+        break;
+      }
     }
     DisconnectChannel();
   }
@@ -391,12 +413,17 @@ Result<Json> ClusterLink::WaitReady() {
   std::unique_lock lock(impl_->mutex);
   impl_->wake.wait(lock, [&] { return impl_->ready || impl_->stopping; });
   if (impl_->stopping)
-    return Error{ErrorCode::kUnavailable, "cluster startup ended"};
+    return impl_->reconnect.Failure().value_or(
+        Error{ErrorCode::kUnavailable, "cluster startup ended"});
   return impl_->config;
 }
 int ClusterLink::ExitCode() {
   std::lock_guard lock(impl_->mutex);
   return impl_->stopping ? impl_->exit_code : 0;
+}
+RetryUnit::Snapshot ClusterLink::RetryStatus() const {
+  std::lock_guard lock(impl_->mutex);
+  return impl_->reconnect;
 }
 void ClusterLink::Flush() {
   std::unique_lock lock(impl_->mutex);
@@ -489,7 +516,7 @@ bool ClusterLink::SendReply(uint64_t generation, const Json& reply) {
   if (bytes > limit) {
     LogEvent(LogLevel::kWarn, "cluster.message_rejected",
              {{"kind", MessageKind(reply)}, {"bytes", bytes}, {"limit", limit}});
-    return Queue(ManagementReply(reply, Error{ErrorCode::kLimitExceeded,
+    return Queue(ManagementReply(reply, Error{ErrorCode::kOutcomeUnknown,
                                               "management reply exceeds encoded size limit"}),
                  generation);
   }

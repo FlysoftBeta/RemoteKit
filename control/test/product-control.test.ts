@@ -798,7 +798,7 @@ test('UA table precedes Browser/view creation; failed application persists desir
     );
     endpoint.failSites = false;
     endpoint.calls = [];
-    control.tenants.get(user.tenantId).reconciliation.retryAt = 0;
+    control.tenants.get(user.tenantId).reconciliation.retry.succeed();
     await control.reconciler.tick();
     const applied = endpoint.calls.findIndex((c) => c.method === 'policy.sites.applied'),
       reloaded = endpoint.calls.findIndex((c) => c.method === 'view.command');
@@ -1102,7 +1102,8 @@ test('popup adoption persists identity first; background stays unfocused, new wi
   }
 });
 
-test('expired pending popup is never URL-recreated; closing its product tab does not resurface it', async () => {
+test('expired pending popup is never URL-recreated; closing its product tab does not resurface it', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   const { store, endpoint, control, user } = await fixture();
   try {
     await control.viewers.attachViewer(
@@ -1139,6 +1140,7 @@ test('expired pending popup is never URL-recreated; closing its product tab does
     endpoint.onAdopt = undefined;
     popup.status = 'timed_out';
     endpoint.calls = [];
+    t.mock.timers.tick(2000);
     await control.reconciler.tick();
     assert.equal(
       store.workspaces.workspace(user.tenantId).tabs.find((t) => t.id === pending.id)!.popup!.status,

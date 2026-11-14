@@ -218,6 +218,11 @@ void RawCamera::Sent(const Message& message, int64_t now) {
   if (message.peer == peer_ && message.capture)
     next_grant_ = std::max(next_grant_, now + kInterval);
 }
+bool RawCamera::CurrentMessage(const Message& message, int64_t now, const Pending& pending) {
+  std::lock_guard lock(mutex_);
+  return Current(now, pending) && message.peer == peer_ && message.revision == revision_ &&
+         (!message.capture || message.capture == capture_);
+}
 
 void RawCamera::Failed(const Message& message) {
   std::lock_guard lock(mutex_);

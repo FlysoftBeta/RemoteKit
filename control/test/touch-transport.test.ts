@@ -283,12 +283,12 @@ test('client candidate backlog refuses overflow without silently discarding raw 
   );
 });
 
-test('focus timeout and rejected focus explicitly discard queued events with original identity', async (t) => {
+test('rejected focus explicitly discards queued events with original identity', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { transport, surface, sent, channel } = setup(t);
   const deliveries: InputDelivery[] = [];
   transport.input.subscribeInputDelivery((delivery) => deliveries.push(delivery));
-  for (const reject of [false, true]) {
+  for (const reject of [true]) {
     transport.input.ensureInputFocus(surface);
     const request = sent[sent.length - 1],
       identity = transport.input.inputIdentity(surface);
@@ -307,7 +307,7 @@ test('focus timeout and rejected focus explicitly discard queued events with ori
           focusRequestId: request.focusRequestId,
           layoutEpoch: '2',
           ok: false,
-          error: { code: 'conflict', message: 'stale_focus' },
+          error: { code: 'rejected', message: 'focus refused' },
         }),
       });
     else t.mock.timers.tick(2000);
@@ -323,8 +323,33 @@ test('focus timeout and rejected focus explicitly discard queued events with ori
   }
   assert.deepEqual(
     sent.map((item) => item.type),
-    ['focus', 'focus'],
+    ['focus'],
   );
+});
+
+test('focus timeout retains queued work and resends the same request identity after backoff', (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  const { transport, surface, sent } = setup(t);
+  const deliveries: InputDelivery[] = [];
+  transport.input.subscribeInputDelivery((delivery) => deliveries.push(delivery));
+  transport.input.ensureInputFocus(surface);
+  const request = sent[sent.length - 1];
+  const identity = transport.input.inputIdentity(surface);
+  const end = {
+    type: 'touch',
+    gestureMode: 'client-v1',
+    action: 'end',
+    inputIdentity: identity,
+    sequenceId: 'focus',
+  };
+  assert.equal(transport.input.sendInput(surface, end), true);
+  t.mock.timers.tick(2000);
+  assert.equal(transport.input.inputIdentity(surface), identity);
+  assert.equal(deliveries.filter((delivery) => delivery.phase === 'discarded').length, 0);
+  t.mock.timers.tick(1000);
+  const focuses = sent.filter((message) => message.type === 'focus');
+  assert.equal(focuses.length, 2);
+  assert.equal(focuses[1].focusRequestId, request.focusRequestId);
 });
 
 test('a local channel send failure reports discarded touch packets and drops dependent queued input', async (t) => {

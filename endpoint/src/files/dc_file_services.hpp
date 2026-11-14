@@ -3,6 +3,7 @@
 #include "util/result_macros.hpp"
 #include "util/thread.hpp"
 #include "util/error.hpp"
+#include "util/retry_unit.hpp"
 #include "util/wire_error.hpp"
 #include "rtc/dc_services.hpp"
 #include "files/file_upload.hpp"
@@ -279,6 +280,7 @@ class PhotoBurstSessions {
 // One Session-lifetime disk worker. No caller waits for it while holding a
 // Session/Browser lock. Admission, receipts and replay history are bounded.
 class DcFileServices {
+  friend class NativeRetryOwnerProbe;
   const Json log_fields_;
 
  public:
@@ -290,7 +292,7 @@ class DcFileServices {
     uint64_t grant{};
   };
   using Execute = std::function<Result<ServiceJson>(const Job&)>;
-  using Sweep = std::function<void()>;
+  using Sweep = std::function<Result<void>()>;
 
  private:
   struct Receipt {
@@ -298,7 +300,30 @@ class DcFileServices {
     ServiceJson reply;
     bool chunk = false;
     uint64_t grant{};
+    RetryUnit retry{"files.admission"};
   };
+  RetryUnit maintenance_retry_{"files.maintenance"};
+  mutable std::mutex maintenance_mutex_;
+  void Maintain(const Sweep& sweep, uint64_t epoch) {
+    std::lock_guard lock(maintenance_mutex_);
+    maintenance_retry_.Input(std::to_string(epoch));
+    if (!maintenance_retry_.Ready())
+      return;
+    try {
+      auto swept = sweep();
+      if (swept)
+        maintenance_retry_.Success();
+      else
+        maintenance_retry_.Fail(swept.error());
+    } catch (const std::filesystem::filesystem_error& error) {
+      maintenance_retry_.Fail(WithOsError(ErrorCode::kUnavailable, error.what(),
+                                          OsError::Kind::kWin32, error.code().value()));
+    } catch (const std::exception& error) {
+      maintenance_retry_.Fail({ErrorCode::kInternal, error.what()});
+    } catch (...) {
+      maintenance_retry_.Fail({ErrorCode::kInternal, "file maintenance failed"});
+    }
+  }
   mutable std::mutex mutex_;
   std::mutex flush_mutex_;
   std::condition_variable wake_;
@@ -315,14 +340,17 @@ class DcFileServices {
   struct Delivery {
     uint64_t serial, grant;
     std::string wire;
+    RetryUnit retry{"files.delivery"};
   };
   std::deque<Job> jobs_;
   std::map<std::string, Receipt> receipts_;
   std::deque<std::string> history_;
   std::deque<Delivery> outbox_;
   void QueueReply(const ServiceJson& reply, uint64_t grant) {
-    if (outbox_.size() < 32)
+    if (outbox_.size() < 32) {
       outbox_.push_back({++delivery_serial_, grant, reply.dump()});
+      outbox_.back().retry.Input(std::to_string(delivery_serial_));
+    }
   }
   bool CurrentLocked(const Job& job) const {
     if (!peer_ || job.peer != peer_ || job.epoch != epoch_ || job.control != control_)
@@ -339,6 +367,14 @@ class DcFileServices {
   }
 
  public:
+  std::optional<Error> MaintenanceFailure() const {
+    std::lock_guard lock(maintenance_mutex_);
+    return maintenance_retry_.Failure();
+  }
+  std::optional<Error> DeliveryFailure() const {
+    std::lock_guard lock(mutex_);
+    return outbox_.empty() ? std::optional<Error>{} : outbox_.front().retry.Failure();
+  }
   ~DcFileServices() { Stop(); }
   void Start(Execute execute, Sweep sweep) {
     worker_ = std::thread([this, execute = std::move(execute), sweep = std::move(sweep)] {
@@ -347,6 +383,7 @@ class DcFileServices {
           [&] {
             for (;;) {
               Job job;
+              uint64_t maintenance_epoch;
               {
                 std::unique_lock lock(mutex_);
                 wake_.wait_for(lock, std::chrono::seconds(1),
@@ -354,12 +391,13 @@ class DcFileServices {
                 if (stop_)
                   return;
                 sweep_requested_ = false;
+                maintenance_epoch = epoch_;
                 if (!jobs_.empty()) {
                   job = std::move(jobs_.front());
                   jobs_.pop_front();
                 }
               }
-              sweep();
+              Maintain(sweep, maintenance_epoch);
               if (!job.peer)
                 continue;
               ServiceJson reply;
@@ -411,6 +449,13 @@ class DcFileServices {
               if (found == receipts_.end())
                 continue;
               found->second.reply = reply;
+              if (!reply.value("ok", false)) {
+                const auto error = ParseWireError(reply.at("error"));
+                found->second.retry.Fail(error);
+              } else {
+                found->second.retry.Success();
+              }
+              std::erase(history_, key);
               history_.push_back(key);
               QueueReply(reply, job.grant);
               while (history_.size() > 128) {
@@ -422,9 +467,15 @@ class DcFileServices {
           [this] {
             std::lock_guard lock(mutex_);
             stop_ = true;
+            for (const auto& job : jobs_) {
+              const auto reply = Reply(job.message, false,
+                                       WireError({ErrorCode::kInternal, "file worker stopped"}));
+              QueueReply(reply, job.grant);
+              const auto found = receipts_.find(job.message["requestId"].get<std::string>());
+              if (found != receipts_.end())
+                found->second.reply = reply;
+            }
             jobs_.clear();
-            authorized_.clear();
-            outbox_.clear();
           });
     });
   }
@@ -522,8 +573,21 @@ class DcFileServices {
     if (const auto found = receipts_.find(key); found != receipts_.end()) {
       if (found->second.fingerprint != fingerprint)
         failure(ErrorCode::kConflict, "file_request_id_conflict");
-      else if (!found->second.reply.is_null())
-        QueueReply(found->second.reply, found->second.grant);
+      else if (!found->second.reply.is_null()) {
+        const auto error = found->second.retry.Failure();
+        const bool readmit =
+            error && (error->code == ErrorCode::kBusy || error->code == ErrorCode::kRateLimited ||
+                      error->code == ErrorCode::kUnavailable);
+        if (found->second.retry.Status() == RetryUnit::State::kWaiting &&
+            found->second.retry.Ready() && readmit && jobs_.size() < 8) {
+          found->second.reply = nullptr;
+          jobs_.push_back(
+              {peer, epoch_, control_, message, authorized_.at(id).binding, found->second.grant});
+          wake_.notify_one();
+        } else {
+          QueueReply(found->second.reply, found->second.grant);
+        }
+      }
       return;
     }
     const bool chunk = message["method"] == "asset.chunk";
@@ -535,11 +599,12 @@ class DcFileServices {
       return;
     }
     receipts_.emplace(key, Receipt{fingerprint, nullptr, chunk, found->second.serial});
+    receipts_.at(key).retry.Input(key);
     jobs_.push_back({peer, epoch_, control_, message, found->second.binding, found->second.serial});
     wake_.notify_one();
   }
   template <class Send>
-  void Flush(uint64_t peer, Send send) {
+  void Flush(uint64_t peer, Send send, RetryUnit::Clock::time_point now = RetryUnit::Clock::now()) {
     // SDK send synchronously marshals to its signaling thread. That thread can
     // concurrently call Admit: never hold the admission lock across SDK calls.
     std::unique_lock delivery(flush_mutex_, std::try_to_lock);
@@ -552,17 +617,26 @@ class DcFileServices {
         std::lock_guard lock(mutex_);
         if (!peer || peer != peer_ || outbox_.empty())
           return;
+        if (!outbox_.front().retry.Ready(now))
+          return;
         epoch = epoch_;
         next = outbox_.front();
       }
-      if (send(next.wire) != 0)
-        return;
+      const auto status = send(next.wire);
       {
         std::lock_guard lock(mutex_);
         if (peer != peer_ || epoch != epoch_)
           return;
-        if (!outbox_.empty() && outbox_.front().serial == next.serial)
+        if (!outbox_.empty() && outbox_.front().serial == next.serial) {
+          if (status) {
+            auto& retry = outbox_.front().retry;
+            retry.Fail({SdkErrorCode(status), "file reply send failed"}, now);
+            return;
+          } else {
+            outbox_.front().retry.Success();
+          }
           outbox_.pop_front();
+        }
       }
     }
   }

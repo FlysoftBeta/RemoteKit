@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { RemoteKitError, parseWireError } from '../../shared/errors';
+import { RemoteKitError, parseWireError, toRemoteKitError } from '../../shared/errors';
+import { BackgroundJob } from '../background';
+import { RetryUnit } from '../../shared/retry-unit';
 import type {
   Asset,
   AssetDescription,
@@ -66,7 +68,9 @@ function librarySource(value: unknown): LibrarySource {
           : url.hostname === channel
       )
         return { app, channel };
-    } catch {}
+    } catch {
+      throw invalid('文件来源无效');
+    }
   }
   throw invalid('文件来源无效');
 }
@@ -150,20 +154,53 @@ export class FileLibrary {
   private readonly queues = new KeyedSerialQueue();
   private readonly availability = new Map<string, string>();
   private readonly availabilityTimers = new Map<string, NodeJS.Timeout>();
+  private readonly availabilityJobs = new Map<string, BackgroundJob>();
+  private closed = false;
+  private readonly selectionRetries = new Map<string, { tenant: string; unit: RetryUnit; input: number }>();
+  failures() {
+    return [
+      ...[...this.selectionRetries.values()].map((entry) => entry.unit.error),
+      ...[...this.availabilityJobs.values()].map((job) => job.retry.error),
+    ].filter((error) => error !== undefined);
+  }
+  endpointReady() {
+    for (const entry of this.selectionRetries.values()) entry.input++;
+  }
   objectsChanged(ids: string[]) {
+    if (this.closed) return;
     for (const tenant of this.repository.referencingTenants(ids)) {
       if (this.availabilityTimers.has(tenant)) continue;
       const timer = setTimeout(() => {
         this.availabilityTimers.delete(tenant);
-        this.refreshAvailability(tenant);
+        let job = this.availabilityJobs.get(tenant);
+        if (!job) {
+          job = new BackgroundJob('library.availability', { tenant });
+          this.availabilityJobs.set(tenant, job);
+        }
+        const current = job;
+        const refresh = () =>
+          current
+            .run(async () => this.refreshAvailability(tenant), ids.join(','))
+            .then(() => {
+              if (!this.closed)
+                current.retry.schedule(() => {
+                  void refresh();
+                });
+            });
+        void refresh();
       }, 250);
       timer.unref();
       this.availabilityTimers.set(tenant, timer);
     }
   }
-  close() {
+  async close() {
+    this.closed = true;
     for (const timer of this.availabilityTimers.values()) clearTimeout(timer);
     this.availabilityTimers.clear();
+    await Promise.all([...this.availabilityJobs.values()].map((job) => job.close()));
+    this.availabilityJobs.clear();
+    await this.queues.drain();
+    for (const entry of this.selectionRetries.values()) entry.unit.close();
   }
   private project(tenant: string, snapshot: LibrarySnapshot) {
     return {
@@ -574,13 +611,21 @@ export class FileLibrary {
       this.repository.insertSelection(tenant, manifest, operationId, payload);
     }
     const { selectionId, binding, files, limits } = manifest;
-    const accepted = await this.endpoint.prepareSelection(tenant, {
-      selectionId,
-      binding,
-      files,
-      limits,
-      requestId,
-    });
+    let accepted;
+    try {
+      accepted = await this.endpoint.prepareSelection(tenant, {
+        selectionId,
+        binding,
+        files,
+        limits,
+        requestId,
+      });
+    } catch (cause) {
+      const failure = toRemoteKitError(cause);
+      if (!['outcome_unknown', 'internal', 'busy', 'rate_limited', 'unavailable'].includes(failure.code))
+        this.repository.settle(tenant, manifest, 'cancelled');
+      throw failure;
+    }
     authorize();
     if (accepted?.accepted !== true) throw new RemoteKitError('outcome_unknown', 'Endpoint未确认文件选择');
     manifest.prepared = true;
@@ -588,33 +633,59 @@ export class FileLibrary {
     return { selectionId };
   }
   private async status(tenant: string, selectionId: string): Promise<SelectionState> {
+    const key = JSON.stringify([tenant, selectionId]);
+    let entry = this.selectionRetries.get(key);
+    if (!entry) {
+      entry = { tenant, input: 0, unit: new RetryUnit({ name: 'library.selection_status' }) };
+      this.selectionRetries.set(key, entry);
+    }
+    if (!entry.unit.ready(String(entry.input))) throw entry.unit.error;
     try {
       const result = await this.endpoint.selectionStatus(tenant, { selectionId });
       const state = result?.state;
-      if (state === 'pending' || state === 'validating' || state === 'selected' || state === 'cancelled')
+      if (
+        state === 'pending' ||
+        state === 'validating' ||
+        state === 'selected' ||
+        state === 'cancelled' ||
+        state === 'unknown'
+      ) {
+        entry.unit.succeed();
         return state;
-    } catch {}
-    return 'unknown';
+      }
+      throw new RemoteKitError('outcome_unknown', '文件选择状态回复无效');
+    } catch (cause) {
+      const failure = toRemoteKitError(cause);
+      entry.unit.fail(failure);
+      if (failure.code === 'not_found') return 'cancelled';
+      throw failure;
+    }
   }
   private async finish(tenant: string, selectionId: string, authorize: () => void) {
     const { manifest, terminal } = this.repository.selection(tenant, selectionId);
     const state = terminal ?? (await this.status(tenant, selectionId));
     authorize();
     if (!terminal) this.repository.settle(tenant, manifest, state);
+    if (state === 'selected' || state === 'cancelled')
+      this.selectionRetries.delete(JSON.stringify([tenant, selectionId]));
     const snapshot = this.repository.snapshot(tenant);
     authorize();
     return { state, snapshot };
   }
   private async get(tenant: string, authorize: () => void) {
     const pending = this.repository.pending(tenant, RECONCILE_BATCH);
-    const results = await Promise.all(
+    const results = await Promise.allSettled(
       pending.map(async (row) => {
         const manifest = row;
         return { manifest, state: await this.status(tenant, manifest.selectionId) };
       }),
     );
     authorize();
-    for (const { manifest, state } of results) this.repository.settle(tenant, manifest, state);
+    for (const result of results)
+      if (result.status === 'fulfilled')
+        this.repository.settle(tenant, result.value.manifest, result.value.state);
+    const failed = results.find((result) => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
     const snapshot = this.repository.snapshot(tenant);
     authorize();
     return snapshot;

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <mutex>
 #include <algorithm>
+#include <charconv>
 namespace remotekit::cluster {
 namespace {
 using namespace std::chrono_literals;
@@ -39,10 +40,18 @@ struct Addresses {
     if (values)
       freeaddrinfo(values);
   }
-  bool Open(const std::string& address, bool listen) {
+  Result<void> Open(const std::string& address, bool listen) {
     const auto colon = address.rfind(':');
-    if (!Initialize() || colon == std::string::npos || colon == 0 || colon + 1 == address.size())
-      return false;
+    if (colon == std::string::npos || colon == 0 || colon + 1 == address.size())
+      return Error{ErrorCode::kInvalidRequest, "invalid peer address"};
+    const auto service = address.substr(colon + 1);
+    unsigned port = 0;
+    const auto [end, code] = std::from_chars(service.data(), service.data() + service.size(), port);
+    if (code != std::errc{} || end != service.data() + service.size() || port > 65535 ||
+        (!listen && !port))
+      return Error{ErrorCode::kInvalidRequest, "invalid peer port"};
+    if (!Initialize())
+      return Error{ErrorCode::kUnavailable, "Winsock initialization failed"};
     auto host = address.substr(0, colon);
     if (host.starts_with('[') && host.ends_with(']'))
       host = host.substr(1, host.size() - 2);
@@ -51,7 +60,11 @@ struct Addresses {
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
     hints.ai_flags = AI_NUMERICSERV | (listen ? AI_PASSIVE : 0);
-    return getaddrinfo(host.c_str(), address.substr(colon + 1).c_str(), &hints, &values) == 0;
+    const auto status = getaddrinfo(host.c_str(), service.c_str(), &hints, &values);
+    if (status)
+      return WithOsError(ErrorCode::kUnavailable, "peer address resolution failed",
+                         OsError::Kind::kWin32, status);
+    return {};
   }
 };
 class TcpCarrier final : public Carrier {
@@ -157,8 +170,9 @@ class TcpCarrier final : public Carrier {
 }  // namespace
 Result<std::unique_ptr<Carrier>> ConnectTcp(const std::string& address) {
   Addresses addresses;
-  if (!addresses.Open(address, false))
-    return Error{ErrorCode::kInvalidRequest, "invalid peer address"};
+  auto resolved = addresses.Open(address, false);
+  if (!resolved)
+    return resolved.error();
   for (auto* item = addresses.values; item; item = item->ai_next) {
     const auto socket = ::socket(item->ai_family, item->ai_socktype, item->ai_protocol);
     if (socket == INVALID_SOCKET)
@@ -198,8 +212,9 @@ const std::string& TcpListener::Address() const {
 }
 Result<std::unique_ptr<TcpListener>> TcpListener::Listen(const std::string& address) {
   Addresses addresses;
-  if (!addresses.Open(address, true))
-    return Error{ErrorCode::kInvalidRequest, "invalid peer listen address"};
+  auto resolved = addresses.Open(address, true);
+  if (!resolved)
+    return resolved.error();
   for (auto* item = addresses.values; item; item = item->ai_next) {
     const auto socket = ::socket(item->ai_family, item->ai_socktype, item->ai_protocol);
     if (socket == INVALID_SOCKET)

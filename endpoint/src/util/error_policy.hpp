@@ -44,7 +44,8 @@ inline std::optional<std::chrono::milliseconds> RetryDelay(const Error& error, u
   using namespace std::chrono;
   if (error.code == ErrorCode::kRateLimited)
     return milliseconds(error.retry_after_ms.value_or(30000));
-  if (error.code != ErrorCode::kBusy && error.code != ErrorCode::kUnavailable)
+  if (error.code != ErrorCode::kBusy && error.code != ErrorCode::kUnavailable &&
+      error.code != ErrorCode::kOutcomeUnknown && error.code != ErrorCode::kConflict)
     return std::nullopt;
   const bool busy = error.code == ErrorCode::kBusy;
   const uint64_t base = busy ? 250 : 1000;
@@ -52,6 +53,8 @@ inline std::optional<std::chrono::milliseconds> RetryDelay(const Error& error, u
   const uint64_t delay = (std::min)(cap, base << (std::min)(attempt, 20u));
   if (!busy)
     return milliseconds(error.retry_after_ms.value_or(static_cast<uint32_t>(delay)));
+  if (error.retry_after_ms)
+    return milliseconds(*error.retry_after_ms);
   thread_local std::mt19937 random(std::random_device{}());
   return milliseconds(
       (std::min)(cap, static_cast<uint64_t>(

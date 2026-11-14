@@ -34,7 +34,7 @@ inline void ValidateCopy(const Json& value) {
   Unsigned(value.at("placementEpoch"), 1);
   if (!value.at("base").is_null())
     ObjectId(value.at("base"));
-  Enum(value.at("state"), {"clean", "dirty"});
+  Enum(value.at("state"), {"clean", "dirty", "restoring"});
   Boolean(value.at("stoppedCleanly"));
   Unsigned(value.at("changesAt"));
   const auto& commit = value.at("lastCommit");

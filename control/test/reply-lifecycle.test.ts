@@ -153,7 +153,7 @@ test('offline empty snapshot and replacement missing view preserve product tab a
     endpoint.offlineNextSnapshot = true;
     await control.reconciler.tick();
     endpoint.running = true;
-    control.tenants.get(tenant).reconciliation.retryAt = 0;
+    control.tenants.get(tenant).reconciliation.retry.succeed();
     assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
     endpoint.replace();
     endpoint.view = undefined;

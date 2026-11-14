@@ -1,56 +1,65 @@
-import { RemoteKitError } from '../../shared/errors';
-import { newErrorId, log } from '../log';
+import { endpointError } from '../../shared/errors';
+import { RetryUnit } from '../../shared/retry-unit';
+import { identifyError, log } from '../log';
 import type { SessionTarget } from './coordination';
 
 interface FaultState {
   target: string;
-  attempts: number;
-  retryAt: number;
-  healthySince?: number;
-  error?: RemoteKitError;
+  unit: RetryUnit;
+  input: number;
+  admitting: boolean;
 }
-
 export class SessionFaults {
   private readonly states = new Map<string, FaultState>();
   constructor(private readonly now = () => performance.now()) {}
   disconnected() {
-    for (const state of this.states.values()) state.healthySince = undefined;
+    for (const state of this.states.values()) state.input++;
   }
   private state(target: SessionTarget) {
     const state = this.states.get(target.tenantId);
     return state?.target === `${target.sessionId}:${target.placementEpoch}` ? state : undefined;
   }
   get(target: SessionTarget) {
-    return this.state(target)?.error;
+    const state = this.state(target);
+    return state?.admitting ? undefined : state?.unit.error;
   }
   fault(target: SessionTarget, cause: unknown) {
     let state = this.state(target);
-    if (state?.error) return state.error;
+    if (state?.unit.error && !state.admitting) return state.unit.error;
     if (!state) {
-      state = { target: `${target.sessionId}:${target.placementEpoch}`, attempts: 0, retryAt: 0 };
+      state = {
+        target: `${target.sessionId}:${target.placementEpoch}`,
+        input: 0,
+        admitting: false,
+        unit: new RetryUnit({
+          now: this.now,
+          failed: (error) =>
+            log.error('session.protocol_failed', {
+              ...target,
+              code: error.code,
+              errorId: error.errorId,
+              err: error,
+            }),
+          recovered: () => log.info('session.protocol_recovered', { ...target }),
+        }),
+      };
       this.states.set(target.tenantId, state);
     }
-    if (state.healthySince !== undefined && this.now() - state.healthySince >= 600_000) state.attempts = 0;
-    state.healthySince = undefined;
-    state.retryAt = this.now() + Math.min(1_800_000, 60_000 * 2 ** state.attempts++);
-    state.error = new RemoteKitError('unavailable', 'Session data could not be processed', {
-      reason: 'browser_unavailable',
-      errorId: newErrorId(),
-      cause,
-    });
-    log.error('session.protocol_fault', { ...target, errorId: state.error.errorId, err: cause });
-    return state.error;
+    state.admitting = false;
+    state.unit.ready(String(state.input));
+    return state.unit.fail(identifyError(endpointError(cause))).error;
   }
   attach(target: SessionTarget) {
     const state = this.state(target);
-    if (!state?.error || this.now() < state.retryAt) return false;
-    state.error = undefined;
+    if (!state?.unit.error || state.admitting || !state.unit.ready(String(state.input))) return false;
+    state.admitting = true;
     return true;
   }
   observe(target: SessionTarget, running: boolean) {
     const state = this.state(target);
-    if (!state || state.error) return;
-    if (running) state.healthySince ??= this.now();
-    else state.healthySince = undefined;
+    if (state && running && state.admitting) {
+      state.admitting = false;
+      state.unit.succeed();
+    }
   }
 }

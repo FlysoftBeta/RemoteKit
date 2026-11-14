@@ -143,12 +143,15 @@ export function SignInCard({
         <FailureNote
           error={
             error ??
-            (account.status === 'failed' || account.status === 'signing_in' ? account.error : undefined)
+            (account.status === 'failed' || account.status === 'unknown' || account.status === 'signing_in'
+              ? account.error
+              : undefined)
           }
           context={{
             operation: '登录学习账户',
             scope: 'surface',
             credential: provider,
+            resolved: account.status === 'unknown',
             input: true,
             issue: failedFlow ? 'content' : 'credentials',
             text: failedFlow

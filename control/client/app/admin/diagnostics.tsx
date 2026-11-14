@@ -36,7 +36,7 @@ function ErrorRecord({ source, line }: { source: string; line: string }) {
   try {
     record = JSON.parse(line);
   } catch {
-    // Keep incomplete records inspectable as raw text.
+    record = { ev: '无法解析此行，展开查看原文' };
   }
   const level = record?.lvl;
   return (

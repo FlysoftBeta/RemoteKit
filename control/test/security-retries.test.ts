@@ -1,13 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import Database from 'better-sqlite3';
+import { ControlDatabase } from '../server/persistence/database';
 import { ViewerSecurity } from '../server/auth/viewer-security';
 import { SessionPurge } from '../server/cluster/session-purge';
 import { RemoteKitError } from '../shared/errors';
 import type { AuthState } from '../shared/security';
 import type { EndpointGateway } from '../server/endpoint/gateway';
-import type { ControlDatabase } from '../server/persistence/database';
 import type { NodeRegistry } from '../server/cluster/node-link';
 import { configureLog } from '../server/log';
 
@@ -23,7 +22,8 @@ function securityFixture() {
     sessionFault: () => undefined,
     published: async () => {
       calls++;
-      if (failLock && viewer.locked) throw new Error('native lock failed');
+      if (failLock && viewer.locked)
+        throw new RemoteKitError('unavailable', 'native lock failed', { retryAfterMs: 10 });
       return { revision: '1' };
     },
     waitObserved: async () => ({
@@ -37,7 +37,7 @@ function securityFixture() {
 
     faceCapabilities: async () => ({ available: true, modelVersion: 'test' }),
     faceStatus: async () => {
-      throw new Error('camera transport failed');
+      throw new RemoteKitError('unavailable', 'camera transport failed', { retryAfterMs: 10 });
     },
     cancelFace: async () => ({}),
   } as unknown as EndpointGateway;
@@ -61,7 +61,8 @@ function securityFixture() {
   };
 }
 
-test('failed native lock is marked not applied and explicit restoration waits for observation', async () => {
+test('failed native lock is marked not applied and explicit restoration waits for observation', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
   const f = securityFixture();
   await f.security.bind('tenant', f.viewer, 'connection');
   assert.equal(f.viewer.peer!.appliedEpoch, 1);
@@ -70,14 +71,18 @@ test('failed native lock is marked not applied and explicit restoration waits fo
   assert.equal(f.viewer.locked, true);
   assert.equal(f.viewer.peer!.appliedEpoch, 0);
   assert.notEqual(f.viewer.peer!.appliedEpoch, f.viewer.peer!.epoch);
-  assert.ok(f.records.some((record) => record.ev === 'security.lock_failed' && record.lvl === 'warn'));
+  assert.ok(
+    f.records.some((record) => record.ev === 'security.authorization_failed' && record.lvl === 'warn'),
+  );
   f.fail(false);
+  t.mock.timers.tick(10);
   await f.security.restore('tenant', f.viewer);
   assert.equal(f.viewer.peer!.appliedEpoch, f.viewer.peer!.epoch);
   assert.equal(f.calls(), 3);
 });
 
-test('replacement and detach revocations retain their peer until native lock is confirmed', async () => {
+test('replacement and detach revocations retain their peer until native lock is confirmed', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
   const f = securityFixture();
   await f.security.bind('tenant', f.viewer, 'old-connection');
   f.fail(true);
@@ -87,6 +92,7 @@ test('replacement and detach revocations retain their peer until native lock is 
   await f.security.retryRevocations();
   assert.equal(f.viewer.peer!.connectionId, 'old-connection');
   f.fail(false);
+  t.mock.timers.tick(10);
   await f.security.retryRevocations();
   assert.equal(f.viewer.peer, undefined);
   const calls = f.calls();
@@ -94,7 +100,8 @@ test('replacement and detach revocations retain their peer until native lock is 
   assert.equal(f.calls(), calls);
 });
 
-test('presence polling failure locks product state and a failed native lock stays retryable', async () => {
+test('presence query failure preserves the challenge and lock state', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
   const f = securityFixture();
   await f.security.bind('tenant', f.viewer, 'connection');
   f.viewer.servicePeer = { connectionId: 'service', epoch: 1, appliedEpoch: 1, requests: 0 };
@@ -109,23 +116,26 @@ test('presence polling failure locks product state and a failed native lock stay
   };
   f.fail(true);
   await f.security.poll('tenant', f.viewer);
-  assert.equal(f.viewer.locked, true);
-  assert.equal(f.viewer.peer!.appliedEpoch, 0);
+  assert.equal(f.viewer.locked, false);
+  assert(f.viewer.challenge);
+  assert.equal(f.viewer.face.error?.code, 'unavailable');
   assert.ok(f.records.some((record) => record.ev === 'security.face_status_failed'));
   f.fail(false);
+  t.mock.timers.tick(10);
   await f.security.restore('tenant', f.viewer);
   assert.equal(f.viewer.peer!.appliedEpoch, f.viewer.peer!.epoch);
 });
 
 function purgeFixture() {
   configureLog({ write() {} });
-  const db = new Database(':memory:');
-  db.exec(
-    'CREATE TABLE session_deletions(session_id TEXT, node_id TEXT, error_code TEXT, error_message TEXT, PRIMARY KEY(session_id,node_id))',
-  );
+  const store = new ControlDatabase(':memory:', { buildId: 'test' });
+  const db = store.db;
   const node = { nodeId: 'node', state: { state: 'ready' }, request: async () => ({}) };
-  const nodes = Object.assign(new EventEmitter(), { all: () => [node] }) as unknown as NodeRegistry;
-  const purge = new SessionPurge({ db } as unknown as ControlDatabase, nodes);
+  const nodes = Object.assign(new EventEmitter(), {
+    all: () => [node],
+    options: { buildId: 'test' },
+  }) as unknown as NodeRegistry;
+  const purge = new SessionPurge(store, nodes);
   purge.enqueue('session');
   return { db, node, purge };
 }
@@ -145,7 +155,7 @@ test('unexpected purge failure is recorded as internal and the deletion remains 
 });
 
 test('unexpected post-request purge failure is recorded and follows the shared retry policy', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
   const f = purgeFixture();
   t.after(async () => {
     await f.purge.close();

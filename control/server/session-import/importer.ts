@@ -1,8 +1,10 @@
 import { encodeJson } from '../persistence/codec';
 import { wireError as wireErrorCodec } from '../persistence/documents';
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { RetryUnit } from '../../shared/retry-unit';
+import { RetryLedger } from '../persistence/retry-units';
+import { BackgroundJob } from '../background';
 import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import type {
   ControlEvent,
@@ -87,7 +89,10 @@ export class SessionImporter {
   private readonly requested = new Set<string>();
   private readonly abort = new AbortController();
   private readonly revokedKeys = new Set<string>();
-  private readonly pairRetryAt = new Map<string, number>();
+  private readonly pairRetries: RetryLedger;
+  private readonly recordRetries: RetryLedger;
+  private readonly mailboxRetries: RetryLedger;
+  private readonly tenantRetries = new Map<string, BackgroundJob>();
   private receiving: Promise<unknown> = Promise.resolve();
   constructor(
     private readonly store: ControlDatabase,
@@ -100,6 +105,9 @@ export class SessionImporter {
       structuredLog.warn('session_import.importer_failed', { message }),
     transportFactory?: TransportFactory,
   ) {
+    this.pairRetries = new RetryLedger(store, 'session_import.pair', () => clock.wallMs());
+    this.recordRetries = new RetryLedger(store, 'session_import.apply', () => clock.wallMs());
+    this.mailboxRetries = new RetryLedger(store, 'session_import.mailbox', () => clock.wallMs());
     this.outbox = new ImportOutbox(
       store.sessionImports,
       () => this.keyPair(),
@@ -113,6 +121,14 @@ export class SessionImporter {
       () => this.keyPair().keyId,
       (batch) => this.receiveBatch(batch),
       {
+        retry: this.mailboxRetries.unit('mailbox'),
+        retryInput: JSON.stringify([
+          store.buildId,
+          createHash('sha256')
+            .update(JSON.stringify(config ?? null))
+            .digest('hex'),
+        ]),
+        saveRetry: () => this.mailboxRetries.save('mailbox'),
         load: (now) => store.sessionImports.mailCursor(now),
         save: (cursor) => store.sessionImports.saveMailCursor(cursor),
       },
@@ -140,6 +156,15 @@ export class SessionImporter {
       devices: this.store.sessionImports.devices(tenant),
       timeline: this.store.sessionImports.timeline(tenant),
     };
+  }
+  failures() {
+    return [
+      ...this.pairRetries.failures(),
+      ...this.recordRetries.failures(),
+      ...[this.dispatchJob, ...this.tenantRetries.values()].flatMap((job) =>
+        job.retry.error ? [{ key: 'dispatch', error: wireError(job.retry.error) }] : [],
+      ),
+    ];
   }
   pairing(tenant: string, open: unknown) {
     if (typeof open !== 'boolean') throw new RemoteKitError('invalid_request', '无效的配对开关');
@@ -212,7 +237,9 @@ export class SessionImporter {
   }
   receiveBatch(batch: Buffer[]): Promise<MailDecision[]> {
     const pending = this.receiving.then(() => this.processBatch(batch));
-    this.receiving = pending.catch(() => {});
+    this.receiving = pending.catch((error) =>
+      this.log('Session import receive: ' + toRemoteKitError(error).code),
+    );
     return pending;
   }
   private async processBatch(batch: Buffer[]): Promise<MailDecision[]> {
@@ -246,7 +273,15 @@ export class SessionImporter {
           decisions[item.index] = 'keep';
           continue;
         }
-        if ((this.pairRetryAt.get(keyId) ?? 0) > this.clock.monotonicMs()) {
+        const pairUnit = this.pairRetries.unit(keyId);
+        if (
+          !pairUnit.ready(
+            JSON.stringify([
+              this.store.buildId,
+              createHash('sha256').update(JSON.stringify(message.events)).digest('hex'),
+            ]),
+          )
+        ) {
           decisions[item.index] = 'keep';
           continue;
         }
@@ -270,14 +305,13 @@ export class SessionImporter {
           }
         } catch (error) {
           const failure = toRemoteKitError(error);
-          const wait = retryDelay(failure, 0);
-          if (wait !== undefined) {
-            this.pairRetryAt.set(keyId, this.clock.monotonicMs() + wait);
-            decisions[item.index] = 'keep';
-            continue;
-          }
-          throw error;
+          pairUnit.fail(failure);
+          this.pairRetries.save(keyId);
+          decisions[item.index] = 'keep';
+          continue;
         }
+        pairUnit.succeed();
+        this.pairRetries.remove(keyId);
         this.store.transaction(() => {
           let trusted = this.store.sessionImports.device(keyId);
           if (trusted) this.store.sessionImports.acknowledge(trusted, message.ack, this.clock.wallMs());
@@ -446,11 +480,15 @@ export class SessionImporter {
   start() {
     if (!this.config || this.timer || this.abort.signal.aborted) return;
     this.mailbox.start();
-    void this.tick();
+    void this.dispatch();
     this.timer = setInterval(() => {
-      void this.tick();
+      void this.dispatch();
     }, 15000);
     this.timer.unref();
+  }
+  private readonly dispatchJob = new BackgroundJob('session_import.dispatch', {});
+  private dispatch() {
+    return this.dispatchJob.run(() => this.tick(), this.store.buildId);
   }
   async tick() {
     if (this.abort.signal.aborted) return;
@@ -462,9 +500,12 @@ export class SessionImporter {
   }
   private applyTenant(tenant: string): Promise<void> {
     if (this.abort.signal.aborted) return Promise.resolve();
-    this.requested.add(tenant);
     const current = this.running.get(tenant);
-    if (current) return current;
+    if (current) {
+      this.requested.add(tenant);
+      return current;
+    }
+    this.requested.delete(tenant);
     const run = async () => {
       try {
         do {
@@ -472,13 +513,22 @@ export class SessionImporter {
           await this.applyRecords(tenant);
         } while (!this.abort.signal.aborted && this.requested.has(tenant));
       } catch (error) {
-        if (!this.abort.signal.aborted) this.log(`Session import apply: ${toRemoteKitError(error).code}`);
+        if (!this.abort.signal.aborted) throw error;
       } finally {
         this.requested.delete(tenant);
-        this.running.delete(tenant);
       }
     };
-    const pending = run();
+    let unit = this.tenantRetries.get(tenant);
+    if (!unit) {
+      unit = new BackgroundJob('session_import.tenant_dispatch', { tenant });
+      this.tenantRetries.set(tenant, unit);
+    }
+    const pending = unit
+      .run(run, JSON.stringify([this.store.buildId, this.gateway.placement.peek(tenant)]))
+      .finally(() => {
+        this.running.delete(tenant);
+        if (this.requested.has(tenant) && !this.abort.signal.aborted) return this.applyTenant(tenant);
+      });
     this.running.set(tenant, pending);
     return pending;
   }
@@ -493,8 +543,18 @@ export class SessionImporter {
   }
   private async applyRecords(tenant: string) {
     for (const record of this.store.sessionImports.pending(tenant)) {
-      if (record.retryAt !== undefined && record.retryAt > this.clock.wallMs()) continue;
       const ref = this.store.sessionImports.latestRef(record.keyId, record.id);
+      const unit = this.recordRetries.unit(record.id);
+      if (
+        !unit.ready(
+          JSON.stringify([this.store.buildId, ref, this.gateway.placement.peek(tenant)?.placementEpoch]),
+        )
+      )
+        continue;
+      if (record.state === 'failed')
+        this.store.db
+          .prepare("UPDATE session_imports SET state='pending',error=NULL,finished_at=NULL WHERE id=?")
+          .run(record.id);
       if (!this.active(tenant, record.id)) return;
       try {
         const payload = this.store.sessionImports.payload(tenant, record.id);
@@ -527,7 +587,9 @@ export class SessionImporter {
             timeout.abort();
           }
         }
-        if (this.active(tenant, record.id, ref))
+        if (this.active(tenant, record.id, ref)) {
+          unit.succeed();
+          this.recordRetries.remove(record.id);
           this.store.transaction(() => {
             this.store.sessionImports.finish(
               tenant,
@@ -544,23 +606,21 @@ export class SessionImporter {
               this.clock.wallMs(),
             );
           });
+        }
       } catch (error) {
         if (this.abort.signal.aborted) return;
         if (!this.active(tenant, record.id, ref)) return;
         const failure = toRemoteKitError(error);
-        const wait = retryDelay(failure, 0);
+        const { delay: wait } = unit.fail(failure);
+        this.recordRetries.save(record.id);
         this.store.db
           .prepare('UPDATE session_imports SET error=?,retry_at=? WHERE id=?')
           .run(
-            encodeJson(
-              wireError(reportError(failure, 'session_import.apply_failed', { tenant, importId: record.id })),
-              wireErrorCodec,
-              `session_imports.error ${record.id}`,
-            ),
-            wait === undefined ? null : this.clock.wallMs() + Math.max(15000, wait),
+            encodeJson(wireError(failure), wireErrorCodec, `session_imports.error ${record.id}`),
+            wait === undefined ? null : this.clock.wallMs() + wait,
             record.id,
           );
-        if (wait === undefined && errorHandling(failure.code) !== 'reconcile') {
+        if (wait === undefined) {
           if (this.active(tenant, record.id, ref))
             this.store.transaction(() => {
               this.store.sessionImports.finish(
@@ -586,8 +646,7 @@ export class SessionImporter {
               );
             });
         } else {
-          this.log(`Session import remains pending: ${failure.code}`);
-          return;
+          continue;
         }
       }
     }
@@ -607,7 +666,7 @@ export class SessionImporter {
     check();
     this.store.sessionImports.saveStorageJob(id, { importId });
     let begin = true;
-    let recoveryAttempts = 0;
+    const unit = new RetryUnit({ now: () => this.clock.monotonicMs() });
     for (;;) {
       check();
       try {
@@ -615,15 +674,16 @@ export class SessionImporter {
           ? await this.gateway.storageImport(tenant, { ...chunk, importId })
           : await this.gateway.storageImportStatus(tenant, { importId });
         check();
+        unit.succeed();
         if (status.state === 'done') return status;
         begin = false;
-        recoveryAttempts = 0;
       } catch (error) {
         const failure = toRemoteKitError(error);
-        if ((failure.code !== 'outcome_unknown' && failure.code !== 'not_found') || recoveryAttempts++)
-          throw error;
-        // Repeating begin recovers a lost admission reply or a restarted Browser.
-        begin = true;
+        const { delay } = unit.fail(failure);
+        if (delay === undefined) throw failure;
+        if (failure.code === 'conflict') begin = true;
+        await unit.wait(this.abort.signal);
+        continue;
       }
       await sleep(200, undefined, { signal: this.abort.signal });
     }
@@ -631,9 +691,14 @@ export class SessionImporter {
   async stop() {
     clearInterval(this.timer);
     this.abort.abort();
+    await this.dispatchJob.close();
+    await Promise.all([...this.tenantRetries.values()].map((job) => job.close()));
     await this.mailbox.stop();
     await this.receiving;
     await this.outbox.stop();
     await Promise.allSettled(this.running.values());
+    this.recordRetries.close();
+    this.pairRetries.close();
+    this.mailboxRetries.close();
   }
 }

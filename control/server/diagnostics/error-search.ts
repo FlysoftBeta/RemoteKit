@@ -24,7 +24,7 @@ export async function findError(
           try {
             if (JSON.parse(line).errorId === errorId) records.push({ source: 'control', line });
           } catch {
-            // Rotation or a crash can leave an incomplete line.
+            continue;
           }
           if (records.length === limits.logSearchLines) return { records, failures };
         }

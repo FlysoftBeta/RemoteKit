@@ -159,7 +159,7 @@ void MigrationRunner(const fs::path& path) {
   sqlite::Database db;
   Take(db.Open(path / "session.db"));
   const std::array<SessionMigration, 1> steps{
-      {{4, "future-test", [](sqlite::Database& store) -> Result<void> {
+      {{5, "future-test", [](sqlite::Database& store) -> Result<void> {
           RK_RETURN_IF_ERROR(store.Execute("CREATE TABLE future_step(value TEXT)"));
           return CorruptState("injected migration failure");
         }}}};
@@ -167,16 +167,80 @@ void MigrationRunner(const fs::path& path) {
   {
     auto query = Take(db.Prepare("PRAGMA user_version"));
     Take(query.Step());
-    Check(query.Int64(0) == 3, "migration rollback preserves schema version");
+    Check(query.Int64(0) == 4, "migration rollback preserves schema version");
   }
   Check(std::distance(fs::directory_iterator(path / "backups"), fs::directory_iterator()) == 1,
         "verified pre-migration backup retained");
   const std::array<SessionMigration, 1> success{
-      {{4, "future-test", [](sqlite::Database& store) -> Result<void> {
+      {{5, "future-test", [](sqlite::Database& store) -> Result<void> {
           return store.Execute("CREATE TABLE future_step(value TEXT)");
         }}}};
   Take(MigrateSessionDb(db, path, "dev", success));
+  Take(CheckSessionDb(db, 5));
+  Take(db.Close());
+}
+// A store written by the previous build (user_version 3, no download retry column) upgrades
+// through the migration module instead of being rejected as corrupt.
+void UpgradeFromVersion3(const fs::path& path) {
+  const std::string selection_id(32, 'a'), draft_id(32, 'b'), asset_id(64, 'a');
+  const Json asset{{"assetId", asset_id}, {"size", 3}, {"type", "text/plain"}};
+  const Json draft{{"operation", "operation"}, {"name", "a"},
+                   {"type", "text/plain"},     {"size", 3},
+                   {"expires", 2000000000},    {"sealed", asset_id}};
+  auto downloads = Download();
+  auto pending = downloads["records"][0];
+  pending.erase("result");
+  pending["eventId"] = "pending-download";
+  pending["attempt"] = 2;
+  pending["retryAt"] = 2000000000000LL;
+  pending["error"] = {{"code", "outcome_unknown"}, {"message", "reply lost"}};
+  downloads["records"].push_back(pending);
+  {
+    SessionDb initial(path);
+    Take(initial.Open());
+    Take(initial.Library().Save(LibraryTable::kAssets, asset_id, asset));
+    Take(initial.Library().Save(LibraryTable::kDrafts, draft_id, draft));
+    Take(initial.Library().Save(LibraryTable::kSelections, selection_id, Selection()));
+    Take(initial.Downloads().Save(downloads));
+    Take(initial.Close());
+  }
+  {
+    sqlite::Database db;
+    Take(db.Open(path / "session.db"));
+    Take(db.Execute("ALTER TABLE download_imports DROP COLUMN retry"));
+    Take(
+        db.Execute("UPDATE library_selections SET state='submitted', "
+                   "document=json_set(document,'$.state','submitted')"));
+    Take(db.Execute("PRAGMA user_version=3"));
+    Take(db.Close());
+  }
+  SessionDb upgraded(path);
+  Take(upgraded.Open());
+  const auto selections = Take(upgraded.Library().Load(LibraryTable::kSelections));
+  Check(selections.at(selection_id) == Selection("unknown"), "v3 selection fully decodes");
+  Check(bool(library_records::ParseSelection(selection_id, selections.at(selection_id))),
+        "migrated selection decodes through its owner");
+  Check(Take(upgraded.Library().Load(LibraryTable::kAssets)).at(asset_id) == asset,
+        "v3 asset record decodes unchanged");
+  Check(Take(upgraded.Library().Load(LibraryTable::kDrafts)).at(draft_id) == draft,
+        "v3 upload draft decodes unchanged");
+  Check(Take(upgraded.Downloads().Load()) == downloads,
+        "v3 pending and completed downloads retain identity, result and retry metadata");
+  Take(upgraded.Close());
+  sqlite::Database db;
+  Take(db.Open(path / "session.db"));
   Take(CheckSessionDb(db, 4));
+  {
+    auto column =
+        Take(db.Prepare("SELECT 1 FROM pragma_table_info('download_imports') WHERE name='retry'"));
+    Check(Take(column.Step()), "v3 store gains the download retry column");
+    auto selection = Take(
+        db.Prepare("SELECT state, json_extract(document,'$.state') FROM library_selections WHERE "
+                   "selection_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"));
+    Check(
+        Take(selection.Step()) && selection.Text(0) == "unknown" && selection.Text(1) == "unknown",
+        "a submitted selection becomes unknown");
+  }
   Take(db.Close());
 }
 void Transactions(const fs::path& path) {
@@ -278,6 +342,14 @@ void Reads(const fs::path& path) {
         "sharing violation is unavailable");
   Check(Take(ReadFileIfExists(name)).value() == "hello", "read file");
   const auto journal = path / "session.copy.json";
+  for (const auto* state : {"clean", "dirty"}) {
+    const Json previous{{"version", 1},    {"sessionId", "session"}, {"placementEpoch", 1},
+                        {"base", nullptr}, {"state", state},         {"stoppedCleanly", true},
+                        {"changesAt", 0},  {"lastCommit", nullptr}};
+    std::ofstream(journal) << previous.dump();
+    Check(Take(Checkpoints::Copy(path / "session")) == previous,
+          "previous copy record decodes through the store format module");
+  }
   std::ofstream(journal) << "{";
   const auto malformed = Checkpoints::Copy(path / "session");
   Check(!malformed && malformed.error().reason == ErrorReason::kCorruptState,
@@ -367,6 +439,7 @@ int wmain(int argc, wchar_t** argv) {
     fs::remove_all(root);
     Formats();
     MigrationRunner(root / "runner");
+    UpgradeFromVersion3(root / "upgrade-v3");
     Transactions(root / "transactions");
     EventTransactions(root / "events");
     Reads(root / "reads");

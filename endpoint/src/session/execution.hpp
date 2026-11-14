@@ -36,8 +36,15 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   bool Running() const { return running_.load(); }
   const std::string& Id() const { return id_; }
   uint64_t PlacementEpoch() const { return epoch_; }
+  RetryUnit::Snapshot SamplingRetryStatus() const;
+  RetryUnit::Snapshot EventsRetryStatus() const;
 
  private:
+  friend class NativeErrorStateProbe;
+  friend class NativeRetryOwnerProbe;
+  Result<void> Sample(const std::function<Result<Json>()>& sample);
+  Result<void> DeliverEvents(const std::function<Result<void>()>& deliver);
+  Result<void> SendEvents();
   Result<void> Authorize(const Json&, uint64_t);
   Result<void> Prepare(const Json&);
   Result<void> Start();
@@ -73,5 +80,7 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   bool starting_ = false, retired_ = false;
   uint64_t runtime_generation_ = 0;
   std::function<void()> signal_;
+  RetryUnit sampling_retry_{"session.sample"}, events_retry_{"session.events"};
+  mutable std::mutex sampling_retry_mutex_, events_retry_mutex_;
 };
 }  // namespace remotekit

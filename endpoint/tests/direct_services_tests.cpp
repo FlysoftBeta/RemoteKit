@@ -46,12 +46,17 @@ void ContextMenuTests() {
     return Json{{"id", identity["menu"]}, {"x", 10}, {"y", 20}, {"source", "mouse"}};
   };
   std::vector<Json> sent;
+  auto now = remotekit::RetryUnit::Clock::now();
   auto flush = [&] {
+    now += std::chrono::seconds(6);
     sent.clear();
-    services.Flush(3, [&](const std::string& bytes) {
-      sent.push_back(Json::parse(bytes));
-      return 0;
-    });
+    services.Flush(
+        3,
+        [&](const std::string& bytes) {
+          sent.push_back(Json::parse(bytes));
+          return 0;
+        },
+        now);
   };
   services.ContextMenu(3, frame, false, fetch, latest);
   services.ContextMenu(3, frame, false, fetch, latest);
@@ -79,16 +84,16 @@ void ContextMenuTests() {
         return Json{{"id", "6"}};
       },
       latest);
-  services.Flush(3, [](const auto&) { return 1; });
+  services.Flush(3, [](const auto&) { return REMOTEKIT_SDK_BUSY; }, now);
   flush();
   Check(sent.size() == 1 && sent[0]["revision"] == "2" && sent[0]["menu"]["id"] == "6",
         "newest menu supersedes old fetch and retries a blocked send");
   view.context_menu.menu_id = 7;
   services.ContextMenu(
       3, frame, false,
-      [&](const Json&) {
+      [&](const Json&) -> remotekit::Result<Json> {
         ++fetches;
-        return Json();
+        return remotekit::Error{remotekit::ErrorCode::kNotFound, "menu disappeared"};
       },
       latest);
   flush();
@@ -184,7 +189,9 @@ void ViewportTests() {
   frame.views[0].page_height_dip = 500;
   frame.views[0].occlusion_revision = 2;
   services.Viewports(4, frame);
-  services.Flush(4, [](auto) { return 1; });
+  services.Flush(
+      4, [](auto) { return REMOTEKIT_SDK_BUSY; },
+      remotekit::RetryUnit::Clock::now() - std::chrono::seconds(6));
   std::vector<Json> sent;
   services.Flush(4, [&](auto bytes) {
     sent.push_back(Json::parse(bytes));
@@ -342,7 +349,9 @@ int main() {
     return 0;
   });
   services.Selection(3, frame, 1, true);
-  services.Flush(3, [&](auto) { return 1; });
+  services.Flush(
+      3, [&](auto) { return REMOTEKIT_SDK_BUSY; },
+      remotekit::RetryUnit::Clock::now() - std::chrono::seconds(6));
   sent.clear();
   services.Flush(3, [&](auto bytes) {
     sent.push_back(Json::parse(bytes));

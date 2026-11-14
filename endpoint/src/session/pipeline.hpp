@@ -40,8 +40,13 @@ class MediaPipeline : private ControllerContext, private media::CompHost {
   void MediaLoop();
   uint32_t SamplingFps() const;
   Result<Json> ApplyMediaPolicy(const Json& request);
+  RetryUnit::Snapshot ClipboardRetryStatus() const;
 
  private:
+  friend class NativeRetryOwnerProbe;
+  void PollClipboard();
+  mutable std::mutex clipboard_retry_mutex_;
+  RetryUnit clipboard_retry_{"clipboard.sync"};
   PeerController& peer_controller;
   AuthorizationController& authorization;
   PresentationController& presentation;

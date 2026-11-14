@@ -1,9 +1,17 @@
 import { log } from '../log';
+import { BackgroundJob } from '../background';
 import limits from '../../../protocol/limits.json';
-import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { RetryLedger } from '../persistence/retry-units';
+import { rpcId } from '../endpoint/rpc-results';
 import { diskFloor } from './disk';
 import { createHmac, randomUUID } from 'node:crypto';
-import { RemoteKitError, parseWireError, toRemoteKitError, type ErrorCode } from '../../shared/errors';
+import {
+  RemoteKitError,
+  parseWireError,
+  toRemoteKitError,
+  wireError,
+  type ErrorCode,
+} from '../../shared/errors';
 import type { ControlDatabase } from '../persistence/database';
 import type Sqlite from 'better-sqlite3';
 import type { NodeLink, NodeRegistry } from './node-link';
@@ -56,6 +64,9 @@ interface RenderFailure {
   display_reason: string | null;
 }
 export class ObjectIndex {
+  private readonly renderLedger: RetryLedger;
+  private readonly replicaLedger: RetryLedger;
+  private readonly cleanupLedger: RetryLedger;
   private readonly commitSql: CommitStatements;
   private readonly fetches = new Map<string, Set<string>>();
   private readonly readFetches = new Map<string, Set<string>>();
@@ -71,6 +82,9 @@ export class ObjectIndex {
   private readonly retired: Set<string>;
   private readonly jobs = new Set<Promise<unknown>>();
   private maintenance?: Promise<void>;
+  private readonly maintenanceJob = new BackgroundJob('objects.background', { job: 'maintenance' });
+  private maintenanceInput = 0;
+  private readonly reconciliationJobs = new Map<string, BackgroundJob>();
   private closed = false;
   private readonly availableObjects = new Set<string>();
   constructor(
@@ -79,8 +93,11 @@ export class ObjectIndex {
     readonly tenantObjectBytes: number | null,
     private readonly placedOn: (tenant: string, node: string) => boolean,
     private readonly checkpointing: (tenant: string) => boolean,
-    private readonly now = Date.now,
+    private readonly now = () => Date.now(),
   ) {
+    this.renderLedger = new RetryLedger(store, 'render', now);
+    this.replicaLedger = new RetryLedger(store, 'replica', now);
+    this.cleanupLedger = new RetryLedger(store, 'object_cleanup', now);
     this.commitSql = {
       object: store.db.prepare('SELECT * FROM objects WHERE id=?'),
       replica: store.db.prepare('SELECT 1 FROM object_replicas WHERE id=? AND node_id=?'),
@@ -147,7 +164,13 @@ export class ObjectIndex {
     this.store.db
       .prepare("UPDATE object_render_failures SET retry_at=0 WHERE reason='unavailable' AND build_id=?")
       .run(this.nodes.options.buildId);
-    this.track(this.reconcile(this.nodes.get(nodeId)!).then(() => this.tick()));
+    let job = this.reconciliationJobs.get(nodeId);
+    if (!job) {
+      job = new BackgroundJob('objects.background', { job: 'reconcile', nodeId });
+      this.reconciliationJobs.set(nodeId, job);
+    }
+    const node = this.nodes.get(nodeId)!;
+    this.track(job.run(() => this.reconcile(node).then(() => this.tick()), JSON.stringify(node.state)));
   };
   private readonly metrics = () => {
     this.track(this.tick());
@@ -223,11 +246,13 @@ export class ObjectIndex {
       if (this.renders.has(sourceId))
         throw new RemoteKitError('busy', '文档正在转换', { detail: 'Document conversion in progress' });
       const failure = this.renderFailure(sourceId);
+      const envelope = this.renderLedger.unit(sourceId).error;
       throw new RemoteKitError(
         failure?.reason ?? 'unavailable',
         failure?.message ?? 'Document conversion unavailable',
         {
-          reason: failure?.display_reason ?? undefined,
+          ...(envelope ?? {}),
+          reason: envelope?.reason ?? failure?.display_reason ?? undefined,
           retryAfterMs:
             failure?.retry_at === null || failure?.retry_at === undefined
               ? undefined
@@ -246,42 +271,37 @@ export class ObjectIndex {
   private failRender(id: string, error: unknown, node?: NodeLink) {
     const value = parseWireError(error) ?? toRemoteKitError(error);
     const reason = value.code;
-    const attempts = Number(this.renderFailure(id)?.attempts ?? 0) + 1;
+    const unit = this.renderLedger.unit(id);
+    unit.ready(this.nodes.options.buildId);
+    const { delay } = unit.fail(value);
+    const attempts = unit.record().attempts;
     const failedAt = this.now();
-    const handling = errorHandling(reason);
-    const policyDelay = retryDelay(value, attempts - 1);
-    const delay =
-      reason === 'unavailable'
-        ? Math.min(24, 2 ** Math.min(attempts - 1, 5)) * 3600_000
-        : policyDelay !== undefined
-          ? Math.max(value.retryAfterMs ?? 0, Math.min(3600_000, 60_000 * 2 ** Math.min(attempts - 1, 6)))
-          : handling === 'reconcile'
-            ? 60_000
-            : undefined;
     const retryAt = delay === undefined ? null : failedAt + delay;
     // An unknown outcome may still be running. Retry only that node, whose queue deduplicates by source.
     const nodeId = reason === 'outcome_unknown' ? (node?.nodeId ?? this.renderFailure(id)?.node_id) : null;
-    this.store.db
-      .prepare(
-        `INSERT INTO object_render_failures(source_id,state,reason,message,failed_at,attempts,retry_at,node_id,build_id,display_reason) VALUES (?,'failed',?,?,?,?,?,?,?,?)
-      ON CONFLICT(source_id) DO UPDATE SET reason=excluded.reason,message=excluded.message,
+    this.renderLedger.save(id, () => {
+      this.store.db
+        .prepare(
+          `INSERT INTO object_render_failures(source_id,state,reason,message,failed_at,attempts,retry_at,node_id,build_id,display_reason) VALUES (?,?, ?,?,?,?,?,?,?,?)
+      ON CONFLICT(source_id) DO UPDATE SET state=excluded.state,reason=excluded.reason,message=excluded.message,
       failed_at=excluded.failed_at,attempts=excluded.attempts,retry_at=excluded.retry_at,
       node_id=excluded.node_id,build_id=excluded.build_id,display_reason=excluded.display_reason`,
-      )
-      .run(
-        id,
-        reason,
-        value?.message ?? 'Document conversion unavailable',
-        failedAt,
-        attempts,
-        retryAt,
-        nodeId ?? null,
-        this.nodes.options.buildId,
-        error && typeof error === 'object' && 'reason' in error && typeof error.reason === 'string'
-          ? error.reason
-          : null,
-      );
-    log.error('render.failed', { id, err: error });
+        )
+        .run(
+          id,
+          reason === 'outcome_unknown' ? 'unknown' : 'failed',
+          reason,
+          value?.message ?? 'Document conversion unavailable',
+          failedAt,
+          attempts,
+          retryAt,
+          nodeId ?? null,
+          this.nodes.options.buildId,
+          error && typeof error === 'object' && 'reason' in error && typeof error.reason === 'string'
+            ? error.reason
+            : null,
+        );
+    });
   }
   render(id: string): void {
     if (this.closed || this.renders.has(id) || this.derived(id, 'document')) return;
@@ -294,7 +314,7 @@ export class ObjectIndex {
       return;
     }
     const failure = this.renderFailure(id);
-    if (failure && (failure.retry_at === null || Number(failure.retry_at) > this.now())) return;
+    if (!this.renderLedger.unit(id).ready(this.nodes.options.buildId)) return;
     const replicas = new Set(this.sources(id).map((source) => source.nodeId));
     const node = this.nodes
       .all()
@@ -320,12 +340,20 @@ export class ObjectIndex {
     this.track(
       (async () => {
         try {
-          const result = await node.request('object.render', '', { params: { id } }, 6 * 60_000);
+          const result = await node.request(
+            'object.render',
+            '',
+            { params: { id } },
+            6 * 60_000,
+            this.renderLedger.unit(id).identity,
+          );
           if (!objectId(result?.documentId) || this.derived(id, 'document') !== result.documentId)
             throw new RemoteKitError('outcome_unknown', '文档转换结果待确认', {
               detail: 'Invalid object render result',
             });
           this.store.db.prepare('DELETE FROM object_render_failures WHERE source_id=?').run(id);
+          this.renderLedger.unit(id).succeed();
+          this.renderLedger.remove(id);
         } catch (error) {
           if (!this.derived(id, 'document')) this.failRender(id, error, node);
         } finally {
@@ -343,6 +371,7 @@ export class ObjectIndex {
     });
     for (const effect of effects) effect();
     this.refreshObjectAvailability([message.objectId]);
+    this.maintenanceInput++;
     return { accepted: true };
   }
   committedBatch(node: NodeLink, message: Record<string, any>) {
@@ -391,6 +420,7 @@ export class ObjectIndex {
     }
     for (const effect of effects) effect();
     this.refreshObjectAvailability(message.objects.map((item: { objectId: string }) => item.objectId));
+    this.maintenanceInput++;
     return { ok: true };
   }
   private commitObject(
@@ -647,14 +677,18 @@ export class ObjectIndex {
     let completed = false;
     const cancel = () => {
       if (node.state.state === 'ready' && node.state.connectionEpoch === epoch)
-        return node.request('object.put.cancel', '', { putId }).catch(() => {});
+        return node
+          .request('object.put.cancel', '', { putId })
+          .catch((error) => log.warn('objects.put_cancel_failed', { putId, err: error }));
       return Promise.resolve();
     };
     let interrupt!: (error: RemoteKitError) => void;
     const interrupted = new Promise<never>((_, reject) => {
       interrupt = reject;
     });
-    void interrupted.catch(() => {});
+    void interrupted.catch((error) => {
+      operation.ending = operation.ending || toRemoteKitError(error).code === 'outcome_unknown';
+    });
     const onAbort = () => {
       interrupt(
         new RemoteKitError(
@@ -662,7 +696,6 @@ export class ObjectIndex {
           operation.ending ? '文件写入结果待确认' : '',
         ),
       );
-      if (!operation.ending) void cancel();
     };
     const onOffline = () =>
       interrupt(
@@ -711,7 +744,10 @@ export class ObjectIndex {
     } finally {
       options.signal?.removeEventListener('abort', onAbort);
       node.off('offline', onOffline);
-      if (!completed) void Promise.resolve(iterator?.return?.()).catch(() => {});
+      if (!completed)
+        await Promise.resolve(iterator?.return?.()).catch((error) =>
+          log.warn('objects.source_release_failed', { putId, err: error }),
+        );
       if (!completed) await cancel();
       this.puts.delete(putId);
     }
@@ -785,6 +821,23 @@ export class ObjectIndex {
         this.ready({ nodeId: node.nodeId });
     }
   }
+  private async cleanup(
+    key: string,
+    input: unknown,
+    work: (operationId: string) => Promise<unknown> | unknown,
+  ) {
+    const unit = this.cleanupLedger.unit(key);
+    const result = await unit.execute(JSON.stringify([this.store.buildId, input]), async (operationId) =>
+      work(operationId),
+    );
+    if (!result.ran) return false;
+    if (result.error) {
+      this.cleanupLedger.save(key);
+      return false;
+    }
+    this.cleanupLedger.remove(key);
+    return true;
+  }
   async gc(now = Date.now()) {
     const durable = tenantObjects(this.store.db, false, now);
     const claims = this.store.db.prepare('SELECT tenant,id,claimed_at FROM object_claims').all() as {
@@ -846,7 +899,12 @@ export class ObjectIndex {
           .all(object.id) as { node_id: string }[]) {
           const node = this.nodes.get(replica.node_id);
           if (node?.state.state !== 'ready') continue;
-          await node.request('object.delete', '', { ids: [object.id] });
+          const deleted = await this.cleanup(
+            JSON.stringify(['gc', node.nodeId, object.id]),
+            [node.state, object.created_at.toString()],
+            (opId) => node.request('object.delete', '', { ids: [object.id] }, undefined, opId),
+          );
+          if (!deleted) continue;
           references = undefined;
           this.removeReplica(object.id, node.nodeId);
         }
@@ -872,7 +930,12 @@ export class ObjectIndex {
       if (!this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(orphan.id)) {
         this.retired.add(orphan.id);
         try {
-          await node.request('object.delete', '', { ids: [orphan.id] });
+          const deleted = await this.cleanup(
+            JSON.stringify(['orphan', node.nodeId, orphan.id]),
+            node.state,
+            (opId) => node.request('object.delete', '', { ids: [orphan.id] }, undefined, opId),
+          );
+          if (!deleted) continue;
         } finally {
           this.retired.delete(orphan.id);
         }
@@ -883,6 +946,10 @@ export class ObjectIndex {
     }
   }
   private async fetch(node: NodeLink, object: IndexedObject) {
+    const pair = JSON.stringify([node.nodeId, object.id]);
+    const unit = this.replicaLedger.unit(pair);
+    const input = JSON.stringify([node.state, this.store.buildId, object.created_at.toString()]);
+    if (!unit.ready(input)) return false;
     const key = node.nodeId;
     const expected = this.fetches.get(key) ?? new Set<string>();
     expected.add(object.id);
@@ -890,13 +957,27 @@ export class ObjectIndex {
     this.busy.set(node.nodeId, (this.busy.get(node.nodeId) ?? 0) + 1);
     this.reserved.set(node.nodeId, (this.reserved.get(node.nodeId) ?? 0) + Number(object.stored_size));
     try {
-      await node.request('object.fetch', '', {
-        ids: [object.id],
-        sources: { [object.id]: this.locateSources(object.id) },
-      });
-      return !!this.store.db
+      await node.request(
+        'object.fetch',
+        '',
+        {
+          ids: [object.id],
+          sources: { [object.id]: this.locateSources(object.id) },
+        },
+        undefined,
+        unit.identity,
+      );
+      const found = !!this.store.db
         .prepare('SELECT 1 FROM object_replicas WHERE id=? AND node_id=?')
         .get(object.id, node.nodeId);
+      if (!found) throw new RemoteKitError('outcome_unknown', '对象副本尚未确认');
+      unit.succeed();
+      this.replicaLedger.remove(pair);
+      return true;
+    } catch (cause) {
+      unit.fail(parseWireError(cause) ?? toRemoteKitError(cause));
+      this.replicaLedger.save(pair);
+      return false;
     } finally {
       expected.delete(object.id);
       if (!expected.size) this.fetches.delete(key);
@@ -965,7 +1046,8 @@ export class ObjectIndex {
         jobs.push(this.fetch(node, object));
       }
     }
-    await Promise.allSettled(jobs);
+    const results = await Promise.allSettled(jobs);
+    for (const result of results) if (result.status === 'rejected') throw result.reason;
     pruneCheckpoints(this.store.db);
   }
   private async diskPressure() {
@@ -976,13 +1058,16 @@ export class ObjectIndex {
       if (sample.value.disk.free >= 2 * floor) node.diskDraining = false;
       if (sample.value.disk.free < floor) node.diskDraining = true;
       if (!node.diskDraining) continue;
-      await node.request('session.cold.delete', '', {});
-      this.store.db
-        .prepare(
-          `DELETE FROM warm_session_copies WHERE node_id=? AND tenant NOT IN
+      const coldDeleted = await this.cleanup(JSON.stringify(['cold', node.nodeId]), node.state, (opId) =>
+        node.request('session.cold.delete', '', {}, undefined, opId),
+      );
+      if (coldDeleted)
+        this.store.db
+          .prepare(
+            `DELETE FROM warm_session_copies WHERE node_id=? AND tenant NOT IN
         (SELECT tenant FROM session_placements WHERE node_id=? AND run_state='running')`,
-        )
-        .run(node.nodeId, node.nodeId);
+          )
+          .run(node.nodeId, node.nodeId);
       let free = node.metrics.latest()?.value.disk.free ?? sample.value.disk.free;
       const copies = this.store.db
         .prepare(
@@ -1017,7 +1102,12 @@ export class ObjectIndex {
           elsewhere = this.sources(object.id).filter((source) => source.nodeId !== node.nodeId);
         }
         if (elsewhere.length < target) continue;
-        await node.request('object.delete', '', { ids: [object.id] });
+        const deleted = await this.cleanup(
+          JSON.stringify(['relief', node.nodeId, object.id]),
+          [node.state, object.created_at.toString()],
+          (opId) => node.request('object.delete', '', { ids: [object.id] }, undefined, opId),
+        );
+        if (!deleted) continue;
         this.removeReplica(object.id, node.nodeId);
         free = Math.max(free + Number(object.stored_size), node.metrics.latest()?.value.disk.free ?? 0);
       }
@@ -1026,17 +1116,24 @@ export class ObjectIndex {
   tick() {
     if (this.closed) return Promise.resolve();
     if (this.maintenance) return this.maintenance;
-    this.maintenance = (async () => {
-      pruneCheckpoints(this.store.db);
-      await this.gc();
-      await this.diskPressure();
-      await this.replicate();
-    })().finally(() => {
-      this.maintenance = undefined;
-    });
+    const input = JSON.stringify([
+      this.maintenanceInput,
+      this.nodes.all().map((node) => [node.nodeId, node.state, node.diskDraining]),
+    ]);
+    this.maintenance = this.maintenanceJob
+      .run(async () => {
+        pruneCheckpoints(this.store.db);
+        await this.gc();
+        await this.diskPressure();
+        await this.replicate();
+      }, input)
+      .finally(() => {
+        this.maintenance = undefined;
+      });
     return this.maintenance;
   }
   forgetTenant(tenant: string) {
+    this.maintenanceInput++;
     this.store.transaction(() => {
       for (const table of ['object_claims', 'checkpoints', 'checkpoint_objects'])
         this.store.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
@@ -1046,6 +1143,16 @@ export class ObjectIndex {
   tenantUsage(tenant: string) {
     const ids = tenantObjects(this.store.db).get(tenant) ?? new Set<string>();
     return { objects: ids.size, bytes: this.bytes(tenant), quotaBytes: this.tenantObjectBytes };
+  }
+  failures() {
+    return [
+      ...this.renderLedger.failures(),
+      ...this.replicaLedger.failures(),
+      ...this.cleanupLedger.failures(),
+      ...[this.maintenanceJob, ...this.reconciliationJobs.values()].flatMap((job) =>
+        job.retry.error ? [{ key: 'background', error: wireError(job.retry.error) }] : [],
+      ),
+    ];
   }
   replicaBytes(nodeId: string) {
     const row = this.store.db
@@ -1097,6 +1204,13 @@ export class ObjectIndex {
     this.nodes.handlers.delete('object.committed.batch');
     this.nodes.handlers.delete('object.locate');
     this.nodes.handlers.delete('object.derivation');
+    await Promise.all([
+      this.maintenanceJob.close(),
+      ...[...this.reconciliationJobs.values()].map((job) => job.close()),
+    ]);
     await Promise.allSettled([...this.jobs, ...(this.maintenance ? [this.maintenance] : [])]);
+    this.renderLedger.close();
+    this.replicaLedger.close();
+    this.cleanupLedger.close();
   }
 }

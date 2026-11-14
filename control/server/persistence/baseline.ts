@@ -61,7 +61,7 @@ CREATE TABLE object_inventory_orphans (
         node_id TEXT NOT NULL, id TEXT NOT NULL, first_seen INTEGER NOT NULL,
         PRIMARY KEY(node_id,id));
 CREATE TABLE object_render_failures (
-        source_id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state='failed'),
+        source_id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('failed','unknown')),
         reason TEXT NOT NULL, message TEXT NOT NULL, failed_at INTEGER NOT NULL,
         attempts INTEGER NOT NULL, retry_at INTEGER, node_id TEXT, build_id TEXT NOT NULL, display_reason TEXT);
 CREATE TABLE object_replicas (
@@ -78,6 +78,7 @@ CREATE TABLE page_previews (
     updated_at INTEGER NOT NULL, PRIMARY KEY(tenant,key));
 CREATE TABLE popup_receipts (tenant TEXT NOT NULL, provisional_id TEXT NOT NULL, tab_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(tenant,provisional_id));
 CREATE TABLE removed_nodes (node_id TEXT PRIMARY KEY, removed_at INTEGER NOT NULL);
+CREATE TABLE retry_units (owner TEXT NOT NULL, unit TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY(owner,unit));
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 CREATE TABLE session_deletions (
         session_id TEXT NOT NULL, node_id TEXT NOT NULL, error_code TEXT, error_message TEXT, PRIMARY KEY(session_id,node_id));
@@ -143,5 +144,5 @@ CREATE UNIQUE INDEX single_admin ON users(is_admin) WHERE is_admin=1;
 CREATE INDEX usage_events_context ON usage_events(tenant,window_id,context,at,id);
 CREATE INDEX usage_events_tenant ON usage_events(tenant,at,id);
 CREATE INDEX viewer_presence_tenant ON viewer_presence(tenant,connected_at);
-INSERT INTO schema_version VALUES (23);
+INSERT INTO schema_version VALUES (24);
 `;

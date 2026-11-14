@@ -288,7 +288,7 @@ test('chooser cancellation uses the authenticated selection command without an u
   assert.equal(messages[0].authEpoch, 7);
 });
 
-test('file failures retain the Endpoint code and public message', async () => {
+test('final file failures retain the Endpoint code and public message', async () => {
   const channel = {
     readyState: 'open',
     bufferedAmount: 0,
@@ -300,7 +300,7 @@ test('file failures retain the Endpoint code and public message', async () => {
           version: 1,
           requestId: request.requestId,
           ok: false,
-          error: { code: 'busy', message: 'file_transfer_busy' },
+          error: { code: 'forbidden', message: 'file_transfer_denied' },
         }),
       );
     },
@@ -310,8 +310,39 @@ test('file failures retain the Endpoint code and public message', async () => {
     client.cancelSelection('chooser'),
     (error: unknown) =>
       error instanceof RemoteKitError &&
-      error.code === 'busy' &&
-      error.message === '服务繁忙，请稍后重试' &&
-      error.detail === 'file_transfer_busy',
+      error.code === 'forbidden' &&
+      error.message === '没有执行此操作的权限' &&
+      error.detail === 'file_transfer_denied',
   );
+});
+
+test('retiring the file channel cancels retry waits and preserves an uncertain response', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  let sends = 0;
+  const channel = {
+    readyState: 'open',
+    bufferedAmount: 0,
+    send(raw: string) {
+      sends++;
+      const request = JSON.parse(raw);
+      queueMicrotask(() =>
+        client.handle({
+          type: 'files.result',
+          version: 1,
+          requestId: request.requestId,
+          ok: false,
+          error: { code: 'outcome_unknown', message: 'reply lost' },
+        }),
+      );
+    },
+  } as RTCDataChannel;
+  const client = new FileChannel(() => channel);
+  const request = client.describeAsset('asset', new AbortController().signal);
+  const failed = assert.rejects(request, { code: 'outcome_unknown' });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  client.disconnect();
+  await failed;
+  t.mock.timers.tick(86400000);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sends, 1);
 });

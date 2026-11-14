@@ -33,7 +33,7 @@ test('provider expiry signs out learning while retaining the Viewer session and 
       safeCode: 'fixture-safe',
     });
     await assert.rejects(requestViewer(app, user.tenantId, 'lease', 'bank.subjects', {}), {
-      code: 'forbidden',
+      code: 'unauthenticated',
       message: '学习账号登录已失效，请重新登录',
     });
     assert.equal(app.tenants.get(user.tenantId).viewer?.id, 'lease');

@@ -1,6 +1,6 @@
 # 协议参考
 
-各边界的消息一览。语义与设计理由见各子系统文档；类型的权威定义在代码里（`control/shared/*.ts`、`protocol/*.h`、`sdk/include/*.h`）。所有 64 位 ID、代次和序号在 JSON 里都用十进制字符串，避免精度丢失。错误统一使用[错误码](architecture.md#错误模型)。
+各边界的消息一览。语义与设计理由见各子系统文档；类型的权威定义在代码里（`control/shared/*.ts`、`protocol/*.h`、`sdk/include/*.h`）。所有 64 位 ID、代次和序号在 JSON 里都用十进制字符串，避免精度丢失。错误统一使用[错误码](errors.md)。
 
 ## Viewer ↔ Control
 
@@ -193,6 +193,8 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 
 `code` 是 `protocol/errors.h` 中错误码的名称。方法包括 `snapshot`、`shutdown`、`session.sitePreferences`、`view.create/adopt/configure/recreate/close/closed.ack`、`focus`、`visible`、`navigate`、`lifecycle`、`input`、`page.requests/reply/fileStatus/command/exitFullscreen/contextMenu`、`clipboard.read/write`、`profile.downloads`、`navigation.ack`、`navigation.export.begin/chunk`、`navigation.import.begin/chunk/commit`、`navigation.transfer.cancel`、`output.open/describe/configure/status/close`、`audio.open/close`。`profile.downloads` 把参数放在 `command` 对象里，避免与 envelope 的 `id` 冲突。
 
+请求解码严格：可选字段存在但类型错误、出现方法未声明的字段，都返回 `invalid_request`（`samples` 存在但不是数组同样拒绝）；只有缺失的可选字段才取缺省。焦点与生命周期请求先判断目标是否可执行，被拒绝的请求不改变任何 view 的焦点，也不取消页面请求。文件选择状态查询（`page.fileStatus`）的回复始终是成功包络：`state`（`pending`/`validating`/`selected`/`cancelled`）与 `selection_id`，取消或文件校验失败的原因在 `reason`，没有字符串 `error` 字段——取消是被查询对象的状态，不是 RPC 错误。页面关闭状态是 `open`/`closing`/`closed`，用户拒绝 beforeunload 后回到 `open`。
+
 `input` 中的键盘布局以 `{session, event:{type:"keyboard.layout", entries}}` 更新 Session，不携带 view token。其余输入保留原 view token 与顺序门禁。`mouse.pen` 可携带 `{id,pressure,tiltX,tiltY,twist,eraser}`，触点及其历史采样可携带 DIP 单位的 `width`、`height`。
 
 `output.configure`：width/height（DIP）、device_scale（0.5–4）、enabled、viewConfigs；尺寸/scale/viewConfigs 变化前须先关闭输出。实际物理尺寸 = `ceil(DIP × scale)` 向上取偶，单轴 ≤8192、面积 ≤16,777,216，超出返回资源预算错误。`output.describe` 返回映射、4 个 Slot 纹理、4 个 ready Fence、4 个 consumed Fence 的句柄（复制进调用方进程），并一次性移交渲染管道。
@@ -208,7 +210,7 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 | 族 | 函数 |
 |---|---|
 | 运行时 | `remotekit_sdk_abi_version`、`initialize`、`shutdown`（幂等初始化；关闭是终态，要求先关闭所有 peer 与渲染通道） |
-| 控制 | `remotekit_sdk_control_connect/request/close`、`control_command`、`control_command_token`、`control_open_render` |
+| 控制 | `remotekit_sdk_control_connect/request/close`、`control_command`、`control_open_render` |
 | 渲染 | `remotekit_sdk_render_connect/begin/observe_signal/stop/close` |
 | 键码 | `remotekit_sdk_windows_dom_code/dom_key` |
 | RTC | `remotekit_rtc_create/close/sample_clock`、`create_offer/set_remote_description/add_ice/get_receive_level`、`set_media_authorized/set_audio_enabled/set_av_sync/set_degradation_preference/set_source_max_fps/set_playout_delay`、`adapt_frame/submit_texture`、`submit_audio`、`send_data/send_auth_data`、`request_stats`、`encoded/encoder_drop` |
@@ -217,7 +219,10 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 - 控制请求从工作线程调用；超时、输出缓冲不足、传输失败会关闭并作废该句柄（防止后续请求收到旧回复）。Browser 的应用拒绝（`ok:false`）是一次成功的传输，不作废句柄。
 - `submit_texture` 成功时把一份释放义务转给 SDK；硬件编码器需在 encode 回调返回前持有自己的租约，硬件完成后释放。只持有 COM 引用不能阻止纹理池覆盖内容。
 - 每个被接受的编码时间戳恰有一次 `encoded` 或 `encoder_drop`；encoder ID 不复用，销毁后的迟到完成被拒绝。`encoded` 的第三个参数返回实际发出的 RTP 时间戳（WebRTC 会加随机偏移），接收端关联用它。
-- peer 关闭与 `render_close` 是回调屏障，不是 GPU 完成证明。
+- peer 关闭与 `render_close` 是回调屏障，不是 GPU 完成证明。并发的 `remotekit_rtc_close` 共享同一个关闭屏障：任何一个返回时都不再有回调在执行。
+- `control_open_render`：`output.open` 的成功回复必须带 `accepted:true`，否则返回 DATA_MISMATCH；render 资源回复只接受一套顶层字段与固定数值类型，未知字段或类型错误同样是 DATA_MISMATCH。`output.describe` 遇到 `busy` 时按错误回复的 `retryAfterMs` 等待，受该调用的总时限约束。
+- 远端 SDP 被拒绝（解析、方向或音频格式不合法）不改变 peer 状态，之后仍可 `set_av_sync`。
+- 公共头不写死共享映射版本号；`protocol/shared_render_slots.h` 不提供 `RenderView`/`RenderFrame` 别名。
 - `set_playout_delay` 两个值都是 10ms 的倍数，`0 ≤ min ≤ max ≤ 40950`；已安装后不能取消（需重建 peer）。
 - `set_av_sync` 只能在 `set_remote_description` 之前调用，决定音频发送器的 stream id（与视频相同即接收端唇音同步），之后返回 INVALID_STATE。`set_audio_enabled` 运行期生效：音频发送器只在"媒体已授权且音频启用"时活动，禁用期间 `submit_audio` 接受并丢弃 PCM。
 

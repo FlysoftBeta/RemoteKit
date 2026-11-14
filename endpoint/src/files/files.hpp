@@ -33,6 +33,10 @@ class LibraryController : private ControllerContext {
     return imported.value().Json();
   }
   Result<void> SweepDirectFiles();
+  Json CleanupFailures() {
+    std::lock_guard lock(file_store_mutex);
+    return cleanup_failures_;
+  }
   static uint64_t FileUnsigned(const Json& value);
   Json SelectionBrowserCommand(const FileBinding& binding, const char* method);
   Json SelectionStatusCommand(const LibrarySelection& selection);
@@ -50,6 +54,7 @@ class LibraryController : private ControllerContext {
   }
 
  private:
+  friend class NativeRetryOwnerProbe;
   AuthorizationController& authorization;
   ViewController& views;
   FileController& files;
@@ -57,11 +62,14 @@ class LibraryController : private ControllerContext {
   remotekit::FileUploadStore file_uploads;
   remotekit::FileLibrary file_library;
   std::mutex file_store_mutex;
+  Json cleanup_failures_ = Json::object();
   struct SelectionWatch {
     remotekit::FileLibrary::Selection selection;
     uint64_t control;
     int64_t expires;
+    RetryUnit retry{"selection.watch"};
   };
+  Result<std::string> WatchSelection(SelectionWatch& watch);
   std::deque<SelectionWatch> selection_watches;  // file worker only.
   int64_t next_selection_watch = 0;
 };

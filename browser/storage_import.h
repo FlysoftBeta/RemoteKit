@@ -53,10 +53,14 @@ class StorageImportJobs {
  private:
   friend class StorageImportJobsProbe;
   struct Job;
-  void Start(std::string import_id, StorageImportData data);
-  void OnItem(std::string import_id, bool cookie, bool applied);
+  void Start(std::string import_id, uint64_t serial, StorageImportData data);
+  void OnItem(std::string import_id, uint64_t serial, bool cookie, bool applied);
   void MaybeFlush(const std::string& import_id);
-  void OnFlushed(const std::string& import_id);
+  void OnFlushed(const std::string& import_id, uint64_t serial);
+  void OnDropped(const std::string& import_id, uint64_t serial, bool item);
+  void OnTimeout(const std::string& import_id, uint64_t serial, bool flushing);
+  uint64_t Serial(const std::string& import_id) const;
+  uint64_t next_serial_ = 0;
 
   std::map<std::string, std::unique_ptr<Job>> jobs_;
   std::deque<std::string> completed_;

@@ -1,6 +1,7 @@
 #include "objects/service.hpp"
 #include "documents/object_documents.hpp"
 #include "util/result_macros.hpp"
+#include "util/retry_unit.hpp"
 #include <future>
 #include <fstream>
 #include <windows.h>
@@ -29,10 +30,11 @@ ObjectService::ObjectService(std::filesystem::path data,
       store_(std::move(data)),
       control_(control),
       server_(store_, key, node, build, peers_),
-      client_(store_, key, std::move(node), std::move(build), peers_) {
+      client_(store_, key, std::move(node), build, peers_) {
   std::filesystem::remove_all(put_root_);
   std::filesystem::create_directories(put_root_);
-  documents_ = std::make_unique<documents::ObjectDocuments>(*this, put_root_.parent_path());
+  documents_ = std::make_unique<documents::ObjectDocuments>(*this, put_root_.parent_path(),
+                                                            std::move(build));
 }
 ObjectService::~ObjectService() {
   documents_.reset();
@@ -92,22 +94,61 @@ Result<void> ObjectService::CommittedBatch(const std::vector<ObjectInfo>& object
       return {};
     if (requests)
       ++*requests;
-    auto result =
-        control_.RequestUntil("object.committed.batch", fields,
-                              std::chrono::steady_clock::time_point(
-                                  std::chrono::steady_clock::duration(commit_deadline_.load())));
-    if (!result && result.error().code == ErrorCode::kOutcomeUnknown) {
+    const auto identity = fields.dump();
+    std::shared_ptr<CommitRetry> state;
+    {
+      std::lock_guard lock(commits_mutex_);
+      auto& entry = commit_retries_[identity];
+      if (!entry)
+        entry = std::make_shared<CommitRetry>();
+      state = entry;
+    }
+    std::lock_guard operation(state->mutex);
+    auto& retry = state->retry;
+    retry.Input(identity + ":" + ConnectionEpoch());
+    const auto failure = [&]() -> Error {
+      auto error = *retry.Failure();
+      if (retry.Status() == RetryUnit::State::kWaiting && SupportsRetryHint(error.code)) {
+        const auto delay =
+            std::chrono::ceil<std::chrono::milliseconds>(retry.Until() - RetryClock::now());
+        error.retry_after_ms = static_cast<uint32_t>(std::max<int64_t>(0, delay.count()));
+      }
+      return error;
+    };
+    if (!retry.Ready())
+      return failure();
+    const auto deadline =
+        std::min(std::chrono::steady_clock::now() + std::chrono::seconds(20),
+                 std::chrono::steady_clock::time_point(
+                     std::chrono::steady_clock::duration(commit_deadline_.load())));
+    const auto request = [&]() -> Result<Json> {
+      auto result = control_.RequestUntil("object.committed.batch", fields, deadline);
+      if (result && (!result.value().is_object() || !result.value().contains("ok") ||
+                     !result.value()["ok"].is_boolean() || !result.value()["ok"].get<bool>()))
+        return Error{ErrorCode::kOutcomeUnknown, "invalid object commit batch reply"};
+      return result;
+    };
+    auto result = request();
+    if (!result) {
+      retry.Fail(result.error());
+    }
+    while (!result && retry.Status() == RetryUnit::State::kWaiting && retry.Until() < deadline) {
+      RetryClock::WaitUntil(retry.Until());
       if (requests)
         ++*requests;
-      result =
-          control_.RequestUntil("object.committed.batch", fields,
-                                std::chrono::steady_clock::time_point(
-                                    std::chrono::steady_clock::duration(commit_deadline_.load())));
+      result = request();
+      if (!result)
+        retry.Fail(result.error());
     }
     if (!result)
-      return result.error();
-    if (!result.value().is_object() || result.value().value("ok", false) != true)
-      return Error{ErrorCode::kOutcomeUnknown, "invalid object commit batch reply"};
+      return failure();
+    retry.Success();
+    {
+      std::lock_guard lock(commits_mutex_);
+      const auto found = commit_retries_.find(identity);
+      if (found != commit_retries_.end() && found->second == state)
+        commit_retries_.erase(found);
+    }
     fields["objects"] = Json::array();
     return {};
   };
@@ -130,9 +171,16 @@ Result<ObjectInfo> ObjectService::Fetch(const std::string& id, const Json& sourc
   for (size_t i = 0; i < sources.size(); ++i) {
     const auto& source = sources[(std::hash<std::string>{}(id) + i) % sources.size()];
     const auto address = source["address"].get<std::string>();
+    const auto unit = id + ":" + address;
     std::shared_ptr<std::counting_semaphore<4>> limit;
     {
       std::lock_guard lock(sources_mutex_);
+      auto& retry = source_retries_.try_emplace(unit, "object.source").first->second;
+      retry.Input(unit + ":" + sources.dump());
+      if (!retry.Ready()) {
+        last = *retry.Failure();
+        continue;
+      }
       auto& entry = source_limits_[address];
       if (!entry)
         entry = std::make_shared<std::counting_semaphore<4>>(4);
@@ -146,11 +194,16 @@ Result<ObjectInfo> ObjectService::Fetch(const std::string& id, const Json& sourc
     auto fetched = client_.Fetch(id, source["nodeId"].get<std::string>());
     if (!fetched) {
       last = fetched.error();
-      if (last.code != ErrorCode::kUnauthenticated && last.code != ErrorCode::kUnavailable &&
-          last.code != ErrorCode::kNotFound && last.code != ErrorCode::kBusy &&
-          last.code != ErrorCode::kRateLimited)
+      std::lock_guard lock(sources_mutex_);
+      auto& retry = source_retries_.at(unit);
+      retry.Fail(last);
+      if (retry.Status() == RetryUnit::State::kFaulted)
         return last;
       continue;
+    }
+    {
+      std::lock_guard lock(sources_mutex_);
+      source_retries_.at(unit).Success();
     }
     return fetched;
   }

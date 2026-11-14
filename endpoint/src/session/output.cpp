@@ -25,19 +25,18 @@ Result<void> OutputController::OpenOutput() {
     trace->SdkClock(clock);
   remotekit_sdk_render_setup setup{};
   setup.struct_size = sizeof(setup);
-  auto result = browser.Rpc().OpenRender(setup);
-  if (!result)
-    return result.error();
   const auto selected = registry.Adapter();
   if (!selected)
     return Error{ErrorCode::kUnavailable, "streaming adapter unavailable"};
   const auto& adapter = *selected;
-  std::string error;
-  if (!pool.Open(setup, browser.Pid(), sdk, adapter.luid, adapter.device.Get(),
-                 adapter.context.Get(), error))
-    return Error{ErrorCode::kInvalidRequest,
-                 error + " expected_adapter=" + AdapterLuid(adapter.luid) + " render_adapter=" +
-                     AdapterLuid({setup.adapter_luid_low, setup.adapter_luid_high})};
+  auto result = browser.Rpc().OpenRender(setup);
+  if (!result)
+    return result.error();
+  std::string diagnostic;
+  auto opened = pool.Open(setup, browser.Pid(), sdk, adapter.luid, adapter.device.Get(),
+                          adapter.context.Get(), diagnostic);
+  if (!opened)
+    return opened.error();
   capture_clock_uncertainty_ms = pool.clock_uncertainty_us() / 1000;
   timing.MarkConnection(ConnectionPhase::output_open_end);
   return PollClipboard(true);
@@ -89,7 +88,8 @@ Result<void> OutputController::Configure(int width,
                      {"device_scale", scale},
                      {"allocation_alignment", RuntimeOptions::kAtlasAllocationAlignment},
                      {"viewConfigs", std::move(views)}};
-  if (configuration_incarnation == browser.Incarnation() && configuration == next)
+  if (configuration_incarnation == browser.Incarnation() && configuration == next &&
+      (!visible || (pool.Generation() && !output_suspended)))
     return {};
   const auto generation = pool.Generation();
   if (generation && configuration_incarnation == browser.Incarnation() &&
@@ -115,6 +115,7 @@ Result<void> OutputController::Configure(int width,
     return {};
   }
   RK_ASSIGN_OR_RETURN(active, PauseOutput(true));
+  configuration_incarnation.clear();
   auto result = browser.Rpc().Request(next);
   if (!result)
     return result.error();
@@ -134,12 +135,13 @@ Result<void> OutputController::Close() {
   std::string error;
   if (!pool.Close(error) && !failure)
     failure = Error{ErrorCode::kOutcomeUnknown, error};
-  if (failure && failure->code == ErrorCode::kOutcomeUnknown)
-    return Error{failure->code, failure->message, ErrorReason::kBrowserRestarting};
-  if (failure)
-    return browser.Exited() || browser.Rpc().Disconnected()
-               ? browser.Unavailable(failure->message)
-               : Error{failure->code, failure->message, ErrorReason::kOutputFailed};
+  if (failure) {
+    if (!failure->reason)
+      failure->reason = failure->code == ErrorCode::kOutcomeUnknown
+                            ? ErrorReason::kBrowserRestarting
+                            : ErrorReason::kOutputFailed;
+    return *failure;
+  }
   return {};
 }
 

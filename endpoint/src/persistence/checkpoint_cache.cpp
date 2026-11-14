@@ -47,18 +47,69 @@ Result<void> CheckpointCache::Start(const fs::path& directory) {
     while (
         !journal_wake_.wait_for(lock, std::chrono::seconds(5), [this] { return cancel_.load(); })) {
       lock.unlock();
-      try {
-        auto flushed = Flush();
-        if (!flushed)
-          LogError(LogLevel::kWarn, "session.changes_flush_failed", flushed.error());
-      } catch (const std::exception& error) {
-        LogError(LogLevel::kWarn, "session.changes_flush_failed",
-                 Error{ErrorCode::kUnavailable, error.what()});
-      }
+      JournalTick([this] { return Flush(); });
       lock.lock();
     }
   });
   return {};
+}
+RetryUnit::Snapshot CheckpointCache::JournalRetryStatus() const {
+  std::lock_guard lock(journal_retry_mutex_);
+  return journal_retry_;
+}
+RetryUnit::Snapshot CheckpointCache::StagingRetryStatus() const {
+  std::lock_guard lock(staging_retry_mutex_);
+  return staging_retry_;
+}
+void CheckpointCache::JournalTick(const std::function<Result<void>()>& flush) {
+  std::lock_guard lock(journal_retry_mutex_);
+  journal_retry_.Input(Utf8(directory_));
+  if (!journal_retry_.Ready())
+    return;
+  try {
+    auto result = flush();
+    if (result)
+      journal_retry_.Success();
+    else
+      journal_retry_.Fail(result.error());
+  } catch (const fs::filesystem_error& error) {
+    journal_retry_.Fail(WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                                    error.code().value()));
+  } catch (const std::exception& error) {
+    journal_retry_.Fail({ErrorCode::kInternal, error.what()});
+  } catch (...) {
+    journal_retry_.Fail({ErrorCode::kInternal, "change journal worker failed"});
+  }
+}
+bool CheckpointCache::QueueStaging(const std::string& input,
+                                   const std::function<Result<void>()>& queue) {
+  std::lock_guard lock(staging_retry_mutex_);
+  staging_retry_.Input(input);
+  if (!staging_retry_.Ready())
+    return false;
+  const auto submit = [&]() -> Result<void> {
+    try {
+      return queue();
+    } catch (const fs::filesystem_error& error) {
+      return WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                         error.code().value());
+    } catch (const std::exception& error) {
+      return Error{ErrorCode::kInternal, error.what()};
+    } catch (...) {
+      return Error{ErrorCode::kInternal, "checkpoint staging queue failed"};
+    }
+  };
+  auto result = submit();
+  if (!result)
+    staging_retry_.Fail(result.error());
+  return bool(result);
+}
+void CheckpointCache::CompleteStaging(Result<void> result) {
+  std::lock_guard lock(staging_retry_mutex_);
+  if (result)
+    staging_retry_.Success();
+  else
+    staging_retry_.Fail(result.error());
 }
 Result<void> CheckpointCache::Flush() {
   std::lock_guard lock(journal_mutex_);
@@ -90,10 +141,10 @@ Result<void> CheckpointCache::Version(const Json& version) {
                        .count();
   const auto age = std::chrono::milliseconds(
       std::max<int64_t>(0, now - version.at("takenAt").get<int64_t>() + 2000));
-  watcher_.Prune(PhaseClock::now() - age);
-  RK_RETURN_IF_ERROR(Checkpoints::TruncateChanges(directory_));
-  last_flush_ = PhaseClock::now();
-  RK_RETURN_IF_ERROR(Checkpoints::FlushChanges(directory_, watcher_.Snapshot()));
+  const auto flushed_at = PhaseClock::now();
+  RK_RETURN_IF_ERROR(Checkpoints::FlushChanges(directory_, watcher_.Snapshot(), true));
+  watcher_.Prune(flushed_at - age);
+  last_flush_ = flushed_at;
   return {};
 }
 void CheckpointCache::Stop() {
@@ -103,7 +154,7 @@ void CheckpointCache::Stop() {
   if (journal_thread_.joinable())
     journal_thread_.join();
   if (staging_.valid())
-    staging_.get();
+    CompleteStaging(staging_.get());
   watcher_.Stop();
 }
 std::optional<StagedFile> CheckpointCache::Find(const std::string& path,
@@ -123,7 +174,7 @@ void CheckpointCache::MaybeStage(objects::ObjectService& objects, const std::str
       std::lock_guard lock(mutex_);
       for (auto staged = staged_.begin(); staged != staged_.end();) {
         const auto current = CheckpointIdentity(LongPath(directory_ / Utf8Path(staged->first)));
-        if (!current || current.value() != staged->second.identity) {
+        if (current && current.value() != staged->second.identity) {
           staged = staged_.erase(staged);
           continue;
         }
@@ -132,32 +183,41 @@ void CheckpointCache::MaybeStage(objects::ObjectService& objects, const std::str
         ++staged;
       }
     }
-    auto refreshed = objects.RefreshClaims(tenant, {ids.begin(), ids.end()});
-    if (refreshed)
-      next_refresh_ = PhaseClock::now() + std::chrono::minutes(30);
-    else {
-      next_refresh_ = PhaseClock::now() + std::chrono::seconds(5);
-      LogError(LogLevel::kWarn, "session.claims_refresh_failed", refreshed.error());
+    claims_retry_.Input(tenant + ":" + Json(ids).dump());
+    if (claims_retry_.Ready()) {
+      auto refreshed = objects.RefreshClaims(tenant, {ids.begin(), ids.end()});
+      if (refreshed) {
+        claims_retry_.Success();
+        next_refresh_ = PhaseClock::now() + std::chrono::minutes(30);
+      } else {
+        claims_retry_.Fail(refreshed.error());
+      }
     }
   }
   if (staging_.valid()) {
     if (staging_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
       return;
-    staging_.get();
+    CompleteStaging(staging_.get());
   }
   const auto changes = watcher_.Snapshot();
   const auto generation = generation_.load();
-  auto task = std::make_shared<std::packaged_task<void()>>([this, &objects, tenant, changes,
-                                                            generation] {
+  auto task = std::make_shared<std::packaged_task<Result<void>()>>([this, &objects, tenant, changes,
+                                                                    generation]() -> Result<void> {
     SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
     struct Priority {
       ~Priority() { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END); }
     } priority;
+    RetryUnit* active_retry = nullptr;
     try {
       for (const auto& [name, changed] : changes.paths) {
         if (cancel_ || generation_ != generation)
-          return;
+          return Error{ErrorCode::kCanceled, "checkpoint staging retired"};
         if (PhaseClock::now() - changed < std::chrono::seconds(10))
+          continue;
+        auto& retry = staging_retries_.try_emplace(name, "checkpoint.prestage").first->second;
+        active_retry = &retry;
+        retry.Input(name + ":" + std::to_string(changed.time_since_epoch().count()));
+        if (!retry.Ready())
           continue;
         const auto path = LongPath(directory_ / Utf8Path(name));
         bool excluded = false;
@@ -169,12 +229,17 @@ void CheckpointCache::MaybeStage(objects::ObjectService& objects, const std::str
         if (excluded || !fs::is_regular_file(path))
           continue;
         auto before = CheckpointIdentity(path);
-        if (!before || Find(name, before.value()))
+        if (!before) {
+          retry.Fail(before.error());
+          continue;
+        }
+        if (Find(name, before.value()))
           continue;
         StagedFile staged{before.value(), {}};
         std::ifstream input(path, std::ios::binary);
         uint64_t remaining = before.value()["size"].get<uint64_t>();
         bool complete = true;
+        std::optional<Error> failure;
         do {
           if (cancel_ || generation_ != generation) {
             complete = false;
@@ -182,6 +247,7 @@ void CheckpointCache::MaybeStage(objects::ObjectService& objects, const std::str
           }
           std::string bytes(static_cast<size_t>(std::min<uint64_t>(remaining, 1024 * 1024)), '\0');
           if (!input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
+            failure = Error{ErrorCode::kUnavailable, "checkpoint pre-stage read failed"};
             complete = false;
             break;
           }
@@ -191,6 +257,7 @@ void CheckpointCache::MaybeStage(objects::ObjectService& objects, const std::str
           }
           auto object = objects.Store().WriteChunk(objects.ObjectKeys(), bytes);
           if (!object) {
+            failure = object.error();
             complete = false;
             break;
           }
@@ -200,23 +267,44 @@ void CheckpointCache::MaybeStage(objects::ObjectService& objects, const std::str
         // Even a discarded read owns claims; normal expiry and GC reclaim the cache.
         auto committed = objects.CommittedBatch(staged.objects, tenant);
         const auto after = CheckpointIdentity(path);
+        if (!committed)
+          failure = committed.error();
+        if (!after)
+          failure = after.error();
+        if (failure)
+          retry.Fail(*failure);
         if (committed && complete && after && before.value() == after.value()) {
           std::lock_guard lock(mutex_);
           staged_[name] = std::move(staged);
+          retry.Success();
         }
-        return;
+        return {};
       }
     } catch (const std::filesystem::filesystem_error& error) {
-      LogError(LogLevel::kWarn, "checkpoint.prestage_failed",
-               WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
-                           error.code().value()));
+      if (active_retry)
+        active_retry->Fail(WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                                       error.code().value()));
+      else
+        return Error{ErrorCode::kUnavailable, error.what()};
     } catch (const std::exception& error) {
-      LogError(LogLevel::kWarn, "checkpoint.prestage_failed",
-               Error{ErrorCode::kUnavailable, error.what()});
+      if (active_retry)
+        active_retry->Fail({ErrorCode::kInternal, error.what()});
+      else
+        return Error{ErrorCode::kInternal, error.what()};
+    } catch (...) {
+      if (active_retry)
+        active_retry->Fail({ErrorCode::kInternal, "checkpoint pre-stage worker failed"});
+      else
+        return Error{ErrorCode::kInternal, "checkpoint pre-stage worker failed"};
     }
+    return {};
   });
   staging_ = task->get_future();
-  if (!objects.PreStage([task] { (*task)(); })) {
+  if (!QueueStaging(tenant + ":" + Utf8(directory_), [&]() -> Result<void> {
+        if (!objects.PreStage([task] { (*task)(); }))
+          return Error{ErrorCode::kBusy, "checkpoint staging queue is full"};
+        return {};
+      })) {
     task.reset();
     staging_ = {};
   }

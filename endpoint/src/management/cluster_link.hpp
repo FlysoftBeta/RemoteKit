@@ -1,6 +1,7 @@
 #pragma once
 #include "management/link.hpp"
 #include "cluster/channel.hpp"
+#include "util/retry_unit.hpp"
 namespace remotekit {
 class ClusterLink final : public ManagementLink {
  public:
@@ -15,6 +16,7 @@ class ClusterLink final : public ManagementLink {
   ~ClusterLink() override;
   Result<Json> WaitReady();
   int ExitCode();
+  RetryUnit::Snapshot RetryStatus() const;
   void Flush();
   bool Next(std::string& bytes, uint64_t& generation, bool& eof) override;
   bool Current(uint64_t generation) override;

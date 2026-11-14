@@ -33,7 +33,7 @@ export class KeyboardLayout {
         const map = await keyboard.getLayoutMap();
         if (active && request === revision) send(keyboardLayoutMessage(map));
       } catch {
-        // Layout access can be denied by the secure-context or permissions policy.
+        active = false;
       }
     };
     keyboard.addEventListener?.('layoutchange', update);

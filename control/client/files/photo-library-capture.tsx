@@ -11,7 +11,7 @@ import { RemoteKitError } from '../../shared/errors';
 import type { LibraryEntry, PhotoMetadata } from '../../shared/file-library';
 import { uiScale } from '../app/ui-scale';
 import { failureError, FailureNote } from '../failures';
-import { recover } from '../failures/recovery';
+import { recoverRead as recover } from '../failures/recovery';
 import { diagnostics } from '../media/diagnostics';
 import { capturePhotoBurst } from './camera-capture';
 import { useLibrary } from './file-library-state';

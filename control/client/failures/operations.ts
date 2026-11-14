@@ -100,6 +100,10 @@ export function ownOperation<T extends object>(operation: T, ownerKey: string): 
   return operation;
 }
 const contexts = new WeakMap<RemoteKitError, Partial<FailureContext>>();
+export function resolvedFailure(error: RemoteKitError) {
+  contexts.set(error, { ...contexts.get(error), resolved: true });
+  return error;
+}
 export function operationFailure(error: unknown, method: string, params?: unknown) {
   const failure = toRemoteKitError(error);
   const values = (params ?? {}) as Record<string, unknown>;
@@ -114,6 +118,7 @@ export function operationFailure(error: unknown, method: string, params?: unknow
   const operation = operations[method];
   if (operation)
     contexts.set(failure, {
+      ...contexts.get(failure),
       operation,
       targetId,
       ownerKey: params && typeof params === 'object' ? owners.get(params) : undefined,

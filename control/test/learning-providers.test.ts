@@ -70,7 +70,7 @@ const xjSession: XinjiaoyuSession = {
   deviceType: 'Other',
   safeCode: 'test-safe',
 };
-const rateLimit = { minIntervalMs: 0, jitterMs: 0, maxRetries: 0, retryBaseMs: 0 };
+const rateLimit = { minIntervalMs: 0, jitterMs: 0, maxRetries: 0 };
 const success = (data: unknown) => ({ code: 200, data });
 const zhixueSuccess = (result: unknown) => ({ code: '000000', result });
 const rejectsCode = (promise: Promise<unknown>, code: ErrorCode) =>

@@ -155,7 +155,7 @@ void InputController::HandleData(const Event& event) {
                                        (dismissal || request_epoch == hooks_.epoch());
                               },
                               [&] { return QpcNow() >= deadline; },
-                              [] { std::this_thread::sleep_for(std::chrono::milliseconds(5)); },
+                              [](auto delay) { RetryClock::Sleep(delay); },
                               [&] { ++input_busy_retries; }, [&] { ++input_busy_exhausted; })
                         : hooks_.rpc(command, 0, 10000, 0, admitted);
     if (!response) {
@@ -267,7 +267,8 @@ InputController::~InputController() {
   Stop();
 }
 void InputController::Start(uint64_t peer) {
-  Stop();
+  std::lock_guard lifecycle(lifecycle_mutex_);
+  StopLocked();
   {
     std::lock_guard lock(input_mutex);
     input_sequence.Bind(peer);
@@ -287,6 +288,10 @@ void InputController::Clear() {
   input_queue.clear();
 }
 void InputController::Stop() {
+  std::lock_guard lifecycle(lifecycle_mutex_);
+  StopLocked();
+}
+void InputController::StopLocked() {
   {
     std::lock_guard lock(input_mutex);
     stop_input = true;

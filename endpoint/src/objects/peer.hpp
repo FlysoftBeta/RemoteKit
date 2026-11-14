@@ -1,10 +1,14 @@
 #pragma once
 #include "objects/store.hpp"
 #include "cluster/tcp.hpp"
+#include "util/retry_unit.hpp"
 #include <atomic>
 #include <thread>
 #include <map>
 #include <optional>
+namespace remotekit {
+class NativeRetryOwnerProbe;
+}
 namespace remotekit::objects {
 struct PeerIdentity {
   std::string node_id, address;
@@ -31,8 +35,15 @@ class PeerServer {
   Result<void> Start(const std::string& address);
   std::string Address() const;
   void Revoke();
+  RetryUnit::Snapshot AcceptRetryStatus() const;
 
  private:
+  friend class ::remotekit::NativeRetryOwnerProbe;
+  Result<std::unique_ptr<cluster::Carrier>> AcceptOne(
+      const std::string& input,
+      const std::function<Result<std::unique_ptr<cluster::Carrier>>()>& accept);
+  mutable std::mutex accept_mutex_;
+  RetryUnit accept_retry_{"peer.accept"};
   void Loop();
   Result<void> Serve(cluster::Channel& channel);
   ObjectStore& store_;

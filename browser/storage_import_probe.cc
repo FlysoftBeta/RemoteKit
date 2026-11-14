@@ -18,7 +18,7 @@ class StorageImportJobsProbe {
     data.fingerprint[0] = 1;
     CHECK(!jobs.Begin(nullptr, "record:0", data, 1));
     data.fingerprint[0] = 0;
-    jobs.OnFlushed("record:0");
+    jobs.OnFlushed("record:0", jobs.Serial("record:0"));
     const auto poll = jobs.Poll("record:0");
     CHECK(poll && *poll.value.FindString("state") == "done");
     CHECK(jobs.Poll("record:0").value == poll.value);
@@ -26,7 +26,7 @@ class StorageImportJobsProbe {
     for (int i = 1; i <= 64; ++i) {
       const auto id = "record:" + std::to_string(i);
       CHECK(jobs.Begin(nullptr, id, data, 1));
-      jobs.OnFlushed(id);
+      jobs.OnFlushed(id, jobs.Serial(id));
     }
     CHECK(!jobs.Poll("record:0"));
     CHECK(jobs.Poll("record:1"));
@@ -37,6 +37,26 @@ class StorageImportJobsProbe {
     CHECK(!jobs.Poll("record:64"));
     jobs.Clear();
     CHECK(!jobs.Poll("record:1"));
+    CHECK(jobs.Begin(nullptr, "dropped", data, 2));
+    jobs.OnDropped("dropped", jobs.Serial("dropped"), true);
+    CHECK(jobs.Poll("dropped").status.error == ErrorCode::kOutcomeUnknown);
+    CHECK(jobs.Begin(nullptr, "dropped", data, 2).status.error == ErrorCode::kOutcomeUnknown);
+    jobs.OnFlushed("dropped", jobs.Serial("dropped"));
+    CHECK(jobs.Poll("dropped").status.error == ErrorCode::kOutcomeUnknown);
+    CHECK(jobs.Begin(nullptr, "next", data, 2));
+    jobs.OnTimeout("next", jobs.Serial("next"), false);
+    CHECK(jobs.Poll("next").status.error == ErrorCode::kOutcomeUnknown);
+    CHECK(jobs.Begin(nullptr, "next", data, 2).status.error == ErrorCode::kOutcomeUnknown);
+    jobs.Clear();
+    CHECK(jobs.Begin(nullptr, "reused", data, 3));
+    const auto retired_serial = jobs.Serial("reused");
+    jobs.Cancel("reused");
+    CHECK(jobs.Begin(nullptr, "reused", data, 3));
+    jobs.OnDropped("reused", retired_serial, false);
+    jobs.OnTimeout("reused", retired_serial, false);
+    jobs.OnFlushed("reused", retired_serial);
+    CHECK(*jobs.Poll("reused").value.FindString("state") == "pending");
+    jobs.Clear();
   }
 };
 }  // namespace remotekit::browser

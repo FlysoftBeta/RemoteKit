@@ -1,3 +1,6 @@
+import { RetryUnit } from '../../shared/retry-unit';
+import { OfferResults } from './offer-results';
+import type { SocketMethods } from '../../shared/product';
 import { requireBrowser } from '../workspace/browser-availability';
 import { KeyedSerialQueue } from '../util/serial-queue';
 import { log, reportError } from '../log';
@@ -10,6 +13,31 @@ import type { DomainContext, DomainServices } from '../application';
 import type { RtcSignal } from '../endpoint/types';
 
 export class RtcSignaling {
+  private closed = false;
+  private readonly pending = new Set<Promise<unknown>>();
+  private track<T>(work: Promise<T>): Promise<T> {
+    this.pending.add(work);
+    const release = () => this.pending.delete(work);
+    void work.then(release, release);
+    return work;
+  }
+  async close() {
+    this.closed = true;
+    this.clearSignals();
+    await this.queue.drain();
+    await Promise.allSettled(this.pending);
+    await Promise.all(this.context.tenants.values().map((runtime) => this.releaseMedia(runtime.tenantId)));
+    for (const unit of [...this.reconnectRetries.values(), ...this.retirementRetries.values()]) unit.close();
+  }
+  private readonly reconnectRetries = new Map<string, RetryUnit>();
+  private readonly retirementRetries = new Map<string, RetryUnit>();
+
+  private readonly offers = new OfferResults<SocketMethods['rtc.offer']['result']>();
+  offerStatus(tenant: string, attemptId: string, lease: string) {
+    this.services.viewers.assertViewer(tenant, lease);
+    return this.offers.status(tenant, lease, attemptId);
+  }
+
   private readonly queue = new KeyedSerialQueue();
   constructor(
     private readonly context: DomainContext,
@@ -19,6 +47,7 @@ export class RtcSignaling {
     >,
   ) {}
   receiveSignal(event: RtcSignal) {
+    if (this.closed) return;
     const binding = this.context.tenants.forConnection(event.connectionId)?.rtc.signal;
     if (
       !binding ||
@@ -66,9 +95,45 @@ export class RtcSignaling {
       .flatMap((runtime) => (runtime.connectionId ? [runtime.connectionId] : [])))
       this.clearSignal(id);
   }
-  async checkReconnectedRtc(tenant: string) {
+  checkReconnectedRtc(tenant: string) {
+    if (this.closed) return Promise.resolve();
+    return this.track(this.checkReconnection(tenant));
+  }
+  private async checkReconnection(tenant: string) {
+    let unit = this.reconnectRetries.get(tenant);
+    if (!unit) {
+      unit = new RetryUnit({
+        failed: (error) =>
+          log.warn('rtc.reconnect_failed', { tenant, code: error.code, errorId: error.errorId, err: error }),
+        recovered: () => log.info('rtc.reconnect_recovered', { tenant }),
+      });
+      this.reconnectRetries.set(tenant, unit);
+    }
+    const input = JSON.stringify([
+      this.context.endpoint.placement.peek(tenant),
+      this.context.endpoint.observation(tenant)?.connectionEpoch,
+      this.context.tenants.get(tenant).viewer?.id,
+    ]);
+    const previous = unit.error;
+    if (!unit.ready(input)) return;
+    try {
+      await this.reconcileRtc(tenant);
+      unit.succeed();
+      const runtime = this.context.tenants.get(tenant);
+      if (previous && runtime.lastError === previous) runtime.clearError();
+    } catch (cause) {
+      const failure = unit.fail(endpointError(cause));
+      this.context.tenants.get(tenant).lastError = failure.error;
+      throw cause;
+    }
+  }
+  private async reconcileRtc(tenant: string) {
     const snapshot = await this.context.endpoint.snapshot(tenant);
     const runtime = this.context.tenants.get(tenant);
+    const retiring = runtime.rtc.disconnectedPeer;
+    if (retiring?.retiring) {
+      await this.retirePeer(tenant, retiring.connectionId);
+    }
     const connectionId = runtime.connectionId ?? runtime.rtc.disconnectedPeer?.connectionId;
     if (connectionId && (snapshot?.rtc?.active !== true || snapshot.rtc.connectionId !== connectionId)) {
       this.clearSignal(connectionId);
@@ -97,7 +162,11 @@ export class RtcSignaling {
     if (security) await this.services.security.restore(tenant, security);
     this.context.tenants.get(tenant).pendingRtcCheck = false;
   }
-  async offer(tenant: string, body: any, lease: string) {
+  offer(tenant: string, body: any, lease: string) {
+    if (this.closed) return Promise.reject(new RemoteKitError('canceled', 'RTC signaling closed'));
+    return this.offers.execute(tenant, lease, body, () => this.applyOffer(tenant, body, lease));
+  }
+  private async applyOffer(tenant: string, body: any, lease: string) {
     const runtime = this.context.tenants.get(tenant);
     if (body.type !== 'offer' || typeof body.sdp !== 'string' || !body.sdp.startsWith('v=0'))
       throw new RemoteKitError('invalid_request', '无效的 SDP offer');
@@ -114,12 +183,10 @@ export class RtcSignaling {
       const security = runtime.viewer!.security;
       const previous = runtime.connectionId ?? runtime.rtc.disconnectedPeer?.connectionId;
       if (previous) {
-        this.clearSignal(previous);
         try {
-          await this.context.endpoint.closeRtc(tenant, { connectionId: previous });
-          runtime.rtc.disconnectedPeer = undefined;
-        } finally {
-          runtime.closeRtc();
+          await this.retirePeer(tenant, previous);
+        } catch (cause) {
+          throw new RemoteKitError('unavailable', '正在关闭先前的媒体连接', { cause });
         }
       }
       this.services.viewers.assertViewer(tenant, lease);
@@ -135,7 +202,9 @@ export class RtcSignaling {
           reject = no;
         });
         // Observe rejection immediately, including cancellation while the acceptance RPC is pending.
-        void pending.catch(() => {});
+        void pending.catch((error) => {
+          runtime.lastError = endpointError(error);
+        });
         const timer = setTimeout(
           () => reject(new RemoteKitError('outcome_unknown', 'RTC answer 等待超时')),
           15000,
@@ -174,7 +243,7 @@ export class RtcSignaling {
         runtime.activateRtc(connectionId, lease);
         this.context.endpoint.invalidate(tenant);
         return {
-          type: 'answer',
+          type: 'answer' as const,
           avSync: accepted.avSync,
           sdp: answer.sdp,
           connectionId,
@@ -186,9 +255,18 @@ export class RtcSignaling {
         this.services.security.forgetPeer(tenant, security);
         this.clearSignal(connectionId);
         if (runtime.connectionId === connectionId) runtime.closeRtc();
-        await this.context.endpoint.closeRtc(tenant, { connectionId }).catch(() => {
-          runtime.rtc.disconnectedPeer = { connectionId, leaseId: lease };
-        });
+        await this.context.endpoint.closeRtc(tenant, { connectionId }).then(
+          () => this.offers.retire(tenant, lease, body.attemptId),
+          () => {
+            runtime.rtc.disconnectedPeer = {
+              connectionId,
+              leaseId: lease,
+              attemptId: body.attemptId,
+              retiring: true,
+            };
+            runtime.pendingRtcCheck = true;
+          },
+        );
         throw error;
       }
     });
@@ -215,11 +293,16 @@ export class RtcSignaling {
   async closeRtc(tenant: string, body: any, lease: string) {
     const runtime = this.context.tenants.get(tenant);
     this.services.viewers.assertViewer(tenant, lease);
-    const owned = runtime.connectionId === body.connectionId;
+    const owned =
+      runtime.connectionId === body.connectionId ||
+      runtime.rtc.disconnectedPeer?.connectionId === body.connectionId;
     if (owned) this.clearSignal(body.connectionId);
     return this.queue.run(tenant, async () => {
       this.services.viewers.assertViewer(tenant, lease);
-      if (runtime.connectionId !== body.connectionId) {
+      if (
+        runtime.connectionId !== body.connectionId &&
+        runtime.rtc.disconnectedPeer?.connectionId !== body.connectionId
+      ) {
         if (owned) return { closed: true };
         throw new RemoteKitError('forbidden', '连接不属于当前会话');
       }
@@ -230,28 +313,71 @@ export class RtcSignaling {
         this.context.events.emit('auth', tenant, lease, this.services.viewers.authState(tenant, security));
         void this.services.security.capabilities(tenant, security);
       }
-      try {
-        await this.context.endpoint.closeRtc(tenant, { connectionId: body.connectionId });
-      } finally {
-        runtime.closeRtc();
-      }
+      await this.retirePeer(tenant, body.connectionId);
       return { closed: true };
     });
   }
   async closeMedia(tenant: string) {
+    if (this.closed) return;
+    return this.track(this.releaseMedia(tenant));
+  }
+  private async releaseMedia(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
-    const previous = runtime.connectionId;
+    const previous = runtime.connectionId ?? runtime.rtc.disconnectedPeer?.connectionId;
     if (!previous) return;
-    this.clearSignal(previous);
     try {
-      await this.context.endpoint.closeRtc(tenant, { connectionId: previous });
+      await this.retirePeer(tenant, previous);
     } catch (err) {
-      log.warn('rtc.close_failed', { tenant, connectionId: previous, err });
-    } finally {
-      if (runtime.connectionId === previous) runtime.closeRtc();
+      runtime.lastError = endpointError(err);
     }
   }
+  private async retirePeer(tenant: string, connectionId: string) {
+    const runtime = this.context.tenants.get(tenant);
+    const current = runtime.rtc.connection;
+    const retained =
+      current.phase !== 'idle' && current.connectionId === connectionId
+        ? { connectionId, leaseId: current.leaseId, attemptId: current.attemptId, retiring: true }
+        : runtime.rtc.disconnectedPeer;
+    if (retained) runtime.rtc.disconnectedPeer = { ...retained, retiring: true };
+    this.clearSignal(connectionId);
+    if (runtime.connectionId === connectionId) runtime.closeRtc();
+    runtime.pendingRtcCheck = true;
+    let unit = this.retirementRetries.get(connectionId);
+    if (!unit) {
+      unit = new RetryUnit({
+        failed: (error) =>
+          log.warn('rtc.close_failed', {
+            tenant,
+            connectionId,
+            code: error.code,
+            errorId: error.errorId,
+            err: error,
+          }),
+        recovered: () => log.info('rtc.close_recovered', { tenant, connectionId }),
+      });
+      this.retirementRetries.set(connectionId, unit);
+    }
+    const input = JSON.stringify([
+      this.context.endpoint.placement.peek(tenant),
+      this.context.endpoint.observation(tenant)?.connectionEpoch,
+      this.context.store.buildId,
+    ]);
+    const previous = unit.error;
+    if (!unit.ready(input)) throw unit.error;
+    try {
+      await this.context.endpoint.closeRtc(tenant, { connectionId });
+      unit.succeed();
+      if (previous && runtime.lastError === previous) runtime.clearError();
+      this.retirementRetries.delete(connectionId);
+    } catch (cause) {
+      runtime.lastError = unit.fail(endpointError(cause)).error;
+      throw runtime.lastError;
+    }
+    if (retained?.attemptId) this.offers.retire(tenant, retained.leaseId, retained.attemptId);
+    if (runtime.rtc.disconnectedPeer?.connectionId === connectionId) runtime.rtc.disconnectedPeer = undefined;
+  }
   endpointOffline(nodeId?: string) {
+    if (this.closed) return;
     for (const runtime of this.context.tenants.values())
       if (!nodeId || this.context.endpoint.isPlacedOn(runtime.tenantId, nodeId)) runtime.disconnectRtc();
     for (const [tenant, viewer] of this.context.tenants.withViewers())

@@ -200,12 +200,17 @@ test('Session protection accrues only while eligible; every automatic stop commi
 
 test('Endpoint allocation failures trigger exhaustion; other output failures do not', async () => {
   let message = 'OSR handle duplicate failed';
+  let allocationPressure = false;
   const gateway = testGateway({
     async request() {
       return {};
     },
     observe() {
-      return { status: { code: 'unavailable', reason: 'output_failed', message }, views: [] };
+      return {
+        status: { code: 'unavailable', reason: 'output_failed', message },
+        stats: { allocationPressure },
+        views: [],
+      };
     },
   });
   const node = gateway.nodes.get('fixture')!;
@@ -213,6 +218,7 @@ test('Endpoint allocation failures trigger exhaustion; other output failures do 
   await assert.rejects(gateway.snapshot('tenant'), { reason: 'output_failed' });
   assert.equal(node.allocationFailedAt, undefined);
   message = 'OSR plane resources allocation failed';
+  allocationPressure = true;
   await assert.rejects(gateway.snapshot('tenant'), { reason: 'output_failed' });
   assert.equal(typeof node.allocationFailedAt, 'number');
 });

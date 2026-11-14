@@ -1,4 +1,5 @@
 import { browserAvailability } from './browser-availability';
+import { RetryUnit } from '../../shared/retry-unit';
 import { endpointError } from '../endpoint/gateway';
 import { createHash } from 'node:crypto';
 import { parseWireError, RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
@@ -189,6 +190,10 @@ function fileRequestAnchor(value: any, instance: string, document: string): File
 }
 
 export class PageRequests {
+  private readonly closeRetries = new Map<string, RetryUnit>();
+  failures() {
+    return [...this.closeRetries.values()].map((unit) => unit.error).filter((error) => error !== undefined);
+  }
   clearFullscreen(tenant: string) {
     delete this.context.tenants.get(tenant).pageRequests.fullscreen;
   }
@@ -416,6 +421,22 @@ export class PageRequests {
     else throw new RemoteKitError('outcome_unknown', 'Endpoint 尚未确认页面关闭');
   }
   async continueWindowClose(state: ProductWorkspace) {
+    if (!state.pendingWindowCloseId) return;
+    let unit = this.closeRetries.get(state.tenantId);
+    if (!unit) {
+      unit = new RetryUnit({ name: 'page.close_batch' });
+      this.closeRetries.set(state.tenantId, unit);
+    }
+    const input = JSON.stringify([
+      state.pendingWindowCloseId,
+      state.pendingWindowCloseIds,
+      state.pendingAppUninstallId,
+      this.context.tenants.get(state.tenantId).browserIncarnation,
+      this.context.store.operations
+        .pendingOperations(state.tenantId)
+        .map((operation) => operation.receipt.operationId),
+    ]);
+    if (!unit.ready(input)) return;
     const windowIds = new Set([state.pendingWindowCloseId, ...(state.pendingWindowCloseIds ?? [])]);
     const spaceIds = new Set(
       state.spaces
@@ -425,9 +446,11 @@ export class PageRequests {
     const appId = state.pendingAppUninstallId;
     try {
       await this.advanceWindowClose(state);
+      unit.succeed();
     } catch (error) {
       const failure = toRemoteKitError(error);
-      if (failure.code !== 'outcome_unknown') {
+      const { delay } = unit.fail(failure);
+      if (delay === undefined && failure.code !== 'outcome_unknown') {
         state.pendingWindowCloseId = null;
         delete state.pendingWindowCloseIds;
         delete state.pendingAppUninstallId;

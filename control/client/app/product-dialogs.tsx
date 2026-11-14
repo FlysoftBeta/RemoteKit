@@ -23,7 +23,7 @@ import { request } from '../control/http-request';
 import type { ProductActionHandler as Action } from '../control/product-operations';
 import { useAutoFocus } from '../editing/local-autofocus';
 import { failureError, FailureNote } from '../failures';
-import { recover } from '../failures/recovery';
+import { recover, recoverRead } from '../failures/recovery';
 import './product-dialogs.css';
 export type { ProductActionHandler as Action } from '../control/product-operations';
 
@@ -57,7 +57,7 @@ export function AuthView({
     setSetupError(undefined);
     try {
       setSetup(
-        await recover(
+        await recoverRead(
           () => request<SetupStatus>('/api/auth/setup'),
           setupAbort.current.signal,
           setSetupError,

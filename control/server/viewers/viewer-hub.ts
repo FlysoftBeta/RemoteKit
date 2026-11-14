@@ -75,12 +75,14 @@ export class ViewerHub {
     this.context.events.emit('state', tenant, state);
   }
   assertViewer(tenant: string, lease: string) {
+    if (this.context.closed) throw new RemoteKitError('canceled', 'Control closed');
     const viewer = this.context.tenants.get(tenant).viewer;
     if (viewer?.id !== lease) throw new RemoteKitError('conflict', '此窗口已由另一个 Viewer 接管');
     if (viewer.authentication && !viewer.authentication.valid())
       throw new RemoteKitError('unauthenticated', '登录已过期');
   }
   validSecurity(tenant: string, security: ViewerSecurityState) {
+    if (this.context.closed) return false;
     const viewer = this.context.tenants.get(tenant).viewer;
     return viewer?.security === security && viewer.authentication?.valid() === true;
   }

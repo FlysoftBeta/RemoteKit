@@ -1,4 +1,6 @@
-import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { errorHandling } from '../../shared/error-policy';
+import { RetryUnit } from '../../shared/retry-unit';
+import { RemoteKitError } from '../../shared/errors';
 import { endpointError } from '../../shared/errors';
 import { type Diagnostics } from '../media/types';
 import { samePlane } from '../presentation/plane-source';
@@ -172,7 +174,7 @@ export class InputPipeline {
     generation: string;
     epoch: string;
     events: QueuedInput[];
-    attempts: number;
+    retry: RetryUnit;
   } | null = null;
 
   flushFocusedInput() {
@@ -193,6 +195,7 @@ export class InputPipeline {
       this.cancelPendingFocus(pending.requestId);
       return;
     }
+    this.pendingFocus?.retry.cancel();
     this.pendingFocus = null;
     if (!pending.focused) {
       this.focusLease = { phase: 'none' };
@@ -252,6 +255,7 @@ export class InputPipeline {
     this.focusTimer = undefined;
     this.focusRetryTimer = undefined;
     if (this.inputFocus.get(pending.view)?.identity === requestId) this.inputFocus.delete(pending.view);
+    this.pendingFocus?.retry.cancel();
     this.pendingFocus = null;
     this.focusLease = { phase: 'none' };
     for (const item of pending.events) this.reportInputDelivery(item, 'discarded', undefined, reason);
@@ -471,8 +475,9 @@ export class InputPipeline {
       generation: this.ports.layout()!.generation,
       epoch: this.ports.layout()!.epoch,
       events: [],
-      attempts: 0,
+      retry: new RetryUnit({ busyBudget: 3, name: 'input.focus' }),
     };
+    this.pendingFocus.retry.ready(requestId);
     this.discardQueuedInput('focus-changed', true);
     this.notify();
     this.sendPendingFocus();
@@ -480,7 +485,7 @@ export class InputPipeline {
 
   private sendPendingFocus() {
     const pending = this.pendingFocus;
-    if (!pending) return;
+    if (!pending || !pending.retry.ready()) return;
     this.layoutChanged();
     if (
       this.pendingFocus !== pending ||
@@ -491,8 +496,14 @@ export class InputPipeline {
     clearTimeout(this.focusTimer);
     this.focusLease = { phase: 'requested', id: pending.requestId, deadline: performance.now() + 2000 };
     this.focusTimer = setTimeout(() => {
-      if (this.cancelPendingFocus(pending.requestId, 'focus-timeout'))
-        this.ports.report({ error: '远程焦点请求结果未知' });
+      if (this.pendingFocus === pending)
+        this.handle({
+          type: 'focus',
+          focusRequestId: pending.requestId,
+          layoutEpoch: pending.epoch,
+          ok: false,
+          error: { code: 'outcome_unknown', message: '远程焦点请求结果未知' },
+        });
     }, 2000);
     try {
       this.ports.send({
@@ -506,9 +517,9 @@ export class InputPipeline {
         layoutEpoch: pending.epoch,
         focused: pending.focused,
       });
-    } catch {
-      this.cancelPendingFocus(pending.requestId, 'focus-send-failed');
-      this.ports.report({ error: '远程焦点请求未发送' });
+    } catch (cause) {
+      pending.retry.fail(new RemoteKitError('unavailable', '远程焦点请求未发送', { cause }));
+      pending.retry.schedule(() => this.sendPendingFocus());
     }
   }
 
@@ -542,13 +553,32 @@ export class InputPipeline {
           this.ports.layout()!.generation === pending.generation;
         if (matches && message.ok === false) {
           const error = endpointError(message.error);
-          const delay = retryDelay(error, pending.attempts);
-          if (delay !== undefined && pending.attempts++ < 3) {
+          const { delay } = pending.retry.fail(error);
+          if (delay !== undefined) {
             clearTimeout(this.focusTimer);
-            clearTimeout(this.focusRetryTimer);
-            this.focusRetryTimer = setTimeout(() => {
-              if (this.pendingFocus === pending) this.sendPendingFocus();
-            }, delay);
+            if (error.code === 'conflict') {
+              for (const item of pending.events)
+                this.reportInputDelivery(item, 'discarded', undefined, 'focus-conflict');
+              pending.events = [];
+            }
+            pending.retry.schedule(() => {
+              if (this.pendingFocus !== pending) return;
+              if (error.code === 'conflict') {
+                const current = this.ports.layout()?.views.find((view) => view.id === pending.view);
+                if (!current) {
+                  this.cancelPendingFocus(pending.requestId);
+                  return;
+                }
+                pending.requestId = `${this.ports.attempt()}:${++this.focusSequence}`;
+                pending.token = current.focus;
+                this.inputFocus.set(current.id, {
+                  token: current.focus,
+                  identity: pending.requestId,
+                  focused: pending.focused,
+                });
+              }
+              this.sendPendingFocus();
+            });
           } else {
             this.cancelPendingFocus(pending.requestId, 'focus-rejected');
             if (errorHandling(error.code) !== 'canceled') this.ports.report({ error: error.message });
@@ -568,6 +598,7 @@ export class InputPipeline {
           this.focusTimer = undefined;
           const focus = this.inputFocus.get(view.id);
           if (focus?.identity === pending.requestId) focus.token = token.focus;
+          pending.retry.succeed();
           this.focusLease = { phase: 'granted', token: token.focus };
           this.ports.grantFocus(view.id, token.focus);
           this.ports.reconcileEditing(this.ports.layout()!.views);

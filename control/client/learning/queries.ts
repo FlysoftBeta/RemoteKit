@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type { LearningPage, LearningSocketMethods } from '../../shared/learning';
-import { recover } from '../failures/recovery';
+import { recoverRead as recover } from '../failures/recovery';
 
 export type LearningCall = <K extends keyof LearningSocketMethods>(
   method: K,

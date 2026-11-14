@@ -264,8 +264,12 @@ void RenderSlots::PublishStats() {
   counters_.peakOccupied = std::max(counters_.peakOccupied, value.occupied);
   value.peakOccupied = counters_.peakOccupied;
   value.unknownGpuRetentions = counters_.unknownGpuRetentions;
+  PublishSnapshot(value, state_ ? state_->latest : SharedAtlasFrame{});
+}
+void RenderSlots::PublishSnapshot(StatsSnapshot stats, const SharedAtlasFrame& metadata) {
   std::lock_guard lock(stats_mutex_);
-  published_ = value;
+  published_ = std::move(stats);
+  published_metadata_ = metadata;
 }
 void RenderSlots::Reap() {
   PublishGuard publish{*this};
@@ -295,13 +299,17 @@ void RenderSlots::Reap() {
       ++it;
   }
 }
-bool RenderSlots::Open(remotekit_sdk_render_setup setup,
-                       uint32_t producer_pid,
-                       Sdk& sdk,
-                       LUID adapter,
-                       ID3D11Device5* device,
-                       ID3D11DeviceContext4* context,
-                       std::string& error) {
+remotekit::Result<void> RenderSlots::Open(remotekit_sdk_render_setup setup,
+                                          uint32_t producer_pid,
+                                          Sdk& sdk,
+                                          LUID adapter,
+                                          ID3D11Device5* device,
+                                          ID3D11DeviceContext4* context,
+                                          std::string& diagnostic) {
+  const auto fail = [&](ErrorCode code, const char* message) -> remotekit::Result<void> {
+    diagnostic = message;
+    return Error{code, message};
+  };
   PublishGuard publish{*this};
   Reap();
   WithdrawAdmission();
@@ -325,19 +333,15 @@ bool RenderSlots::Open(remotekit_sdk_render_setup setup,
   }
   s->admission = admission_client_;
   s->incarnation = ++next_incarnation_;
-  state_ = s;
   if (!s->events.handle()) {
-    error = "render event creation failed";
-    return false;
+    return fail(ErrorCode::kUnavailable, "render event creation failed");
   }
   if (setup.struct_size != sizeof(setup) || !setup.generation || !setup.width || !setup.height ||
       setup.mapping_size != sizeof(SharedRenderMapping)) {
-    error = "render setup ABI mismatch";
-    return false;
+    return fail(ErrorCode::kInternal, "render setup ABI mismatch");
   }
   if (adapter.LowPart != setup.adapter_luid_low || adapter.HighPart != setup.adapter_luid_high) {
-    error = "render adapter differs from selected streaming adapter";
-    return false;
+    return fail(ErrorCode::kInternal, "render adapter differs from selected streaming adapter");
   }
   s->device = device;
   s->context = context;
@@ -349,34 +353,33 @@ bool RenderSlots::Open(remotekit_sdk_render_setup setup,
                                           IID_PPV_ARGS(&slot.ready))) ||
         FAILED(s->device->OpenSharedFence(reinterpret_cast<HANDLE>(setup.consumed_fence_handles[i]),
                                           IID_PPV_ARGS(&slot.consumed)))) {
-      error = "render slot import failed";
-      return false;
+      return fail(ErrorCode::kUnavailable, "render slot import failed");
     }
     D3D11_TEXTURE2D_DESC desc{};
     slot.texture->GetDesc(&desc);
     if (desc.Width != setup.width || desc.Height != setup.height ||
         desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
-      error = "render slot texture mismatch";
-      return false;
+      return fail(ErrorCode::kInternal, "render slot texture mismatch");
     }
   }
   s->mapping = static_cast<SharedRenderMapping*>(
       MapViewOfFile(reinterpret_cast<HANDLE>(setup.mapping_handle), FILE_MAP_READ | FILE_MAP_WRITE,
                     0, 0, sizeof(SharedRenderMapping)));
-  if (!s->mapping || s->mapping->magic != kSharedRenderMagic ||
-      s->mapping->version != kSharedRenderVersion ||
+  if (!s->mapping)
+    return fail(ErrorCode::kUnavailable, "render mapping import failed");
+  if (s->mapping->magic != kSharedRenderMagic || s->mapping->version != kSharedRenderVersion ||
       s->mapping->mapping_size != sizeof(SharedRenderMapping)) {
-    error = "render mapping ABI mismatch";
-    return false;
+    return fail(ErrorCode::kInternal, "render mapping ABI mismatch");
   }
   s->pacing.Reset(setup.generation);
-  if (sdk.remotekit_sdk_render_connect(setup.render_channel, State::Event, s.get(), &s->channel) !=
-      0) {
-    error = "render channel connect failed";
-    return false;
+  const auto connected =
+      sdk.remotekit_sdk_render_connect(setup.render_channel, State::Event, s.get(), &s->channel);
+  if (connected != 0) {
+    return fail(SdkErrorCode(connected), "render channel connect failed");
   }
   clipboard_state_.store(s);
-  return true;
+  state_ = s;
+  return {};
 }
 bool RenderSlots::Begin(uint32_t interval,
                         bool force,
@@ -612,7 +615,8 @@ uint64_t RenderSlots::Generation() const {
   return state ? state->setup.generation : 0;
 }
 SharedAtlasFrame RenderSlots::LatestMetadata() const {
-  return state_ ? state_->latest : SharedAtlasFrame{};
+  std::lock_guard lock(stats_mutex_);
+  return published_metadata_;
 }
 bool RenderSlots::Close(std::string& error) {
   PublishGuard publish{*this};

@@ -3,6 +3,7 @@
 #include "cluster/node_files.hpp"
 #include "util/result_macros.hpp"
 #include "util/wire_error.hpp"
+#include "util/retry_unit.hpp"
 #include <windows.h>
 #include <fstream>
 #include <algorithm>
@@ -92,9 +93,13 @@ void PeerServer::Loop() {
   while (!stopping_) {
     std::shared_ptr<cluster::Channel> channel;
     try {
-      auto carrier = listener_->Accept(100ms);
-      if (!carrier)
+      auto carrier = AcceptOne(listener_->Address(), [&] { return listener_->Accept(100ms); });
+      if (!carrier) {
+        if (stopping_)
+          break;
+        std::this_thread::sleep_for(20ms);
         continue;
+      }
       std::optional<PeerIdentity> identity;
       auto established = cluster::AcceptCarrier(
           std::move(carrier).value(), key_,
@@ -145,6 +150,36 @@ void PeerServer::Loop() {
       channels_.erase(channel);
     }
   }
+}
+RetryUnit::Snapshot PeerServer::AcceptRetryStatus() const {
+  std::lock_guard lock(accept_mutex_);
+  return accept_retry_;
+}
+Result<std::unique_ptr<cluster::Carrier>> PeerServer::AcceptOne(
+    const std::string& input,
+    const std::function<Result<std::unique_ptr<cluster::Carrier>>()>& accept) {
+  std::lock_guard lock(accept_mutex_);
+  accept_retry_.Input(input);
+  if (!accept_retry_.Ready())
+    return *accept_retry_.Failure();
+  const auto receive = [&]() -> Result<std::unique_ptr<cluster::Carrier>> {
+    try {
+      return accept();
+    } catch (const fs::filesystem_error& error) {
+      return WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                         error.code().value());
+    } catch (const std::exception& error) {
+      return Error{ErrorCode::kInternal, error.what()};
+    } catch (...) {
+      return Error{ErrorCode::kInternal, "peer accept failed"};
+    }
+  };
+  auto result = receive();
+  if (result)
+    accept_retry_.Success();
+  else if (!stopping_ && result.error().code != ErrorCode::kBusy)
+    accept_retry_.Fail(result.error());
+  return result;
 }
 Result<void> PeerServer::Serve(cluster::Channel& channel) {
   RK_ASSIGN_OR_RETURN(message, channel.Receive(20s));

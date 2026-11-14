@@ -1155,7 +1155,9 @@ test('pre-render chooses a source replica, authorizes only its operation and cre
 test('pre-render without a replica uses the least loaded ready node and logs failure once', async (t) => {
   const h = await harness();
   const failures: unknown[][] = [];
-  t.mock.method(log, 'error', (...args: unknown[]) => failures.push(args));
+  t.mock.method(log, 'warn', (...args: unknown[]) => {
+    if (args[0] === 'render_failed') failures.push(args);
+  });
   try {
     const alpha = await h.connect('alpha', 0.6);
     const beta = await h.connect('beta', 0.1);
@@ -1174,7 +1176,7 @@ test('pre-render without a replica uses the least loaded ready node and logs fai
     assert.equal(beta.requests.filter((request) => request.method === 'object.render').length, 1);
     assert.equal(alpha.requests.filter((request) => request.method === 'object.render').length, 0);
     assert.equal(failures.length, 1);
-    assert.equal(failures[0][0], 'render.failed');
+    assert.equal(failures[0][0], 'render_failed');
   } finally {
     await h.close();
   }
@@ -1611,7 +1613,8 @@ test('normal stop waits ten minutes and fails without committing a checkpoint af
           lastError: { code: 'unavailable', message: 'unclean' },
         });
     };
-    await assert.rejects(h.control.lifecycle.stop('tenant', clearSnapshot()), { code: 'unavailable' });
+    assert.equal(await h.control.lifecycle.stop('tenant', clearSnapshot()), false);
+    assert.equal(h.control.lifecycle.failures()[0]?.code, 'unavailable');
     assert.ok(h.placement.peek('tenant')!.pendingCommit);
     assert.equal(h.store.db.prepare('SELECT 1 FROM checkpoints').get(), undefined);
   } finally {
@@ -1981,7 +1984,7 @@ test('offline lock and unlock queue desired state and navigation reports the ava
     await offline;
     const errors: unknown[] = [];
     t.mock.method(log, 'error', (...args: unknown[]) => errors.push(args));
-    await h.control.security.lock(user.tenantId, viewer);
+    await assert.rejects(h.control.security.lock(user.tenantId, viewer), { code: 'unavailable' });
     await h.control.security.request(user.tenantId, viewer, 'auth.verify', {
       method: 'password',
       secret: 'offline-lock-password',
@@ -2083,7 +2086,7 @@ test('a malformed Session RPC reply faults its placement while the other tenant 
     client.handler = (message) =>
       message.method === 'session.identity' ? 'bad result' : client.handle(message);
     const faulted = once(h.nodes, 'session.fault');
-    await assert.rejects(h.gateway.identity('first'), { code: 'unavailable' });
+    await assert.rejects(h.gateway.identity('first'), { code: 'outcome_unknown' });
     await faulted;
     await h.gateway.published('first');
     await h.nodes.get('alpha')!.request('fixture.barrier', '');

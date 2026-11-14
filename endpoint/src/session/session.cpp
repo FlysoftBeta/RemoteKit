@@ -325,6 +325,15 @@ void Session::DrainPeerResources() {
 Result<void> Session::Stop() {
   return CloseRuntime(false);
 }
+Result<void> Session::Fence() {
+  auto stopped = Stop();
+  files.Stop();
+  checkpoint_cache.Stop();
+  auto closed = store.Close();
+  if (!stopped)
+    return stopped.error();
+  return closed;
+}
 Result<void> Session::Shutdown() {
   if (browser.Alive()) {
     RK_ASSIGN_OR_RETURN(snapshot, Snapshot());
@@ -352,18 +361,33 @@ Result<void> Session::CloseRuntime(bool graceful) {
     return stopped;
   navigation.Reset();
   views.Reset();
-  if (had_process) {
-    auto files_stopped = files.BrowserStopped(browser.ProcessIncarnation());
-    if (!files_stopped)
-      return files_stopped.error();
-    auto closed = output.Close();
-    if (!closed)
-      return closed.error();
-  }
+  if (had_process)
+    pending_exit_cleanup_ = browser.ProcessIncarnation();
+  RK_RETURN_IF_ERROR(CleanupExitedBrowser(
+      [this](const std::string& incarnation) { return files.BrowserStopped(incarnation); }));
   browser.ReleaseExited();
   registry.ReleaseAdapter();
   presentation.Bind(0);
   return stopped;
+}
+Result<void> Session::CleanupExitedBrowser(
+    const std::function<Result<void>(const std::string&)>& cleanup) {
+  if (pending_exit_cleanup_) {
+    exit_cleanup_retry_.Input(*pending_exit_cleanup_);
+    if (!exit_cleanup_retry_.Ready())
+      return *exit_cleanup_retry_.Failure();
+    auto files_stopped = cleanup(*pending_exit_cleanup_);
+    if (!files_stopped) {
+      exit_cleanup_retry_.Fail(files_stopped.error());
+      return files_stopped.error();
+    }
+    exit_cleanup_retry_.Success();
+    auto closed = output.Close();
+    if (!closed)
+      return closed.error();
+    pending_exit_cleanup_.reset();
+  }
+  return {};
 }
 Result<Json> Session::Snapshot(bool output_diagnostics) {
   RK_ASSIGN_OR_RETURN(snapshot, views.Snapshot(output_diagnostics));
@@ -443,7 +467,7 @@ Result<Json> Session::StopAndCommit(const Json& request_id,
         {{"state", copy["state"]}, {"base", copy["base"]}, {"committed", copy["lastCommit"]}});
     return details;
   }
-  if (check_blockers) {
+  if (check_blockers && stop_phase_ == StopPhase::kRunning) {
     RK_ASSIGN_OR_RETURN(snapshot, Snapshot());
     for (const auto& [name, value] : snapshot["stopBlockers"].items())
       if ((value.is_boolean() && value.get<bool>()) ||
@@ -451,26 +475,45 @@ Result<Json> Session::StopAndCommit(const Json& request_id,
         return Error{ErrorCode::kConflict, "stop blocked: " + name};
   }
   auto save = [&]() -> Result<Json> {
-    RK_RETURN_IF_ERROR(Shutdown());
-    RK_ASSIGN_OR_RETURN(events, store.Events().State());
-    if (check_blockers && events.at("pending") != 0)
-      return Error{ErrorCode::kBusy, "stop waiting for final event acknowledgments"};
-    files.Stop();
-    if (!request_id.is_null() && PhaseClock::now() < deadline) {
-      RK_RETURN_IF_ERROR(files.PrepareCheckpoint());
-      for (const auto* relative : {"uploads", "file-library/staging"})
-        fs::remove_all(LongPath(config.directory) / relative);
+    if (stop_phase_ == StopPhase::kRunning) {
+      RK_RETURN_IF_ERROR(Shutdown());
+      stop_phase_ = StopPhase::kBrowserStopped;
     }
-    RK_RETURN_IF_ERROR(store.Close());
-    checkpoint_cache.Stop();
-    RK_RETURN_IF_ERROR(MarkStopped());
+    if (stop_phase_ == StopPhase::kBrowserStopped) {
+      RK_ASSIGN_OR_RETURN(events, store.Events().State());
+      if (check_blockers && events.at("pending") != 0)
+        return Error{ErrorCode::kBusy, "stop waiting for final event acknowledgments"};
+      files.Stop();
+      if (!request_id.is_null()) {
+        RK_RETURN_IF_ERROR(files.PrepareCheckpoint());
+        for (const auto* relative : {"uploads", "file-library/staging"})
+          fs::remove_all(LongPath(config.directory) / relative);
+      }
+      stop_phase_ = StopPhase::kFilesPrepared;
+    }
+    if (stop_phase_ == StopPhase::kFilesPrepared) {
+      RK_RETURN_IF_ERROR(store.Close());
+      checkpoint_cache.Stop();
+      stop_phase_ = StopPhase::kStoreClosed;
+    }
+    if (stop_phase_ == StopPhase::kStoreClosed) {
+      RK_RETURN_IF_ERROR(MarkStopped());
+      stop_phase_ = StopPhase::kMarkedStopped;
+    }
     RK_ASSIGN_OR_RETURN(stopped_copy, Checkpoints::Copy(config.directory));
-    if (request_id.is_null() || PhaseClock::now() >= deadline)
+    if (request_id.is_null())
       return Json{{"state", "dirty"}, {"base", stopped_copy["base"]}, {"committed", nullptr}};
-    RK_ASSIGN_OR_RETURN(checkpoint, Checkpoints(context.objects, config.object_access,
-                                                &timing.fields, &checkpoint_cache)
-                                        .Create(config.directory, config.tenant,
-                                                config.options.build_id, deadline, defer_commits));
+    if (PhaseClock::now() >= deadline)
+      return Error{ErrorCode::kUnavailable, "checkpoint commit deadline exceeded"};
+    if (!stopped_checkpoint_) {
+      RK_ASSIGN_OR_RETURN(
+          checkpoint,
+          Checkpoints(context.objects, config.object_access, &timing.fields, &checkpoint_cache)
+              .Create(config.directory, config.tenant, config.options.build_id, deadline,
+                      defer_commits));
+      stopped_checkpoint_ = std::move(checkpoint);
+    }
+    const auto& checkpoint = *stopped_checkpoint_;
     stopped_copy["state"] = "clean";
     stopped_copy["base"] = checkpoint["manifestId"];
     stopped_copy["lastVersion"] = {
@@ -478,6 +521,7 @@ Result<Json> Session::StopAndCommit(const Json& request_id,
     stopped_copy["lastCommit"] = {{"requestId", request_id},
                                   {"manifestId", checkpoint["manifestId"]}};
     RK_RETURN_IF_ERROR(Checkpoints::WriteCopy(config.directory, stopped_copy));
+    stop_phase_ = StopPhase::kPublished;
     RK_RETURN_IF_ERROR(Checkpoints::TruncateChanges(config.directory));
     return Json{{"state", "clean"},
                 {"base", stopped_copy["base"]},
@@ -489,18 +533,21 @@ Result<Json> Session::StopAndCommit(const Json& request_id,
     auto saved = save();
     if (!saved) {
       auto error = saved.error();
-      if (error.code == ErrorCode::kBusy)
-        return error;
-      error.code = ErrorCode::kOutcomeUnknown;
-      error.retry_after_ms.reset();
+      if (stop_phase_ == StopPhase::kPublished) {
+        error.code = ErrorCode::kOutcomeUnknown;
+        error.retry_after_ms.reset();
+      }
       return error;
     }
     return saved;
   } catch (const std::filesystem::filesystem_error& error) {
-    return WithOsError(ErrorCode::kOutcomeUnknown, error.what(), OsError::Kind::kWin32,
-                       error.code().value());
+    return WithOsError(
+        stop_phase_ == StopPhase::kPublished ? ErrorCode::kOutcomeUnknown : ErrorCode::kUnavailable,
+        error.what(), OsError::Kind::kWin32, error.code().value());
   } catch (const std::exception& error) {
-    return Error{ErrorCode::kOutcomeUnknown, error.what()};
+    return Error{
+        stop_phase_ == StopPhase::kPublished ? ErrorCode::kOutcomeUnknown : ErrorCode::kInternal,
+        error.what()};
   }
 }
 }  // namespace remotekit

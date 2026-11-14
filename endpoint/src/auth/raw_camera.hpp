@@ -39,6 +39,7 @@ class RawCamera {
                const Pending& pending,
                const Submit& submit);
   std::optional<Message> Next(int64_t now, const Pending& pending);
+  bool CurrentMessage(const Message&, int64_t now, const Pending& pending);
   void Sent(const Message& message, int64_t now);
   void Failed(const Message& message);
 

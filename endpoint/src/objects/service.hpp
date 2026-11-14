@@ -2,10 +2,14 @@
 #include "objects/peer.hpp"
 #include "management/link.hpp"
 #include "objects/work_queue.hpp"
+#include "util/retry_unit.hpp"
 #include <set>
 #include <semaphore>
 namespace remotekit::documents {
 class ObjectDocuments;
+}
+namespace remotekit {
+class NativeRetryOwnerProbe;
 }
 namespace remotekit::objects {
 class ObjectService {
@@ -20,6 +24,10 @@ class ObjectService {
   Result<void> Start(const std::string& listen);
   ObjectStore& Store() { return store_; }
   documents::ObjectDocuments& Documents() { return *documents_; }
+  std::string ConnectionEpoch() const {
+    const auto ready = control_.ReadyConfiguration();
+    return ready ? ready->connection_epoch : std::string();
+  }
   Result<Json> Derivation(const std::string& id, const std::string& tenant);
   Result<void> Configure(const Json& keys);
   const Keys& ObjectKeys() const { return keys_; }
@@ -45,6 +53,7 @@ class ObjectService {
   }
 
  private:
+  friend class ::remotekit::NativeRetryOwnerProbe;
   Result<Json> DispatchPut(const Json& request);
   Result<ObjectInfo> Fetch(const std::string& id, const Json& sources);
   Result<ObjectInfo> EnsureLocal(const std::string& id, const Json& sources);
@@ -71,6 +80,13 @@ class ObjectService {
   std::array<std::mutex, 16> transfers_;
   std::mutex sources_mutex_;
   std::map<std::string, std::shared_ptr<std::counting_semaphore<4>>> source_limits_;
+  std::map<std::string, RetryUnit> source_retries_;
+  struct CommitRetry {
+    mutable std::mutex mutex;
+    RetryUnit retry{"object.commit"};
+  };
+  mutable std::mutex commits_mutex_;
+  std::map<std::string, std::shared_ptr<CommitRetry>> commit_retries_;
   WorkQueue work_;
   WorkQueue staging_{1};
   std::atomic<bool> staging_busy_{false};

@@ -11,7 +11,6 @@ export const DEFAULT_RATE_LIMIT: RateLimitOptions = {
   minIntervalMs: 850,
   jitterMs: 250,
   maxRetries: 4,
-  retryBaseMs: 1_000,
 };
 
 export class RateLimiter {

@@ -9,6 +9,7 @@
 #include "components/services/storage/public/mojom/local_storage_control.mojom.h"
 #include "content/public/browser/storage_partition.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "mojo/public/cpp/bindings/callback_helpers.h"
 #include "net/cookies/canonical_cookie.h"
 #include "net/cookies/cookie_access_result.h"
 #include "net/cookies/cookie_options.h"
@@ -43,13 +44,19 @@ struct StorageImportJobs::Job {
   content::StoragePartition* partition = nullptr;
   std::vector<mojo::Remote<blink::mojom::StorageArea>> areas;
   std::array<uint8_t, 32> fingerprint{};
-  uint64_t view = 0;
+  uint64_t view = 0, serial = 0;
   size_t pending = 0;
-  bool flushing = false, done = false;
+  enum class Phase { kApplying, kFlushing, kDone, kUnknown };
+  Phase phase = Phase::kApplying;
+  bool Terminal() const { return phase == Phase::kDone || phase == Phase::kUnknown; }
 };
 
 StorageImportJobs::StorageImportJobs() = default;
 StorageImportJobs::~StorageImportJobs() = default;
+uint64_t StorageImportJobs::Serial(const std::string& id) const {
+  const auto found = jobs_.find(id);
+  return found == jobs_.end() ? 0 : found->second->serial;
+}
 
 Result<base::DictValue> StorageImportJobs::Begin(content::StoragePartition* partition,
                                                  const std::string& id,
@@ -63,24 +70,34 @@ Result<base::DictValue> StorageImportJobs::Begin(content::StoragePartition* part
     return Poll(id);
   }
   for (const auto& [other_id, job] : jobs_)
-    if (job->view == view && !job->done)
+    if (job->view == view && !job->Terminal())
       return {{}, {ErrorCode::kBusy, "Storage import already pending for this view"}};
-  if (std::ranges::count_if(jobs_, [](const auto& entry) { return !entry.second->done; }) >= 16)
+  if (jobs_.size() >= 80)
+    return {{}, {ErrorCode::kLimitExceeded, "Storage import result retention is full"}};
+  if (std::ranges::count_if(jobs_, [](const auto& entry) { return !entry.second->Terminal(); }) >=
+      16)
     return {{}, {ErrorCode::kBusy, "Too many storage import jobs"}};
   auto job = std::make_unique<Job>();
+  const auto serial = job->serial = ++next_serial_;
   job->partition = partition;
   job->view = view;
   job->fingerprint = data.fingerprint;
   jobs_.emplace(id, std::move(job));
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE, base::BindOnce(&StorageImportJobs::Start, weak_factory_.GetWeakPtr(), id, data));
+      FROM_HERE,
+      base::BindOnce(&StorageImportJobs::Start, weak_factory_.GetWeakPtr(), id, serial, data));
   return Poll(id);
 }
 
-void StorageImportJobs::Start(std::string id, StorageImportData data) {
-  if (!jobs_.contains(id))
+void StorageImportJobs::Start(std::string id, uint64_t serial, StorageImportData data) {
+  if (Serial(id) != serial)
     return;
   auto& job = *jobs_.at(id);
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce(&StorageImportJobs::OnTimeout, weak_factory_.GetWeakPtr(), id, job.serial,
+                     false),
+      base::Seconds(10));
   job.pending = data.cookies.size();
   for (const auto& origin : data.local_storage)
     job.pending += origin.items.size();
@@ -96,17 +113,21 @@ void StorageImportJobs::Start(std::string id, StorageImportData data) {
         now, input.secure, input.http_only, input.same_site, net::COOKIE_PRIORITY_DEFAULT,
         std::nullopt, &status);
     if (!cookie) {
-      OnItem(id, true, false);
+      OnItem(id, serial, true, false);
       continue;
     }
-    manager->SetCanonicalCookie(*cookie, url, net::CookieOptions::MakeAllInclusive(),
-                                base::BindOnce(
-                                    [](base::WeakPtr<StorageImportJobs> jobs, std::string id,
-                                       net::CookieAccessResult result) {
-                                      if (jobs)
-                                        jobs->OnItem(id, true, result.status.IsInclude());
-                                    },
-                                    weak_factory_.GetWeakPtr(), id));
+    manager->SetCanonicalCookie(
+        *cookie, url, net::CookieOptions::MakeAllInclusive(),
+        mojo::WrapCallbackWithDropHandler(
+            base::BindOnce(
+                [](base::WeakPtr<StorageImportJobs> jobs, std::string id, uint64_t serial,
+                   net::CookieAccessResult result) {
+                  if (jobs)
+                    jobs->OnItem(id, serial, true, result.status.IsInclude());
+                },
+                weak_factory_.GetWeakPtr(), id, job.serial),
+            base::BindOnce(&StorageImportJobs::OnDropped, weak_factory_.GetWeakPtr(), id,
+                           job.serial, true)));
   }
   for (const auto& origin : data.local_storage) {
     mojo::Remote<blink::mojom::StorageArea> area;
@@ -115,22 +136,34 @@ void StorageImportJobs::Start(std::string id, StorageImportData data) {
         area.BindNewPipeAndPassReceiver());
     for (const auto& [key, value] : origin.items)
       area->Put(EncodeLocalStorage(key), EncodeLocalStorage(value), std::nullopt, nullptr,
-                base::BindOnce(&StorageImportJobs::OnItem, weak_factory_.GetWeakPtr(), id, false));
+                mojo::WrapCallbackWithDropHandler(
+                    base::BindOnce(&StorageImportJobs::OnItem, weak_factory_.GetWeakPtr(), id,
+                                   job.serial, false),
+                    base::BindOnce(&StorageImportJobs::OnDropped, weak_factory_.GetWeakPtr(), id,
+                                   job.serial, true)));
     job.areas.push_back(std::move(area));
   }
   MaybeFlush(id);
 }
 
-void StorageImportJobs::OnItem(std::string id, bool cookie, bool applied) {
-  if (!jobs_.contains(id))
+void StorageImportJobs::OnItem(std::string id, uint64_t serial, bool cookie, bool applied) {
+  if (Serial(id) != serial)
     return;
   auto& job = *jobs_.at(id);
+  if (!job.pending)
+    return;
   auto& counts = cookie ? job.cookies : job.local_storage;
   if (applied)
     ++counts.applied;
   else
     ++counts.rejected;
   --job.pending;
+  if (job.phase == Job::Phase::kUnknown) {
+    if (!job.pending) {
+      auto released_areas = std::move(job.areas);
+    }
+    return;
+  }
   MaybeFlush(id);
 }
 
@@ -138,23 +171,54 @@ void StorageImportJobs::MaybeFlush(const std::string& id) {
   if (!jobs_.contains(id))
     return;
   auto& job = *jobs_.at(id);
-  if (job.pending || job.flushing)
+  if (job.pending || job.phase != Job::Phase::kApplying)
     return;
-  job.flushing = true;
+  job.phase = Job::Phase::kFlushing;
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce(&StorageImportJobs::OnTimeout, weak_factory_.GetWeakPtr(), id, job.serial,
+                     true),
+      base::Seconds(10));
   // LocalStorageControl::Flush is one-way; issue it before awaiting the cookie flush.
   job.partition->GetLocalStorageControl()->Flush();
   job.partition->GetCookieManagerForBrowserProcess()->FlushCookieStore(
-      base::BindOnce(&StorageImportJobs::OnFlushed, weak_factory_.GetWeakPtr(), id));
+      mojo::WrapCallbackWithDropHandler(
+          base::BindOnce(&StorageImportJobs::OnFlushed, weak_factory_.GetWeakPtr(), id, job.serial),
+          base::BindOnce(&StorageImportJobs::OnDropped, weak_factory_.GetWeakPtr(), id, job.serial,
+                         false)));
 }
 
-void StorageImportJobs::OnFlushed(const std::string& id) {
-  if (!jobs_.contains(id))
+void StorageImportJobs::OnDropped(const std::string& id, uint64_t serial, bool item) {
+  const auto found = jobs_.find(id);
+  if (found == jobs_.end() || found->second->serial != serial)
+    return;
+  auto& job = *found->second;
+  job.phase = Job::Phase::kUnknown;
+  if (item && job.pending)
+    --job.pending;
+  if (!job.pending) {
+    auto released_areas = std::move(job.areas);
+  }
+}
+
+void StorageImportJobs::OnTimeout(const std::string& id, uint64_t serial, bool flushing) {
+  const auto found = jobs_.find(id);
+  if (found == jobs_.end() || found->second->serial != serial || found->second->Terminal() ||
+      found->second->phase != (flushing ? Job::Phase::kFlushing : Job::Phase::kApplying))
+    return;
+  // Keep the identity and in-flight remotes: a deadline cannot prove whether
+  // the storage service applied a write. A repeated Begin only reads this result.
+  found->second->phase = Job::Phase::kUnknown;
+}
+
+void StorageImportJobs::OnFlushed(const std::string& id, uint64_t serial) {
+  if (Serial(id) != serial)
     return;
   auto& job = *jobs_.at(id);
-  job.areas.clear();
-  if (job.done)
+  auto released_areas = std::move(job.areas);
+  if (job.Terminal())
     return;
-  job.done = true;
+  job.phase = Job::Phase::kDone;
   completed_.push_back(id);
   while (completed_.size() > 64) {
     jobs_.erase(completed_.front());
@@ -167,10 +231,12 @@ Result<base::DictValue> StorageImportJobs::Poll(const std::string& id) {
   if (found == jobs_.end())
     return {{}, {ErrorCode::kNotFound, "Unknown storage import job"}};
   const auto& job = *found->second;
+  if (job.phase == Job::Phase::kUnknown)
+    return {{}, {ErrorCode::kOutcomeUnknown, "Storage import completion is unknown"}};
   base::DictValue value;
   value.Set("importId", id);
-  value.Set("state", job.done ? "done" : "pending");
-  if (job.done) {
+  value.Set("state", job.Terminal() ? "done" : "pending");
+  if (job.Terminal()) {
     value.Set("cookies", job.cookies.Value());
     value.Set("localStorage", job.local_storage.Value());
   }

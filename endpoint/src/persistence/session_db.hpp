@@ -58,6 +58,10 @@ class DownloadStore {
   explicit DownloadStore(SessionDb& db) : db_(db) {}
   Result<Json> Load();
   Result<void> Save(const Json& state);
+  Result<void> SaveFailure(const Json& state,
+                           const Json& failure,
+                           const std::string& event_id,
+                           const std::string& incarnation);
   Result<void> Complete(const std::string& event_id);
 
  private:

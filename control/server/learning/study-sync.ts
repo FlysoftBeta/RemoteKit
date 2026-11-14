@@ -1,7 +1,8 @@
 import { corruptRecord, decodeJson, encodeJson } from '../persistence/codec';
 import { wireError as wireErrorCodec } from '../persistence/documents';
 import { createHash, randomUUID } from 'node:crypto';
-import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { RetryLedger } from '../persistence/retry-units';
+import { BackgroundJob } from '../background';
 import { RemoteKitError, toRemoteKitError, wireError, type WireError } from '../../shared/errors';
 import type { AttachmentSave, StudySync as SyncState } from '../../shared/learning';
 import type { ObjectIndex } from '../cluster/objects';
@@ -48,7 +49,20 @@ interface DownloadRow {
 type Objects = Pick<ObjectIndex, 'put' | 'render' | 'derived'>;
 const DAY = 86400_000;
 export class StudySync {
+  failures() {
+    return [
+      this.dispatchJob.retry.error,
+      ...[...this.dispatchers.values()].map((job) => job.retry.error),
+    ].filter((error) => error !== undefined);
+  }
+  private readonly dispatchJob = new BackgroundJob('learning.dispatch', {});
+  private readonly dispatchers = new Map<string, BackgroundJob>();
   private readonly slots = new Slots(4);
+  private readonly collections: RetryLedger;
+  private readonly attachments: RetryLedger;
+  private readonly retentions: RetryLedger;
+  private readonly manualInputs = new Map<string, number>();
+  private readonly collectionCutoffs = new Map<string, { input: string; cutoff: number }>();
   private readonly tenants = new Map<
     string,
     {
@@ -73,7 +87,11 @@ export class StudySync {
     private readonly changed: (tenant: string) => void,
     private readonly now = Date.now,
     private readonly random = Math.random,
-  ) {}
+  ) {
+    this.collections = new RetryLedger(store, 'learning.collection', now);
+    this.attachments = new RetryLedger(store, 'learning.attachment', now);
+    this.retentions = new RetryLedger(store, 'learning.retention', now);
+  }
   private runtime(tenant: string) {
     let runtime = this.tenants.get(tenant);
     if (!runtime) {
@@ -94,17 +112,25 @@ export class StudySync {
     if (!row) throw corruptRecord(`learning_settings ${tenant}`, new Error('missing required record'));
     const runtime = this.tenants.get(tenant);
     return {
-      attachmentFailures: (
-        this.store.db
-          .prepare(
-            "SELECT key,failure FROM learning_downloads WHERE tenant=? AND state='failed' AND failure IS NOT NULL",
-          )
-          .all(tenant) as { key: string; failure: string }[]
-      ).map((item) => ({ key: item.key, error: wireError(storedFailure(item.failure, tenant, item.key)) })),
+      attachmentFailures: [
+        ...(
+          this.store.db
+            .prepare(
+              "SELECT key,failure FROM learning_downloads WHERE tenant=? AND state IN ('failed','unknown') AND failure IS NOT NULL",
+            )
+            .all(tenant) as { key: string; failure: string }[]
+        ).map((item) => ({ key: item.key, error: wireError(storedFailure(item.failure, tenant, item.key)) })),
+        ...this.retentions.failures().flatMap((item) => {
+          const [owner, key] = JSON.parse(item.key) as string[];
+          return owner === tenant ? [{ key: key!, error: item.error }] : [];
+        }),
+      ],
       retentionDays: Number(row.retention_days),
       syncing: !!runtime?.syncing,
       ...(row?.last_sync_at ? { lastSyncAt: Number(row.last_sync_at) } : {}),
-      ...(runtime?.error ? { error: runtime.error } : {}),
+      ...((runtime?.error ?? this.collections.unit(tenant).record().error)
+        ? { error: runtime?.error ?? this.collections.unit(tenant).record().error }
+        : {}),
     };
   }
   private row(tenant: string, key: string) {
@@ -120,8 +146,11 @@ export class StudySync {
       if (this.library.entryExists(tenant, row.entry_id)) return { state: 'saved', entryId: row.entry_id };
       if (row.state === 'saved') this.dismiss(tenant, [row.entry_id]);
     }
-    return row?.state === 'failed'
-      ? { state: 'failed', error: wireError(storedFailure(row.failure, tenant, row.key)) }
+    return row && ['failed', 'unknown'].includes(row.state)
+      ? {
+          state: row.state === 'unknown' ? 'unknown' : 'failed',
+          error: wireError(storedFailure(row.failure, tenant, row.key)),
+        }
       : { state: 'not_saved' };
   }
   dismiss(tenant: string, ids: string[]) {
@@ -138,21 +167,33 @@ export class StudySync {
       )
       .all(tenant, cutoff) as DownloadRow[];
     for (const row of rows) {
-      if (row.entry_id && !this.library.entryExists(tenant, row.entry_id)) {
-        this.dismiss(tenant, [row.entry_id]);
-        continue;
+      const key = JSON.stringify([tenant, row.key, row.saved_at.toString()]);
+      const unit = this.retentions.unit(key);
+      if (!unit.ready(JSON.stringify([this.store.buildId, this.state(tenant).retentionDays]))) continue;
+      try {
+        if (row.entry_id && !this.library.entryExists(tenant, row.entry_id)) {
+          this.dismiss(tenant, [row.entry_id]);
+          continue;
+        }
+        if (row.entry_id)
+          await this.library.expireStudyEntry(
+            tenant,
+            row.entry_id,
+            createHash('sha256')
+              .update(JSON.stringify(['study-retention', row.key, row.saved_at.toString()]))
+              .digest('hex'),
+          );
+        this.store.db
+          .prepare(
+            "UPDATE learning_downloads SET state='retained' WHERE tenant=? AND key=? AND state='saved'",
+          )
+          .run(tenant, row.key);
+        unit.succeed();
+        this.retentions.remove(key);
+      } catch (cause) {
+        unit.fail(cause);
+        this.retentions.save(key);
       }
-      if (row.entry_id)
-        await this.library.expireStudyEntry(
-          tenant,
-          row.entry_id,
-          createHash('sha256')
-            .update(JSON.stringify(['study-retention', row.key, row.saved_at.toString()]))
-            .digest('hex'),
-        );
-      this.store.db
-        .prepare("UPDATE learning_downloads SET state='retained' WHERE tenant=? AND key=? AND state='saved'")
-        .run(tenant, row.key);
     }
   }
   async settings(tenant: string, days: number) {
@@ -173,42 +214,62 @@ export class StudySync {
     const runtime = this.runtime(tenant);
     const existing = runtime.downloads.get(key);
     if (existing) return existing;
-    const task = runtime.slots.run(async () => {
-      const status = this.saved(tenant, key);
-      if (status.state === 'saved') {
-        const row = this.row(tenant, key)!;
-        if (row.document && row.object_id) this.render(row.object_id);
-        return { entryId: status.entryId };
-      }
-      if (automatic && this.row(tenant, key)?.state === 'dismissed')
-        throw new RemoteKitError('not_found', '文件已删除');
-      const previous = this.row(tenant, key);
-      if (automatic && previous?.state === 'failed' && !this.retryDue(tenant, previous))
-        throw storedFailure(previous.failure, tenant, previous.key);
-      if (
-        previous?.failure &&
-        storedFailure(previous.failure, tenant, previous.key).code === 'outcome_unknown'
-      ) {
-        const entry = previous.entry_id && this.library.entryExists(tenant, previous.entry_id);
-        if (entry) {
-          this.store.db
-            .prepare(
-              "UPDATE learning_downloads SET state='saved',failure=NULL,retry_at=NULL WHERE tenant=? AND key=?",
-            )
-            .run(tenant, key);
-          return { entryId: previous.entry_id! };
+    const task = runtime.slots
+      .run(async () => {
+        const status = this.saved(tenant, key);
+        if (status.state === 'saved') {
+          const row = this.row(tenant, key)!;
+          if (row.document && row.object_id) this.render(row.object_id);
+          return { entryId: status.entryId };
         }
+        if (automatic && this.row(tenant, key)?.state === 'dismissed')
+          throw new RemoteKitError('not_found', '文件已删除');
+        const previous = this.row(tenant, key);
+        const unit = this.attachments.unit(JSON.stringify([tenant, key]));
+        if (!automatic)
+          this.manualInputs.set(
+            JSON.stringify([tenant, key]),
+            (this.manualInputs.get(JSON.stringify([tenant, key])) ?? 0) + 1,
+          );
+        if (!unit.ready(this.attachmentInput(tenant, key))) throw unit.error;
         if (
-          !previous.object_id ||
-          !this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(previous.object_id)
+          previous?.failure &&
+          storedFailure(previous.failure, tenant, previous.key).code === 'outcome_unknown'
+        ) {
+          const entry = previous.entry_id && this.library.entryExists(tenant, previous.entry_id);
+          if (entry) {
+            this.store.db
+              .prepare(
+                "UPDATE learning_downloads SET state='saved',failure=NULL,retry_at=NULL WHERE tenant=? AND key=?",
+              )
+              .run(tenant, key);
+            return { entryId: previous.entry_id! };
+          }
+          if (
+            previous.object_id &&
+            !this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(previous.object_id)
+          )
+            throw new RemoteKitError('outcome_unknown', '附件导入结果待对账');
+        }
+        const item = await this.study(tenant).resolve(key);
+        const result = await this.download(tenant, item, runtime);
+        unit.succeed();
+        this.attachments.remove(JSON.stringify([tenant, key]));
+        return result;
+      })
+      .catch((cause) => {
+        if (
+          !runtime.abort.signal.aborted &&
+          this.attachments.unit(JSON.stringify([tenant, key])).error !== cause
         )
-          throw new RemoteKitError('outcome_unknown', '附件导入结果待对账');
-      }
-      const item = await this.study(tenant).resolve(key);
-      return this.download(tenant, item, runtime);
-    });
+          this.failAttachment(tenant, key, cause, runtime);
+        throw cause;
+      });
     runtime.downloads.set(key, task);
-    void task.finally(() => runtime.downloads.delete(key)).catch(() => {});
+    void task.then(
+      () => runtime.downloads.delete(key),
+      () => runtime.downloads.delete(key),
+    );
     return task;
   }
   private usage(tenant: string) {
@@ -217,14 +278,55 @@ export class StudySync {
       .get(tenant) as { bytes: bigint };
     return Number(row?.bytes ?? 0);
   }
+  private attachmentInput(tenant: string, key: string) {
+    return JSON.stringify([
+      this.store.buildId,
+      this.accounts.generation(tenant, 'changyan'),
+      this.usage(tenant),
+      this.manualInputs.get(JSON.stringify([tenant, key])) ?? 0,
+    ]);
+  }
   private retryDue(tenant: string, row: DownloadRow) {
-    if (storedFailure(row.failure, tenant, row.key).code === 'limit_exceeded')
-      return row.failed_usage !== null && this.usage(tenant) < Number(row.failed_usage);
-    if (errorHandling(storedFailure(row.failure, tenant, row.key).code) === 'reconcile') return true;
-    return (
-      retryDelay({ code: storedFailure(row.failure, tenant, row.key).code }, 0) !== undefined &&
-      Number(row.retry_at ?? 0) <= this.now()
-    );
+    return this.attachments
+      .unit(JSON.stringify([tenant, row.key]))
+      .ready(this.attachmentInput(tenant, row.key));
+  }
+  private failAttachment(
+    tenant: string,
+    key: string,
+    cause: unknown,
+    runtime: ReturnType<StudySync['runtime']>,
+  ) {
+    const unitKey = JSON.stringify([tenant, key]);
+    const unit = this.attachments.unit(unitKey);
+    unit.ready(this.attachmentInput(tenant, key));
+    const original = toRemoteKitError(cause);
+    const existing = this.row(tenant, key);
+    const unknown =
+      original.code === 'outcome_unknown' || (original.code === 'internal' && !!existing?.object_id);
+    const failure = unit.fail(original).error;
+    const retryAt = unit.state.phase === 'waiting' ? unit.state.until : null;
+    this.attachments.save(unitKey, () => {
+      this.store.db
+        .prepare(
+          `INSERT INTO learning_downloads(tenant,key,published_at,saved_at,state) VALUES (?,?,0,0,?) ON CONFLICT(tenant,key) DO UPDATE SET state=excluded.state WHERE state!='dismissed'`,
+        )
+        .run(tenant, key, unknown ? 'unknown' : 'failed');
+      this.store.db
+        .prepare('UPDATE learning_downloads SET failure=?,retry_at=?,failed_usage=? WHERE tenant=? AND key=?')
+        .run(
+          encodeJson(wireError(failure), wireErrorCodec, `learning_downloads.failure ${tenant}/${key}`),
+          retryAt,
+          failure.code === 'limit_exceeded' ? this.usage(tenant) : null,
+          tenant,
+          key,
+        );
+    });
+    runtime.progress.set(key, {
+      state: unknown ? 'unknown' : 'failed',
+      error: wireError(failure),
+    });
+    this.changed(tenant);
   }
   private async download(tenant: string, item: DownloadItem, runtime: ReturnType<StudySync['runtime']>) {
     const generation = this.accounts.generation(tenant, 'changyan');
@@ -273,13 +375,13 @@ export class StudySync {
         authorize();
       };
       const entryId =
-        previous?.state === 'failed' || previous?.state === 'pending'
+        previous && ['failed', 'unknown', 'pending'].includes(previous.state)
           ? (previous.entry_id ?? randomUUID())
           : randomUUID();
       const rememberObject = (id: string) => {
         this.store.db
           .prepare(
-            `INSERT INTO learning_downloads(tenant,key,published_at,saved_at,entry_id,object_id,state,failure) VALUES (?,?,?,0,?,?,'failed','{"code":"outcome_unknown","message":"附件导入结果待对账"}') ON CONFLICT(tenant,key) DO UPDATE SET entry_id=excluded.entry_id,object_id=excluded.object_id,state=excluded.state,failure=excluded.failure`,
+            `INSERT INTO learning_downloads(tenant,key,published_at,saved_at,entry_id,object_id,state,failure) VALUES (?,?,?,0,?,?,'unknown','{"code":"outcome_unknown","message":"附件导入结果待对账"}') ON CONFLICT(tenant,key) DO UPDATE SET entry_id=excluded.entry_id,object_id=excluded.object_id,state=excluded.state,failure=excluded.failure`,
           )
           .run(tenant, item.key, item.publishedAt, entryId, id);
       };
@@ -330,56 +432,43 @@ export class StudySync {
       this.changed(tenant);
       return { entryId };
     } catch (error) {
-      const failure = toRemoteKitError(error);
-      if (!runtime.abort.signal.aborted && this.accounts.generation(tenant, 'changyan') === generation) {
-        this.store.db
-          .prepare(
-            `INSERT INTO learning_downloads (tenant,key,published_at,saved_at,entry_id,object_id,state) VALUES (?,?,?,0,NULL,NULL,'failed')
-          ON CONFLICT(tenant,key) DO UPDATE SET state='failed' WHERE state!='dismissed'`,
-          )
-          .run(tenant, item.key, item.publishedAt);
-        const delay = retryDelay(failure, 0);
-        this.store.db
-          .prepare(
-            'UPDATE learning_downloads SET failure=?,retry_at=?,failed_usage=? WHERE tenant=? AND key=?',
-          )
-          .run(
-            encodeJson(
-              wireError(reportError(failure, 'learning.attachment_failed', { tenant, key: item.key })),
-              wireErrorCodec,
-              `learning_downloads.failure ${tenant}/${item.key}`,
-            ),
-            delay === undefined ? null : this.now() + Math.min(delay, 60_000),
-            failure.code === 'limit_exceeded' ? this.usage(tenant) : null,
-            tenant,
-            item.key,
-          );
-        runtime.progress.set(item.key, { state: 'failed', error: wireError(failure) });
-        this.changed(tenant);
-      }
       throw error;
     }
   }
+
   private render(id: string) {
     if (!this.objects.derived(id, 'document')) this.objects.render(id);
   }
-  sync(tenant: string) {
+  sync(tenant: string, automatic = false) {
     this.accounts.session(tenant, 'changyan');
     const runtime = this.runtime(tenant);
     if (this.closed || runtime.syncing) return this.state(tenant);
+    if (!automatic) this.manualInputs.set(tenant, (this.manualInputs.get(tenant) ?? 0) + 1);
+    const unit = this.collections.unit(tenant);
+    const input = this.collectionInput(tenant);
+    if (!unit.ready(input)) return this.state(tenant);
+    if (this.collectionCutoffs.get(tenant)?.input !== input || unit.error?.code === 'conflict')
+      this.collectionCutoffs.set(tenant, {
+        input,
+        cutoff: this.now() - this.state(tenant).retentionDays * DAY,
+      });
+    const cutoff = this.collectionCutoffs.get(tenant)!.cutoff;
     runtime.syncing = this.slots.run(async () => {
       const started = this.now();
       runtime.diagnostic = { startedAt: started };
       try {
         if (runtime.abort.signal.aborted) return;
         await this.retention(tenant);
-        const items = await this.study(tenant).collect(this.now() - this.state(tenant).retentionDays * DAY);
+        const items = await this.study(tenant).collect(cutoff);
         let errorCode: string | undefined;
         for (let index = 0; index < items.length; index += 2) {
           if (runtime.abort.signal.aborted) return;
           const selected = items.slice(index, index + 2).filter((item) => {
             const row = this.row(tenant, item.key);
-            return row?.state !== 'dismissed' && (row?.state !== 'failed' || this.retryDue(tenant, row));
+            return (
+              row?.state !== 'dismissed' &&
+              (!row || !['failed', 'unknown'].includes(row.state) || this.retryDue(tenant, row))
+            );
           });
           const results = await Promise.allSettled(selected.map((item) => this.save(tenant, item.key, true)));
           for (const result of results)
@@ -391,23 +480,30 @@ export class StudySync {
             'INSERT INTO learning_settings(tenant,last_sync_at) VALUES (?,?) ON CONFLICT(tenant) DO UPDATE SET last_sync_at=excluded.last_sync_at',
           )
           .run(tenant, this.now());
+        unit.succeed();
+        this.collections.save(tenant);
+        this.collectionCutoffs.delete(tenant);
         runtime.error = undefined;
         runtime.diagnostic.errorCode = errorCode;
       } catch (error) {
-        runtime.error = wireError(reportError(toRemoteKitError(error), 'learning.sync_failed', { tenant }));
+        runtime.error = wireError(unit.fail(toRemoteKitError(error)).error);
+        this.collections.save(tenant);
         runtime.diagnostic.errorCode = toRemoteKitError(error).code;
       } finally {
         runtime.diagnostic.durationMs = this.now() - started;
         runtime.due =
-          this.now() +
-          (runtime.error &&
-          ['busy', 'rate_limited', 'unavailable', 'outcome_unknown'].includes(runtime.error.code)
-            ? 60_000
-            : this.state(tenant).attachmentFailures?.some((item) =>
-                  ['busy', 'rate_limited', 'unavailable', 'outcome_unknown'].includes(item.error.code),
-                )
-              ? 60_000
-              : 30 * 60_000 + (this.random() - 0.5) * 180_000);
+          unit.state.phase === 'waiting'
+            ? unit.state.until
+            : unit.state.phase === 'idle'
+              ? this.now() + 30 * 60_000 + (this.random() - 0.5) * 180_000
+              : Infinity;
+        const pending = this.store.db
+          .prepare(
+            'SELECT min(retry_at) AS due FROM learning_downloads WHERE tenant=? AND retry_at IS NOT NULL',
+          )
+          .get(tenant) as { due: bigint | null };
+        if (pending.due !== null && unit.state.phase === 'idle')
+          runtime.due = Math.min(runtime.due, Number(pending.due));
         delete runtime.syncing;
         if (!runtime.abort.signal.aborted) this.changed(tenant);
       }
@@ -420,12 +516,49 @@ export class StudySync {
     await runtime?.syncing;
     await Promise.allSettled([...(runtime?.downloads.values() ?? [])]);
   }
+  private collectionInput(tenant: string) {
+    return JSON.stringify([
+      this.store.buildId,
+      this.accounts.generation(tenant, 'changyan'),
+      this.accounts.state(tenant, 'changyan'),
+      this.state(tenant).retentionDays,
+      this.usage(tenant),
+      this.manualInputs.get(tenant) ?? 0,
+    ]);
+  }
   start() {
     this.timer = setInterval(() => {
-      for (const tenant of this.accounts.signedInTenants())
-        if (this.runtime(tenant).due <= this.now()) this.sync(tenant);
+      void this.dispatchJob.run(() => this.dispatch(), this.store.buildId);
     }, 15_000);
     this.timer.unref();
+  }
+  private async dispatch() {
+    await Promise.all(
+      this.accounts.signedInTenants().map(async (tenant) => {
+        let job = this.dispatchers.get(tenant);
+        if (!job) {
+          job = new BackgroundJob('learning.tenant_dispatch', { tenant });
+          this.dispatchers.set(tenant, job);
+        }
+        await job.run(
+          async () => {
+            if (this.closed) return;
+            if (
+              this.runtime(tenant).due <= this.now() ||
+              this.collections.unit(tenant).record().input !== this.collectionInput(tenant)
+            ) {
+              this.sync(tenant, true);
+              await this.runtime(tenant).syncing;
+            }
+          },
+          JSON.stringify([this.store.buildId, this.accounts.generation(tenant, 'changyan')]),
+        );
+        if (job.retry.error) {
+          this.runtime(tenant).error = wireError(job.retry.error);
+          this.changed(tenant);
+        }
+      }),
+    );
   }
   async stopTenant(tenant: string) {
     const runtime = this.tenants.get(tenant);
@@ -440,6 +573,11 @@ export class StudySync {
     this.closed = true;
     clearInterval(this.timer);
     await Promise.all([...this.tenants.keys()].map((tenant) => this.stopTenant(tenant)));
+    await this.dispatchJob.close();
+    await Promise.all([...this.dispatchers.values()].map((job) => job.close()));
+    this.collections.close();
+    this.attachments.close();
+    this.retentions.close();
   }
 }
 

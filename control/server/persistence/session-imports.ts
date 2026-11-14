@@ -84,8 +84,9 @@ function visibleRecord({
 }
 export class SessionImportsRepository {
   constructor(
-    private readonly db: Database.Database,
+    readonly db: Database.Database,
     private readonly key: AtRestKey,
+    readonly buildId: string,
   ) {}
   saveApplyCounts(id: string, chunkIndex: number, counts: NonNullable<StoredImport['applyCounts']>) {
     this.db
@@ -392,7 +393,11 @@ export class SessionImportsRepository {
   }
   pendingTenants(): string[] {
     return (
-      this.db.prepare("SELECT DISTINCT tenant FROM session_imports WHERE state='pending'").all() as {
+      this.db
+        .prepare(
+          "SELECT DISTINCT tenant FROM session_imports WHERE state='pending' OR (state='failed' AND payload IS NOT NULL)",
+        )
+        .all() as {
         tenant: string;
       }[]
     ).map((row) => row.tenant);
@@ -401,7 +406,7 @@ export class SessionImportsRepository {
     return (
       this.db
         .prepare(
-          "SELECT * FROM session_imports WHERE tenant=? AND state='pending' ORDER BY received_at,rowid",
+          "SELECT * FROM session_imports WHERE tenant=? AND (state='pending' OR (state='failed' AND payload IS NOT NULL)) ORDER BY received_at,rowid",
         )
         .all(tenant) as any[]
     ).map(record);
@@ -430,9 +435,10 @@ export class SessionImportsRepository {
   ) {
     this.db
       .prepare(
-        "UPDATE session_imports SET state=?,payload=NULL,rejected_items=?,error=?,finished_at=? WHERE tenant=? AND id=? AND state='pending'",
+        "UPDATE session_imports SET state=?,payload=CASE WHEN ?='failed' THEN payload ELSE NULL END,rejected_items=?,error=?,finished_at=? WHERE tenant=? AND id=? AND state='pending'",
       )
       .run(
+        state,
         state,
         rejectedItems,
         error === null ? null : encodeJson(error, codecs.wireError, `session_imports.error ${id}`),

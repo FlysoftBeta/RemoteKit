@@ -1,10 +1,31 @@
 #include "cluster/frames.hpp"
+#include <set>
 namespace remotekit::cluster {
 namespace {
 Error Invalid() {
   return {ErrorCode::kInvalidRequest, "invalid cluster frame"};
 }
 }  // namespace
+Result<Json> DecodeJson(std::span<const uint8_t> text) {
+  std::vector<std::set<std::string>> objects;
+  bool duplicate = false;
+  const auto callback = [&](int, Json::parse_event_t event, Json& value) {
+    if (event == Json::parse_event_t::object_start)
+      objects.emplace_back();
+    else if (event == Json::parse_event_t::object_end)
+      objects.pop_back();
+    else if (event == Json::parse_event_t::key &&
+             !objects.back().insert(value.get<std::string>()).second)
+      duplicate = true;
+    return true;
+  };
+  auto value = Json::parse(text.begin(), text.end(), callback, false);
+  if (duplicate)
+    return Error{ErrorCode::kInvalidRequest, "duplicate key in cluster JSON"};
+  if (!value.is_object())
+    return Invalid();
+  return value;
+}
 size_t JsonLimit(const Json& message) {
   if (message.value("method", Json()) == "session.desired" ||
       message.value("method", Json()) == "session.clipboard" ||
@@ -65,9 +86,10 @@ Result<Message> DecodeFrame(std::span<const uint8_t> plain) {
     return Invalid();
   if ((binary && length > kMaxJson) || length > plain.size() - start)
     return Invalid();
-  auto json = Json::parse(plain.begin() + start, plain.begin() + start + length, nullptr, false);
-  if (!json.is_object())
-    return Invalid();
+  auto decoded = DecodeJson(plain.subspan(start, length));
+  if (!decoded)
+    return decoded.error();
+  auto json = std::move(decoded).value();
   if (!binary && length > JsonLimit(json))
     return Invalid();
   Bytes bytes;

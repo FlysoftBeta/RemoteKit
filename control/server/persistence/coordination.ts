@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type { AtRestKey } from '../auth/crypto';
 import { canonical, type SessionDesired, type SessionEvent } from '../endpoint/coordination';
-import { encodeJson } from './codec';
+import { encodeJson, decodeJson } from './codec';
 import { sessionEventPayload } from './documents';
 
 export class CoordinationRepository {
@@ -78,6 +78,23 @@ export class CoordinationRepository {
     this.db
       .prepare('UPDATE session_event_inbox SET disposition=? WHERE tenant=? AND session_id=? AND event_id=?')
       .run(disposition, event.tenantId, event.sessionId, event.eventId);
+  }
+  pendingDownloads() {
+    return (
+      this.db
+        .prepare(
+          "SELECT tenant,session_id,event_id,payload FROM session_event_inbox WHERE disposition='download_pending'",
+        )
+        .all() as { tenant: string; session_id: string; event_id: string; payload: string }[]
+    ).map((row) => {
+      const aad = canonical(['session-event', row.tenant, row.session_id, row.event_id]);
+      const payload = decodeJson(
+        this.key.open(aad, row.payload).toString(),
+        sessionEventPayload,
+        'session_event_inbox.payload',
+      );
+      return { tenant: row.tenant, sessionId: row.session_id, eventId: row.event_id, payload };
+    });
   }
   advance(event: SessionEvent) {
     const previous = BigInt(this.cursor(event));

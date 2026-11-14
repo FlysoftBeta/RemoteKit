@@ -22,13 +22,13 @@ const enumerations: Record<string, readonly (string | bigint)[]> = {
   'session_import_events.direction': ['in', 'out'],
   'learning_accounts.provider': ['changyan', 'xinjiaoyu'],
   'learning_accounts.status': ['signed_in', 'expired'],
-  'learning_downloads.state': ['saved', 'retained', 'dismissed', 'failed', 'pending'],
+  'learning_downloads.state': ['saved', 'retained', 'dismissed', 'failed', 'unknown', 'pending'],
   'learning_downloads.document': [0n, 1n],
   'library_entries.kind': ['file', 'snippet'],
   'file_library_selections.terminal': ['selected', 'cancelled'],
   'file_library_selections.checked': [0n, 1n],
   'object_derivations.kind': ['thumbnail', 'document'],
-  'object_render_failures.state': ['failed'],
+  'object_render_failures.state': ['failed', 'unknown'],
 };
 
 // SQLite affinity does not constrain the stored type. Validate native rows before repositories use them.

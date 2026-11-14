@@ -328,3 +328,71 @@ test('deleting a user removes every row of its tenant and queues node data delet
     await h.close();
   }
 });
+
+test('a Session starting during reset retirement leaves all learning records intact', async (t) => {
+  const h = await stack();
+  t.after(() => h.close());
+  await h.call('admin.createUser', { username: 'reset-race', password });
+  const user = h.store.accounts.byUsername('reset-race')!;
+  h.store.db.prepare('UPDATE learning_settings SET retention_days=13 WHERE tenant=?').run(user.tenant);
+  h.store.db.prepare('INSERT INTO document_progress VALUES (?,?,1,0,1)').run(user.tenant, 'asset');
+  t.mock.method(h.control.learning, 'retireTenant', async () => {
+    h.control.endpoint.placement.resolve(user.tenant);
+  });
+  await assert.rejects(h.call('admin.resetSession', { username: user.username }), { code: 'conflict' });
+  assert.equal(
+    (
+      h.store.db
+        .prepare('SELECT retention_days FROM learning_settings WHERE tenant=?')
+        .get(user.tenant) as any
+    ).retention_days,
+    13n,
+  );
+  assert(h.store.db.prepare('SELECT 1 FROM document_progress WHERE tenant=?').get(user.tenant));
+  assert.doesNotThrow(() => h.control.learning.state(user.tenant));
+});
+
+for (const [table, event] of [
+  ['learning_settings', 'DELETE'],
+  ['learning_settings', 'INSERT'],
+  ['document_progress', 'DELETE'],
+  ['clipboards', 'DELETE'],
+  ['session_placements', 'DELETE'],
+  ['workspaces', 'INSERT'],
+] as const) {
+  test(`reset failure at ${event} ${table} rolls back required persistent state`, async (t) => {
+    const h = await stack();
+    t.after(() => h.close());
+    await h.call('admin.createUser', { username: 'reset-fault', password });
+    const user = h.store.accounts.byUsername('reset-fault')!;
+    h.control.endpoint.placement.resolve(user.tenant).runState = 'stopped';
+    h.store.clipboards.record(user.id, { text: 'preserved', html: '' });
+    h.store.db.prepare('UPDATE learning_settings SET retention_days=13 WHERE tenant=?').run(user.tenant);
+    h.store.db.prepare('INSERT INTO document_progress VALUES (?,?,1,0,1)').run(user.tenant, 'asset');
+    // The fixture placement lives in memory; production placements are inside this SQLite transaction.
+    if (table === 'workspaces') {
+      t.mock.method(h.store.workspaces, 'saveWorkspace', () => {
+        throw new Error('injected workspace failure');
+      });
+    } else if (table === 'session_placements') {
+      t.mock.method(h.control.endpoint.placement, 'forgetTenant', () => {
+        throw new Error('injected placement failure');
+      });
+    } else
+      h.store.db.exec(
+        `CREATE TRIGGER reset_fault BEFORE ${event} ON ${table} BEGIN SELECT RAISE(ABORT,'injected reset failure'); END`,
+      );
+    await assert.rejects(h.call('admin.resetSession', { username: user.username }));
+    assert.equal(
+      (
+        h.store.db
+          .prepare('SELECT retention_days FROM learning_settings WHERE tenant=?')
+          .get(user.tenant) as any
+      ).retention_days,
+      13n,
+    );
+    assert(h.store.db.prepare('SELECT 1 FROM document_progress WHERE tenant=?').get(user.tenant));
+    assert.equal(h.store.clipboards.latest(user.id)?.text, 'preserved');
+    h.store.db.exec('DROP TRIGGER IF EXISTS reset_fault');
+  });
+}

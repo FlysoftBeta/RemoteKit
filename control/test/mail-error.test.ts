@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mailError } from '../server/session-import/mail-error';
 import { RemoteKitError } from '../shared/errors';
 
-test('mailbox authentication failures do not expire the Control session', () => {
+test('mailbox authentication failures preserve their credential-domain code', () => {
   for (const error of [
     { code: 'EAUTH' },
     { authenticationFailed: true },
@@ -12,7 +12,7 @@ test('mailbox authentication failures do not expire the Control session', () => 
     { responseCode: 530 },
     new RemoteKitError('unauthenticated', 'Mailbox session expired'),
   ]) {
-    for (const sending of [false, true]) assert.equal(mailError(error, sending).code, 'forbidden');
+    for (const sending of [false, true]) assert.equal(mailError(error, sending).code, 'unauthenticated');
   }
   const unavailable = new RemoteKitError('unavailable', 'Mailbox offline');
   assert.equal(mailError(unavailable, false), unavailable);

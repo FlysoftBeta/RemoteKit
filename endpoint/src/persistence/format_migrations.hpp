@@ -8,10 +8,10 @@ struct FormatMigration {
   uint64_t version;
   Json (*up)(const Json&);
 };
-enum class Store { kControl, kNode, kManager, kOwner, kCopy, kChanges, kManifest };
+enum class Store { kControl, kNode, kManager, kOwner, kCopy, kChanges, kManifest, kDocumentJob };
 inline Json MigrateFormat(Store store, Json value) {
   static constexpr std::array<FormatMigration, 0> control{}, node{}, manager{}, owner{}, copy{},
-      changes{}, manifest{};
+      changes{}, manifest{}, document_job{};
   std::span<const FormatMigration> steps;
   switch (store) {
     case Store::kControl:
@@ -34,6 +34,9 @@ inline Json MigrateFormat(Store store, Json value) {
       break;
     case Store::kManifest:
       steps = manifest;
+      break;
+    case Store::kDocumentJob:
+      steps = document_job;
       break;
   }
   for (const auto& step : steps)

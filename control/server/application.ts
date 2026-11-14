@@ -1,4 +1,5 @@
 import { ServicePeers } from './viewers/service-peers';
+import { BackgroundJob } from './background';
 import { SessionEvents } from './workspace/session-events';
 import { compileDesired } from './workspace/desired';
 import { log } from './log';
@@ -157,10 +158,10 @@ export function createApplication(
     endpoint,
     services.servicePeers,
     (tenant, viewer, workspace) => {
-      if (!context.closed)
-        void services.servicePeers
-          .authorize(tenant)
-          .catch((err) => log.warn('service.authorize_failed', { tenant, err }));
+      if (context.closed) return;
+      void services.servicePeers
+        .authorize(tenant)
+        .catch((err) => log.warn('service.authorize_failed', { tenant, err }));
       const lease = context.tenants.get(tenant).viewer?.id;
       if (!lease || !services.viewers.validSecurity(tenant, viewer)) return;
       context.events.emit('auth', tenant, lease, services.viewers.authState(tenant, viewer));
@@ -190,24 +191,73 @@ export function createApplication(
   );
   const sessionEvents = new SessionEvents(context, services);
   const unsubscribeSignals = endpoint.onSignal((event) => services.rtc.receiveSignal(event));
-  services.close = async () => {
+  let closePromise: Promise<void> | undefined;
+  services.close = () => (closePromise ??= closeApplication());
+  async function closeApplication() {
     context.closed = true;
+    await services.security.close();
     endpoint.nodes.off('session.fault', sessionFault);
     endpoint.nodes.off('session.observed', sessionObserved);
     unsubscribeSignals?.();
+    await services.rtc.close();
+    await services.reconciler.close();
     await services.servicePeers.dispose();
     await sessionEvents.close();
-    endpoint.setDesiredSource();
+    await endpoint.close();
     await services.learning.stop();
     await services.sessionImporter.stop();
     await context.tenants.close();
-    services.library.close();
+    await services.library.close();
     await services.objects.close();
     await services.sessionPurge.close();
     store.reclaim.close();
     context.events.removeAllListeners();
-  };
+  }
   return services;
+}
+
+export class ApplicationBackground {
+  private readonly jobs = new Map<string, BackgroundJob>();
+  private closed = false;
+  constructor(
+    private readonly control: Pick<DomainServices, 'reconciler' | 'objects' | 'servicePeers' | 'library'>,
+    private readonly nodes: Pick<NodeRegistry, 'all' | 'get'>,
+  ) {}
+  private run(name: string, work: () => Promise<unknown>, input: string) {
+    if (this.closed) return Promise.resolve();
+    let job = this.jobs.get(name);
+    if (!job) {
+      job = new BackgroundJob('background.run', { job: name });
+      this.jobs.set(name, job);
+    }
+    return job.run(work, input);
+  }
+  tick() {
+    const input = JSON.stringify(this.nodes.all().map((node) => [node.nodeId, node.state]));
+    return Promise.all([
+      this.run('reconciler', () => this.control.reconciler.tick(), input),
+      this.run('objects', () => this.control.objects.tick(), input),
+      this.run('servicePeers', () => this.control.servicePeers.tick(), input),
+    ]).then(() => undefined);
+  }
+  endpointReady(identity: { processChanged: boolean; nodeId: string }) {
+    if (this.closed) return Promise.resolve();
+    this.control.library.endpointReady();
+    return this.run(
+      `endpointReady:${identity.nodeId}`,
+      () => this.control.reconciler.endpointReady(identity),
+      JSON.stringify(this.nodes.get(identity.nodeId)?.state),
+    );
+  }
+  failures() {
+    return [...this.jobs].flatMap(([name, job]) =>
+      job.retry.error ? [{ name, error: job.retry.error }] : [],
+    );
+  }
+  async close() {
+    this.closed = true;
+    await Promise.all([...this.jobs.values()].map((job) => job.close()));
+  }
 }
 
 export function startApplication(
@@ -218,20 +268,10 @@ export function startApplication(
   server: ReturnType<typeof createHttp>,
 ) {
   let closing = false;
-  const background = new Set<Promise<unknown>>();
-  function run(work: Promise<unknown>) {
-    background.add(work);
-    void work.then(
-      () => background.delete(work),
-      (error) => {
-        background.delete(work);
-        log.error('background.run_failed', { err: error });
-      },
-    );
-  }
+  const background = new ApplicationBackground(control, nodes);
   const endpointReady = (identity: { processChanged: boolean; nodeId: string }) => {
     if (!closing) {
-      run(control.reconciler.endpointReady(identity));
+      void background.endpointReady(identity);
     }
   };
   nodes.on('ready', endpointReady);
@@ -241,9 +281,7 @@ export function startApplication(
   nodes.on('offline', endpointOffline);
   const reconciliationTimer = setInterval(() => {
     if (!closing) {
-      run(control.reconciler.tick());
-      run(control.objects.tick());
-      run(control.servicePeers.tick());
+      void background.tick();
     }
   }, 1500);
   server.listen(config.port, config.host, () => {
@@ -270,7 +308,7 @@ export function startApplication(
     nodes.off('offline', endpointOffline);
     closePromise = (async () => {
       await server.shutdown();
-      while (background.size) await Promise.allSettled([...background]);
+      await background.close();
       await control.close();
       await nodes.stop();
       store.db.close();

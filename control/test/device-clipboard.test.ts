@@ -122,6 +122,7 @@ test('device writes finish before a caller forwards paste, and failures leave th
   });
   await assert.rejects(h.sync.send('retry'));
   h.sync.configure('one', true, h.set);
+  await h.sync.focus();
   await h.sync.send('retry');
   assert.deepEqual(h.sent, ['retry']);
 });
@@ -183,4 +184,40 @@ test('local explicit paste reads only after permission is already granted', asyn
   h.grant(true);
   await h.sync.readForPaste(false);
   assert.deepEqual(h.sent, ['device']);
+});
+
+test('unapplied remote clipboard blocks stale focus publication until the write succeeds', async () => {
+  let fail = true;
+  let local = 'old device';
+  let reads = 0;
+  const published: string[] = [];
+  const sync = new DeviceClipboardSync({
+    focused: () => true,
+    granted: async () => true,
+    read: async () => {
+      reads++;
+      return local;
+    },
+    write: async (text) => {
+      if (fail) throw new Error('write rejected');
+      local = text;
+    },
+    failed: () => undefined,
+  });
+  sync.configure('scope', true, async (text) => {
+    published.push(text);
+    return { revision: '10' };
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  published.length = 0;
+  reads = 0;
+  sync.receive({ revision: '20', text: 'new shared' });
+  await new Promise((resolve) => setImmediate(resolve));
+  await sync.focus();
+  assert.equal(reads, 0);
+  assert.deepEqual(published, []);
+  fail = false;
+  await sync.focus();
+  assert.equal(local, 'new shared');
+  assert.deepEqual(published, []);
 });

@@ -53,7 +53,7 @@ Result<void> WriteDurableText(const fs::path& raw_path,
     for (size_t offset = 0; offset < bytes.size();) {
       const auto count = static_cast<DWORD>(std::min<size_t>(65536, bytes.size() - offset));
       DWORD written = 0;
-      if (!WriteFile(file, bytes.data() + offset, count, &written, nullptr))
+      if (!WriteFile(file, bytes.data() + offset, count, &written, nullptr) || written == 0)
         return IoError("state write failed");
       offset += written;
     }

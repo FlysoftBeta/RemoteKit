@@ -278,7 +278,7 @@ void LimitsAndRetry() {
           "oversized reply replaced");
     const auto rejected = Take(server->Receive(5s)).json;
     Check(rejected["id"] == 1 && rejected["opId"] == "operation" &&
-              rejected["error"]["code"] == "limit_exceeded",
+              rejected["error"]["code"] == "outcome_unknown",
           "bounded reply preserves identity");
     Check(link.Current(generation), "oversized reply leaves link current");
     Check(link.SendEvent({{"event", "rtc.signal"}}, generation), "link remains writable");

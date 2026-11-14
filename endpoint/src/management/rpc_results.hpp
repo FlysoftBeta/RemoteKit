@@ -1,6 +1,7 @@
 #pragma once
 
 #include "management/coordination.hpp"
+#include "util/retry_unit.hpp"
 #include <deque>
 #include <future>
 #include <memory>
@@ -8,6 +9,15 @@
 
 namespace remotekit {
 class RpcResults {
+  friend class NativeRetryOwnerProbe;
+  static bool MayReadmit(const RetryUnit& retry) {
+    if (!retry.Failure())
+      return false;
+    const auto code = retry.Failure()->code;
+    return code == ErrorCode::kBusy || code == ErrorCode::kRateLimited ||
+           code == ErrorCode::kUnavailable;
+  }
+
  public:
   template <class Action>
   Result<Json> Execute(const Json& request, Action action) {
@@ -32,22 +42,41 @@ class RpcResults {
         entry = found->second;
         if (entry->fingerprint != fingerprint)
           return Error{ErrorCode::kConflict, "opId payload conflicts"};
+        if (entry->result.wait_for(std::chrono::seconds(0)) == std::future_status::ready &&
+            entry->retry->Status() == RetryUnit::State::kWaiting && entry->retry->Ready() &&
+            MayReadmit(*entry->retry)) {
+          auto next = std::make_shared<Entry>(fingerprint);
+          next->retry = entry->retry;
+          entry = std::move(next);
+          found->second = entry;
+          fresh = true;
+        }
       } else {
         if (request["replay"].get<bool>())
           return Error{ErrorCode::kOutcomeUnknown, "RPC result is not retained"};
         entry = std::make_shared<Entry>(fingerprint);
+        entry->retry->Input(id);
         entries_.emplace(id, entry);
         fresh = true;
       }
     }
     if (fresh) {
+      Result<Json> result =
+          Error{ErrorCode::kOutcomeUnknown, "RPC execution did not return a result"};
       try {
-        entry->completion.set_value(action());
+        result = action();
       } catch (...) {
-        entry->completion.set_value(
-            Error{ErrorCode::kOutcomeUnknown, "RPC execution did not return a result"});
+        result = Error{ErrorCode::kOutcomeUnknown, "RPC execution did not return a result"};
       }
       std::lock_guard lock(mutex_);
+      if (result)
+        entry->retry->Success();
+      else {
+        entry->retry->Fail(result.error());
+        result = *entry->retry->Failure();
+      }
+      entry->completion.set_value(std::move(result));
+      std::erase(completed_, id);
       completed_.push_back(id);
       while (completed_.size() > coordination::kMaxResults) {
         entries_.erase(completed_.front());
@@ -64,8 +93,9 @@ class RpcResults {
     std::string fingerprint;
     std::promise<Result<Json>> completion;
     std::shared_future<Result<Json>> result;
+    std::shared_ptr<RetryUnit> retry = std::make_shared<RetryUnit>("rpc.admission");
   };
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::map<std::string, std::shared_ptr<Entry>> entries_;
   std::deque<std::string> completed_;
 };

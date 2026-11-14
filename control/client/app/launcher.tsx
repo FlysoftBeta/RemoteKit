@@ -29,7 +29,7 @@ import {
 } from '../../shared/product';
 import { useAutoFocus } from '../editing/local-autofocus';
 import { failureError, FailureNote } from '../failures';
-import { recover } from '../failures/recovery';
+import { recoverRead as recover } from '../failures/recovery';
 import { useLibrary } from '../files/file-library-state';
 import { FileThumbnail, fileTypeColor, FileTypeIcon } from '../files/file-thumbnail';
 import { AppIcon } from './app-icon';

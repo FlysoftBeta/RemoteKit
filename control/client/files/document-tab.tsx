@@ -6,7 +6,7 @@ import type { LibraryEntry } from '../../shared/file-library';
 import { Tool } from '../app/window-tool';
 import { operationId } from '../control/product-operations';
 import { failureError, FailureNote, SurfaceState } from '../failures';
-import { recover } from '../failures/recovery';
+import { recoverRead as recover } from '../failures/recovery';
 import type { LearningCall } from '../learning/queries';
 import './document-tab.css';
 import { FileEntryMenu } from './file-entry-menu';
@@ -148,7 +148,10 @@ function SnippetDocument({ id }: { id: string }) {
     const abort = new AbortController();
     void recover(() => snippet(id), abort.signal, setError).then(
       (value) => {
-        if (active) setText(value.text);
+        if (active) {
+          setText(value.text);
+          setError(undefined);
+        }
       },
       (error) => {
         if (active) setError(failureError(error));

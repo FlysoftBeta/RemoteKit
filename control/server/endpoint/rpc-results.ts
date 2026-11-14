@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, endpointError } from '../../shared/errors';
+import { errorHandling } from '../../shared/error-policy';
 import { canonical, coordinationLimits } from './coordination';
 
 export function rpcId(method: string, ...identity: unknown[]): string {
@@ -30,7 +31,13 @@ export class RpcResults {
     if (replay) return Promise.reject(new RemoteKitError('outcome_unknown', 'RPC result is not retained'));
     const result = Promise.resolve()
       .then(action)
+      .catch((cause) => {
+        const handling = errorHandling(endpointError(cause).code);
+        if (['retry-soon', 'retry-after', 'backoff', 'refresh'].includes(handling)) this.entries.delete(opId);
+        throw cause;
+      })
       .finally(() => {
+        if (!this.entries.has(opId)) return;
         this.completed.push(opId);
         while (this.completed.length > coordinationLimits.results)
           this.entries.delete(this.completed.shift()!);

@@ -15,7 +15,12 @@ export type LearningAccount =
     }
   | { status: 'signed_in'; displayName: string; since: number }
   | { status: 'expired'; displayName: string; username?: string }
-  | { status: 'failed'; error: WireError; failureKind?: 'expired' | 'browser-replaced'; username?: string };
+  | {
+      status: 'failed' | 'unknown';
+      error: WireError;
+      failureKind?: 'expired' | 'browser-replaced';
+      username?: string;
+    };
 
 export interface StudySync {
   attachmentFailures?: { key: string; error: WireError }[];
@@ -52,7 +57,7 @@ export interface LearningPage<T> {
 export type AttachmentSave =
   | { state: 'saved'; entryId: string }
   | { state: 'downloading'; received: number; total?: number }
-  | { state: 'failed'; error: WireError }
+  | { state: 'failed' | 'unknown'; error: WireError }
   | { state: 'not_saved' };
 
 export interface StudyAttachment {

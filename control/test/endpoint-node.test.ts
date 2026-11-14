@@ -262,7 +262,7 @@ test('balanced placement publishes desired once per revision and fences reconnec
   }
 });
 
-test('Endpoint peer authentication failures cannot invalidate the Viewer Control session', async () => {
+test('Endpoint peer authentication failures preserve their credential-domain code', async () => {
   const h = await harness();
   try {
     const endpoint = await h.connect();
@@ -270,7 +270,7 @@ test('Endpoint peer authentication failures cannot invalidate the Viewer Control
       throw { code: 'unauthenticated', message: 'Peer identity not admitted' };
     };
     await assert.rejects(h.registry.get('alpha')!.request('object.fetch', 'one'), {
-      code: 'forbidden',
+      code: 'unauthenticated',
       message: 'Peer identity not admitted',
     });
     endpoint.desiredHandler = (_document, observation) => {
@@ -279,7 +279,7 @@ test('Endpoint peer authentication failures cannot invalidate the Viewer Control
     };
     await publishAndObserve(h.gateway, 'one');
     const observation = await h.gateway.waitObserved('one', (value) => !!value.lastError);
-    assert.equal(observation.lastError?.code, 'forbidden');
+    assert.equal(observation.lastError?.code, 'unauthenticated');
     assert.equal(observation.lastError?.message, 'Peer identity not admitted');
   } finally {
     await h.close();
@@ -514,7 +514,7 @@ test('browser status reasons map once at the Endpoint boundary and keep uncertai
       await node.barrier();
       await assert.rejects(h.gateway.snapshot('one'), { code: 'unavailable', message, detail });
       const runtime = control.tenants.get('one');
-      runtime.reconciliation.error = undefined;
+      runtime.reconciliation.retry.succeed();
       runtime.started = true;
       await assert.rejects(control.reconciler.reconcileProduct('one'), { message });
       assert.equal(runtime.lastError?.message, message);

@@ -1,4 +1,4 @@
-import { retryDelay } from '../../shared/error-policy';
+import { RetryUnit } from '../../shared/retry-unit';
 import { toRemoteKitError, type RemoteKitError } from '../../shared/errors';
 type Listener = (preview: Preview) => void;
 export interface Preview {
@@ -19,6 +19,7 @@ const MAX_PENDING = 128;
 export class FileThumbnails {
   private previews = new Map<string, Preview>();
   private pending = new Map<string, PendingPreview>();
+  private readonly units = new Map<string, RetryUnit>();
   private active = 0;
   private bytes = 0;
 
@@ -63,6 +64,8 @@ export class FileThumbnails {
   }
 
   clear() {
+    for (const unit of this.units.values()) unit.cancel();
+    this.units.clear();
     this.previews.clear();
     for (const job of this.pending.values()) {
       job.controller?.abort();
@@ -92,12 +95,13 @@ export class FileThumbnails {
     for (const [id, job] of this.pending) {
       if (this.active >= 1) return;
       if (job.controller || job.timer) continue;
-      const due = this.previews.get(id)?.retryAt;
-      if (due && due > Date.now() && due !== Infinity) {
-        job.timer = setTimeout(() => {
-          job.timer = undefined;
-          this.pump();
-        }, due - Date.now());
+      let unit = this.units.get(id);
+      if (!unit) {
+        unit = new RetryUnit();
+        this.units.set(id, unit);
+      }
+      if (!unit.ready(id)) {
+        unit.schedule(() => this.pump());
         continue;
       }
       const controller = new AbortController();
@@ -107,6 +111,7 @@ export class FileThumbnails {
         .then(
           (blob) => {
             if (this.pending.get(id) !== job) return;
+            unit.succeed();
             const chosen = this.previews.get(id)?.blob ?? blob;
             this.cache(id, { blob: chosen });
             job.listeners.forEach((listener) => listener({ blob: chosen }));
@@ -114,11 +119,11 @@ export class FileThumbnails {
           (error) => {
             if (this.pending.get(id) === job && !this.previews.get(id)?.blob) {
               const failure = toRemoteKitError(error);
-              const delay = retryDelay(failure, 0);
+              const delay = unit.fail(failure).delay;
               if (failure.code !== 'canceled')
                 this.cache(id, {
                   error: failure,
-                  retryAt: delay === undefined ? Infinity : Date.now() + Math.min(60_000, delay),
+                  retryAt: delay === undefined ? Infinity : Date.now() + delay,
                 });
               job.listeners.forEach((listener) => listener(this.previews.get(id) ?? {}));
             }

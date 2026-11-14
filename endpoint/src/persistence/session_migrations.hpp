@@ -13,5 +13,5 @@ Result<void> MigrateSessionDb(sqlite::Database& db,
                               const std::filesystem::path& directory,
                               const std::string& build,
                               std::span<const SessionMigration> steps = {});
-Result<void> CheckSessionDb(sqlite::Database& db, int64_t expected_version = 3);
+Result<void> CheckSessionDb(sqlite::Database& db, int64_t expected_version = 4);
 }  // namespace remotekit

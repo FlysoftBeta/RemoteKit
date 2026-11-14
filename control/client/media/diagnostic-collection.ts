@@ -1,3 +1,4 @@
+import { RetryUnit } from '../../shared/retry-unit';
 import type { DiagnosticEnvironment, DiagnosticMethods, DiagnosticReply } from '../../shared/diagnostics';
 import { toRemoteKitError, type RemoteKitError, type WireError } from '../../shared/errors';
 import { recover, recoveryDelay } from '../failures/recovery';
@@ -96,7 +97,7 @@ export type DiagnosticState =
 
 export class DiagnosticCollection {
   private readonly abort = new AbortController();
-  private attempts = 0;
+  private readonly finalizationRetry = new RetryUnit();
   private state: DiagnosticState = { phase: 'idle' };
   private available = false;
   private disposed = false;
@@ -135,6 +136,7 @@ export class DiagnosticCollection {
   dispose() {
     this.disposed = true;
     this.abort.abort();
+    this.finalizationRetry.cancel();
     this.available = false;
     clearTimeout(this.timer);
   }
@@ -249,6 +251,12 @@ export class DiagnosticCollection {
 
   private async finish(checkStatus: boolean) {
     if (!this.available || this.finalizing || this.state.phase !== 'finalizing') return;
+    if (!this.finalizationRetry.ready(this.state.id)) {
+      this.finalizationRetry.schedule(() => {
+        void this.finish(true);
+      });
+      return;
+    }
     this.finalizing = true;
     const generation = this.generation;
     try {
@@ -264,14 +272,17 @@ export class DiagnosticCollection {
         reply = await this.request('diagnostics.stop', { id: current.id });
       }
       if (generation !== this.generation) return;
+      this.finalizationRetry.succeed();
       if (!this.apply(reply, current) || reply.status === 'finalizing')
         this.schedule(() => void this.finish(true));
     } catch (error) {
       if (this.available && generation === this.generation && this.state.phase === 'finalizing') {
         const failure = toRemoteKitError(error);
-        const delay = recoveryDelay(failure, this.attempts++);
+        const delay = this.finalizationRetry.fail(failure).delay;
         this.update({ ...this.state, error: failure, phase: delay === undefined ? 'failed' : 'finalizing' });
-        if (delay !== undefined) this.timer = setTimeout(() => void this.finish(true), delay);
+        this.finalizationRetry.schedule(() => {
+          void this.finish(true);
+        });
       }
     } finally {
       this.finalizing = false;

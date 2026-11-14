@@ -137,7 +137,8 @@ inline void Downloads(const Json& state) {
   Array(state.at("records"), 4096);
   std::set<std::string> ids;
   for (const auto& row : state.at("records")) {
-    Keys(row, {"incarnation", "eventId", "download"}, {"result", "attempt", "retryAt", "error"});
+    Keys(row, {"incarnation", "eventId", "download"},
+         {"result", "attempt", "retryAt", "error", "retry"});
     Text(row.at("incarnation"), 1, 128);
     Require(ids.insert(Text(row.at("eventId"), 1, 128)).second, "duplicate download import");
     const auto& download = row.at("download");
@@ -161,6 +162,19 @@ inline void Downloads(const Json& state) {
       Unsigned(row.at("retryAt"));
     if (row.contains("error"))
       WireError(row.at("error"));
+    if (row.contains("retry")) {
+      const auto& retry = row.at("retry");
+      Keys(retry, {"state", "attempt", "retryAt", "input", "error", "buildId"}, {"reported"});
+      Enum(retry.at("state"), {"idle", "waiting", "faulted", "dropped"});
+      Unsigned(retry.at("attempt"), 0, UINT32_MAX);
+      Unsigned(retry.at("retryAt"));
+      Text(retry.at("input"), 0, 1024);
+      Text(retry.at("buildId"), 0, 128);
+      if (retry.contains("reported"))
+        Boolean(retry.at("reported"));
+      if (!retry.at("error").is_null())
+        WireError(retry.at("error"));
+    }
   }
 }
 }  // namespace remotekit::session_documents

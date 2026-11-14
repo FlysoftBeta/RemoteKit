@@ -54,27 +54,41 @@ Result<void> Service::Clear() {
   {
     std::lock_guard lock(mutex_);
     service_peers_.clear();
-    closing.swap(sessions_);
-    session_count_ = 0;
+    closing = sessions_;
   }
-  std::vector<std::future<void>> stopping;
+  std::vector<std::pair<std::string, std::future<Result<Json>>>> stopping;
   for (auto& [tenant, managed] : closing) {
     managed.coordinator->ManagementLost(0);
-    stopping.push_back(std::async(std::launch::async, [this, managed, deadline] {
-      auto stopped = managed.coordinator->Execute([&]() -> Result<Json> {
-        const auto commit = "node-" + incarnation_ + "-" + managed.execution->Id();
-        RK_ASSIGN_OR_RETURN(
-            copy, Checkpoints::Copy(options_.data / "sessions" / managed.execution->Id()));
-        const bool clean = !copy.is_null() && copy.at("state") == "clean";
-        return managed.execution->Stop(failed_ || clean ? Json() : Json(commit), false, deadline,
-                                       !link_.Current(fenced_generation_));
-      });
-      if (!stopped)
-        LogError(LogLevel::kWarn, "session.shutdown_commit_failed", stopped.error());
-    }));
+    stopping.emplace_back(
+        tenant, std::async(std::launch::async, [this, managed, deadline] {
+          return managed.coordinator->Execute([&]() -> Result<Json> {
+            const auto commit = "node-" + incarnation_ + "-" + managed.execution->Id();
+            RK_ASSIGN_OR_RETURN(
+                copy, Checkpoints::Copy(options_.data / "sessions" / managed.execution->Id()));
+            const bool clean = !copy.is_null() && copy.at("state") == "clean";
+            return managed.execution->Stop(failed_ || clean ? Json() : Json(commit), false,
+                                           deadline, !link_.Current(fenced_generation_));
+          });
+        }));
   }
-  for (auto& task : stopping)
-    task.get();
+  std::optional<Error> failure;
+  for (auto& [tenant, task] : stopping) {
+    auto result = task.get();
+    if (!result) {
+      LogError(LogLevel::kWarn, "session.shutdown_commit_failed", result.error(),
+               {{"sessionId", closing.at(tenant).execution->Id()}});
+      if (!failure || result.error().code == ErrorCode::kOutcomeUnknown)
+        failure = result.error();
+      continue;
+    }
+    std::lock_guard lock(mutex_);
+    const auto found = sessions_.find(tenant);
+    if (found != sessions_.end() && found->second.execution == closing.at(tenant).execution)
+      sessions_.erase(found);
+  }
+  session_count_ = sessions_.size();
+  if (failure)
+    return *failure;
   return {};
 }
 Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
@@ -182,6 +196,32 @@ Result<void> Service::Fence(const Json& desired, uint64_t generation) {
       return Error{ErrorCode::kConflict, "node.desired revision conflicts"};
   }
   const auto& placements = desired["sessions"];
+  std::map<std::string, Error> errors;
+  const auto attempt = [](const std::function<Result<void>()>& work) -> Result<void> {
+    try {
+      return work();
+    } catch (const fs::filesystem_error& error) {
+      return WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                         error.code().value());
+    } catch (const std::exception& error) {
+      return Error{ErrorCode::kInternal, error.what()};
+    }
+  };
+  const auto failed = [&](const Json& target, Error error) {
+    auto& retry = placement_retries_
+                      .try_emplace(target.at("sessionId").get<std::string>(), "placement.reconcile")
+                      .first->second;
+    retry.Fail(error);
+    errors.insert_or_assign(target.at("sessionId").get<std::string>(), std::move(error));
+  };
+  const auto retire = [&](ManagedSession& managed) -> Result<void> {
+    managed.coordinator->ManagementLost(0);
+    RK_ASSIGN_OR_RETURN(stopped, managed.coordinator->Execute([&]() -> Result<Json> {
+      RK_RETURN_IF_ERROR(attempt([&] { return managed.execution->Fence(); }));
+      return Json::object();
+    }));
+    return {};
+  };
   std::vector<ManagedSession> retiring;
   {
     std::lock_guard lock(mutex_);
@@ -203,52 +243,76 @@ Result<void> Service::Fence(const Json& desired, uint64_t generation) {
     }
   }
   for (auto& managed : retiring) {
-    RK_ASSIGN_OR_RETURN(stopped, managed.coordinator->Execute([&]() -> Result<Json> {
-      RK_RETURN_IF_ERROR(managed.execution->Fence());
-      return Json::object();
-    }));
-    const auto directory = options_.data / "sessions" / managed.execution->Id();
-    if (fs::exists(directory))
-      fs::last_write_time(directory, fs::file_time_type::clock::now());
+    auto result = attempt([&] { return retire(managed); });
+    if (!result)
+      failed(managed.coordinator->Target(), result.error());
   }
   retiring.clear();
   const auto root = options_.data / "sessions";
-  fs::create_directories(root);
-  for (const auto& entry : fs::directory_iterator(root)) {
-    const auto name = entry.path().filename().string();
-    if (name.size() != 42 || !name.ends_with(".copy.json"))
-      continue;
-    const auto id = name.substr(0, 32);
-    if (std::none_of(placements.begin(), placements.end(),
-                     [&](const Json& value) { return value["sessionId"] == id; }))
-      fs::remove(entry.path());
+  auto swept = attempt([&]() -> Result<void> {
+    fs::create_directories(root);
+    for (const auto& entry : fs::directory_iterator(root)) {
+      const auto name = entry.path().filename().string();
+      if (name.size() != 42 || !name.ends_with(".copy.json"))
+        continue;
+      const auto id = name.substr(0, 32);
+      if (std::none_of(placements.begin(), placements.end(),
+                       [&](const Json& value) { return value["sessionId"] == id; })) {
+        auto forgotten = attempt([&] { return Checkpoints::ForgetCopy(root / id); });
+        if (!forgotten)
+          failed({{"tenantId", ""}, {"sessionId", id}}, forgotten.error());
+      }
+    }
+    return {};
+  });
+  if (!swept) {
+    for (const auto& placement : placements)
+      failed(placement, swept.error());
   }
   for (const auto& placement : placements) {
     const auto directory = root / placement["sessionId"].get<std::string>();
-    RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory));
-    if (!copy.is_null() &&
-        copy["placementEpoch"].get<uint64_t>() < placement["placementEpoch"].get<uint64_t>() &&
-        placement["dataState"] == "clean") {
-      fs::remove_all(LongPath(directory));
-      fs::remove(LongPath(directory).wstring() + L".copy.json");
-      fs::remove(LongPath(directory).wstring() + L".checkpoint-index.json");
-      RK_RETURN_IF_ERROR(Checkpoints::TruncateChanges(directory));
-      copy = nullptr;
-    }
-    if (!copy.is_null() && copy["placementEpoch"] == placement["placementEpoch"] &&
-        copy["state"] == "clean" && !copy["lastCommit"].is_null() &&
-        placement["dataState"] == "dirty") {
-      RK_ASSIGN_OR_RETURN(details, Checkpoints(objects_).Describe(copy["base"]));
-      std::vector<objects::ObjectInfo> pending;
-      for (const auto& id : details["objects"]) {
-        auto local = objects_.Store().Inspect(id.get<std::string>());
-        if (local)
-          pending.push_back(std::move(local).value());
-      }
-      RK_RETURN_IF_ERROR(
-          objects_.CommittedBatch(pending, placement["tenantId"].get<std::string>()));
-    }
     const auto tenant = placement["tenantId"].get<std::string>();
+    const auto id = placement["sessionId"].get<std::string>();
+    auto prepared = PreparePlacement(placement, desired.at("revision"), generation, [&] {
+      return attempt([&]() -> Result<void> {
+        if (errors.contains(id))
+          return errors.at(id);
+        RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory));
+        if (!copy.is_null() &&
+            copy["placementEpoch"].get<uint64_t>() < placement["placementEpoch"].get<uint64_t>() &&
+            placement["dataState"] == "clean") {
+          ManagedSession obsolete;
+          {
+            std::lock_guard lock(mutex_);
+            const auto found = sessions_.find(tenant);
+            if (found != sessions_.end()) {
+              obsolete = found->second;
+              sessions_.erase(found);
+            }
+          }
+          if (obsolete.coordinator)
+            RK_RETURN_IF_ERROR(retire(obsolete));
+          RK_RETURN_IF_ERROR(Checkpoints::ForgetCopy(directory));
+          copy = nullptr;
+        }
+        if (!copy.is_null() && copy["placementEpoch"] == placement["placementEpoch"] &&
+            copy["state"] == "clean" && !copy["lastCommit"].is_null() &&
+            placement["dataState"] == "dirty") {
+          RK_ASSIGN_OR_RETURN(details, Checkpoints(objects_).Describe(copy["base"]));
+          std::vector<objects::ObjectInfo> pending;
+          for (const auto& id : details["objects"]) {
+            auto local = objects_.Store().Inspect(id.get<std::string>());
+            if (local)
+              pending.push_back(std::move(local).value());
+          }
+          RK_RETURN_IF_ERROR(
+              objects_.CommittedBatch(pending, placement["tenantId"].get<std::string>()));
+        }
+        return {};
+      });
+    });
+    if (!prepared && !errors.contains(id))
+      errors.insert_or_assign(id, prepared.error());
     ManagedSession managed;
     {
       std::lock_guard lock(mutex_);
@@ -268,9 +332,17 @@ Result<void> Service::Fence(const Json& desired, uint64_t generation) {
       }
       managed = entry;
     }
+    auto recorded = managed.coordinator->SetFenceError(
+        errors.contains(id) ? std::optional<Error>(errors.at(id)) : std::nullopt);
+    if (!recorded)
+      failed(placement, recorded.error());
     managed.execution->Activate(connection_epoch_, generation);
     managed.coordinator->Activate(connection_epoch_, desired["revision"], generation);
-    RK_ASSIGN_OR_RETURN(observation, managed.coordinator->Report());
+    auto observation = managed.coordinator->Report();
+    if (!observation) {
+      failed(placement, observation.error());
+      auto recorded_error = managed.coordinator->SetFenceError(observation.error());
+    }
   }
   node_desired_ = std::move(document);
   placements_ = placements;
@@ -286,7 +358,6 @@ Result<Json> Service::DeleteSession(const std::string& id) {
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
       if (it->second.execution->Id() == id) {
         retiring = it->second;
-        sessions_.erase(it);
         break;
       }
     }
@@ -298,20 +369,76 @@ Result<Json> Service::DeleteSession(const std::string& id) {
       return Json::object();
     }));
   }
+  try {
+    for (const auto* suffix :
+         {"", ".copy.json", ".copy.json.new", ".changes", ".checkpoint-index.json",
+          ".checkpoint-index.json.new", ".restore", ".discard"})
+      fs::remove_all(options_.data / "sessions" / (id + suffix));
+    auto logs = DeleteSessionLogs(options_.node_root, id);
+    if (!logs) {
+      auto error = logs.error();
+      error.code = ErrorCode::kOutcomeUnknown;
+      error.retry_after_ms.reset();
+      return error;
+    }
+  } catch (const fs::filesystem_error& error) {
+    return WithOsError(ErrorCode::kOutcomeUnknown, error.what(), OsError::Kind::kWin32,
+                       error.code().value());
+  }
+  {
+    std::lock_guard lock(mutex_);
+    std::erase_if(sessions_,
+                  [&](const auto& entry) { return entry.second.execution == retiring.execution; });
+  }
   placements_.erase(std::remove_if(placements_.begin(), placements_.end(),
                                    [&](const Json& p) { return p["sessionId"] == id; }),
                     placements_.end());
-  for (const auto* suffix :
-       {"", ".copy.json", ".copy.json.new", ".changes", ".checkpoint-index.json",
-        ".checkpoint-index.json.new", ".restore", ".discard"})
-    fs::remove_all(options_.data / "sessions" / (id + suffix));
-  RK_RETURN_IF_ERROR(DeleteSessionLogs(options_.node_root, id));
   return Json{{"stopped", bool(retiring.coordinator)}};
 }
 Result<Json> Service::DeleteCold(bool expired_only) {
+  return DeleteCold(expired_only, [&](const std::string& id) -> Result<bool> {
+    const auto directory = options_.data / "sessions" / id;
+    RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory));
+    if (expired_only && !copy.is_null() && copy["state"] == "dirty")
+      return false;
+    const fs::path timestamp =
+        fs::exists(directory) ? directory : fs::path(directory.wstring() + L".copy.json");
+    if (expired_only && fs::exists(timestamp) &&
+        fs::file_time_type::clock::now() - fs::last_write_time(timestamp) <
+            std::chrono::hours(24 * 7))
+      return false;
+    RK_ASSIGN_OR_RETURN(result, DeleteSession(id));
+    return true;
+  });
+}
+Result<Json> Service::SweepCold(uint64_t generation, const std::function<Result<Json>()>& sweep) {
+  cold_retry_.Input(std::to_string(generation));
+  if (!cold_retry_.Ready())
+    return *cold_retry_.Failure();
+  Result<Json> result = Error{ErrorCode::kInternal, "cold cleanup failed"};
+  try {
+    result = sweep();
+  } catch (const fs::filesystem_error& error) {
+    result = WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                         error.code().value());
+  } catch (const std::exception& error) {
+    result = Error{ErrorCode::kInternal, error.what()};
+  } catch (...) {
+    result = Error{ErrorCode::kInternal, "cold cleanup failed"};
+  }
+  if (result)
+    cold_retry_.Success();
+  else
+    cold_retry_.Fail(result.error());
+  return result;
+}
+Result<Json> Service::DeleteCold(
+    bool expired_only,
+    const std::function<Result<bool>(const std::string&)>& remove_candidate) {
   const auto root = options_.data / "sessions";
   fs::create_directories(root);
   size_t deleted = 0;
+  Json items = Json::array();
   std::set<std::string> ids;
   for (const auto& entry : fs::directory_iterator(root)) {
     const auto name = entry.path().filename().string();
@@ -322,20 +449,34 @@ Result<Json> Service::DeleteCold(bool expired_only) {
     if (std::any_of(placements_.begin(), placements_.end(),
                     [&](const Json& p) { return p["sessionId"] == id; }))
       continue;
-    const auto directory = root / id;
-    RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory));
-    if (expired_only && !copy.is_null() && copy["state"] == "dirty")
+    auto& retry = cold_delete_retries_.try_emplace(id, "session.cold_delete").first->second;
+    retry.Input(id + ":" + std::to_string(fenced_generation_.load()) + ":" + options_.build_id +
+                ":" + std::to_string(expired_only));
+    if (!retry.Ready()) {
+      items.push_back({{"sessionId", id}, {"error", WireError(*retry.Failure())}});
       continue;
-    const fs::path timestamp =
-        fs::exists(directory) ? directory : fs::path(directory.wstring() + L".copy.json");
-    if (expired_only && fs::exists(timestamp) &&
-        fs::file_time_type::clock::now() - fs::last_write_time(timestamp) <
-            std::chrono::hours(24 * 7))
-      continue;
-    RK_ASSIGN_OR_RETURN(result, DeleteSession(id));
-    ++deleted;
+    }
+    Result<bool> result = false;
+    try {
+      result = remove_candidate(id);
+    } catch (const fs::filesystem_error& error) {
+      result = WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                           error.code().value());
+    } catch (const std::exception& error) {
+      result = Error{ErrorCode::kInternal, error.what()};
+    }
+    if (!result) {
+      retry.Fail(result.error());
+      items.push_back({{"sessionId", id}, {"error", WireError(*retry.Failure())}});
+    } else {
+      retry.Success();
+      if (result.value()) {
+        ++deleted;
+        items.push_back({{"sessionId", id}, {"deleted", true}});
+      }
+    }
   }
-  return Json{{"deleted", deleted}};
+  return Json{{"deleted", deleted}, {"items", items}};
 }
 bool Service::HandleRequest(Json request, uint64_t generation) {
   if (!link_.Current(generation))
@@ -364,6 +505,90 @@ bool Service::HandleRequest(Json request, uint64_t generation) {
                                               RequestLogFields(request)));
   return shutdown;
 }
+Result<void> Service::PreparePlacement(const Json& placement,
+                                       const std::string& revision,
+                                       uint64_t generation,
+                                       const std::function<Result<void>()>& prepare) {
+  auto& retry =
+      placement_retries_
+          .try_emplace(placement.at("sessionId").get<std::string>(), "placement.reconcile")
+          .first->second;
+  retry.Input(placement.dump() + ":" + revision + ":" + std::to_string(generation));
+  if (!retry.Ready())
+    return *retry.Failure();
+  auto result = prepare();
+  if (result)
+    retry.Success();
+  else
+    retry.Fail(result.error());
+  return result;
+}
+Result<Json> Service::ScheduleVersion(const std::string& id,
+                                      uint64_t epoch,
+                                      const std::function<Result<Json>()>& ready) {
+  std::lock_guard lock(snapshot_mutex_);
+  auto& retry = version_retries_.try_emplace(id, "snapshot.schedule").first->second;
+  retry.Input(id + ":" + std::to_string(epoch) + ":" + options_.build_id);
+  if (!retry.Ready())
+    return *retry.Failure();
+  auto result = ready();
+  if (!result)
+    retry.Fail(result.error());
+  else if (result.value() == false)
+    retry.Success();
+  return result;
+}
+Result<Json> Service::TakeSnapshot(SnapshotClient& client, const std::vector<std::string>& paths) {
+  std::lock_guard lock(snapshot_mutex_);
+  snapshot_retry_.Input(Json{
+      {"paths", paths}, {"build", options_.build_id}, {"generation", metrics_generation_.load()}}
+                            .dump());
+  if (!snapshot_retry_.Ready())
+    return *snapshot_retry_.Failure();
+  auto result = client.Take(options_.data, paths);
+  if (result)
+    snapshot_retry_.Success();
+  else
+    snapshot_retry_.Fail(result.error());
+  return result;
+}
+Result<void> Service::SnapshotWork(const std::function<Result<void>()>& work) {
+  std::lock_guard lock(snapshot_mutex_);
+  snapshot_worker_retry_.Input(options_.build_id + ":" +
+                               std::to_string(metrics_generation_.load()));
+  if (!snapshot_worker_retry_.Ready())
+    return *snapshot_worker_retry_.Failure();
+  const auto invoke = [&]() -> Result<void> {
+    try {
+      return work();
+    } catch (const fs::filesystem_error& error) {
+      return WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                         error.code().value());
+    } catch (const std::exception& error) {
+      return Error{ErrorCode::kInternal, error.what()};
+    } catch (...) {
+      return Error{ErrorCode::kInternal, "snapshot scheduler failed"};
+    }
+  };
+  auto result = invoke();
+  if (result)
+    snapshot_worker_retry_.Success();
+  else
+    snapshot_worker_retry_.Fail(result.error());
+  return result;
+}
+Json Service::SnapshotFailures() const {
+  std::lock_guard lock(snapshot_mutex_);
+  Json errors = Json::object();
+  for (const auto& [id, retry] : version_retries_)
+    if (retry.Failure())
+      errors[id] = WireError(*retry.Failure());
+  if (snapshot_retry_.Failure())
+    errors["take"] = WireError(*snapshot_retry_.Failure());
+  if (snapshot_worker_retry_.Failure())
+    errors["worker"] = WireError(*snapshot_worker_retry_.Failure());
+  return errors;
+}
 void Service::Versions() {
   SnapshotClient client(options_.node_id);
 
@@ -373,12 +598,8 @@ void Service::Versions() {
       LogError(LogLevel::kWarn, "snapshot.unavailable", error);
     snapshot_unavailable_streak_ = true;
   };
-  if (!client.Available()) {
-    unavailable(Error{ErrorCode::kUnavailable, "snapshot service is unavailable"});
-    return;
-  }
   if (!snapshot_unavailable_streak_)
-    snapshot_available_ = true;
+    snapshot_available_ = client.Available();
   int64_t interval = 300000;
 #ifndef NDEBUG
   if (const char* value = std::getenv("REMOTEKIT_TEST_VERSION_INTERVAL_MS"))
@@ -392,11 +613,11 @@ void Service::Versions() {
   }
   std::vector<std::string> paths;
   for (const auto& managed : candidates) {
-    auto ready = managed.coordinator->Execute([&]() -> Result<Json> {
-      return Json(managed.execution->VersionDue(VersionNow(), interval));
+    auto ready = ScheduleVersion(managed.execution->Id(), managed.execution->PlacementEpoch(), [&] {
+      return managed.coordinator->Execute([&]() -> Result<Json> {
+        return Json(managed.execution->VersionDue(VersionNow(), interval));
+      });
     });
-    if (!ready)
-      LogError(LogLevel::kWarn, "snapshot.schedule_failed", ready.error());
     if (ready && ready.value() == true) {
       due.push_back(managed);
       paths.push_back("sessions/" + managed.execution->Id());
@@ -404,7 +625,7 @@ void Service::Versions() {
   }
   if (paths.empty())
     return;
-  auto taken = client.Take(options_.data, paths);
+  auto taken = TakeSnapshot(client, paths);
   if (!taken) {
     unavailable(taken.error());
     return;
@@ -430,8 +651,9 @@ void Service::Versions() {
     if (!saved) {
       if (!client.Available())
         unavailable(saved.error());
-      LogError(LogLevel::kWarn, "snapshot.version_failed", saved.error());
+      version_retries_.at(managed.execution->Id()).Fail(saved.error());
     } else {
+      version_retries_.at(managed.execution->Id()).Success();
       auto reported = managed.coordinator->Report();
       if (!reported)
         LogError(LogLevel::kWarn, "snapshot.report_failed", reported.error());
@@ -456,12 +678,10 @@ int Service::Run() {
       interval = std::max<int64_t>(100, std::stoll(value));
 #endif
     while (!stop.stop_requested()) {
-      try {
+      auto worked = SnapshotWork([&]() -> Result<void> {
         Versions();
-      } catch (const std::exception& error) {
-        LogError(LogLevel::kWarn, "snapshot.version_failed",
-                 Error{ErrorCode::kUnavailable, error.what()});
-      }
+        return {};
+      });
       std::unique_lock lock(wait_mutex);
       wake.wait_for(lock, stop, std::chrono::milliseconds(interval), [] { return false; });
     }
@@ -470,11 +690,14 @@ int Service::Run() {
   auto next_sweep = PhaseClock::now();
   uint64_t configured_generation = 0;
   metrics_.Start([this] { return session_count_.load(); },
-                 [this](Json sample) {
+                 [this](Json sample) -> Result<void> {
                    sample["event"] = "node.metrics";
                    sample["snapshot"] = snapshot_available_.load() ? "available" : "unavailable";
-                   link_.SendEvent(sample, metrics_generation_.load());
-                 });
+                   if (!link_.SendEvent(sample, metrics_generation_.load()))
+                     return Error{ErrorCode::kBusy, "metrics publication queue is full"};
+                   return {};
+                 },
+                 [this] { return std::to_string(metrics_generation_.load()); });
   while (!failed_) {
     bool eof = false;
     uint64_t generation = 0;
@@ -517,11 +740,10 @@ int Service::Run() {
           link_.SendReply(generation, busy);
       }
     }
-    if (PhaseClock::now() >= next_sweep) {
-      auto swept = DeleteCold(true);
-      if (!swept)
-        LogError(LogLevel::kWarn, "session.cold_sweep_failed", swept.error());
-      next_sweep = PhaseClock::now() + std::chrono::hours(1);
+    cold_retry_.Input(std::to_string(configured_generation));
+    if (PhaseClock::now() >= next_sweep && cold_retry_.Ready()) {
+      auto swept = SweepCold(configured_generation, [&] { return DeleteCold(true); });
+      next_sweep = swept ? PhaseClock::now() + std::chrono::hours(1) : cold_retry_.Until();
     }
     size_t running = 0;
     {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { accountsFor, registerUser, requestViewer, testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -45,6 +46,20 @@ const openAdmin = { type: 'window.open', appId: 'admin', placement: { mode: 'spa
 const adminWindows = (h: Awaited<ReturnType<typeof stack>>, tenant: string) =>
   h.store.workspaces.workspace(tenant).windows.filter((win) => win.appId === 'admin');
 
+test('a publication identity returns the existing announcement after a lost reply', async (t) => {
+  const h = await stack();
+  t.after(() => h.close());
+  const draft = { id: randomUUID(), title: '维护通知', body: '今晚维护' };
+  const first = await h.call(h.admin.tenantId, 'admin.publishAnnouncement', draft);
+  const second = await h.call(h.admin.tenantId, 'admin.publishAnnouncement', draft);
+  assert.deepEqual(second, first);
+  assert.equal(h.control.announcements.list().length, 1);
+  await assert.rejects(
+    h.call(h.admin.tenantId, 'admin.publishAnnouncement', { ...draft, body: '不同内容' }),
+    { code: 'conflict' },
+  );
+});
+
 test('the admin App opens only for the administrator, once, and closes when the role moves', async () => {
   const h = await stack();
   try {
@@ -77,18 +92,29 @@ test('announcements reach every user, track reads per publication and are admin-
   const h = await stack();
   try {
     const announcements = (tenant: string) => h.control.viewers.productState(tenant).announcements;
-    await assert.rejects(h.call(h.user.tenantId, 'admin.publishAnnouncement', { title: 't', body: 'b' }), {
-      code: 'forbidden',
-    });
-    await assert.rejects(h.call(h.admin.tenantId, 'admin.publishAnnouncement', { title: ' ', body: 'b' }), {
-      code: 'invalid_request',
-    });
     await assert.rejects(
-      h.call(h.admin.tenantId, 'admin.publishAnnouncement', { title: 't', body: 'x'.repeat(5001) }),
+      h.call(h.user.tenantId, 'admin.publishAnnouncement', { id: randomUUID(), title: 't', body: 'b' }),
+      {
+        code: 'forbidden',
+      },
+    );
+    await assert.rejects(
+      h.call(h.admin.tenantId, 'admin.publishAnnouncement', { id: randomUUID(), title: ' ', body: 'b' }),
+      {
+        code: 'invalid_request',
+      },
+    );
+    await assert.rejects(
+      h.call(h.admin.tenantId, 'admin.publishAnnouncement', {
+        id: randomUUID(),
+        title: 't',
+        body: 'x'.repeat(5001),
+      }),
       { code: 'limit_exceeded' },
     );
 
     const published = await h.call(h.admin.tenantId, 'admin.publishAnnouncement', {
+      id: randomUUID(),
       title: ' 维护通知 ',
       body: '今晚\n停机一小时',
     });

@@ -47,6 +47,7 @@ class OutputController : private ControllerContext {
   }
 
  private:
+  friend class NativeErrorStateProbe;
   PeerController& peer_controller;
   AuthorizationController& authorization;
   PresentationController& presentation;

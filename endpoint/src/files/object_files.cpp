@@ -13,7 +13,7 @@ Result<void> ObjectFiles::Start() {
         RK_RETURN_IF_ERROR(Require(job));
         return Execute(job, Required(job.message, "method"), job.message.at("params"));
       },
-      [this] { Sweep(); });
+      [this] { return Sweep(); });
   return {};
 }
 Result<Json> ObjectFiles::Execute(const FileJob& job,
@@ -152,13 +152,12 @@ Result<Json> ObjectFiles::Photo(const FileJob& job, const std::string& method, c
   return Error{ErrorCode::kUnavailable, "photo_processing_unavailable"};
 }
 
-void ObjectFiles::Sweep() {
-  auto swept = file_library.Sweep();
-  if (!swept)
-    LogError(LogLevel::kWarn, "files.sweep_failed", swept.error());
+Result<void> ObjectFiles::Sweep() {
+  RK_RETURN_IF_ERROR(file_library.Sweep());
 #ifdef RK_FILE_PHOTO
   photo_bursts.Sweep([&](uint64_t grant) { return services.CurrentLibraryGrant(grant); });
 #endif
+  return {};
 }
 
 }  // namespace remotekit

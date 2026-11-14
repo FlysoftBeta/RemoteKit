@@ -24,9 +24,9 @@ using Json = nlohmann::json;
 
 void RpcLockAndStatusMapping() {
   using remotekit::ErrorCode;
-  CHECK(remotekit::media::SdkErrorCode(REMOTEKIT_SDK_CHANNEL_CLOSED) == ErrorCode::kUnavailable);
-  CHECK(remotekit::media::SdkErrorCode(REMOTEKIT_SDK_LOST) == ErrorCode::kOutcomeUnknown);
-  CHECK(remotekit::media::SdkErrorCode(REMOTEKIT_SDK_BUSY) == ErrorCode::kBusy);
+  CHECK(remotekit::SdkErrorCode(REMOTEKIT_SDK_CHANNEL_CLOSED) == ErrorCode::kUnavailable);
+  CHECK(remotekit::SdkErrorCode(REMOTEKIT_SDK_LOST) == ErrorCode::kOutcomeUnknown);
+  CHECK(remotekit::SdkErrorCode(REMOTEKIT_SDK_BUSY) == ErrorCode::kBusy);
   CHECK(remotekit::BrowserRpc::ReplyError(
             {{"error", {{"code", "internal"}, {"message", "Browser invariant"}}}})
             .code == ErrorCode::kInternal);
@@ -123,7 +123,7 @@ void InputWireFailures() {
   auto dispatch = [&] {
     return remotekit::RetryBrowserInput(
         Json{{"method", "input"}, {"sequence", "41"}}, rpc, [&] { return identity; },
-        [&] { return expired; }, [&] { ++waits; }, [&] { ++retries; }, [&] { ++exhausted; });
+        [&] { return expired; }, [&](auto) { ++waits; }, [&] { ++retries; }, [&] { ++exhausted; });
   };
   CHECK(dispatch().value().at("ok") == true);
   CHECK(calls == 3 && retries == 2 && waits == 2 && exhausted == 0);
@@ -147,7 +147,7 @@ void InputWireFailures() {
   expired = false;
   const auto before = calls;
   CHECK(dispatch().error().code == remotekit::ErrorCode::kBusy);
-  CHECK(calls - before == 51 && exhausted == 2);
+  CHECK(calls - before == remotekit::RetryUnit::kBusyAttempts && exhausted == 2);
   application = {{"ok", false},
                  {"error", {{"code", "outcome_unknown"}, {"message", "partial injection"}}},
                  {"inputAdmitted", true}};
@@ -207,56 +207,60 @@ void OpenRenderLifetimeAndStartupBackoff() {
 
 void ControlBackpressure() {
   remotekit::ControlOutbox box;
+  auto now = remotekit::RetryUnit::Clock::now();
   box.Bind({1, 1});
   std::vector<std::string> sent;
   std::string busy = "mode";
-  auto send = [&](const std::string& bytes) {
+  auto send = [&](const std::string& bytes) -> int {
     if (bytes == busy)
-      return 6;
+      return REMOTEKIT_SDK_BUSY;
     sent.push_back(bytes);
     return 0;
   };
   box.Replace({1, 1}, "mode", "layout1", "prepare1");
   for (int i = 0; i < 100; ++i)
-    box.Flush({1, 1}, send);
+    box.Flush({1, 1}, send, now);
   CHECK(sent.empty());
   box.Transient({1, 1}, "frame", send);
   CHECK(sent.empty());
+  now += std::chrono::seconds(6);
   busy = "layout1";
-  box.Flush({1, 1}, send);
+  box.Flush({1, 1}, send, now);
   CHECK(sent == std::vector<std::string>{"mode"});
+  now += std::chrono::seconds(6);
   busy = "prepare1";
-  box.Flush({1, 1}, send);
+  box.Flush({1, 1}, send, now);
   CHECK((sent == std::vector<std::string>{"mode", "layout1"}));
   for (int i = 0; i < 100; ++i) {
     box.Replace({1, 1}, "", "layout1", "prepare1");
-    box.Flush({1, 1}, send);
+    box.Flush({1, 1}, send, now);
   }
   CHECK((sent == std::vector<std::string>{"mode", "layout1"}));  // BUSY head never rewinds.
   // Superseding layout revokes the old pending prepare, even under long BUSY.
   box.Replace({1, 1}, "", "layout2", "prepare2");
   busy = "prepare2";
-  box.Flush({1, 1}, send);
+  box.Flush({1, 1}, send, now);
   CHECK((sent == std::vector<std::string>{"mode", "layout1", "mode", "layout2"}));
+  now += std::chrono::seconds(6);
   busy = "";
-  box.Flush({1, 1}, send);
+  box.Flush({1, 1}, send, now);
   CHECK(sent.back() == "prepare2");
   CHECK(std::find(sent.begin(), sent.end(), "prepare1") == sent.end());
   const auto admitted = sent.size();
   for (int i = 0; i < 100; ++i) {
     box.Replace({1, 1}, "", "layout2", "prepare2");
-    box.Flush({1, 1}, send);
+    box.Flush({1, 1}, send, now);
   }
   CHECK(sent.size() == admitted);  // Identical transactions are already reliable.
   box.Replace({1, 1}, "", "old-layout", "old-prepare");
   box.Bind({2, 1});
-  box.Flush({1, 1}, send);
+  box.Flush({1, 1}, send, now);
   box.Replace({1, 1}, "bad-mode", "bad-layout", "bad-prepare");
   const auto count = sent.size();
-  box.Flush({2, 1}, send);
+  box.Flush({2, 1}, send, now);
   CHECK(sent.size() == count);
   box.Replace({2, 1}, "mode2", "layout3", "prepare3");
-  box.Flush({2, 1}, send);
+  box.Flush({2, 1}, send, now);
   CHECK(sent.back() == "prepare3");
   // Outbox admission does not release the media gate; only matching ACK does.
   remotekit::PresentationBarrier gate;
@@ -393,7 +397,7 @@ void IncrementalExport() {
     failed.Tick();
   failed.disk_fail = true;
   failed.Tick();
-  CHECK(failed.failed && failed.saved.contains("previous") && !failed.exporter.Pending());
+  CHECK(failed.failed && failed.saved.contains("previous") && failed.exporter.Pending());
   // Fairness between two views: bounded active transfer then next candidate.
   ExportFixture multiple;
   multiple.Observe();

@@ -45,7 +45,7 @@ class ObjectFiles {
   }
   Result<Json> Execute(const FileJob&, const std::string&, const Json&);
   Result<Json> Photo(const FileJob&, const std::string&, const Json&);
-  void Sweep();
+  Result<void> Sweep();
   SessionDb store;
   FileLibrary file_library;
   DcFileServices services;

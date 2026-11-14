@@ -34,8 +34,14 @@ SessionCoordinator::Hooks SessionExecution::Hooks() {
       .views = [self](const Json& value) { return self->Views(value); },
       .stop = [self](const Json& value) { return self->Stop(value); },
       .observe = [self] { return self->Observe(); },
-      .maintain = [self] { self->Maintain(); },
-      .signals = [self] { self->FlushSignals(); },
+      .maintain = [self]() -> Result<void> {
+        self->Maintain();
+        return {};
+      },
+      .signals = [self]() -> Result<void> {
+        self->FlushSignals();
+        return {};
+      },
       .admit = [self](const Json& value,
                       uint64_t generation) { return self->Admit(value, generation); },
       .request = [self](const Json& value,
@@ -83,9 +89,11 @@ Result<void> SessionExecution::Authorize(const Json& document, uint64_t generati
     return session->AuthorizeDesired(document, generation);
   return {};
 }
-Result<void> SessionExecution::Prepare(const Json& document) {
+Result<void> SessionExecution::Prepare(const Json& document) try {
   RK_RETURN_IF_ERROR(clipboard_.Resolve(document.at("clipboard").at("revision")));
   auto session = runtime_.load();
+  if (session && session->PersistenceClosed())
+    return Error{ErrorCode::kOutcomeUnknown, "Session stop is awaiting reconciliation"};
   if (!session) {
     reader_.reset();
     RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory_));
@@ -143,6 +151,9 @@ Result<void> SessionExecution::Prepare(const Json& document) {
   RK_RETURN_IF_ERROR(session->StageDesired(document, clipboard_));
   staged_revision_ = document.at("revision").get<std::string>();
   return {};
+} catch (const fs::filesystem_error& error) {
+  return WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                     error.code().value());
 }
 Result<void> SessionExecution::Start() {
   const auto session = runtime_.load();
@@ -168,12 +179,13 @@ Result<Json> SessionExecution::Stop(const Json& commit,
                                     bool deferred) {
   if (auto session = runtime_.load()) {
     if (const auto document = desired_.load();
-        document && document->at("revision").get<std::string>() != staged_revision_) {
+        document && !session->PersistenceClosed() &&
+        document->at("revision").get<std::string>() != staged_revision_) {
       RK_RETURN_IF_ERROR(session->StageDesired(*document, clipboard_));
       staged_revision_ = document->at("revision").get<std::string>();
     }
     auto stopped = session->StopAndCommit(commit, check_blockers, deadline, deferred);
-    if (stopped || stopped.error().code == ErrorCode::kOutcomeUnknown) {
+    if (stopped) {
       ++runtime_generation_;
       runtime_.store({});
       running_ = false;
@@ -245,26 +257,31 @@ Result<Json> SessionExecution::Stop(const Json& commit,
 Result<void> SessionExecution::Fence() {
   retired_ = true;
   ++runtime_generation_;
-  const auto session = runtime_.exchange({});
+  const auto session = runtime_.load();
   running_ = false;
   reader_.reset();
-  if (session)
-    return session->Stop();
+  if (session) {
+    RK_RETURN_IF_ERROR(session->Fence());
+    runtime_.store({});
+  }
   return {};
 }
-Result<Json> SessionExecution::EventState() {
+Result<Json> SessionExecution::EventState() try {
+  if (retired_)
+    return Error{ErrorCode::kConflict, "Session execution is fenced"};
   Json state;
-  if (auto session = runtime_.load()) {
+  if (auto session = runtime_.load(); session && !session->PersistenceClosed()) {
     RK_ASSIGN_OR_RETURN(current, session->EventState());
     state = std::move(current);
   } else {
-    if (!fs::exists(directory_ / "session.db"))
+    RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory_));
+    if (copy.is_null() || !fs::exists(directory_ / "session.db"))
       return Json{{"streamId", nullptr}, {"ackedThrough", "0"}, {"lastSeq", "0"}, {"pending", 0}};
     if (!reader_) {
-      RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory_));
-      reader_ = std::make_unique<SessionDb>(directory_);
+      auto reader = std::make_unique<SessionDb>(directory_);
       RK_RETURN_IF_ERROR(
-          reader_->OpenReadOnly(!copy.is_null() && copy.at("stoppedCleanly").get<bool>()));
+          reader->OpenReadOnly(!copy.is_null() && copy.at("stoppedCleanly").get<bool>()));
+      reader_ = std::move(reader);
     }
     RK_ASSIGN_OR_RETURN(current, reader_->Events().State());
     state = std::move(current);
@@ -280,13 +297,16 @@ Result<Json> SessionExecution::EventState() {
     state["pending"] = pending.size();
   }
   return state;
+} catch (const fs::filesystem_error& error) {
+  return WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                     error.code().value());
 }
 Result<Json> SessionExecution::ReadEvents() {
   RK_ASSIGN_OR_RETURN(state, EventState());
   if (state.at("streamId").is_null())
     return Json::array();
   const auto after = std::stoull(state.at("ackedThrough").get<std::string>());
-  if (auto session = runtime_.load())
+  if (auto session = runtime_.load(); session && !session->PersistenceClosed())
     return session->PendingEvents(after);
   return reader_->Events().Load(after);
 }
@@ -294,7 +314,7 @@ Result<void> SessionExecution::Acknowledge(const std::string& stream, uint64_t u
   RK_ASSIGN_OR_RETURN(state, EventState());
   if (state.at("streamId") != stream || stream != sent_stream_ || up_to > sent_through_)
     return Error{ErrorCode::kConflict, "event acknowledgment exceeds emitted stream"};
-  if (auto session = runtime_.load())
+  if (auto session = runtime_.load(); session && !session->PersistenceClosed())
     RK_RETURN_IF_ERROR(session->AcknowledgeEvents(stream, up_to));
   acknowledged_[stream] = std::max(acknowledged_[stream], up_to);
   last_events_sent_ = {};
@@ -324,10 +344,12 @@ Result<Json> SessionExecution::CommitVersion(const Version& version,
     return Json{{"discarded", true}};
   return session->CommitVersion(snapshot, built);
 }
-Result<Json> SessionExecution::Observe() {
+Result<Json> SessionExecution::Observe() try {
   if (retired_)
     return Error{ErrorCode::kUnavailable, "Session actor is retired"};
   RK_ASSIGN_OR_RETURN(copy, Checkpoints::Copy(directory_));
+  if (!copy.is_null() && copy.at("state") == "restoring")
+    return Error{ErrorCode::kUnavailable, "Session checkpoint restoration is incomplete"};
   Json snapshot{
       {"views", Json::array()},
       {"pendingPopups", Json::array()},
@@ -348,7 +370,7 @@ Result<Json> SessionExecution::Observe() {
                 {"downloadsInProgress", 0},  {"pendingDownloadImports", 0},
                 {"rtcConnected", false},     {"lifecycleUncertain", false}};
   bool running = false;
-  if (auto session = runtime_.load()) {
+  if (auto session = runtime_.load(); session && !session->PersistenceClosed()) {
     RK_ASSIGN_OR_RETURN(current, session->Snapshot());
     snapshot.update(current);
     running = session->Running();
@@ -397,6 +419,9 @@ Result<Json> SessionExecution::Observe() {
               {"blockers", blockers},
               {"events", events},
               {"stats", snapshot.at("stats")}};
+} catch (const fs::filesystem_error& error) {
+  return WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                     error.code().value());
 }
 void SessionExecution::FlushSignals() {
   if (retired_)
@@ -407,12 +432,10 @@ void SessionExecution::FlushSignals() {
 void SessionExecution::Maintain() {
   if (retired_)
     return;
-  if (auto session = runtime_.load()) {
+  if (auto session = runtime_.load(); session && !session->PersistenceClosed()) {
     session->FlushSignals();
     session->MaintainRecovery();
-    auto sampled = session->Snapshot();
-    if (!sampled)
-      return;
+    auto sampled = Sample([&] { return session->Snapshot(); });
   }
   const auto generation = generation_.load();
   if (!management_.Current(generation))
@@ -420,10 +443,71 @@ void SessionExecution::Maintain() {
   const auto now = std::chrono::steady_clock::now();
   if (now - last_events_sent_ < std::chrono::milliseconds(500))
     return;
+  auto delivered = DeliverEvents([this] { return SendEvents(); });
+}
+RetryUnit::Snapshot SessionExecution::SamplingRetryStatus() const {
+  std::lock_guard lock(sampling_retry_mutex_);
+  return sampling_retry_;
+}
+RetryUnit::Snapshot SessionExecution::EventsRetryStatus() const {
+  std::lock_guard lock(events_retry_mutex_);
+  return events_retry_;
+}
+Result<void> SessionExecution::Sample(const std::function<Result<Json>()>& sample) {
+  std::lock_guard lock(sampling_retry_mutex_);
+  sampling_retry_.Input(std::to_string(generation_.load()) + ":" + staged_revision_);
+  if (!sampling_retry_.Ready())
+    return *sampling_retry_.Failure();
+  Result<Json> result = Error{ErrorCode::kInternal, "session sampling failed"};
+  try {
+    result = sample();
+  } catch (const fs::filesystem_error& error) {
+    result = WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                         error.code().value());
+  } catch (const std::exception& error) {
+    result = Error{ErrorCode::kInternal, error.what()};
+  } catch (...) {
+    result = Error{ErrorCode::kInternal, "session sampling failed"};
+  }
+  if (result) {
+    sampling_retry_.Success();
+    return {};
+  }
+  sampling_retry_.Fail(result.error());
+  return result.error();
+}
+Result<void> SessionExecution::DeliverEvents(const std::function<Result<void>()>& deliver) {
+  std::lock_guard lock(events_retry_mutex_);
+  events_retry_.Input(std::to_string(generation_.load()) + ":" + staged_revision_);
+  if (!events_retry_.Ready())
+    return *events_retry_.Failure();
+  Result<void> result;
+  try {
+    result = deliver();
+  } catch (const fs::filesystem_error& error) {
+    result = WithOsError(ErrorCode::kUnavailable, error.what(), OsError::Kind::kWin32,
+                         error.code().value());
+  } catch (const std::exception& error) {
+    result = Error{ErrorCode::kInternal, error.what()};
+  } catch (...) {
+    result = Error{ErrorCode::kInternal, "session event publication failed"};
+  }
+  if (result)
+    events_retry_.Success();
+  else
+    events_retry_.Fail(result.error());
+  return result;
+}
+Result<void> SessionExecution::SendEvents() {
+  const auto generation = generation_.load();
+  const auto now = std::chrono::steady_clock::now();
   auto state = EventState();
   auto events = ReadEvents();
-  if (!state || !events || state.value().at("streamId").is_null())
-    return;
+  if (!state || !events) {
+    return !state ? state.error() : events.error();
+  }
+  if (state.value().at("streamId").is_null())
+    return {};
   std::string connection;
   {
     std::lock_guard lock(scope_mutex_);
@@ -435,7 +519,6 @@ void SessionExecution::Maintain() {
     sent_through_ = 0;
   }
   auto budget = management_.EventBudget();
-  last_events_sent_ = now;
   for (auto event : events.value()) {
     if (!budget.messages)
       break;
@@ -448,12 +531,15 @@ void SessionExecution::Maintain() {
     const auto bytes = event.dump().size();
     if (bytes > budget.bytes)
       break;
-    if (!management_.SendEvent(event, generation))
-      break;
+    if (!management_.SendEvent(event, generation)) {
+      return Error{ErrorCode::kBusy, "event publication queue is full"};
+    }
     --budget.messages;
     budget.bytes -= bytes;
     sent_through_ = std::max(sent_through_, std::stoull(event.at("seq").get<std::string>()));
   }
+  last_events_sent_ = now;
+  return {};
 }
 Result<void> SessionExecution::Admit(const Json& request, uint64_t generation) {
   if (!management_.Current(generation) || !request.value("params", Json()).is_object())

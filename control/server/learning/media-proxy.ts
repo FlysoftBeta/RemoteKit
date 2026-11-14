@@ -154,7 +154,7 @@ export class MediaProxy {
           if (!res.write(chunk.value)) await once(res, 'drain', { signal: abort.signal });
         }
       } finally {
-        await reader.cancel().catch(() => {});
+        await reader.cancel().catch((error) => log.warn('learning.media_cancel_failed', { err: error }));
         reader.releaseLock();
       }
       if (!range && upstream.status === 200 && received <= MAX_ITEM) {
@@ -216,3 +216,4 @@ export class MediaProxy {
       }
   }
 }
+import { log } from '../log';

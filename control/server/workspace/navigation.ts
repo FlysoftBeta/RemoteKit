@@ -1,7 +1,8 @@
+import { RetryUnit } from '../../shared/retry-unit';
 import { requireBrowser } from './browser-availability';
 import { RemoteKitError } from '../../shared/errors';
 import { endpointError } from '../endpoint/gateway';
-import { reportError } from '../log';
+import { log, reportError } from '../log';
 import { wireError } from '../../shared/errors';
 import { isLocalTab, type ProductTab, type ProductWorkspace } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
@@ -9,6 +10,13 @@ import type { CommandEffect } from './commands';
 import { settle } from './operations';
 import { pageUsageIdentity } from './workspace';
 export class Navigation {
+  private readonly acknowledgments = new Map<string, RetryUnit>();
+  failures() {
+    return [...this.acknowledgments.values()]
+      .map((unit) => unit.error)
+      .filter((error) => error !== undefined);
+  }
+
   constructor(
     private readonly context: DomainContext,
     private readonly services: Pick<DomainServices, 'policy' | 'workspace'>,
@@ -189,14 +197,30 @@ export class Navigation {
           );
           this.context.store.operations.saveOperation(state, saved.receipt);
         }
-        await this.context.endpoint
-          .ackNavigation(tenant, {
+        const key = JSON.stringify([tenant, terminal.operationGeneration, terminal.operationId]);
+        let unit = this.acknowledgments.get(key);
+        if (!unit) {
+          unit = new RetryUnit({
+            failed: (error) =>
+              reportError(error, 'navigation.ack_failed', { tenant, operation: terminal.operationId }),
+            recovered: () =>
+              log.info('navigation.ack_recovered', { tenant, operation: terminal.operationId }),
+          });
+          this.acknowledgments.set(key, unit);
+        }
+        if (!unit.ready(snapshot.browserIncarnation)) continue;
+        try {
+          await this.context.endpoint.ackNavigation(tenant, {
             browserIncarnation: snapshot.browserIncarnation,
             viewId: t.webviewId,
             operationId: terminal.operationId,
             operationGeneration: terminal.operationGeneration,
-          })
-          .catch(() => {});
+          });
+          unit.succeed();
+          this.acknowledgments.delete(key);
+        } catch (cause) {
+          unit.fail(endpointError(cause));
+        }
       }
   }
 }

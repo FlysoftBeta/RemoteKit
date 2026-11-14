@@ -145,9 +145,17 @@ Result<void> Checkpoints::WriteCopy(const fs::path& directory, const Json& copy)
 }
 bool Checkpoints::ReuseCopy(const Json& copy, uint64_t epoch, const Json& checkpoint) {
   return copy.is_object() && copy.at("placementEpoch").get<uint64_t>() <= epoch &&
-         (copy.at("state") == "dirty" || copy.at("base") == checkpoint);
+         (copy.at("state") == "dirty" ||
+          (copy.at("state") == "clean" && copy.at("base") == checkpoint));
 }
-Result<void> Checkpoints::FlushChanges(const fs::path& directory, const DirectoryChanges& changes) {
+Result<void> Checkpoints::ForgetCopy(const fs::path& directory) {
+  fs::remove(LongPath(directory).wstring() + L".copy.json");
+  fs::remove(LongPath(directory).wstring() + L".checkpoint-index.json");
+  return TruncateChanges(directory);
+}
+Result<void> Checkpoints::FlushChanges(const fs::path& directory,
+                                       const DirectoryChanges& changes,
+                                       bool replace) {
   RK_ASSIGN_OR_RETURN(copy, Copy(directory));
   if (copy.is_null())
     return CorruptState("Session copy record missing");
@@ -165,33 +173,21 @@ Result<void> Checkpoints::FlushChanges(const fs::path& directory, const Director
                     {"continuous", changes.continuous}};
   RK_ASSIGN_OR_RETURN(encoded,
                       checkpoint_formats::Encode(record, checkpoint_formats::ValidateChanges));
-  const auto bytes = encoded + "\n";
+  std::string bytes;
   const auto path = LongPath(directory).wstring() + L".changes";
-  HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
-                            FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file == INVALID_HANDLE_VALUE)
-    return Error{ErrorCode::kUnavailable, "change journal open failed"};
-  DWORD written = 0;
-  const bool ok =
-      WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) &&
-      written == bytes.size() && FlushFileBuffers(file);
-  CloseHandle(file);
-  if (!ok)
-    return Error{ErrorCode::kUnavailable, "change journal flush failed"};
+  if (!replace) {
+    RK_ASSIGN_OR_RETURN(previous, ReadFileIfExists(path));
+    if (previous)
+      bytes = std::move(*previous);
+  }
+  bytes += encoded + "\n";
+  RK_RETURN_IF_ERROR(WriteDurableText(path, bytes));
   copy["changesAt"] = now;
   return WriteCopy(directory, copy);
 }
 Result<void> Checkpoints::TruncateChanges(const fs::path& directory) {
   const auto path = LongPath(directory).wstring() + L".changes";
-  HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
-                            FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file == INVALID_HANDLE_VALUE)
-    return Error{ErrorCode::kUnavailable, "change journal truncate failed"};
-  const bool ok = FlushFileBuffers(file) != FALSE;
-  CloseHandle(file);
-  if (!ok)
-    return Error{ErrorCode::kUnavailable, "change journal truncate flush failed"};
-  return {};
+  return WriteDurableText(path, "");
 }
 Result<DirectoryChanges> Checkpoints::RecoverChanges(const fs::path& raw_directory,
                                                      int64_t changes_at,
@@ -204,6 +200,23 @@ Result<DirectoryChanges> Checkpoints::RecoverChanges(const fs::path& raw_directo
     previous = Json::object();
   RK_ASSIGN_OR_RETURN(journal, ReadFileIfExists(directory.wstring() + L".changes"));
   if (journal) {
+    const auto complete = journal->find_last_of('\n');
+    if (!journal->empty() && journal->back() != '\n') {
+      // An interrupted append has no durable record boundary. A full scan
+      // recovers its changes, and replacement prevents a later append poisoning it.
+      metadata_walk = true;
+      changes.continuous = false;
+      journal->resize(complete == std::string::npos ? 0 : complete + 1);
+      *journal += Json{{"version", 1},
+                       {"at", 0},
+                       {"paths", Json::array()},
+                       {"removed", Json::array()},
+                       {"subtrees", Json::array()},
+                       {"continuous", false}}
+                      .dump() +
+                  "\n";
+      RK_RETURN_IF_ERROR(WriteDurableText(directory.wstring() + L".changes", *journal));
+    }
     std::istringstream lines(*journal);
     std::string line;
     while (std::getline(lines, line)) {
@@ -795,6 +808,12 @@ Result<void> Checkpoints::Restore(const fs::path& raw_directory,
     index[file.name] = file.identity;
   AddPhase(phases_, "materialize", "ms", PhaseMs(materialize_start));
   const auto swap_start = PhaseClock::now();
+  RK_ASSIGN_OR_RETURN(copy, Copy(directory));
+  if (!copy.is_null()) {
+    copy["state"] = "restoring";
+    copy["stoppedCleanly"] = false;
+    RK_RETURN_IF_ERROR(WriteCopy(directory, copy));
+  }
   if (warm) {
     for (const auto& entry : fs::recursive_directory_iterator(restore)) {
       const auto target = directory / entry.path().lexically_relative(restore);

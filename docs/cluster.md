@@ -118,7 +118,7 @@ Control 与 Endpoint 之间只有三种交互，没有逐方法的恢复路径�
 
 - Session 由 Control 的 `session.desired{sessionId, placementEpoch, checkpoint, profileKey, run, …}` 打开（见[协调协议](#协调协议)）；Profile 密钥由 DEK 经 HKDF-SHA256 派生，Endpoint 只放在内存里并在销毁时清零。Endpoint 只在 `session.open` 时创建 Session，目录 `<dataPath>/sessions/<sessionId>`；同参数幂等，同 Tenant 不同 sessionId 或 epoch 回退为 `conflict`，未打开的 Tenant 上的其他方法为 `not_found`。
 - Profile 密钥经 Endpoint 新建的匿名管道交给 Browser：只把读端放进 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 继承，参数 `--profile-key-handle=<句柄值>`；Browser 在创建任何 BrowserContext 之前读出恰好 32 字节，不足、多余或句柄无效都拒绝启动（见[页面生命周期 · Profile](page-lifecycle.md#profile-持久化)）。Browser 进程内的会话编号固定为 1，Profile 位于 `<sessionDir>/session-1/profile-1`。
-- **fencing**：每次重新放置都使 epoch 加一。`node.desired` 列出放在该节点上的全部 Session（不论运行与否，带 epoch 与 `dataState`）；Endpoint 在每次（重新）连接时终止并遗忘不在清单中或 epoch 过旧的 Session，删除它们的副本记录，目录变成冷副本（7 天后或磁盘压力时删除，`session.cold.delete{}`）；epoch 更新而清单说是 `clean` 的旧副本直接删除（例如管理员把它转移到了别的节点）。
+- **fencing**：每次重新放置都使 epoch 加一。`node.desired` 列出放在该节点上的全部 Session（不论运行与否，带 epoch 与 `dataState`）；Endpoint 在每次（重新）连接时终止并遗忘不在清单中或 epoch 过旧的 Session，删除它们的副本记录，目录变成冷副本（7 天后或磁盘压力时删除，`session.cold.delete{}`）；epoch 更新而清单说是 `clean` 的旧副本不再可用（例如管理员把它转移到了别的节点）：先让旧 Session 退役并释放它在目录里持有的全部文件与句柄（包括只读的 `session.db` 读取器），再删除节点级的副本记录、检查点索引与变更日志，不删除目录本身；没有副本记录的目录在打开时按请求的 checkpoint 恢复到 `.restore` 再替换。一份 `node.desired` 里每个放置独立成败：某个放置处理失败只记为那个 Session 的错误，其余放置照常收敛，节点的会话清单仍然生效。
 
 ## 对象存储
 

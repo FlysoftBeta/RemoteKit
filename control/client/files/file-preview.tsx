@@ -1,11 +1,12 @@
 import { Button, LinearProgress } from '@mui/material';
-import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, memo, Suspense, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import type { LibraryEntry, LibraryFileEntry } from '../../shared/file-library';
 import { ChannelDocumentSource } from '../documents/channel-source';
 import type { DocumentProgress } from '../documents/document-source';
+import { DocumentProgressWriter } from '../documents/progress-writer';
 import { failureError, FailureNote, SurfaceState } from '../failures';
-import { recover } from '../failures/recovery';
+import { recoverRead } from '../failures/recovery';
 import type { LearningCall } from '../learning/queries';
 import { canonicalJson } from '../util/canonical-json';
 import type { FileChannel } from './file-channel';
@@ -34,7 +35,7 @@ function MediaPreview({ entry }: { entry: LibraryFileEntry }) {
     let objectUrl = '';
     setError(undefined);
     setUrl('');
-    void recover(() => rpc.readAsset(entry, controller.signal), controller.signal, setError).then(
+    void recoverRead(() => rpc.readAsset(entry, controller.signal), controller.signal, setError).then(
       (blob) => {
         if (controller.signal.aborted) return;
         setError(undefined);
@@ -125,16 +126,14 @@ const PreviewContent = memo(
     );
     const [progress, setProgress] = useState<DocumentProgress | null | undefined>();
     const [progressError, setProgressError] = useState<RemoteKitError | undefined>();
-    const pendingProgress = useRef<DocumentProgress>(undefined);
     const document = isDocumentFile(entry);
     useEffect(() => {
       setProgress(undefined);
       setProgressError(undefined);
-      pendingProgress.current = undefined;
       let active = true;
       const abort = new AbortController();
       if (!document || !call || !online) return;
-      void recover(
+      void recoverRead(
         () => call('document.progress.get', { assetId: entry.assetId }),
         abort.signal,
         setProgressError,
@@ -157,21 +156,17 @@ const PreviewContent = memo(
         abort.abort();
       };
     }, [entry.assetId, call, document, online]);
-    const progressAbort = useRef<AbortController | undefined>(undefined);
-    useEffect(() => () => progressAbort.current?.abort(), []);
+    const writer = useMemo(
+      () =>
+        new DocumentProgressWriter(
+          (value) => call!('document.progress.set', { assetId: entry.assetId, ...value }),
+          setProgressError,
+        ),
+      [call, entry.assetId],
+    );
+    useLayoutEffect(() => () => writer.dispose(), [writer]);
     const saveProgress = (value: DocumentProgress) => {
-      if (!call) return;
-      pendingProgress.current = value;
-      progressAbort.current?.abort();
-      progressAbort.current = new AbortController();
-      void recover(
-        () => call('document.progress.set', { assetId: entry.assetId, ...pendingProgress.current! }),
-        progressAbort.current.signal,
-        setProgressError,
-      ).then(
-        () => setProgressError(undefined),
-        (error) => setProgressError(failureError(error)),
-      );
+      if (call && online) writer.save(value);
     };
     if (!online)
       return (

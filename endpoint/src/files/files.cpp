@@ -77,11 +77,7 @@ Result<Json> FileController::AuthorizeFiles(const Json& request) {
 
 void FileController::Start() {
   file_services.Start([this](const auto& job) { return DirectFileCommand(job); },
-                      [this] {
-                        auto swept = library.SweepDirectFiles();
-                        if (!swept)
-                          LogError(LogLevel::kWarn, "files.sweep_failed", swept.error());
-                      });
+                      [this] { return library.SweepDirectFiles(); });
 }
 
 void FileController::Stop() {
@@ -105,7 +101,25 @@ void FileController::Flush(uint64_t handle, const std::function<int(const std::s
 }
 Result<void> LibraryController::SweepDirectFiles() {
   const auto now = QpcNow();
-  RK_RETURN_IF_ERROR(file_library.Sweep());
+  {
+    std::lock_guard lock(file_store_mutex);
+    auto swept = file_uploads.Sweep();
+    if (!swept)
+      cleanup_failures_["uploads"] = WireError(swept.error());
+    else
+      cleanup_failures_.erase("uploads");
+  }
+  auto swept = file_library.Sweep();
+  const auto library_failures = file_library.CleanupFailures();
+  {
+    std::lock_guard lock(file_store_mutex);
+    if (!swept)
+      cleanup_failures_["library"] = WireError(swept.error());
+    else if (!library_failures.empty())
+      cleanup_failures_["library"] = library_failures;
+    else
+      cleanup_failures_.erase("library");
+  }
   if (selection_watches.empty() || now < next_selection_watch)
     return {};
   next_selection_watch = now + QpcFrequency() / 10;
@@ -113,22 +127,42 @@ Result<void> LibraryController::SweepDirectFiles() {
   selection_watches.pop_front();
   if (watch.control != browser.Rpc().Control() || now >= watch.expires)
     return {};
+  auto state = WatchSelection(watch);
+  {
+    std::lock_guard lock(file_store_mutex);
+    const auto key = "selection:" + watch.selection.id;
+    if (!state)
+      cleanup_failures_[key] = WireError(state.error());
+    else
+      cleanup_failures_.erase(key);
+  }
+  if (!state || (state.value() != "selected" && state.value() != "cancelled"))
+    selection_watches.push_back(std::move(watch));
+  return {};
+}
+Result<std::string> LibraryController::WatchSelection(SelectionWatch& watch) {
+  watch.retry.Input(watch.selection.id + ":" + std::to_string(watch.control));
+  if (!watch.retry.Ready()) {
+    return *watch.retry.Failure();
+  }
   {
     auto rpc_result =
         browser.Rpc().Request(SelectionStatusCommand(watch.selection), watch.control, 10000, true);
     if (!rpc_result) {
       const Error operation_error = rpc_result.error();
-      if (watch.control == browser.Rpc().Control())
-        selection_watches.push_back(std::move(watch));
-      return {};
+      watch.retry.Fail(operation_error);
+      return operation_error;
     }
     const auto status = std::move(rpc_result).value();
-    RK_ASSIGN_OR_RETURN(state, ObserveSelection(watch.selection, status));
-    if (state != "selected" && state != "cancelled")
-      selection_watches.push_back(std::move(watch));
+    auto state = ObserveSelection(watch.selection, status);
+    if (!state) {
+      const auto error = state.error();
+      watch.retry.Fail(error);
+      return error;
+    }
+    watch.retry.Success();
+    return state.value();
   }
-
-  return {};
 }
 
 uint64_t LibraryController::FileUnsigned(const Json& value) {
@@ -154,7 +188,7 @@ Json LibraryController::SelectionStatusCommand(const LibrarySelection& selection
 }
 
 Result<std::string> LibraryController::RetireUnsubmittedSelection(const std::string& selection_id) {
-  // Claim persists submitted before sending Browser the callback. A retired
+  // Claim persists dispatching before sending Browser the callback. A retired
   // target proves cancellation only if the manifest never crossed that boundary.
   RK_ASSIGN_OR_RETURN(
       state, file_library.Finish(selection_id, LibraryState::cancelled, LibraryState::pending));
@@ -176,11 +210,13 @@ Result<std::string> LibraryController::ObserveSelection(const LibrarySelection& 
     return std::string("unknown");
   const auto state = status.value("state", std::string("unknown"));
   const bool matched = status.value("selection_id", std::string()) == selection.id;
-  if (state == "selected" && matched && current->state == LibraryState::submitted) {
+  const bool dispatched =
+      current->state == LibraryState::dispatching || current->state == LibraryState::unknown;
+  if (state == "selected" && matched && dispatched) {
     RK_ASSIGN_OR_RETURN(finished, file_library.Finish(selection.id, LibraryState::selected));
     return std::string(finished == LibraryState::selected ? "selected" : "cancelled");
   }
-  if (state == "cancelled" && matched && current->state == LibraryState::submitted) {
+  if (state == "cancelled" && matched && dispatched) {
     RK_ASSIGN_OR_RETURN(finished, file_library.Finish(selection.id, LibraryState::cancelled));
     return std::string(finished == LibraryState::cancelled ? "cancelled" : "selected");
   }
@@ -219,25 +255,34 @@ Result<Json> LibraryController::DirectSelectionCommit(const FileJob& job,
   RK_ASSIGN_OR_RETURN(sources, file_library.SelectionSources(
                                    *selection, [&] { return files.RequireFileJob(job); }));
   Json selected_files = Json::array();
+  std::string upload;
   {
     std::lock_guard lock(file_store_mutex);
     const auto check = [&] { return files.RequireFileJob(job); };
     RK_ASSIGN_OR_RETURN(batch, file_uploads.Stage(job.binding, sources, check));
-    const auto upload = batch.id;
+    upload = batch.id;
     {
       for (const auto& file : batch.files)
         selected_files.push_back({{"path", Utf8(file.path)}, {"displayName", file.name}});
-      RK_ASSIGN_OR_RETURN(claimed, file_library.Claim(selection_id, check));
-      if (!claimed)
-        return Error{ErrorCode::kConflict, "file_selection_already_submitted"};
-      RK_RETURN_IF_ERROR(file_uploads.MarkSubmitted(upload));
+      auto claimed = file_library.Claim(selection_id, check);
+      if (!claimed || !claimed.value()) {
+        RK_RETURN_IF_ERROR(file_uploads.AbortSubmission(upload));
+        return claimed ? Error{ErrorCode::kConflict, "file_selection_already_submitted"}
+                       : claimed.error();
+      }
+      auto marked = file_uploads.MarkSubmitted(upload);
+      if (!marked) {
+        RK_RETURN_IF_ERROR(file_library.ReleaseClaim(selection_id));
+        RK_RETURN_IF_ERROR(file_uploads.AbortSubmission(upload));
+        return marked.error();
+      }
     }
   }
   // The claim is durable before the callback is sent. A lost reply or a
   // retired chooser grant can be reconciled only with a matching Browser receipt.
   if (selection_watches.size() < 64) {
     auto submitted = *selection;
-    submitted.state = LibraryState::submitted;
+    submitted.state = LibraryState::dispatching;
     selection_watches.push_back(
         {std::move(submitted), job.control, QpcNow() + QpcFrequency() * 120});
   }
@@ -246,8 +291,24 @@ Result<Json> LibraryController::DirectSelectionCommit(const FileJob& job,
                                                      {"accept", true},
                                                      {"files", selected_files},
                                                      {"selection_id", selection_id}});
-  if (!direct_file_rpc_result)
+  if (!direct_file_rpc_result) {
+    if (direct_file_rpc_result.error().code == ErrorCode::kOutcomeUnknown) {
+      auto unknown = file_library.Unknown(selection_id);
+      if (!unknown) {
+        auto error = unknown.error();
+        error.code = ErrorCode::kOutcomeUnknown;
+        error.retry_after_ms.reset();
+        return error;
+      }
+    } else {
+      std::lock_guard lock(file_store_mutex);
+      RK_RETURN_IF_ERROR(file_library.ReleaseClaim(selection_id));
+      RK_RETURN_IF_ERROR(file_uploads.AbortSubmission(upload));
+      std::erase_if(selection_watches,
+                    [&](const auto& watch) { return watch.selection.id == selection_id; });
+    }
     return direct_file_rpc_result.error();
+  }
   auto response = std::move(direct_file_rpc_result).value();
   RK_ASSIGN_OR_RETURN(observed, ObserveSelection(*selection, response));
   return result(observed);
@@ -263,7 +324,7 @@ Result<Json> LibraryController::DirectSelectionCancel(const FileJob& job) {
     return Error{ErrorCode::kConflict, "file_transfer_interrupted"};
   const auto check = [&] { return files.RequireFileJob(job); };
   RK_ASSIGN_OR_RETURN(state, file_library.CancelPendingSelections(job.binding, check));
-  if (state == LibraryState::submitted)
+  if (state == LibraryState::dispatching || state == LibraryState::unknown)
     return Json{{"state", "validating"}};
   if (state == LibraryState::selected)
     return Json{{"state", "selected"}};
@@ -387,9 +448,9 @@ Result<Json> LibraryController::LibraryCommand(const std::string& method, const 
 }
 
 Result<void> LibraryController::BrowserStopped(const std::string& incarnation) {
-  last_confirmed_browser_exit = incarnation;
   std::lock_guard lock(file_store_mutex);
-  file_uploads.ConfirmBrowserStopped(incarnation);
+  RK_RETURN_IF_ERROR(file_uploads.ConfirmBrowserStopped(incarnation));
+  last_confirmed_browser_exit = incarnation;
 
   return {};
 }

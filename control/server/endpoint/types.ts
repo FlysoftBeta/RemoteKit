@@ -76,7 +76,11 @@ export interface EndpointSnapshot {
   browserPid?: number;
   views: ViewSnapshot[];
   rtc?: { active: boolean; connectionId?: string; avSync?: boolean | null };
-  stats?: { mediaPolicy?: { applied?: AppliedMediaPolicy | null }; [key: string]: unknown };
+  stats?: {
+    allocationPressure?: boolean;
+    mediaPolicy?: { applied?: AppliedMediaPolicy | null };
+    [key: string]: unknown;
+  };
   pendingPopups?: import('./coordination').PendingPopup[];
   [key: string]: unknown;
 }

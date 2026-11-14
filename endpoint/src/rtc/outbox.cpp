@@ -1,6 +1,16 @@
 #include "rtc/outbox.hpp"
+#include "util/sdk_error.hpp"
 
 namespace remotekit {
+std::optional<Error> ControlOutbox::Failure(Scope scope) const {
+  std::lock_guard lock(mutex_);
+  if (scope != scope_)
+    return {};
+  for (const auto* queue : {&pending_, &critical_})
+    if (!queue->empty() && queue->front().retry.Failure())
+      return queue->front().retry.Failure();
+  return {};
+}
 void ControlOutbox::Bind(Scope scope) {
   std::lock_guard lock(mutex_);
   scope_ = scope;
@@ -25,16 +35,24 @@ void ControlOutbox::Replace(Scope scope,
   pending_.clear();
   for (const auto& message : transaction)
     if (!message.empty())
-      pending_.push_back(message);
+      pending_.emplace_back(message);
 }
-void ControlOutbox::Flush(Scope scope, const Send& send) {
+void ControlOutbox::Flush(Scope scope, const Send& send, RetryUnit::Clock::time_point now) {
   std::lock_guard lock(mutex_);
   if (!scope.peer || scope != scope_)
     return;
   for (auto* queue : {&pending_, &critical_}) {
     while (!queue->empty()) {
-      if (send(queue->front()) != 0)
-        return;
+      auto& message = queue->front();
+      if (!message.retry.Ready(now))
+        break;
+      const auto status = send(message.bytes);
+      if (status) {
+        message.retry.Fail({SdkErrorCode(status), "control data send failed"}, now);
+        break;
+      } else {
+        message.retry.Success();
+      }
       queue->pop_front();
     }
   }
@@ -51,7 +69,7 @@ void ControlOutbox::Transient(Scope scope,
       return;
   }
   if (!low_priority)
-    critical_.push_back(bytes);
+    critical_.emplace_back(bytes);
 }
 void ControlOutbox::Notice(Scope scope,
                            const std::string& bytes,

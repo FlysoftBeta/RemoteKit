@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type { AdminAnnouncement } from '../../shared/admin';
 import { RemoteKitError } from '../../shared/errors';
 import { ANNOUNCEMENT_LIMITS } from '../../shared/product';
@@ -23,10 +22,17 @@ export class Announcements {
     return this.context.store.announcements.list().map((item) => ({ ...item, recipients }));
   }
   // The publishing administrator has read what they wrote.
-  publish(actor: string, title: unknown, body: unknown) {
+  publish(actor: string, id: unknown, title: unknown, body: unknown) {
     const draft = this.draft(title, body);
-    const id = randomUUID();
+    if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id))
+      throw new RemoteKitError('invalid_request', '无效公告身份');
     this.context.store.transaction(() => {
+      const previous = this.context.store.announcements.list().find((item) => item.id === id);
+      if (previous) {
+        if (previous.title !== draft.title || previous.body !== draft.body)
+          throw new RemoteKitError('conflict', '同一公告身份不能用于不同内容');
+        return;
+      }
       this.context.store.announcements.insert(id, draft.title, draft.body, this.context.clock.wallMs());
       this.context.store.announcements.markRead(id, this.userId(actor));
     });

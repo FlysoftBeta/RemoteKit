@@ -38,6 +38,7 @@ const server = createHttp(control, {
   clientDir: config.clientDir,
 });
 const paused = new Set<string>();
+let pausedPublication: { desired: any; clipboard: any } | undefined;
 for (const node of nodes.all()) {
   const start = node.start.bind(node);
   node.start = () => {
@@ -99,6 +100,41 @@ process.on('message', (message: any) => {
       return { model };
     }
     if (message.method === 'stop') return control.userAdmin.stop(message.username);
+    if (message.method === 'pausePublications') {
+      pausedPublication = {
+        desired: (gateway as any).desiredSource,
+        clipboard: (gateway as any).clipboardSource,
+      };
+      gateway.setDesiredSource();
+      return { paused: true };
+    }
+    if (message.method === 'resumePublications') {
+      gateway.setDesiredSource(pausedPublication!.desired, pausedPublication!.clipboard);
+      pausedPublication = undefined;
+      for (const { tenant } of store.db.prepare('SELECT tenant FROM session_placements').all() as {
+        tenant: string;
+      }[])
+        gateway.invalidate(tenant);
+      return { resumed: true };
+    }
+    if (message.method === 'fenceClean') {
+      const placement = gateway.placement.peek(message.tenant)!;
+      if (placement.dataState !== 'clean') throw Error('Session must be committed before fencing');
+      gateway.setDesiredSource();
+      store.db
+        .prepare(
+          'UPDATE session_placements SET placement_epoch=placement_epoch+1,data_state=? WHERE tenant=?',
+        )
+        .run(message.stageDirty ? 'dirty' : 'clean', message.tenant);
+      await nodes.get(placement.nodeId)!.coordinate();
+      if (message.stageDirty) {
+        store.db
+          .prepare("UPDATE session_placements SET data_state='clean' WHERE tenant=?")
+          .run(message.tenant);
+        await nodes.get(placement.nodeId)!.coordinate();
+      }
+      return gateway.placement.peek(message.tenant);
+    }
     if (message.method === 'snapshots')
       return Promise.all(
         store.db

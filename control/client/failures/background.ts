@@ -4,6 +4,7 @@ import type { SessionImportSocketMethods } from '../../shared/session-import';
 import { RemoteKitError } from '../../shared/errors';
 import { notices } from './notices';
 import { presentFailure } from './present';
+import { RetryUnit } from '../../shared/retry-unit';
 
 type ImportCall = <K extends keyof SessionImportSocketMethods>(
   method: K,
@@ -15,9 +16,15 @@ export function useBackgroundNotices(state: ProductState | null, online: boolean
   useEffect(() => {
     if (!online) return;
     let active = true;
+    let pending = false;
+    const unit = new RetryUnit();
     const update = async () => {
+      if (!active || pending || !unit.ready()) return;
+      pending = true;
       try {
         const result = await call('sessionImport.state', {});
+        unit.succeed();
+        notices.resolve('poll:session-import');
         if (!active) return;
         const visible = !!document.querySelector('[data-session-import]');
         for (const entry of result.timeline) {
@@ -55,14 +62,22 @@ export function useBackgroundNotices(state: ProductState | null, online: boolean
             );
           else notices.post(key, { class: 'B', text: '手机会话已导入' });
         }
-      } catch {
-        // The Control connection owns background polling availability.
+      } catch (error) {
+        const failure = unit.fail(error);
+        if (failure.first)
+          notices.post(
+            'poll:session-import',
+            presentFailure(failure.error, { operation: '读取会话导入状态', scope: 'global' }),
+          );
+      } finally {
+        pending = false;
       }
     };
     void update();
     const timer = setInterval(() => void update(), 5000);
     return () => {
       active = false;
+      unit.close();
       clearInterval(timer);
     };
   }, [online, call]);

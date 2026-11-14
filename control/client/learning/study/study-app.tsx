@@ -23,7 +23,7 @@ import type { ClassMaterial, HomeworkSummary, MaterialType } from '../../../shar
 import { scaledAnchor } from '../../app/ui-scale';
 import { operationId } from '../../control/product-operations';
 import { failureError, FailureNote, SurfaceState } from '../../failures';
-import { recover } from '../../failures/recovery';
+import { recover, recoverRead } from '../../failures/recovery';
 import { useLibrary } from '../../files/file-library-state';
 import { FilePreview } from '../../files/file-preview';
 import { VirtualList } from '../../ui/virtual-list';
@@ -169,6 +169,7 @@ export function StudyApp(
     setError(undefined);
     try {
       await recover(operation, actionAbort.current.signal, setError);
+      setError(undefined);
     } catch (failure) {
       setError(failureError(failure));
     }
@@ -209,7 +210,7 @@ export function StudyApp(
       if (!entry) throw new RemoteKitError('unavailable', '文件尚未就绪');
       if (active) setPreview(entry);
     };
-    void recover(open, abort.signal, setMaterialError).catch((failure) => {
+    void recoverRead(open, abort.signal, setMaterialError).catch((failure) => {
       if (active) setMaterialError(failureError(failure));
     });
     return () => {

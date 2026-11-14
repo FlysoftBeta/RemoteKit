@@ -1,5 +1,6 @@
 #include "persistence/snapshot_client.hpp"
 #include "util/result_macros.hpp"
+#include "util/wire_error.hpp"
 
 namespace remotekit {
 SnapshotClient::SnapshotClient(const std::string& node) {
@@ -10,27 +11,30 @@ SnapshotClient::~SnapshotClient() {
   if (Available())
     CloseHandle(pipe_);
 }
-Result<Json> SnapshotClient::Request(const Json& request) {
+Result<Json> SnapshotClient::Request(const Json& request) try {
   std::vector<uint8_t> bytes;
-  if (!Available() || !snapshot::SendJson(pipe_, request) || !snapshot::Receive(pipe_, bytes)) {
+  const bool sent = Available() && snapshot::SendJson(pipe_, request);
+  if (!sent || !snapshot::Receive(pipe_, bytes)) {
     if (Available())
       CloseHandle(pipe_);
     pipe_ = INVALID_HANDLE_VALUE;
-    return Error{ErrorCode::kUnavailable, "snapshot service is unavailable"};
+    return Error{sent ? ErrorCode::kOutcomeUnknown : ErrorCode::kUnavailable,
+                 "snapshot service is unavailable"};
   }
   auto reply = Json::parse(bytes, nullptr, false);
-  if (!reply.is_object() || !reply.contains("ok"))
-    return Error{ErrorCode::kUnavailable, "invalid snapshot service response"};
+  if (!reply.is_object() || !reply.contains("ok") || !reply["ok"].is_boolean())
+    return Error{ErrorCode::kOutcomeUnknown, "invalid snapshot service response"};
   if (!reply.value("ok", false)) {
     const auto& error = reply.at("error");
-    Error result{error.value("code", "") == "invalid_request" ? ErrorCode::kInvalidRequest
-                                                              : ErrorCode::kUnavailable,
-                 error.value("message", "snapshot failed")};
+    Error result = ParseWireError(error);
     if (error.contains("os"))
       result.os = OsError{OsError::Kind::kHresult, error["os"].at("value").get<int64_t>()};
     return result;
   }
   return reply.at("result");
+} catch (const std::exception& error) {
+  return Error{ErrorCode::kOutcomeUnknown,
+               std::string("invalid snapshot response: ") + error.what()};
 }
 Result<Json> SnapshotClient::Take(const fs::path& root, const std::vector<std::string>& paths) {
   std::lock_guard lock(mutex_);
@@ -52,7 +56,7 @@ Result<std::string> SnapshotClient::Read(const std::string& id,
   if (!snapshot::Receive(pipe_, bytes) || bytes.size() != header.at("length")) {
     CloseHandle(pipe_);
     pipe_ = INVALID_HANDLE_VALUE;
-    return Error{ErrorCode::kUnavailable, "snapshot data frame is incomplete"};
+    return Error{ErrorCode::kOutcomeUnknown, "snapshot data frame is incomplete"};
   }
   return std::string(bytes.begin(), bytes.end());
 }

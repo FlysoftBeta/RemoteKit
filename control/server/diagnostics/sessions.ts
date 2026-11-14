@@ -1,3 +1,4 @@
+import { RetryUnit } from '../../shared/retry-unit';
 import { decodeJson, encodeJson } from '../persistence/codec';
 import limits from '../../../protocol/limits.json';
 import { archiveMetadata, diagnosticManifest } from './formats';
@@ -42,7 +43,7 @@ const stopReasons = [
 ] as const;
 type StopReason = (typeof stopReasons)[number];
 type Status =
-  | { id: string; status: 'collecting' | 'finalizing' }
+  | { id: string; status: 'collecting' | 'finalizing'; error?: WireError }
   | { id: string; status: 'complete'; reason: StopReason; bytes: number }
   | { id: string; status: 'failed'; reason: 'archive-write-failed'; error: WireError };
 type Source = 'client' | 'control' | 'endpoint' | 'events';
@@ -69,12 +70,26 @@ interface Session {
   interval?: NodeJS.Timeout;
   expiry?: NodeJS.Timeout;
   eventLoop: ReturnType<typeof monitorEventLoopDelay>;
+  controlRetry: RetryUnit;
+  endpointRetry: RetryUnit;
   finalization?: Promise<Status>;
+  finalizeWork?: { reason: StopReason; endedAt: number; elapsedMs: number; logs?: CollectedLogs };
+  finalizeRetry?: RetryUnit;
   unavailable: { control: number; endpoint: number; browserOutput: number; endpointPending: number };
   truncated: Set<string>;
 }
 
 export class DiagnosticSessions {
+  failures(tenant: string) {
+    return [...this.sessions.values()]
+      .filter((session) => session.viewer.tenant === tenant)
+      .flatMap((session) => [
+        session.controlRetry.error,
+        session.endpointRetry.error,
+        session.finalizeRetry?.error,
+      ])
+      .filter((error) => error !== undefined);
+  }
   private readonly active = new Map<string, Session>();
   private readonly sessions = new Map<string, Session>();
   private readonly recent = new Map<string, { tenant: string; status: Status }>();
@@ -121,6 +136,8 @@ export class DiagnosticSessions {
       entries: { client: [], control: [], endpoint: [], events: [] },
       bytes: 0,
       sequence: 0,
+      controlRetry: new RetryUnit({ name: 'diagnostics.control_sample' }),
+      endpointRetry: new RetryUnit({ name: 'diagnostics.endpoint_sample' }),
       eventLoop: monitorEventLoopDelay({ resolution: 20 }),
       unavailable: { control: 0, endpoint: 0, browserOutput: 0, endpointPending: 0 },
       truncated: new Set(),
@@ -199,6 +216,7 @@ export class DiagnosticSessions {
 
   async shutdown() {
     this.closing = true;
+    for (const session of this.sessions.values()) session.finalizeRetry?.cancel();
     await Promise.all([...this.sessions.values()].map((session) => this.finish(session, 'shutdown')));
   }
 
@@ -222,30 +240,42 @@ export class DiagnosticSessions {
   }
 
   private capture(session: Session) {
+    if (session.status.status !== 'collecting') return;
     if (!session.viewer.allowed()) {
       void this.finish(session, 'authorization-changed');
       return;
     }
     const tenant = session.viewer.tenant;
-    try {
-      const loop = session.eventLoop;
-      const eventLoopDelayMs = loop.count
-        ? { mean: loop.mean / 1e6, p95: loop.percentile(95) / 1e6, max: loop.max / 1e6, samples: loop.count }
-        : undefined;
-      loop.reset();
-      this.append(session, 'control', {
-        runtime: {
-          cpuUsageUs: process.cpuUsage(),
-          memoryBytes: process.memoryUsage(),
-          uptimeSeconds: process.uptime(),
-          eventLoopDelayMs,
-        },
-        workspace: this.sources.control(tenant),
-      });
-    } catch {
-      session.unavailable.control++;
+    if (session.controlRetry.ready()) {
+      try {
+        const loop = session.eventLoop;
+        const eventLoopDelayMs = loop.count
+          ? {
+              mean: loop.mean / 1e6,
+              p95: loop.percentile(95) / 1e6,
+              max: loop.max / 1e6,
+              samples: loop.count,
+            }
+          : undefined;
+        loop.reset();
+        this.append(session, 'control', {
+          runtime: {
+            cpuUsageUs: process.cpuUsage(),
+            memoryBytes: process.memoryUsage(),
+            uptimeSeconds: process.uptime(),
+            eventLoopDelayMs,
+          },
+          workspace: this.sources.control(tenant),
+        });
+        session.controlRetry.succeed();
+      } catch (cause) {
+        const failure = session.controlRetry.fail(cause);
+        session.unavailable.control++;
+        if (failure.first)
+          this.append(session, 'events', { source: 'control', error: wireError(failure.error) });
+      }
     }
-    if (session.status.status !== 'collecting') return;
+    if (session.status.status !== 'collecting' || !session.endpointRetry.ready()) return;
     if (this.snapshotPending.has(tenant) || this.snapshotPending.size >= maxActive) {
       session.unavailable.endpointPending++;
       return;
@@ -271,12 +301,16 @@ export class DiagnosticSessions {
           session.unavailable.endpoint++;
           return;
         }
+        session.endpointRetry.succeed();
         const data = diagnosticEndpointSnapshot(snapshot, session.truncated);
         if (data.browserOutputAvailable !== true) session.unavailable.browserOutput++;
         this.append(session, 'endpoint', { requestedElapsedMs, data });
       })
-      .catch(() => {
+      .catch((cause) => {
+        const failure = session.endpointRetry.fail(cause);
         if (timely && session.status.status === 'collecting') session.unavailable.endpoint++;
+        if (failure.first)
+          this.append(session, 'events', { source: 'endpoint', error: wireError(failure.error) });
       })
       .finally(() => {
         clearTimeout(deadline);
@@ -287,24 +321,72 @@ export class DiagnosticSessions {
   private finish(session: Session, reason: StopReason): Promise<Status> {
     if (session.finalization) return session.finalization;
     const { id } = session.status;
-    const endedAt = Date.now();
-    const elapsedMs = performance.now() - session.startedMonotonicMs;
-    clearInterval(session.interval);
-    clearTimeout(session.expiry);
-    session.eventLoop.disable();
-    this.active.delete(session.viewer.tenant);
-    session.status = { id, status: 'finalizing' };
-    session.entries.events.push(
-      Buffer.from(JSON.stringify({ receivedAt: endedAt, elapsedMs, event: 'stopped', reason }) + '\n'),
-    );
-    session.finalization = this.collectLogs(session.viewer.tenant, reason)
-      .then((logs) => this.write(session, reason, endedAt, elapsedMs, logs))
+    if (!session.finalizeWork) {
+      session.finalizeWork = {
+        reason,
+        endedAt: Date.now(),
+        elapsedMs: performance.now() - session.startedMonotonicMs,
+      };
+      clearInterval(session.interval);
+      clearTimeout(session.expiry);
+      session.eventLoop.disable();
+      this.active.delete(session.viewer.tenant);
+      session.status = { id, status: 'finalizing' };
+      session.entries.events.push(
+        Buffer.from(
+          JSON.stringify({
+            receivedAt: session.finalizeWork.endedAt,
+            elapsedMs: session.finalizeWork.elapsedMs,
+            event: 'stopped',
+            reason,
+          }) + '\n',
+        ),
+      );
+      session.finalizeRetry = new RetryUnit({
+        failed: (error) =>
+          reportError(error, 'diagnostics.finalization_failed', {
+            tenant: session.viewer.tenant,
+            diagnosticId: id,
+          }),
+        recovered: () => log.info('diagnostics.finalization_recovered', { diagnosticId: id }),
+      });
+    }
+    const unit = session.finalizeRetry!;
+    if (!unit.ready(id)) return Promise.resolve(session.status);
+    const work = session.finalizeWork;
+    session.finalization = Promise.resolve()
+      .then(async () => {
+        work.logs ??= await this.collectLogs(session.viewer.tenant, work.reason);
+        return this.write(session, work.reason, work.endedAt, work.elapsedMs, work.logs);
+      })
       .then((status) => {
+        unit.succeed();
         session.status = status;
         this.sessions.delete(id);
         if (this.recent.size >= maxRecent) this.recent.delete(this.recent.keys().next().value!);
         this.recent.set(id, { tenant: session.viewer.tenant, status });
         return status;
+      })
+      .catch((cause) => {
+        const error =
+          cause instanceof RemoteKitError
+            ? cause
+            : typeof (cause as NodeJS.ErrnoException)?.code === 'string'
+              ? new RemoteKitError('unavailable', '诊断文件暂时无法保存', { cause })
+              : toRemoteKitError(cause);
+        const failure = unit.fail(error);
+        session.status =
+          failure.delay === undefined
+            ? { id, status: 'failed', reason: 'archive-write-failed', error: wireError(error) }
+            : { id, status: 'finalizing', error: wireError(error) };
+        if (!this.closing)
+          unit.schedule(() => {
+            void this.finish(session, work.reason);
+          });
+        return session.status;
+      })
+      .finally(() => {
+        session.finalization = undefined;
       });
     return session.finalization;
   }
@@ -367,20 +449,7 @@ export class DiagnosticSessions {
       entries,
       endedAt,
       reason,
-    ).then<Status, Status>(
-      (bytes) => ({ id, status: 'complete', bytes, reason }),
-      (error) => ({
-        id,
-        status: 'failed',
-        reason: 'archive-write-failed',
-        error: wireError(
-          reportError(toRemoteKitError(error), 'diagnostics.archive_failed', {
-            tenant: session.viewer.tenant,
-            diagnosticId: id,
-          }),
-        ),
-      }),
-    );
+    ).then((bytes) => ({ id, status: 'complete' as const, bytes, reason }));
   }
 
   private async collectLogs(tenant: string, reason: StopReason): Promise<CollectedLogs> {

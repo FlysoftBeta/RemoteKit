@@ -168,14 +168,16 @@ export class OperationPipeline {
             operation: operation.operationId,
           });
           settle(receipt, {
-            status: failure.code === 'outcome_unknown' ? 'unknown' : 'failed',
+            status: ['outcome_unknown', 'internal'].includes(failure.code) ? 'unknown' : 'failed',
             error: wireError(failure),
           });
           const workspace = this.context.store.workspaces.workspace(tenant);
           for (const tab of workspace.tabs)
             if (tab.navigation?.operationId === operation.operationId) {
-              tab.navigation.status = failure.code === 'outcome_unknown' ? 'unknown' : 'rejected';
-              if (failure.code !== 'outcome_unknown') {
+              tab.navigation.status = ['outcome_unknown', 'internal'].includes(failure.code)
+                ? 'unknown'
+                : 'rejected';
+              if (!['outcome_unknown', 'internal'].includes(failure.code)) {
                 tab.kind = tab.navigation.previousKind;
                 tab.url = tab.navigation.previousUrl;
                 if (isLocalTab(tab)) tab.loading = false;

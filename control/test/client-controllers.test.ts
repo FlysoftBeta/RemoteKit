@@ -145,7 +145,8 @@ test('retryable receipts resubmit the same operation identity and status final f
   );
   t.mock.timers.tick(60_000);
   assert.equal(polls, 1);
-  assert.equal(stopped.getSnapshot().pending.length, 0);
+  assert.equal(stopped.getSnapshot().pending.length, 1);
+  assert.equal(stopped.getSnapshot().pending[0].phase, 'unknown');
 });
 
 for (const status of ['accepted', 'applying', 'committed', 'unknown', 'failed'] as const)
@@ -284,6 +285,7 @@ test('HTTP auth credentials are sent once and never enter pending snapshots thro
 });
 
 test('HTTP auth outcome_unknown queries use only operation identity and never resend the action', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
   const sent: ProductOperation[] = [];
   const queries: unknown[] = [];
   const store = new OperationsStore({
@@ -314,6 +316,8 @@ test('HTTP auth outcome_unknown queries use only operation identity and never re
     status: 'unknown',
     error: { code: 'outcome_unknown', message: '回复丢失' },
   });
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(1000);
   assert.equal((await response).status, 'committed');
   assert.deepEqual(queries, [
     { operationId: sent[0].operationId, operationGeneration: sent[0].operationGeneration },

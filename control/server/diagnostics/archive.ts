@@ -1,10 +1,12 @@
 import { decodeJson, encodeJson } from '../persistence/codec';
 import { archiveMetadata, diagnosticManifest, type stopReason } from './formats';
 import { mkdir, open, rename, rm } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createZstdCompress } from 'node:zlib';
+import { RemoteKitError } from '../../shared/errors';
 
 export type ArchiveEntry =
   | 'manifest.json'
@@ -65,10 +67,11 @@ export async function writeDiagnosticArchive(
   const final = join(directory, `${id}.tar.zst`);
   const partial = join(directory, `${id}.partial`);
   const metadata = join(directory, `${id}.reason`);
-  const partialFile = await open(partial, 'wx', 0o600);
   let ownsMetadata = false;
+  await rm(partial, { force: true });
+  await rm(metadata, { force: true });
   try {
-    const output = partialFile.createWriteStream();
+    const output = createWriteStream(partial, { flags: 'wx', mode: 0o600 });
     await pipeline(Readable.from(tar(entries, Math.floor(endedAt / 1000))), createZstdCompress(), output);
     const reasonFile = await open(metadata, 'wx', 0o600);
     ownsMetadata = true;
@@ -80,11 +83,15 @@ export async function writeDiagnosticArchive(
     await rename(partial, final);
     return output.bytesWritten;
   } catch (error) {
-    await partialFile.close().catch(() => {});
-    await Promise.allSettled([
+    const cleanup = await Promise.allSettled([
       rm(partial, { force: true }),
       ...(ownsMetadata ? [rm(metadata, { force: true })] : []),
     ]);
+    const failures = cleanup.flatMap((result) => (result.status === 'rejected' ? [result.reason] : []));
+    if (failures.length)
+      throw new RemoteKitError('unavailable', '诊断文件暂时无法保存', {
+        cause: { operation: error, cleanup: failures },
+      });
     throw error;
   }
 }

@@ -2,6 +2,7 @@ import { RemoteKitError, wireError } from '../../shared/errors';
 import type { BankQuery, LearningSocketMethods, LearningState, MaterialType } from '../../shared/learning';
 import type { DomainContext, DomainServices } from '../application';
 import { log } from '../log';
+import { createLearningSettings } from '../persistence/learning-settings';
 import { assertWindowMutable, findWindow } from '../workspace/model';
 import { closeSignInTab, openSignInTab } from '../workspace/sign-in';
 import { LearningAccounts } from './accounts';
@@ -311,18 +312,33 @@ export class LearningService {
     return { saved: true };
   }
   async forgetTenant(tenant: string) {
+    await this.retireTenant(tenant);
+    this.forgetTenantData(tenant);
+  }
+  async retireTenant(tenant: string) {
     await Promise.all(
       (['changyan', 'xinjiaoyu'] as const).map((provider) => this.signIn.cancel(tenant, provider)),
     );
-    this.accounts.delete(tenant, 'changyan');
-    this.accounts.delete(tenant, 'xinjiaoyu');
     await this.sync.stopTenant(tenant);
+  }
+  forgetTenantData(tenant: string, persist: () => void = () => undefined, replaceSettings = false) {
+    this.context.store.transaction(() => {
+      for (const table of [
+        'learning_accounts',
+        'learning_settings',
+        'learning_downloads',
+        'document_progress',
+      ])
+        this.context.store.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
+      if (replaceSettings) createLearningSettings(this.context.store.db, tenant);
+      persist();
+    });
+    this.accounts.forgetCached(tenant, 'changyan');
+    this.accounts.forgetCached(tenant, 'xinjiaoyu');
     this.studies.delete(tenant);
     this.banks.delete(tenant);
     this.providers.delete(tenant);
     this.media.forget(tenant);
-    for (const table of ['learning_accounts', 'learning_settings', 'learning_downloads', 'document_progress'])
-      this.context.store.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
   }
   start() {
     this.sync.start();

@@ -1,12 +1,22 @@
+import { OfferResults } from './offer-results';
+import type { SocketMethods } from '../../shared/product';
 import { randomUUID } from 'node:crypto';
 import limits from '../../../protocol/limits.json';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, endpointError, wireError, type WireError } from '../../shared/errors';
+import { RetryUnit } from '../../shared/retry-unit';
+import { rpcId } from '../endpoint/rpc-results';
+import { log } from '../log';
 import type { DomainContext, DomainServices } from '../application';
 import type { NodeLink } from '../cluster/node-link';
 import type { FaceBinding, FaceStatusReply, RtcSignal } from '../endpoint/types';
 import { KeyedSerialQueue } from '../util/serial-queue';
 
 interface ServiceConnection {
+  failure?: WireError;
+  notification?: string;
+  phase: 'active' | 'retiring';
+  authorization: RetryUnit;
+  retirement: RetryUnit;
   node: NodeLink;
   nodeEpoch: string;
   tenant: string;
@@ -19,7 +29,15 @@ interface ServiceConnection {
 }
 
 export class ServicePeers {
+  private closed = false;
+  private readonly offers = new OfferResults<SocketMethods['service.offer']['result']>();
+  offerStatus(tenant: string, attemptId: string, lease: string) {
+    this.services.viewers.assertViewer(tenant, lease);
+    return this.offers.status(tenant, lease, attemptId);
+  }
+
   private readonly connections = new Map<string, ServiceConnection>();
+  private readonly retirements = new Map<ServiceConnection, Promise<{ closed: boolean }>>();
   private readonly queue = new KeyedSerialQueue();
   private readonly subscriptions: (() => void)[];
   constructor(
@@ -60,6 +78,8 @@ export class ServicePeers {
 
   private current(connection: ServiceConnection) {
     return (
+      !this.closed &&
+      connection.phase === 'active' &&
       this.connections.get(connection.tenant) === connection &&
       connection.node.state.state === 'ready' &&
       !this.context.endpoint.nodes.isRemoved(connection.node.nodeId) &&
@@ -69,6 +89,7 @@ export class ServicePeers {
   }
 
   private changed(connection: ServiceConnection) {
+    if (this.closed || this.context.closed) return;
     const viewer = this.context.tenants.get(connection.tenant).viewer;
     if (!viewer || viewer.id !== connection.lease) return;
     this.context.events.emit(
@@ -77,6 +98,21 @@ export class ServicePeers {
       connection.lease,
       this.services.viewers.authState(connection.tenant, viewer.security),
     );
+  }
+  private clearFailure(connection: ServiceConnection) {
+    const viewer = this.context.tenants.get(connection.tenant).viewer;
+    if (viewer?.id === connection.lease && viewer.security.face.error === connection.failure)
+      delete viewer.security.face.error;
+    delete connection.failure;
+  }
+  private setFailure(connection: ServiceConnection, cause: unknown) {
+    const viewer = this.context.tenants.get(connection.tenant).viewer;
+    if (viewer?.id !== connection.lease) return;
+    const failure = wireError(endpointError(cause));
+    if (JSON.stringify(connection.failure) === JSON.stringify(failure)) return;
+    connection.failure = failure;
+    viewer.security.face.error = failure;
+    this.changed(connection);
   }
 
   private signal(node: NodeLink, event: RtcSignal) {
@@ -102,6 +138,13 @@ export class ServicePeers {
   }
 
   offer(tenant: string, params: { type: string; sdp: string; attemptId: string }, lease: string) {
+    return this.offers.execute(tenant, lease, params, () => this.applyOffer(tenant, params, lease));
+  }
+  private applyOffer(
+    tenant: string,
+    params: { type: string; sdp: string; attemptId: string },
+    lease: string,
+  ) {
     this.services.viewers.assertViewer(tenant, lease);
     if (
       params.type !== 'offer' ||
@@ -116,12 +159,22 @@ export class ServicePeers {
     return this.queue.run(tenant, async () => {
       this.services.viewers.assertViewer(tenant, lease);
       await this.close(tenant);
+      if (this.closed) throw new RemoteKitError('canceled', 'Service peers closed');
       const node = this.chooseNode(tenant);
       if (!node) throw new RemoteKitError('unavailable', '没有可用节点提供文件和人脸服务');
       if (node.state.state !== 'ready') throw new RemoteKitError('unavailable', '文件服务节点离线');
       const viewer = this.context.tenants.get(tenant).viewer!;
       const connectionId = randomUUID();
       const connection: ServiceConnection = {
+        phase: 'active',
+        authorization: new RetryUnit({
+          failed: (error) => log.warn('service.authorize_failed', { tenant, err: error }),
+          recovered: () => log.info('service.authorize_recovered', { tenant }),
+        }),
+        retirement: new RetryUnit({
+          failed: (error) => log.warn('service.close_failed', { tenant, err: error }),
+          recovered: () => log.info('service.close_recovered', { tenant }),
+        }),
         node,
         nodeEpoch: node.state.connectionEpoch!,
         tenant,
@@ -140,7 +193,7 @@ export class ServicePeers {
           timer: setTimeout(() => reject(new RemoteKitError('outcome_unknown', '文件服务协商超时')), 15000),
         };
       });
-      void answer.catch(() => {});
+      void answer.catch((error) => log.warn('service.answer_failed', { tenant, err: error }));
       try {
         await node.request('service.offer', tenant, {
           ...params,
@@ -190,18 +243,38 @@ export class ServicePeers {
   private async authorizeConnection(connection: ServiceConnection) {
     const viewer = this.context.tenants.get(connection.tenant).viewer!;
     if (connection.lockEpoch === viewer.security.epoch && connection.peer.appliedEpoch) return;
-    connection.lockEpoch = viewer.security.epoch;
-    const epoch = ++connection.peer.epoch;
-    connection.peer.appliedEpoch = 0;
-    await connection.node.request('service.authorize', connection.tenant, {
-      connectionId: connection.connectionId,
-      leaseId: connection.lease,
-      epoch,
-      unlocked: !viewer.security.locked,
-    });
-    if (this.current(connection) && connection.peer.epoch === epoch) {
-      connection.peer.appliedEpoch = epoch;
-      this.changed(connection);
+    const input = JSON.stringify([viewer.security.epoch, connection.node.state]);
+    const changed = connection.authorization.record().input !== input;
+    if (!connection.authorization.ready(input)) throw connection.authorization.error;
+    if (changed) {
+      connection.lockEpoch = viewer.security.epoch;
+      connection.peer.epoch++;
+      connection.peer.appliedEpoch = 0;
+    }
+    const epoch = connection.peer.epoch;
+    try {
+      await connection.node.request(
+        'service.authorize',
+        connection.tenant,
+        {
+          connectionId: connection.connectionId,
+          leaseId: connection.lease,
+          epoch,
+          unlocked: !viewer.security.locked,
+        },
+        undefined,
+        rpcId('service.authorize', connection.connectionId, epoch),
+      );
+      connection.authorization.succeed();
+      this.clearFailure(connection);
+      if (this.current(connection) && connection.peer.epoch === epoch) {
+        connection.peer.appliedEpoch = epoch;
+        this.changed(connection);
+      }
+    } catch (error) {
+      connection.authorization.fail(endpointError(error));
+      this.setFailure(connection, error);
+      throw error;
     }
   }
 
@@ -213,7 +286,15 @@ export class ServicePeers {
       (lease && lease !== connection.lease)
     )
       return { closed: true };
-    this.connections.delete(tenant);
+    const current = this.retirements.get(connection);
+    if (current) return current;
+    const work = this.retireConnection(connection).finally(() => this.retirements.delete(connection));
+    this.retirements.set(connection, work);
+    return work;
+  }
+  private async retireConnection(connection: ServiceConnection) {
+    const { tenant } = connection;
+    connection.phase = 'retiring';
     clearTimeout(connection.answer?.timer);
     connection.answer?.reject(new RemoteKitError('unavailable', '文件服务已中断'));
     const viewer = this.context.tenants.get(tenant).viewer;
@@ -221,34 +302,72 @@ export class ServicePeers {
       this.services.security.forgetServicePeer(tenant, viewer.security);
       this.changed(connection);
     }
-    await connection.node
-      .request('service.close', tenant, { connectionId: connection.connectionId, leaseId: connection.lease })
-      .catch(() => {});
+    const unit = connection.retirement;
+    if (!unit.ready(JSON.stringify(connection.node.state))) throw unit.error;
+    try {
+      await connection.node.request(
+        'service.close',
+        tenant,
+        { connectionId: connection.connectionId, leaseId: connection.lease },
+        undefined,
+        rpcId('service.close', connection.connectionId),
+      );
+      unit.succeed();
+      this.clearFailure(connection);
+      this.changed(connection);
+      this.offers.retire(tenant, connection.lease, connection.attemptId);
+      if (this.connections.get(tenant) === connection) this.connections.delete(tenant);
+      connection.authorization.close();
+    } catch (cause) {
+      unit.fail(endpointError(cause));
+      this.setFailure(connection, cause);
+      throw cause;
+    }
     return { closed: true };
   }
 
   async tick() {
+    if (this.closed) return;
     for (const [tenant, connection] of this.connections) {
       // A connected service peer stays on its node (moving it would cut off transfers in flight); only
       // losing that node moves it.
-      if (!this.current(connection)) {
-        this.context.events.emit('rtc.signal', tenant, connection.lease, {
-          type: 'rtc.signal',
-          connectionId: connection.connectionId,
-          attemptId: connection.attemptId,
-          signal: { type: 'error', error: { code: 'unavailable', message: '文件服务节点离线' } },
-        });
-        await this.close(tenant);
-      } else await this.authorize(tenant).catch(() => {});
+      try {
+        if (connection.phase === 'retiring' || !this.current(connection)) {
+          const error = connection.retirement.error
+            ? wireError(connection.retirement.error)
+            : { code: 'unavailable' as const, message: '文件服务节点离线' };
+          const notification = JSON.stringify([connection.node.state, error]);
+          if (notification !== connection.notification) {
+            connection.notification = notification;
+            this.context.events.emit('rtc.signal', tenant, connection.lease, {
+              type: 'rtc.signal',
+              connectionId: connection.connectionId,
+              attemptId: connection.attemptId,
+              signal: { type: 'error', error },
+            });
+          }
+          await this.close(tenant);
+        } else await this.authorize(tenant);
+      } catch (cause) {
+        this.setFailure(connection, cause);
+      }
     }
   }
   private face(tenant: string, method: string, params: object = {}) {
     const connection = this.require(tenant, (params as { connectionId?: string }).connectionId);
-    return connection.node.request(method, tenant, {
-      ...params,
-      connectionId: connection.connectionId,
-      leaseId: connection.lease,
-    });
+    return connection.node.request(
+      method,
+      tenant,
+      {
+        ...params,
+        connectionId: connection.connectionId,
+        leaseId: connection.lease,
+      },
+      undefined,
+      ['service.face.begin', 'service.face.cancel'].includes(method)
+        ? rpcId(method, connection.connectionId, params)
+        : undefined,
+    );
   }
   describeAsset(
     tenant: string,
@@ -272,8 +391,18 @@ export class ServicePeers {
     return this.face(tenant, 'service.face.status', params);
   }
   async dispose() {
+    this.closed = true;
     this.subscriptions.forEach((unsubscribe) => unsubscribe());
-    await Promise.all([...this.connections.keys()].map((tenant) => this.close(tenant)));
+    const results = await Promise.allSettled(
+      [...this.connections.keys()].map((tenant) => this.close(tenant)),
+    );
     await this.queue.drain();
+    await Promise.allSettled(this.retirements.values());
+    for (const connection of this.connections.values()) {
+      connection.authorization.close();
+      connection.retirement.close();
+    }
+    const failure = results.find((result) => result.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
   }
 }

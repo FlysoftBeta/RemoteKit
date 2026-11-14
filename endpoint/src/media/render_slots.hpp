@@ -31,13 +31,13 @@ class RenderSlots {
   enum class Result { idle, ready, error };
   void SetTrace(std::shared_ptr<ServerTrace> trace) { trace_ = std::move(trace); }
   void SetClock(const remotekit_rtc_clock_sample& sample) { clock_ = sample; }
-  bool Open(remotekit_sdk_render_setup,
-            uint32_t producer_pid,
-            Sdk&,
-            LUID,
-            ID3D11Device5*,
-            ID3D11DeviceContext4*,
-            std::string&);
+  remotekit::Result<void> Open(remotekit_sdk_render_setup,
+                               uint32_t producer_pid,
+                               Sdk&,
+                               LUID,
+                               ID3D11Device5*,
+                               ID3D11DeviceContext4*,
+                               std::string& diagnostic);
   bool Begin(uint32_t interval_us,
              bool force,
              std::string&,
@@ -69,6 +69,7 @@ class RenderSlots {
   uint64_t shared_held_slots() const;
 
  private:
+  friend class NativeLifetimeProbe;
   struct State;
   FrameAdmission& admission_;
   std::shared_ptr<FrameAdmission::Client> admission_client_;
@@ -80,12 +81,14 @@ class RenderSlots {
   std::vector<std::shared_ptr<State>> retired_;
   void Reap();
   void PublishStats();
+  void PublishSnapshot(StatsSnapshot stats, const SharedAtlasFrame& metadata);
   struct PublishGuard {
     RenderSlots& owner;
     ~PublishGuard() { owner.PublishStats(); }
   };
   StatsSnapshot counters_, published_;
   mutable std::mutex stats_mutex_;
+  SharedAtlasFrame published_metadata_{};
   remotekit_rtc_clock_sample clock_{};
   std::shared_ptr<ServerTrace> trace_;
   std::atomic<uint64_t> delivered_{0};

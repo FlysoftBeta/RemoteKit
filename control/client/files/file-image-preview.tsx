@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import type { LibraryEntry, LibraryFileEntry } from '../../shared/file-library';
 import { failureError, FailureNote } from '../failures';
-import { recover } from '../failures/recovery';
+import { recoverRead as recover } from '../failures/recovery';
 import { useLibrary } from './file-library-state';
 import type { PhotoDestination } from './photo-job-store';
 import { PhotoRotateButton } from './photo-rotate-button';

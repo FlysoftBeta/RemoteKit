@@ -143,6 +143,7 @@ export interface ProductTab {
   lifecycleRecovery?: LifecycleRecovery;
   lifecycleRecoveryError?: WireError;
   pendingUaReloadOrigin?: string;
+  pendingUaReloadIdentity?: { operationId: string; operationGeneration: string; browserIncarnation: string };
   popup?: { provisionalId: string; status: 'pending' | 'adopted' | 'failed'; error?: WireError };
 }
 export interface ProductWindow {
@@ -354,7 +355,7 @@ export interface PageFullscreen {
 export interface BackgroundTask {
   id: string;
   kind: 'download';
-  state: 'complete' | 'failed';
+  state: 'complete' | 'failed' | 'unknown';
   name: string;
   entryId?: string;
   error?: WireError;
@@ -504,6 +505,13 @@ export interface SocketMethods
     params: { type: 'offer'; sdp: string; attemptId: string };
     result: { type: 'answer'; sdp: string; connectionId: string; epoch: number };
   };
+  'service.offerStatus': {
+    params: { attemptId: string };
+    result: {
+      state: 'pending' | 'ready' | 'unknown' | 'retired';
+      answer?: SocketMethods['service.offer']['result'];
+    };
+  };
   'service.ice': {
     params: { connectionId: string; candidate: unknown; attemptId?: string };
     result: unknown;
@@ -521,6 +529,13 @@ export interface SocketMethods
     };
   };
   'rtc.ice': { params: { connectionId: string; candidate: unknown; attemptId?: string }; result: unknown };
+  'rtc.offerStatus': {
+    params: { attemptId: string };
+    result: {
+      state: 'pending' | 'ready' | 'unknown' | 'retired';
+      answer?: SocketMethods['rtc.offer']['result'];
+    };
+  };
   'rtc.close': { params: { connectionId: string }; result: { closed: boolean } };
   'clock.ping': { params: { clientTime?: number }; result: { serverTime: number; clientTime?: number } };
 }

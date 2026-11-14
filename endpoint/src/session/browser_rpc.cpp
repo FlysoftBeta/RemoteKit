@@ -18,8 +18,7 @@ Result<void> BrowserRpc::Connect(const std::string& channel) {
   uint64_t handle = 0;
   const int status = sdk_.remotekit_sdk_control_connect(channel.c_str(), &handle);
   if (status)
-    return Error{media::SdkErrorCode(status),
-                 "browser control connect SDK " + std::to_string(status)};
+    return Error{SdkErrorCode(status), "browser control connect SDK " + std::to_string(status)};
   if (!handle)
     return Error{ErrorCode::kUnavailable, "browser control connect returned no handle"};
   control_ = handle;
@@ -83,7 +82,6 @@ Result<Json> BrowserRpc::Exchange(Json command,
   std::vector<char> response(clipboard ? 32 * 1024 * 1024 : 1024 * 1024);
   size_t count = 0;
   record("input_rpc_sdk_call");
-  const auto started = std::chrono::steady_clock::now();
   const int status =
       sdk_.remotekit_sdk_control_request(Control(), encoded.data(), encoded.size(), response.data(),
                                          response.size(), &count, timeout_ms);
@@ -95,19 +93,11 @@ Result<Json> BrowserRpc::Exchange(Json command,
       if (const auto handle = control_.exchange(0))
         sdk_.remotekit_sdk_control_close(handle);
     }
-    LogError(LogLevel::kWarn, "browser.rpc_failed", error,
-             {{"method", command.value("method", std::string())},
-              {"requestId", serial_},
-              {"elapsedMs", std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now() - started)
-                                .count()},
-              {"sdkStatus", status},
-              {"control", Control()}});
     return error;
   };
   if (status) {
     needs_health_check_ = true;
-    return failed(Error{media::SdkErrorCode(status),
+    return failed(Error{SdkErrorCode(status),
                         "browser request transport SDK " + std::to_string(status),
                         status == REMOTEKIT_SDK_CHANNEL_CLOSED
                             ? std::optional<ErrorReason>(ErrorReason::kBrowserRestarting)
@@ -154,7 +144,6 @@ Result<void> BrowserRpc::OpenRender(remotekit_sdk_render_setup& setup) {
   std::unique_lock lock(mutex_);
   if (!Control())
     return Error{ErrorCode::kUnavailable, "browser control unavailable"};
-  const auto started = std::chrono::steady_clock::now();
   remotekit_sdk_failure failure{};
   const int status = sdk_.remotekit_sdk_control_open_render(Control(), GetCurrentProcessId(),
                                                             &setup, 15000, &failure);
@@ -166,13 +155,6 @@ Result<void> BrowserRpc::OpenRender(remotekit_sdk_render_setup& setup) {
         sdk_.remotekit_sdk_control_close(handle);
     }
     needs_health_check_ = true;
-    LogError(LogLevel::kWarn, "browser.rpc_failed", media::SdkFailure(status, failure),
-             {{"method", "output.open"},
-              {"elapsedMs", std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now() - started)
-                                .count()},
-              {"sdkStatus", status},
-              {"control", Control()}});
     return media::SdkFailure(status, failure);
   }
   return {};

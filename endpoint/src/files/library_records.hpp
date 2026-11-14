@@ -18,8 +18,10 @@ inline const char* StateName(State state) {
   switch (state) {
     case State::pending:
       return "pending";
-    case State::submitted:
-      return "submitted";
+    case State::dispatching:
+      return "dispatching";
+    case State::unknown:
+      return "unknown";
     case State::selected:
       return "selected";
     case State::cancelled:
@@ -28,7 +30,8 @@ inline const char* StateName(State state) {
   throw std::logic_error("invalid selection enum");
 }
 inline Result<State> ParseState(const std::string& state) {
-  for (const auto value : {State::pending, State::submitted, State::selected, State::cancelled})
+  for (const auto value :
+       {State::pending, State::dispatching, State::unknown, State::selected, State::cancelled})
     if (state == StateName(value))
       return value;
   return Error{ErrorCode::kInvalidRequest, "invalid_selection_state"};

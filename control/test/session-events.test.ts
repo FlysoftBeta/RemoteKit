@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
+import { RemoteKitError } from '../shared/errors';
 import { ControlDatabase } from '../server/persistence/database';
 import { TenantRegistry } from '../server/tenants/tenant-registry';
 import { systemClock } from '../server/util/clock';
@@ -24,6 +25,7 @@ function fixture() {
   const nodes = new EventEmitter();
   const acknowledgments: EventsAck[] = [];
   const faults = new Map<string, unknown>();
+  let connectionEpoch = 'connection';
   const context = {
     store,
     clock: systemClock,
@@ -34,7 +36,7 @@ function fixture() {
       sessionFault: (tenant: string) => faults.get(tenant),
       faultSession: (tenant: string, error: unknown) => faults.set(tenant, error),
       nodes: Object.assign(nodes, {
-        get: () => ({ state: { state: 'ready', connectionEpoch: 'connection' } }),
+        get: () => ({ state: { state: 'ready', connectionEpoch } }),
       }),
       placement: { peek: () => ({ nodeId: 'node', sessionId: 'a'.repeat(32), placementEpoch: 1 }) },
       observation: () => ({
@@ -88,6 +90,10 @@ function fixture() {
     events,
     event,
     acknowledgments,
+    reconnect: () => {
+      connectionEpoch = 'reconnected';
+      faults.clear();
+    },
     async close() {
       await events.close();
       await context.tenants.close();
@@ -173,14 +179,16 @@ test('clipboard disposition and concurrent snippets commit atomically before ack
     f.store.db.exec(
       "CREATE TRIGGER fail_disposition BEFORE UPDATE ON session_event_inbox BEGIN SELECT RAISE(ABORT,'disk full'); END",
     );
-    await assert.rejects(f.events.receive('node', current), /disk full/);
+    await assert.rejects(f.events.receive('node', current), { code: 'internal' });
     assert.equal(f.store.clipboards.latest('user')?.text, 'device');
     assert.equal(f.acknowledgments.length, 1);
     f.store.db.exec('DROP TRIGGER fail_disposition');
-    await f.events.receive('node', current);
+    f.reconnect();
+    const redelivered = { ...current, connectionEpoch: 'reconnected' };
+    await f.events.receive('node', redelivered);
     assert.equal(f.store.clipboards.latest('user')?.revision, '2');
     assert.equal(f.store.clipboards.latest('user')?.text, 'new native');
-    await f.events.receive('node', { ...current, streamId: 'restored', seq: '1' });
+    await f.events.receive('node', { ...redelivered, streamId: 'restored', seq: '1' });
     assert.equal(f.store.clipboards.latest('user')?.revision, '2');
   } finally {
     await f.close();
@@ -212,21 +220,65 @@ test('HTML-only concurrent native clipboard copies survive as snippets and accou
   }
 });
 
-test('failed download catalog commits never acknowledge', async () => {
+test('catalog rejection is durable and does not block the next Session event', async () => {
   const f = fixture();
   try {
     f.services.library.consumeDownload = async () => {
-      throw new Error('catalog unavailable');
+      throw new RemoteKitError('limit_exceeded', 'catalog full', { capacity: 'catalog' });
     };
     const download = f.event('1', {
       type: 'download.failed',
       body: { name: 'file', origin: '', error: { code: 'rejected', message: 'failed' } },
     });
-    await assert.rejects(f.events.receive('node', download), /catalog unavailable/);
-    assert.equal(f.acknowledgments.length, 0);
-    f.services.library.consumeDownload = async () => {};
     await f.events.receive('node', download);
+    assert.equal(f.acknowledgments[0].upTo, '1');
+    assert.equal(f.store.coordination.receive(download), 'download_pending');
+    assert.equal(
+      f.context.tenants.get('tenant').backgroundTasks.get(download.eventId)?.error?.code,
+      'limit_exceeded',
+    );
+    await f.events.receive('node', f.event('2'));
+    assert.equal(f.acknowledgments[1].upTo, '2');
+    assert.equal(f.context.endpoint.sessionFault('tenant'), undefined);
+    f.services.library.consumeDownload = async () => {};
+    await f.events.reconcileDownloads();
+    assert.equal(f.store.coordination.receive(download), 'download_pending');
+    f.store.db
+      .prepare(
+        'INSERT INTO library_state VALUES (?,1,NULL) ON CONFLICT(tenant) DO UPDATE SET revision=revision+1',
+      )
+      .run('tenant');
+    await f.events.reconcileDownloads();
+    assert.equal(f.store.coordination.receive(download), 'recorded');
   } finally {
     await f.close();
   }
+});
+
+test('uncertain download ingestion retains its event identity and projects unknown until reconciliation', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+  const f = fixture();
+  t.after(() => f.close());
+  const imported = new Set<string>();
+  let calls = 0;
+  f.services.library.consumeDownload = async (_tenant, event) => {
+    calls++;
+    if (imported.has(event.eventId!)) return;
+    imported.add(event.eventId!);
+    throw new RemoteKitError('outcome_unknown', 'reply lost', { errorId: 'e-0123456789' });
+  };
+  const event = f.event('1', {
+    type: 'download.imported',
+    body: { name: 'file', origin: '', assetId: 'b'.repeat(64), size: '1', mimeType: 'text/plain' },
+  });
+  await f.events.receive('node', event);
+  assert.equal(f.context.tenants.get('tenant').backgroundTasks.get(event.eventId)?.state, 'unknown');
+  assert.equal(f.store.coordination.cursor(event), '1');
+  assert.equal(f.store.coordination.receive(event), 'download_pending');
+  t.mock.timers.tick(1000);
+  await f.events.reconcileDownloads();
+  assert.equal(calls, 2);
+  assert.equal(imported.size, 1);
+  assert.equal(f.context.tenants.get('tenant').backgroundTasks.get(event.eventId)?.state, 'complete');
+  assert.equal(f.store.coordination.receive(event), 'recorded');
 });

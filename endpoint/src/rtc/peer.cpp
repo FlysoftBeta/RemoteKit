@@ -68,10 +68,10 @@ Result<Json> PeerController::Offer(const Json& request,
     }
   } exit{*this};
   if (status != 0 || !handle)
-    return Error{media::SdkErrorCode(status), "RTC create failed"};
+    return Error{SdkErrorCode(status), "RTC create failed"};
   const int sync_status = sdk_.remotekit_rtc_set_av_sync(handle, av_sync);
   if (sync_status)
-    return Error{media::SdkErrorCode(sync_status), "RTC AV sync failed"};
+    return Error{SdkErrorCode(sync_status), "RTC AV sync failed"};
   av_sync_ = av_sync;
   hooks_.bind(handle, generation);
   auto policy = role_ == Role::kBrowser ? Policy(fps, degradation, audio) : Result<void>();
@@ -80,12 +80,12 @@ Result<Json> PeerController::Offer(const Json& request,
   const int playout_status = sdk_.remotekit_rtc_set_playout_delay(
       handle, RuntimeOptions::kRtcPlayoutMinMs, RuntimeOptions::kRtcPlayoutMaxMs);
   if (playout_status)
-    return Error{media::SdkErrorCode(playout_status), "RTC playout delay failed"};
+    return Error{SdkErrorCode(playout_status), "RTC playout delay failed"};
   const int offer_status =
       sdk_.remotekit_rtc_set_remote_description(handle, 1, sdp.data(), sdp.size());
   if (offer_status)
     return Error{offer_status == REMOTEKIT_SDK_INVALID_ARGUMENT ? ErrorCode::kRejected
-                                                                : media::SdkErrorCode(offer_status),
+                                                                : SdkErrorCode(offer_status),
                  "RTC remote offer failed"};
   uint32_t level = 0;
   if (sdk_.remotekit_rtc_get_receive_level(handle, &level) != 0)
@@ -95,9 +95,13 @@ Result<Json> PeerController::Offer(const Json& request,
     return Error{ErrorCode::kRejected, "peer has no compatible receiving H264 level"};
   receive_level_ = level;
   auto started = hooks_.started(handle, sdp);
-  if (!started)
-    return Error{ErrorCode::kOutcomeUnknown,
-                 "RTC offer applied before media startup failed: " + started.error().message};
+  if (!started) {
+    auto error = started.error();
+    error.code = ErrorCode::kOutcomeUnknown;
+    error.retry_after_ms.reset();
+    error.message = "RTC offer applied before media startup failed: " + error.message;
+    return error;
+  }
   exit.accepted = true;
   return Json{
       {"accepted", true}, {"pending", true}, {"connectionId", connection}, {"avSync", av_sync}};
@@ -110,7 +114,7 @@ Result<void> PeerController::Policy(uint32_t fps, uint32_t degradation, bool aud
   if (degradation_status)
     return Error{degradation_status == REMOTEKIT_SDK_INVALID_ARGUMENT
                      ? ErrorCode::kInvalidRequest
-                     : media::SdkErrorCode(degradation_status),
+                     : SdkErrorCode(degradation_status),
                  "RTC degradation policy failed"};
   if (sdk_.remotekit_rtc_set_source_max_fps(handle, fps) != 0 ||
       sdk_.remotekit_rtc_set_audio_enabled(handle, audio) != 0)
@@ -136,7 +140,7 @@ Result<Json> PeerController::Ice(const Json& request) {
       Handle(), mid.c_str(), ice.value("sdpMLineIndex", 0), candidate.data(), candidate.size());
   if (status)
     return Error{status == REMOTEKIT_SDK_INVALID_ARGUMENT ? ErrorCode::kInvalidRequest
-                                                          : media::SdkErrorCode(status),
+                                                          : SdkErrorCode(status),
                  "ICE candidate failed"};
   return Json::object();
 }

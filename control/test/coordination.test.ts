@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../shared/errors';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -137,46 +138,33 @@ test('clipboard UTF-8 fields accept the contract boundary and reject one byte pa
   }
 });
 
-test('Session faults back off on attaches and reset after healthy running', () => {
+test('Session admission retains availability backoff and clears on an eligible attach', () => {
   let now = 0;
   const faults = new SessionFaults(() => now);
   const target = { tenantId: 'tenant', sessionId: 'a'.repeat(32), placementEpoch: 1 };
-  const first = faults.fault(target, 'bad');
+  const first = faults.fault(target, new RemoteKitError('unavailable', 'offline'));
   assert.match(first.errorId!, /^c-/);
-  assert.equal(faults.fault(target, 'again'), first);
+  assert.equal(faults.fault(target, new Error('again')), first);
   assert.equal(faults.attach(target), false);
-  now = 60_000;
-  assert.equal(faults.attach(target), true);
-  faults.fault(target, 'again');
-  now += 60_000;
+  now = 999;
   assert.equal(faults.attach(target), false);
-  now += 60_000;
+  now++;
   assert.equal(faults.attach(target), true);
+  assert.equal(faults.get(target), undefined);
   faults.observe(target, true);
-  now += 600_000;
-  faults.fault(target, 'again');
-  now += 60_000;
-  assert.equal(faults.attach(target), true);
   assert.equal(faults.get({ ...target, placementEpoch: 2 }), undefined);
 });
 
-test('management disconnect interrupts the Session fault healthy-running reset window', () => {
-  let now = 0;
-  const faults = new SessionFaults(() => now);
+test('a final Session fault requires a new attach input and preserves its code', () => {
+  const faults = new SessionFaults();
   const target = { tenantId: 'tenant', sessionId: 'a'.repeat(32), placementEpoch: 1 };
-  faults.fault(target, 'first');
-  now = 60_000;
-  assert.equal(faults.attach(target), true);
-  faults.observe(target, true);
-  now += 500_000;
+  const failure = faults.fault(target, new RemoteKitError('rejected', 'invalid profile'));
   faults.disconnected();
-  now += 100_000;
-  faults.observe(target, true);
-  faults.fault(target, 'second');
-  now += 60_000;
-  assert.equal(faults.attach(target), false);
-  now += 60_000;
+  assert.equal(faults.get(target), failure);
+  assert.equal(failure.code, 'rejected');
   assert.equal(faults.attach(target), true);
+  faults.observe(target, true);
+  assert.equal(faults.get(target), undefined);
 });
 
 import { encodeJson } from '../server/cluster/frames';

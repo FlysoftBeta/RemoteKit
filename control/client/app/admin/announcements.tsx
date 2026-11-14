@@ -75,8 +75,12 @@ export function AdminAnnouncementsSection({ online, call }: { online: boolean; c
           onSave={async (draft) =>
             setData(
               editing.kind === 'edit'
-                ? await call('admin.updateAnnouncement', { id: editing.item.id, ...draft })
-                : await call('admin.publishAnnouncement', { title: draft.title, body: draft.body }),
+                ? await call('admin.updateAnnouncement', draft)
+                : await call('admin.publishAnnouncement', {
+                    id: draft.id,
+                    title: draft.title,
+                    body: draft.body,
+                  }),
             )
           }
         />
@@ -107,9 +111,10 @@ function AnnouncementEditor({
 }: {
   item?: AdminAnnouncement;
   onClose(): void;
-  onSave(draft: { title: string; body: string; republish: boolean }): Promise<void>;
+  onSave(draft: { id: string; title: string; body: string; republish: boolean }): Promise<void>;
 }) {
   const autoFocusRef = useAutoFocus<HTMLInputElement>();
+  const [id] = useState(() => item?.id ?? crypto.randomUUID());
   const [title, setTitle] = useState(item?.title ?? ''),
     [body, setBody] = useState(item?.body ?? ''),
     [republish, setRepublish] = useState(false);
@@ -120,7 +125,8 @@ function AnnouncementEditor({
       confirmLabel={item ? '保存' : '发布'}
       disabled={!title.trim() || !body.trim()}
       onClose={onClose}
-      onConfirm={() => onSave({ title, body, republish })}
+      retryIdentity={item ? undefined : id}
+      onConfirm={() => onSave({ id, title, body, republish })}
     >
       <TextField
         label="标题"

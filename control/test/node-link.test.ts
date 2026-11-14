@@ -11,9 +11,88 @@ import { decodeFrame, encodeJson, encodeStdio, MAX_JSON } from '../server/cluste
 import { encodeNodeReady } from '../server/cluster/ready';
 import { EndpointLog } from '../server/cluster/endpoint-log';
 import { log } from '../server/log';
+import type { ErrorCode } from '../shared/errors';
 import { testNode, nodePrivateKey } from './node-fixture';
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+for (const code of [
+  'busy',
+  'rate_limited',
+  'unavailable',
+  'outcome_unknown',
+  'conflict',
+  'not_found',
+  'invalid_request',
+  'internal',
+  'rejected',
+  'limit_exceeded',
+  'forbidden',
+  'locked',
+  'unauthenticated',
+] satisfies ErrorCode[]) {
+  test(`node.desired ${code} retry policy`, async (t) => {
+    const logs = closeLogs(t);
+    const recovered: unknown[] = [];
+    t.mock.method(log, 'info', (...args: unknown[]) => recovered.push(args));
+    t.mock.method(Math, 'random', () => 0.5);
+    const h = fixture(t);
+    const peer = h.connect();
+    await flush();
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    let epoch = 1;
+    h.registry.fencing = () => [
+      { tenantId: 'tenant', sessionId: 'a'.repeat(32), placementEpoch: epoch, dataState: 'dirty' },
+    ];
+    peer.autoFence = false;
+    const documents = () =>
+      peer.frames.flatMap((frame) =>
+        frame.kind === 'json' && frame.message.method === 'node.desired' ? [frame.message] : [],
+      );
+    const pending = assert.rejects(h.link.coordinate(), { code });
+    await flush();
+    const initial = documents().slice(-1)[0]!;
+    peer.send({ id: initial.id, ok: false, error: { code, message: 'fixture', errorId: 'e-0123456789' } });
+    await pending;
+    await flush();
+    const retryable = ['busy', 'rate_limited', 'unavailable', 'outcome_unknown', 'conflict'].includes(code);
+    const delay = code === 'busy' ? 250 : code === 'rate_limited' ? 30_000 : 1000;
+    const before = documents().length;
+    await assert.rejects(h.link.coordinate(), { code });
+    if (retryable) {
+      t.mock.timers.tick(delay - 1);
+      await flush();
+      assert.equal(documents().length, before);
+      t.mock.timers.tick(1);
+      await flush();
+      const retried = documents().slice(-1)[0]!;
+      assert.equal(documents().length, before + 1);
+      assert.equal(retried.revision === initial.revision, code !== 'conflict');
+      peer.send({ id: retried.id, ok: false, error: { code, message: 'again' } });
+      await flush();
+      const secondDelay = code === 'rate_limited' ? delay : delay * 2;
+      peer.autoFence = true;
+      t.mock.timers.tick(secondDelay - 1);
+      await flush();
+      assert.equal(documents().length, before + 1);
+      t.mock.timers.tick(1);
+      await flush();
+      await h.link.coordination;
+    } else {
+      t.mock.timers.tick(1_000_000);
+      await assert.rejects(h.link.coordinate(), { code });
+      assert.equal(documents().length, before);
+      epoch++;
+      peer.autoFence = true;
+      await h.link.coordinate();
+      await flush();
+    }
+    assert.equal(peer.carrier.isClosing, false);
+    assert.equal(logs.records.filter((record) => record.event === 'node.coordination_failed').length, 1);
+    assert.equal(recovered.length, 1);
+    assert.deepEqual(logs.causes(), []);
+  });
+}
 
 class MemoryCarrier extends Carrier {
   readonly bufferedAmount = 0;
@@ -29,6 +108,27 @@ class MemoryCarrier extends Carrier {
     this.emit('close');
   }
 }
+
+test('a reconnect clears a coordination fault and logs its recovery', async (t) => {
+  const logs = closeLogs(t);
+  const recovered: string[] = [];
+  t.mock.method(log, 'info', (event: string) => recovered.push(event));
+  const h = fixture(t);
+  const peer = h.connect();
+  peer.autoFence = false;
+  await flush();
+  const frame = peer.frames[peer.frames.length - 1];
+  assert.equal(frame.kind, 'json');
+  if (frame.kind !== 'json') throw Error('Expected node.desired');
+  peer.send({ id: frame.message.id, ok: false, error: { code: 'internal', message: 'fixture' } });
+  await assert.rejects(h.link.coordination, { code: 'internal' });
+  peer.carrier.closeWithCause('fixture', 'reconnect');
+  h.connect();
+  await flush();
+  await h.link.coordination;
+  assert.equal(logs.records.filter((record) => record.event === 'node.coordination_failed').length, 1);
+  assert.deepEqual(recovered, ['node.coordination_recovered']);
+});
 
 function closeLogs(t: TestContext) {
   const records: { event: string; fields: Record<string, any> }[] = [];
@@ -237,22 +337,12 @@ test('an unmatched reply is logged and keeps the link', async (t) => {
   assert.ok(logs.records.some((record) => record.event === 'node.reply_unmatched'));
 });
 
-for (const failure of [
-  'hello',
-  'identity',
-  'build',
-  'decrypt',
-  'frame',
-  'opId',
-  'fencing',
-  'replacement',
-] as const) {
+for (const failure of ['hello', 'identity', 'build', 'decrypt', 'frame', 'opId', 'replacement'] as const) {
   test(`logs the ${failure} close decision exactly once`, async (t) => {
     const logs = closeLogs(t);
     const h = fixture(t);
     const hello = failure === 'hello' ? { type: 'invalid' } : failure === 'build' ? { buildId: 'other' } : {};
     const peer = h.connect(hello, failure === 'identity' ? Buffer.alloc(32, 23) : undefined);
-    if (failure === 'fencing') peer.autoFence = false;
     await flush();
     let reason = 'handshake_failed';
     let detail: RegExp = /./;
@@ -277,14 +367,6 @@ for (const failure of [
       await pending;
       reason = 'protocol_violation';
       detail = /opId/;
-    }
-    if (failure === 'fencing') {
-      const frame = peer.frames[peer.frames.length - 1];
-      if (frame.kind !== 'json') throw new Error('Expected fencing');
-      peer.send({ id: frame.message.id, ok: false, error: { code: 'busy', message: 'Busy' } });
-      await flush();
-      reason = 'fencing_failed';
-      detail = /Busy/;
     }
     if (failure === 'replacement') {
       h.connect();
@@ -452,4 +534,37 @@ test('node.ready accepts the payload limit and rejects one extra byte before att
       assert.equal(causes[causes.length - 1].reason, 'ready_oversize');
     }
   }
+});
+
+test('a malformed delivered Session RPC reply keeps mutation uncertainty separate from Session health', async (t) => {
+  const h = fixture(t);
+  const target = {
+    tenantId: 'tenant',
+    sessionId: 'a'.repeat(32),
+    placementEpoch: 1,
+    dataState: 'dirty' as const,
+  };
+  h.registry.fencing = () => [target];
+  const peer = h.connect();
+  await flush();
+  const pending = h.link.invoke({
+    method: 'view.command',
+    ...target,
+    endpointIncarnation: 'a'.repeat(32),
+    opId: 'command',
+    replay: false,
+    params: { viewId: '1', command: 'reload' },
+  });
+  const rejected = assert.rejects(pending, { code: 'outcome_unknown' });
+  await flush();
+  const request = peer.frames
+    .flatMap((frame) =>
+      frame.kind === 'json' && frame.message.method === 'view.command' ? [frame.message] : [],
+    )
+    .slice(-1)[0];
+  assert(request);
+  peer.send({ id: request.id, opId: 'command', ok: true });
+  await rejected;
+  assert.equal(h.link.faults.get(target)?.code, 'internal');
+  assert.equal(peer.carrier.isClosing, false);
 });

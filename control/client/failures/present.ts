@@ -21,6 +21,7 @@ export interface FailureContext {
   input?: boolean;
   capacity?: CapacityKind;
   connection?: boolean;
+  resolved?: boolean;
   credential?: 'control' | 'changyan' | 'xinjiaoyu' | 'mailbox';
   issue?: 'permission' | 'credentials' | 'lease' | 'configuration' | 'content' | 'validation' | 'revision';
   consequence?: string;
@@ -123,7 +124,15 @@ export function presentFailure(value: RemoteKitError | WireError, context: Failu
     parsedErrors.set(value, error);
   }
   context = { ...context, ...failureContext(error) };
+  if (['internal', 'unavailable', 'outcome_unknown'].includes(error.code))
+    viewerErrors.identify(error, {
+      operation: context.operation,
+      scope: context.scope,
+      targetId: context.targetId,
+    });
   const texts = operationText(context);
+  if (error.code === 'outcome_unknown' && context.resolved)
+    return { class: 'C', text: '操作结果无法确认，请核对当前状态', errorId: error.errorId };
   if (error.reason === 'session_data_on_offline_node')
     return {
       class: 'A',

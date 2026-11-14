@@ -15,6 +15,8 @@ import { RemoteKitError } from '../../../shared/errors';
 import type { ErrorSearchMethods } from '../../control/socket-methods';
 import { failureError, FailureNote } from '../../failures';
 import { recover } from '../../failures/recovery';
+import { RetryUnit } from '../../../shared/retry-unit';
+import { diagnostics } from '../../media/diagnostics';
 export type { ErrorSearchResult } from '../../control/socket-methods';
 
 type AdminMethods = AdminSocketMethods & ErrorSearchMethods;
@@ -66,20 +68,36 @@ export function useAdminResource<T>(online: boolean, load: () => Promise<T>, int
   const [data, setData] = useState<T | null>(null),
     [error, setError] = useState<RemoteKitError | undefined>();
   const loader = useRef(load);
+  const retry = useRef(
+    new RetryUnit({
+      failed: (error) => diagnostics.record('admin_poll_failed', error),
+      recovered: () => diagnostics.record('admin_poll_recovered', {}),
+    }),
+  );
+  const input = useRef(0);
+  const pending = useRef(false);
   loader.current = load;
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (manual = true) => {
+    if (pending.current) return;
+    if (manual) input.current++;
+    if (!retry.current.ready(String(input.current))) return;
+    pending.current = true;
     try {
       setData(await loader.current());
+      retry.current.succeed();
       setError(undefined);
     } catch (e) {
+      retry.current.fail(e);
       setError(failureError(e));
+    } finally {
+      pending.current = false;
     }
   }, []);
   useEffect(() => {
     if (!online) return;
     let active = true;
     const tick = () => {
-      if (active && document.visibilityState === 'visible') void refresh();
+      if (active && document.visibilityState === 'visible') void refresh(false);
     };
     void refresh();
     const timer = setInterval(tick, intervalMs);
@@ -172,6 +190,7 @@ export function ConfirmDialog({
   danger,
   disabled,
   onConfirm,
+  retryIdentity,
   onClose,
 }: {
   open: boolean;
@@ -181,6 +200,7 @@ export function ConfirmDialog({
   danger?: boolean;
   disabled?: boolean;
   onConfirm: () => Promise<void>;
+  retryIdentity?: string;
   onClose: () => void;
 }) {
   const abort = useRef(new AbortController());
@@ -212,7 +232,7 @@ export function ConfirmDialog({
             setBusy(true);
             setError(undefined);
             try {
-              await recover(onConfirm, abort.current.signal, setError);
+              await recover(onConfirm, abort.current.signal, setError, { identity: retryIdentity });
               onClose();
             } catch (e) {
               setError(failureError(e));

@@ -183,7 +183,7 @@ void OutboxPriorityAndEpoch() {
   box.Transient(first, "frame", send);
   CHECK(sent.empty());
   busy = false;
-  box.Flush(first, send);
+  box.Flush(first, send, RetryUnit::Clock::now() + std::chrono::seconds(6));
   CHECK((sent == std::vector<std::string>{"mode", "layout", "prepare", "critical"}));
   busy = true;
   box.Transient(first, "obsolete", send, false);

@@ -14,8 +14,10 @@ class NavigationRecovery : private ControllerContext {
   Json ViewStatus(const std::string& view) const;
   void Annotate(const std::string& view, Json& item) const;
   bool Recovering(const std::string& view) const;
+  bool NeedsReplacement(const std::string& view) const;
   Json RecoverySnapshot() const;
   bool CancelRecovery(const std::string& view);
+  void ReplacementUnknown(const std::string& view);
   void MaintainRecovery();
   Result<void> CaptureNavigation(const Json& browser_view);
   void MaintainNavigationExport();
@@ -23,6 +25,8 @@ class NavigationRecovery : private ControllerContext {
   const Json& FinalExportTiming() const { return final_export_timing_; }
 
  private:
+  friend class NativeErrorStateProbe;
+  friend class NativeRetryOwnerProbe;
   ViewController& views;
   RecoveryStore recovery_store;
   std::map<std::string, std::string> recovery_revisions;
@@ -44,28 +48,25 @@ class NavigationRecovery : private ControllerContext {
       kWaiting,
       kVisible,
       kComplete,
-      kFallback,
-      kFallbackStarted,
+      kReplacementUnknown,
       kFailed
     };
     Phase phase = Phase::kLoad;
     std::optional<Error> error;
     std::string transfer;
     bool reconcile = false;
-    unsigned attempts = 0;
+    RetryUnit retry{"navigation.recovery"};
     const char* PhaseName() const;
 
     Json saved;
     size_t chunk = 0;
     uint64_t offset = 0, buffer_bytes = 0;
     int64_t deadline = 0, next_poll = 0;
-    bool Pending() const {
-      return phase != Phase::kComplete && phase != Phase::kFallbackStarted &&
-             phase != Phase::kFailed;
-    }
+    bool Pending() const { return phase != Phase::kComplete && phase != Phase::kFailed; }
   };
   std::map<std::string, Recovery> recoveries;
   std::string recovery_cursor;
+  RetryUnit scavenge_retry_{"storage.scavenge"};
 
   void FailRecovery(const std::string& view, Recovery& task, const Error& error);
   Json RecoveryStatus(const Recovery& recovery) const;

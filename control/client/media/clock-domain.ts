@@ -1,3 +1,5 @@
+import { RetryUnit } from '../../shared/retry-unit';
+import { toRemoteKitError } from '../../shared/errors';
 import { RequestTracker } from '../util/request-tracker';
 /** One remote host's wall clock. Never share a calibration between hosts. */
 export class ClockDomain {
@@ -78,8 +80,12 @@ export class ClockDomain {
 
 /** Bounded single-flight sampling. Instance/reset lifetime is the transport channel. */
 export class ClockProbe {
+  get failure() {
+    return this.retry.error;
+  }
   private readonly requests = new RequestTracker<void>();
-  private pending?: { requestId: string; at: number; wall: number };
+  private readonly retry = new RetryUnit({ now: () => this.observed?.at ?? performance.now() });
+  private pending?: { requestId: string; at: number; wall: number; active: boolean };
   private last = -Infinity;
   private serial = 0;
   private generation = 0;
@@ -91,6 +97,7 @@ export class ClockProbe {
     this.last = -Infinity;
     this.observed = undefined;
     this.generation++;
+    this.retry.ready(String(this.generation));
     this.clock.reset();
   }
   begin(now: number, wall: number) {
@@ -99,14 +106,22 @@ export class ClockProbe {
     if (observed && (now < observed.at || Math.abs(wall - observed.wall - (now - observed.at)) > 5))
       this.reset();
     this.observed = { at: now, wall };
-    if (this.pending && now - this.pending.at >= 1500) this.pending = undefined;
-    if ((this.pending && this.requests.has(this.pending.requestId)) || now - this.last < 5000) return;
-    const requestId = `clock-${this.generation}-${++this.serial}`;
-    this.pending = { requestId, at: now, wall };
+    if (!this.retry.ready(String(this.generation))) return;
+    if (this.pending?.active || now - this.last < 5000) return;
+    const requestId =
+      this.retry.error?.code === 'outcome_unknown' && this.pending
+        ? this.pending.requestId
+        : `clock-${this.generation}-${++this.serial}`;
+    const pending = { requestId, at: now, wall, active: true };
+    this.pending = pending;
     void this.requests
       .request(requestId, 1500, () => {})
-      .catch(() => {
-        /* A missed clock sample carries no product outcome. */
+      .catch((error) => {
+        if (this.pending !== pending) return;
+        this.retry.fail(error);
+        this.last = -Infinity;
+        pending.active = false;
+        if (this.retry.error?.code !== 'outcome_unknown') this.pending = undefined;
       });
     this.last = now;
     return { type: 'clock.ping' as const, version: 1 as const, requestId };
@@ -115,9 +130,13 @@ export class ClockProbe {
     const pending = this.pending;
     if (!pending || pending.requestId !== requestId) return false;
     this.requests.resolve(requestId, undefined);
+    this.retry.succeed();
     this.pending = undefined;
     if (now < pending.at || now - pending.at >= 1500) return false;
     return this.clock.calibrate(pending.at, pending.wall, now, wall, remote, mono);
+  }
+  fail(requestId: string, error: unknown) {
+    this.requests.reject(requestId, toRemoteKitError(error));
   }
   pong(
     value: Extract<import('../rtc/protocol').Incoming, { type: 'clock.pong' }>,

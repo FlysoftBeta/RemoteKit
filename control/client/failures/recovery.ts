@@ -1,12 +1,10 @@
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
-import { retryDelay } from '../../shared/error-policy';
+import { RetryUnit } from '../../shared/retry-unit';
+import { diagnostics } from '../media/diagnostics';
+import { resolvedFailure } from './operations';
 
-export function recoveryDelay(error: unknown, attempt: number, cap = 60_000) {
-  const failure = toRemoteKitError(error);
-  const delay =
-    retryDelay(failure, attempt) ??
-    (failure.code === 'outcome_unknown' ? Math.min(cap, 1000 * 2 ** Math.min(attempt, 16)) : undefined);
-  return delay === undefined ? undefined : Math.min(cap, delay);
+export function recoveryDelay(error: unknown, attempt: number) {
+  return RetryUnit.delay(toRemoteKitError(error), attempt);
 }
 
 export function waitForRecovery(delay: number, signal?: AbortSignal) {
@@ -31,17 +29,39 @@ export async function recover<T>(
   work: () => Promise<T>,
   signal: AbortSignal,
   failed?: (error: RemoteKitError) => void,
+  options: { read?: boolean; identity?: string; recompute?: () => Promise<void> } = {},
 ): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
+  const unit = new RetryUnit({
+    failed: (error) => diagnostics.record('recovery_failed', error),
+    recovered: () => diagnostics.record('recovery_recovered', {}),
+  });
+  unit.ready(options.identity ?? 'request');
+  for (;;) {
     if (signal.aborted) throw new RemoteKitError('canceled', '');
     try {
-      return await work();
+      const result = await work();
+      unit.succeed();
+      return result;
     } catch (error) {
       const failure = toRemoteKitError(error);
       failed?.(failure);
-      const delay = recoveryDelay(failure, attempt);
+      const { delay } = unit.fail(failure);
+      if (failure.code === 'outcome_unknown' && !options.read && !options.identity)
+        throw resolvedFailure(failure);
+      if (failure.code === 'conflict') {
+        if (options.recompute) await options.recompute();
+        else if (!options.read) throw failure;
+      }
       if (delay === undefined) throw failure;
       await waitForRecovery(delay, signal);
     }
   }
+}
+
+export function recoverRead<T>(
+  work: () => Promise<T>,
+  signal: AbortSignal,
+  failed?: (error: RemoteKitError) => void,
+) {
+  return recover(work, signal, failed, { read: true });
 }

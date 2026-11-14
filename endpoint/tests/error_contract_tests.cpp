@@ -27,7 +27,9 @@ int main() {
     CHECK(parsed.code == code && parsed.message == error.message && parsed.reason == error.reason);
     CHECK(wire.contains("retryAfterMs") == SupportsRetryHint(code));
     CHECK(parsed.retry_after_ms == error.retry_after_ms);
-    CHECK(RetryDelay(error, 0).has_value() == SupportsRetryHint(code));
+    CHECK(RetryDelay(error, 0).has_value() ==
+          (SupportsRetryHint(code) || code == ErrorCode::kConflict ||
+           code == ErrorCode::kOutcomeUnknown));
   }
   CHECK(!ParseErrorCode("unsupported"));
   CHECK(!ParseErrorReason("arbitrary"));
@@ -61,13 +63,13 @@ int main() {
     const auto base = std::min(5000u, 250u << std::min(attempt, 10u));
     CHECK(delay >= base * 8 / 10 && delay <= std::min(5000u, base * 12 / 10));
   }
-  CHECK(media::SdkErrorCode(REMOTEKIT_SDK_CHANNEL_CLOSED) == ErrorCode::kUnavailable);
-  CHECK(media::SdkErrorCode(REMOTEKIT_SDK_MOJO_ERROR) == ErrorCode::kUnavailable);
-  CHECK(media::SdkErrorCode(REMOTEKIT_SDK_INVALID_STATE) == ErrorCode::kUnavailable);
-  CHECK(media::SdkErrorCode(REMOTEKIT_SDK_INVALID_ARGUMENT) == ErrorCode::kInternal);
-  CHECK(media::SdkErrorCode(REMOTEKIT_SDK_BUSY) == ErrorCode::kBusy);
-  CHECK(media::SdkErrorCode(REMOTEKIT_SDK_LOST) == ErrorCode::kOutcomeUnknown);
-  CHECK(media::SdkErrorCode(REMOTEKIT_SDK_DATA_MISMATCH) == ErrorCode::kOutcomeUnknown);
+  CHECK(SdkErrorCode(REMOTEKIT_SDK_CHANNEL_CLOSED) == ErrorCode::kUnavailable);
+  CHECK(SdkErrorCode(REMOTEKIT_SDK_MOJO_ERROR) == ErrorCode::kUnavailable);
+  CHECK(SdkErrorCode(REMOTEKIT_SDK_INVALID_STATE) == ErrorCode::kUnavailable);
+  CHECK(SdkErrorCode(REMOTEKIT_SDK_INVALID_ARGUMENT) == ErrorCode::kInternal);
+  CHECK(SdkErrorCode(REMOTEKIT_SDK_BUSY) == ErrorCode::kBusy);
+  CHECK(SdkErrorCode(REMOTEKIT_SDK_LOST) == ErrorCode::kOutcomeUnknown);
+  CHECK(SdkErrorCode(REMOTEKIT_SDK_DATA_MISMATCH) == ErrorCode::kOutcomeUnknown);
   remotekit_sdk_failure refusal{};
   std::strcpy(refusal.code, "rate_limited");
   std::strcpy(refusal.reason, "document_corrupt");

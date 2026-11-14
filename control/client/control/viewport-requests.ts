@@ -1,6 +1,6 @@
 import { RemoteKitError } from '../../shared/errors';
 import type { ProductState, ViewerViewport } from '../../shared/product';
-import { recoveryDelay } from '../failures/recovery';
+import { RetryUnit } from '../../shared/retry-unit';
 
 import { selectVisibility } from '../app/visibility';
 import { currentWindowFullscreen } from '../app/window-fullscreen';
@@ -22,10 +22,10 @@ export class ViewportRequests extends Store<RemoteKitError | undefined> {
   private serial = 0;
   private acknowledged?: string;
   private pending?: string;
-  private attempts = 0;
-  private failedKey?: string;
-  private retry?: { key: string; at: number };
-  private attemptKey?: string;
+  private unit = new RetryUnit({
+    failed: (error) => diagnostics.record('viewport_failed', error),
+    recovered: () => diagnostics.record('viewport_recovered', {}),
+  });
   private state: ProductState | null = null;
   private bounds = { width: 0, height: 0 };
   private dpr = 1;
@@ -56,10 +56,11 @@ export class ViewportRequests extends Store<RemoteKitError | undefined> {
     this.serial++;
     this.acknowledged = undefined;
     this.pending = undefined;
-    this.failedKey = undefined;
-    this.attempts = 0;
-    this.retry = undefined;
-    this.attemptKey = undefined;
+    this.unit.close();
+    this.unit = new RetryUnit({
+      failed: (error) => diagnostics.record('viewport_failed', error),
+      recovered: () => diagnostics.record('viewport_recovered', {}),
+    });
     clearTimeout(this.timer);
     this.timer = undefined;
     this.state = null;
@@ -69,10 +70,10 @@ export class ViewportRequests extends Store<RemoteKitError | undefined> {
   dismissNotice() {
     this.publish(undefined);
   }
-  private schedule() {
+  private schedule(delay = 100) {
     clearTimeout(this.timer);
     if (!this.state || !this.available || this.bounds.width <= 0) return;
-    this.timer = setTimeout(() => {
+    const publish = () => {
       this.timer = undefined;
       const state = this.state;
       if (!state || !this.available) return;
@@ -109,19 +110,9 @@ export class ViewportRequests extends Store<RemoteKitError | undefined> {
         }),
       };
       const key = canonicalJson(params);
-      if (
-        key === this.failedKey ||
-        key === this.pending ||
-        (this.pending === undefined && key === this.acknowledged)
-      )
-        return;
-      if (this.attemptKey !== key) {
-        this.attempts = 0;
-        this.retry = undefined;
-        this.attemptKey = key;
-      }
-      if (this.retry?.key === key && this.retry.at > Date.now()) {
-        this.timer = setTimeout(() => this.schedule(), this.retry.at - Date.now());
+      if (key === this.pending || (this.pending === undefined && key === this.acknowledged)) return;
+      if (!this.unit.ready(key)) {
+        this.unit.schedule(() => this.schedule(0));
         return;
       }
       this.pending = key;
@@ -132,9 +123,7 @@ export class ViewportRequests extends Store<RemoteKitError | undefined> {
             this.pending = undefined;
             this.acknowledged = key;
             this.publish(undefined);
-            this.attempts = 0;
-            this.retry = undefined;
-            this.failedKey = undefined;
+            this.unit.succeed();
             this.schedule();
           }
         })
@@ -143,26 +132,15 @@ export class ViewportRequests extends Store<RemoteKitError | undefined> {
             this.pending = undefined;
             this.acknowledged = undefined;
           }
-          diagnostics.record('viewport', error);
           if (serial !== this.serial) return;
           const failure =
             error instanceof RemoteKitError ? error : new RemoteKitError('internal', '画面尺寸更新失败');
-          const delay = recoveryDelay(failure, this.attempts++);
-          if (delay !== undefined) {
-            this.publish(failure);
-            this.retry = { key, at: Date.now() + Math.min(60_000, delay) };
-            this.timer = setTimeout(
-              () => {
-                this.timer = undefined;
-                this.schedule();
-              },
-              Math.min(60_000, delay),
-            );
-            return;
-          }
-          this.failedKey = key;
+          this.unit.fail(failure);
+          this.unit.schedule(() => this.schedule(0));
           if (serial === this.serial && this.available) this.publish(failure);
         });
-    }, 100);
+    };
+    if (delay === 0) publish();
+    else this.timer = setTimeout(publish, delay);
   }
 }

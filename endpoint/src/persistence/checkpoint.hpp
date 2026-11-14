@@ -51,10 +51,13 @@ class Checkpoints {
   static Result<Json> Copy(const fs::path& directory);
   static Result<void> WriteCopy(const fs::path& directory, const Json& copy);
   static bool ReuseCopy(const Json& copy, uint64_t epoch, const Json& checkpoint);
+  static Result<void> ForgetCopy(const fs::path& directory);
   static Result<DirectoryChanges> RecoverChanges(const fs::path& directory,
                                                  int64_t changes_at,
                                                  bool metadata_walk = true);
-  static Result<void> FlushChanges(const fs::path& directory, const DirectoryChanges& changes);
+  static Result<void> FlushChanges(const fs::path& directory,
+                                   const DirectoryChanges& changes,
+                                   bool replace = false);
   static Result<void> TruncateChanges(const fs::path& directory);
   Result<Json> Describe(const std::string& manifest);
 

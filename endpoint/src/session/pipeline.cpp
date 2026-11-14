@@ -11,6 +11,21 @@
 #include "session/presentation.hpp"
 #include "util/log.hpp"
 namespace remotekit {
+RetryUnit::Snapshot MediaPipeline::ClipboardRetryStatus() const {
+  std::lock_guard lock(clipboard_retry_mutex_);
+  return clipboard_retry_;
+}
+void MediaPipeline::PollClipboard() {
+  std::lock_guard lock(clipboard_retry_mutex_);
+  clipboard_retry_.Input(browser.Incarnation() + ":" + std::to_string(authorization.Stamp()));
+  if (!clipboard_retry_.Ready())
+    return;
+  auto result = output.PollClipboard();
+  if (!result)
+    clipboard_retry_.Fail(result.error());
+  else
+    clipboard_retry_.Success();
+}
 using ConnectionPhase = ConnectionTiming::ConnectionPhase;
 using Event = RtcEvent;
 MediaPipeline::MediaPipeline(ControllerContext context,
@@ -121,9 +136,7 @@ void MediaPipeline::MediaLoop() {
                              !output.Suspended()};
   };
   while (state == State::kRunning) {
-    auto clipboard_result = output.PollClipboard();
-    if (!clipboard_result)
-      LogEvent(LogLevel::kWarn, "clipboard.sync_failed");
+    PollClipboard();
     const auto stamp = authorization.Stamp();
     if (stamp != active_authorization) {
       authorization.SetFrame(0);

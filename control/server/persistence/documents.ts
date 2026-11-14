@@ -92,6 +92,25 @@ export const wireError = object(
   },
 );
 
+export const retryUnitRecord: Codec<import('../../shared/retry-unit').RetryUnitRecord> = object(
+  {
+    identity: s({ min: 1, max: 64 }),
+    input: s(),
+    attempts: i(),
+    streak: b(),
+    state: union(
+      object({ phase: literal('idle') }),
+      object({ phase: literal('waiting'), attempt: i(), until: n() }),
+      object(
+        { phase: literal('faulted'), code: errorCode, input: s() },
+        { errorId: s({ pattern: /^[cev]-[0-9a-f]{10}$/ }) },
+      ),
+      object({ phase: literal('dropped') }),
+    ),
+  },
+  { error: wireError },
+);
+
 import { windowState } from '../../shared/persisted-window-state';
 export { windowState };
 const tabKind = literal('start', 'remote');
@@ -128,6 +147,7 @@ export const tab = object(
     }),
     lifecycleRecoveryError: wireError,
     pendingUaReloadOrigin: s(),
+    pendingUaReloadIdentity: object({ operationId: s(), operationGeneration: s(), browserIncarnation: s() }),
     popup: object(
       { provisionalId: s(), status: literal('pending', 'adopted', 'failed') },
       { error: wireError },

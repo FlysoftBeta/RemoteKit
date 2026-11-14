@@ -3,6 +3,9 @@
 #include "documents/document_types.hpp"
 #include "objects/service.hpp"
 #include "util/result_macros.hpp"
+#include "util/file_io.hpp"
+#include "persistence/durable_json.hpp"
+#include "persistence/document_job_formats.hpp"
 
 #include <fstream>
 
@@ -16,10 +19,15 @@ Json Reference(const std::string& tenant, const std::string& source) {
 }
 }  // namespace
 
-ObjectDocuments::ObjectDocuments(objects::ObjectService& objects, std::filesystem::path data)
+ObjectDocuments::ObjectDocuments(objects::ObjectService& objects,
+                                 std::filesystem::path data,
+                                 std::string build,
+                                 WriteRecord write_record)
     : objects_(objects),
       data_(std::move(data)),
       tools_(DefaultToolsDirectory()),
+      build_(std::move(build)),
+      write_record_(std::move(write_record)),
       renders_(data_, tools_) {}
 
 ObjectDocuments::~ObjectDocuments() {
@@ -39,12 +47,72 @@ ObjectDocuments::Future ObjectDocuments::Submit(const std::string& source,
                                                 const std::string& media_type) {
   std::lock_guard lock(mutex_);
   std::erase_if(jobs_, [](const auto& entry) { return entry.second.expires <= Clock::now(); });
-  if (auto found = jobs_.find(source); found != jobs_.end())
-    return found->second.future;
+  const auto identity = Json::array({source, tenant}).dump();
+  const auto key =
+      Sha256Hex(std::span(reinterpret_cast<const uint8_t*>(identity.data()), identity.size()));
+  const auto input =
+      Json::array({source, tenant, media_type, build_, objects_.ConnectionEpoch()}).dump();
+  const auto path = data_ / "documents/jobs" / (key + ".json");
+  auto& job = jobs_[key];
+  if (job.future.valid() &&
+      job.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+    return job.future;
+  const bool same_input = job.retry.Identity() == input;
+  job.retry.Input(input);
+  job.persistence.Input(input);
+  if (!same_input) {
+    job.pending_result.reset();
+    job.pending_retry.reset();
+    job.pending_record.reset();
+  }
+  const auto completed = [&](Result<std::string> result) {
+    std::promise<Result<std::string>> ready;
+    ready.set_value(std::move(result));
+    job.future = ready.get_future().share();
+    return job.future;
+  };
+  if (job.pending_result)
+    return completed(Publish(job, path));
+  if (!job.retry.Ready())
+    return job.future.valid() ? job.future : completed(*job.retry.Failure());
+  if (!job.loaded) {
+    const auto load = [&]() -> Result<void> {
+      RK_ASSIGN_OR_RETURN(bytes, ReadFileIfExists(path));
+      if (!bytes)
+        return {};
+      RK_ASSIGN_OR_RETURN(record, document_job_formats::Decode(*bytes));
+      RK_RETURN_IF_ERROR(job.retry.Restore(record.at("retry")));
+      job.retry.Input(input);
+      return {};
+    };
+    auto loaded = load();
+    if (!loaded) {
+      job.retry.Fail(loaded.error());
+      return completed(loaded.error());
+    }
+    job.loaded = true;
+    if (!job.retry.Ready())
+      return completed(*job.retry.Failure());
+  }
+  if (same_input && job.future.valid() && job.future.get())
+    return job.future;
   auto promise = std::make_shared<std::promise<Result<std::string>>>();
   auto future = promise->get_future().share();
-  jobs_.emplace(source, Job{future});
-  if (!workers_.Submit([this, source, tenant, temporary, media_type, promise] {
+  job.future = future;
+  job.expires = Clock::time_point::max();
+  const auto finish = [this, key, path, promise](Result<std::string> result) {
+    auto& job = jobs_.at(key);
+    job.pending_retry = job.retry;
+    if (result)
+      job.pending_retry->Success();
+    else
+      job.pending_retry->Fail(result.error());
+    job.pending_record = {
+        {"version", 1}, {"buildId", build_}, {"retry", job.pending_retry->Save()}};
+    job.pending_result = std::move(result);
+    promise->set_value(Publish(job, path));
+  };
+  if (!workers_.Submit([this, source, tenant, temporary, media_type, finish] {
         Result<std::string> result = Error{ErrorCode::kInternal, "document rendition failed"};
         try {
           result = Convert(source, tenant, temporary, media_type);
@@ -53,19 +121,34 @@ ObjectDocuments::Future ObjectDocuments::Submit(const std::string& source,
                                error.code().value());
         } catch (const std::exception& error) {
           result = Error{ErrorCode::kInternal, error.what()};
+        } catch (...) {
+          result = Error{ErrorCode::kInternal, "document rendition failed"};
         }
         std::lock_guard lock(mutex_);
-        const bool conversion_failure =
-            !result && (result.error().code == ErrorCode::kRejected ||
-                        result.error().code == ErrorCode::kInvalidRequest);
-        jobs_.at(source).expires = Clock::now() + (conversion_failure ? std::chrono::minutes(10)
-                                                                      : std::chrono::minutes(0));
-        promise->set_value(std::move(result));
+        finish(std::move(result));
       })) {
-    jobs_.erase(source);
-    promise->set_value(Error{ErrorCode::kBusy, "document workers busy"});
+    finish(Error{ErrorCode::kBusy, "document workers busy"});
   }
   return future;
+}
+
+Result<std::string> ObjectDocuments::Publish(Job& job, const std::filesystem::path& path) {
+  if (!job.persistence.Ready())
+    return *job.persistence.Failure();
+  auto saved = write_record_(path, *job.pending_record);
+  if (!saved) {
+    job.persistence.Fail(saved.error());
+    return saved.error();
+  }
+  job.persistence.Success();
+  job.retry = std::move(*job.pending_retry);
+  auto result = std::move(*job.pending_result);
+  job.pending_result.reset();
+  job.pending_retry.reset();
+  job.pending_record.reset();
+  if (result)
+    job.expires = Clock::now() + std::chrono::minutes(10);
+  return result;
 }
 
 Result<std::string> ObjectDocuments::Convert(const std::string& source,
@@ -75,6 +158,7 @@ Result<std::string> ObjectDocuments::Convert(const std::string& source,
   RK_ASSIGN_OR_RETURN(derivation, objects_.Derivation(source, tenant));
   if (!derivation.is_null())
     return derivation["id"].get<std::string>();
+  RK_RETURN_IF_ERROR(Available());
   RK_ASSIGN_OR_RETURN(sources, objects_.Locate(source, Reference(tenant, source)));
   RK_RETURN_IF_ERROR(objects_.Ensure(source, sources));
   TemporaryDirectory staging(temporary);

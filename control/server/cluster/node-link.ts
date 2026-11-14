@@ -10,6 +10,7 @@ import {
 } from '../endpoint/coordination';
 import { RpcResults, rpcId } from '../endpoint/rpc-results';
 import { diskFloor } from './disk';
+import { RetryUnit } from '../../shared/retry-unit';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -22,6 +23,7 @@ import { EndpointLog } from './endpoint-log';
 import { MetricsHistory } from './metrics';
 import {
   RemoteKitError,
+  endpointError,
   toRemoteKitError,
   wireError,
   nativeWireError,
@@ -188,6 +190,8 @@ export interface NodeHistory {
   disconnectedAt?: number;
   rejected?: { code: string; buildId: string; at: number };
   exited?: { code: number | null; at: number };
+  coordinationError?: import('../../shared/errors').WireError;
+  launchError?: import('../../shared/errors').WireError;
 }
 export class NodeLink extends EventEmitter implements EndpointLink {
   state: EndpointLinkState = { state: 'offline' };
@@ -201,7 +205,25 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   allocationFailedAt?: number;
   coordination: Promise<void> = Promise.resolve();
   private fenceKey = '';
+  private coordinating = false;
   private fenceRevision = 0n;
+  private readonly fenceRetry = new RetryUnit({
+    failed: (error) =>
+      log.warn('node.coordination_failed', {
+        nodeId: this.nodeId,
+        code: error.code,
+        errorId: error.errorId,
+        err: error,
+      }),
+    recovered: () => log.info('node.coordination_recovered', { nodeId: this.nodeId }),
+  });
+  private announceReady?: () => void;
+  private fenceDocument?: {
+    method: 'node.desired';
+    connectionEpoch: string;
+    revision: string;
+    sessions: ReturnType<NodeRegistry['fencing']>;
+  };
   readonly observations = new Map<string, SessionObserved>();
   readonly faults = new SessionFaults();
   faultSession(target: SessionTarget, cause: unknown) {
@@ -216,10 +238,11 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   private readonly pending = new Map<string, Pending>();
   private readonly timedOut = new Set<string>();
   private child?: ChildProcessWithoutNullStreams;
-  private retry?: NodeJS.Timeout;
+  private readonly launchRetry = new RetryUnit({
+    failed: (error) => log.warn('node.launch_failed', { nodeId: this.nodeId, err: error }),
+    recovered: () => log.info('node.launch_recovered', { nodeId: this.nodeId }),
+  });
   private stopped = false;
-  private launchFailures = 0;
-  private healthySince?: number;
   constructor(
     readonly nodeId: string,
     readonly configured: ConfiguredNode,
@@ -246,27 +269,53 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     if (!connection) return Promise.reject(new RemoteKitError('unavailable', 'Node is offline'));
     const sessions = this.registry.fencing(this.nodeId);
     const key = canonical(sessions);
-    if (key === this.fenceKey) return this.coordination;
+    if (key === this.fenceKey && this.coordinating) return this.coordination;
+    if (!this.fenceRetry.ready(`${connection.epoch}:${key}`)) return this.coordination;
+    if (key === this.fenceKey && !this.fenceRetry.error) return this.coordination;
+    const reuse = key === this.fenceKey && this.fenceRetry.error?.code !== 'conflict';
+    if (!reuse) {
+      this.fenceDocument = {
+        method: 'node.desired',
+        connectionEpoch: connection.epoch,
+        revision: String(++this.fenceRevision),
+        sessions,
+      };
+    }
     this.fenceKey = key;
-    const revision = String(++this.fenceRevision);
+    const document = this.fenceDocument!;
+    this.fenceRetry.cancel();
     const previous = this.coordination;
-    const pending = previous
-      .catch(() => {})
-      .then(async () => {
-        if (this.current !== connection) throw new RemoteKitError('unavailable', 'Node connection changed');
-        const document = {
-          method: 'node.desired' as const,
-          connectionEpoch: connection.epoch,
-          revision,
-          sessions,
-        };
-        validateNodeDesired(document);
-        await this.exchange(document);
-      });
+    const send = async () => {
+      if (this.current !== connection) throw new RemoteKitError('unavailable', 'Node connection changed');
+      validateNodeDesired(document);
+      await this.exchange(document);
+    };
+    const pending = previous.then(send, send);
     this.coordination = pending;
-    void pending.catch(() => {
-      if (this.coordination === pending) this.fenceKey = '';
-    });
+    this.coordinating = true;
+    void pending.then(
+      () => {
+        if (this.current !== connection || this.coordination !== pending) return;
+        this.coordinating = false;
+        this.fenceRetry.succeed();
+        delete this.events.coordinationError;
+        const ready = this.announceReady;
+        this.announceReady = undefined;
+        ready?.();
+      },
+      (error) => {
+        if (this.current !== connection || this.coordination !== pending) return;
+        this.coordinating = false;
+        const failure = this.fenceRetry.fail(error);
+        this.events.coordinationError = wireError(failure.error);
+        if (failure.delay === undefined) return;
+        this.fenceRetry.schedule(() => {
+          void this.coordinate().catch((error) => {
+            this.events.coordinationError = wireError(endpointError(error));
+          });
+        });
+      },
+    );
     return pending;
   }
   publish(message: object): Promise<any> {
@@ -290,28 +339,39 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   }
   start() {
     const launch = this.configured.local;
-    if (!launch || this.stopped || this.child || this.registry.isRemoved(this.nodeId)) return;
+    if (
+      !launch ||
+      this.stopped ||
+      this.child ||
+      this.state.state === 'connecting' ||
+      this.registry.isRemoved(this.nodeId)
+    )
+      return;
+    if (!this.launchRetry.ready(JSON.stringify([launch, this.registry.options.buildId]))) return;
     this.state = { state: 'connecting' };
     let finished = false;
-    const exited = (code: number | null) => {
+    const exited = (code: number | null, cause?: unknown) => {
       if (finished) return;
       finished = true;
       this.child = undefined;
-      log.warn('node.exited', { nodeId: this.nodeId, code });
       this.events = { ...this.events, exited: { code, at: Date.now() } };
       if (!this.current) this.state = { state: 'offline' };
-      if (this.healthySince !== undefined && Date.now() - this.healthySince >= 60_000)
-        this.launchFailures = 0;
-      this.healthySince = undefined;
-      if (!this.stopped && code !== 3) {
-        const delay = code === 4 ? 0 : Math.min(60_000, 1500 * 2 ** Math.min(this.launchFailures++, 6));
-        this.retry = setTimeout(() => this.start(), delay);
+      if (!this.stopped) {
+        this.launchRetry.fail(
+          cause ??
+            new RemoteKitError(
+              code === 3 ? 'rejected' : code === 4 ? 'conflict' : 'unavailable',
+              `Local node exited ${code}`,
+            ),
+        );
+        this.launchRetry.schedule(() => this.start());
       }
     };
     void (async () => {
       if (this.registry.options.buildId !== 'dev') {
         try {
-          if (!launch.versionDir) throw new Error('Missing local node version directory');
+          if (!launch.versionDir)
+            throw new RemoteKitError('invalid_request', 'Missing local node version directory');
           await new Promise<void>((resolve, reject) => {
             const installer = spawn(
               join(launch.versionDir!, 'bin', 'remotekit_node.exe'),
@@ -330,8 +390,12 @@ export class NodeLink extends EventEmitter implements EndpointLink {
           });
           this.child = undefined;
         } catch (error) {
-          log.error('node.install_failed', { nodeId: this.nodeId, err: error });
-          exited(null);
+          exited(
+            null,
+            error instanceof RemoteKitError
+              ? error
+              : new RemoteKitError('unavailable', 'Local node installation failed', { cause: error }),
+          );
           return;
         }
       }
@@ -346,8 +410,8 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         this.nodeId,
       );
       child.once('error', () => exited(null));
-      child.once('exit', exited);
-    })();
+      child.once('exit', (code) => exited(code));
+    })().catch((error) => exited(null, endpointError(error)));
   }
 
   attach(connection: Connection, incarnation: string) {
@@ -364,26 +428,24 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     this.current = connection;
     connection.carrier.once('closing', () => this.disconnect(connection));
     this.coordination = Promise.resolve();
+    this.coordinating = false;
     this.fenceKey = '';
     this.fenceRevision = 0n;
+    this.fenceDocument = undefined;
     this.observations.clear();
     this.incarnation = incarnation;
     this.metrics.clear();
-    this.healthySince = Date.now();
     this.buildId = this.registry.options.buildId;
     this.state = transition.state;
     log.warn('node.online', { nodeId: this.nodeId });
     this.events = { connectedAt: Date.now() };
-    void this.coordinate().then(
-      () => {
-        if (this.current === connection)
-          this.emit('ready', { incarnation, processChanged: transition.processChanged });
-      },
-      (error) => {
-        if (this.current === connection)
-          connection.carrier.closeWithCause('fencing_failed', errorDetail(error));
-      },
-    );
+    this.announceReady = () => {
+      this.launchRetry.succeed();
+      this.emit('ready', { incarnation, processChanged: transition.processChanged });
+    };
+    void this.coordinate().catch((error) => {
+      this.events.coordinationError = wireError(endpointError(error));
+    });
   }
   receive(connection: Connection, message: Record<string, any>) {
     if (this.current !== connection) return;
@@ -486,12 +548,14 @@ export class NodeLink extends EventEmitter implements EndpointLink {
             throw new Error('Invalid Endpoint incarnation');
           const previous = this.observations.get(message.tenantId);
           if (previous && BigInt(previous.seq) >= BigInt(message.seq)) return;
-          if (message.lastError?.code === 'unauthenticated') message.lastError.code = 'forbidden';
           this.faults.observe(placed, message.browser === 'running' && message.lastError === null);
           this.observations.set(message.tenantId, message);
         } else validateSessionEvent(message);
       } catch (error) {
-        this.faultSession(placed, error);
+        this.faultSession(
+          placed,
+          new RemoteKitError('internal', 'Invalid Session coordination event', { cause: error }),
+        );
         return;
       }
       this.registry.emit(message.event, { nodeId: this.nodeId, message });
@@ -546,7 +610,9 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       )
         this.faultSession(placed, new Error('Invalid Session RPC reply'));
       pending.reject(
-        this.faults.get(pending.target) ?? new RemoteKitError('unavailable', 'Invalid Session RPC reply'),
+        new RemoteKitError('outcome_unknown', 'Invalid Session RPC reply', {
+          cause: this.faults.get(pending.target),
+        }),
       );
       return;
     }
@@ -555,7 +621,11 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       !['session.desired', 'session.clipboard'].includes(pending.method ?? '') &&
       this.faults.get(pending.target)
     ) {
-      pending.reject(this.faults.get(pending.target));
+      pending.reject(
+        new RemoteKitError('outcome_unknown', 'Session faulted after RPC delivery', {
+          cause: this.faults.get(pending.target),
+        }),
+      );
       return;
     }
     if (message.ok) pending.resolve(message.result);
@@ -563,7 +633,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       const error = parseWireError(message.error)
         ? message.error
         : { code: 'outcome_unknown', message: 'Node returned an invalid error envelope' };
-      if (error.code === 'unauthenticated') error.code = 'forbidden';
+      // Endpoint peer credentials do not authenticate the Viewer Control session.
       pending.reject(error);
     }
   }
@@ -574,7 +644,9 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   }
   private sendFrame(connection: Connection, bytes: Buffer) {
     try {
-      void connection.carrier.write(connection.transport.send.encrypt(bytes)).catch(() => {});
+      void connection.carrier
+        .write(connection.transport.send.encrypt(bytes))
+        .catch((error) => connection.carrier.closeWithCause('write_failed', errorDetail(error)));
     } catch (error) {
       connection.carrier.closeWithCause('encrypt_failed', errorDetail(error));
     }
@@ -603,10 +675,12 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     tenantId: string,
     args: Record<string, unknown> = {},
     timeoutMs?: number,
+    operationId?: string,
   ): Promise<any> {
     if (this.state.state !== 'ready')
       return Promise.reject(new RemoteKitError('unavailable', 'Node is offline'));
-    const identity = typeof args.putId === 'string' ? rpcId(method, args.putId) : randomUUID();
+    const identity =
+      operationId ?? (typeof args.putId === 'string' ? rpcId(method, args.putId) : randomUUID());
     return this.invoke(
       {
         method,
@@ -685,13 +759,13 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   }
   disconnect(connection: Connection) {
     if (this.current !== connection) return;
+    this.fenceRetry.cancel();
+    this.announceReady = undefined;
     this.current = undefined;
     this.timedOut.clear();
     this.faults.disconnected();
     log.warn('node.offline', { nodeId: this.nodeId });
     this.state = { state: 'offline' };
-    if (this.healthySince !== undefined && Date.now() - this.healthySince >= 60_000) this.launchFailures = 0;
-    this.healthySince = undefined;
     this.events = { ...this.events, disconnectedAt: Date.now() };
     for (const [id, pending] of this.pending) {
       if (pending.epoch !== connection.epoch) continue;
@@ -704,7 +778,10 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     this.emit('offline');
   }
   history(): Readonly<NodeHistory> {
-    return this.events;
+    return {
+      ...this.events,
+      ...(this.launchRetry.error ? { launchError: wireError(this.launchRetry.error) } : {}),
+    };
   }
   rejected(code: string, buildId: string) {
     this.events = { ...this.events, rejected: { code, buildId, at: Date.now() } };
@@ -718,7 +795,8 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   stop() {
     if (this.stopped) return;
     this.stopped = true;
-    clearTimeout(this.retry);
+    this.launchRetry.close();
+    this.fenceRetry.close();
     if (this.current) {
       const connection = this.current;
       connection.carrier.closeWithCause('stopped', 'Node stopped');
@@ -907,13 +985,18 @@ export class NodeRegistry extends EventEmitter {
             void carrier
               .write(response)
               .finally(() => carrier.closeWithCause('handshake_failed', reject!))
-              .catch(() => {});
+              .catch((error) => carrier.closeWithCause('write_failed', errorDetail(error)));
             return;
           }
           connection = { carrier, transport: handshake.split(), epoch };
-          void carrier.write(response).catch(() => {});
-          clearTimeout(deadline);
-          if (role === 'endpoint') link!.attach(connection, hello.incarnation);
+          void carrier
+            .write(response)
+            .then(() => {
+              if (carrier.isClosing) return;
+              clearTimeout(deadline);
+              if (role === 'endpoint') link!.attach(connection!, hello.incarnation);
+            })
+            .catch((error) => carrier.closeWithCause('write_failed', errorDetail(error)));
           return;
         }
         failureReason = 'decrypt_failed';
@@ -926,7 +1009,7 @@ export class NodeRegistry extends EventEmitter {
         if (message.type === 'node.ping') {
           void carrier
             .write(connection.transport.send.encrypt(encodeJson({ type: 'node.pong' })))
-            .catch(() => {});
+            .catch((error) => carrier.closeWithCause('write_failed', errorDetail(error)));
         } else if (message.type === 'node.pong') {
           return;
         } else if (role === 'updater') {
@@ -953,7 +1036,7 @@ export class NodeRegistry extends EventEmitter {
                   encodeJson({ type: 'package.error', error: wireError(error) }),
                 ),
               )
-              .catch(() => {});
+              .catch((error) => carrier.closeWithCause('write_failed', errorDetail(error)));
             return;
           }
           downloading = true;
@@ -969,7 +1052,7 @@ export class NodeRegistry extends EventEmitter {
                     encodeJson({ type: 'package.error', error: wireError(failure) }),
                   ),
                 )
-                .catch(() => {});
+                .catch((error) => carrier.closeWithCause('write_failed', errorDetail(error)));
             })
             .finally(() => {
               downloading = false;

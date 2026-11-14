@@ -1,4 +1,4 @@
-import { errorHandling, retryDelay } from '../../shared/error-policy';
+import { RetryUnit } from '../../shared/retry-unit';
 import { RemoteKitError } from '../../shared/errors';
 import type { FileChannel } from '../files/file-channel';
 import type { DocumentInfo, DocumentOpenOptions, DocumentSource } from './document-source';
@@ -14,25 +14,19 @@ export class ChannelDocumentSource implements DocumentSource {
   ) {}
 
   async open(signal: AbortSignal, options?: DocumentOpenOptions): Promise<DocumentInfo> {
-    let attempt = 0;
+    const unit = new RetryUnit();
     for (;;) {
       if (signal.aborted) throw new RemoteKitError('canceled', '');
       let result;
       let wait = 1500;
       try {
         result = await this.channel.documentOpen(this.assetId, this.type, signal);
+        unit.succeed();
       } catch (error) {
         if (!(error instanceof RemoteKitError)) throw error;
-        const handling = errorHandling(error.code);
-        if (
-          handling !== 'retry-soon' &&
-          handling !== 'retry-after' &&
-          handling !== 'backoff' &&
-          handling !== 'reconcile'
-        )
-          throw error;
-        wait = Math.min(60_000, retryDelay(error, attempt) ?? 1000 * 2 ** Math.min(attempt, 6));
-        attempt++;
+        const failure = unit.fail(error);
+        if (failure.delay === undefined) throw failure.error;
+        wait = failure.delay;
       }
       if (signal.aborted) throw new RemoteKitError('canceled', '');
       if (result?.state === 'ready') {

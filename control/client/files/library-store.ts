@@ -1,10 +1,11 @@
+import { RetryUnit } from '../../shared/retry-unit';
 import { operationFailure } from '../failures/operations';
 import { errorHandling } from '../../shared/error-policy';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type { LibraryMethods, LibrarySnapshot, SelectionState } from '../../shared/file-library';
 import type { SocketMethods } from '../../shared/product';
 import { operationId } from '../control/product-operations';
-import { recover } from '../failures/recovery';
+import { recover, recoverRead } from '../failures/recovery';
 import { diagnostics } from '../media/diagnostics';
 import { Store } from '../util/store';
 import type { FileChannel } from './file-channel';
@@ -24,7 +25,7 @@ interface Checkout {
   state: SelectionState;
   active: boolean;
   nextCheck: number;
-  attempts: number;
+  retry: RetryUnit;
   error?: RemoteKitError;
 }
 
@@ -114,7 +115,7 @@ export class LibraryStore extends Store<LibraryState> {
     if (online && enabled && identity) {
       this.loadAbort?.abort();
       this.loadAbort = new AbortController();
-      void recover(this.refresh, this.loadAbort.signal).catch((error) =>
+      void recoverRead(this.refresh, this.loadAbort.signal).catch((error) =>
         diagnostics.record('library-refresh', error),
       );
       this.timer = setInterval(this.reconcile, 1500);
@@ -199,9 +200,16 @@ export class LibraryStore extends Store<LibraryState> {
                   this.emit();
                 }
               },
+              {
+                identity: params.operationId,
+                recompute: async () => {
+                  await this.refresh();
+                },
+              },
             );
       this.loadError = undefined;
       this.accept(next, epoch);
+      if (this.current(epoch)) this.emit();
       if (windowId && this.current(epoch) && (method === 'library.import' || method === 'library.basket')) {
         for (const id of next.basket.filter((id) => !before.has(id))) {
           void this.recordUsage(id, windowId).catch((error) => diagnostics.record('file-usage', error));
@@ -209,7 +217,7 @@ export class LibraryStore extends Store<LibraryState> {
       }
       return next;
     } catch (error) {
-      this.loadError = undefined;
+      this.loadError = toRemoteKitError(error);
       this.emit();
       if (
         (method === 'library.basket' || method === 'library.replace') &&
@@ -247,7 +255,8 @@ export class LibraryStore extends Store<LibraryState> {
     }
   };
   private async confirm(requestId: string, transaction: Checkout, submit: boolean) {
-    if (transaction.active) return;
+    if (transaction.active || !transaction.retry.ready(JSON.stringify([this.epoch, transaction.operationId])))
+      return;
     const epoch = this.epoch;
     transaction.active = true;
 
@@ -284,15 +293,20 @@ export class LibraryStore extends Store<LibraryState> {
       if (!this.current(epoch)) return;
       transaction.state = result.state;
       transaction.error = undefined;
-      transaction.attempts = 0;
+      transaction.retry.succeed();
       this.accept(result.snapshot, epoch);
     } catch (value) {
       transaction.error = toRemoteKitError(value);
-      transaction.attempts++;
+      transaction.retry.fail(transaction.error);
       throw value;
     } finally {
       transaction.active = false;
-      transaction.nextCheck = Date.now() + Math.min(60_000, 1500 * 2 ** Math.min(transaction.attempts, 6));
+      transaction.nextCheck =
+        transaction.retry.state.phase === 'waiting'
+          ? transaction.retry.state.until
+          : transaction.retry.state.phase === 'idle'
+            ? Date.now() + 1500
+            : Infinity;
       if (this.current(epoch)) this.emit();
     }
   }
@@ -306,7 +320,7 @@ export class LibraryStore extends Store<LibraryState> {
         state: 'pending',
         active: false,
         nextCheck: 0,
-        attempts: 0,
+        retry: new RetryUnit({ name: 'library.checkout' }),
       };
       this.checkouts.set(requestId, transaction);
     }

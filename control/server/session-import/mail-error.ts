@@ -1,10 +1,7 @@
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 
 export function mailError(error: unknown, sending: boolean): RemoteKitError {
-  if (error instanceof RemoteKitError)
-    return error.code === 'unauthenticated'
-      ? new RemoteKitError('forbidden', error.message, { cause: error })
-      : error;
+  if (error instanceof RemoteKitError) return error;
   const evidence = error as
     | { code?: string; responseCode?: number; authenticationFailed?: boolean; serverResponseCode?: string }
     | undefined;
@@ -16,7 +13,7 @@ export function mailError(error: unknown, sending: boolean): RemoteKitError {
     evidence?.responseCode === 535 ||
     evidence?.responseCode === 530
   )
-    return new RemoteKitError('forbidden', '会话导入邮箱认证失败，请检查邮箱凭据', { detail });
+    return new RemoteKitError('unauthenticated', '会话导入邮箱认证失败，请检查邮箱凭据', { detail });
   if (evidence?.responseCode === 550 || evidence?.responseCode === 553)
     return new RemoteKitError('forbidden', '会话导入邮箱拒绝访问或投递', { detail });
   if (

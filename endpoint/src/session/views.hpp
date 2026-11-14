@@ -27,7 +27,7 @@ class ViewController : private ControllerContext {
         registry(registry),
         navigation(navigation),
         diagnostics(diagnostics),
-        downloads(context.store.Downloads()),
+        downloads(context.store.Downloads(), context.options.build_id),
         view_store(context.store.Views()),
         recovery_store(context.store.Recovery()) {}
   struct Geometry {
@@ -43,6 +43,7 @@ class ViewController : private ControllerContext {
     return std::max(downloads.Pending(), size_t(download_reconciliation_failed));
   }
   void PollSignIn();
+  Json SignInFailures() const;
   Result<void> Initialize();
   void Reset();
   bool Contains(const std::string& view) const { return desired.contains(view); }
@@ -84,6 +85,8 @@ class ViewController : private ControllerContext {
   Result<Json> ManageViewNavigate(const Json& request);
 
  private:
+  friend class NativeErrorStateProbe;
+  friend class NativeRetryOwnerProbe;
   std::function<Result<void>()> before_views;
   std::function<Result<void>()> stop_runtime;
   PeerController& peer_controller;
@@ -106,8 +109,16 @@ class ViewController : private ControllerContext {
   float atlas_scale = 1;
   Json site_preferences = Json::object();
   Json sign_in_acknowledged = Json::array();
+  std::map<std::string, Json> sign_in_pending_;
   std::string sign_in_incarnation;
-  int64_t next_sign_in_poll = 0;
+  RetryClock::time_point next_sign_in_poll{};
+  using SignInAppend =
+      std::function<Result<Json>(const Json&, const std::string&, const std::string&)>;
+  void PollSignIn(const SignInAppend& append);
+  void DeliverSignIn(const SignInAppend& append);
+  RetryUnit sign_in_fetch_{"signin.fetch"};
+  std::map<std::string, RetryUnit> sign_in_handoff_;
+  RetryUnit output_retry_{"output.reconcile"};
   std::set<std::string> observed_closed;
   std::atomic<bool> reconciliation_pending{false};
   int64_t next_reconciliation = 0;

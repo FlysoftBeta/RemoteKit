@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import { ObjectIndex } from '../server/cluster/objects';
@@ -7,6 +7,7 @@ import { encodeJson } from '../server/cluster/frames';
 import type { NodeLink, NodeRegistry } from '../server/cluster/node-link';
 import { ControlDatabase } from '../server/persistence/database';
 import { RemoteKitError } from '../shared/errors';
+import { log } from '../server/log';
 
 const source = 'a'.repeat(64);
 const document = 'b'.repeat(64);
@@ -313,6 +314,72 @@ function fixture() {
   };
 }
 
+for (const code of [
+  'busy',
+  'rate_limited',
+  'unavailable',
+  'outcome_unknown',
+  'conflict',
+  'not_found',
+  'invalid_request',
+  'internal',
+  'rejected',
+  'limit_exceeded',
+  'forbidden',
+  'locked',
+  'unauthenticated',
+] as const) {
+  test(`object maintenance ${code} follows the background policy`, async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: 0 });
+    t.mock.method(Math, 'random', () => 0.5);
+    const warnings: string[] = [];
+    const recovered: string[] = [];
+    t.mock.method(log, 'warn', (event: string) => warnings.push(event));
+    t.mock.method(log, 'info', (event: string) => recovered.push(event));
+    const f = fixture();
+    const maintenance = f.index as unknown as {
+      gc(): Promise<void>;
+      diskPressure(): Promise<void>;
+      replicate(): Promise<void>;
+    };
+    let calls = 0;
+    let failing = true;
+    t.mock.method(maintenance, 'gc', async () => {
+      calls++;
+      if (failing) throw new RemoteKitError(code, 'fixture');
+    });
+    t.mock.method(maintenance, 'diskPressure', async () => {});
+    t.mock.method(maintenance, 'replicate', async () => {});
+    try {
+      await f.index.tick();
+      await f.index.tick();
+      assert.equal(calls, 1);
+      const retryable = ['busy', 'rate_limited', 'unavailable', 'outcome_unknown', 'conflict'].includes(code);
+      const delay = code === 'busy' ? 250 : code === 'rate_limited' ? 30_000 : 1000;
+      if (retryable) {
+        t.mock.timers.tick(delay - 1);
+        await f.index.tick();
+        assert.equal(calls, 1);
+        t.mock.timers.tick(1);
+        await f.index.tick();
+        assert.equal(calls, 2);
+      } else {
+        t.mock.timers.tick(1_000_000);
+        await f.index.tick();
+        assert.equal(calls, 1);
+      }
+      failing = false;
+      f.nodes[0].state.connectionEpoch = 'reconnected';
+      await f.index.tick();
+      assert.equal(calls, retryable ? 3 : 2);
+      assert.deepEqual(warnings, ['objects.background_failed']);
+      assert.deepEqual(recovered, ['objects.background_recovered']);
+    } finally {
+      await f.close();
+    }
+  });
+}
+
 test('study conversion is in flight once across tenant nodes and committed derivations are shared', async () => {
   const f = fixture();
   let finish!: () => void;
@@ -385,8 +452,9 @@ test('deterministic failures persist across Control restart and never retry for 
   }
 });
 
-test('transient failures retry after persistent exponential backoff with minute-scale saturation delays capped at one hour', async (t) => {
+test('busy renders retain shared backoff across restart and stop after their retry budget', async (t) => {
   t.mock.method(console, 'error', () => {});
+  t.mock.method(Math, 'random', () => 0.5);
   const f = fixture();
   f.setWork(async () => {
     throw new RemoteKitError('busy', 'document queue full');
@@ -395,20 +463,24 @@ test('transient failures retry after persistent exponential backoff with minute-
     f.index.render(source);
     await settle();
     await f.reopen();
-    for (const hours of [1, 2, 4, 8, 16, 32, 60].map((minutes) => minutes / 60)) {
+    for (const delay of [250, 500, 1000, 2000, 4000, 5000, 5000, 5000]) {
       const row = f.failure()!;
-      assert.equal(Number(row.retry_at! - row.failed_at), hours * HOUR);
+      assert.equal(Number(row.retry_at! - row.failed_at), delay);
       const count = f.requests.length;
-      f.advance(hours - 0.001);
+      f.advance((delay - 1) / HOUR);
       f.index.render(source);
       assert.equal(f.requests.length, count);
-      f.advance(0.001);
+      f.advance(1 / HOUR);
       f.index.render(source);
       await settle();
       assert.equal(f.requests.length, count + 1);
     }
     f.setWork(async (node) => f.commit(node));
     f.advance(24);
+    f.index.render(source);
+    await settle();
+    assert.equal(f.failure()!.retry_at, null);
+    f.registry.options.buildId = 'build-b';
     f.index.render(source);
     await settle();
     assert.equal(f.failure(), undefined);
