@@ -1,6 +1,5 @@
 #include "session/execution.hpp"
 #include "cluster/node_files.hpp"
-#include "diagnostics/log_files.hpp"
 #include "management/methods.hpp"
 #include "persistence/checkpoint.hpp"
 #include "util/wire_error.hpp"
@@ -545,8 +544,6 @@ Result<void> SessionExecution::Admit(const Json& request, uint64_t generation) {
   if (!management_.Current(generation) || !request.value("params", Json()).is_object())
     return Error{ErrorCode::kConflict, "RPC target is retired"};
   const auto method = request.at("method").get<std::string>();
-  if (method == "session.logs.read")
-    return {};
   const auto session = runtime_.load();
   if (!session)
     return Error{ErrorCode::kUnavailable, "Session execution is stopped"};
@@ -562,8 +559,6 @@ Result<Json> SessionExecution::Request(const Json& request, uint64_t generation)
   const auto method = request.at("method").get<std::string>();
   auto params = request.at("params");
   params["method"] = method;
-  if (method == "session.logs.read")
-    return ReadSessionLog(options_.node_root, id_, params);
   const auto handler = ManagementMethods::Find(method);
   if (!handler)
     return Error{ErrorCode::kInvalidRequest, "unknown Session RPC: " + method};

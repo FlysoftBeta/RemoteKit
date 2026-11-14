@@ -15,6 +15,28 @@
 #include <thread>
 
 namespace {
+struct LogRecords {
+  std::atomic<bool> pacing{false};
+  std::atomic<bool> sender{false};
+  std::atomic<bool> invalid{false};
+};
+void OnLog(void* context, int, const char* event, const char* fields) {
+  auto& logs = *static_cast<LogRecords*>(context);
+  if (std::strcmp(event, "rtc.screenshare_pacing") == 0) {
+    logs.pacing = true;
+    if (!std::strstr(fields, "\"peer\":") || !std::strstr(fields, "\"trial\":") ||
+        !std::strstr(fields, "\"rfc8888Enabled\":") ||
+        !std::strstr(fields, "\"explicitScreenshareTrial\":") ||
+        !std::strstr(fields, "\"explicitStrictTrial\":"))
+      logs.invalid = true;
+  }
+  if (std::strcmp(event, "rtc.video_sender") == 0) {
+    logs.sender = true;
+    if (!std::strstr(fields, "\"peer\":") ||
+        !std::strstr(fields, "\"transportSequenceExtension\":"))
+      logs.invalid = true;
+  }
+}
 struct Event {
   uint64_t peer;
   uint32_t type;
@@ -79,6 +101,9 @@ int main(int argc, char** argv) {
   const bool cross_thread = argc > 1 && std::strcmp(argv[1], "--cross-thread") == 0;
   const bool loopback = argc > 1 && std::strcmp(argv[1], "--loopback") == 0;
   const bool trickle = argc > 1 && !cross_thread && !loopback;
+  LogRecords logs;
+  if (remotekit_sdk_set_log_sink(OnLog, &logs) != REMOTEKIT_SDK_OK)
+    return 41;
   Events events;
   remotekit_rtc_options options{};
   options.struct_size = sizeof(options);
@@ -438,6 +463,8 @@ int main(int argc, char** argv) {
     shutdown_status = remotekit_sdk_shutdown();
   if (shutdown_status != REMOTEKIT_SDK_OK)
     return 14;
+  if (!logs.pacing || !logs.sender || logs.invalid)
+    return 42;
   std::puts("RTC H264 SDP / ICE / DTLS-SCTP DataChannel / close barrier passed");
   return 0;
 }

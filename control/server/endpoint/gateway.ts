@@ -26,8 +26,6 @@ import type {
   Accepted,
   EndpointSnapshot,
   LifecycleRequest,
-  LogWindow,
-  LogWindowRequest,
   OperationIdentity,
   PageIdentity,
   PageReplyRequest,
@@ -514,9 +512,7 @@ export class EndpointGateway {
       return;
     await node.publish(event);
   }
-  readLog(tenant: string, request: LogWindowRequest): Promise<LogWindow> {
-    return this.invoke<LogWindow>('session.logs.read', tenant, request);
-  }
+
   async offer(
     tenant: string,
     args: { connectionId: string; leaseId: string; sdp: string; avSync: boolean },

@@ -80,7 +80,7 @@ try {
     output += data;
   });
   // Control announces its listener in its own log file, not on stdout.
-  const logPath = resolve(scratch, 'logs/control.jsonl');
+  const logPath = resolve(scratch, 'logs', new Date().toLocaleDateString('en-CA'), 'control.jsonl');
   const port = await wait(
     new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {

@@ -365,13 +365,15 @@ try {
   await click('large');
   await until(
     async () =>
-      (await readFile(join(run, 'logs/control.jsonl'), 'utf8')).split('\n').some((line) => {
-        try {
-          return JSON.parse(line).ev === 'clipboard.write_exceeds_limits';
-        } catch {
-          return false;
-        }
-      }),
+      (await readFile(join(run, 'logs', new Date().toLocaleDateString('en-CA'), 'control.jsonl'), 'utf8'))
+        .split('\n')
+        .some((line) => {
+          try {
+            return JSON.parse(line).ev === 'clipboard.write_exceeds_limits';
+          } catch {
+            return false;
+          }
+        }),
     'oversize warning',
   );
   assert.deepEqual(row(), retained);

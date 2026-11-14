@@ -91,7 +91,27 @@ Result<void> Service::Clear() {
     return *failure;
   return {};
 }
+void Service::PruneLogFiles() {
+  std::set<std::string> active;
+  {
+    std::lock_guard lock(mutex_);
+    for (const auto& [tenant, managed] : sessions_)
+      if (managed.execution->Running())
+        active.insert(managed.execution->Id());
+  }
+  log_prune_date_ = LocalLogDate();
+  PruneLogs(options_.node_root / "logs", *log_retention_days_, log_prune_date_, active);
+}
 Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
+  if (request.is_object() && request.value("type", Json()) == "node.settings") {
+    if (!coordination::Keys(request, {"type", "logRetentionDays"}) ||
+        !request["logRetentionDays"].is_number_integer() || request["logRetentionDays"] < 1 ||
+        request["logRetentionDays"] > 365)
+      return Error{ErrorCode::kInvalidRequest, "invalid node.settings"};
+    log_retention_days_ = request["logRetentionDays"].get<unsigned>();
+    PruneLogFiles();
+    return Json::object();
+  }
   if (!request.is_object() || !request.value("method", Json()).is_string())
     return Error{ErrorCode::kInvalidRequest, "invalid request envelope"};
   const auto method = request["method"].get<std::string>();
@@ -102,7 +122,7 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
   if (generation != fenced_generation_ || !link_.Current(generation))
     return Error{ErrorCode::kUnavailable, "node fencing is not established"};
   const auto tenant = request.value("tenantId", std::string());
-  const bool node_rpc = method == "node.logs.search" || method == "shutdown" ||
+  const bool node_rpc = method.starts_with("node.logs.") || method == "shutdown" ||
                         method.starts_with("service.") || method.starts_with("object.") ||
                         method == "session.cold.delete" || method == "session.delete";
   if (node_rpc) {
@@ -127,8 +147,25 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
       auto params = request["params"];
       params["tenantId"] = tenant;
       params["method"] = method;
-      if (method == "node.logs.search")
+      if (method == "node.logs.search") {
+        if (!coordination::Keys(request["params"], {"errorId"}))
+          return Error{ErrorCode::kInvalidRequest, "invalid log search"};
         return SearchErrorLogs(options_.node_root, Required(params, "errorId"));
+      }
+      if (method == "node.logs.days") {
+        if (!coordination::Keys(request["params"], {}))
+          return Error{ErrorCode::kInvalidRequest, "invalid log days"};
+        return NodeLogDays(options_.node_root / "logs");
+      }
+      if (method == "node.logs.list") {
+        if (!coordination::Keys(request["params"], {"date"}))
+          return Error{ErrorCode::kInvalidRequest, "invalid log list"};
+        return NodeLogList(options_.node_root / "logs", Required(params, "date"));
+      }
+      if (method == "node.logs.read")
+        return ReadNodeLog(options_.node_root / "logs", request["params"]);
+      if (method.starts_with("node.logs."))
+        return Error{ErrorCode::kInvalidRequest, "unknown node log RPC"};
       if (method == "shutdown") {
         RK_RETURN_IF_ERROR(Clear());
         return Json{{"closed", true}};
@@ -179,7 +216,7 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
     return coordinator->DeliverClipboard(request, generation);
   if (method == "session.events.ack")
     return coordinator->Acknowledge(request, generation);
-  if (method != "session.logs.read" && !ManagementMethods::Find(method))
+  if (!ManagementMethods::Find(method))
     return Error{ErrorCode::kInvalidRequest, "unknown Session RPC: " + method};
   return coordinator->Request(request, generation);
 }
@@ -500,6 +537,15 @@ bool Service::HandleRequest(Json request, uint64_t generation) {
     SecureZeroMemory(key.data(), key.size());
     request.erase("profileKey");
   }
+  if (request.value("type", Json()) == "node.settings")
+    return false;
+  if (result && request.value("method", Json()) == "node.logs.read") {
+    auto value = std::move(result).value();
+    auto data = std::move(value["data"].get_binary());
+    value.erase("data");
+    link_.SendBinaryReply(generation, ManagementReply(request, std::move(value)), data);
+    return false;
+  }
   const bool shutdown = result && request.value("method", std::string()) == "shutdown";
   link_.SendReply(generation, ManagementReply(request, std::move(result), "mgmt.request_failed",
                                               RequestLogFields(request)));
@@ -699,6 +745,9 @@ int Service::Run() {
                  },
                  [this] { return std::to_string(metrics_generation_.load()); });
   while (!failed_) {
+    if (log_retention_days_ && LocalLogDate() != log_prune_date_) {
+      PruneLogFiles();
+    }
     bool eof = false;
     uint64_t generation = 0;
     const bool received = link_.Next(line, generation, eof);
@@ -726,9 +775,9 @@ int Service::Run() {
       const auto method = envelope.is_object() && envelope.value("method", Json()).is_string()
                               ? envelope["method"].get<std::string>()
                               : std::string();
-      if (method == "node.desired" || method == "session.desired" ||
-          method == "session.clipboard" || method == "session.delete" ||
-          method == "session.cold.delete" || method == "shutdown") {
+      if (envelope.value("type", Json()) == "node.settings" || method == "node.desired" ||
+          method == "session.desired" || method == "session.clipboard" ||
+          method == "session.delete" || method == "session.cold.delete" || method == "shutdown") {
         if (HandleRequest(std::move(envelope), generation))
           break;
       } else {

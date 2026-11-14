@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Carrier, NodeRegistry, StdioCarrier, type RegistryOptions } from '../server/cluster/node-link';
 import { NoiseHandshake, publicKey, MAX_HANDSHAKE_PAYLOAD, type Transport } from '../server/cluster/noise';
-import { decodeFrame, encodeJson, encodeStdio, MAX_JSON } from '../server/cluster/frames';
+import { decodeFrame, encodeJson, encodeBinary, encodeStdio, MAX_JSON } from '../server/cluster/frames';
 import { encodeNodeReady } from '../server/cluster/ready';
 import { EndpointLog } from '../server/cluster/endpoint-log';
 import { log } from '../server/log';
@@ -193,6 +193,44 @@ function fixture(t: TestContext, overrides: Partial<RegistryOptions> = {}) {
   }
   return { registry, connect, link: registry.get('alpha')! };
 }
+
+test('retention is published on ready and change, and node log reads decode binary replies', async (t) => {
+  const h = fixture(t);
+  h.registry.setLogRetentionDays(14);
+  const peer = h.connect();
+  await flush();
+  const settings = () =>
+    peer.frames.flatMap((frame) =>
+      frame.kind === 'json' && frame.message.type === 'node.settings' ? [frame.message.logRetentionDays] : [],
+    );
+  assert.deepEqual(settings(), [14]);
+  h.registry.setLogRetentionDays(7);
+  assert.deepEqual(settings(), [14, 7]);
+  const path = '2026-11-14/endpoint.jsonl';
+  const pending = h.link.logsRead(path, 0, 3);
+  await flush();
+  const request = peer.frames[peer.frames.length - 1];
+  assert.equal(request.kind, 'json');
+  if (request.kind !== 'json') throw new Error('Expected request');
+  assert.equal(request.message.method, 'node.logs.read');
+  assert.deepEqual(request.message.params, { path, offset: 0, length: 3 });
+  peer.carrier.emit(
+    'message',
+    peer.transport!.send.encrypt(
+      encodeBinary(
+        {
+          id: request.message.id,
+          opId: request.message.opId,
+          ok: true,
+          result: { path, offset: 0, size: 3 },
+        },
+        Buffer.from('abc'),
+      ),
+    ),
+  );
+  assert.deepEqual(await pending, { path, offset: 0, size: 3, data: Buffer.from('abc') });
+  await assert.rejects(h.link.logsRead(path, 0, 524289), /invalid log length/);
+});
 
 test('an unconfirmed request times out without closing, then its write and late reply can finish', async (t) => {
   const logs = closeLogs(t);
@@ -465,7 +503,7 @@ for (const failure of [
     });
     const carrier = new StdioCarrier(
       child as unknown as ChildProcessWithoutNullStreams,
-      new EndpointLog(join(tmpdir(), 'rk-node-link-unused.log')),
+      new EndpointLog(123),
     );
     h.registry.accept(carrier, 'alpha');
     let reason: string;

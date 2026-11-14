@@ -31,7 +31,7 @@ const source = `
 `;
 
 for (const stdin of ['pipe', 'ignore'] as const) {
-  test(`application handles ${stdin} stdin lifetime`, { timeout: 15000 }, async (t) => {
+  test(`application handles ${stdin} stdin lifetime`, { timeout: 60000 }, async (t) => {
     const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], {
       cwd: new URL('../', import.meta.url),
       stdio: stdin === 'pipe' ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', 'ipc'],
@@ -49,7 +49,8 @@ for (const stdin of ['pipe', 'ignore'] as const) {
       errors += chunk;
     });
     const exited = once(child, 'exit');
-    const deadline = Date.now() + 10000;
+    // This verifies shutdown, allowing cold source-module loading on Windows.
+    const deadline = Date.now() + 45000;
     while (!output.includes('started')) {
       assert.equal(child.exitCode, null, errors);
       assert.ok(Date.now() < deadline, errors || output);

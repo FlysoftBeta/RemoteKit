@@ -140,6 +140,7 @@ service peer service.offer/ice/close/authorize{connectionId, leaseId, epoch?, un
 Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, offset}+≤1MiB … object.put.end{putId}
           → {objectId, size, storedSize, storedSha256}；object.put.cancel{putId}
 节点集合  node.peers{peers}
+节点设置  node.settings{logRetentionDays}
 保活      {type:"node.ping"} / {type:"node.pong"}
 更新包    package.get{buildId, offset} → BINARY package.chunk{offset} … package.end{size}（role updater）
 ```
@@ -169,13 +170,13 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 | `view.appInfo` | 读取页面的 App 信息（安装网页为 App） |
 | `session.identity` | Browser 的 UA 与 Client Hints 元数据 |
 | `session.snapshot` | 只读诊断快照；`outputDiagnostics:true` 附输出状态 |
-| `session.logs.read` | 诊断用原始日志窗口：`{log: browser | endpoint | endpoint.1, end?, maxBytes ≤ 512 KiB}` → `{exists, size, start, end, data(base64)}`；`browser` 是节点 `logs/browser/<sessionId>.log`，`crashes`/`dump/<name>` 来自节点 `logs/crashes/<sessionId>/` |
 | `session.library.prepare/selectionStatus` | 文件选择事务 |
 | `session.storage.import/importStatus` | 会话导入写入 |
 | `rtc.offer` / `rtc.ice` / `rtc.close` / `rtc.actionResult` | 信令（`rtc.offer` 必带 `avSync`）；产品动作的收据回传 |
 | `auth.face.capabilities/begin/status/cancel` | 人脸挑战 |
 | `object.derivation` / `object.render` / `object.fetch` / `object.delete` / `object.inventory` | 节点级：文档渲染结果、拉取副本、删除、分页列出对象 |
-| `node.logs.search` | 节点级：`{errorId}` → `{lines}`，最多 50 行，按时间从旧到新 |
+| `node.logs.search` | 节点级：`{errorId}` → `{lines}`，最多 50 行，按时间从旧到新，只搜保留期内的日期目录 |
+| `node.logs.days` / `node.logs.list` / `node.logs.read` | 节点级：日期目录列表；某天的文件 `{date}` → `{files:[{path, size, mtime}]}`；分段读取 `{path, offset, length ≤ 512 KiB}` → 二进制帧 `{path, offset, size}` + 字节（见[诊断 · 节点日志接口](diagnostics.md#节点日志接口)） |
 | `session.cold.delete` / `session.delete` / `shutdown` | 节点级：删除冷副本；删除一个 Session 的全部本地数据；优雅关闭 Endpoint |
 
 观察状态中 view 的 `actual/desired`：0 live、1 frozen、2 discarded、3 unloaded；`blockers` 是停止阻塞项（未确认事件、未决原生选择、上传中、页面请求、下载中与未交接的下载导入的计数，以及 RTC 是否连接、生命周期是否不确定）。

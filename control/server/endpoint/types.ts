@@ -42,22 +42,6 @@ export interface Accepted {
   [key: string]: unknown;
 }
 export type ViewSnapshot = import('./coordination').ObservedView;
-// Raw log names an Endpoint serves for diagnostics: this Session's Browser log
-// and the node's Endpoint log with its first rotation.
-export type EndpointLogName = 'browser' | 'endpoint' | 'endpoint.1' | 'crashes' | `dump/${string}`;
-export interface LogWindowRequest {
-  log: EndpointLogName;
-  end?: number;
-  maxBytes: number;
-}
-export interface LogWindow {
-  exists: boolean;
-  size: number;
-  start: number;
-  end: number;
-  data: string;
-  dumps?: { name: string; size: number }[];
-}
 export interface EndpointSnapshot {
   status?: NativeError | null;
   browserRestart?: 'ready' | 'waiting' | 'exhausted';

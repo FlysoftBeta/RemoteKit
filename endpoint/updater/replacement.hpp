@@ -1,12 +1,12 @@
 #pragma once
-#include "logging.hpp"
+#include "platform.hpp"
+#include "util/log.hpp"
 namespace remotekit::updater {
 Result<bool> ReplaceExecutable(const fs::path& installed,
                                const fs::path& replacement,
                                const fs::path& root,
                                const std::wstring& arguments,
-                               bool service,
-                               Log& log);
+                               bool service);
 void CleanupRuntime(const fs::path& root, const std::string& current, bool downloads);
-void CleanupRuntimeBestEffort(const fs::path& root, const std::string& current, Log& log) noexcept;
+void CleanupRuntimeBestEffort(const fs::path& root, const std::string& current) noexcept;
 }  // namespace remotekit::updater

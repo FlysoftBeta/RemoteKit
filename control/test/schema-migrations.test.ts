@@ -40,9 +40,9 @@ test('release v23 migrates durable retry state and keeps a verified backup', () 
     const store = new ControlDatabase(path, { buildId: 'test' });
     try {
       assert(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='retry_units'").get());
-      assert.equal(schema(store.db).length, before.length + 1);
+      assert.equal(schema(store.db).length, before.length + 2);
       assert(Number(store.db.pragma('schema_version', { simple: true })) > Number(version));
-      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 24n }]);
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 25n }]);
       assert.equal(existsSync(join(directory, 'backups')), true);
     } finally {
       store.db.close();
@@ -67,7 +67,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
   }
   writeFileSync(join(backupDirectory, 'keep.txt'), 'keep');
   migrations.push({
-    version: 25,
+    version: 26,
     name: 'future-test',
     up(database) {
       database.exec('CREATE TABLE future_step(id TEXT)');
@@ -84,7 +84,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
     const copy = new Sqlite(
       join(
         backupDirectory,
-        readdirSync(backupDirectory).find((name) => /^control-v23-to-v25-test-.*T.*Z\.db$/.test(name))!,
+        readdirSync(backupDirectory).find((name) => /^control-v23-to-v26-test-.*T.*Z\.db$/.test(name))!,
       ),
       { readonly: true },
     );

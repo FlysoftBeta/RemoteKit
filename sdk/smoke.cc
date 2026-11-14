@@ -1,13 +1,59 @@
 #include "remotekit_sdk.h"
 
 #include <array>
+#include <atomic>
+#include <io.h>
 #include <cstdio>
 #include <cstring>
 
-int main() {
+namespace {
+std::atomic<unsigned> records{0};
+std::atomic<bool> invalid_record{false};
+void LogSink(void* context, int level, const char* event, const char* fields) {
+  if (context != &records || level < REMOTEKIT_SDK_LOG_DEBUG || level > REMOTEKIT_SDK_LOG_ERROR ||
+      !event || !std::strchr(event, '.') || !fields || fields[0] != '{' ||
+      fields[std::strlen(fields) - 1] != '}')
+    invalid_record.store(true);
+  records.fetch_add(1);
+}
+
+bool InitializeWithSilentStderr(bool expect_records = true) {
+  FILE* capture = nullptr;
+  if (tmpfile_s(&capture) != 0)
+    return false;
+  const int saved = _dup(_fileno(stderr));
+  if (saved < 0 || _dup2(_fileno(capture), _fileno(stderr)) != 0) {
+    if (saved >= 0)
+      _close(saved);
+    std::fclose(capture);
+    return false;
+  }
+  const int initialized = remotekit_sdk_initialize();
+  const int repeated = remotekit_sdk_initialize();
+  std::fflush(stderr);
+  const auto bytes = _filelengthi64(_fileno(capture));
+  const int restored = _dup2(saved, _fileno(stderr));
+  _close(saved);
+  std::fclose(capture);
+  return initialized == REMOTEKIT_SDK_OK && repeated == REMOTEKIT_SDK_OK && bytes == 0 &&
+         restored == 0 && (records.load() != 0) == expect_records && !invalid_record.load();
+}
+}  // namespace
+
+int main(int argc, char** argv) {
+  if (argc == 2 && std::strcmp(argv[1], "--no-sink") == 0) {
+    const bool success =
+        InitializeWithSilentStderr(false) &&
+        remotekit_sdk_set_log_sink(LogSink, &records) == REMOTEKIT_SDK_INVALID_STATE &&
+        remotekit_sdk_shutdown() == REMOTEKIT_SDK_OK;
+    return success ? 0 : 3;
+  }
   if (remotekit_sdk_abi_version() != REMOTEKIT_SDK_ABI_VERSION ||
-      remotekit_sdk_initialize() != REMOTEKIT_SDK_OK ||
-      remotekit_sdk_initialize() != REMOTEKIT_SDK_OK) {
+      remotekit_sdk_set_log_sink(nullptr, nullptr) != REMOTEKIT_SDK_INVALID_ARGUMENT ||
+      remotekit_sdk_set_log_sink(LogSink, &records) != REMOTEKIT_SDK_OK ||
+      remotekit_sdk_set_log_sink(LogSink, &records) != REMOTEKIT_SDK_INVALID_STATE ||
+      !InitializeWithSilentStderr() ||
+      remotekit_sdk_set_log_sink(LogSink, &records) != REMOTEKIT_SDK_INVALID_STATE) {
     std::fputs("SDK initialization failed\n", stderr);
     return 1;
   }

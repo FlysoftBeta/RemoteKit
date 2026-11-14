@@ -2,24 +2,13 @@
 #include "persistence/checkpoint_cache.hpp"
 #include "persistence/checkpoint.hpp"
 #include "util/result_macros.hpp"
+#include "util/file_io.hpp"
 #include <fstream>
 #include <sstream>
 
 namespace remotekit {
 Result<Json> CheckpointIdentity(const fs::path& path) {
-  HANDLE file =
-      CreateFileW(LongPath(path).c_str(), FILE_READ_ATTRIBUTES,
-                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-                  FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-  if (file == INVALID_HANDLE_VALUE)
-    return Error{ErrorCode::kUnavailable, "checkpoint file attributes unavailable"};
-  BY_HANDLE_FILE_INFORMATION info{};
-  const bool ok = GetFileInformationByHandle(file, &info) != FALSE;
-  CloseHandle(file);
-  if (!ok)
-    return Error{ErrorCode::kUnavailable, "checkpoint file identity unavailable"};
-  if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
-    return Error{ErrorCode::kRejected, "checkpoint contains a reparse point"};
+  RK_ASSIGN_OR_RETURN(info, FileIdentityNoReparse(LongPath(path)));
   return Json{
       {"size", (uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow},
       {"mtime",

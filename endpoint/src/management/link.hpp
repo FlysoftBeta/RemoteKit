@@ -43,6 +43,7 @@ class ManagementLink {
   virtual bool Next(std::string& bytes, uint64_t& generation, bool& eof) = 0;
   virtual bool Current(uint64_t generation) = 0;
   virtual bool SendReply(uint64_t generation, const Json& reply) = 0;
+  virtual bool SendBinaryReply(uint64_t, const Json&, std::span<const uint8_t>) { return false; }
   virtual bool SendEvent(const Json& event, uint64_t generation, DeliveryFlag delivery = {}) = 0;
   struct QueueBudget {
     size_t messages, bytes;

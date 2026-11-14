@@ -27,7 +27,7 @@ int ClusterEndpoint(const std::filesystem::path& root) {
       continue;
     }
     auto& established = connected.value();
-    std::cout << "dummy cluster " << build.value() << " " << established.reply.value("type", "")
+    std::cerr << "dummy cluster " << build.value() << " " << established.reply.value("type", "")
               << " " << established.reply.value("code", "") << std::endl;
     if (established.reply.value("type", "") == "node.reject")
       return established.reply.value("code", "") == "build_mismatch" ? 3 : 1;
@@ -62,7 +62,7 @@ int wmain(int argc, wchar_t** argv) {
     std::ofstream file(root / L"dummy-runs.jsonl", std::ios::app);
     file << Json{{"step", step}, {"time", GetTickCount64()}}.dump() << '\n';
   }
-  std::cout << "dummy endpoint step " << step << std::endl;
+  std::cerr << "dummy endpoint step " << step << std::endl;
   if (step >= sequence.size() || sequence[step].is_null()) {
     std::array<uint8_t, 16> bytes;
     DWORD count = 0;

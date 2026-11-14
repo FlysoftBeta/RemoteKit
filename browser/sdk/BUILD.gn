@@ -19,8 +19,11 @@ sdk_headers = [
 
 sdk_sources = [
   "../control_clipboard.h",
+  "../log_record.h",
   "sdk_control.cc",
   "sdk_internal.h",
+  "sdk_logging.cc",
+  "sdk_logging.h",
   "sdk_render.cc",
   "sdk_resources.cc",
   "sdk_resources.h",
@@ -92,7 +95,12 @@ executable("remotekit_rtc_adaptation_probe") {
   testonly = true
   include_dirs = [ "//remotekit" ]
   configs -= [ "//build/config/clang:find_bad_constructs" ]
-  sources = [ "rtc_adaptation_probe.cc" ] + sdk_headers + rtc_sources
+  sources = [
+              "../log_record.h",
+              "rtc_adaptation_probe.cc",
+              "sdk_logging.cc",
+              "sdk_logging.h",
+            ] + sdk_headers + rtc_sources
   defines = [ "REMOTEKIT_SDK_IMPLEMENTATION" ]
   libs = [ "ws2_32.lib" ]
   deps = [

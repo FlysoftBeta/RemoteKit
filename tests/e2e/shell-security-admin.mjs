@@ -109,7 +109,10 @@ await runScenario('shell-security-admin', async (v, stack) => {
     await f.getByText('公钥指纹', { exact: true }).waitFor();
     await v.shot('admin-node');
     await select('诊断');
-    const log = readFileSync(join(stack.run, 'logs/control.jsonl'), 'utf8')
+    const log = readFileSync(
+      join(stack.run, 'logs', new Date().toLocaleDateString('en-CA'), 'control.jsonl'),
+      'utf8',
+    )
       .trim()
       .split('\n')
       .map(JSON.parse);

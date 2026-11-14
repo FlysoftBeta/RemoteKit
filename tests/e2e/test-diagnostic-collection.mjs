@@ -53,7 +53,7 @@ function readArchive(compressed) {
     const field = (start, end) => header.subarray(start, end).toString('ascii').split('\0')[0];
     const checksum = header.reduce((sum, byte, index) => sum + (index >= 148 && index < 156 ? 32 : byte), 0);
     assert.equal(checksum, Number.parseInt(field(148, 156), 8), 'Invalid tar checksum');
-    const name = field(0, 100);
+    const name = [field(345, 500), field(0, 100)].filter(Boolean).join('/');
     const size = Number.parseInt(field(124, 136), 8);
     assert(size > 0 && offset + 512 + size <= tar.length && !entries.has(name), 'Invalid tar member');
     const body = tar
@@ -154,7 +154,7 @@ try {
           const method = methods.get(reply.id);
           if (!method) return;
           methods.delete(reply.id);
-          probe.replies.push({ method, result: reply.result, error: reply.error });
+          probe.replies.push({ id: reply.id, method, result: reply.result, error: reply.error });
         });
         this.addEventListener('open', () => {
           if (new URL(this.url).pathname === '/api/socket') probe.controlSocket = this;
@@ -164,7 +164,11 @@ try {
       send(data) {
         if (typeof data === 'string' && new URL(this.url).pathname === '/api/socket') {
           const message = JSON.parse(data);
-          if (message.method?.startsWith('diagnostics.')) this.observeDiagnostic(message);
+          if (
+            message.method?.startsWith('diagnostics.') ||
+            ['admin.diagnostics.save', 'library.get'].includes(message.method)
+          )
+            this.observeDiagnostic(message);
           if (message.method === 'diagnostics.sample') probe.latestLayout = message.params?.data?.layout;
         }
         return super.send(data);
@@ -339,24 +343,27 @@ try {
   const compressed = await readFile(join(owner, complete.id + '.tar.zst'));
   assert.equal(compressed.length, complete.bytes);
   const entries = readArchive(compressed);
-  assert.deepEqual([...entries.keys()].sort(), [
+  assert.deepEqual([...entries.keys()].filter((name) => !name.startsWith('logs/')).sort(), [
     'client.jsonl',
     'control.jsonl',
     'endpoint.jsonl',
     'events.jsonl',
-    'logs/browser.log',
-    'logs/control.jsonl',
-    'logs/endpoint.log',
     'manifest.json',
   ]);
   const manifest = entries.get('manifest.json');
   // Raw logs include history from before the collection started.
-  assert.match(entries.get('logs/browser.log'), /RemoteKit startup InitLogging/);
-  assert.match(entries.get('logs/browser.log'), /CONSOLE.*diagnostic-fixture-console-marker/);
-  assert.match(entries.get('logs/endpoint.log'), /"ev":"browser\.launched"/);
-  assert.match(entries.get('logs/control.jsonl'), /"ev":"control\.started"/);
-  assert.equal(manifest.logs.browser.exists, true);
-  assert.equal(manifest.logs.endpoint.exists, true);
+  const rawLog = (pattern) =>
+    [...entries]
+      .filter(([name]) => pattern.test(name))
+      .map(([, text]) => text)
+      .join('\n');
+  assert.match(rawLog(/^logs\/node\/\d{4}-\d{2}-\d{2}\/browser-/), /"ev":"chromium\.log"/);
+  assert.match(rawLog(/^logs\/node\/\d{4}-\d{2}-\d{2}\/browser-/), /diagnostic-fixture-console-marker/);
+  assert.match(rawLog(/^logs\/node\/\d{4}-\d{2}-\d{2}\/endpoint/), /"ev":"browser\.launched"/);
+  assert.match(rawLog(/^logs\/control\/\d{4}-\d{2}-\d{2}\/control/), /"ev":"control\.started"/);
+  assert.equal(manifest.schemaVersion, 2);
+  assert(Object.keys(manifest.logs).some((path) => path.includes('/browser-')));
+  assert(Object.keys(manifest.logs).some((path) => path.includes('/endpoint')));
   assert.equal(manifest.id, complete.id);
   assert.equal(manifest.reason, 'user');
   assert.equal(manifest.interrupted, false);
@@ -429,6 +436,25 @@ try {
   assert(outputStats, 'No Browser output and Endpoint encode stats');
 
   assert.deepEqual(downloads, []);
+  await read(`diagnosticQA.controlSocket.send(JSON.stringify({
+    id:'qa-save', method:'admin.diagnostics.save', params:{id:${JSON.stringify(complete.id)},operationId:crypto.randomUUID()}
+  }))`);
+  const saved = await until(
+    () => read("diagnosticQA.replies.find(reply => reply.method === 'admin.diagnostics.save')"),
+    'No save reply',
+  );
+  assert(saved.result?.entryId, JSON.stringify(saved));
+  await read(
+    `diagnosticQA.controlSocket.send(JSON.stringify({id:'qa-library',method:'library.get',params:{}}))`,
+  );
+  const library = await until(
+    // The app issues its own library.get; match this request's ID.
+    () => read("diagnosticQA.replies.find(reply => reply.id === 'qa-library')"),
+    'No My Files reply',
+  );
+  const entry = library.result.entries.find((entry) => entry.id === saved.result.entryId);
+  assert.deepEqual(entry.source, { app: 'diagnostics', channel: 'collection' });
+  assert.equal(entry.name, `RemoteKit 诊断 ${complete.id}.tar.zst`);
   await page.goto('about:blank');
   await stack.stop();
   stack = await startStack(stackOptions);

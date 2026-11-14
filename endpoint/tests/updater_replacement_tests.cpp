@@ -35,9 +35,9 @@ int Child() {
   const auto replacement = root / L"replacement";
   std::ofstream(replacement) << "replacement bytes";
   const auto original = cluster::Sha256File(installed).value();
-  Log log(root / L"logs/replacement.log");
+
   fail_install = true;
-  const auto result = ReplaceExecutable(installed, replacement, root, L"", true, log);
+  const auto result = ReplaceExecutable(installed, replacement, root, L"", true);
   Check(!result && result.error().message == "cannot install new supervisor",
         "installation failure returned");
   Check(fs::exists(installed) && cluster::Sha256File(installed).value() == original,
@@ -45,7 +45,7 @@ int Child() {
   Check(!fs::exists(installed.wstring() + L".old"), "rollback consumes old path");
   Check(fs::exists(installed.wstring() + L".new"), "new executable was staged before renaming");
   fail_install = false;
-  auto retried = ReplaceExecutable(installed, replacement, root, L"", true, log);
+  auto retried = ReplaceExecutable(installed, replacement, root, L"", true);
   Check(retried && retried.value(), "same release replacement retried after transient failure");
   Check(cluster::Sha256File(installed).value() == cluster::Sha256File(replacement).value(),
         "atomic replacement installed promised bytes");

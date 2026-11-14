@@ -1,4 +1,6 @@
 #include "browser/control_response.h"
+#include "browser/diagnostic_log.h"
+#include "third_party/blink/public/mojom/devtools/console_message.mojom.h"
 #include "browser/page_requests.h"
 #include "browser/signin.h"
 #include "browser/browser_context.h"
@@ -46,6 +48,39 @@
 #endif
 
 namespace remotekit::browser {
+bool PageRequests::DidAddMessageToConsole(content::WebContents*,
+                                          blink::mojom::ConsoleMessageLevel level,
+                                          const std::u16string& message,
+                                          int32_t line,
+                                          const std::u16string& source_id) {
+  const char* name = "info";
+  const char* severity = "info";
+  switch (level) {
+    case blink::mojom::ConsoleMessageLevel::kVerbose:
+      if (!VLOG_IS_ON(1))
+        return true;
+      name = "verbose";
+      severity = "debug";
+      break;
+    case blink::mojom::ConsoleMessageLevel::kInfo:
+      break;
+    case blink::mojom::ConsoleMessageLevel::kWarning:
+      name = "warning";
+      severity = "warn";
+      break;
+    case blink::mojom::ConsoleMessageLevel::kError:
+      name = "error";
+      severity = "error";
+      break;
+  }
+  LogEvent(severity, "page.console",
+           base::DictValue()
+               .Set("level", name)
+               .Set("source", base::UTF16ToUTF8(source_id))
+               .Set("line", line)
+               .Set("message", base::UTF16ToUTF8(message)));
+  return true;
+}
 namespace {
 std::set<PageRequests*>& BoundPages() {
   static base::NoDestructor<std::set<PageRequests*>> pages;

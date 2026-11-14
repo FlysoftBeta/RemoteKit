@@ -1,5 +1,6 @@
 #pragma once
-#include "logging.hpp"
+#include "platform.hpp"
+#include "util/log.hpp"
 #include "../release/current.hpp"
 #include "util/retry_unit.hpp"
 namespace remotekit::updater {
@@ -15,7 +16,6 @@ using UpdateStage = std::variant<DiscoverRelease, DownloadedRelease>;
 // True means self-replacement launched a successor (or requests service recovery).
 Result<bool> Update(const fs::path& root,
                     HANDLE stop,
-                    Log& log,
                     bool service,
                     RetryUnit& retry,
                     UpdateStage& stage);

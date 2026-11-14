@@ -32,6 +32,11 @@ class PageRequests final : public content::WebContentsDelegate,
   PageRequests();
   ~PageRequests() override;
   void Bind(content::WebContents* contents);
+  bool DidAddMessageToConsole(content::WebContents* source,
+                              blink::mojom::ConsoleMessageLevel level,
+                              const std::u16string& message,
+                              int32_t line,
+                              const std::u16string& source_id) override;
   struct AnchorLayout {
     int width;
     int height;

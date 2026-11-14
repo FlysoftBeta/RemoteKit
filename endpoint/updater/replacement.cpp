@@ -5,8 +5,7 @@ Result<bool> ReplaceExecutable(const fs::path& installed,
                                const fs::path& replacement,
                                const fs::path& root,
                                const std::wstring& arguments,
-                               bool service,
-                               Log& log) {
+                               bool service) {
   auto running = ExecutablePath();
   if (!fs::exists(installed) || !fs::equivalent(running, installed))
     return false;
@@ -51,7 +50,7 @@ Result<bool> ReplaceExecutable(const fs::path& installed,
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
   }
-  log.Event(LogLevel::kInfo, "supervisor.replaced");
+  LogEvent(LogLevel::kInfo, "supervisor.replaced");
   return true;
 }
 void CleanupRuntime(const fs::path& root, const std::string& current, bool downloads) {
@@ -63,12 +62,12 @@ void CleanupRuntime(const fs::path& root, const std::string& current, bool downl
     for (auto& entry : fs::directory_iterator(root / L"downloads"))
       fs::remove_all(ExtendedPath(entry.path()));
 }
-void CleanupRuntimeBestEffort(const fs::path& root, const std::string& current, Log& log) noexcept {
+void CleanupRuntimeBestEffort(const fs::path& root, const std::string& current) noexcept {
   try {
     CleanupRuntime(root, current, true);
   } catch (const std::exception& error) {
     try {
-      log.Event(LogLevel::kWarn, "runtime.cleanup_failed", {{"message", error.what()}});
+      LogEvent(LogLevel::kWarn, "runtime.cleanup_failed", {{"message", error.what()}});
     } catch (...) {
       fputs("runtime.cleanup_failed\n", stderr);
     }

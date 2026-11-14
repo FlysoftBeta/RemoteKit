@@ -1,3 +1,4 @@
+import { FileDownloadButton } from './file-download-button';
 import {
   ArrowDropDown,
   CheckBoxOutlined,
@@ -1080,6 +1081,7 @@ const LibraryEntryView = memo(
         open={open}
         disabled={disabled || unavailable}
         marker={basketMarker(entry)}
+        corner={<FileDownloadButton entry={entry} disabled={disabled || unavailable} />}
         start={entryCheckbox(entry, true)}
         onOpen={(anchor) => onOpen(entry.id, anchor)}
         onLongPress={() => onLongPress(entry.id)}
@@ -1102,6 +1104,7 @@ const LibraryEntryView = memo(
         trailing={
           !selecting && (
             <>
+              <FileDownloadButton entry={entry} disabled={disabled || unavailable} />
               <Tooltip title={inBasket ? '从文件篮移除' : '加入文件篮'}>
                 <span>
                   <IconButton

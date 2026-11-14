@@ -631,9 +631,45 @@ void PendingRequestLimit() {
   for (auto& request : pending)
     Take(request.get());
 }
+void SettingsAndBinary() {
+  Responder responder({Ready()});
+  ClusterLink link([&] { return responder.Connect(); }, true, "dev", "endpoint", Validate);
+  Take(link.WaitReady());
+  auto server = responder.At(0);
+  Take(server->Send({{"type", "node.settings"}, {"logRetentionDays", 30}}));
+  std::string text;
+  uint64_t generation = 0;
+  bool eof = false;
+  Await([&] { return link.Next(text, generation, eof); });
+  Check(Json::parse(text)["logRetentionDays"] == 30, "settings delivered");
+  std::vector<uint8_t> bytes(limits::logWindowBytes, 123);
+  const Json header{
+      {"id", "read"},
+      {"opId", "read"},
+      {"ok", true},
+      {"result",
+       {{"path", "2026-11-14/endpoint.jsonl"}, {"offset", 5}, {"size", bytes.size() + 5}}}};
+  Check(link.SendBinaryReply(generation, header, bytes), "binary read reply queued");
+  const auto reply = Take(server->Receive(5s));
+  Check(reply.kind == Message::Kind::kBinary && reply.json == header && reply.bytes == bytes,
+        "binary reply framing and payload");
+  for (const auto& invalid :
+       std::vector<Json>{{{"type", "node.settings"}, {"logRetentionDays", 0}},
+                         {{"type", "node.settings"}, {"logRetentionDays", 366}},
+                         {{"type", "node.settings"}, {"logRetentionDays", 1.0}},
+                         {{"type", "node.settings"}, {"logRetentionDays", "30"}},
+                         {{"type", "node.settings"}, {"logRetentionDays", 30}, {"extra", true}}}) {
+    Responder rejected({Ready()});
+    ClusterLink invalid_link([&] { return rejected.Connect(); }, true, "dev", "endpoint", Validate);
+    Take(invalid_link.WaitReady());
+    Take(rejected.At(0)->Send(invalid));
+    Await([&] { return invalid_link.ExitCode() == 1; });
+  }
+}
 }  // namespace
 int main() {
   try {
+    SettingsAndBinary();
     Shutdown();
     Local();
     Reconnect();

@@ -8,7 +8,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EndpointLog } from '../server/cluster/endpoint-log';
-import { log } from '../server/log';
+import { log, log as logModule } from '../server/log';
 import { NodeRegistry, StdioCarrier } from '../server/cluster/node-link';
 import { endpointDefaults, testNode, nodePrivateKey } from './node-fixture';
 import { NoiseHandshake } from '../server/cluster/noise';
@@ -31,10 +31,7 @@ test('a swapped local bootstrap rejection belongs to the receiving stdio node', 
       child.emit('exit', 1);
     },
   });
-  const carrier = new StdioCarrier(
-    child as unknown as ChildProcessWithoutNullStreams,
-    new EndpointLog(join(tmpdir(), 'rk-swapped-identity.log')),
-  );
+  const carrier = new StdioCarrier(child as unknown as ChildProcessWithoutNullStreams, new EndpointLog(123));
   registry.accept(carrier, 'alpha');
   const handshake = new NoiseHandshake('initiator', nodePrivateKey('beta'), publicKey(key));
   child.stdout.write(
@@ -61,9 +58,12 @@ test('a swapped local bootstrap rejection belongs to the receiving stdio node', 
 for (const code of [1, 0, null, 99, 3, 4]) {
   test(`local Endpoint exit ${code} follows the restart policy`, (t) => {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const warnings: { event: string; fields: any }[] = [];
+    t.mock.method(log, 'warn', (event: string, fields: unknown) => warnings.push({ event, fields }));
     const children: EventEmitter[] = [];
     t.mock.method(childProcess, 'spawn', () => {
       const child = Object.assign(new EventEmitter(), {
+        pid: 4321,
         stdin: new PassThrough(),
         stdout: new PassThrough(),
         stderr: new PassThrough(),
@@ -92,6 +92,13 @@ for (const code of [1, 0, null, 99, 3, 4]) {
     });
     registry.start();
     children[0].emit('exit', code);
+    if (code === 1) {
+      const failure = warnings.find((warning) => warning.event === 'node.launch_failed')!.fields;
+      assert.equal(failure.childPid, 4321);
+      assert.equal(failure.code, 1);
+      assert.match(failure.errorId, /^c-/);
+      assert.equal(warnings.filter((warning) => warning.event === 'process.exited').length, 0);
+    }
     if (code === 3) {
       t.mock.timers.tick(60_000);
       assert.equal(children.length, 1);
@@ -199,7 +206,9 @@ test('local stdio shares authenticated handshake, encrypted RPCs and lost-reply 
   });
   const log = await mkdtemp(join(tmpdir(), 'rk-endpoint-log-'));
   t.after(() => rm(log, { recursive: true, force: true }));
-  const endpointLog = new EndpointLog(join(log, 'logs', 'endpoint.log'));
+  const records: any[] = [];
+  t.mock.method(logModule, 'warn', (_event: string, fields: unknown) => records.push(fields));
+  const endpointLog = new EndpointLog(123);
   const carrier = new StdioCarrier(child as unknown as ChildProcessWithoutNullStreams, endpointLog);
   registry.accept(carrier, 'local');
   const handshake = new NoiseHandshake('initiator', nodePrivateKey('local'), publicKey(key));
@@ -229,12 +238,15 @@ test('local stdio shares authenticated handshake, encrypted RPCs and lost-reply 
   assert.equal(initial.kind, 'json');
   if (initial.kind !== 'json') throw Error('Expected fencing');
   assert.equal(initial.message.method, 'node.desired');
+  const settings = once(child.stdin, 'data');
   child.stdout.write(
     encodeStdio(
       transport.send.encrypt(encodeJson({ id: initial.message.id, ok: true, result: { accepted: true } })),
     ),
   );
   await new Promise((resolve) => setImmediate(resolve));
+  const settingFrame = decodeFrame(transport.receive.decrypt(decoder.push((await settings)[0])[0]));
+  assert.equal(settingFrame.kind === 'json' && settingFrame.message.type, 'node.settings');
   const link = registry.get('local')!;
   const outbound = once(child.stdin, 'data');
   const request = link.request('fixture.read', 'tenant');
@@ -259,6 +271,6 @@ test('local stdio shares authenticated handshake, encrypted RPCs and lost-reply 
   child.stderr.write('endpoint stderr line\n');
   await new Promise((resolve) => setImmediate(resolve));
   await endpointLog.flush();
-  assert.equal(await readFile(join(log, 'logs', 'endpoint.log'), 'utf8'), 'endpoint stderr line\n');
+  assert.equal(records.find((record) => record?.text === 'endpoint stderr line')?.childPid, 123);
   registry.stop();
 });

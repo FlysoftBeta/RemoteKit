@@ -47,13 +47,12 @@ const environment = object(
 );
 const logSummary = union(
   object({ available: literal(false) }),
-  object({ bytes: count(), droppedBefore: count() }),
   object({ exists: boolean(), size: count(), start: count(), bytes: count() }),
   object({ error: text() }, { size: count() }),
 );
 const source = object({ records: count(), available: boolean() });
 export const diagnosticManifest = object({
-  schemaVersion: literal(1),
+  schemaVersion: literal(2),
   id: string({ pattern: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/ }),
   startedAt: count(),
   endedAt: count(),
@@ -85,17 +84,14 @@ export const diagnosticManifest = object({
     sampleIntervalMs: count(),
     messageBytes: count(),
     logBytes: object({
+      control: count(),
       browser: count(),
       endpoint: count(),
-      crashes: count(),
       dump: count(),
       dumpCount: count(),
     }),
   }),
-  logs: record(logSummary, {
-    key: /^(?:control|browser|endpoint|endpoint\.1|crashes|dump\/[0-9a-f-]{36}\.dmp)$/,
-    max: 8,
-  }),
+  logs: record(logSummary, { key: /^[a-zA-Z0-9_./-]+$/, max: 10000 }),
   sources: object({ client: source, control: source, endpoint: source, events: source }),
   unavailable: object({
     control: count(),
@@ -112,4 +108,19 @@ export const diagnosticManifest = object({
     endpoint: text(),
     cpuUsageUs: text(),
   }),
+});
+
+export const logPackageManifest = object({
+  schemaVersion: literal(1),
+  kind: literal('logs'),
+  date: string({ pattern: /^\d{4}-\d{2}-\d{2}$/ }),
+  hosts: array(
+    object(
+      {
+        host: string({ min: 1, max: 128 }),
+        files: array(object({ path: string({ min: 1, max: 512 }), size: count(), mtime: duration() })),
+      },
+      { failed: text() },
+    ),
+  ),
 });

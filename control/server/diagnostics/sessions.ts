@@ -1,17 +1,18 @@
+import { controlLogFiles } from './control-log';
 import { RetryUnit } from '../../shared/retry-unit';
 import { decodeJson, encodeJson } from '../persistence/codec';
-import limits from '../../../protocol/limits.json';
 import { archiveMetadata, diagnosticManifest } from './formats';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import type { AdminDiagnostic } from '../../shared/admin';
 import { RemoteKitError, toRemoteKitError, wireError, type WireError } from '../../shared/errors';
-import type { EndpointLogName, LogWindow, LogWindowRequest } from '../endpoint/types';
-import { log, reportError } from '../log';
+import type { NodeLink } from '../cluster/node-link';
+import { nodeLogDays, nodeLogList, nodeLogRead, logReadBytes } from './node-logs';
+import { readHostFile, retentionBound, type LogFile } from './host-logs';
+import { log, reportError, localDate } from '../log';
 import { writeDiagnosticArchive, type ArchiveEntry } from './archive';
-import { controlLogTail } from './control-log';
 import { diagnosticClientSample, diagnosticEndpointSnapshot, diagnosticEnvironment } from './projection';
 
 const intervalMs = 2000;
@@ -22,13 +23,12 @@ const maxActive = 4;
 // Raw logs are read once at stop, newest bytes first, so history from before
 // the collection started is included up to each budget.
 const logBudgets = {
+  control: 4 * 1024 * 1024,
   browser: 16 * 1024 * 1024,
   endpoint: 8 * 1024 * 1024,
-  crashes: 256 * 1024,
   dump: 16 * 1024 * 1024,
   dumpCount: 3,
 } as const;
-const logWindowBytes = limits.logWindowBytes;
 const logDeadlineMs = 15000;
 const shutdownLogDeadlineMs = 3000;
 const maxRecent = 1024;
@@ -60,6 +60,7 @@ export interface DiagnosticViewer {
 }
 interface Session {
   viewer: DiagnosticViewer;
+  logTarget?: { node: Pick<NodeLink, 'request'>; sessionId: string };
   status: Status;
   startedAt: number;
   startedMonotonicMs: number;
@@ -94,7 +95,6 @@ export class DiagnosticSessions {
   private readonly sessions = new Map<string, Session>();
   private readonly recent = new Map<string, { tenant: string; status: Status }>();
   private readonly snapshotPending = new Set<string>();
-  private readonly downloads = new Map<string, { path: string; id: string; expires: number }>();
   private closing = false;
 
   constructor(
@@ -102,7 +102,8 @@ export class DiagnosticSessions {
     private readonly sources: {
       control: (tenant: string) => unknown;
       endpoint: (tenant: string) => Promise<unknown>;
-      endpointLog: (tenant: string, request: LogWindowRequest) => Promise<LogWindow>;
+      nodeLogs: (tenant: string) => { node: Pick<NodeLink, 'request'>; sessionId: string } | undefined;
+      retentionDays?: () => number;
       logDir?: string;
     },
   ) {}
@@ -128,6 +129,7 @@ export class DiagnosticSessions {
     if (this.sessions.size >= maxActive) throw new RemoteKitError('busy', '诊断采集繁忙，请稍后重试');
     const status = { id: randomUUID(), status: 'collecting' } as const;
     const session: Session = {
+      logTarget: this.sources.nodeLogs(viewer.tenant),
       viewer,
       status,
       startedAt: Date.now(),
@@ -356,7 +358,7 @@ export class DiagnosticSessions {
     const work = session.finalizeWork;
     session.finalization = Promise.resolve()
       .then(async () => {
-        work.logs ??= await this.collectLogs(session.viewer.tenant, work.reason);
+        work.logs ??= await this.collectLogs(session, work.reason);
         return this.write(session, work.reason, work.endedAt, work.elapsedMs, work.logs);
       })
       .then((status) => {
@@ -400,7 +402,7 @@ export class DiagnosticSessions {
   ): Promise<Status> {
     const { id } = session.status;
     const manifest = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       id,
       startedAt: session.startedAt,
       endedAt,
@@ -452,91 +454,138 @@ export class DiagnosticSessions {
     ).then((bytes) => ({ id, status: 'complete' as const, bytes, reason }));
   }
 
-  private async collectLogs(tenant: string, reason: StopReason): Promise<CollectedLogs> {
+  private async collectLogs(session: Session, reason: StopReason): Promise<CollectedLogs> {
     const files = new Map<ArchiveEntry, Buffer[]>();
     const summary: Record<string, unknown> = {};
-    const control = this.sources.logDir ? await controlLogTail(this.sources.logDir) : undefined;
-    if (control) {
-      files.set('logs/control.jsonl', [control.data]);
-      summary.control = { bytes: control.data.length, droppedBefore: control.dropped };
-    } else summary.control = { available: false };
     const deadline = Date.now() + (reason === 'shutdown' ? shutdownLogDeadlineMs : logDeadlineMs);
-    const read = async (log: EndpointLogName, budget: number, entry: ArchiveEntry) => {
-      try {
-        const tail = await this.readTail(tenant, log, budget, deadline);
-        if (tail.chunks.length) files.set(entry, tail.chunks);
-        summary[log] = { exists: tail.exists, size: tail.size, start: tail.start, bytes: tail.bytes };
-        return tail;
-      } catch (error) {
-        summary[log] = { error: error instanceof Error ? error.message : 'unavailable' };
-        return undefined;
-      }
-    };
-    await read('browser', logBudgets.browser, 'logs/browser.log');
-    const endpoint = await read('endpoint', logBudgets.endpoint, 'logs/endpoint.log');
-    if (endpoint && endpoint.start === 0 && endpoint.bytes < logBudgets.endpoint)
-      await read('endpoint.1', logBudgets.endpoint - endpoint.bytes, 'logs/endpoint.log.1');
-    const crashes = await read('crashes', logBudgets.crashes, 'crashes/events.jsonl');
-    for (const dump of crashes?.dumps.slice(0, logBudgets.dumpCount) ?? []) {
-      if (!/^[0-9a-f-]{36}\.dmp$/i.test(dump.name) || !Number.isSafeInteger(dump.size)) continue;
-      if (dump.size > logBudgets.dump) {
-        summary[`dump/${dump.name}`] = { size: dump.size, error: 'dump size limit' };
-        continue;
-      }
-      const entry = `crashes/${dump.name}` as ArchiveEntry;
-      const data = await read(`dump/${dump.name}`, logBudgets.dump, entry);
-      if (data && (data.start !== 0 || data.bytes !== dump.size)) {
-        files.delete(entry);
-        summary[`dump/${dump.name}`] = { error: 'incomplete dump' };
-      }
-    }
-    return { files, summary };
-  }
-
-  // Walks backwards from the size seen by the first window, so concurrent
-  // appends do not shift the bytes already collected.
-  private async readTail(tenant: string, log: EndpointLogName, budget: number, deadline: number) {
-    const chunks: Buffer[] = [];
-    let dumps: { name: string; size: number }[] = [];
-    let end: number | undefined,
-      size = 0,
-      start = 0,
-      bytes = 0,
-      exists = false;
-    while (bytes < budget) {
+    const bounded = async <T>(work: () => Promise<T>): Promise<T> => {
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error('log read deadline');
       let timer: NodeJS.Timeout | undefined;
-      const window = await Promise.race([
-        this.sources.endpointLog(tenant, {
-          log,
-          ...(end === undefined ? {} : { end }),
-          maxBytes: Math.min(logWindowBytes, budget - bytes),
-        }),
+      return Promise.race([
+        work(),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error('log read deadline')), remaining);
         }),
       ]).finally(() => clearTimeout(timer));
-      if (
-        !window ||
-        typeof window.exists !== 'boolean' ||
-        ![window.size, window.start, window.end].every(Number.isSafeInteger) ||
-        typeof window.data !== 'string'
-      )
-        throw new Error('invalid log window');
-      if (end === undefined) dumps = window.dumps ?? [];
-      if (!window.exists) break;
-      if (!exists) size = window.size;
-      exists = true;
-      const data = Buffer.from(window.data, 'base64');
-      if (data.length !== window.end - window.start) throw new Error('invalid log window');
-      chunks.unshift(data);
-      bytes += data.length;
-      start = window.start;
-      if (window.start === 0 || !data.length) break;
-      end = window.start;
+    };
+    const failure = (key: string, cause: unknown) => {
+      const error = reportError(toRemoteKitError(cause), 'diagnostics.log_read_failed', { source: key });
+      const text =
+        cause instanceof RemoteKitError
+          ? `${error.code}: ${(error.detail ?? error.message).split(/\r?\n/)[0]}`
+          : cause instanceof Error
+            ? cause.message
+            : (JSON.stringify(cause)?.slice(0, 500) ?? String(cause));
+      summary[key] = { error: error.errorId ? `${text} (${error.errorId})` : text };
+    };
+    const collect = async (
+      host: string,
+      candidates: LogFile[],
+      budget: number,
+      read: (file: LogFile, offset: number, length: number) => Promise<{ data: Buffer; size: number }>,
+    ) => {
+      let bytes = 0;
+      for (const file of candidates) {
+        if (bytes >= budget) break;
+        const key = `${host}/${file.path}`;
+        const length = Math.min(file.size, budget - bytes);
+        const start = file.size - length;
+        const chunks: Buffer[] = [];
+        try {
+          for (let offset = start; offset < file.size;) {
+            const part = await bounded(() => read(file, offset, Math.min(logReadBytes, file.size - offset)));
+            if (!part.data.length || offset + part.data.length > file.size)
+              throw new Error('incomplete log file');
+            chunks.push(part.data);
+            offset += part.data.length;
+          }
+          files.set(`logs/${key}`, chunks);
+          summary[key] = { exists: true, size: file.size, start, bytes: length };
+          bytes += length;
+        } catch (error) {
+          failure(key, error);
+        }
+      }
+      return bytes;
+    };
+    if (this.sources.logDir) {
+      try {
+        const directory = this.sources.logDir;
+        const candidates = await bounded(() =>
+          controlLogFiles(directory, this.sources.retentionDays?.() ?? 30),
+        );
+        await collect('control', candidates, logBudgets.control, (file, offset, length) =>
+          readHostFile(directory, file.path, offset, length),
+        );
+      } catch (error) {
+        failure('control', error);
+      }
+    } else summary.control = { available: false };
+    try {
+      const target = session.logTarget;
+      if (!target) throw new Error('session node unavailable');
+      const { node, sessionId } = target;
+      const seen = new Set<string>();
+      const days = await bounded(() => nodeLogDays(node, deadline - Date.now()));
+      // Include today's crash records even when the node has no date file yet.
+      const dates = [...new Set([localDate(), ...days])].sort().reverse();
+      const used = { browser: 0, endpoint: 0, dumps: 0 };
+      const read = (file: LogFile, offset: number, length: number) =>
+        nodeLogRead(node, file.path, offset, length, deadline - Date.now());
+      for (const date of dates) {
+        const listed = await bounded(() => nodeLogList(node, date, deadline - Date.now()));
+        const newest = listed
+          .filter((file) => !seen.has(file.path))
+          .sort(
+            (a, b) =>
+              b.mtime - a.mtime ||
+              Number(/\.(\d+)\.jsonl$/.exec(b.path)?.[1] ?? 0) -
+                Number(/\.(\d+)\.jsonl$/.exec(a.path)?.[1] ?? 0),
+          );
+        for (const file of newest) seen.add(file.path);
+        used.browser += await collect(
+          'node',
+          newest.filter(
+            (file) =>
+              /^browser-/.test(file.path.split('/').pop()!) &&
+              file.path.split('/').pop()!.startsWith(`browser-${sessionId}`),
+          ),
+          logBudgets.browser - used.browser,
+          read,
+        );
+        used.endpoint += await collect(
+          'node',
+          newest.filter((file) => /^endpoint(?:\.\d+)?\.jsonl$/.test(file.path.split('/').pop()!)),
+          logBudgets.endpoint - used.endpoint,
+          read,
+        );
+        const crashes = newest.filter((file) => file.path.startsWith(`crashes/${sessionId}/`));
+        await collect(
+          'node',
+          crashes.filter((file) => file.path.endsWith('/events.jsonl')),
+          Number.MAX_SAFE_INTEGER,
+          read,
+        );
+        for (const dump of crashes
+          .filter((file) => file.path.endsWith('.dmp'))
+          .slice(0, logBudgets.dumpCount - used.dumps)) {
+          used.dumps++;
+          if (dump.size > logBudgets.dump)
+            summary[`node/${dump.path}`] = { size: dump.size, error: 'dump size limit' };
+          else await collect('node', [dump], logBudgets.dump, read);
+        }
+        if (
+          used.browser >= logBudgets.browser &&
+          used.endpoint >= logBudgets.endpoint &&
+          used.dumps >= logBudgets.dumpCount
+        )
+          break;
+      }
+    } catch (error) {
+      failure('node', error);
     }
-    return { chunks, exists, size, start, bytes, dumps };
+    return { files, summary };
   }
 
   private ownerDirectory(tenant: string) {
@@ -638,20 +687,14 @@ export class DiagnosticSessions {
     await rm(this.ownerDirectory(tenant), { recursive: true, force: true });
   }
 
-  // Downloads are plain HTTP GETs, so the unlocked Viewer request mints a short-lived single-use ticket.
-  async downloadTicket(id: unknown) {
-    const archive = await this.archive(id);
-    const now = Date.now();
-    for (const [ticket, item] of this.downloads) if (item.expires <= now) this.downloads.delete(ticket);
-    const ticket = randomBytes(32).toString('hex');
-    this.downloads.set(ticket, { path: archive.path, id: archive.id, expires: now + 60000 });
-    return ticket;
+  async archiveFile(id: unknown) {
+    return this.archive(id);
   }
 
-  takeDownload(ticket: string) {
-    const item = this.downloads.get(ticket);
-    this.downloads.delete(ticket);
-    if (!item || item.expires <= Date.now()) throw new RemoteKitError('not_found', '下载链接已失效');
-    return item;
+  async prune(days: number, now = new Date()) {
+    const bound = retentionBound(days, now).getTime();
+    for (const archive of await this.stored()) {
+      if ((await stat(archive.path)).mtimeMs < bound) await this.deleteArchive(archive.id);
+    }
   }
 }

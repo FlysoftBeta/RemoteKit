@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Bounded real Browser checks for recovery scheduling, dirty state and close ACK."""
-import base64
 import sqlite3
 import argparse, http.server, json, queue, subprocess, threading, time
 from cluster_bridge import endpoint_command, SessionDriver
@@ -107,9 +106,7 @@ def main():
         ready=service.wait(captured)
         assert not (state/'data/sessions'/session/'browser.log').exists()
         assert not (state/'data/sessions'/session/'crashes').exists()
-        assert (state/'logs/browser'/(session+'.log')).exists()
-        browser_log,_=service.call('session.logs.read',log='browser',maxBytes=131072)
-        assert browser_log['exists'] and base64.b64decode(browser_log['data'])
+        assert list((state/'logs').glob('????-??-??/browser-'+session+'*.jsonl'))
         assert ready['views'][0]['document']==document,ready
         assert len(set(revisions))>=2,revisions
         database=sqlite3.connect(session_db, timeout=0)
@@ -125,9 +122,7 @@ def main():
         dead=service.snapshot(); assert dead['browserIncarnation'] != initial['browserIncarnation'] or dead['browser']=='stopped'
         crash_file=state/'logs/crashes'/session/'events.jsonl'
         crash=json.loads(crash_file.read_text().splitlines()[-1])
-        assert crash['ev']=='browser.crashed' and crash['exitCode']!=0
-        crash_log,_=service.call('session.logs.read',log='crashes',maxBytes=131072)
-        assert crash_log['exists'] and b'browser.crashed' in base64.b64decode(crash_log['data'])
+        assert crash['ev']=='process.crashed' and crash['proc']=='browser' and crash['code']!=0
         stale,_=service.call('view.close.reply',ok=False,viewId='1',requestId='1',accept=True,
             instance='1',document='1',browserIncarnation=initial['browserIncarnation'])
         assert stale['error']['code']=='conflict'

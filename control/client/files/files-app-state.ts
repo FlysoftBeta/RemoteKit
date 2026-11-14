@@ -174,12 +174,14 @@ export const sameSource = (a: LibrarySource | null, b: LibrarySource) =>
   a?.app === b.app && a.channel === b.channel;
 export const sourceKey = (source: LibrarySource) => JSON.stringify([source.app, source.channel]);
 export function sourceAppName(app: string, apps: readonly { id: string; name: string }[] = []) {
+  if (app === 'diagnostics') return '诊断信息';
   if (app === 'download') return '下载';
   if (isBuiltinApp(app)) return BUILTIN_APP_TITLES[app];
   if (app === 'clipboard') return '剪贴板';
   return apps.find((item) => `web:${item.id}` === app)?.name ?? app;
 }
 export function sourceChannelName(source: LibrarySource) {
+  if (source.app === 'diagnostics') return source.channel === 'logs' ? '日志' : '诊断采集';
   if (source.app === 'files') return source.channel === 'camera' ? '拍照' : '上传';
   return source.channel;
 }

@@ -128,7 +128,7 @@ def main():
                             "--data-path=" + str(run / "data"),
                             "--profile-key-handle=" + str(native_reader),
                             "--remotekit-render-host=offscreen",
-                            "--log-file=" + str(run / (tag + "-browser.log")),
+                            "--log-dir=" + str(run / (tag + "-logs")),
                         ], stdout=self.log, stderr=self.log, startupinfo=startup,
                             creationflags=subprocess.CREATE_NO_WINDOW)
                         self.resources.callback(self.stop_process)

@@ -154,7 +154,6 @@ Result<void> InstallBundled(const fs::path& root, const fs::path& package) {
 }
 Result<bool> Update(const fs::path& root,
                     HANDLE stop,
-                    Log& log,
                     bool service,
                     RetryUnit& retry,
                     UpdateStage& stage) {
@@ -184,7 +183,7 @@ Result<bool> Update(const fs::path& root,
       if (id == previous)
         return ReplaceExecutable(root / L"remotekit_node.exe",
                                  root / L"runtime" / id / L"bin/remotekit_node.exe", root,
-                                 L"run --root=" + Quote(root.wstring()), service, log);
+                                 L"run --root=" + Quote(root.wstring()), service);
       fs::create_directories(root / L"downloads");
       fs::create_directories(root / L"runtime");
       auto partial = root / L"downloads" / (id + ".tar.zst.partial");
@@ -207,13 +206,13 @@ Result<bool> Update(const fs::path& root,
     }
     auto runtime = root / L"runtime" / id;
     release::AtomicText(root / L"current", id);
-    log.Event(LogLevel::kInfo, "runtime.activated", {{"buildId", id}});
+    LogEvent(LogLevel::kInfo, "runtime.activated", {{"buildId", id}});
     auto replaced =
         ReplaceExecutable(root / L"remotekit_node.exe", runtime / L"bin/remotekit_node.exe", root,
-                          L"run --root=" + Quote(root.wstring()), service, log);
+                          L"run --root=" + Quote(root.wstring()), service);
     if (!replaced)
       return replaced.error();
-    CleanupRuntimeBestEffort(root, id, log);
+    CleanupRuntimeBestEffort(root, id);
     stage = DiscoverRelease{};
     return replaced;
   } catch (const release::Failure& failure) {

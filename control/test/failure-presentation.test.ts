@@ -1,3 +1,4 @@
+import { localDate } from '../server/log';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RemoteKitError, isErrorId, parseWireError, wireError } from '../shared/errors';
@@ -9,7 +10,7 @@ import { ViewerErrorReports } from '../client/failures/reporting';
 import { ViewerErrors } from '../server/diagnostics/viewer-errors';
 import { configureLog } from '../server/log';
 import { findError } from '../server/diagnostics/error-search';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -196,8 +197,9 @@ test('Control logs client.error once with tenant and lease', () => {
 test('v- lookup searches Control logs without querying Endpoint nodes', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'remotekit-v-error-'));
   try {
+    await mkdir(join(directory, localDate()));
     await writeFile(
-      join(directory, 'control.jsonl'),
+      join(directory, localDate(), 'control.jsonl'),
       JSON.stringify({ errorId: 'v-0123456789', ev: 'viewer.error' }) + '\n',
     );
     const result = await findError('v-0123456789', directory, {

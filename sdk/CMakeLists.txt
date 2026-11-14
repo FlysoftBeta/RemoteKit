@@ -28,6 +28,7 @@ target_link_libraries(remotekit_control_client PRIVATE RemoteKit::SDK)
 target_compile_features(remotekit_control_client PRIVATE cxx_std_17)
 enable_testing()
 add_test(NAME remotekit_sdk_smoke COMMAND remotekit_sdk_smoke)
+add_test(NAME remotekit_sdk_no_sink_smoke COMMAND remotekit_sdk_smoke --no-sink)
 
 add_executable(remotekit_rtc_smoke rtc-smoke.cc)
 target_link_libraries(remotekit_rtc_smoke PRIVATE RemoteKit::SDK d3d11)

@@ -97,27 +97,46 @@ test('a caret-only remote target dismisses without a menu and hides clipped hand
 
 test('remote paste refreshes before dispatch and abandons a retired menu', async () => {
   const sent: Record<string, unknown>[] = [];
-  const target = new RemoteSelectionTarget({ input: {
-    ensureInputFocus: () => true,
-    sendInput: (_surface: Surface, event: Record<string, unknown>) => { sent.push(event); return true; },
-  } } as never, message, surface,
-  { width: 450, height: 300, canvas: { left: 20, top: 30, width: 400, height: 200 } }, canvas);
-  const originalRead = deviceClipboard.readForPaste;
+  const target = new RemoteSelectionTarget(
+    {
+      input: {
+        ensureInputFocus: () => true,
+        sendInput: (_surface: Surface, event: Record<string, unknown>) => {
+          sent.push(event);
+          return true;
+        },
+      },
+    } as never,
+    message,
+    surface,
+    { width: 450, height: 300, canvas: { left: 20, top: 30, width: 400, height: 200 } },
+    canvas,
+  );
+  const originalPrepare = deviceClipboard.preparePaste;
   let finish!: () => void;
-  deviceClipboard.readForPaste = () => new Promise<void>((resolve) => { finish = resolve; });
+  deviceClipboard.preparePaste = () =>
+    new Promise<void>((resolve) => {
+      finish = resolve;
+    });
   try {
     target.run('paste');
     assert.equal(sent.length, 0);
     finish();
     await Promise.resolve();
     assert.deepEqual(sent.pop(), { type: 'selection_command', menu: '5', command: 'paste' });
-    target.update({ ...message, revision: '2' }, surface,
-      { width: 450, height: 300, canvas: { left: 20, top: 30, width: 400, height: 200 } }, canvas);
+    target.update(
+      { ...message, revision: '2' },
+      surface,
+      { width: 450, height: 300, canvas: { left: 20, top: 30, width: 400, height: 200 } },
+      canvas,
+    );
     target.run('paste');
     target.collapse();
     sent.length = 0;
     finish();
     await Promise.resolve();
     assert.equal(sent.length, 0);
-  } finally { deviceClipboard.readForPaste = originalRead; }
+  } finally {
+    deviceClipboard.preparePaste = originalPrepare;
+  }
 });

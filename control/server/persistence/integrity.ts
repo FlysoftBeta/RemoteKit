@@ -1,3 +1,4 @@
+import { serverSettings } from './server-settings';
 import type Database from 'better-sqlite3';
 import { RemoteKitError, wireError, type WireError } from '../../shared/errors';
 import type { LearningProvider } from '../../shared/learning';
@@ -20,6 +21,7 @@ export interface IntegrityResult {
   problems: IntegrityProblem[];
 }
 const documents: [string, string, Codec<unknown>][] = [
+  ['server_settings', 'data', serverSettings],
   ['retry_units', 'record', codecs.retryUnitRecord],
   ['workspace_tabs', 'data', codecs.tab],
   ['workspace_spaces', 'data', codecs.space],

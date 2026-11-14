@@ -1,0 +1,95 @@
+--- a/content/public/browser/child_process_launcher_utils.h
++++ b/content/public/browser/child_process_launcher_utils.h
+@@ -5,13 +5,27 @@
+ #ifndef CONTENT_PUBLIC_BROWSER_CHILD_PROCESS_LAUNCHER_UTILS_H_
+ #define CONTENT_PUBLIC_BROWSER_CHILD_PROCESS_LAUNCHER_UTILS_H_
+ 
++#include "build/build_config.h"
+ #include "content/common/content_export.h"
+ 
++#if BUILDFLAG(IS_WIN)
++#include "base/win/windows_types.h"
++#endif
++
+ namespace base {
++class FilePath;
+ class SingleThreadTaskRunner;
+-}
++}  // namespace base
+ 
+ namespace content {
++
++#if BUILDFLAG(IS_WIN)
++// Install before launching children. The provider runs on the launcher thread
++// and returns an owned inheritable append handle, or null. path identifies the
++// file so the launcher can prevent executable mappings before sharing it.
++using ChildLogHandleProvider = HANDLE (*)(base::FilePath* path);
++CONTENT_EXPORT void SetChildLogHandleProvider(ChildLogHandleProvider provider);
++#endif
+ 
+ // The caller must take a reference to the returned TaskRunner pointer if it
+ // wants to use the pointer directly.
+--- a/content/browser/child_process_launcher_helper_win.cc
++++ b/content/browser/child_process_launcher_helper_win.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "content/browser/child_process_launcher_helper.h"
++
++#include <atomic>
+ 
+ #include "base/base_switches.h"
+ #include "base/files/file_path.h"
+@@ -28,6 +30,9 @@
+ 
+ namespace {
+ 
++std::atomic<content::ChildLogHandleProvider> g_child_log_handle_provider{
++    nullptr};
++
+ // Helper to avoid marking the log file as non-executable every time we launch a
+ // process.
+ bool ShouldMarkLogfileAsNonExecute() {
+@@ -42,6 +47,11 @@
+ }  // namespace
+ 
+ namespace content {
++
++void SetChildLogHandleProvider(ChildLogHandleProvider provider) {
++  g_child_log_handle_provider.store(provider, std::memory_order_release);
++}
++
+ namespace internal {
+ 
+ void ChildProcessLauncherHelper::BeforeLaunchOnClientThread() {
+@@ -53,8 +63,9 @@
+ ChildProcessLauncherHelper::CreateNamedPlatformChannelOnLauncherThread() {
+   CHECK(CurrentlyOnProcessLauncherTaskRunner(), base::NotFatalUntil::M159);
+ 
+-  if (!delegate_->ShouldLaunchElevated())
++  if (!delegate_->ShouldLaunchElevated()) {
+     return std::nullopt;
++  }
+ 
+   mojo::NamedPlatformChannel::Options options;
+   mojo::NamedPlatformChannel named_channel(options);
+@@ -73,6 +84,19 @@
+     base::CommandLine* cmd_line) {
+   const base::CommandLine& browser_command_line =
+       *base::CommandLine::ForCurrentProcess();
++  if (auto provider =
++          g_child_log_handle_provider.load(std::memory_order_acquire)) {
++    base::FilePath embedder_log_path;
++    log_handle_.Set(provider(&embedder_log_path));
++    if (log_handle_.is_valid()) {
++      std::ignore = base::PreventExecuteMappingUnchecked(
++          embedder_log_path, base::PreventExecuteMappingClasses::GetPassKey());
++      cmd_line->AppendSwitchASCII(
++          "log-handle",
++          base::NumberToString(base::win::HandleToUint32(log_handle_.get())));
++      launch_options->handles_to_inherit.push_back(log_handle_.get());
++    }
++  }
+   // Sandboxed processes on Windows cannot open files, and can't always figure
+   // out default paths, so we directly pass a handle if logging is enabled.
+   if (logging::IsLoggingToFileEnabled()) {

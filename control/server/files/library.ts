@@ -53,6 +53,7 @@ function librarySource(value: unknown): LibrarySource {
   if (/^web:[a-zA-Z0-9_-]{1,128}$/.test(app) && channel === '') return { app, channel };
   if (app === 'download' && channel === '') return { app, channel };
   if (app === 'clipboard' && channel === '') return { app, channel };
+  if (app === 'diagnostics' && (channel === 'logs' || channel === 'collection')) return { app, channel };
   if (app === 'study' && channel.length > 0 && channel.length <= 120 && !/[\x00-\x1f\x7f]/.test(channel))
     return { app, channel };
   if (

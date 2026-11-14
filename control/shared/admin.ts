@@ -155,10 +155,24 @@ export interface AdminSocketMethods {
     result: AdminAnnouncement[];
   };
   'admin.deleteAnnouncement': { params: { id: string }; result: AdminAnnouncement[] };
-  'admin.downloadDiagnostic': { params: { id: string }; result: { url: string } };
+  'admin.diagnostics.save': { params: { id: string; operationId: string }; result: { entryId: string } };
+  'admin.logs.settings': { params: { logRetentionDays?: number }; result: { logRetentionDays: number } };
+  'admin.logs.days': { params: Record<string, never>; result: LogDay[] };
+  'admin.logs.package': { params: { date: string; operationId: string }; result: LogPackageJob };
+  'admin.logs.jobs': { params: Record<string, never>; result: LogPackageJob[] };
 }
 
 export interface ErrorSearchResult {
   records: { source: string; line: string }[];
   failures: { nodeId: string; error: import('./errors').WireError }[];
 }
+
+export interface LogDay {
+  date: string;
+  hosts: { host: string; present: boolean; errorId?: string }[];
+}
+export type LogPackageJob = { operationId: string; date: string } & (
+  | { state: 'running'; bytes: number }
+  | { state: 'done'; entryId: string; fileName: string }
+  | { state: 'failed'; errorId: string; code: import('./errors').ErrorCode }
+);

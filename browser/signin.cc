@@ -1,4 +1,5 @@
 #include "browser/signin.h"
+#include "browser/diagnostic_log.h"
 
 #include "base/functional/bind.h"
 #include "base/logging.h"
@@ -170,7 +171,7 @@ void SignIn::Complete(base::DictValue result) {
   event_.Set("webviewId", base::NumberToString(view_));
   event_.Set("provider", purpose_);
   event_.Set("result", std::move(result));
-  LOG(INFO) << "sign-in completed for view " << view_;
+  LogEvent("info", "signin.completed", base::DictValue().Set("view", static_cast<double>(view_)));
 }
 void SignIn::Acknowledge(const base::ListValue& ids) {
   const auto* id = event_.FindString("eventId");

@@ -164,7 +164,7 @@ manifest 只含绝对 URL，管理器只认识配置里的一个 manifest URL（
   data/                   control.db、诊断、本地节点根 node/
   versions/<buildId>/     唯一的当前版本：版本树 + release/node.tar.zst + payload.tar
   work/                   下载片、中间 payload、安装暂存
-  logs/                   manager.log；control.jsonl（Control 自己写）；control.stdout.log（Control 控制台输出，只有崩溃时有内容）
+  logs/                   <日期>/manager.jsonl、<日期>/control.jsonl（各自写，Control 的控制台输出由管理器包装进 manager.jsonl）；crashes/
 ```
 
 ```powershell

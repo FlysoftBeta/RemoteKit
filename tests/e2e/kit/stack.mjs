@@ -201,20 +201,31 @@ export async function startStack({
     endpoint: join(
       run,
       nodeIds.length === 1 && nodeIds[0] === 'local' ? 'node' : `${nodeIds[0]}/root`,
-      'logs/endpoint.log',
+      'logs',
+      new Date().toLocaleDateString('en-CA'),
+      'endpoint.jsonl',
     ),
     nodes: Object.fromEntries(
-      nodeIds.map((id) => [id, join(run, id === 'local' ? 'node' : `${id}/root`, 'logs/endpoint.log')]),
+      nodeIds.map((id) => [
+        id,
+        join(
+          run,
+          id === 'local' ? 'node' : `${id}/root`,
+          'logs',
+          new Date().toLocaleDateString('en-CA'),
+          'endpoint.jsonl',
+        ),
+      ]),
     ),
     diagnostics: join(run, 'diagnostics'),
-    events: join(run, 'logs/control.jsonl'),
+    events: join(run, 'logs', new Date().toLocaleDateString('en-CA'), 'control.jsonl'),
     pids: join(run, 'pids.jsonl'),
     browser: () =>
       Object.values(logs.nodes).flatMap((log) => {
-        const directory = join(dirname(log), 'browser');
+        const directory = dirname(log);
         return existsSync(directory)
           ? readdirSync(directory)
-              .filter((name) => name.endsWith('.log'))
+              .filter((name) => /^browser-.*\.jsonl$/.test(name))
               .map((name) => join(directory, name))
           : [];
       }),
@@ -380,14 +391,18 @@ export async function startStack({
       new Promise((_, reject) =>
         child.once('exit', (code) => reject(Error('Control exited ' + code + ': ' + logs.control))),
       ),
-      until(async () => {
-        if (child.exitCode !== null) throw Error('Control exited ' + child.exitCode + ': ' + logs.control);
-        return (
-          await fetch(`http://127.0.0.1:${ports.control}/api/auth/setup`, {
-            signal: AbortSignal.timeout(1000),
-          })
-        ).ok;
-      }, 'Control ready', 120000),
+      until(
+        async () => {
+          if (child.exitCode !== null) throw Error('Control exited ' + child.exitCode + ': ' + logs.control);
+          return (
+            await fetch(`http://127.0.0.1:${ports.control}/api/auth/setup`, {
+              signal: AbortSignal.timeout(1000),
+            })
+          ).ok;
+        },
+        'Control ready',
+        120000,
+      ),
     ]);
     await until(async () => (await fetch(origin, { signal: AbortSignal.timeout(1000) })).ok, 'Viewer ready');
     if (fixtures)

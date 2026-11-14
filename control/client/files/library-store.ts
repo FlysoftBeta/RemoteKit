@@ -2,7 +2,12 @@ import { RetryUnit } from '../../shared/retry-unit';
 import { operationFailure } from '../failures/operations';
 import { errorHandling } from '../../shared/error-policy';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
-import type { LibraryMethods, LibrarySnapshot, SelectionState } from '../../shared/file-library';
+import type {
+  LibraryFileEntry,
+  LibraryMethods,
+  LibrarySnapshot,
+  SelectionState,
+} from '../../shared/file-library';
 import type { SocketMethods } from '../../shared/product';
 import { operationId } from '../control/product-operations';
 import { recover, recoverRead } from '../failures/recovery';
@@ -39,7 +44,7 @@ export interface LibraryState {
 }
 export type FilePort = Pick<
   FileChannel,
-  'photoThumbnail' | 'uploadAsset' | 'processPhoto' | 'commitSelection' | 'cancelSelection'
+  'photoThumbnail' | 'uploadAsset' | 'processPhoto' | 'commitSelection' | 'cancelSelection' | 'readAsset'
 >;
 export class LibraryStore extends Store<LibraryState> {
   readonly thumbnails: FileThumbnails;
@@ -235,6 +240,20 @@ export class LibraryStore extends Store<LibraryState> {
   recordUsage = (entryId: string, windowId: string) =>
     this.request('usage.record', { item: `file:${entryId}`, windowId });
 
+  // File bytes come over the viewer's WebRTC file channel, like previews; Control serves no file route.
+  // A failed save is reported on the button and repeated only by the user.
+  download = async (entry: LibraryFileEntry, signal = new AbortController().signal) => {
+    const blob = await this.rpc.readAsset(entry, signal);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = entry.name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    // Revoking during click cancels the save on some mobile browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  };
   snippet = (id: string) => this.request('library.snippet', { id });
   copySnippet = (id: string) => this.request('library.copySnippet', { id });
 

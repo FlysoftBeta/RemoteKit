@@ -98,7 +98,7 @@ def main():
         shutil.copy2(protocol_header, staging / "include/protocol/render_slots.h")
         (staging / "manifest.json").write_text(json.dumps({
             **metadata,
-            "abi_version": 2,
+            "abi_version": int(re.search(r"^#define REMOTEKIT_SDK_ABI_VERSION (\d+)u?$", header.read_text(encoding="utf-8"), re.MULTILINE).group(1)),
             "rtc_abi_version": int(re.search(r"^#define REMOTEKIT_RTC_ABI_VERSION (\d+)u?$", rtc_header.read_text(encoding="utf-8"), re.MULTILINE).group(1)),
             "public_headers": ["remotekit_sdk.h", "remotekit_rtc.h",
                                "protocol/shared_render_slots.h", "protocol/render_slots.h"],

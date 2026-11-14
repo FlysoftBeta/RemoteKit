@@ -1,3 +1,4 @@
+#include "crash/crash.hpp"
 #include "download.hpp"
 #include "service.hpp"
 #include "supervisor.hpp"
@@ -15,6 +16,8 @@ BOOL WINAPI Stop(DWORD code) {
 }
 }  // namespace
 int wmain(int argc, wchar_t** argv) {
+  if (remotekit::RunCrashHandler(argc, argv))
+    return 0;
   using namespace remotekit::updater;
   try {
     const Service service{L"RemoteKitNode", L"RemoteKit Node", L"remotekit_node.exe", Supervise};
@@ -31,6 +34,8 @@ int wmain(int argc, wchar_t** argv) {
     if (argc < 3 || !std::wstring_view(argv[2]).starts_with(L"--root=") || !argv[2][7])
       throw remotekit::InvalidRequest("expected --root=<directory>");
     auto root = fs::absolute(fs::path(argv[2] + 7)).lexically_normal();
+    remotekit::InitLog(root / L"logs", "node");
+    remotekit::InstallCrashHandler(root / L"logs", "node");
     if (command == L"install") {
       if (argc != 4 || !std::wstring_view(argv[3]).starts_with(L"--package=") || !argv[3][10])
         throw remotekit::InvalidRequest("expected --package=<Control package directory>");
@@ -62,19 +67,21 @@ int wmain(int argc, wchar_t** argv) {
     stop_event = nullptr;
     return code;
   } catch (const remotekit::release::Failure& failure) {
-    remotekit::LogError(remotekit::LogLevel::kError, "supervisor.failed", failure.error);
+    remotekit::LogError(remotekit::LogLevel::kError, "supervisor.failed", failure.error,
+                        {{"proc", "node"}});
     return 1;
   } catch (const remotekit::InvalidRequest& error) {
     remotekit::LogError(remotekit::LogLevel::kError, "supervisor.failed",
-                        {remotekit::ErrorCode::kInvalidRequest, error.what()});
+                        {remotekit::ErrorCode::kInvalidRequest, error.what()}, {{"proc", "node"}});
     return 1;
   } catch (const std::filesystem::filesystem_error& error) {
     remotekit::LogError(remotekit::LogLevel::kError, "supervisor.failed",
-                        {remotekit::ErrorCode::kUnavailable, error.what()});
+                        {remotekit::ErrorCode::kUnavailable, error.what()}, {{"proc", "node"}});
     return 1;
   } catch (const std::exception& error) {
     remotekit::LogError(remotekit::LogLevel::kError, "supervisor.failed",
-                        remotekit::Error{remotekit::ErrorCode::kInternal, error.what()});
+                        remotekit::Error{remotekit::ErrorCode::kInternal, error.what()},
+                        {{"proc", "node"}});
     return 1;
   }
 }

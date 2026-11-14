@@ -51,6 +51,11 @@
       "id": "occlusion-plane",
       "path": "0021-occlusion-plane.patch",
       "sha256": "9e4c379ace64d7cabd1120600a235585793e20e41e703b455ca10344cc3443fb"
+    },
+    {
+      "id": "child-log-handle",
+      "path": "0022-child-log-handle.patch",
+      "sha256": "9d1890b39bf15b1d237dcb1d18fcaedf1d60fec1f0c8371818daca5d5ba65f4b"
     }
   ]
 }

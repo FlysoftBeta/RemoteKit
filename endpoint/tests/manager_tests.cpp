@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "release_fixtures.hpp"
 #include "release/payload.hpp"
 #include "release/crypto.hpp"
@@ -9,6 +10,12 @@
 #include "release/executor.hpp"
 #include <iostream>
 
+namespace remotekit {
+std::unique_ptr<DailyLog> manager_test_log;
+void ManagerLogEvent(LogLevel level, std::string_view event, Json fields = Json::object()) {
+  manager_test_log->Write(level, event, std::move(fields));
+}
+}  // namespace remotekit
 namespace {
 std::atomic<ULONGLONG> manager_clock_offset = 0;
 std::optional<remotekit::release::Fetched> manager_release;
@@ -36,7 +43,9 @@ Fetched FetchManagerFixture(const std::string&,
 }  // namespace remotekit::release
 #define GetTickCount64 ManagerClock
 #define Fetch FetchManagerFixture
+#define LogEvent ManagerLogEvent
 #include "../manager/supervisor.cpp"
+#undef LogEvent
 #undef Fetch
 #undef GetTickCount64
 
@@ -57,7 +66,7 @@ std::string TextFile(const fs::path& path) {
   return {(std::istreambuf_iterator<char>(input)), {}};
 }
 Json ManagerEvents(const fs::path& root) {
-  std::ifstream input(root / L"logs/manager.log");
+  std::ifstream input(root / L"logs" / LocalLogDate() / L"manager.jsonl");
   Json records = Json::array();
   for (std::string line; std::getline(input, line);)
     records.push_back(Json::parse(line));
@@ -72,8 +81,10 @@ void ConfigureManager(const fs::path& root) {
 class ManagerRun {
  public:
   explicit ManagerRun(const fs::path& root)
-      : stop_(CreateEventW(nullptr, TRUE, FALSE, nullptr)),
-        thread_([this, root] { code_ = manager::Supervise(root, stop_.value, false); }) {}
+      : stop_(CreateEventW(nullptr, TRUE, FALSE, nullptr)), thread_() {
+    manager_test_log = std::make_unique<DailyLog>(root / L"logs", "manager", GetCurrentProcessId());
+    thread_ = std::jthread([this, root] { code_ = manager::Supervise(root, stop_.value, false); });
+  }
   ~ManagerRun() { Stop(); }
   void Stop() {
     SetEvent(stop_.value);
@@ -186,8 +197,8 @@ void ReadFailure(const fs::path& root, const fs::path& blocked_file) {
   ManagerRun running(root);
   Until(
       [&] {
-        return TextFile(root / L"logs/manager.log").find("manager.current_failed") !=
-               std::string::npos;
+        return TextFile(root / L"logs" / LocalLogDate() / L"manager.jsonl")
+                   .find("manager.current_failed") != std::string::npos;
       },
       "startup read failure was not reported");
   Check(fs::exists(root / L"versions/preserve") && fs::exists(root / L"work/stage-preserve"),
@@ -221,8 +232,8 @@ void RunningReadFailure(const fs::path& scratch) {
     manager_clock_offset += 300001;
     Until(
         [&] {
-          return TextFile(root / L"logs/manager.log").find("manager.current_failed") !=
-                 std::string::npos;
+          return TextFile(root / L"logs" / LocalLogDate() / L"manager.jsonl")
+                     .find("manager.current_failed") != std::string::npos;
         },
         "periodic read failure was not reported");
     Sleep(200);
@@ -243,7 +254,10 @@ void RunningReadFailure(const fs::path& scratch) {
 }
 }  // namespace
 int wmain(int argc, wchar_t** argv) {
-  if (argc == 2 && fs::path(argv[1]).filename() == L"server.mjs") {
+  if (argc == 4 && std::wstring_view(argv[1]) == L"--report-on-fatalerror" &&
+      std::wstring_view(argv[2]).starts_with(L"--report-directory=") &&
+      fs::path(argv[3]).filename() == L"server.mjs") {
+    Check(fs::is_directory(argv[2] + 19), "Control diagnostic report directory exists");
     WriteText(L"control-child.pid", std::to_string(GetCurrentProcessId()));
     char byte;
     DWORD count = 0;
@@ -383,7 +397,7 @@ int wmain(int argc, wchar_t** argv) {
               fs::exists(root / L"work/assets/keep"),
           "manager cleanup");
     ReadFailure(root, root / L"current");
-    fs::remove(root / L"logs/manager.log");
+    fs::remove(root / L"logs" / LocalLogDate() / L"manager.jsonl");
     ReadFailure(root, version / L"build.json");
     SelfHealing(root);
     RunningReadFailure(root);

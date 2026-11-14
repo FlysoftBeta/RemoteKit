@@ -45,16 +45,17 @@ bool BaseUsable(const fs::path& version) {
     return false;
   }
 }
-std::unique_ptr<updater::ChildProcess> StartControl(const fs::path& root,
-                                                    const std::string& id,
-                                                    updater::Log& manager_log,
-                                                    updater::Log& control_log) {
+std::unique_ptr<updater::ChildProcess> StartControl(const fs::path& root, const std::string& id) {
   auto version = root / L"versions" / id;
+  const auto reports = root / L"logs/crashes/control";
+  fs::create_directories(reports);
   auto child = std::make_unique<updater::ChildProcess>(
-      version / L"bin/node.exe", updater::Quote((version / L"control/dist/server.mjs").wstring()),
-      root, control_log, true,
+      version / L"bin/node.exe",
+      L"--report-on-fatalerror --report-directory=" + updater::Quote(reports.wstring()) + L" " +
+          updater::Quote((version / L"control/dist/server.mjs").wstring()),
+      root, "control", true,
       L"REMOTEKIT_CONTROL_CONFIG=" + (root / L"config/control.json").wstring());
-  manager_log.Event(LogLevel::kInfo, "control.started", {{"buildId", id}});
+  LogEvent(LogLevel::kInfo, "control.started", {{"buildId", id}});
   return child;
 }
 }  // namespace
@@ -95,12 +96,12 @@ void Cleanup(const fs::path& root, const std::string& current) {
 }
 int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
   auto lock = Lock(root, stop, 30000);
-  updater::Log log(root / L"logs/manager.log"), control_log(root / L"logs/control.stdout.log");
+
   auto config = LoadConfig(root);
   auto key = LoadKey(root / L"config/release.key");
   std::string id;
   State state{};
-  Http http(config.proxy, stop, &log);
+  Http http(config.proxy, stop);
   std::unique_ptr<updater::ChildProcess> child;
   std::map<std::string, std::unique_ptr<updater::SnapshotSupervisor>> snapshots;
   std::map<std::string, RetryUnit> snapshot_retries;
@@ -119,7 +120,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
     if (child) {
       child->Stop(60000);
       child.reset();
-      log.Event(LogLevel::kInfo, "control.stopped");
+      LogEvent(LogLevel::kInfo, "control.stopped");
     }
     snapshots.clear();
   };
@@ -130,7 +131,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
         current_check_at = now + config.interval;
         auto current = Current(root);
         if (!current) {
-          log.Event(LogLevel::kError, "manager.current_failed", LogErrorFields(current.error()));
+          LogEvent(LogLevel::kError, "manager.current_failed", LogErrorFields(current.error()));
           // A running Control keeps running: only a successful read may replace or stop it.
           if (startup == Startup::kPending) {
             if (updater::Delay(stop, 1000))
@@ -142,7 +143,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
           const auto* missing = std::get_if<NotInstalled>(&current.value());
           const auto invalid = missing ? missing->invalid : std::nullopt;
           if (invalid && invalid != reported_invalid)
-            log.Event(LogLevel::kWarn, "current.invalid", {{"message", *invalid}});
+            LogEvent(LogLevel::kWarn, "current.invalid", {{"message", *invalid}});
           reported_invalid = invalid;
           auto current_id = InstalledId(current.value());
           if (startup == Startup::kPending || current_id != id) {
@@ -176,7 +177,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
             try {
               Cleanup(root, id);
             } catch (const std::exception& failure) {
-              log.Event(LogLevel::kWarn, "runtime.cleanup_failed", {{"message", failure.what()}});
+              LogEvent(LogLevel::kWarn, "runtime.cleanup_failed", {{"message", failure.what()}});
             }
             replacement_check_at = 0;
             process_retry.Input(id);
@@ -187,7 +188,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
       if (!id.empty() && now >= replacement_check_at && replacement_retry.Ready()) {
         auto replaced = updater::ReplaceExecutable(
             root / L"remotekit_control.exe", root / L"versions" / id / L"bin/remotekit_control.exe",
-            root, L"run --root=" + updater::Quote(root.wstring()), service, log);
+            root, L"run --root=" + updater::Quote(root.wstring()), service);
         if (!replaced)
           replacement_retry.Fail(replaced.error());
         else {
@@ -204,7 +205,6 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
       }
       process_retry.Input(id);
       if (child && WaitForSingleObject(child->handle(), 0) == WAIT_OBJECT_0) {
-        log.Event(LogLevel::kWarn, "control.exited", {{"exitCode", child->ExitCode()}});
         child.reset();
         if (now - started >= 60000)
           process_retry.Success();
@@ -212,7 +212,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
       }
       if (!child && !id.empty() && process_retry.Ready()) {
         try {
-          child = StartControl(root, id, log, control_log);
+          child = StartControl(root, id);
           started = GetTickCount64();
         } catch (const std::exception& failure) {
           process_retry.Fail({ErrorCode::kUnavailable, failure.what()});
@@ -256,13 +256,13 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
                 auto& retry = snapshot_retries.at(node_id);
                 Error error{ErrorCode::kUnavailable, failure.what()};
                 if (!retry.Failure())
-                  log.Event(LogLevel::kWarn, "manager.snapshot_failed",
-                            LogErrorFields(error, {{"nodeId", node_id}}));
+                  LogEvent(LogLevel::kWarn, "manager.snapshot_failed",
+                           LogErrorFields(error, {{"nodeId", node_id}}));
                 retry.Fail(error);
               });
         } catch (const std::exception& failure) {
-          log.Event(LogLevel::kWarn, "manager.snapshot_config_failed",
-                    {{"message", failure.what()}});
+          LogEvent(LogLevel::kWarn, "manager.snapshot_config_failed",
+                   {{"message", failure.what()}});
         }
       }
       if (!worker.joinable() && now >= check_at) {
@@ -290,7 +290,7 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
             const auto previous_status = update_retry.Status();
             update_retry.Fail(*error);
             if (previous_status == RetryUnit::State::kIdle)
-              log.Event(LogLevel::kWarn, "manager.update_failed", LogErrorFields(*error));
+              LogEvent(LogLevel::kWarn, "manager.update_failed", LogErrorFields(*error));
           }
           done.store(true);
         });
@@ -310,19 +310,18 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
   if (worker.joinable())
     worker.join();
   SecureZeroMemory(key.data(), key.size());
-  log.Event(LogLevel::kInfo, "manager.stopped");
+  LogEvent(LogLevel::kInfo, "manager.stopped");
   return 0;
 }
 int Supervise(const fs::path& root, HANDLE stop, bool service) {
-  updater::Log log(root / L"logs/manager.log");
   try {
     return SuperviseLoop(root, stop, service);
   } catch (const Failure& failure) {
-    log.Event(LogLevel::kError, "manager.failed", LogErrorFields(failure.error));
+    LogEvent(LogLevel::kError, "manager.failed", LogErrorFields(failure.error));
   } catch (const fs::filesystem_error&) {
-    log.Event(LogLevel::kError, "manager.filesystem_failed");
+    LogEvent(LogLevel::kError, "manager.filesystem_failed");
   } catch (...) {
-    log.Event(LogLevel::kError, "manager.failed");
+    LogEvent(LogLevel::kError, "manager.failed");
   }
   return 1;
 }

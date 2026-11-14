@@ -1,3 +1,4 @@
+#include "crash/crash.hpp"
 #include "supervisor.hpp"
 #include "persistence/config_formats.hpp"
 #include "release/options.hpp"
@@ -26,6 +27,8 @@ constexpr char kUsage[] =
     "remotekit_control service-uninstall\n";
 }  // namespace
 int wmain(int argc, wchar_t** argv) {
+  if (remotekit::RunCrashHandler(argc, argv))
+    return 0;
   using namespace remotekit;
   using namespace release;
   try {
@@ -44,6 +47,8 @@ int wmain(int argc, wchar_t** argv) {
     if (command == L"init") {
       Options options(argc, argv, {L"root", L"manifest", L"key-file"});
       auto root = options.Path(L"root");
+      InitLog(root / L"logs", "manager");
+      InstallCrashHandler(root / L"logs", "manager");
       auto manifest = options.Text(L"manifest");
       Require(ValidUrl(manifest), "invalid manager manifest URL");
       auto key = LoadKey(options.Path(L"key-file"));
@@ -63,6 +68,8 @@ int wmain(int argc, wchar_t** argv) {
     if (command == L"install") {
       Options options(argc, argv, {L"root", L"payload"});
       auto root = options.Path(L"root");
+      InitLog(root / L"logs", "manager");
+      InstallCrashHandler(root / L"logs", "manager");
       auto lock = manager::Lock(root);
       auto payload = options.Path(L"payload");
       auto id = PayloadBuildId(payload);
@@ -73,6 +80,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     Options options(argc, argv, {L"root"});
     auto root = options.Path(L"root");
+    InitLog(root / L"logs", "manager");
+    InstallCrashHandler(root / L"logs", "manager");
     if (command == L"service-install") {
       Take(updater::InstallService(root, service));
       return 0;
@@ -89,9 +98,9 @@ int wmain(int argc, wchar_t** argv) {
     stop_event = nullptr;
     return code;
   } catch (const Failure& failure) {
-    LogError(LogLevel::kError, "manager.failed", failure.error);
+    LogError(LogLevel::kError, "manager.failed", failure.error, {{"proc", "manager"}});
   } catch (const std::exception&) {
-    LogEvent(LogLevel::kError, "manager.filesystem_failed");
+    LogEvent(LogLevel::kError, "manager.filesystem_failed", {{"proc", "manager"}});
   }
   return 1;
 }

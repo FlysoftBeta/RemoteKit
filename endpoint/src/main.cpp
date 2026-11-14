@@ -1,3 +1,4 @@
+#include "crash/crash.hpp"
 #include "util/log.hpp"
 #include "service.hpp"
 #include "media/sdk_loader.hpp"
@@ -13,6 +14,8 @@
 #include <cstdio>
 int main(int argc, char** argv) {
   using namespace remotekit;
+  if (RunCrashHandler(argc, argv))
+    return 0;
   _setmode(_fileno(stdin), _O_BINARY);
   _setmode(_fileno(stdout), _O_BINARY);
   struct TimerResolution {
@@ -29,6 +32,8 @@ int main(int argc, char** argv) {
           return;
         }
         auto process = std::move(parsed).value();
+        InitLog(process.node_root / "logs", "endpoint");
+        InstallCrashHandler(process.node_root / "logs", "endpoint");
         auto files = cluster::LoadNodeFiles(process.node_root);
         if (!files ||
             (process.stdio ? !files.value().control.empty() : files.value().control.empty())) {

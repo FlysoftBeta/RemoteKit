@@ -1,65 +1,36 @@
+﻿import { StringDecoder } from 'node:string_decoder';
 import { log } from '../log';
-import { appendFile, mkdir, rename, rm, stat } from 'node:fs/promises';
-import { dirname } from 'node:path';
-
-// Same file and rotation as the node updater (endpoint/updater/logging.cpp), so
-// `<node root>/logs/endpoint.log` exists whichever launcher runs the Endpoint.
-const limit = 16 * 1024 * 1024;
-const rotations = 4;
 
 export class EndpointLog {
-  private queue: Promise<void>;
-  private size?: number;
-  private failed = false;
-
-  constructor(private readonly path: string) {
-    this.queue = mkdir(dirname(path), { recursive: true }).then(() => {});
-  }
-
+  private readonly decoder = new StringDecoder('utf8');
+  private pending = '';
+  constructor(
+    private readonly childPid: number | undefined,
+    private readonly stream = 'stderr',
+    private readonly child = 'endpoint',
+  ) {}
   write(bytes: Buffer) {
-    this.queue = this.queue
-      .then(async () => {
-        await this.append(bytes);
-        this.failed = false;
-      })
-      .catch((err) => {
-        if (!this.failed) log.warn('endpoint_log.write_failed', { path: this.path, err });
-        this.failed = true;
-      });
+    this.split(this.decoder.write(bytes));
   }
-
   flush() {
-    return this.queue;
+    this.split(this.decoder.end());
+    if (this.pending) this.emit(this.pending);
+    this.pending = '';
   }
-
-  private async append(bytes: Buffer) {
-    this.size ??= await stat(this.path).then(
-      (info) => info.size,
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === 'ENOENT') return 0;
-        throw error;
-      },
-    );
-    while (bytes.length) {
-      if (this.size >= limit) {
-        await this.rotate();
-        this.size = 0;
-      }
-      const chunk = bytes.subarray(0, limit - this.size);
-      await appendFile(this.path, chunk);
-      this.size += chunk.length;
-      bytes = bytes.subarray(chunk.length);
+  private split(text: string) {
+    this.pending += text;
+    while (this.pending.length) {
+      const end = this.pending.indexOf('\n');
+      if (end >= 0 && end < 8192) {
+        this.emit(this.pending.slice(0, end).replace(/\r$/, ''));
+        this.pending = this.pending.slice(end + 1);
+      } else if (this.pending.length >= 8192) {
+        this.emit(this.pending.slice(0, 8192));
+        this.pending = this.pending.slice(8192);
+      } else break;
     }
   }
-
-  private async rotate() {
-    for (let i = rotations; i >= 1; i--) {
-      const target = `${this.path}.${i}`;
-      await rm(target, { force: true });
-      const source = i === 1 ? this.path : `${this.path}.${i - 1}`;
-      await rename(source, target).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== 'ENOENT') throw error;
-      });
-    }
+  private emit(text: string) {
+    log.warn('process.output', { child: this.child, childPid: this.childPid, stream: this.stream, text });
   }
 }

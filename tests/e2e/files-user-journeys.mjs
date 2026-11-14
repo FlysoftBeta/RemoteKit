@@ -319,6 +319,14 @@ try {
     );
     await j.open('我的文件');
     await button('page-notes.txt').waitFor({ timeout: 90000 });
+    const saved = page.waitForEvent('download', { timeout: 30000 });
+    await click(button('下载到本地 page-notes.txt'));
+    const file = await saved;
+    assert.equal(await file.failure(), null);
+    assert.equal(file.suggestedFilename(), 'page-notes.txt');
+    const chunks = [];
+    for await (const chunk of await file.createReadStream()) chunks.push(chunk);
+    assert.equal(Buffer.concat(chunks).toString('utf8'), 'Downloaded notes');
   });
   await step('15-study-sign-in-browse-attachment', async () => {
     await j.open('学习');

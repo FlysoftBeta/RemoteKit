@@ -5,10 +5,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
-import { configureLog, FileLogSink, log, logFiles, reportError } from '../server/log';
+import { configureLog, FileLogSink, localDate, log, reportError } from '../server/log';
 import { RemoteKitError, nativeError, wireError } from '../shared/errors';
 import { formatError } from '../client/util/format-error';
-import { controlLogTail } from '../server/diagnostics/control-log';
 import { findError } from '../server/diagnostics/error-search';
 import limits from '../../protocol/limits.json';
 import { dispatchViewerRequest } from '../server/http/viewer-socket';
@@ -42,25 +41,36 @@ test('node log search accepts the line limit and omits the next line', async () 
   }
 });
 
-test('file sink rotates four backups and the diagnostic tail uses the newest combined bytes', async (t) => {
+test('daily writer rolls over dates, keeps all parts, and bounds each day across restarts', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'rk-control-log-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const sink = new FileLogSink(directory, 4);
-  try {
-    for (let index = 0; index < 7; index++) sink.write(`${index}ab\n`);
-  } finally {
-    sink.close();
-  }
-  assert.deepEqual(await Promise.all(logFiles(directory).map((file) => readFile(file, 'utf8'))), [
-    '6ab\n',
-    '5ab\n',
-    '4ab\n',
-    '3ab\n',
-    '2ab\n',
-  ]);
-  const tail = await controlLogTail(directory, 6);
-  assert.equal(tail.data.toString(), 'b\n6ab\n');
-  assert.equal(tail.dropped, 2);
+  let now = new Date();
+  const day = localDate(now);
+  const options = { now: () => now, partBytes: 4, dayBytes: 200 };
+  const sink = new FileLogSink(directory, options);
+  for (let index = 0; index < 7; index++) sink.write(`${index}ab\n`);
+  assert.equal(await readFile(join(directory, day, 'control.6.jsonl'), 'utf8'), '6ab\n');
+  sink.write('x'.repeat(200));
+  sink.write('discarded');
+  sink.close();
+  const restarted = new FileLogSink(directory, options);
+  restarted.write('discarded after restart');
+  restarted.close();
+  const { readdir } = await import('node:fs/promises');
+  const text = (
+    await Promise.all(
+      (await readdir(join(directory, day))).map((name) => readFile(join(directory, day, name), 'utf8')),
+    )
+  ).join('');
+  assert.equal(text.match(/log.budget_exhausted/g)?.length, 1);
+  assert(!text.includes('discarded'));
+  now = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const next = new FileLogSink(directory, options);
+  next.write('new day');
+  now = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  next.write('rollover');
+  next.close();
+  assert.equal(await readFile(join(directory, localDate(now), 'control.jsonl'), 'utf8'), 'rollover');
 });
 
 test('reportError assigns once, keeps Endpoint IDs and serializes the diagnosis and cause', () => {
@@ -86,26 +96,38 @@ test('reportError assigns once, keeps Endpoint IDs and serializes the diagnosis 
   assert.equal(records[4].err.reason, 'corrupt_state');
 });
 
-test('Endpoint stderr write failures log once per streak and recover after a successful write', async (t) => {
+test('Endpoint stderr splits UTF-8 lines, bounds long output, and flushes partial text', () => {
   const records = capture();
-  const directory = await mkdtemp(join(tmpdir(), 'rk-endpoint-stderr-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const path = join(directory, 'endpoint.log');
-  await mkdir(path);
-  const sink = new EndpointLog(path);
-  sink.write(Buffer.from('first'));
-  sink.write(Buffer.from('second'));
-  await sink.flush();
-  assert.equal(records.filter((record) => record.ev === 'endpoint_log.write_failed').length, 1);
-  await rm(path, { recursive: true });
-  sink.write(Buffer.from('recovered'));
-  await sink.flush();
-  assert.equal(await readFile(path, 'utf8'), 'recovered');
-  await rm(path);
-  await mkdir(path);
-  sink.write(Buffer.from('third'));
-  await sink.flush();
-  assert.equal(records.filter((record) => record.ev === 'endpoint_log.write_failed').length, 2);
+  const sink = new EndpointLog(123);
+  const bytes = Buffer.from('中文\r\npartial');
+  sink.write(bytes.subarray(0, 2));
+  sink.write(bytes.subarray(2));
+  sink.flush();
+  const long = new EndpointLog(124);
+  long.write(Buffer.from('x'.repeat(20000)));
+  long.flush();
+  assert.deepEqual(
+    records.slice(0, 2).map((record) => record.text),
+    ['中文', 'partial'],
+  );
+  assert(
+    records.every(
+      (record) =>
+        record.ev === 'process.output' &&
+        record.child === 'endpoint' &&
+        record.stream === 'stderr' &&
+        record.proc === 'control' &&
+        record.pid === process.pid,
+    ),
+  );
+  assert(records.slice(2).every((record) => record.text.length <= 8192));
+  assert.equal(
+    records
+      .slice(2)
+      .map((record) => record.text)
+      .join(''),
+    'x'.repeat(20000),
+  );
 });
 
 test('Viewer error formatting uses shared messages and appends the original error ID', async () => {
@@ -198,17 +220,19 @@ test('WS failure replies carry the error ID of the structured log record', async
   client.terminate();
 });
 
-test('admin.findError validates IDs, confirms JSON matches and caps rotated Control log results', async (t) => {
+test('admin.findError validates IDs, confirms JSON matches and caps daily Control log results', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'rk-error-search-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const errorId = 'c-1234567890';
+  const day = localDate();
+  await mkdir(join(directory, day));
   const current = JSON.stringify({ errorId, ev: 'current.failed' });
   await writeFile(
-    logFiles(directory)[0],
+    join(directory, day, 'control.1.jsonl'),
     [JSON.stringify({ note: errorId }), '{broken ' + errorId, current].join('\n') + '\n',
   );
   await writeFile(
-    logFiles(directory)[1],
+    join(directory, day, 'control.jsonl'),
     Array.from({ length: 60 }, () => JSON.stringify({ errorId })).join('\n'),
   );
   const control = fakeControl();
@@ -284,4 +308,24 @@ test('admin.findError queries every ready node in parallel using the management 
   );
   assert.equal(result.failures[0].error.code, 'internal');
   assert.match(result.failures[0].error.errorId, /^c-[0-9a-f]{10}$/);
+});
+
+test('Control error search walks newer date directories first and excludes expired dates', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'rk-search-days-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const days = [localDate(), localDate(yesterday), '2000-01-01'];
+  for (const day of days) {
+    await mkdir(join(directory, day));
+    await writeFile(
+      join(directory, day, 'control.jsonl'),
+      JSON.stringify({ errorId: 'c-1234567890', day }) + '\n',
+    );
+  }
+  const result = await findError('c-1234567890', directory, { all: () => [] }, 30);
+  assert.deepEqual(
+    result.records.map((record) => JSON.parse(record.line).day),
+    days.slice(0, 2),
+  );
 });

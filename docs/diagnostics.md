@@ -2,25 +2,87 @@
 
 ## 日志
 
-所有 RemoteKit 进程的日志是同一种 JSON 行：`{"ts":"<UTC ISO>","lvl":"debug|info|warn|error","ev":"<组件.事件>", ...字段}`。事件名是 `component.what` 的小写下划线形式，变量放在字段里，不拼进事件名或句子；错误放在 `err` 字段（code、reason、英文诊断、`errorId`、OS 错误码 `os:{kind: win32|hresult|sqlite, value}`，Control 还带栈与 `cause` 链）。级别语义固定：`error` 需要人处理，`warn` 是已自动处理的异常，`info` 是生命周期事件，`debug` 默认关闭。每条记录先完整构造再一次写出，多线程不会交错。
+### 记录格式
 
-| 进程 | 文件 | 写入者 |
-|---|---|---|
-| Control | `<storage.logs>/control.jsonl`（打包版为根目录 `logs/`），16 MiB 轮转、保留 `.1`–`.4` | Control 自己（`control/server/log.ts`）；启动前和单元测试中写 stderr |
-| Control 控制台 | `logs/control.stdout.log` | 管理器转写子进程原始输出，只在 Node 崩溃等日志器之外的情况有内容 |
-| 管理器 / 节点监管 | `logs/manager.log`、`<节点根>/logs/supervisor.log` | 同格式 |
-| 快照进程 | `<节点根>/logs/snapshot.log` | 监管者转写 `remotekit_snapshot.exe` 的 JSON 行 |
-| Endpoint | `<节点根>/logs/endpoint.log`，16 MiB 轮转、保留 `.1`–`.4` | Endpoint 写 stderr，由监管者（或本地节点时由 Control）落盘 |
-| Browser | `<节点根>/logs/browser/<sessionId>.log`，启动前超过 16 MiB 改名为 `.log.1` | Chromium 原生日志（非结构化），Endpoint 以 `--log-file` 指定 |
-| 崩溃 | `<节点根>/logs/crashes/<sessionId>/`（Crashpad dump 与 `events.jsonl`） | Browser（`--crash-dir`）与 Endpoint |
+所有 RemoteKit 进程（Control、管理器、节点监管、Endpoint、快照进程、Browser 及其子进程）只写一种格式：JSON 行，每行一条记录。
 
-日志不在 Session 目录里，checkpoint 不需要排除它们；Session 被删除或冷副本被清理时，它在 `logs/browser/`、`logs/crashes/` 下的文件一起删除。
+```
+{"ts":"<UTC ISO，毫秒>","lvl":"debug|info|warn|error","ev":"<组件.事件>","proc":"<进程类别>","pid":<PID>, ...字段}
+```
 
-**按错误 ID 查找**：`internal`、`outcome_unknown`、`unavailable` 离开产生它的进程时带一个错误 ID，记录完整诊断的那条日志带同一个 ID（见[错误模型](errors.md)）。管理 App → 诊断输入 ID：`c-` 在 Control 的 `control.jsonl` 及轮转文件里找，`e-` 向每个就绪节点发 `node.logs.search`（5 秒期限，查不到的节点单独列出），最多各 50 条。
+- 事件名是 `component.what` 的小写下划线形式，变量放在字段里，不拼进事件名或句子；错误放在 `err` 字段（code、reason、英文诊断、`errorId`、OS 错误码 `os:{kind: win32|hresult|sqlite, value}`，Control 还带栈与 `cause` 链）。
+- 级别语义固定：`error` 需要人处理，`warn` 是已自动处理的异常，`info` 是生命周期事件，`debug` 默认关闭。
+- `proc` 取 `control`、`manager`、`node`（节点监管/updater）、`endpoint`、`snapshot`、`browser`；Browser 及其子进程另带 `sessionId` 与 `process`（`browser`、`renderer`、`gpu`、`utility`…）。
+- 每条记录先完整构造再一次追加写出，多线程、多进程不会交错。没有 printf 式的自由文本行：第三方库与 Chromium 的 `LOG` 也转成记录（见下）。
+
+### 每个进程自己写文件
+
+每个进程直接追加写自己的文件，不经过 stdout/stderr 管道转写。父进程卡住不会让子进程的日志写入阻塞，子进程崩溃也不会丢掉父进程的日志。
+
+- **Chromium `LOG`**：Browser 在每个进程里用 `logging::SetLogMessageHandler` 接管，转成 `ev:"chromium.log"`，字段 `severity`、`file`、`line`、`message`；页面 console 是 `ev:"page.console"`，字段 `level`、`source`、`line`、`message`。
+- **SDK**：`remotekit_sdk.dll` 里的 libwebrtc/Chromium `LOG` 与 SDK 自己的诊断经 C ABI 日志回调交给宿主（`sdk/include/remotekit_sdk.h` 的 `remotekit_sdk_set_log_sink`），由 Endpoint 写成 `sdk.*` 事件；SDK 不写 stderr。高频诊断（如编码器 SetRates）是带限频的结构化事件，同一编码器每秒最多一条。
+- **兜底**：父进程仍接住子进程的 stdout/stderr（本地 Endpoint 的 stdout 是集群通道，只接 stderr），任何到达的字节都是日志器之外的输出（Node 致命错误、CRT abort、第三方直接写的文本），按行包装成 `process.output{child, childPid, stream, text}` 写进**父进程自己**的文件。一个文件只有一个写入者（崩溃记录除外，见下）。
+
+### 布局与保留
+
+```
+<日志根>/<YYYY-MM-DD>/<proc>.jsonl            Control、manager、node、endpoint、snapshot
+<日志根>/<YYYY-MM-DD>/browser-<sessionId>.jsonl
+<日志根>/<YYYY-MM-DD>/<name>.<n>.jsonl        同一天内的续写分片，n 从 1 起
+<日志根>/crashes/<sessionId>/                 Browser 的 Crashpad 数据库与 events.jsonl
+<日志根>/crashes/<proc>/                      其他进程的 dump
+```
+
+- 日志根：Control 主机是 `<storage.logs>`（打包版为根目录 `logs/`，Control 与管理器共用），节点是 `<节点根>/logs`。本地节点有自己的节点根，与 Control 主机的日志根分开。
+- **日期是写入那一刻所在主机的本地日期**；`ts` 仍是 UTC。写入者每次追加前比较日期，跨日即在新目录开新文件。单个文件超过 64 MiB 时续写下一个分片。
+- **Browser 子进程不切换文件**：renderer、GPU 等子进程写 Browser 进程启动时传给它的文件句柄，可能在跨日后仍写入前一天的文件。打包某一天时，除了当天目录，还收录较早目录中最后修改时间落在这一天的文件，所以不会漏掉。
+- **预算**：每个进程每天最多 1 GiB；用尽时写一条 `log.budget_exhausted`，当天其余记录丢弃。
+- **保留天数**：管理 App → 诊断设置，默认 30 天（1–365），存在 Control。Control 清理自己主机的日志根；节点由 Endpoint 清理整个节点日志根，Control 在节点就绪时与设置变化时推送 `node.settings{logRetentionDays}`。清理在启动时、设置变化时与每次跨日时进行，删除日期早于"今天 − 保留天数"的日期目录，以及 `crashes/` 下最后修改时间早于同一界限的文件。正在运行的 Browser 的 Crashpad 数据库只删其中过期的 dump。
+- Session 被删除或冷副本被清理时，它在 `crashes/<sessionId>/` 下的文件一起删除；日期目录里的日志按保留天数过期，不随 Session 删除。
+
+### 崩溃
+
+进程记录不了自己的崩溃，所以由崩溃之外的一方记录，结果统一是一条 `process.crashed`：
+
+```
+{"ev":"process.crashed","lvl":"error","proc":"<崩溃的进程类别>","pid":<崩溃的 PID>,
+ "code":<异常码或退出码>,"codeName":"<如 EXCEPTION_ACCESS_VIOLATION>","address":"<模块+偏移>",
+ "stack":["<模块>!<函数>+<偏移> 或 <模块>+<偏移>", ...],"dump":"<相对日志根的路径>","threadId":<线程>}
+```
+
+- **Endpoint、快照进程、节点监管、管理器**（同一个静态库 `remotekit_crash`）：进程启动时先拉起自己的崩溃处理子进程（同一个可执行文件，`--crash-handler=<共享内存名>`），传过去事件与共享内存。崩溃时未处理异常过滤器只把异常指针、线程 ID 写进共享内存、置事件并等待；处理子进程用 `MiniDumpWriteDump`（`MiniDumpNormal | MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo`，客户端指针）把 dump 写到 `crashes/<proc>/<proc>-<pid>-<时间>.dmp`，用 DbgHelp 在挂起的进程上走栈并符号化（同目录有 PDB 时带函数名，否则模块+偏移），把 `process.crashed` 追加到**崩溃进程当天的日志文件**（它已被挂起，不会交错），然后结束它。崩溃处理子进程随宿主退出而退出；它自己起不来时宿主照常运行，记一条 `crash.handler_unavailable`。
+- **Browser 进程**：Crashpad 照常写 dump；Endpoint 观察到非正常退出时记 `process.crashed{proc:"browser", sessionId, code, dump, lastFatal}`（`lastFatal` 是 Browser 日志中最后一条 `FATAL` 级 `chromium.log` 的 `message`），并照旧追加到该 Session 的 `crashes/<sessionId>/events.jsonl`。
+- **Browser 子进程**（renderer、GPU、utility）：Browser 进程经 `RenderProcessHostObserver` 与 `BrowserChildProcessObserver` 记 `process.crashed{proc:"browser", process:"renderer|gpu|utility", sessionId, code, reason, dump}`，`reason` 取 Chromium 的终止状态（`crashed`、`oom`、`launch_failed`…），正常退出与被要求结束不记。
+- **Control**（Node）：管理器记 `process.crashed{proc:"control", code}`，Node 的致命错误输出按"兜底"规则进管理器的文件；Control 以 `--report-on-fatalerror --report-directory=<日志根>/crashes/control` 启动，Node 的诊断报告是该次崩溃的 dump。
+- 任何子进程的非零退出（非崩溃）由父进程记 `process.exited{child, childPid, code}`。
+
+### 按错误 ID 查找
+
+`internal`、`outcome_unknown`、`unavailable` 离开产生它的进程时带一个错误 ID，记录完整诊断的那条日志带同一个 ID（见[错误模型](errors.md)）。管理 App → 诊断输入 ID：`c-` 在 Control 主机日志根里从新到旧找，`e-` 向每个就绪节点发 `node.logs.search`（5 秒期限，查不到的节点单独列出），最多各 50 条；都只搜保留期内的日期目录。
+
+### 节点日志接口
+
+Control 读取节点日志只用三个节点级方法（不属于任何 Session），返回的路径都相对节点日志根：
+
+- `node.logs.days` → `{days:["YYYY-MM-DD", ...]}`：存在的日期目录，新到旧。
+- `node.logs.list{date}` → `{files:[{path, size, mtime}]}`：该日期目录下的文件，加上较早日期目录与 `crashes/` 下最后修改时间落在这一天的文件。`size` 与 `mtime` 从文件句柄读取：目录枚举里的值对仍在追加的文件是旧的。
+- `node.logs.read{path, offset, length ≤ 512 KiB}` → 二进制帧 `{path, offset, size}` + 字节：`path` 必须是 `<date>/<文件>` 或 `crashes/<目录>/<文件>` 形式，不接受 `..`、绝对路径与日志根之下任何一级的 reparse point（日志根本身是配置值，可以位于联接之后）；`size` 是读取时的文件大小，调用者据此从尾部或头部分段读取，并发追加不影响已读部分。
+
+## 诊断包
+
+诊断数据有两种来源，结果都是一个 tar.zst **诊断包**，由管理员保存到自己的"我的文件"里；保存后它就是普通文件，不受日志保留天数影响，由用户自己管理。"我的文件"里它们的来源是**诊断信息**（`source:{app:"diagnostics", channel:"logs"|"collection"}`）。"我的文件"里的每个文件都有"下载到本地"按钮（和预览一样经 WebRTC 文件通道读出，由浏览器保存）。
+
+管理 App → 诊断标签页：
+
+- **日志**：保留天数设置；所有主机（Control 主机与每个节点）合并后的日期列表，每天一个"打包到我的文件"。打包是后台任务：Control 读自己主机该日期的文件，并对每个就绪节点 `node.logs.list` + 分段 `node.logs.read`，按 `<主机>/<相对路径>` 写入包，附 `manifest.json{schemaVersion, kind:"logs", date, hosts:[{host, files, failed?}]}`；离线或读取失败的节点记进 manifest，包照常生成。任务列表显示进行中、完成（文件名）或失败（错误 ID）。文件名 `RemoteKit 日志 <date>.tar.zst`。
+- **诊断采集**：用户侧诊断收集产生的包列表（用户、开始时间、原因、大小），每项"保存到我的文件"与删除；它们留在 Control 上，按日志保留天数过期。文件名 `RemoteKit 诊断 <诊断 ID>.tar.zst`。
+- **错误 ID 查找**（见上）。
+
+包计入保存者的"我的文件"配额与单文件上限；超出时以 `limit_exceeded` 失败，不截断。节点日志与 Control 日志是全局的，可能含其他 Tenant 的信息，所以只有管理员能打包、保存；非管理员发起的诊断采集也只出现在管理 App 里。
 
 ## 用户侧诊断收集
 
-用户在"设置"里点开始诊断，复现问题，用带红点的悬浮"停止数据收集"按钮结束。停止后服务端把数据打包成 tar.zst 保存在 Control，客户端显示诊断 ID。数据不自动下载到客户端，也不发往第三方；收集复用已有的 peer 和遥测，不增加媒体传输。
+用户在"设置"里点开始诊断，复现问题，用带红点的悬浮"停止数据收集"按钮结束。停止后服务端把数据打包成诊断包保存在 Control，客户端显示诊断 ID；管理员在管理 App 里把它保存到"我的文件"。数据不发往第三方；收集复用已有的 peer 和遥测，不增加媒体传输。
 
 **内容**：
 
@@ -28,11 +90,9 @@
 - Control 每 2 秒采样一次进程/事件循环/产品投影，以及 Endpoint 快照（`session.snapshot{outputDiagnostics:true}`：本 Tenant 的编码器、Comp、Browser 输出状态，经已有的管理连接）。一个慢的 Endpoint 请求不会堆积更多请求，也不阻塞归档停止（采集期限 1800ms）。
 - 每份数据保留自己的时钟域，记录缺测与终止原因。
 - 采样数据（JSONL）不包含：凭据、SDP/候选 IP、Profile、用户文件、页面像素、输入文本。投影使用字段白名单和遍历预算。
-- **原始日志**（`logs/`）在停止时原样收录，不做脱敏：本 Session 的 Browser 日志（节点 `logs/browser/<sessionId>.log`，Chromium 日志，含页面全部 console 输出与 WebRTC/GPU/解码错误）尾部最多 16 MiB；节点 `logs/endpoint.log` 尾部，不足 8 MiB 时用 `endpoint.log.1` 补足；Control 自己的 `control.jsonl` 与 `.1` 尾部共 4 MiB。都从尾部向前读，因此包含开始诊断之前的历史——"先出问题、再开诊断"也能看到现场。Endpoint 以 `session.logs.read` 每次最多 512 KiB 分段返回，Control 从第一次看到的文件大小向前拼接，并发追加不影响已读部分；整个读取有 15 秒期限（Control 关闭时 3 秒），超时或失败记入 manifest 的 `logs`，归档照常写出。节点日志与 Control 日志是全局的，可能含其他 Tenant 的信息；归档只有管理员能下载。
+- **原始日志**在停止时原样收录，不做脱敏，都从尾部向前读，因此包含开始诊断之前的历史——"先出问题、再开诊断"也能看到现场：本 Session 的 Browser 日志（最新的 `browser-<sessionId>` 文件，不足时向前一个文件补足）共 16 MiB；节点的 `endpoint` 日志同样共 8 MiB；Control 的 `control` 日志共 4 MiB；该 Session 的 `process.crashed` 记录与最新 3 个 dump（每个最多 16 MiB）。节点文件经 `node.logs.list`/`node.logs.read` 读取；整个读取有 15 秒期限（Control 关闭时 3 秒），超时或失败记入 manifest 的 `logs`，包照常写出。
 
-**Browser 崩溃**：Browser 内嵌 Crashpad，以 Browser 可执行文件自身作为 handler 进程，Browser、renderer、GPU 与 utility 进程崩溃时把 minidump 写到 Endpoint 用 `--crash-dir` 指定的节点 `logs/crashes/<sessionId>/`（不在 Session 目录里，不进 checkpoint；没有该参数时不启用崩溃报告）；不配置上传地址、上传同意恒为否，handler 随 Browser 退出。Browser 非正常退出（CHECK 的 `0x80000003`、访问违例等）时，Endpoint 在 `endpoint.log` 写一条 `browser.crashed` 事件（同时追加到该 Session 崩溃目录的 `events.jsonl`）：退出码、Browser 日志中最后一行 `FATAL`/`Check failed`、最新 dump 路径。诊断归档收录崩溃事件与最新 3 个 dump（每个最多 16 MiB）。
-
-**限制与生命周期**：每次最长 10 分钟，采样数据 32MiB 未压缩（日志另计上述预算），单个请求 128KiB；全局并发 4 个；最近 1024 个状态记录。锁定、授权变化、断线、时长/大小上限、正常关闭都会以对应原因结束；重复 stop/status 幂等。归档是 USTAR + Zstandard（Node 内置），包含 manifest、非空的 client/control/endpoint/events JSONL 成员与 `logs/` 下的原始日志，先写部分文件再发布，路径 `<db目录>/diagnostics/<SHA256(tenant)>/<id>.tar.zst`，旁边的 `.reason` 是 `{version, reason}`；manifest 带 `schemaVersion`，两者的格式定义在 `control/server/diagnostics/formats.ts`，重启后仍可按 ID 查询。强制终止 Control 会丢失进行中的内存数据；已完成的归档目前没有自动清理。
+**限制与生命周期**：每次最长 10 分钟，采样数据 32MiB 未压缩（日志另计上述预算），单个请求 128KiB；全局并发 4 个；最近 1024 个状态记录。锁定、授权变化、断线、时长/大小上限、正常关闭都会以对应原因结束；重复 stop/status 幂等。包是 USTAR + Zstandard（Node 内置），包含 manifest、非空的 client/control/endpoint/events JSONL 成员与 `logs/` 下的原始日志，先写部分文件再发布，路径 `<db目录>/diagnostics/<SHA256(tenant)>/<id>.tar.zst`，旁边的 `.reason` 是 `{version, reason}`；manifest 带 `schemaVersion`，两者的格式定义在 `control/server/diagnostics/formats.ts`，重启后仍可按 ID 查询。强制终止 Control 会丢失进行中的内存数据。
 
 ## 开发侧追踪
 

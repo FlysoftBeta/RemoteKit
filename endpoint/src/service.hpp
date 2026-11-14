@@ -31,6 +31,7 @@ class Service {
   friend class NativeRetryOwnerProbe;
   Result<Json> Dispatch(const Json& request, uint64_t generation);
   Result<void> Clear();
+  void PruneLogFiles();
   bool HandleRequest(Json request, uint64_t generation);
   Result<void> Fence(const Json& desired, uint64_t generation);
   Result<void> PreparePlacement(const Json& placement,
@@ -64,6 +65,8 @@ class Service {
   std::atomic<uint64_t> fenced_generation_{0};
   std::string connection_epoch_;
   Json node_desired_;
+  std::optional<unsigned> log_retention_days_;
+  std::string log_prune_date_;
   Json placements_ = Json::array();
   std::mutex mutex_;
   struct ManagedSession {

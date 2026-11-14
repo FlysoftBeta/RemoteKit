@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readdirSync, readSync, statSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { isRemoteKitError, type RemoteKitError } from '../shared/errors';
 
@@ -68,6 +68,8 @@ function emit(level: LogLevel, event: string, fields?: LogFields) {
   const record: Record<string, unknown> = { ts: new Date().toISOString(), lvl: level, ev: event };
   for (const [key, value] of Object.entries(fields ?? {}))
     record[key] = key === 'err' ? serializeError(value) : value;
+  record.proc = 'control';
+  record.pid = process.pid;
   let line: string;
   try {
     line = JSON.stringify(record, (_key, value) => (typeof value === 'bigint' ? value.toString() : value));
@@ -76,6 +78,8 @@ function emit(level: LogLevel, event: string, fields?: LogFields) {
       ts: record.ts,
       lvl: level,
       ev: event,
+      proc: 'control',
+      pid: process.pid,
       unserializable: String(error),
     });
   }
@@ -113,37 +117,44 @@ export function identifyError(error: RemoteKitError) {
   return error;
 }
 
-export const logFileName = 'control.jsonl';
-const rotateBytes = 16 * 1024 * 1024;
-const backups = 4;
-
-export function logFiles(directory: string): string[] {
-  const current = join(directory, logFileName);
-  return [current, ...Array.from({ length: backups }, (_, index) => `${current}.${index + 1}`)];
+export function localDate(date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
 export class FileLogSink implements LogSink {
-  private fd: number;
-  private size: number;
+  private fd?: number;
+  private size = 0;
+  private total = 0;
+  private day = '';
+  private part = 0;
+  private exhausted = false;
   private failed = false;
-  private readonly path: string;
 
   constructor(
     private readonly directory: string,
-    private readonly maxBytes = rotateBytes,
-  ) {
-    mkdirSync(directory, { recursive: true });
-    this.path = join(directory, logFileName);
-    this.fd = openSync(this.path, 'a');
-    this.size = statSync(this.path).size;
-  }
+    private readonly options: { now?: () => Date; partBytes?: number; dayBytes?: number } = {},
+  ) {}
 
   write(line: string) {
-    const bytes = Buffer.from(line, 'utf8');
     try {
-      if (this.size > 0 && this.size + bytes.length > this.maxBytes) this.rotate();
-      writeSync(this.fd, bytes);
-      this.size += bytes.length;
+      const now = this.options.now?.() ?? new Date();
+      const day = localDate(now);
+      if (day !== this.day || this.fd === undefined) this.openDay(day);
+      if (this.exhausted) return;
+      const bytes = Buffer.from(line, 'utf8');
+      const marker = Buffer.from(
+        JSON.stringify({
+          ts: now.toISOString(),
+          lvl: 'warn',
+          ev: 'log.budget_exhausted',
+          proc: 'control',
+          pid: process.pid,
+        }) + '\n',
+      );
+      if (this.total + bytes.length + marker.length > (this.options.dayBytes ?? 1024 ** 3)) {
+        this.append(marker);
+        this.exhausted = true;
+      } else this.append(bytes);
       this.failed = false;
     } catch (error) {
       // The log cannot record its own failure; report once per failure streak.
@@ -153,23 +164,51 @@ export class FileLogSink implements LogSink {
   }
 
   close() {
-    closeSync(this.fd);
+    if (this.fd !== undefined) closeSync(this.fd);
+    this.fd = undefined;
   }
 
-  private rotate() {
-    closeSync(this.fd);
-    try {
-      const files = logFiles(this.directory);
-      rmSync(files[backups], { force: true });
-      for (let index = backups - 1; index >= 0; index--)
-        try {
-          renameSync(files[index], files[index + 1]);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        }
-    } finally {
-      this.fd = openSync(this.path, 'a');
-      this.size = statSync(this.path).size;
+  private openDay(day: string) {
+    this.close();
+    this.day = day;
+    this.part = 0;
+    this.total = 0;
+    const directory = join(this.directory, day);
+    mkdirSync(directory, { recursive: true });
+    for (const name of readdirSync(directory)) {
+      const match = /^control(?:\.(\d+))?\.jsonl$/.exec(name);
+      if (!match) continue;
+      this.part = Math.max(this.part, Number(match[1] ?? 0));
+      this.total += statSync(join(directory, name)).size;
     }
+    this.exhausted = this.total >= (this.options.dayBytes ?? 1024 ** 3);
+    this.openPart();
+    const tail = Buffer.alloc(Math.min(512, this.size));
+    if (tail.length) {
+      const reader = openSync(join(directory, `control${this.part ? '.' + this.part : ''}.jsonl`), 'r');
+      try {
+        readSync(reader, tail, 0, tail.length, this.size - tail.length);
+      } finally {
+        closeSync(reader);
+      }
+      this.exhausted ||= tail.includes('"ev":"log.budget_exhausted"');
+    }
+  }
+
+  private openPart() {
+    const path = join(this.directory, this.day, `control${this.part ? '.' + this.part : ''}.jsonl`);
+    this.fd = openSync(path, 'a');
+    this.size = statSync(path).size;
+  }
+
+  private append(bytes: Buffer) {
+    if (this.size && this.size + bytes.length > (this.options.partBytes ?? 64 * 1024 ** 2)) {
+      this.close();
+      this.part++;
+      this.openPart();
+    }
+    writeSync(this.fd!, bytes);
+    this.size += bytes.length;
+    this.total += bytes.length;
   }
 }

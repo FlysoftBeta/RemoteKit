@@ -1,4 +1,6 @@
 #include "remotekit/browser/sdk/rtc_internal.h"
+#include "browser/sdk/sdk_logging.h"
+#include "base/strings/stringprintf.h"
 using namespace remotekit::rtc;
 namespace remotekit::rtc {
 class ExternalEncoder : public webrtc::VideoEncoder {
@@ -49,12 +51,19 @@ class ExternalEncoder : public webrtc::VideoEncoder {
     config.max_bitrate_bps = codec->maxBitrate * 1000u;
     config.max_payload_size = static_cast<uint32_t>(settings.max_payload_size);
     config.h264_level_idc = level_;
-    std::fprintf(stderr,
-                 "RTC encoder configure: peer=%llu encoder=%llu %ux%u fps=%u "
-                 "start=%u max=%u level=%u requestedStart=%u requestedMax=%u\n",
-                 peer_, id_, config.width, config.height, config.fps, config.bitrate_bps,
-                 config.max_bitrate_bps, level_, options_.start_bitrate_bps,
-                 options_.max_bitrate_bps);
+    remotekit::sdk::LogEvent(
+        REMOTEKIT_SDK_LOG_INFO, "rtc.encoder_configure",
+        base::DictValue()
+            .Set("peer", static_cast<double>(peer_))
+            .Set("encoder", static_cast<double>(id_))
+            .Set("width", static_cast<int>(config.width))
+            .Set("height", static_cast<int>(config.height))
+            .Set("fps", static_cast<int>(config.fps))
+            .Set("startBps", static_cast<double>(config.bitrate_bps))
+            .Set("maxBps", static_cast<double>(config.max_bitrate_bps))
+            .Set("level", static_cast<int>(level_))
+            .Set("requestedStartBps", static_cast<double>(options_.start_bitrate_bps))
+            .Set("requestedMaxBps", static_cast<double>(options_.max_bitrate_bps)));
     const int configured = options_.encoder.configure(options_.context, id_, &config);
     if (configured == 0) {
       std::lock_guard lock(state_->mutex);
@@ -117,11 +126,20 @@ class ExternalEncoder : public webrtc::VideoEncoder {
                                                                       : WEBRTC_VIDEO_CODEC_ERROR;
   }
   void SetRates(const RateControlParameters& p) override {
-    if (last_rate_ != p.bitrate.get_sum_bps() || last_fps_ != p.framerate_fps) {
-      std::fprintf(stderr, "RTC encoder rates: encoder=%llu target=%u fps=%.2f timeMs=%lld\n", id_,
-                   p.bitrate.get_sum_bps(), p.framerate_fps, webrtc::TimeMillis());
-      last_rate_ = p.bitrate.get_sum_bps();
-      last_fps_ = p.framerate_fps;
+    rates_pending_ |= last_rate_ != p.bitrate.get_sum_bps() || last_fps_ != p.framerate_fps;
+    last_rate_ = p.bitrate.get_sum_bps();
+    last_fps_ = p.framerate_fps;
+    const auto now = webrtc::TimeMillis();
+    if (rates_pending_ && (!rate_logged_ || now - last_rate_log_ms_ >= 1000)) {
+      remotekit::sdk::LogEvent(REMOTEKIT_SDK_LOG_INFO, "rtc.encoder_rates",
+                               base::DictValue()
+                                   .Set("encoder", static_cast<double>(id_))
+                                   .Set("targetBps", static_cast<double>(last_rate_))
+                                   .Set("fps", last_fps_)
+                                   .Set("timeMs", static_cast<double>(now)));
+      rates_pending_ = false;
+      rate_logged_ = true;
+      last_rate_log_ms_ = now;
     }
     options_.encoder.set_rates(options_.context, id_, p.bitrate.get_sum_bps(),
                                static_cast<uint32_t>(std::max(0.0, p.framerate_fps)));
@@ -150,6 +168,9 @@ class ExternalEncoder : public webrtc::VideoEncoder {
   bool created_ = false;
   uint32_t last_rate_ = 0;
   double last_fps_ = 0;
+  bool rates_pending_ = false;
+  bool rate_logged_ = false;
+  int64_t last_rate_log_ms_ = 0;
   std::shared_ptr<EncoderState> state_;
 };
 
@@ -274,11 +295,16 @@ int remotekit_rtc_encoded(uint64_t id,
       else if (bytes[i + 2] == 0 && bytes[i + 3] == 1)
         nalu = i + 4;
       if (nalu && (bytes[nalu] & 31) == 7) {
-        std::fprintf(stderr,
-                     "RTC H264 SPS: encoder=%llu profile-level-id=%02x%02x%02x "
-                     "size=%ux%u rtp=%u\n",
-                     id, unsigned(bytes[nalu + 1]), unsigned(bytes[nalu + 2]),
-                     unsigned(bytes[nalu + 3]), frame->width, frame->height, frame->rtp_timestamp);
+        remotekit::sdk::LogEvent(
+            REMOTEKIT_SDK_LOG_INFO, "rtc.h264_sps",
+            base::DictValue()
+                .Set("encoder", static_cast<double>(id))
+                .Set("profileLevelId",
+                     base::StringPrintf("%02x%02x%02x", unsigned(bytes[nalu + 1]),
+                                        unsigned(bytes[nalu + 2]), unsigned(bytes[nalu + 3])))
+                .Set("width", static_cast<int>(frame->width))
+                .Set("height", static_cast<int>(frame->height))
+                .Set("rtp", static_cast<double>(frame->rtp_timestamp)));
         s->logged_sps = true;
         break;
       }

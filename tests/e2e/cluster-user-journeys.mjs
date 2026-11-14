@@ -553,7 +553,9 @@ try {
     await shot(first, 'duplicate-user-error');
     assert.doesNotMatch(await d.innerText(), /[cev]-[a-f0-9]{10}/i);
     await click(first, d.getByRole('button', { name: '取消', exact: true }));
-    const logs = (await readFile(join(run, 'logs/control.jsonl'), 'utf8'))
+    const logs = (
+      await readFile(join(run, 'logs', new Date().toLocaleDateString('en-CA'), 'control.jsonl'), 'utf8')
+    )
       .trim()
       .split(/\r?\n/)
       .map((x) => {

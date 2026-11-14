@@ -1,5 +1,7 @@
 #include "remotekit/browser/browser_runtime.h"
 #include "browser/clipboard_bridge.h"
+#include "browser/child_crash_observer.h"
+#include "browser/diagnostic_log.h"
 #include "remotekit/browser/audio_target.h"
 
 #include <algorithm>
@@ -88,13 +90,17 @@ void BrowserRuntime::OnGpuInfoUpdate() {
   auto* manager = content::GpuDataManager::GetInstance();
   const auto info = manager->GetGPUInfo();
   const auto& active = info.active_gpu();
-  LOG(INFO) << "RemoteKit GPU init ANGLE=" << info.gl_renderer
-            << " adapter=" << active.device_string << " luid=" << active.luid.HighPart << ","
-            << active.luid.LowPart
-            << " hardware=" << (!active.IsSoftwareRenderer() && !info.UsesSwiftShader())
-            << " compositing=" << manager->GetFeatureStatus(gpu::GPU_FEATURE_TYPE_ACCELERATED_GL)
-            << " rasterization="
-            << manager->GetFeatureStatus(gpu::GPU_FEATURE_TYPE_GPU_TILE_RASTERIZATION);
+  LogEvent("info", "gpu.init",
+           base::DictValue()
+               .Set("angle", info.gl_renderer)
+               .Set("adapter", active.device_string)
+               .Set("luid", base::DictValue()
+                                .Set("high", static_cast<int>(active.luid.HighPart))
+                                .Set("low", static_cast<double>(active.luid.LowPart)))
+               .Set("hardware", !active.IsSoftwareRenderer() && !info.UsesSwiftShader())
+               .Set("compositing", manager->GetFeatureStatus(gpu::GPU_FEATURE_TYPE_ACCELERATED_GL))
+               .Set("rasterization",
+                    manager->GetFeatureStatus(gpu::GPU_FEATURE_TYPE_GPU_TILE_RASTERIZATION)));
 }
 BrowserRuntime::~BrowserRuntime() {
   content::GpuDataManager::GetInstance()->RemoveObserver(this);
@@ -221,6 +227,7 @@ void RemoteKitMainParts::PostCreateMainMessageLoop() {
   // Install before content's thread/service startup. Content owns and destroys
   // this UI-thread clipboard after browser teardown (BrowserMainLoop dtor).
   headless::SetHeadlessClipboardForCurrentThread();
+  child_crashes_ = std::make_unique<ChildCrashObserver>();
 }
 int RemoteKitMainParts::PostCreateThreads() {
   CHECK(content::GetIOThreadTaskRunner({})->PostTask(
@@ -233,7 +240,7 @@ constexpr int kDataPathKey = 16000;
 }  // namespace
 
 int RemoteKitMainParts::PreMainMessageLoopRun() {
-  LOG(INFO) << "RemoteKit startup PreMain entered";
+  LogEvent("info", "browser.startup", base::DictValue().Set("phase", "pre_main"));
   state_ = std::make_unique<BrowserRuntime>();
   const auto& command = *base::CommandLine::ForCurrentProcess();
   CHECK(!display::Screen::HasScreen());
@@ -267,7 +274,7 @@ int RemoteKitMainParts::PreMainMessageLoopRun() {
       data.AppendASCII("session-" + base::NumberToString(session.value))
           .AppendASCII("profile-" + base::NumberToString(profile.value)),
       std::move(profile_key)));
-  LOG(INFO) << "RemoteKit startup Profile ready";
+  LogEvent("info", "browser.startup", base::DictValue().Set("phase", "profile_ready"));
   int width = 1920, height = 1080;
   if ((command.HasSwitch("atlas-width") &&
        !base::StringToInt(command.GetSwitchValueASCII("atlas-width"), &width)) ||
@@ -297,7 +304,7 @@ int RemoteKitMainParts::PreMainMessageLoopRun() {
       base::BindRepeating(&ControlDispatcher::Dispatch, base::Unretained(state_->dispatcher.get())),
       base::BindRepeating(&BrowserRuntime::TakeControlAttachment, base::Unretained(state_.get())),
       base::BindOnce(&BrowserRuntime::OnControlClosed, base::Unretained(state_.get())));
-  LOG(INFO) << "RemoteKit startup control ready";
+  LogEvent("info", "browser.startup", base::DictValue().Set("phase", "control_ready"));
   return 0;
 }
 void RemoteKitMainParts::WillRunMainMessageLoop(std::unique_ptr<base::RunLoop>& run_loop) {

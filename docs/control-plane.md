@@ -145,13 +145,13 @@ RPC 受理、导航开始、文档提交、资源加载完成是不同结果。
 | 公告 | 发布、编辑、删除；每条显示发布/修改时间与"已读/启用用户数"。编辑可选"重新提醒已读的用户" |
 | 节点 | 见[多节点 · 管理 App](cluster.md#管理-app) |
 | 存储 | 对象数、内容与单副本占用、副本不足、孤立副本与待清理会话；每个用户的存储用量（及配额）、文件数与最近 checkpoint |
-| 诊断 | 服务端保存的诊断包（ID、用户、时间、大小、结束原因），下载与删除 |
+| 诊断 | 日志保留天数、按天打包日志、诊断采集包（保存到我的文件、删除）、错误 ID 查找，见[诊断 · 诊断包](diagnostics.md#诊断包) |
 
 **删除用户**是彻底删除：先停用并撤销 token、断开 Viewer；在该 Tenant 的串行队列里，一个事务删除账户、安全设置、公告读记录、工作区、设置、站点偏好、操作与弹窗收据、文件目录与选择事务、放置、checkpoint 与对象索引。对象副本转为首次发现时间为 0 的孤立副本，下一次对象维护即向持有它的节点发送 `object.delete`；离线节点在下次连接对账时清理。Session 本身按节点排队到 `session_deletions`（每个配置的节点一行），节点就绪时发送 `session.delete`，成功后删除该行，因此离线节点重新上线后也会删掉其热/冷副本。最后删除该用户的诊断包目录（若仍在采集，先结束采集）。每张表只由其所有者删除：账户、安全、工作区、操作、文件目录各自的 repository，Placement 删除放置与 checkpoint，对象索引删除对象，`SessionPurge` 负责节点上的 Session 数据。
 
 **公告**是全局的，由管理员发布给所有用户。`announcements(id, title, body, published_at, updated_at)` 保存公告，`announcement_reads(announcement_id, user_id)` 记录谁已读；标题至多 100 字、内容至多 5000 字纯文本（Viewer 保留换行，不解析 HTML/链接）。每个用户的 `ProductState.announcements` 是全部公告按发布时间倒序、带本人的 `read` 标记；发布、编辑、删除后向所有在线 Viewer 推送新快照。Viewer 在产品就绪且开始屏幕未打开时，用对话框从最早的未读公告起逐条显示，关闭即 WS `announcement.read{id}`（幂等）；设置 → 公告列出全部公告。读记录只属于一次发布：编辑时选择重新提醒会更新 `published_at` 并清空该公告的读记录，否则保留。删除用户时删除其读记录；已读统计只计启用的用户。
 
-**诊断下载**是普通 HTTP GET，不能证明 Viewer 已解锁，所以由 `admin.downloadDiagnostic` 在已解锁的租约上签发 60 秒有效、只能使用一次的票据，下载路由 `GET /api/admin/diagnostics/<票据>` 另外要求管理员 cookie。
+Control 不提供文件下载的 HTTP 路由。我的文件的「下载到本地」和预览一样经 Viewer 的 WebRTC 文件通道读出字节（`asset.read`），在客户端拼成 Blob 后由浏览器保存，因此天然受已解锁租约约束。诊断包也没有单独的下载路由：管理员先保存到我的文件。
 
 ## 剪贴板
 

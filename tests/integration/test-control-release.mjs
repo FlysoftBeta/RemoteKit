@@ -8,6 +8,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+function logPath(root, proc) {
+  const now = new Date();
+  const day = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, '0'),
+    String(now.getDate()).padStart(2, '0'),
+  ].join('-');
+  return path.join(root, 'logs', day, `${proc}.jsonl`);
+}
 const execute = promisify(execFile);
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const [manager, releaseTool, updater, dummy] = process.argv.slice(2).map((value) => path.resolve(value));
@@ -57,7 +66,7 @@ async function until(predicate, description, timeout = 90000) {
     await delay(100);
   }
   throw Error(
-    `${phase}: deadline waiting for ${description}\n${await text(path.join(root, 'logs/manager.log'))}\n${await text(path.join(root, 'logs/control.stdout.log'))}\n${await text(path.join(nodeRoot, 'logs/supervisor.log'))}`,
+    `${phase}: deadline waiting for ${description}\n${await text(logPath(root, 'manager'))}\n${await text(logPath(nodeRoot, 'node'))}`,
   );
 }
 async function pythonScript(script, args = []) {
@@ -289,7 +298,7 @@ async function installed(version) {
   await until(
     async () =>
       (await text(path.join(root, 'current'))).trim() === id &&
-      (await text(path.join(root, 'logs/manager.log')))
+      (await text(logPath(root, 'manager')))
         .split('\n')
         .filter(Boolean)
         .map(JSON.parse)
@@ -338,13 +347,13 @@ async function nodeInstalled(version) {
   assert.deepEqual(await readdir(path.join(nodeRoot, 'runtime')), [id]);
   assert.deepEqual(await readdir(path.join(nodeRoot, 'downloads')), []);
   assert(
-    (await text(path.join(nodeRoot, 'logs/supervisor.log')))
+    (await text(logPath(nodeRoot, 'node')))
       .split('\n')
       .filter(Boolean)
       .map(JSON.parse)
       .some((record) => record.ev === 'runtime.activated' && record.buildId === id),
   );
-  assert((await text(path.join(nodeRoot, 'logs/endpoint.log'))).includes('dummy cluster ' + id));
+  assert((await text(logPath(nodeRoot, 'node'))).includes('dummy cluster ' + id));
 }
 function assertAssets(expected) {
   const actual = requests.filter(
@@ -421,9 +430,9 @@ try {
     [null, `bytes=${dropBytes}-`],
   );
   assert.equal(fresh.filter((request) => request.status === 206).length, 1);
-  assert((await text(path.join(root, 'logs/manager.log'))).includes('transfer interrupted'));
+  assert((await text(logPath(root, 'manager'))).includes('transfer interrupted'));
   assert(
-    (await text(path.join(root, 'logs/control.jsonl')))
+    (await text(logPath(root, 'control')))
       .split('\n')
       .filter(Boolean)
       .map(JSON.parse)
@@ -445,13 +454,13 @@ try {
   await installed(2);
   await nodeInstalled(2);
   assertAssets([[2, 'patch']]);
-  assert((await text(path.join(nodeRoot, 'logs/endpoint.log'))).includes('build_mismatch'));
+  assert((await text(logPath(nodeRoot, 'node'))).includes('build_mismatch'));
   assert(
-    (await text(path.join(nodeRoot, 'logs/supervisor.log')))
+    (await text(logPath(nodeRoot, 'node')))
       .split('\n')
       .filter(Boolean)
       .map(JSON.parse)
-      .some((record) => record.ev === 'endpoint.exited' && record.exitCode === 3),
+      .some((record) => record.ev === 'process.exited' && record.child === 'endpoint' && record.code === 3),
   );
   phase = 'missed-deltas';
   console.log('Missed releases chain v2 to v3 to v4');
@@ -499,11 +508,7 @@ try {
     [7, 'patch'],
     [7, 'full'],
   ]);
-  assert(
-    (await text(path.join(root, 'logs/manager.log'))).includes(
-      'release key does not match or data corrupted',
-    ),
-  );
+  assert((await text(logPath(root, 'manager'))).includes('release key does not match or data corrupted'));
   corrupt = undefined;
   phase = 'self-update';
   console.log('Manager v8 self-replacement and successor');
@@ -533,7 +538,7 @@ try {
   );
   assert(successor && successor.ProcessId !== predecessor.child.pid, 'successor manager is running');
   assert(
-    (await text(path.join(root, 'logs/manager.log')))
+    (await text(logPath(root, 'manager')))
       .split('\n')
       .filter(Boolean)
       .map(JSON.parse)
@@ -553,9 +558,7 @@ try {
   start(path.join(wrongRoot, 'remotekit_control.exe'), wrongRoot);
   await until(
     async () =>
-      (await text(path.join(wrongRoot, 'logs/manager.log'))).includes(
-        'release key does not match or data corrupted',
-      ),
+      (await text(logPath(wrongRoot, 'manager'))).includes('release key does not match or data corrupted'),
     'wrong-key rejection',
   );
   assert.equal(await exists(path.join(wrongRoot, 'current')), false);
@@ -566,7 +569,7 @@ try {
     1,
   );
   for (const directory of [root, wrongRoot]) {
-    const log = await text(path.join(directory, 'logs/manager.log'));
+    const log = await text(logPath(directory, 'manager'));
     assert(!log.includes((await text(key)).trim()));
     assert(!log.includes((await text(wrongKey)).trim()));
   }

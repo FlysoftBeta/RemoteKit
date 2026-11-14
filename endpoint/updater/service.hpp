@@ -1,5 +1,6 @@
 #pragma once
-#include "logging.hpp"
+#include "platform.hpp"
+#include "util/log.hpp"
 namespace remotekit::updater {
 struct Service {
   const wchar_t* name;

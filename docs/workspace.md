@@ -189,7 +189,8 @@ WS `launcher.get` 返回 `{ items: LauncherItem[] }`：每项 `{ key, kind: 'app
 
 ### 模型
 
-- 条目保存 `source: {app, channel} | null`、`partitionId | null`、`collected`、名称、类型、大小；`kind:file` 使用资产，`kind:snippet` 使用 Control 保存的文本与预览。文件选择从请求所属 Tab 的窗口 App 与 origin 推断来源，`browser` 使用页面主机名，`web:<id>` 使用空渠道。「我的文件」的上传和拍照使用 `files/upload` 与 `files/camera`。网页下载完成后由 Control 按 `download/<页面主机>` 收集为未分组条目，来源在界面显示为「下载」。排除该来源后，新下载不入目录。
+- 条目保存 `source: {app, channel} | null`、`partitionId | null`、`collected`、名称、类型、大小；`kind:file` 使用资产，`kind:snippet` 使用 Control 保存的文本与预览。文件选择从请求所属 Tab 的窗口 App 与 origin 推断来源，`browser` 使用页面主机名，`web:<id>` 使用空渠道。「我的文件」的上传和拍照使用 `files/upload` 与 `files/camera`。网页下载完成后由 Control 按 `download/<页面主机>` 收集为未分组条目，来源在界面显示为「下载」。排除该来源后，新下载不入目录。管理员保存的诊断包使用 `diagnostics/logs`（按天打包的日志）与 `diagnostics/collection`（诊断采集），来源显示为「诊断信息」（见[诊断 · 诊断包](diagnostics.md#诊断包)）。
+- 每个文件条目都可以「下载到本地」：和预览一样经 WebRTC 文件通道（`asset.read`）读出整个文件，在客户端拼成 Blob 后交给浏览器保存；Control 不提供文件下载路由。
 - 学习 App 自动保存的附件来源为 `{app:'study', channel:<学科名>}`（显示为"学习 › 数学"），条目带 `detail`（作业名或资料名），只用于显示和搜索，不参与分类；超过用户设置的保留天数后按[学习与题库 · 附件进我的文件](learning.md#附件进我的文件)的规则移除。
 - 引用：条目存活当且仅当在文件篮中、被未决选择持有、在某个分区中，或 `collected && source ≠ null`。字节仍按 hash 存储，由对象索引引用计数。
 - 分区：扁平，`{id, name}`，一个条目最多属于一个分区。

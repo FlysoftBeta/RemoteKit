@@ -37,6 +37,7 @@ function libraryPort() {
       selectionId,
     }),
     cancelSelection: async () => ({ state: 'unknown' as SelectionState }),
+    readAsset: async () => new Blob(),
   };
 }
 

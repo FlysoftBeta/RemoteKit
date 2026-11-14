@@ -911,8 +911,7 @@ void Fencing(const fs::path& root) {
       if (step == 2)
         request = test::NodeDesired(Json::array(), "connection", "2");
       else if (step == 3)
-        request = test::Rpc("session.logs.read", {{"log", "browser"}, {"maxBytes", 128}},
-                            "old-session", session);
+        request = test::Rpc("session.snapshot", Json::object(), "old-session", session);
       else {
         request = test::Rpc(step == 4 ? "session.cold.delete" : "shutdown", Json::object(),
                             "node-" + std::to_string(step));

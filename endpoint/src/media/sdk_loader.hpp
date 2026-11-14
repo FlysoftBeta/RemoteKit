@@ -15,6 +15,19 @@ inline Error SdkFailure(int status, const remotekit_sdk_failure& failure) {
           ParseErrorReason(failure.reason),
           failure.has_retry_after ? std::optional<uint32_t>(failure.retry_after_ms) : std::nullopt};
 }
+inline void SdkLogSink(void*, int level, const char* event, const char* fields_json) {
+  const std::string_view raw = fields_json ? fields_json : "";
+  auto fields = Json::parse(raw, nullptr, false);
+  if (!fields.is_object()) {
+    LogEvent(LogLevel::kWarn, "sdk.log_invalid", {{"text", raw.substr(0, 4096)}});
+    return;
+  }
+  const auto severity = level == REMOTEKIT_SDK_LOG_DEBUG   ? LogLevel::kDebug
+                        : level == REMOTEKIT_SDK_LOG_WARN  ? LogLevel::kWarn
+                        : level == REMOTEKIT_SDK_LOG_ERROR ? LogLevel::kError
+                                                           : LogLevel::kInfo;
+  LogEvent(severity, "sdk." + std::string(event ? event : "log"), std::move(fields));
+}
 struct Sdk {
   HMODULE module = nullptr;
   int (*encoder_drop)(uint64_t, uint32_t) = nullptr;
@@ -22,6 +35,7 @@ struct Sdk {
   decltype(&remotekit_rtc_sample_clock) sample_clock = nullptr;
 #define RK_SDK_FUNCTION(name) decltype(&name) name = nullptr;
   RK_SDK_FUNCTION(remotekit_sdk_abi_version)
+  RK_SDK_FUNCTION(remotekit_sdk_set_log_sink)
   RK_SDK_FUNCTION(remotekit_sdk_initialize)
   RK_SDK_FUNCTION(remotekit_sdk_shutdown)
   RK_SDK_FUNCTION(remotekit_sdk_control_connect)
@@ -65,6 +79,9 @@ struct Sdk {
     RK_LOAD(remotekit_sdk_abi_version);
     if (remotekit_sdk_abi_version() != REMOTEKIT_SDK_ABI_VERSION)
       return Error{ErrorCode::kUnavailable, "Browser SDK ABI version mismatch"};
+    RK_LOAD(remotekit_sdk_set_log_sink);
+    if (remotekit_sdk_set_log_sink(SdkLogSink, nullptr) != REMOTEKIT_SDK_OK)
+      return Error{ErrorCode::kUnavailable, "SDK log sink installation failed"};
     RK_LOAD(remotekit_sdk_initialize);
     RK_LOAD(remotekit_sdk_shutdown);
     RK_LOAD(remotekit_sdk_control_connect);

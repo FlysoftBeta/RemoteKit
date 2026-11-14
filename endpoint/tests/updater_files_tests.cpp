@@ -23,7 +23,7 @@ BOOL WINAPI AtomicFlush(HANDLE file) {
 #include <iostream>
 namespace remotekit {
 std::optional<Error> command_error;
-void CaptureCommandError(LogLevel, std::string_view, const Error& error) {
+void CaptureCommandError(LogLevel, std::string_view, const Error& error, Json) {
   command_error = error;
 }
 namespace updater {
@@ -115,7 +115,6 @@ SupervisorFixture supervisor_fixture = SupervisorFixture::kFinalError;
 fs::path supervised_root;
 Result<bool> SupervisedUpdate(const fs::path& root,
                               HANDLE stop,
-                              Log&,
                               bool,
                               RetryUnit&,
                               UpdateStage& stage) {
@@ -183,6 +182,7 @@ int wmain(int argc, wchar_t** argv) {
   auto root = fs::path(argv[1]) / (L"node-files-" + std::to_wstring(GetCurrentProcessId()));
   try {
     fs::create_directories(root);
+    InitLog(root / L"logs", "node");
     wchar_t executable[] = L"node";
     wchar_t uninstall[] = L"service-uninstall";
     wchar_t* command[] = {executable, uninstall};
@@ -296,7 +296,7 @@ int wmain(int argc, wchar_t** argv) {
     Write(root / L"node.json", config);
     offered_release = descriptor;
     offered_release["buildId"] = std::string(64, 'b');
-    Log update_log(root / L"logs/update.log");
+
     Handle update_stop(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     for (auto code :
          {ErrorCode::kInvalidRequest, ErrorCode::kUnauthenticated, ErrorCode::kForbidden,
@@ -308,13 +308,13 @@ int wmain(int argc, wchar_t** argv) {
       download_failure = Error{code, "injected download failure"};
       offered_release["buildId"] = std::string(64, 'b');
       download_requests = 0;
-      auto first = Update(root, update_stop.value, update_log, false, retry, stage);
+      auto first = Update(root, update_stop.value, false, retry, stage);
       Check(!first && first.error().code == code && download_requests == 1);
       retry.Fail(first.error());
-      auto repeated = Update(root, update_stop.value, update_log, false, retry, stage);
+      auto repeated = Update(root, update_stop.value, false, retry, stage);
       Check(!repeated && repeated.error().code == code && download_requests == 1);
       offered_release["buildId"] = std::string(64, 'c');
-      auto changed = Update(root, update_stop.value, update_log, false, retry, stage);
+      auto changed = Update(root, update_stop.value, false, retry, stage);
       Check(!changed && changed.error().code == code && download_requests == 2);
     }
     download_failure.reset();
@@ -323,17 +323,17 @@ int wmain(int argc, wchar_t** argv) {
       UpdateStage stage = DiscoverRelease{};
       receive_failure = Error{ErrorCode::kInvalidRequest, "duplicate key in cluster JSON"};
       receive_failure->error_id = "e-1234567890";
-      auto failed = Update(root, update_stop.value, update_log, false, retry, stage);
+      auto failed = Update(root, update_stop.value, false, retry, stage);
       Check(!failed && failed.error().code == ErrorCode::kInvalidRequest &&
             failed.error().error_id == receive_failure->error_id);
       retry.Fail(failed.error());
       Check(retry.Status() == RetryUnit::State::kFaulted);
       const auto requests = download_requests;
-      auto repeated = Update(root, update_stop.value, update_log, false, retry, stage);
+      auto repeated = Update(root, update_stop.value, false, retry, stage);
       Check(!repeated && repeated.error().code == ErrorCode::kInvalidRequest &&
             download_requests == requests);
       offered_release["sha256"] = std::string(64, 'd');
-      auto changed = Update(root, update_stop.value, update_log, false, retry, stage);
+      auto changed = Update(root, update_stop.value, false, retry, stage);
       Check(!changed && download_requests == requests + 1);
       Check(release::InstalledId(release::Take(ReadCurrent(root))) == std::string(64, 'a'));
       receive_failure.reset();
@@ -352,25 +352,22 @@ int wmain(int argc, wchar_t** argv) {
     {
       Handle blocked(CreateFileW((root / L"current.tmp").c_str(), GENERIC_WRITE, 0, nullptr,
                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
-      auto failed =
-          Update(root, update_stop.value, update_log, false, activation, activation_stage);
+      auto failed = Update(root, update_stop.value, false, activation, activation_stage);
       Check(!failed && failed.error().code == ErrorCode::kUnavailable);
       Check(release::InstalledId(release::Take(ReadCurrent(root))) == std::string(64, 'a'));
     }
     atomic_flush_mode = AtomicFlushMode::kFail;
-    auto unflushed =
-        Update(root, update_stop.value, update_log, false, activation, activation_stage);
+    auto unflushed = Update(root, update_stop.value, false, activation, activation_stage);
     atomic_flush_mode = AtomicFlushMode::kWrite;
     Check(!unflushed && unflushed.error().code == ErrorCode::kUnavailable);
     Check(release::InstalledId(release::Take(ReadCurrent(root))) == std::string(64, 'a'));
     {
       Handle retained(CreateFileW((runtime / L"build.json").c_str(), GENERIC_READ, FILE_SHARE_READ,
                                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-      auto activated =
-          Update(root, update_stop.value, update_log, false, activation, activation_stage);
+      auto activated = Update(root, update_stop.value, false, activation, activation_stage);
       Check(activated && !activated.value());
       Check(release::InstalledId(release::Take(ReadCurrent(root))) == std::string(64, 'b'));
-      std::ifstream events(root / L"logs/update.log");
+      std::ifstream events(root / L"logs" / LocalLogDate() / L"node.jsonl");
       std::string text((std::istreambuf_iterator<char>(events)), {});
       Check(text.find("runtime.cleanup_failed") != std::string::npos);
     }
@@ -382,11 +379,11 @@ int wmain(int argc, wchar_t** argv) {
       extraction = Extraction::kFixture;
       runtime_move = RuntimeMove::kFailOnce;
       const auto connections = release_connections;
-      auto failed = Update(root, update_stop.value, update_log, false, retry, stage);
+      auto failed = Update(root, update_stop.value, false, retry, stage);
       Check(!failed && failed.error().code == ErrorCode::kUnavailable);
       Check(std::holds_alternative<DownloadedRelease>(stage));
       Check(release::InstalledId(release::Take(ReadCurrent(root))) == std::string(64, 'b'));
-      auto installed = Update(root, update_stop.value, update_log, false, retry, stage);
+      auto installed = Update(root, update_stop.value, false, retry, stage);
       Check(installed && !installed.value() && release_connections == connections + 1);
       Check(release::InstalledId(release::Take(ReadCurrent(root))) == std::string(64, 'c'));
       extraction = Extraction::kArchive;
@@ -426,10 +423,13 @@ int wmain(int argc, wchar_t** argv) {
       Check(TestSupervise(changed_root, stop.value, false) == 0);
       Check(supervised_updates == 2 && supervised_delays == 10);
     }
-    Log broken_log(root / L"logs/broken");
-    fs::create_directory(root / L"logs/broken");
+
     {
-      ChildProcess flood(ExecutablePath(), L"--flood", root, broken_log, true);
+      Handle blocked_log(CreateFileW((root / "logs" / LocalLogDate() / "node.jsonl").c_str(),
+                                     GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                     FILE_ATTRIBUTE_NORMAL, nullptr));
+      Check(blocked_log.value != INVALID_HANDLE_VALUE);
+      ChildProcess flood(ExecutablePath(), L"--flood", root, "fixture", true);
       Check(WaitForSingleObject(flood.handle(), 10000) == WAIT_OBJECT_0);
       Check(flood.ExitCode() == 0);
     }
@@ -438,10 +438,10 @@ int wmain(int argc, wchar_t** argv) {
     Handle cleanup_lock(CreateFileW((root / L"runtime/obsolete/locked").c_str(), GENERIC_READ,
                                     FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
                                     nullptr));
-    Log cleanup_log(root / L"logs/cleanup.log");
-    CleanupRuntimeBestEffort(root, std::string(64, 'a'), cleanup_log);
+
+    CleanupRuntimeBestEffort(root, std::string(64, 'a'));
     Check(fs::exists(root / L"runtime/obsolete/locked"));
-    std::ifstream cleanup_events(root / L"logs/cleanup.log");
+    std::ifstream cleanup_events(root / L"logs" / LocalLogDate() / L"node.jsonl");
     std::string cleanup_text((std::istreambuf_iterator<char>(cleanup_events)), {});
     Check(cleanup_text.find("runtime.cleanup_failed") != std::string::npos);
     cleanup_events.close();
@@ -463,28 +463,12 @@ int wmain(int argc, wchar_t** argv) {
     SetEvent(stop.value);
     supervisor.join();
     Check(fs::exists(root / L"runtime/preserve"));
-    Check(!fs::exists(root / L"logs/endpoint.log"));
-    std::ifstream current_events(root / L"logs/supervisor.log");
+    std::ifstream current_events(root / L"logs" / LocalLogDate() / L"node.jsonl");
     std::string current_text((std::istreambuf_iterator<char>(current_events)), {});
     Check(current_text.find("supervisor.current_failed") != std::string::npos);
     current_events.close();
     CloseHandle(blocked_current.Release());
 
-    Log log(root / L"logs/test.log");
-    Bytes bytes(16 * 1024 * 1024);
-    for (uint8_t marker = 0; marker < 6; ++marker) {
-      std::fill(bytes.begin(), bytes.end(), marker);
-      log.Write(bytes);
-    }
-    log.Write(Bytes{99});
-    Check(fs::file_size(root / L"logs/test.log") == 1);
-    for (int i = 1; i <= 4; ++i) {
-      auto path = root / L"logs" / (L"test.log." + std::to_wstring(i));
-      Check(fs::file_size(path) == 16 * 1024 * 1024);
-      std::ifstream file(path, std::ios::binary);
-      Check(file.get() == 6 - i);
-    }
-    Check(!fs::exists(root / L"logs/test.log.5"));
     fs::remove_all(root);
     return 0;
   } catch (const std::exception& error) {

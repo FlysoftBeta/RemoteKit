@@ -35,7 +35,7 @@ export function driveDiagnosticServer(path: 'control' | 'endpoint' | 'archive'):
     let owner = new DiagnosticSessions(directory, {
       control: () => (path === 'control' ? boundary.callSync({ tenant: 'tenant' }, {}) : {}),
       endpoint: () => (path === 'endpoint' ? boundary.call({ tenant: 'tenant' }, {}) : Promise.resolve({})),
-      endpointLog: async () => ({ available: false, data: '', truncated: false }) as never,
+      nodeLogs: () => undefined,
     });
     const viewer = { tenant: 'tenant', lease: 'lease', identity: 'user', epoch: 1, allowed: () => true };
     let id = '';
@@ -57,7 +57,7 @@ export function driveDiagnosticServer(path: 'control' | 'endpoint' | 'archive'):
           control: () => (path === 'control' ? boundary.callSync({ tenant: 'tenant' }, {}) : {}),
           endpoint: () =>
             path === 'endpoint' ? boundary.call({ tenant: 'tenant' }, {}) : Promise.resolve({}),
-          endpointLog: async () => ({ available: false, data: '', truncated: false }) as never,
+          nodeLogs: () => undefined,
         });
         await begin();
       },

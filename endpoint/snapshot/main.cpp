@@ -1,3 +1,5 @@
+#include "crash/crash.hpp"
+#include "util/log.hpp"
 #include "request.hpp"
 #include "workers.hpp"
 #include "util/wire_error.hpp"
@@ -327,8 +329,7 @@ class Service {
     shadow->taken_at = (properties.m_tsCreationTimestamp / 10000) - 11644473600000LL;
     VssFreeSnapshotProperties(&properties);
     shadow->created = Clock::now();
-    std::cout << Json{{"event", "snapshot.taken"}, {"takenAt", shadow->taken_at}}.dump()
-              << std::endl;
+    LogEvent(LogLevel::kInfo, "snapshot.taken", {{"takenAt", shadow->taken_at}});
     return shadow;
   }
   HANDLE root_lock_ = INVALID_HANDLE_VALUE;
@@ -378,6 +379,8 @@ int Run(int argc, wchar_t** argv) {
       node.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") ==
           std::string::npos &&
       supervisor != 0);
+  InitLog(root.parent_path() / "logs", "snapshot");
+  InstallCrashHandler(root.parent_path() / "logs", "snapshot");
   Check(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
   Check(CoInitializeSecurity(nullptr, -1, nullptr, nullptr, RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
                              RPC_C_IMP_LEVEL_IDENTIFY, nullptr, EOAC_NONE, nullptr));
@@ -432,16 +435,19 @@ int Run(int argc, wchar_t** argv) {
 }
 }  // namespace remotekit::snapshot
 int wmain(int argc, wchar_t** argv) {
+  if (remotekit::RunCrashHandler(argc, argv))
+    return 0;
   try {
     return remotekit::snapshot::Run(argc, argv);
   } catch (const remotekit::snapshot::Failure& failure) {
-    std::cout << remotekit::Json{{"event", "snapshot.unavailable"},
-                                 {"os", {{"kind", "hresult"}, {"value", int64_t(failure.hr)}}}}
-                     .dump()
-              << std::endl;
+    remotekit::LogError(
+        remotekit::LogLevel::kError, "snapshot.unavailable",
+        remotekit::WithOsError(remotekit::ErrorCode::kUnavailable, "snapshot unavailable",
+                               remotekit::OsError::Kind::kHresult, int64_t(failure.hr)),
+        {{"proc", "snapshot"}});
   } catch (const std::exception& error) {
-    std::cout << remotekit::Json{{"event", "snapshot.failed"}, {"message", error.what()}}.dump()
-              << std::endl;
+    remotekit::LogEvent(remotekit::LogLevel::kError, "snapshot.failed",
+                        {{"proc", "snapshot"}, {"message", error.what()}});
   }
   return 1;
 }

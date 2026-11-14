@@ -45,6 +45,7 @@ export function useFileLibrary(
       recordUsage: store.recordUsage,
       snippet: store.snippet,
       copySnippet: store.copySnippet,
+      download: store.download,
       mutate: store.mutate,
       select: store.select,
       cancelSelection: store.cancelSelection,

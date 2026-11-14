@@ -1,4 +1,5 @@
 #include "browser/device_configuration.h"
+#include "browser/diagnostic_log.h"
 #include "browser/signin.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
@@ -20,12 +21,11 @@
 #include "base/command_line.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
-#include "base/logging/logging_settings.h"
 #include "base/memory/ref_counted_memory.h"
 #include "base/path_service.h"
-#include "base/strings/string_number_conversions.h"
 #include "components/embedder_support/user_agent_utils.h"
 #include "content/public/browser/browser_main_parts.h"
+#include "content/public/browser/child_process_launcher_utils.h"
 #include "content/public/browser/content_browser_client.h"
 #include "content/public/common/content_client.h"
 #include "content/public/common/content_features.h"
@@ -51,8 +51,8 @@ class ContentClient final : public content::ContentClient {
   }
   blink::OriginTrialPolicy* GetOriginTrialPolicy() override {
     if (!origin_policy_logged_.exchange(true, std::memory_order_relaxed)) {
-      LOG(INFO) << "RemoteKit OriginTrialPolicy supported="
-                << origin_trials_.IsOriginTrialsSupported();
+      LogEvent("info", "browser.origin_trial_policy",
+               base::DictValue().Set("supported", origin_trials_.IsOriginTrialsSupported()));
     }
     return &origin_trials_;
   }
@@ -76,7 +76,7 @@ class BrowserClient final : public ServicesBrowserClient {
  public:
   void AppendExtraCommandLineSwitches(base::CommandLine* command, int child_process_id) override {
     ServicesBrowserClient::AppendExtraCommandLineSwitches(command, child_process_id);
-    constexpr const char* switches[] = {"crash-dir"};
+    constexpr const char* switches[] = {"crash-dir", "tenant-id"};
     command->CopySwitchesFrom(*base::CommandLine::ForCurrentProcess(), switches);
   }
   std::unique_ptr<media::AudioManager> CreateAudioManager(media::AudioLogFactory* log) override {
@@ -198,26 +198,12 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
   enabled += features::kWebContentsDiscard.name;
   enabled += ",RemoteKitOsrOutput";
   command.AppendSwitchASCII("enable-features", enabled);
-  logging::LoggingSettings settings;
-  settings.logging_dest = logging::LOG_TO_STDERR;
-  auto log_path = command.GetSwitchValuePath("log-file");
-  // Chromium child processes receive an inherited logging HANDLE, not a path.
-  // Preserve it so GPU/renderer failures reach this Session's browser log.
-  if (command.GetSwitchValueASCII("enable-logging") == "handle") {
-    uint64_t log_handle = 0;
-    if (base::StringToUint64(command.GetSwitchValueASCII("log-file"), &log_handle) && log_handle) {
-      settings.logging_dest |= logging::LOG_TO_FILE;
-      settings.log_file = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(log_handle));
-    }
+  if (!InitializeDiagnosticLog())
+    return 2;
+  if (!command.HasSwitch("type")) {
+    content::SetChildLogHandleProvider(DuplicateDiagnosticLogHandle);
+    LogEvent("info", "browser.startup", base::DictValue().Set("phase", "logging_ready"));
   }
-  if (!log_path.empty() && log_path.IsAbsolute() && base::CreateDirectory(log_path.DirName())) {
-    settings.logging_dest |= logging::LOG_TO_FILE;
-    settings.log_file_path = log_path.value().c_str();
-    settings.lock_log = logging::LOCK_LOG_FILE;
-  }
-  const bool logging_ready = logging::InitLogging(settings);
-  if (!command.HasSwitch("type"))
-    LOG(INFO) << "RemoteKit startup InitLogging=" << logging_ready;
   if (command.GetSwitchValueASCII("type") == "gpu-process") {
     const auto error = ValidateServiceGpuAdapter(command);
     if (!error.empty()) {

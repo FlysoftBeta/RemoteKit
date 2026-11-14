@@ -1,21 +1,25 @@
+import { controlLogFiles } from './control-log';
+import { join } from 'node:path';
 import { createReadStream } from 'node:fs';
 import limits from '../../../protocol/limits.json';
 import { createInterface } from 'node:readline';
 import { isErrorId, RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import type { NodeRegistry } from '../cluster/node-link';
-import { log, logFiles, reportError } from '../log';
+import { log, reportError } from '../log';
 
 export async function findError(
   errorId: unknown,
   directory: string | undefined,
   nodes: Pick<NodeRegistry, 'all'>,
+  retentionDays = 30,
 ) {
   if (!isErrorId(errorId)) throw new RemoteKitError('invalid_request', '无效的错误 ID');
   const records: { source: string; line: string }[] = [];
   const failures: import('../../shared/admin').ErrorSearchResult['failures'] = [];
   if (!errorId.startsWith('e-')) {
     if (!directory) throw new RemoteKitError('unavailable', '日志目录未配置');
-    for (const path of logFiles(directory)) {
+    for (const file of await controlLogFiles(directory, retentionDays)) {
+      const path = join(directory, file.path);
       const input = createReadStream(path, { encoding: 'utf8' });
       const lines = createInterface({ input, crlfDelay: Infinity });
       try {

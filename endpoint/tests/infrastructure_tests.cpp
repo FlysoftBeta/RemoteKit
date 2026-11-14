@@ -296,20 +296,8 @@ void ManagementDispatch() {
   auto invalid = desired;
   invalid["run"] = "running";
   invalid["commit"] = "invalid";
-  auto logs = test::Rpc("session.logs.read", {{"log", "browser"}, {"maxBytes", 128}}, "log-read");
-  auto replay = logs;
-  replay["replay"] = true;
-  auto unknown = logs;
-  unknown["opId"] = "evicted";
-  unknown["replay"] = true;
-  link.requests = {test::NodeDesired(Json::array({test::Placement()})),
-                   desired,
-                   conflict,
-                   stale,
-                   invalid,
-                   logs,
-                   replay,
-                   unknown};
+  link.requests = {test::NodeDesired(Json::array({test::Placement()})), desired, conflict, stale,
+                   invalid};
   media::Sdk sdk;
   Service service(sdk, parsed.value(), link, {}, "endpoint");
   Check(service.Run() == 0, "management dispatch");
@@ -323,8 +311,6 @@ void ManagementDispatch() {
   Check(reply(2)["error"]["code"] == "conflict" && reply(3)["error"]["code"] == "conflict",
         "revision and placement conflicts");
   Check(reply(4)["error"]["code"] == "invalid_request", "running commit rejected");
-  Check(reply(5)["ok"] && reply(6)["result"] == reply(5)["result"], "target-bound RPC replay");
-  Check(reply(7)["error"]["code"] == "outcome_unknown", "missing replay never executes");
   Check(!link.events.empty() && link.events[0]["event"] == "session.observed",
         "initial observed replaces copy report");
 }

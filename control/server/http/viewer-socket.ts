@@ -1,3 +1,5 @@
+import type { DiagnosticPackages } from '../diagnostics/packages';
+import type { LogRetention } from '../diagnostics/retention';
 import { randomUUID } from 'node:crypto';
 import { BackgroundJob } from '../background';
 import type { IncomingMessage, Server } from 'node:http';
@@ -13,7 +15,13 @@ import { learningMethods } from '../learning/service';
 import { log, reportError } from '../log';
 import type { ViewerAuthority } from '../viewers/viewer-hub';
 
-type DiagnosticAuthority = { sessions?: DiagnosticSessions; identity: string; allowed: () => boolean };
+type DiagnosticAuthority = {
+  sessions?: DiagnosticSessions;
+  packages?: DiagnosticPackages;
+  retention?: LogRetention;
+  identity: string;
+  allowed: () => boolean;
+};
 type RequestContext = {
   host?: string;
   logs?: { directory?: string; nodes: Pick<NodeRegistry, 'all'> };
@@ -123,6 +131,15 @@ const admin = (handler: Handler): Handler =>
       throw new RemoteKitError('forbidden', '需要管理员权限');
     return handler(ctx, params);
   });
+function assertAdmin(ctx: RequestContext) {
+  ctx.services.viewers.assertProductViewer(
+    ctx.authority.tenantId,
+    ctx.authority.leaseId,
+    ctx.authority.epoch,
+  );
+  if (!ctx.services.store.accounts.userForTenant(ctx.authority.tenantId)?.isAdmin)
+    throw new RemoteKitError('forbidden', '需要管理员权限');
+}
 const archives = (ctx: RequestContext) => {
   if (!ctx.diagnostics?.sessions) throw new RemoteKitError('not_found', '诊断采集未配置');
   return ctx.diagnostics.sessions;
@@ -216,7 +233,12 @@ Object.assign(handlers, {
   'admin.removeNode': admin(({ services }, params) => services.nodeAdmin.remove(nodeId(params))),
   'admin.readdNode': admin(({ services }, params) => services.nodeAdmin.readd(nodeId(params))),
   'admin.findError': admin((ctx, params) =>
-    findError(params.errorId, ctx.logs?.directory, ctx.logs?.nodes ?? { all: () => [] }),
+    findError(
+      params.errorId,
+      ctx.logs?.directory,
+      ctx.logs?.nodes ?? { all: () => [] },
+      ctx.diagnostics?.retention?.days ?? 30,
+    ),
   ),
   'admin.diagnostics': admin((ctx) => archives(ctx).archives(tenants(ctx))),
   'admin.deleteDiagnostic': admin(async (ctx, params) => {
@@ -231,9 +253,30 @@ Object.assign(handlers, {
     services.announcements.update(authority.tenantId, params.id, params.title, params.body, params.republish),
   ),
   'admin.deleteAnnouncement': admin(({ services }, params) => services.announcements.delete(params.id)),
-  'admin.downloadDiagnostic': admin(async (ctx, params) => ({
-    url: '/api/admin/diagnostics/' + (await archives(ctx).downloadTicket(params.id)),
-  })),
+  'admin.diagnostics.save': admin((ctx, params) => {
+    if (!ctx.diagnostics?.packages) throw new RemoteKitError('unavailable', '诊断包服务未配置');
+    return ctx.diagnostics.packages.save(ctx.authority.tenantId, params.id, params.operationId, () =>
+      assertAdmin(ctx),
+    );
+  }),
+  'admin.logs.days': admin((ctx) => {
+    if (!ctx.diagnostics?.packages) throw new RemoteKitError('unavailable', '日志未配置');
+    return ctx.diagnostics.packages.dates();
+  }),
+  'admin.logs.jobs': admin((ctx) => ctx.diagnostics?.packages?.jobs(ctx.authority.tenantId) ?? []),
+  'admin.logs.package': admin((ctx, params) => {
+    if (!ctx.diagnostics?.packages) throw new RemoteKitError('unavailable', '日志未配置');
+    return ctx.diagnostics.packages.package(ctx.authority.tenantId, params.date, params.operationId, () => {
+      if (!ctx.services.store.accounts.userForTenant(ctx.authority.tenantId)?.isAdmin)
+        throw new RemoteKitError('forbidden', '需要管理员权限');
+    });
+  }),
+  'admin.logs.settings': admin((ctx, params) => {
+    if (!ctx.diagnostics?.retention) throw new RemoteKitError('unavailable', '日志未配置');
+    return params.logRetentionDays === undefined
+      ? { logRetentionDays: ctx.diagnostics.retention.days }
+      : ctx.diagnostics.retention.change(params.logRetentionDays);
+  }),
 } satisfies Record<string, Handler>);
 for (const method of [
   'auth.get',
@@ -309,6 +352,8 @@ export function attachViewerSocket(
   options: { nodes?: NodeRegistry; logDir?: string },
   helpers: {
     diagnosticSessions?: DiagnosticSessions;
+    packages?: DiagnosticPackages;
+    retention?: LogRetention;
     firstViewer: Map<string, number>;
     checkOrigin: (origin: string | undefined) => void;
     readToken: (req: IncomingMessage) => string | undefined;
@@ -508,6 +553,8 @@ export function attachViewerSocket(
                   request.params,
                   {
                     sessions: diagnosticSessions,
+                    packages: helpers.packages,
+                    retention: helpers.retention,
                     identity: hash,
                     allowed: () =>
                       currentIdentity.tenantId === peer.tenant &&

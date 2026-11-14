@@ -1,4 +1,5 @@
 #include "remotekit/browser/sdk/rtc_internal.h"
+#include "browser/sdk/sdk_logging.h"
 using namespace remotekit::rtc;
 namespace remotekit::rtc {
 // Preserve explicit Chromium trials. Our screenshare default changes only the
@@ -191,10 +192,10 @@ class LocalDescriptionObserver : public webrtc::SetLocalDescriptionObserverInter
               [](const webrtc::RtpExtension& extension) {
                 return extension.uri == webrtc::RtpExtension::kTransportSequenceNumberUri;
               });
-          std::fprintf(stderr,
-                       "RTC negotiated video sender: peer=%llu "
-                       "transport_sequence_extension=%d\n",
-                       p->id, transport_sequence);
+          sdk::LogEvent(REMOTEKIT_SDK_LOG_INFO, "rtc.video_sender",
+                        base::DictValue()
+                            .Set("peer", static_cast<double>(p->id))
+                            .Set("transportSequenceExtension", transport_sequence));
         }
         p->Event(offer_ ? REMOTEKIT_RTC_SDP_OFFER : REMOTEKIT_RTC_SDP_ANSWER, sdp_.data(),
                  sdp_.size());
@@ -271,14 +272,17 @@ int Peer::Start() {
     auto default_env = webrtc::CreateEnvironment();
     auto env = webrtc::CreateEnvironment(
         std::make_unique<RemoteKitFieldTrials>(default_env.field_trials().CreateCopy()));
-    std::fprintf(stderr,
-                 "RTC screenshare pacing configuration: peer=%llu trial=%s "
-                 "rfc8888_enabled=%d explicit_screenshare_trial=%d explicit_strict_trial=%d "
-                 "(configuration only; actual pacing rate is controller-owned)\n",
-                 id, env.field_trials().Lookup("WebRTC-ProbingScreenshareBwe").c_str(),
-                 env.field_trials().IsEnabled("WebRTC-RFC8888CongestionControlFeedback"),
-                 !default_env.field_trials().Lookup("WebRTC-ProbingScreenshareBwe").empty(),
-                 !default_env.field_trials().Lookup("WebRTC-StrictPacingAndProbing").empty());
+    sdk::LogEvent(
+        REMOTEKIT_SDK_LOG_INFO, "rtc.screenshare_pacing",
+        base::DictValue()
+            .Set("peer", static_cast<double>(id))
+            .Set("trial", env.field_trials().Lookup("WebRTC-ProbingScreenshareBwe"))
+            .Set("rfc8888Enabled",
+                 env.field_trials().IsEnabled("WebRTC-RFC8888CongestionControlFeedback"))
+            .Set("explicitScreenshareTrial",
+                 !default_env.field_trials().Lookup("WebRTC-ProbingScreenshareBwe").empty())
+            .Set("explicitStrictTrial",
+                 !default_env.field_trials().Lookup("WebRTC-StrictPacingAndProbing").empty()));
     webrtc::PeerConnectionFactoryDependencies deps;
     deps.env = env;
     deps.network_thread = network.get();
@@ -300,7 +304,8 @@ int Peer::Start() {
       webrtc::PeerConnectionFactoryInterface::Options factory_options;
       factory_options.network_ignore_mask = 0;
       factory->SetOptions(factory_options);
-      std::fprintf(stderr, "RTC explicit loopback candidate experiment enabled: peer=%llu\n", id);
+      sdk::LogEvent(REMOTEKIT_SDK_LOG_INFO, "rtc.loopback_enabled",
+                    base::DictValue().Set("peer", static_cast<double>(id)));
     }
     webrtc::PeerConnectionInterface::RTCConfiguration config;
     config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;

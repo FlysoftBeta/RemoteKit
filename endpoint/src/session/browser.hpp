@@ -91,7 +91,8 @@ class BrowserRuntime {
   BrowserProcess process_;
   BrowserRpc rpc_;
   const cluster::Key& profile_key_;
-  fs::path log_;
+  fs::path logs_root_;
+  std::string session_id_;
   fs::path crash_directory_;
   std::string incarnation_, process_incarnation_;
   BrowserStartPolicy start_policy_;

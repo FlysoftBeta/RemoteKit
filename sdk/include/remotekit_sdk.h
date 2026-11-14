@@ -33,6 +33,26 @@ enum remotekit_sdk_status {
 };
 
 REMOTEKIT_SDK_API uint32_t remotekit_sdk_abi_version(void);
+
+enum remotekit_sdk_log_level {
+  REMOTEKIT_SDK_LOG_DEBUG = 0,
+  REMOTEKIT_SDK_LOG_INFO = 1,
+  REMOTEKIT_SDK_LOG_WARN = 2,
+  REMOTEKIT_SDK_LOG_ERROR = 3
+};
+/* event_ascii is "component.what" (lowercase, underscores, one dot).
+ * fields_json is a NUL-terminated UTF-8 JSON object without ts/lvl/ev/proc/pid.
+ * Both pointers are valid only for the duration of the call. Called from any
+ * SDK or WebRTC thread, possibly concurrently; the sink must not block on SDK
+ * work or call back into the SDK. */
+typedef void (*remotekit_sdk_log_fn)(void* context,
+                                     int level,
+                                     const char* event_ascii,
+                                     const char* fields_json);
+/* Install before remotekit_sdk_initialize; may be called once. The SDK never
+ * writes to stdout or stderr. Records produced before installation and records
+ * the SDK emits when no sink is installed are dropped. */
+REMOTEKIT_SDK_API int remotekit_sdk_set_log_sink(remotekit_sdk_log_fn sink, void* context);
 /* Standalone process only: do not initialize inside a Chromium ContentMain
  * process. Calls are serialized. Shutdown is terminal; initialize is idempotent
  * before shutdown. No C++ types or owned allocations cross this ABI. */
@@ -79,7 +99,7 @@ REMOTEKIT_SDK_API int remotekit_sdk_control_request(uint64_t handle,
                                                     uint32_t timeout_ms);
 REMOTEKIT_SDK_API int remotekit_sdk_control_close(uint64_t handle);
 
-#define REMOTEKIT_SDK_ABI_VERSION 4
+#define REMOTEKIT_SDK_ABI_VERSION 5
 #define REMOTEKIT_SDK_RENDER_SLOT_COUNT 4
 struct remotekit_sdk_render_setup {
   uint32_t struct_size, width, height, mapping_size;

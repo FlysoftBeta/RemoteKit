@@ -1,33 +1,24 @@
-import { open } from 'node:fs/promises';
-import { log, logFiles } from '../log';
+import { lstat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { children, hostDays, type LogFile } from './host-logs';
 
-export async function controlLogTail(directory: string, budget = 4 * 1024 * 1024) {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  let total = 0;
-  for (const path of logFiles(directory).slice(0, 2)) {
-    const file = await open(path, 'r').catch((err: NodeJS.ErrnoException) => {
-      if (err.code === 'ENOENT') return undefined;
-      log.warn('diagnostics.control_log_failed', { path, err });
-      throw err;
-    });
-    if (!file) continue;
-    try {
-      const { size } = await file.stat();
-      total += size;
-      const length = Math.min(size, budget - bytes);
-      const chunk = Buffer.alloc(length);
-      let read = 0;
-      while (read < length) {
-        const result = await file.read(chunk, read, length - read, size - length + read);
-        if (!result.bytesRead) break;
-        read += result.bytesRead;
-      }
-      chunks.unshift(chunk.subarray(0, read));
-      bytes += read;
-    } finally {
-      await file.close();
+export async function controlLogFiles(directory: string, days = 30) {
+  const files: LogFile[] = [];
+  for (const day of await hostDays(directory, days)) {
+    const parts: LogFile[] = [];
+    for (const entry of await children(join(directory, day))) {
+      if (!entry.isFile() || entry.isSymbolicLink() || !/^control(?:\.\d+)?\.jsonl$/.test(entry.name))
+        continue;
+      const info = await lstat(join(directory, day, entry.name));
+      if (info.isSymbolicLink()) continue;
+      parts.push({ path: `${day}/${entry.name}`, size: info.size, mtime: info.mtimeMs });
     }
+    parts.sort(
+      (a, b) =>
+        Number(/control\.(\d+)\.jsonl$/.exec(b.path)?.[1] ?? 0) -
+        Number(/control\.(\d+)\.jsonl$/.exec(a.path)?.[1] ?? 0),
+    );
+    files.push(...parts);
   }
-  return { data: Buffer.concat(chunks), dropped: total - bytes };
+  return files;
 }

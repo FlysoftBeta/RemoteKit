@@ -52,6 +52,7 @@ struct ClusterLink::Impl {
     std::string bytes;
     DeliveryFlag delivery;
     std::string observation;
+    std::optional<std::vector<uint8_t>> binary;
   };
   Connector connect;
   ValidateConfig validate;
@@ -250,6 +251,15 @@ struct ClusterLink::Impl {
               continue;
             }
             auto& json = received.value().json;
+            if (json.value("type", Json()) == "node.settings") {
+              if (json.size() != 2 || !json.contains("logRetentionDays") ||
+                  !json["logRetentionDays"].is_number_integer() || json["logRetentionDays"] < 1 ||
+                  json["logRetentionDays"] > 365) {
+                protocol_error = true;
+                lost("invalid_settings");
+                break;
+              }
+            }
             if (json.value("type", Json()) == "node.peers") {
               std::lock_guard callback_lock(callback_mutex);
               if (!json.contains("peers") || !json["peers"].is_array() ||
@@ -348,7 +358,7 @@ struct ClusterLink::Impl {
           return;
         message = std::move(outgoing.front());
         outgoing.pop_front();
-        outgoing_bytes -= message.bytes.size();
+        outgoing_bytes -= message.bytes.size() + (message.binary ? message.binary->size() : 0);
         if (outgoing.size() < limits::managementQueueMessages &&
             outgoing_bytes < limits::managementQueueBytes)
           queue_full = false;
@@ -358,7 +368,11 @@ struct ClusterLink::Impl {
         current = channel;
         sending = true;
       }
-      const auto send = [&] { return bool(current->Send(Json::parse(message.bytes))); };
+      const auto send = [&] {
+        const auto header = Json::parse(message.bytes);
+        return message.binary ? bool(current->SendBinary(header, *message.binary))
+                              : bool(current->Send(header));
+      };
       const auto sent =
           message.delivery ? message.delivery->Dispatch(send) : std::optional<bool>(send());
       {
@@ -454,7 +468,10 @@ std::optional<ManagementLink::ReadyState> ClusterLink::ReadyConfiguration() {
     return {};
   return ReadyState{impl_->active, impl_->object_keys, impl_->connection_epoch};
 }
-bool ClusterLink::Queue(const Json& message, uint64_t generation, DeliveryFlag delivery) {
+bool ClusterLink::Queue(const Json& message,
+                        uint64_t generation,
+                        DeliveryFlag delivery,
+                        std::optional<std::vector<uint8_t>> binary) {
   auto bytes = message.dump();
   std::lock_guard lock(impl_->mutex);
   if (!generation || generation != impl_->active || impl_->stopping)
@@ -479,7 +496,8 @@ bool ClusterLink::Queue(const Json& message, uint64_t generation, DeliveryFlag d
   const bool reply = (message.contains("id") && message.contains("ok")) ||
                      message.value("event", Json()) == "rtc.signal";
   const auto queued_messages = impl_->outgoing.size() + (replaced == impl_->outgoing.end() ? 1 : 0);
-  const auto queued_bytes = impl_->outgoing_bytes - replaced_bytes + bytes.size();
+  const auto queued_bytes =
+      impl_->outgoing_bytes - replaced_bytes + bytes.size() + (binary ? binary->size() : 0);
   if (!reply &&
       ((replaced == impl_->outgoing.end() && queued_messages > limits::managementQueueMessages) ||
        queued_bytes > limits::managementQueueBytes)) {
@@ -498,7 +516,8 @@ bool ClusterLink::Queue(const Json& message, uint64_t generation, DeliveryFlag d
     delivery = found->second.delivery;
   }
   impl_->outgoing_bytes = queued_bytes;
-  Impl::Message queued{generation, std::move(bytes), std::move(delivery), std::move(observation)};
+  Impl::Message queued{generation, std::move(bytes), std::move(delivery), std::move(observation),
+                       std::move(binary)};
   if (replaced != impl_->outgoing.end()) {
     *replaced = std::move(queued);
     if (queued_bytes < limits::managementQueueBytes &&
@@ -510,6 +529,14 @@ bool ClusterLink::Queue(const Json& message, uint64_t generation, DeliveryFlag d
   impl_->wake.notify_all();
   return true;
 }
+bool ClusterLink::SendBinaryReply(uint64_t generation,
+                                  const Json& header,
+                                  std::span<const uint8_t> bytes) {
+  if (bytes.size() > limits::logWindowBytes)
+    return false;
+  return Queue(header, generation, {}, std::vector<uint8_t>(bytes.begin(), bytes.end()));
+}
+
 bool ClusterLink::SendReply(uint64_t generation, const Json& reply) {
   const auto bytes = reply.dump().size();
   const auto limit = cluster::JsonLimit(reply);

@@ -18,6 +18,7 @@
 #include "content/public/browser/gpu_data_manager_observer.h"
 #include "ui/display/screen.h"
 namespace remotekit::browser {
+class ChildCrashObserver;
 class RemoteTouchSelectionMenuRunner;
 class RemoteContextMenu;
 class ClipboardBridge;
@@ -81,6 +82,7 @@ class RemoteKitMainParts final : public content::BrowserMainParts {
   void PostMainMessageLoopRun() override;
 
  private:
+  std::unique_ptr<ChildCrashObserver> child_crashes_;
   std::unique_ptr<BrowserRuntime> state_;
 };
 }  // namespace remotekit::browser

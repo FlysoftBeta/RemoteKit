@@ -1,3 +1,4 @@
+import { readServerSettings } from './server-settings';
 import { strictSqlite } from './sqlite';
 import { CoordinationRepository } from './coordination';
 import Sqlite from 'better-sqlite3';
@@ -48,6 +49,7 @@ export class ControlDatabase {
         buildId: options.buildId,
         atRestKey: this.atRestKey,
       });
+      readServerSettings(this.db);
     } catch (error) {
       this.db.close();
       throw error;

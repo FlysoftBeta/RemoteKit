@@ -8,6 +8,24 @@
 #include <windows.h>
 
 namespace remotekit {
+inline Result<BY_HANDLE_FILE_INFORMATION> FileIdentityNoReparse(const std::filesystem::path& path) {
+  const auto file = CreateFileW(
+      path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (file == INVALID_HANDLE_VALUE)
+    return WithOsError(ErrorCode::kUnavailable, "file attributes unavailable",
+                       OsError::Kind::kWin32, GetLastError());
+  BY_HANDLE_FILE_INFORMATION info{};
+  const auto ok = GetFileInformationByHandle(file, &info);
+  const auto error = GetLastError();
+  CloseHandle(file);
+  if (!ok)
+    return WithOsError(ErrorCode::kUnavailable, "file identity unavailable", OsError::Kind::kWin32,
+                       error);
+  if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+    return Error{ErrorCode::kRejected, "file contains a reparse point"};
+  return info;
+}
 inline Result<std::optional<std::string>> ReadFileIfExists(const std::filesystem::path& path) {
   const auto file = CreateFileW(path.c_str(), GENERIC_READ,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,

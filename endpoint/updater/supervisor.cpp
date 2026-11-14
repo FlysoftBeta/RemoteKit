@@ -13,8 +13,6 @@ using EndpointResult = std::variant<DWORD, Replaced>;
 EndpointResult RunEndpoint(const fs::path& root,
                            const std::string& id,
                            HANDLE stop,
-                           Log& log,
-                           Log& endpoint_log,
                            bool service,
                            RetryUnit& replacement_retry) {
   auto executable = root / L"runtime" / id / L"bin/endpoint_service.exe";
@@ -23,9 +21,9 @@ EndpointResult RunEndpoint(const fs::path& root,
     throw std::runtime_error("cannot load snapshot node identity");
   SnapshotSupervisor snapshots(executable.parent_path() / L"remotekit_snapshot.exe", root,
                                config.value().node_id);
-  ChildProcess child(executable, L"--node-root=" + Quote(root.wstring()), root, endpoint_log,
-                     false);
-  log.Event(LogLevel::kInfo, "endpoint.started");
+  ChildProcess child(executable, L"--node-root=" + Quote(root.wstring()), root, "endpoint", false,
+                     L"", false);
+  LogEvent(LogLevel::kInfo, "endpoint.started");
   HANDLE waits[] = {stop, child.handle()};
   DWORD result = WAIT_TIMEOUT;
   while ((result = WaitForMultipleObjects(2, waits, FALSE, 1000)) == WAIT_TIMEOUT) {
@@ -33,7 +31,7 @@ EndpointResult RunEndpoint(const fs::path& root,
       continue;
     auto replaced = ReplaceExecutable(root / L"remotekit_node.exe",
                                       executable.parent_path() / L"remotekit_node.exe", root,
-                                      L"run --root=" + Quote(root.wstring()), service, log);
+                                      L"run --root=" + Quote(root.wstring()), service);
     if (!replaced)
       replacement_retry.Fail(replaced.error());
     else {
@@ -47,7 +45,7 @@ EndpointResult RunEndpoint(const fs::path& root,
   if (result == WAIT_OBJECT_0 || result == WAIT_FAILED)
     child.Stop(30000);
   DWORD code = child.ExitCode();
-  log.Event(LogLevel::kWarn, "endpoint.exited", {{"exitCode", code}});
+
   return code;
 }
 }  // namespace
@@ -56,10 +54,10 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
   std::error_code ec;
   fs::remove(root / L"remotekit_node.exe.old", ec);
   fs::remove(root / L"remotekit_node.exe.new", ec);
-  Log log(root / L"logs/supervisor.log"), endpoint_log(root / L"logs/endpoint.log");
+
   auto config = cluster::LoadNodeFiles(root);
   if (!config) {
-    log.Event(LogLevel::kError, "supervisor.config_failed", LogErrorFields(config.error()));
+    LogEvent(LogLevel::kError, "supervisor.config_failed", LogErrorFields(config.error()));
     return 1;
   }
   enum class Phase { kStartup, kRun, kUpdate };
@@ -73,7 +71,7 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
   while (!Stopping(stop)) {
     auto current = ReadCurrent(root);
     if (!current) {
-      log.Event(LogLevel::kError, "supervisor.current_failed", LogErrorFields(current.error()));
+      LogEvent(LogLevel::kError, "supervisor.current_failed", LogErrorFields(current.error()));
       if (Delay(stop, 1000))
         break;
       continue;
@@ -81,7 +79,7 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
     const auto* missing = std::get_if<release::NotInstalled>(&current.value());
     const auto invalid = missing ? missing->invalid : std::nullopt;
     if (invalid && !reported_invalid) {
-      log.Event(LogLevel::kWarn, "current.invalid", {{"message", *invalid}});
+      LogEvent(LogLevel::kWarn, "current.invalid", {{"message", *invalid}});
       update_retry.Input(config.value().node_id + ":" + *invalid);
       phase = Phase::kStartup;
     }
@@ -92,7 +90,7 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
     }
     observed_current = id;
     if (phase == Phase::kStartup) {
-      CleanupRuntimeBestEffort(root, id, log);
+      CleanupRuntimeBestEffort(root, id);
       update_stage = DiscoverRelease{};
       phase = Phase::kRun;
     }
@@ -100,7 +98,7 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
     if (!id.empty() && replacement_retry.Ready()) {
       auto replaced = ReplaceExecutable(root / L"remotekit_node.exe",
                                         root / L"runtime" / id / L"bin/remotekit_node.exe", root,
-                                        L"run --root=" + Quote(root.wstring()), service, log);
+                                        L"run --root=" + Quote(root.wstring()), service);
       if (!replaced)
         replacement_retry.Fail(replaced.error());
       else {
@@ -117,12 +115,12 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
           break;
         continue;
       }
-      auto result = Update(root, stop, log, service, update_retry, update_stage);
+      auto result = Update(root, stop, service, update_retry, update_stage);
       if (!result) {
         const auto previous_status = update_retry.Status();
         update_retry.Fail(result.error());
         if (previous_status == RetryUnit::State::kIdle)
-          log.Event(LogLevel::kError, "supervisor.update_failed", LogErrorFields(result.error()));
+          LogEvent(LogLevel::kError, "supervisor.update_failed", LogErrorFields(result.error()));
         continue;
       }
       update_retry.Success();
@@ -140,7 +138,7 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
     const auto started = GetTickCount64();
     DWORD code = 1;
     try {
-      auto result = RunEndpoint(root, id, stop, log, endpoint_log, service, replacement_retry);
+      auto result = RunEndpoint(root, id, stop, service, replacement_retry);
       if (std::holds_alternative<Replaced>(result))
         return service ? 1 : 0;
       code = std::get<DWORD>(result);
@@ -160,7 +158,7 @@ int Supervise(const fs::path& root, HANDLE stop, bool service) {
       continue;
     process_retry.Fail({ErrorCode::kUnavailable, "endpoint process exited"});
   }
-  log.Event(LogLevel::kInfo, "supervisor.stopped");
+  LogEvent(LogLevel::kInfo, "supervisor.stopped");
   return 0;
 }
 }  // namespace remotekit::updater

@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { Readable } from 'node:stream';
+import { DiagnosticPackages } from '../diagnostics/packages';
+import { LogRetention } from '../diagnostics/retention';
 import { readFile } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -26,7 +28,7 @@ export function createHttp(
   },
 ) {
   let closing = false;
-  const diagnosticSessions = options.diagnosticDir
+  const diagnosticSessions: DiagnosticSessions | undefined = options.diagnosticDir
     ? new DiagnosticSessions(options.diagnosticDir, {
         control: (tenant) => {
           const { revision, spaces, activeSpaceId, settings, tabs, windows } =
@@ -52,10 +54,30 @@ export function createHttp(
           };
         },
         endpoint: (tenant) => control.endpoint.snapshot(tenant, { outputDiagnostics: true }),
-        endpointLog: (tenant, request) => control.endpoint.readLog(tenant, request),
+        nodeLogs: (tenant) => {
+          const placement = control.endpoint.placement.peek(tenant);
+          const node = placement && control.endpoint.nodes.get(placement.nodeId);
+          return node && placement ? { node, sessionId: placement.sessionId } : undefined;
+        },
+        retentionDays: (): number => retention?.days ?? 30,
         logDir: options.logDir,
       })
     : undefined;
+  const retention =
+    options.logDir && options.nodes
+      ? new LogRetention(control.store, options.nodes, options.logDir, diagnosticSessions)
+      : undefined;
+  const packages =
+    options.logDir && options.nodes
+      ? new DiagnosticPackages(
+          control,
+          options.nodes,
+          options.logDir,
+          diagnosticSessions,
+          () => retention?.days ?? 30,
+        )
+      : undefined;
+  retention?.start();
   const inflight = new Set<Promise<unknown>>();
   const track = <T>(promise: Promise<T>): Promise<T> => {
     inflight.add(promise);
@@ -117,19 +139,6 @@ export function createHttp(
           Vary: 'Cookie',
         });
         res.end(req.method === 'HEAD' ? undefined : icon.png);
-        return;
-      }
-      const download = /^\/api\/admin\/diagnostics\/([0-9a-f]{64})$/.exec(path);
-      if (download && req.method === 'GET') {
-        if (!diagnosticSessions) throw new RemoteKitError('not_found', '诊断采集未配置');
-        if (!control.accounts.identity(token)?.user.isAdmin)
-          throw new RemoteKitError('forbidden', '需要管理员权限');
-        const archive = diagnosticSessions.takeDownload(download[1]);
-        res.writeHead(200, {
-          'Content-Type': 'application/zstd',
-          'Content-Disposition': `attachment; filename="remotekit-diagnostics-${archive.id}.tar.zst"`,
-        });
-        await pipeline(createReadStream(archive.path), res);
         return;
       }
       if (path === '/api/socket/check' && req.method === 'GET') {
@@ -202,6 +211,10 @@ export function createHttp(
         method: req.method,
         route: new URL(req.url ?? '/', 'http://localhost').pathname,
       });
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
       if (failure.retryAfterMs !== undefined)
         res.setHeader('Retry-After', String(Math.ceil(failure.retryAfterMs / 1000)));
       json(res, httpStatus[failure.code], { error: wireError(failure) });
@@ -221,6 +234,8 @@ export function createHttp(
   });
   const viewerSocket = attachViewerSocket(control, server, options, {
     diagnosticSessions,
+    packages,
+    retention,
     firstViewer,
     checkOrigin,
     readToken,
@@ -250,6 +265,8 @@ export function createHttp(
       await httpClosed;
       while (inflight.size) await Promise.allSettled([...inflight]);
       await archivesClosed;
+      await packages?.close();
+      await retention?.close();
       control.rtc.clearSignals();
     })();
     return shutdownPromise;

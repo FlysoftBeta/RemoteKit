@@ -1,3 +1,4 @@
+#include "util/log.hpp"
 #include "supervisor.hpp"
 #include <thread>
 #include <iostream>
@@ -37,6 +38,7 @@ int wmain(int argc, wchar_t** argv) {
         Sleep(20);
       }
     });
+    remotekit::InitLog(root / L"logs", "node");
     int code = Supervise(root, stop.value, false);
     watcher.request_stop();
     return code;

@@ -58,9 +58,17 @@ export const migrations: Migration[] = [
       );
     },
   },
+  {
+    version: 25,
+    name: 'diagnostic retention settings',
+    up(db) {
+      db.exec(`CREATE TABLE server_settings (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);
+        INSERT INTO server_settings VALUES (1,'{"version":1,"logRetentionDays":30}');`);
+    },
+  },
 ];
 
-export const currentVersion = 24;
+export const currentVersion = 25;
 export interface MigrationOptions extends MigrationContext {
   backupDirectory: string;
   buildId: string;

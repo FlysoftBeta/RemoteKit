@@ -10,7 +10,6 @@
 #include <atomic>
 #include <condition_variable>
 #include <cmath>
-#include <cstdio>
 #include <functional>
 #include <limits>
 #include <map>

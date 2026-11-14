@@ -4,6 +4,7 @@ import {
   ContentPasteOutlined,
   DeleteOutline,
   DownloadOutlined,
+  DescriptionOutlined,
   EditOutlined,
   FolderOutlined,
   InboxOutlined,
@@ -519,6 +520,7 @@ function NavRow({
 
 export function sourceIcon(view: FilesView) {
   const app = typeof view === 'object' && 'source' in view ? view.source.app : '';
+  if (app === 'diagnostics') return <DescriptionOutlined />;
   if (app === 'download') return <DownloadOutlined />;
   if (app === 'browser') return <LanguageOutlined />;
   if (app === 'files') return <FolderOutlined />;

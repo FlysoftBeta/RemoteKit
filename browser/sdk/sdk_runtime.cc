@@ -1,4 +1,5 @@
 #include "remotekit/browser/sdk/sdk_internal.h"
+#include "browser/sdk/sdk_logging.h"
 #include "ui/events/event_constants.h"
 #include "ui/events/keycodes/dom/keycode_converter.h"
 // Chromium's layout-aware Windows key translation is private to ui/events.
@@ -49,6 +50,17 @@ uint32_t remotekit_sdk_abi_version(void) {
   return REMOTEKIT_SDK_ABI_VERSION;
 }
 
+int remotekit_sdk_set_log_sink(remotekit_sdk_log_fn sink, void* context) {
+  if (!sink)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  auto& state = State();
+  std::lock_guard lock(state.lock);
+  if (state.phase != SDKPhase::kUninitialized || HasLogSink())
+    return REMOTEKIT_SDK_INVALID_STATE;
+  InstallLogSink(sink, context);
+  return REMOTEKIT_SDK_OK;
+}
+
 int remotekit_sdk_initialize(void) {
   auto& state = State();
   std::lock_guard<std::mutex> lock(state.lock);
@@ -77,6 +89,7 @@ int remotekit_sdk_initialize(void) {
   state.ipc_support = std::make_unique<mojo::core::ScopedIPCSupport>(
       state.io_thread->task_runner(), mojo::core::ScopedIPCSupport::ShutdownPolicy::CLEAN);
   state.phase = SDKPhase::kRunning;
+  LogEvent(REMOTEKIT_SDK_LOG_INFO, "runtime.initialized", base::DictValue());
   return REMOTEKIT_SDK_OK;
 }
 

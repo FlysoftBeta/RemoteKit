@@ -91,8 +91,7 @@ bool ValidUrl(const std::string& url) {
     return false;
   }
 }
-Http::Http(std::string proxy, HANDLE stop, updater::Log* log)
-    : proxy_(std::move(proxy)), stop_(stop), log_(log) {}
+Http::Http(std::string proxy, HANDLE stop) : proxy_(std::move(proxy)), stop_(stop) {}
 void Http::Request(const std::string& url,
                    uint64_t offset,
                    const std::function<void(bool)>& begin,
@@ -185,8 +184,7 @@ Bytes Http::Get(const std::string& url, uint64_t limit) const {
   return bytes;
 }
 void Http::LogFailure(const Error& error) const {
-  if (log_)
-    log_->Event(LogLevel::kWarn, "release.http_failed", LogErrorFields(error));
+  LogEvent(LogLevel::kWarn, "release.http_failed", LogErrorFields(error));
 }
 void Http::Download(const std::string& url, const fs::path& partial, uint64_t expected) const {
   uint64_t offset = fs::exists(partial) ? fs::file_size(partial) : 0;
@@ -216,11 +214,10 @@ void Http::Download(const std::string& url, const fs::path& partial, uint64_t ex
       });
   file.close();
   Io(!file.fail() && offset == expected, "release slice transfer interrupted");
-  if (log_)
-    log_->Event(
-        LogLevel::kInfo, "release.slice_downloaded",
-        {{"file", partial.filename().string()},
-         {"bytes", offset},
-         {"bytesPerSecond", received * 1000 / std::max<ULONGLONG>(1, GetTickCount64() - started)}});
+  LogEvent(
+      LogLevel::kInfo, "release.slice_downloaded",
+      {{"file", partial.filename().string()},
+       {"bytes", offset},
+       {"bytesPerSecond", received * 1000 / std::max<ULONGLONG>(1, GetTickCount64() - started)}});
 }
 }  // namespace remotekit::release

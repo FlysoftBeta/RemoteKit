@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import { EndpointLog } from './endpoint-log';
+import { nodeLogDays, nodeLogList, nodeLogRead } from '../diagnostics/node-logs';
 import { MetricsHistory } from './metrics';
 import {
   RemoteKitError,
@@ -145,6 +146,7 @@ export class StdioCarrier extends Carrier {
       this.recordClose('child_error', errorDetail(error));
       this.emit('close');
     });
+    child.once('close', () => endpointLog.flush());
     child.once('exit', (code, signal) => {
       this.recordClose('child_exit', `Endpoint exited: code=${code}, signal=${signal}`);
       this.emit('close');
@@ -189,7 +191,7 @@ export interface NodeHistory {
   connectedAt?: number;
   disconnectedAt?: number;
   rejected?: { code: string; buildId: string; at: number };
-  exited?: { code: number | null; at: number };
+  exited?: { code: number | null; at: number; childPid?: number };
   coordinationError?: import('../../shared/errors').WireError;
   launchError?: import('../../shared/errors').WireError;
 }
@@ -239,7 +241,16 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   private readonly timedOut = new Set<string>();
   private child?: ChildProcessWithoutNullStreams;
   private readonly launchRetry = new RetryUnit({
-    failed: (error) => log.warn('node.launch_failed', { nodeId: this.nodeId, err: error }),
+    failed: (error) => {
+      log.warn('node.launch_failed', {
+        nodeId: this.nodeId,
+        child: 'endpoint',
+        childPid: this.events.exited?.childPid,
+        code: this.events.exited?.code,
+        errorId: error.errorId,
+        err: error,
+      });
+    },
     recovered: () => log.info('node.launch_recovered', { nodeId: this.nodeId }),
   });
   private stopped = false;
@@ -350,11 +361,14 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     if (!this.launchRetry.ready(JSON.stringify([launch, this.registry.options.buildId]))) return;
     this.state = { state: 'connecting' };
     let finished = false;
-    const exited = (code: number | null, cause?: unknown) => {
+    const exited = (code: number | null, cause?: unknown, childPid = this.child?.pid) => {
       if (finished) return;
       finished = true;
       this.child = undefined;
-      this.events = { ...this.events, exited: { code, at: Date.now() } };
+      this.events = {
+        ...this.events,
+        exited: { code, at: Date.now(), ...(childPid === undefined ? {} : { childPid }) },
+      };
       if (!this.current) this.state = { state: 'offline' };
       if (!this.stopped) {
         this.launchRetry.fail(
@@ -365,6 +379,8 @@ export class NodeLink extends EventEmitter implements EndpointLink {
             ),
         );
         this.launchRetry.schedule(() => this.start());
+      } else if (code !== null && code !== 0) {
+        log.warn('process.exited', { child: 'endpoint', childPid, code });
       }
     };
     void (async () => {
@@ -379,14 +395,17 @@ export class NodeLink extends EventEmitter implements EndpointLink {
               { stdio: 'pipe', windowsHide: true },
             );
             this.child = installer;
-            const log = new EndpointLog(join(launch.root, 'logs', 'endpoint.log'));
+            const stdout = new EndpointLog(installer.pid, 'stdout', 'node');
+            const stderr = new EndpointLog(installer.pid, 'stderr', 'node');
             installer.stdin.end();
-            installer.stdout.on('data', (bytes: Buffer) => log.write(bytes));
-            installer.stderr.on('data', (bytes: Buffer) => log.write(bytes));
+            installer.stdout.on('data', (bytes: Buffer) => stdout.write(bytes));
+            installer.stderr.on('data', (bytes: Buffer) => stderr.write(bytes));
             installer.once('error', reject);
-            installer.once('close', (code) =>
-              code === 0 ? resolve() : reject(new Error(`Local node install exited ${code}`)),
-            );
+            installer.once('close', (code) => {
+              stdout.flush();
+              stderr.flush();
+              code === 0 ? resolve() : reject(new Error(`Local node install exited ${code}`));
+            });
           });
           this.child = undefined;
         } catch (error) {
@@ -405,12 +424,9 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         windowsHide: true,
       });
       this.child = child;
-      this.registry.accept(
-        new StdioCarrier(child, new EndpointLog(join(launch.root, 'logs', 'endpoint.log'))),
-        this.nodeId,
-      );
+      this.registry.accept(new StdioCarrier(child, new EndpointLog(child.pid)), this.nodeId);
       child.once('error', () => exited(null));
-      child.once('exit', (code) => exited(code));
+      child.once('exit', (code) => exited(code, undefined, child.pid));
     })().catch((error) => exited(null, endpointError(error)));
   }
 
@@ -441,6 +457,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     this.events = { connectedAt: Date.now() };
     this.announceReady = () => {
       this.launchRetry.succeed();
+      this.send({ type: 'node.settings', logRetentionDays: this.registry.logRetentionDays });
       this.emit('ready', { incarnation, processChanged: transition.processChanged });
     };
     void this.coordinate().catch((error) => {
@@ -637,6 +654,19 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       pending.reject(error);
     }
   }
+  receiveBinary(connection: Connection, header: Record<string, any>, bytes: Buffer) {
+    const pending = this.pending.get(header.id);
+    if (!pending) return;
+    if (
+      pending.method !== 'node.logs.read' ||
+      header.ok !== true ||
+      !header.result ||
+      typeof header.result !== 'object' ||
+      Array.isArray(header.result)
+    )
+      throw new Error('Unexpected binary reply');
+    this.receive(connection, { ...header, result: { ...header.result, data: bytes } });
+  }
   send(message: object) {
     const connection = this.current;
     if (!connection) return;
@@ -669,6 +699,15 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     } catch {
       throw new RemoteKitError('unavailable', '文件数据发送失败', { detail: 'Object chunk delivery failed' });
     }
+  }
+  logsDays(timeoutMs?: number) {
+    return nodeLogDays(this, timeoutMs);
+  }
+  logsList(date: string, timeoutMs?: number) {
+    return nodeLogList(this, date, timeoutMs);
+  }
+  logsRead(path: string, offset: number, length: number, timeoutMs?: number) {
+    return nodeLogRead(this, path, offset, length, timeoutMs);
   }
   request(
     method: string,
@@ -1004,7 +1043,11 @@ export class NodeRegistry extends EventEmitter {
         failureReason = 'frame_decode_error';
         const frame = decodeFrame(plaintext);
         failureReason = 'protocol_violation';
-        if (frame.kind !== 'json') throw new Error('Unexpected binary message');
+        if (frame.kind === 'binary') {
+          if (role !== 'endpoint') throw new Error('Unexpected binary message');
+          link!.receiveBinary(connection, frame.header, frame.bytes);
+          return;
+        }
         const message = frame.message;
         if (message.type === 'node.ping') {
           void carrier
@@ -1071,6 +1114,12 @@ export class NodeRegistry extends EventEmitter {
         address: node.config.peer.address,
         publicKey: node.configured.publicKey,
       }));
+  }
+  logRetentionDays = 30;
+  setLogRetentionDays(days: number) {
+    this.logRetentionDays = days;
+    for (const node of this.all())
+      if (node.state.state === 'ready') node.send({ type: 'node.settings', logRetentionDays: days });
   }
   publishPeers() {
     for (const node of this.all())

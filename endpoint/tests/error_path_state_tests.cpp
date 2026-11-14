@@ -73,10 +73,12 @@ media::Sdk MakeSdk() {
 }  // namespace
 class NativeErrorStateProbe {
  public:
-  static void Launch(BrowserRuntime& browser, const fs::path& root,
+  static void Launch(BrowserRuntime& browser,
+                     const fs::path& root,
                      const wchar_t* mode = L" --hold") {
     browser.crash_directory_ = root / "crashes";
-    browser.log_ = root / "browser.log";
+    browser.logs_root_ = root;
+    browser.session_id_ = "test";
     fs::create_directories(browser.crash_directory_);
     wchar_t executable[32768]{};
     GetModuleFileNameW(nullptr, executable, 32768);

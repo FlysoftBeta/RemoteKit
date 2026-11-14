@@ -1,5 +1,6 @@
 import DeleteOutline from '@mui/icons-material/DeleteOutline';
-import Download from '@mui/icons-material/Download';
+import SaveAlt from '@mui/icons-material/SaveAlt';
+import { operationId } from '../../control/product-operations';
 import {
   Box,
   Button,
@@ -15,7 +16,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { Fragment, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import type { AdminDiagnostic } from '../../../shared/admin';
 import { RemoteKitError } from '../../../shared/errors';
 import { failureError, FailureNote } from '../../failures';
@@ -98,7 +99,7 @@ function ErrorLookup({ online, call }: { online: boolean; call: AdminCall }) {
   const [busy, setBusy] = useState(false);
   return (
     <Box sx={{ mb: 3 }}>
-      <SectionHeader title="查找错误 ID" />
+      <SectionHeader title="错误 ID 查找" />
       <Box
         component="form"
         sx={{ display: 'flex', gap: 1, mb: 2 }}
@@ -131,7 +132,7 @@ function ErrorLookup({ online, call }: { online: boolean; call: AdminCall }) {
       </Box>
       <LoadState error={error} loading={busy} />
       {result && result.records.length === 0 && (
-        <Typography color="text.secondary">没有找到（日志可能已轮转）</Typography>
+        <Typography color="text.secondary">没有找到（日志可能已过期）</Typography>
       )}
       {result && result.records.length > 0 && (
         <Box className="admin-table">
@@ -182,24 +183,24 @@ export function AdminDiagnosticsSection({ online, call }: { online: boolean; cal
   const { data, setData, error } = useAdminResource(online, () => call('admin.diagnostics', {}), 15000);
   const [deleting, setDeleting] = useState<AdminDiagnostic | null>(null),
     [downloadError, setDownloadError] = useState<RemoteKitError | undefined>();
-  const download = async (item: AdminDiagnostic) => {
+  const [saved, setSaved] = useState<string>();
+  const [saving, setSaving] = useState<string>();
+  const save = async (item: AdminDiagnostic) => {
+    setSaving(item.id);
     setDownloadError(undefined);
     try {
-      const { url } = await call('admin.downloadDiagnostic', { id: item.id });
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = '';
-      document.body.append(link);
-      link.click();
-      link.remove();
+      await call('admin.diagnostics.save', { id: item.id, operationId: operationId() });
+      setSaved(item.id);
     } catch (e) {
       setDownloadError(failureError(e));
+    } finally {
+      setSaving(undefined);
     }
   };
   return (
     <Box className="admin-section">
-      <ErrorLookup online={online} call={call} />
-      <SectionHeader title="诊断" detail="用户在设置中收集的诊断包，按诊断 ID 对应" />
+      <LogsSection online={online} call={call} />
+      <SectionHeader title="诊断采集" detail="用户在设置中收集的诊断包，按诊断 ID 对应" />
       <LoadState error={error} loading={!data} />
       {downloadError && (
         <FailureNote error={downloadError} context={{ operation: '读取诊断记录', scope: 'surface' }} />
@@ -246,14 +247,14 @@ export function AdminDiagnosticsSection({ online, call }: { online: boolean; cal
                   </TableCell>
                   <TableCell padding="checkbox">
                     <Box sx={{ display: 'flex' }}>
-                      <Tooltip title="下载">
+                      <Tooltip title="保存到我的文件">
                         <span>
                           <IconButton
-                            disabled={!online}
-                            aria-label="下载诊断包"
-                            onClick={() => void download(item)}
+                            disabled={!online || saving === item.id}
+                            aria-label="保存到我的文件"
+                            onClick={() => void save(item)}
                           >
-                            <Download />
+                            <SaveAlt />
                           </IconButton>
                         </span>
                       </Tooltip>
@@ -276,6 +277,8 @@ export function AdminDiagnosticsSection({ online, call }: { online: boolean; cal
           </Table>
         </Box>
       )}
+      {saved && <Typography role="status">诊断包已保存到我的文件</Typography>}
+      <ErrorLookup online={online} call={call} />
       <ConfirmDialog
         open={!!deleting}
         danger
@@ -288,6 +291,138 @@ export function AdminDiagnosticsSection({ online, call }: { online: boolean; cal
       >
         <Typography>删除诊断包 {deleting?.id}？</Typography>
       </ConfirmDialog>
+    </Box>
+  );
+}
+
+function LogsSection({ online, call }: { online: boolean; call: AdminCall }) {
+  const dates = useAdminResource(online, () => call('admin.logs.days', {}), 15000);
+  const jobs = useAdminResource(online, () => call('admin.logs.jobs', {}), 2000);
+  const settings = useAdminResource(online, () => call('admin.logs.settings', {}), 15000);
+  const [days, setDays] = useState('30');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<RemoteKitError>();
+  useEffect(() => {
+    if (settings.data) setDays(String(settings.data.logRetentionDays));
+  }, [settings.data?.logRetentionDays]);
+  const run = async (work: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await work();
+      await jobs.refresh();
+    } catch (cause) {
+      setError(failureError(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Box sx={{ mb: 4 }}>
+      <SectionHeader title="日志" detail="按主机本地日期保存；打包结果保存到我的文件" />
+      <Box
+        component="form"
+        sx={{ display: 'flex', gap: 1, mb: 2 }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          void run(async () => {
+            settings.setData(await call('admin.logs.settings', { logRetentionDays: Number(days) }));
+            await dates.refresh();
+          });
+        }}
+      >
+        <TextField
+          size="small"
+          label="日志保留天数"
+          type="number"
+          value={days}
+          onChange={(event) => setDays(event.target.value)}
+          slotProps={{ htmlInput: { min: 1, max: 365, step: 1 } }}
+        />
+        <Button
+          type="submit"
+          variant="outlined"
+          disabled={
+            !online || busy || !Number.isInteger(Number(days)) || Number(days) < 1 || Number(days) > 365
+          }
+        >
+          保存
+        </Button>
+      </Box>
+      <LoadState
+        error={error ?? settings.error ?? dates.error ?? jobs.error}
+        loading={!dates.data || !settings.data}
+      />
+      {dates.data?.length === 0 && <Typography color="text.secondary">暂无日志</Typography>}
+      {dates.data && dates.data.length > 0 && (
+        <Box className="admin-table">
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>日期</TableCell>
+                <TableCell>主机</TableCell>
+                <TableCell />
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {dates.data.map(({ date, hosts }) => (
+                <TableRow key={date}>
+                  <TableCell>{date}</TableCell>
+                  <TableCell>
+                    <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                      {hosts.map((host) => (
+                        <Chip
+                          key={host.host}
+                          size="small"
+                          variant="outlined"
+                          label={`${host.host} · ${host.present ? '有日志' : host.errorId ? '读取失败 ' + host.errorId : '无日志'}`}
+                        />
+                      ))}
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      disabled={
+                        !online ||
+                        busy ||
+                        jobs.data?.some((job) => job.date === date && job.state === 'running')
+                      }
+                      onClick={() =>
+                        void run(() => call('admin.logs.package', { date, operationId: operationId() }))
+                      }
+                    >
+                      打包到我的文件
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Box>
+      )}
+      {!!jobs.data?.length && (
+        <Box sx={{ mt: 2 }}>
+          <Typography variant="subtitle2">打包任务</Typography>
+          {jobs.data.map((job) => (
+            <Box key={job.operationId} sx={{ py: 1 }}>
+              <Typography variant="body2">
+                {job.date} ·{' '}
+                {job.state === 'running'
+                  ? `正在打包 · 已读取 ${formatBytes(job.bytes)}`
+                  : job.state === 'done'
+                    ? `已保存到我的文件 · ${job.fileName}`
+                    : '打包失败'}
+              </Typography>
+              {job.state === 'failed' && (
+                <FailureNote
+                  error={new RemoteKitError(job.code, '日志打包失败', { errorId: job.errorId })}
+                  context={{ operation: '打包日志', scope: 'item', targetId: job.operationId }}
+                />
+              )}
+            </Box>
+          ))}
+        </Box>
+      )}
     </Box>
   );
 }

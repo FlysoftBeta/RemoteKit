@@ -2,6 +2,7 @@ import {
   CheckBoxOutlined,
   ContentCopyOutlined,
   DeleteOutline,
+  DownloadOutlined,
   DriveFileMoveOutlined,
   ShoppingBasketOutlined,
   TuneOutlined,
@@ -51,7 +52,7 @@ export function FileEntryMenu({
   onSelect?(entry: LibraryEntry): void;
   onDeleted?(): void;
 }) {
-  const { snapshot, online, mutate, copySnippet } = useLibrary();
+  const { snapshot, online, mutate, copySnippet, download } = useLibrary();
   const [copied, setCopied] = useState(false);
   const [move, setMove] = useState<LibraryEntry>();
   const [deletion, setDeletion] = useState<{ entry: LibraryEntry; operationId: string }>();
@@ -113,6 +114,17 @@ export function FileEntryMenu({
               <ContentCopyOutlined fontSize="small" />
             </ListItemIcon>
             <ListItemText>复制</ListItemText>
+          </MenuItem>
+        )}
+        {entry?.kind === 'file' && (
+          <MenuItem
+            disabled={disabled || unavailable}
+            onClick={() => choose((item) => item.kind === 'file' && void run(() => download(item)))}
+          >
+            <ListItemIcon>
+              <DownloadOutlined fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>下载到本地</ListItemText>
           </MenuItem>
         )}
         {onOpen && (

@@ -21,6 +21,9 @@ class ClusterLink final : public ManagementLink {
   bool Next(std::string& bytes, uint64_t& generation, bool& eof) override;
   bool Current(uint64_t generation) override;
   bool SendReply(uint64_t generation, const Json& reply) override;
+  bool SendBinaryReply(uint64_t generation,
+                       const Json& header,
+                       std::span<const uint8_t> bytes) override;
   bool SendEvent(const Json& event, uint64_t generation, DeliveryFlag delivery = {}) override;
   QueueBudget EventBudget() override;
   void OnDisconnect(Disconnect callback) override;
@@ -33,7 +36,10 @@ class ClusterLink final : public ManagementLink {
                             std::chrono::steady_clock::time_point deadline) override;
 
  private:
-  bool Queue(const Json& message, uint64_t generation, DeliveryFlag delivery = {});
+  bool Queue(const Json& message,
+             uint64_t generation,
+             DeliveryFlag delivery = {},
+             std::optional<std::vector<uint8_t>> binary = {});
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
