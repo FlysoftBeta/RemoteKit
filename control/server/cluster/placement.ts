@@ -331,15 +331,7 @@ export class Placement {
         objects.some((id) => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id))
       )
         throw new RemoteKitError('rejected', '会话检查点无效', { detail: 'Invalid checkpoint' });
-      for (const id of objects) {
-        if (
-          retiringObjects(this.store).has(id) ||
-          !tenantObjects(this.store.db).get(placement.tenant)?.has(id)
-        )
-          throw new RemoteKitError('conflict', '会话检查点尚未提交', {
-            detail: 'Checkpoint object is not committed',
-          });
-      }
+      // Every observation repeats the current version; answer it before rebuilding references.
       const sameVersion =
         current.checkpoint === manifestId &&
         this.store.db
@@ -347,6 +339,12 @@ export class Placement {
           .get(placement.tenant, current.checkpointId, placement.placementEpoch, version.takenAt);
       if (sameVersion && (version.kind === 'running' || current.dataState === 'clean'))
         return current.checkpointId!;
+      const retiring = retiringObjects(this.store);
+      const references = tenantObjects(this.store.db).get(placement.tenant);
+      if (objects.some((id) => retiring.has(id) || !references?.has(id)))
+        throw new RemoteKitError('conflict', '会话检查点尚未提交', {
+          detail: 'Checkpoint object is not committed',
+        });
       const row = this.store.db
         .prepare('SELECT coalesce(max(id),0)+1 AS id FROM checkpoints WHERE tenant=?')
         .get(placement.tenant) as { id: bigint };

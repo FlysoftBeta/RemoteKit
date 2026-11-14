@@ -11,6 +11,7 @@ import { hkdfSync, randomBytes } from 'node:crypto';
 import { createApplication } from '../server/application';
 import { NodeRegistry } from '../server/cluster/node-link';
 import { Placement } from '../server/cluster/placement';
+import { retiringObjects } from '../server/cluster/objects';
 import { MetricsHistory } from '../server/cluster/metrics';
 import { tenantKeys } from '../server/cluster/keys';
 import type { NodeLimits } from '../server/config';
@@ -109,6 +110,32 @@ test('single-node commits prune superseded versions even with equal manifests an
       count: 1n,
     });
     assert.equal(h.placement.newestComplete('tenant')!.takenAt, 2000);
+  } finally {
+    await h.close();
+  }
+});
+
+test('repeated reports of the registered version return before checking object references', async () => {
+  const h = await harness(4096, {}, ['alpha']);
+  try {
+    const alpha = await h.connect('alpha');
+    await publishAndObserve(h.gateway, 'tenant');
+    for (const n of [1, 2]) await h.commit(alpha, 'tenant', id(n));
+    const placed = h.placement.peek('tenant')!;
+    const version = { kind: 'running' as const, takenAt: 1000 };
+    const registered = h.placement.commitCheckpoint(placed, id(1), [id(1), id(2)], 'dev', version);
+    retiringObjects(h.store).add(id(2));
+    try {
+      const current = h.placement.peek('tenant')!;
+      assert.equal(h.placement.commitCheckpoint(current, id(1), [id(1), id(2)], 'dev', version), registered);
+      assert.throws(
+        () =>
+          h.placement.commitCheckpoint(current, id(1), [id(1), id(2)], 'dev', { ...version, takenAt: 2000 }),
+        (error: RemoteKitError) => error.code === 'conflict',
+      );
+    } finally {
+      retiringObjects(h.store).delete(id(2));
+    }
   } finally {
     await h.close();
   }
