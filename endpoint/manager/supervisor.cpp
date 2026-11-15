@@ -4,6 +4,7 @@
 #include "release/executor.hpp"
 #include "release/payload.hpp"
 #include "updater/archive.hpp"
+#include "updater/download.hpp"
 #include "updater/process.hpp"
 #include "updater/snapshot.hpp"
 #include "updater/replacement.hpp"
@@ -229,11 +230,6 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
               control.at("nodes"), snapshots,
               [&](const std::string& node_id,
                   const Json& local_config) -> std::unique_ptr<updater::SnapshotSupervisor> {
-                auto& retry =
-                    snapshot_retries.try_emplace(node_id, "manager.snapshot").first->second;
-                retry.Input(node_id);
-                if (!retry.Ready())
-                  return {};
                 const auto local_text = local_config.at("root").get<std::string>();
                 auto local = fs::path(std::u8string(local_text.begin(), local_text.end()));
                 if (local.is_relative())
@@ -245,7 +241,16 @@ int SuperviseLoop(const fs::path& root, HANDLE stop, bool service) {
                   if (endpoint.is_relative())
                     endpoint = root / L"config" / endpoint;
                   executable = endpoint.parent_path() / L"remotekit_snapshot.exe";
+                } else if (!updater::RuntimeInstalled(local / L"runtime" / id, id)) {
+                  // After an update the local node installs this build's runtime from Control;
+                  // waiting for it is the normal path, not a failure. Reconciled every second.
+                  return {};
                 }
+                auto& retry =
+                    snapshot_retries.try_emplace(node_id, "manager.snapshot").first->second;
+                retry.Input(node_id);
+                if (!retry.Ready())
+                  return {};
                 auto supervisor = std::make_unique<updater::SnapshotSupervisor>(
                     fs::absolute(executable).lexically_normal(),
                     fs::absolute(local).lexically_normal(), node_id);

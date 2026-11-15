@@ -18,10 +18,17 @@ class ChildProcess {
   HANDLE handle() const { return child_.value; }
   DWORD ExitCode() const;
   DWORD Pid() const { return GetProcessId(child_.value); }
+  // Closes stdin and waits for a graceful exit; killing it after the timeout is abnormal.
   void Stop(DWORD timeout);
+  // Ends the child immediately as its intended way of stopping.
+  void Terminate();
 
  private:
+  enum class Ending { kSelf, kTerminated, kStopTimedOut };
+  void Kill();
+
   Handle child_, input_, output_, error_, job_;
+  Ending ending_ = Ending::kSelf;
   std::string child_name_;
   std::thread forwarding_, errors_;
 };

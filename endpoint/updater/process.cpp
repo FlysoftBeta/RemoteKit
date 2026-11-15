@@ -115,7 +115,7 @@ ChildProcess::ChildProcess(const fs::path& executable,
   }
 }
 ChildProcess::~ChildProcess() {
-  Stop(0);
+  Terminate();
   if (job_.value)
     TerminateJobObject(job_.value, 1);
   for (auto* forwarding : {&forwarding_, &errors_}) {
@@ -126,19 +126,43 @@ ChildProcess::~ChildProcess() {
       CancelSynchronousIo(thread);
     forwarding->join();
   }
-  LogProcessExit(child_name_, Pid(), ExitCode(), child_name_ == "control");
+  switch (ending_) {
+    case Ending::kSelf:
+      LogProcessExit(child_name_, Pid(), ExitCode(), child_name_ == "control");
+      break;
+    case Ending::kTerminated:
+      LogEvent(LogLevel::kInfo, "process.terminated",
+               {{"child", child_name_}, {"childPid", Pid()}});
+      break;
+    case Ending::kStopTimedOut:
+      LogEvent(LogLevel::kWarn, "process.stop_timed_out",
+               {{"child", child_name_}, {"childPid", Pid()}});
+      break;
+  }
 }
 
 void ChildProcess::Stop(DWORD timeout) {
   if (input_.value)
     CloseHandle(input_.Release());
   if (child_.value && WaitForSingleObject(child_.value, timeout) != WAIT_OBJECT_0) {
-    if (job_.value)
-      TerminateJobObject(job_.value, 1);
-    else
-      TerminateProcess(child_.value, 1);
-    WaitForSingleObject(child_.value, INFINITE);
+    ending_ = Ending::kStopTimedOut;
+    Kill();
   }
+}
+void ChildProcess::Terminate() {
+  if (input_.value)
+    CloseHandle(input_.Release());
+  if (child_.value && WaitForSingleObject(child_.value, 0) != WAIT_OBJECT_0) {
+    ending_ = Ending::kTerminated;
+    Kill();
+  }
+}
+void ChildProcess::Kill() {
+  if (job_.value)
+    TerminateJobObject(job_.value, 1);
+  else
+    TerminateProcess(child_.value, 1);
+  WaitForSingleObject(child_.value, INFINITE);
 }
 DWORD ChildProcess::ExitCode() const {
   DWORD code = 1;

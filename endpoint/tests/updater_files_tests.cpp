@@ -177,6 +177,10 @@ int wmain(int argc, wchar_t** argv) {
       std::cout << bytes;
     return 0;
   }
+  if (argc == 2 && std::wstring_view(argv[1]) == L"--hang") {
+    Sleep(INFINITE);
+    return 0;
+  }
   if (argc != 2)
     return 2;
   auto root = fs::path(argv[1]) / (L"node-files-" + std::to_wstring(GetCurrentProcessId()));
@@ -432,6 +436,29 @@ int wmain(int argc, wchar_t** argv) {
       ChildProcess flood(ExecutablePath(), L"--flood", root, "fixture", true);
       Check(WaitForSingleObject(flood.handle(), 10000) == WAIT_OBJECT_0);
       Check(flood.ExitCode() == 0);
+    }
+    {
+      // An owner-intended termination is not an abnormal exit; a stop that times out is.
+      {
+        ChildProcess hang(ExecutablePath(), L"--hang", root, "fixture-terminated", true);
+        hang.Terminate();
+      }
+      {
+        ChildProcess hang(ExecutablePath(), L"--hang", root, "fixture-timeout", true);
+        hang.Stop(0);
+      }
+      const auto line = [&](std::string_view event, std::string_view child) {
+        std::ifstream events(root / L"logs" / LocalLogDate() / L"node.jsonl");
+        for (std::string entry; std::getline(events, entry);) {
+          if (entry.find(event) != std::string::npos &&
+              entry.find("\"" + std::string(child) + "\"") != std::string::npos)
+            return true;
+        }
+        return false;
+      };
+      Check(line("process.terminated", "fixture-terminated"));
+      Check(!line("process.exited", "fixture-terminated"));
+      Check(line("process.stop_timed_out", "fixture-timeout"));
     }
     fs::create_directories(root / L"runtime/obsolete");
     std::ofstream(root / L"runtime/obsolete/locked") << "locked";

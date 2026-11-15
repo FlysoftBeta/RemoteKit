@@ -7,6 +7,8 @@ namespace remotekit::updater {
 Result<void> InstallBundled(const fs::path& root, const fs::path& package);
 Result<release::CurrentState> ReadCurrent(const fs::path& root);
 Json DecodeNodeRelease(std::string_view text);
+// A node runtime directory is complete only after extraction; until then nothing may start from it.
+bool RuntimeInstalled(const fs::path& runtime, const std::string& id);
 struct DiscoverRelease {};
 struct DownloadedRelease {
   Json descriptor;

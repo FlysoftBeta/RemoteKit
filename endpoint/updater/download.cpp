@@ -73,13 +73,6 @@ Result<void> Download(cluster::Channel& channel,
   }
   return Retry("update stopped");
 }
-bool RuntimeInstalled(const fs::path& runtime, const std::string& id) {
-  auto build = cluster::ReadBuildId(runtime);
-  return build && build.value() == id &&
-         fs::is_regular_file(runtime / L"bin/endpoint_service.exe") &&
-         fs::is_regular_file(runtime / L"bin/remotekit_node.exe") &&
-         fs::is_regular_file(runtime / L"bin/remotekit_snapshot.exe");
-}
 Result<void> InstallRuntime(const fs::path& root, const fs::path& archive, const std::string& id) {
   auto runtime = root / L"runtime" / id;
   if (RuntimeInstalled(runtime, id))
@@ -105,6 +98,13 @@ Result<void> InstallRuntime(const fs::path& root, const fs::path& archive, const
   return {};
 }
 }  // namespace
+bool RuntimeInstalled(const fs::path& runtime, const std::string& id) {
+  auto build = cluster::ReadBuildId(runtime);
+  return build && build.value() == id &&
+         fs::is_regular_file(runtime / L"bin/endpoint_service.exe") &&
+         fs::is_regular_file(runtime / L"bin/remotekit_node.exe") &&
+         fs::is_regular_file(runtime / L"bin/remotekit_snapshot.exe");
+}
 Result<release::CurrentState> ReadCurrent(const fs::path& root) {
   return release::ReadCurrent(root, L"runtime", release::kNodeFiles);
 }

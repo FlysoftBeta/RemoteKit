@@ -25,7 +25,7 @@ SnapshotSupervisor::SnapshotSupervisor(fs::path executable, fs::path root, std::
           LogEvent(LogLevel::kInfo, "snapshot.started");
           HANDLE waits[] = {stop_.value, child.handle()};
           WaitForMultipleObjects(2, waits, FALSE, INFINITE);
-          child.Stop(0);
+          child.Terminate();
 
           if (Stopping(stop_.value))
             break;

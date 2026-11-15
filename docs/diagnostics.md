@@ -54,7 +54,7 @@
 - **Browser 进程**：Crashpad 照常写 dump；Endpoint 观察到非正常退出时记 `process.crashed{proc:"browser", sessionId, code, dump, lastFatal}`（`lastFatal` 是 Browser 日志中最后一条 `FATAL` 级 `chromium.log` 的 `message`），并照旧追加到该 Session 的 `crashes/<sessionId>/events.jsonl`。
 - **Browser 子进程**（renderer、GPU、utility）：Browser 进程经 `RenderProcessHostObserver` 与 `BrowserChildProcessObserver` 记 `process.crashed{proc:"browser", process:"renderer|gpu|utility", sessionId, code, reason, dump}`，`reason` 取 Chromium 的终止状态（`crashed`、`oom`、`launch_failed`…），正常退出与被要求结束不记。
 - **Control**（Node）：管理器记 `process.crashed{proc:"control", code}`，Node 的致命错误输出按"兜底"规则进管理器的文件；Control 以 `--report-on-fatalerror --report-directory=<日志根>/crashes/control` 启动，Node 的诊断报告是该次崩溃的 dump。
-- 任何子进程的非零退出（非崩溃）由父进程记 `process.exited{child, childPid, code}`。
+- 任何子进程的非零退出（非崩溃）由父进程记 `process.exited{child, childPid, code}`。父进程有意终止子进程（如停止快照进程）记 info 级 `process.terminated{child, childPid}`；请求优雅停止后超时被强杀记 `process.stop_timed_out{child, childPid}`。
 
 ### 按错误 ID 查找
 
