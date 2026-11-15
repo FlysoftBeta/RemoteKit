@@ -144,7 +144,9 @@ ASSET = { "salt": "…", "size": <压缩后明文字节>, "slices": [ { "url": "
 
 manifest 只含绝对 URL，管理器只认识配置里的一个 manifest URL（`https://github.com/FlysoftBeta/RemoteKit/releases/latest/download/control.manifest`），沿 `patch.manifest` 回溯；GitHub 的接口只出现在发布脚本里。校验严格：键集合固定、片数与片大小由 `size` 决定、至少有一个资产。`patch.manifest` 指向的必须也是 format 2 manifest；回溯遇到 format 1 即视为链的起点。
 
-差分在发布机上生成：`remotekit_release pack` 链接 HDiffPatch 的 diff 端，管理器只链接 patch 端与 zstd 解码。差分的匹配方式与参数（全量后缀数组匹配或块匹配、zstd 级别）由发布机内存与实测的差分大小决定，写在 `remotekit_release pack` 里，不进 manifest：应用端对两种方式产出的差分一视同仁。
+差分在发布机上生成：`remotekit_release pack` 链接 HDiffPatch 的 diff 端，管理器只链接 patch 端与 zstd 解码。差分用流式块匹配（64 字节块，zstd 19，单线程）：新旧 payload 都从磁盘按需读取，索引只占几百 MiB。两个相邻的 2.9 GB payload（只有我们自己的二进制与 PDB 不同）实测：差分 511 KB，生成加解回自检共 138 秒，峰值 689 MiB。参数写在 `remotekit_release pack` 里，不进 manifest；应用端对任何匹配方式产出的差分一视同仁。
+
+**否决的全量后缀数组匹配**：1 GB 的相邻 payload 上差分约小 4 倍（9 MiB 对 42 MiB），但峰值内存约 5.8 GiB；2.9 GB（带 PDB）的 payload 超过 2 GiB 后改用 64 位索引，未完成时已占 17 GiB、整机只剩不到 2 GiB 可用，发布机（32 GiB）承受不了。它产出的差分应用也更慢（1 GB 上约 2 分钟，块匹配 4–8 秒），因为引用在旧 payload 里随机跳读。
 
 #### 格式过渡
 
