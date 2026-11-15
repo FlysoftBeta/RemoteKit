@@ -13,9 +13,19 @@ set "RK_ROOT=%~dp0.."
 set "RK_BUILD=%RK_ROOT%\build\endpoint"
 set "RK_PACKAGE_ARGS="
 set "RK_TARGET="
+rem Packaged binaries must be byte-identical for identical sources (the buildId hashes them);
+rem link.exe writes a new PDB GUID on every link, lld-link with /Brepro does not.
+rem CMAKE_LINKER_TYPE applies at generate time; CMAKE_LINKER is frozen when a build dir is created.
+set "RK_LLD_DIR=C:\src\chromium\src\third_party\llvm-build\Release+Asserts\bin"
+if defined REMOTEKIT_LLD_DIR set "RK_LLD_DIR=%REMOTEKIT_LLD_DIR%"
 if "%~1"=="package" (
+  if not exist "%RK_LLD_DIR%\lld-link.exe" (
+    echo lld-link not found in %RK_LLD_DIR% 1>&2
+    exit /b 1
+  )
+  set "PATH=%RK_LLD_DIR%;%PATH%"
   set "RK_BUILD=%RK_ROOT%\build\endpoint-package"
-  set "RK_PACKAGE_ARGS=-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF"
+  set "RK_PACKAGE_ARGS=-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_LINKER_TYPE=LLD -UCMAKE_LINKER"
   set "RK_TARGET=--target endpoint_service remotekit_snapshot remotekit_node remotekit_control remotekit_release"
 )
 if "%~1"=="encoder-smoke" (

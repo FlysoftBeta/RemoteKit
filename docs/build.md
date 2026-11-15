@@ -59,7 +59,9 @@ root_extra_deps = [
 
 开发配置 `out/dev` 继续使用 `is_component_build = true`、`dcheck_always_on = true`、`symbol_level = 1`，其余功能参数与发布配置相同；两者都不配置额外 DRM 模块。`is_official_build = false` 保留本地非官方构建，发布包关闭 DCHECK。
 
-**符号**：Chromium 整体用 `symbol_level = 1`（函数、行号与内联帧，不含类型和局部变量）；`remotekit_browser` 与 `remotekit_sdk` 两个目标把 `//build/config/compiler:default_symbols` 换成 `:symbols`，RemoteKit 自己的代码带完整符号。符号不改变机器码。Endpoint 的 CMake Release 配置同样生成完整 PDB（`/Zi`，链接 `/DEBUG:FULL /OPT:REF /OPT:ICF`，后两项保持与不带调试信息时相同的裁剪）。发布包把这些 PDB 放在各自的二进制旁边（见下文版本树），节点上的崩溃处理与 Crashpad dump 可以直接符号化；第三方 DLL 不带 PDB。
+**符号**：Chromium 整体用 `symbol_level = 1`（函数、行号与内联帧，不含类型和局部变量）；`remotekit_browser` 与 `remotekit_sdk` 两个目标把 `//build/config/compiler:default_symbols` 换成 `:symbols`，RemoteKit 自己的代码带完整符号。符号不改变机器码。Endpoint 的 CMake Release 配置同样生成完整 PDB（`/Z7`，链接 `/DEBUG:FULL /OPT:REF /OPT:ICF`，后两项保持与不带调试信息时相同的裁剪）。发布包把这些 PDB 放在各自的二进制旁边（见下文版本树），节点上的崩溃处理与 Crashpad dump 可以直接符号化；第三方 DLL 不带 PDB。
+
+**可复现**：构建 ID 对二进制取 hash，所以同样的源码必须得到逐字节相同的二进制。Chromium 的 GN 构建本身是确定性的。Endpoint 的 Release 编译与链接都加 `/Brepro`（时间戳与 PDB GUID 改为内容 hash），调试信息用 `/Z7` 写进各个 obj，不经 mspdbsrv 并发写的共享编译 PDB；`toolsuild-endpoint.cmd package` 用 Chromium 工具链里的 `lld-link`（`REMOTEKIT_LLD_DIR` 可覆盖其目录，经 `CMAKE_LINKER_TYPE=LLD` 选用：`CMAKE_LINKER` 在构建目录创建时就固定了）。MSVC 的 `link.exe` 即使加 `/Brepro`，每次链接 PDB 也不同，PDB GUID 随之写进 exe，同一 commit 重编就得到新的构建 ID，主机会无谓地再下载一次。可复现以同一台发布机、同一检出路径为前提：路径会写进 PDB 与 `__FILE__`。
 
 ## 运行
 

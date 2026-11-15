@@ -1,9 +1,3 @@
-if(MSVC)
-  add_compile_options("$<$<CONFIG:Release>:/Zi>")
-  add_link_options("$<$<CONFIG:Release>:/DEBUG:FULL>" "$<$<CONFIG:Release>:/OPT:REF>"
-    "$<$<CONFIG:Release>:/OPT:ICF>")
-endif()
-
 set(RK_LIMITS_FILE "${PROJECT_SOURCE_DIR}/protocol/limits.json")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${RK_LIMITS_FILE}")
 file(READ "${RK_LIMITS_FILE}" RK_LIMITS_JSON)

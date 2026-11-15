@@ -132,9 +132,9 @@ try {
   assert.equal((await rpc('auth.get', {})).locked, true, 'Reattached Viewer must begin locked');
   assert.equal(latest, undefined, 'Locked Viewer must receive no product snapshot');
   assert.equal((await rpc('auth.verify', { method: 'password', secret: password })).locked, false);
-  const state = await waitState(() => true);
+  // A placement tried before the node's first metrics sample fails transiently and is retried.
+  const state = await waitState((value) => value.endpointError === null);
   assert.equal(state.workspace.settings.workspace.showStats, showStats, 'Committed operation must persist');
-  assert.equal(state.endpointError, null);
   console.log(
     JSON.stringify({
       tenantId: state.workspace.tenantId,
