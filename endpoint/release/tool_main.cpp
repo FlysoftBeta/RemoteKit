@@ -21,7 +21,7 @@ constexpr char kUsage[] =
     "--base-build=<id>]\n";
 int Level(const Options& options) {
   if (!options.Has(L"level"))
-    return 19;
+    return 9;
   auto value = options.Text(L"level");
   int level = 0;
   auto [end, ec] = std::from_chars(value.data(), value.data() + value.size(), level);

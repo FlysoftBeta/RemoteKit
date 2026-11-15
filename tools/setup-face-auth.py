@@ -69,6 +69,16 @@ def msvc_tools():
     return cmake, ninja, env
 
 
+# The static libraries are linked into packaged binaries whose hashes form the buildId: objects
+# must not carry timestamps, and OpenCV's build-information string must not record the time.
+IMAGING_FLAGS = "/Brepro"
+IMAGING_IDENTITY = {**LLVM_IDENTITY, "flags": IMAGING_FLAGS}
+
+
+def imaging_env(env):
+    return {**env, "CFLAGS": IMAGING_FLAGS, "CXXFLAGS": IMAGING_FLAGS, "SOURCE_DATE_EPOCH": "0"}
+
+
 def install_opencv():
     opencv = CONFIG["opencv"]
     source = CACHE / f'opencv-{opencv["version"]}'
@@ -82,6 +92,7 @@ def install_opencv():
     for path, expected in opencv["licenses"].values():
         verify(source / path, expected)
     cmake, ninja, env = msvc_tools()
+    env = imaging_env(env)
     build = DEPS / "opencv-build"
     install = DEPS / "opencv-static"
     toolchain_args = imaging_cmake_args(build, install)
@@ -120,6 +131,7 @@ def install_webp():
     for path, expected in config["licenses"].values():
         verify(source / path, expected)
     cmake, ninja, env = msvc_tools()
+    env = imaging_env(env)
     build = DEPS / "webp-build"
     install = DEPS / "webp-static"
     toolchain_args = imaging_cmake_args(build, install)
@@ -140,8 +152,8 @@ def install_webp():
 def imaging_cmake_args(build, install):
     args = native_cmake_args(build)
     marker = install / ".remotekit-toolchain.json"
-    if not marker.is_file() or json.loads(marker.read_text(encoding="utf-8")) != LLVM_IDENTITY:
-        # A compiler/version change must replace both compiled objects and installed libraries.
+    if not marker.is_file() or json.loads(marker.read_text(encoding="utf-8")) != IMAGING_IDENTITY:
+        # A compiler or flag change must replace both compiled objects and installed libraries.
         for directory in (build, install):
             if directory.exists():
                 shutil.rmtree(directory)
@@ -150,7 +162,7 @@ def imaging_cmake_args(build, install):
 
 def record_toolchain(install):
     (install / ".remotekit-toolchain.json").write_text(
-        json.dumps(LLVM_IDENTITY), encoding="utf-8")
+        json.dumps(IMAGING_IDENTITY), encoding="utf-8")
 
 
 def export_minifas(source, output):
