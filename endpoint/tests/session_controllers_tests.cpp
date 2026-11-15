@@ -837,7 +837,10 @@ void OrderedTouchInput() {
               dispatched.push_back(request);
               if (input_calls == 1)
                 return Json{{"ok", false},
-                            {"error", {{"code", "busy"}, {"message", "Input queue full"}}},
+                            {"error",
+                             {{"code", "busy"},
+                              {"message", "Input queue full"},
+                              {"retryAfterMs", 16}}},
                             {"inputAdmitted", false}};
               return Json{{"ok", true}, {"inputAdmitted", true}};
             },

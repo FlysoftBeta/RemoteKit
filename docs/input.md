@@ -35,7 +35,7 @@ DataChannel 上的 `input` 消息携带全部身份、连接内 `sequence` 和�
 
 **悬停例外**：不按键的鼠标 move/leave 可以发给未聚焦的可见 live view（悬停不改变焦点），但仍校验全部身份与序号。拖拽、down/up、滚轮、键盘、IME、触控都要求焦点。
 
-**BUSY 重试**：Browser 在解析目标或收尾期间对所有输入返回 `ok:false, code:busy`（受理之前）。Endpoint 以同一个 browser sequence 和 token 串行重试，间隔 5ms，最多 50 次 / 250ms；peer 或 epoch 变化立即停止。受理之后的异步失败从不重放。旧实现的 RPC 包装把所有 `ok:false` 都转成异常，导致 BUSY 重试逻辑在真实服务里根本走不到，这是"传输失败"与"应用拒绝"必须分开表示的直接原因。
+**BUSY 重试**：Browser 在解析目标或收尾期间对所有输入返回 `ok:false, code:busy`（受理之前）。这类 busy 都是 ACK 或触摸队列在约一帧内就会排空的饱和，回复带 `retryAfterMs:16`。Endpoint 经共享重试单元 `input.admission` 以同一个 browser sequence 和 token 串行重试，等待取这个提示（错误模型里的 `busy` 默认等待 250ms 起，会让重试落在输入时限之外），总时限 250ms、最多 8 次；peer 或 epoch 变化立即停止。受理之后的异步失败从不重放。"传输失败"与"应用拒绝"分开表示：RPC 包装若把 `ok:false` 都转成传输错误，BUSY 重试就走不到。
 
 **队列**：Endpoint 普通队列上限 256，只合并相邻、同 peer/授权/view 的鼠标 move；键盘、IME、touch start/end/cancel 严格保序。输入与媒体在不同线程，输入 RPC 不会阻塞媒体循环。
 

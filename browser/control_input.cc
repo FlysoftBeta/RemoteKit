@@ -119,9 +119,16 @@ ControlResult ControlDispatcher::HandleInput(const InputRequest& request) {
 
   reply.Set("token", TokenValue(runtime_.view_model.Token(session, view).value));
   runtime_.UpdateOutput();
+  if (!status && input_admitted)
+    return ControlResult::Failure(id, ErrorCode::kOutcomeUnknown, status.message, std::move(reply));
+  // A pre-admission BUSY is an ACK or touch queue that drains within about a frame; the hint
+  // lets the caller retry inside its input deadline instead of the generic busy backoff.
+  constexpr uint32_t kInputBusyRetryMs = 16;
   if (!status)
-    return ControlResult::Failure(id, input_admitted ? ErrorCode::kOutcomeUnknown : *status.error,
-                                  status.message, std::move(reply));
+    return ControlResult::Failure(id, *status.error, status.message, std::move(reply), std::nullopt,
+                                  *status.error == ErrorCode::kBusy
+                                      ? std::optional<uint32_t>(kInputBusyRetryMs)
+                                      : std::nullopt);
   return reply;
 }
 }  // namespace remotekit::browser
