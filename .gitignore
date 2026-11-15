@@ -1,5 +1,6 @@
 /build/
 /develop/tmp/*
+/develop/release/
 !/develop/tmp/.gitkeep
 __pycache__/
 *.pyc

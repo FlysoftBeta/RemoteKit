@@ -131,7 +131,7 @@ Endpoint 编译直接包含仓库 `sdk/include` 公共头，不链接 SDK import
 - **patch**：上一版 payload → 新 payload 的 HDiffPatch 单流压缩差分（single compressed diff，zstd 压缩插件），整个 payload tar 对 tar 做一次差分。HDiffPatch 按旧文件的绝对偏移引用，没有滑动窗口，payload 大小不受 zstd `windowLog` 31（2 GiB）的限制；应用端只需随机读旧 payload、顺序写新 payload，内存与 payload 大小无关。
 - **full**（可选）：新 payload 的普通 zstd 流。没有上一版、显式 `--full`、或自上一个 full 以来的 patch 累计超过那个 full 的大小时才带，使任何主机的下载量都不超过约两个 full。
 
-加密用发布密钥（32 字节随机数，base64 文件；发布机默认在 `%LOCALAPPDATA%/RemoteKit/release/release.key`，部署时由 `init` 写入主机的 `config/release.key`），每个 manifest 和资产各用随机 salt 经 HKDF-SHA256 派生自己的 AES-256-GCM 密钥：
+加密用发布密钥（32 字节随机数，base64 文件；发布机默认在仓库的 `develop/release/release.key`，被 git 忽略，部署时由 `init` 写入主机的 `config/release.key`），每个 manifest 和资产各用随机 salt 经 HKDF-SHA256 派生自己的 AES-256-GCM 密钥：
 
 - manifest：`"RKRM" 01 salt(32)` + 密文 + tag，nonce 为零，前 37 字节作 AAD；明文 JSON 不超过 1 MiB。
 - 资产片：明文按 32 MiB − 16 字节切块，第 i 片 = 密文 + tag，nonce = `00000000 ‖ u64be(i)`，AAD = `"RKRS" 01 ‖ u32be(i) ‖ u32be(片数)`，片序、截断与替换都会使认证失败。
@@ -165,7 +165,7 @@ format 1 的 patch 是 zstd `--patch-from` 帧，旧管理器严格解码，只�
 
 `tools/publish-release.py --package <版本树>`（`release.py --publish` 调用它）：
 
-1. 生成确定性 payload 到缓存 `%LOCALAPPDATA%/RemoteKit/release/payloads/<buildId>.tar`。
+1. 生成确定性 payload 到缓存 `develop/release/payloads/<buildId>.tar`。
 2. 用 `gh` 找上一版：已发布（含预发布）的 Release 里最新的 format 2 manifest；没有则这一版只带 full。上一版 buildId 相同则停止。上一版 payload 不在缓存时用 `remotekit_release fetch` 按发布链从 GitHub 重建。`--transition` 不找上一版，只在 latest 已是同一 buildId 的 format 1 时停止。
 3. `remotekit_release pack` 生成 patch（必要时加 full）、manifest 和上传清单，输出保留在 `cache/out/<buildId>-f<format>/`：salt 是随机的，续传必须用同一批文件。打包后把每个资产解回去核对 payload hash。
 4. 建草稿 Release（tag `control-<UTC 时间>-<buildId 前 8 位>-f<format>`，指向来源 commit），按清单逐个上传：先全部片，最后 manifest；不并行，每个文件独立重试（最多 8 次，5–60 秒退避），已存在且大小相同的跳过。重跑同一 buildId 与 format 会找到草稿继续（草稿说明里写 buildId 与 format）。另外上传不加密的 `remotekit_control.exe` 与 `remotekit_node.exe` 供首次部署下载。

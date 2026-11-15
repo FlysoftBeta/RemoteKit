@@ -5,7 +5,6 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -280,7 +279,7 @@ class Publisher:
 
 
 def main(arguments=None):
-    cache = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'RemoteKit/release'
+    cache = ROOT / 'develop/release'
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--package', type=Path, required=True)
     parser.add_argument('--repo', default='FlysoftBeta/RemoteKit')

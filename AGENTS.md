@@ -85,4 +85,4 @@ C:\src\depot_tools\python3.bat tools/package-runtime.py
 
 ## 发布
 
-- 发布用 `tools/release.py --publish`（GitHub Releases，`gh` 已登录）；发布密钥在 `%LOCALAPPDATA%/RemoteKit/release/release.key`，不输出、不提交、不进日志与命令行。用户要求用 Codex 时以 gpt-6.1-sol、low 执行，返回 Release 链接与 buildId。
+- 发布用 `tools/release.py --publish`（GitHub Releases，`gh` 已登录）；发布密钥在 `develop/release/release.key`（git 忽略），不输出、不提交、不进日志与命令行。用户要求用 Codex 时以 gpt-6.1-sol、low 执行，返回 Release 链接与 buildId。
