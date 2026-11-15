@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Fetch pinned, hash-verified endpoint hardware/media build dependencies."""
 from pathlib import Path
+import argparse
+import subprocess
 import zipfile
 import tarfile
 import json
 import tempfile
-from fetch_common import digest, download
+from fetch_common import digest, download, ensure_llvm, native_cmake_args, LLVM_VERSION
 ROOT = Path(__file__).resolve().parents[1]
 DEPENDENCIES = [
  ('HDiffPatch-v5.1.3.tar.gz','https://github.com/sisong/HDiffPatch/archive/refs/tags/v5.1.3.tar.gz','435c46447e7a1ace0327b67da2ec50a06e7f02d19960a182b493ff2e3f91c2b0'),
@@ -65,8 +67,16 @@ def extract_dependency(archive_path, destination, name, expected):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cmake-args", type=Path, metavar="BUILD_DIR")
+    args = parser.parse_args()
+    if args.cmake_args is not None:
+        print(subprocess.list2cmdline(native_cmake_args(args.cmake_args)))
+        return
     destination = ROOT / "build/dependencies"
     destination.mkdir(parents=True, exist_ok=True)
+    print(f"Verifying LLVM {LLVM_VERSION}", flush=True)
+    ensure_llvm()
     trees = {"HDiffPatch-v5.1.3.tar.gz": "HDiffPatch-5.1.3", "sqlite-amalgamation-3540100.zip": "sqlite-amalgamation-3540100",
              "libvpl-v2.17.0.zip": "libvpl-2.17.0", "zstd-1.5.7.tar.gz": "zstd-1.5.7"}
     for name, url, expected in DEPENDENCIES:

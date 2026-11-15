@@ -10,7 +10,8 @@ foreach(RK_LIMIT_INDEX RANGE ${RK_LIMIT_LAST})
   string(APPEND RK_LIMITS_HEADER "inline constexpr size_t ${RK_LIMIT_NAME} = ${RK_LIMIT_VALUE};\n")
 endforeach()
 string(APPEND RK_LIMITS_HEADER "}\n")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/protocol/limits.hpp" "${RK_LIMITS_HEADER}")
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/protocol/limits.hpp"
+  CONTENT "${RK_LIMITS_HEADER}" @ONLY)
 include_directories("${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 if(WIN32)

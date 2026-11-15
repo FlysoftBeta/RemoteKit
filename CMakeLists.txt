@@ -7,12 +7,11 @@ include(CTest)
 if(MSVC)
   # Release binaries must be byte-identical for identical sources, because the package buildId
   # hashes them. /Brepro replaces timestamps and the PDB GUID with content hashes; /Z7 keeps debug
-  # info in each object instead of a shared compile PDB written concurrently by mspdbsrv. The
-  # package build links with lld-link (tools/build-endpoint.cmd): link.exe PDBs differ per link.
+  # info in each object. clang-cl, lld-link and llvm-lib preserve this determinism.
   add_compile_options("$<$<CONFIG:Release>:/Z7>" "$<$<CONFIG:Release>:/Brepro>")
   add_link_options("$<$<CONFIG:Release>:/DEBUG:FULL>" "$<$<CONFIG:Release>:/OPT:REF>"
     "$<$<CONFIG:Release>:/OPT:ICF>" "$<$<CONFIG:Release>:/Brepro>")
-  string(APPEND CMAKE_STATIC_LINKER_FLAGS_RELEASE " /Brepro")
+  # llvm-lib archives are deterministic by default.
 endif()
 if(WIN32)
   set(RK_DEPS "${PROJECT_SOURCE_DIR}/build/dependencies")

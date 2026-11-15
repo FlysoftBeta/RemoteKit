@@ -39,7 +39,8 @@ def main():
     if not args.skip_build:
         setup = runpy.run_path(str(repo / "tools/setup-face-auth.py"))
         cmake, ninja, env = setup["msvc_tools"]()
-        subprocess.run([str(cmake), "-S", str(Path(__file__).parent), "-B", str(build),
+        subprocess.run([str(cmake), *setup["native_cmake_args"](build),
+                        "-S", str(Path(__file__).parent), "-B", str(build),
                         "-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}",
                         "-DCMAKE_BUILD_TYPE=Release"], env=env, check=True)
         subprocess.run([str(cmake), "--build", str(build), "--parallel", "2"], env=env, check=True)

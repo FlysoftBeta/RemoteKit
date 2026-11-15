@@ -6,7 +6,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-from fetch_common import digest, download, verify
+from fetch_common import (digest, download, verify, ensure_llvm, native_cmake_args,
+                          LLVM_IDENTITY)
 import shutil
 import subprocess
 import sys
@@ -83,6 +84,7 @@ def install_opencv():
     cmake, ninja, env = msvc_tools()
     build = DEPS / "opencv-build"
     install = DEPS / "opencv-static"
+    toolchain_args = imaging_cmake_args(build, install)
     disabled = (
         "BUILD_SHARED_LIBS", "BUILD_WITH_STATIC_CRT", "BUILD_TESTS", "BUILD_PERF_TESTS",
         "BUILD_EXAMPLES", "BUILD_DOCS", "BUILD_JAVA", "BUILD_opencv_apps",
@@ -94,7 +96,7 @@ def install_opencv():
         "WITH_JPEG", "WITH_PNG", "WITH_TIFF", "WITH_WEBP", "WITH_OPENJPEG",
         "WITH_JASPER", "WITH_OPENEXR", "WITH_GIF", "WITH_AVIF", "WITH_GSTREAMER",
     )
-    subprocess.run([str(cmake), "-S", str(source), "-B", str(build), "-G", "Ninja",
+    subprocess.run([str(cmake), *toolchain_args, "-S", str(source), "-B", str(build), "-G", "Ninja",
                     f"-DCMAKE_MAKE_PROGRAM={ninja}", "-DCMAKE_BUILD_TYPE=Release",
                     f"-DCMAKE_INSTALL_PREFIX={install}", "-DBUILD_LIST=core,imgproc,dnn,objdetect",
                     "-DOPENCV_SKIP_CMAKE_ROOT_CONFIG=ON", "-DOPENCV_CONFIG_INSTALL_PATH=cmake",
@@ -102,6 +104,7 @@ def install_opencv():
                     *[f"-D{option}=OFF" for option in disabled]], check=True, env=env)
     subprocess.run([str(cmake), "--build", str(build), "--parallel", str(os.cpu_count() or 1),
                     "--target", "install"], check=True, env=env)
+    record_toolchain(install)
 
 
 def install_webp():
@@ -119,17 +122,35 @@ def install_webp():
     cmake, ninja, env = msvc_tools()
     build = DEPS / "webp-build"
     install = DEPS / "webp-static"
+    toolchain_args = imaging_cmake_args(build, install)
     disabled = ("BUILD_SHARED_LIBS", "WEBP_BUILD_ANIM_UTILS", "WEBP_BUILD_CWEBP",
                 "WEBP_BUILD_DWEBP", "WEBP_BUILD_GIF2WEBP", "WEBP_BUILD_IMG2WEBP",
                 "WEBP_BUILD_VWEBP", "WEBP_BUILD_WEBPINFO", "WEBP_BUILD_WEBPMUX",
                 "WEBP_BUILD_EXTRAS", "WEBP_BUILD_LIBWEBPMUX")
-    subprocess.run([str(cmake), "-S", str(source), "-B", str(build), "-G", "Ninja",
+    subprocess.run([str(cmake), *toolchain_args, "-S", str(source), "-B", str(build), "-G", "Ninja",
                     f"-DCMAKE_MAKE_PROGRAM={ninja}", "-DCMAKE_BUILD_TYPE=Release",
                     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL",
                     f"-DCMAKE_INSTALL_PREFIX={install}",
                     *[f"-D{option}=OFF" for option in disabled]], check=True, env=env)
     subprocess.run([str(cmake), "--build", str(build), "--parallel", str(os.cpu_count() or 1),
                     "--target", "install"], check=True, env=env)
+    record_toolchain(install)
+
+
+def imaging_cmake_args(build, install):
+    args = native_cmake_args(build)
+    marker = install / ".remotekit-toolchain.json"
+    if not marker.is_file() or json.loads(marker.read_text(encoding="utf-8")) != LLVM_IDENTITY:
+        # A compiler/version change must replace both compiled objects and installed libraries.
+        for directory in (build, install):
+            if directory.exists():
+                shutil.rmtree(directory)
+    return args
+
+
+def record_toolchain(install):
+    (install / ".remotekit-toolchain.json").write_text(
+        json.dumps(LLVM_IDENTITY), encoding="utf-8")
 
 
 def export_minifas(source, output):
@@ -220,6 +241,7 @@ def main():
     parser.add_argument("--verify", action="store_true", help="verify existing runtime files offline")
     args = parser.parse_args()
     if not args.verify:
+        ensure_llvm()
         install_opencv()
         install_webp()
         install_models()
