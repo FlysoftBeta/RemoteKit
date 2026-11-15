@@ -1,6 +1,9 @@
 import("//tools/grit/repack.gni")
 
 executable("remotekit_browser") {
+  # RemoteKit code carries full symbols (types, locals); the rest of Chromium follows symbol_level.
+  configs -= [ "//build/config/compiler:default_symbols" ]
+  configs += [ "//build/config/compiler:symbols" ]
   configs -= [ "//build/config/clang:find_bad_constructs" ]
   configs -= [ "//build/config/win:console" ]
   configs += [ "//build/config/win:windowed" ]

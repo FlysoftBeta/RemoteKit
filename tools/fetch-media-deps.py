@@ -8,6 +8,7 @@ import tempfile
 from fetch_common import digest, download
 ROOT = Path(__file__).resolve().parents[1]
 DEPENDENCIES = [
+ ('HDiffPatch-v5.1.3.tar.gz','https://github.com/sisong/HDiffPatch/archive/refs/tags/v5.1.3.tar.gz','435c46447e7a1ace0327b67da2ec50a06e7f02d19960a182b493ff2e3f91c2b0'),
  ('sqlite-amalgamation-3540100.zip','https://sqlite.org/2026/sqlite-amalgamation-3540100.zip','0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9'),
  ('zstd-1.5.7.tar.gz','https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz','eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3'),
  ('json-LICENSE.MIT','https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT','46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603'),
@@ -41,6 +42,10 @@ def extract_dependency(archive_path, destination, name, expected):
         files = {path.relative_to(source).as_posix(): digest(path)
                  for path in source.rglob("*") if path.is_file()}
         required = {
+            "HDiffPatch-5.1.3": ("libHDiffPatch/HPatch/patch.c", "libHDiffPatch/HDiff/diff.cpp",
+                                  "compress_plugin_demo.h", "decompress_plugin_demo.h",
+                                  "libHDiffPatch/HDiff/private_diff/libdivsufsort/divsufsort.cpp",
+                                  "libHDiffPatch/HDiff/private_diff/libdivsufsort/divsufsort.c.inc.h", "LICENSE"),
             "sqlite-amalgamation-3540100": ("sqlite3.c", "sqlite3.h"),
             "libvpl-2.17.0": ("CMakeLists.txt", "api/vpl/mfxvideo.h", "LICENSE"),
             "zstd-1.5.7": ("lib/zstd.h", "build/cmake/CMakeLists.txt", "LICENSE"),
@@ -62,14 +67,15 @@ def extract_dependency(archive_path, destination, name, expected):
 def main():
     destination = ROOT / "build/dependencies"
     destination.mkdir(parents=True, exist_ok=True)
-    trees = {"sqlite-amalgamation-3540100.zip": "sqlite-amalgamation-3540100",
+    trees = {"HDiffPatch-v5.1.3.tar.gz": "HDiffPatch-5.1.3", "sqlite-amalgamation-3540100.zip": "sqlite-amalgamation-3540100",
              "libvpl-v2.17.0.zip": "libvpl-2.17.0", "zstd-1.5.7.tar.gz": "zstd-1.5.7"}
     for name, url, expected in DEPENDENCIES:
+        print("Verifying " + name, flush=True)
         path = destination / name
         download(url, path, expected)
         if name in trees:
             extract_dependency(path, destination, trees[name], expected)
-    print("Endpoint dependencies verified: SQLite 3.54.1, libvpl 2.17.0, JSON 3.12.0, NVENC API 13.0, zstd 1.5.7")
+    print("Endpoint dependencies verified: SQLite 3.54.1, libvpl 2.17.0, JSON 3.12.0, NVENC API 13.0, zstd 1.5.7, HDiffPatch 5.1.3")
 
 
 if __name__ == "__main__":

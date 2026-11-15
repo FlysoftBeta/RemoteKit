@@ -26,20 +26,64 @@ def failure():
 
 class PublishingTests(unittest.TestCase):
     def test_full_inclusion_threshold(self):
-        full = {'full': {'size': 100}}
-        history = [{'patch': {'asset': {'size': 30}}}, full]
+        full = {'format': 2, 'full': {'size': 100}}
+        history = [{'format': 2, 'patch': {'asset': {'size': 30}}}, full]
         self.assertFalse(publisher.should_include_full(history, 70))
         self.assertTrue(publisher.should_include_full(history, 71))
         self.assertFalse(publisher.should_include_full([full], 99))
         self.assertTrue(publisher.should_include_full([full], 101))
         self.assertTrue(publisher.should_include_full([full], 0, force=True))
         self.assertTrue(publisher.should_include_full([], 0))
-        self.assertTrue(publisher.should_include_full([{'patch': {'asset': {'size': 1}}}], 1))
+        self.assertTrue(publisher.should_include_full([{'format': 2, 'patch': {'asset': {'size': 1}}}], 1))
         # The newest full terminates the walk, even if it also has a patch.
         self.assertFalse(publisher.should_include_full([
-            {'full': {'size': 100}, 'patch': {'asset': {'size': 1000}}},
-            {'full': {'size': 1}},
+            {'format': 2, 'full': {'size': 100}, 'patch': {'asset': {'size': 1000}}},
+            {'format': 2, 'full': {'size': 1}},
         ], 99))
+
+    def test_format_one_terminates_full_history(self):
+        self.assertTrue(publisher.should_include_full([
+            {'format': 2, 'patch': {'asset': {'size': 1}}},
+            {'format': 1, 'full': {'size': 100000}},
+        ], 1))
+
+    def test_previous_uses_newest_published_format_two_including_prereleases(self):
+        args = argparse.Namespace(cache=SCRATCH, package=SCRATCH, tool=SCRATCH / 'tool',
+                                  key=SCRATCH / 'key', repo='owner/repo', transition=False)
+        instance = publisher.Publisher(args)
+        releases = [dict(tag_name=tag, published_at=date, draft=draft, prerelease=tag == "pre",
+                         assets=[{'name': 'control.manifest'}])
+                    for tag, date, draft in [('draft', '5', True), ('bad', '4', False),
+                                            ('transition', '3', False), ('pre', '2', False),
+                                            ('stable', '1', False)]]
+        def inspect(url):
+            if '/bad/' in url:
+                raise ValueError('undecodable manifest')
+            return {'format': 1 if '/transition/' in url else 2, 'buildId': url}
+        with patch.object(publisher, 'releases', return_value=releases), \
+             patch.object(instance, 'inspect', side_effect=inspect):
+            manifest, url = instance.previous_release()
+        self.assertEqual(manifest['format'], 2)
+        self.assertIn('/pre/', url)
+
+    def test_history_ends_at_format_one(self):
+        args = argparse.Namespace(cache=SCRATCH, package=SCRATCH, tool=SCRATCH / 'tool',
+                                  key=SCRATCH / 'key', repo='owner/repo', transition=False)
+        instance = publisher.Publisher(args)
+        latest = {'format': 2, 'buildId': 'a', 'patch': {'from': 'b', 'manifest': 'old'}}
+        previous = {'format': 1, 'buildId': 'b', 'full': {'size': 10},
+                    'patch': {'from': 'c', 'manifest': 'older'}}
+        with patch.object(instance, 'inspect', side_effect=lambda url: latest if url == 'latest' else previous) as inspect:
+            self.assertEqual(list(instance.history('latest')), [latest])
+        self.assertNotIn('older', [call.args[0] for call in inspect.call_args_list])
+
+    def test_draft_identity_includes_format(self):
+        releases = [dict(draft=True, body='buildId: ' + 'a' * 64 + f'\nformat {format}',
+                         tag_name=f'f{format}') for format in (1, 2)]
+        with patch.object(publisher, 'releases', return_value=releases):
+            for format in (1, 2):
+                self.assertEqual(publisher.draft_release('owner/repo', 'a' * 64, format)['tag_name'],
+                                 f'f{format}')
 
     def test_upload_resume_skips_only_equal_sizes_and_keeps_order(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
@@ -93,7 +137,7 @@ class PublishingTests(unittest.TestCase):
             for name in ('remotekit_control.exe', 'remotekit_node.exe'):
                 (tree / 'bin' / name).write_bytes(b'bootstrap')
             args = argparse.Namespace(package=tree, cache=root / 'cache', key=root / 'release.key',
-                                      tool=root / 'tool.exe', repo='owner/repo', full=False, dry_run=True)
+                                      tool=root / 'tool.exe', repo='owner/repo', full=False, dry_run=True, transition=False, prerelease=False)
             draft = None
             writes = []
 
@@ -126,17 +170,99 @@ class PublishingTests(unittest.TestCase):
                 self.assertEqual(writes, [])
                 self.assertIn('Upload control-full.000', output.getvalue())
                 self.assertIn('Upload remotekit_control.exe', output.getvalue())
-                state = json.loads((root / 'cache/out' / (build_id + '.json')).read_text())
-                draft = {'draft': True, 'tag_name': state['tag'], 'body': 'buildId: ' + build_id,
+                state = json.loads((root / 'cache/out' / (build_id + '-f2.json')).read_text())
+                draft = {'draft': True, 'tag_name': state['tag'], 'body': 'buildId: ' + build_id + '\nformat 2',
                          'assets': [{'name': 'control-full.000', 'size': len(b'encrypted bytes'),
                                      'state': 'uploaded'}]}
                 args.dry_run = False
                 publisher.Publisher(args).run()
                 self.assertEqual(native.call_count, 1)
             uploads = [Path(call[3]).name for call in writes if call[:2] == ('release', 'upload')]
-            self.assertEqual(uploads, ['control.manifest', 'remotekit_control.exe', 'remotekit_node.exe'])
+            self.assertEqual(uploads, ['remotekit_control.exe', 'remotekit_node.exe', 'control.manifest'])
             self.assertEqual(writes[-1][:3], ('release', 'edit', state['tag']))
             self.assertEqual(writes[-1][-2:], ('--draft=false', '--latest'))
+
+    def test_transition_and_prerelease_publication_modes(self):
+        for transition, prerelease, dry_run in ((True, False, False), (False, True, False),
+                                                (True, False, True), (False, True, True)):
+            with self.subTest(transition=transition), tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+                root = Path(temporary)
+                tree = root / 'package'
+                (tree / 'bin').mkdir(parents=True)
+                build_id = 'a' * 64
+                (tree / 'build.json').write_text(json.dumps({'buildId': build_id}))
+                (tree / 'manifest.json').write_text(json.dumps({
+                    'buildId': build_id, 'source': {'commit': 'b' * 40},
+                }))
+                for name in ('remotekit_control.exe', 'remotekit_node.exe'):
+                    (tree / 'bin' / name).write_bytes(b'bootstrap')
+                args = argparse.Namespace(package=tree, cache=root / 'cache', key=root / 'key',
+                                          tool=root / 'tool', repo='owner/repo', full=False,
+                                          dry_run=dry_run, transition=transition, prerelease=prerelease)
+                def pack(command, **options):
+                    self.assertEqual(command, 'pack')
+                    self.assertEqual(options['format'], 1 if transition else 2)
+                    self.assertTrue(options['full'])
+                    self.assertIsNone(options['base'])
+                    options['out'].mkdir()
+                    (options['out'] / 'control.manifest').write_bytes(b'envelope')
+                    (options['out'] / 'upload.json').write_text(json.dumps([
+                        {'name': 'control.manifest', 'size': 8},
+                    ]))
+                    return {}
+                with patch.object(publisher, 'gh', return_value='{}') as gh, \
+                     patch.object(publisher, 'latest_release', return_value={'tag_name': 'latest'}) as latest, \
+                     patch.object(publisher, 'draft_release', return_value=None), \
+                     patch.object(publisher.Publisher, 'previous_release', return_value=(None, None)) as previous, \
+                     patch.object(publisher.Publisher, 'inspect', return_value={'format': 2, 'buildId': build_id}), \
+                     patch.object(publisher.Publisher, 'invoke', side_effect=pack), \
+                     redirect_stdout(io.StringIO()):
+                    publisher.Publisher(args).run()
+                if transition:
+                    previous.assert_not_called()
+                    latest.assert_called_once()
+                else:
+                    latest.assert_not_called()
+                    previous.assert_called_once()
+                self.assertTrue((root / 'cache/out' / f'{build_id}-f{1 if transition else 2}.json').is_file())
+                if dry_run:
+                    self.assertTrue(all(call.args[0] == 'api' for call in gh.call_args_list))
+                    continue
+                edit = gh.call_args_list[-1].args
+                self.assertEqual(edit[-3:] if prerelease else edit[-2:],
+                                 ('--draft=false', '--prerelease', '--latest=false') if prerelease
+                                 else ('--draft=false', '--latest'))
+                notes = next(call.args[-1] for call in gh.call_args_list
+                             if call.args[:2] == ('release', 'create'))
+                self.assertIn(f'format {1 if transition else 2}', notes)
+
+    def test_transition_rejects_conflicting_publication_flags(self):
+        from contextlib import redirect_stderr
+        for flag in ('--full', '--prerelease'):
+            with self.subTest(flag=flag), patch.object(publisher, 'Publisher') as native, \
+                 redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                publisher.main(['--package', 'fixture', '--transition', flag])
+            native.assert_not_called()
+
+    def test_transition_same_build_stops_only_for_format_one_latest(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            root = Path(temporary)
+            (root / 'build.json').write_text(json.dumps({'buildId': 'a' * 64}))
+            (root / 'manifest.json').write_text(json.dumps({
+                'buildId': 'a' * 64, 'source': {'commit': 'b' * 40},
+            }))
+            args = argparse.Namespace(package=root, cache=root / 'cache', key=root / 'key',
+                                      tool=root / 'tool', repo='owner/repo', full=False,
+                                      dry_run=True, transition=True, prerelease=False)
+            with patch.object(publisher, 'gh', return_value='{}'), \
+                 patch.object(publisher, 'write_payload', return_value={}), \
+                 patch.object(publisher, 'latest_release', return_value={'tag_name': 'latest'}), \
+                 patch.object(publisher, 'draft_release') as draft, \
+                 patch.object(publisher.Publisher, 'inspect', return_value={'format': 1, 'buildId': 'a' * 64}), \
+                 redirect_stdout(io.StringIO()) as output:
+                publisher.Publisher(args).run()
+            self.assertIn('already published', output.getvalue())
+            draft.assert_not_called()
 
     def test_patch_is_packed_before_full_decision_and_cipher_tags_are_excluded(self):
         for full_size, expect_full in ((200, False), (160, True)):
@@ -152,12 +278,12 @@ class PublishingTests(unittest.TestCase):
                 for name in ('remotekit_control.exe', 'remotekit_node.exe'):
                     (tree / 'bin' / name).write_bytes(b'bootstrap')
                 older_url = 'https://github.com/owner/repo/releases/download/older/control.manifest'
-                previous = {'buildId': 'c' * 64, 'payload': {
+                previous = {'format': 2, 'buildId': 'c' * 64, 'payload': {
                     'size': 4, 'sha256': hashlib.sha256(b'base').hexdigest(),
                 }, 'patch': {'from': 'd' * 64, 'manifest': older_url, 'asset': {'size': 30}}}
-                older = {'buildId': 'd' * 64, 'full': {'size': full_size}}
+                older = {'format': 2, 'buildId': 'd' * 64, 'full': {'size': full_size}}
                 args = argparse.Namespace(package=tree, cache=root / 'cache', key=root / 'key',
-                                          tool=root / 'tool', repo='owner/repo', full=False, dry_run=True)
+                                          tool=root / 'tool', repo='owner/repo', full=False, dry_run=True, transition=False, prerelease=False)
                 packed_full_flags = []
 
                 def gh(*arguments):
@@ -166,7 +292,9 @@ class PublishingTests(unittest.TestCase):
                     if arguments[:2] == ('api', 'repos/owner/repo/releases/latest'):
                         return json.dumps({'tag_name': 'previous'})
                     if arguments[:3] == ('api', '--paginate', '--slurp'):
-                        return '[[]]'
+                        return json.dumps([[{'tag_name': 'previous', 'published_at': '2026-11-15',
+                                             'draft': False, 'prerelease': True,
+                                             'assets': [{'name': 'control.manifest'}]}]])
                     self.fail('Unexpected GitHub write: ' + str(arguments))
 
                 def invoke(command, **options):

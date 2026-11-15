@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { createDecipheriv, createHash, hkdfSync, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -102,9 +102,9 @@ function payload(id) {
 async function run(executable, args) {
   return execute(executable, args, { timeout: 60000, windowsHide: true });
 }
-async function pack(index, base, full = false) {
+async function pack(index, base, full = false, format) {
   const directory = path.join(temporary, String(index));
-  await run(tool, [
+  const result = await run(tool, [
     'pack',
     '--key=' + key,
     '--payload=' + path.join(temporary, `${index}.tar`),
@@ -112,7 +112,7 @@ async function pack(index, base, full = false) {
     '--url-prefix=' + prefix + index + '/',
     '--out=' + directory,
     '--level=1',
-    '--patch-level=1',
+    ...(format === undefined ? [] : ['--format=' + format]),
     ...(base === undefined
       ? []
       : [
@@ -122,6 +122,7 @@ async function pack(index, base, full = false) {
         ]),
     ...(full ? ['--full'] : []),
   ]);
+  assert.equal(JSON.parse(result.stdout).format, format ?? 2);
   const upload = JSON.parse(await readFile(path.join(directory, 'upload.json'), 'utf8'));
   assert.equal(upload.at(-1).name, 'control.manifest');
   for (const asset of upload) {
@@ -154,8 +155,10 @@ try {
   await assert.rejects(run(tool, ['keygen', '--out=' + key]));
   for (let index = 0; index < ids.length; ++index)
     await writeFile(path.join(temporary, `${index}.tar`), payload(ids[index]));
-  const first = await pack(0);
-  await pack(1, 0, true);
+  await assert.rejects(pack(0, undefined, false, 1));
+  await assert.rejects(pack(1, 0, true, 1));
+  const first = await pack(0, undefined, true, 1);
+  const second = await pack(1, 0, true, 2);
   await pack(2, 1);
   const inspected = await run(tool, [
     'inspect',
@@ -163,6 +166,7 @@ try {
     '--manifest=' + path.join(first, 'control.manifest'),
   ]);
   assert.equal(JSON.parse(inspected.stdout).buildId, ids[0]);
+  assert.equal(JSON.parse(inspected.stdout).format, 1);
   const releaseKey = Buffer.from((await readFile(key, 'utf8')).trim(), 'base64');
   const envelope = served.get('/0/control.manifest');
   const manifestKey = hkdfSync(
@@ -217,6 +221,34 @@ try {
   corruptPatch = true;
   await fetch(1, 'replan', 0);
   corruptPatch = false;
+  const secondManifest = JSON.parse(
+    (await run(tool, ['inspect', '--key=' + key, '--manifest=' + path.join(second, 'control.manifest')]))
+      .stdout,
+  );
+  assert.equal(secondManifest.format, 2);
+  const patchAsset = secondManifest.patch.asset;
+  const patchKey = hkdfSync(
+    'sha256',
+    releaseKey,
+    Buffer.from(patchAsset.salt, 'hex'),
+    'remotekit release asset v1',
+    32,
+  );
+  const patchNonce = Buffer.alloc(12);
+  const patchAad = Buffer.alloc(13);
+  patchAad.write('RKRS');
+  patchAad[4] = 1;
+  patchAad.writeUInt32BE(patchAsset.slices.length, 9);
+  const diff = decrypt(patchKey, patchNonce, patchAad, savedPatch);
+  assert.equal(diff.subarray(0, 8).toString(), 'HDIFFSF2');
+  diff[0] ^= 1;
+  const encoder = createCipheriv('aes-256-gcm', patchKey, patchNonce);
+  encoder.setAAD(patchAad);
+  served.set(missing, Buffer.concat([encoder.update(diff), encoder.final(), encoder.getAuthTag()]));
+  await fetch(1, 'corrupt-diff-replan', 0);
+  const work = path.join(temporary, 'corrupt-diff-replan.tar.work');
+  assert(!(await readdir(work)).some((name) => name.endsWith('.hdiff')));
+  served.set(missing, savedPatch);
   dropped = false;
   ignoreRange = true;
   await fetch(0, 'restart');

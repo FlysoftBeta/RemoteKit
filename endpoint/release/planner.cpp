@@ -26,7 +26,7 @@ Plan MakePlan(const std::string& url, const State& state, const FetchManifest& f
       break;
     if (manifest.full && usable(*manifest.full))
       candidate(*manifest.full, true);
-    if (!manifest.patch || !usable(manifest.patch->asset))
+    if (manifest.format == 1 || !manifest.patch || !usable(manifest.patch->asset))
       break;
     if (manifest.patch->from == state.current && state.base_usable) {
       candidate(manifest.patch->asset, false);

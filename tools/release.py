@@ -26,7 +26,13 @@ def main():
     parser.add_argument('--out', choices=['dev', 'rel'], default='rel')
     parser.add_argument('--publish', action='store_true')
     parser.add_argument('--full', action='store_true', help='publish a full asset as well as the patch')
+    parser.add_argument('--transition', action='store_true')
+    parser.add_argument('--prerelease', action='store_true')
     args = parser.parse_args()
+    if (args.transition or args.prerelease) and not args.publish:
+        parser.error('--transition and --prerelease require --publish')
+    if args.transition and (args.full or args.prerelease):
+        parser.error('--transition is incompatible with --full and --prerelease')
     if args.full and not args.publish:
         raise ValueError('--full requires --publish')
     status = subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True)
@@ -72,7 +78,9 @@ def main():
     result = packager.main(['--out', args.out, '--smoke'])
     if args.publish:
         publish = [sys.executable, 'tools/publish-release.py', '--package', result['directory']]
-        run(publish + (['--full'] if args.full else []), env)
+        publish.extend('--' + flag for flag in ('full', 'transition', 'prerelease')
+                       if getattr(args, flag))
+        run(publish, env)
     print(json.dumps(result, indent=2), flush=True)
 
 

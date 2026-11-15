@@ -53,7 +53,8 @@ fs::path Execute(const Plan& plan,
       }
     };
     try {
-      Decode(input, output, step.manifest.payload, previous, !step.full);
+      Decode(input, output, step.manifest.payload, previous,
+             step.full ? fs::path{} : work / ("patch-" + step.asset.salt + ".hdiff"));
       Require(HashFile(output) == step.manifest.payload.sha256, "release payload SHA-256 mismatch");
     } catch (const Replan&) {
       throw;

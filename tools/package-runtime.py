@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package Windows streaming runtimes from GN runtime dependencies, without symbols or profiles."""
+"""Package Windows streaming runtimes from GN runtime dependencies, with native symbols."""
 
 import argparse
 from datetime import datetime, timezone, timedelta
@@ -16,6 +16,9 @@ import tempfile
 from release_payload import build_id as payload_build_id, digest, write_payload
 
 ROOT = Path(__file__).resolve().parents[1]
+CHROMIUM_PDBS = ('remotekit_browser.exe.pdb', 'remotekit_sdk.dll.pdb')
+ENDPOINT_PDBS = ('endpoint_service.pdb', 'remotekit_snapshot.pdb',
+                 'remotekit_node.pdb', 'remotekit_control.pdb')
 SOURCE_TREES = ('browser', 'endpoint', 'control', 'protocol', 'sdk', 'tools', 'patches')
 
 
@@ -77,7 +80,14 @@ def check_control_freshness():
             )
 
 
+def require_pdbs(directory, names, component):
+    for name in names:
+        if not (directory / name).is_file():
+            raise RuntimeError(f'Stale {component}: missing PDB {directory / name}')
+
+
 def check_endpoint_freshness(build):
+    require_pdbs(build / 'endpoint', ENDPOINT_PDBS, 'Endpoint')
     if not (build / 'CMakeCache.txt').is_file() or not (build / 'build.ninja').is_file():
         raise RuntimeError(f'Stale Endpoint: package build is missing from {build}')
     cache = {}
@@ -139,6 +149,7 @@ def check_endpoint_freshness(build):
 
 
 def check_freshness(chromium, output):
+    require_pdbs(output, CHROMIUM_PDBS, 'Chromium Browser/SDK')
     staged = subprocess.run(
         [
             sys.executable,
@@ -253,12 +264,14 @@ def validate_runtime_tree(root):
             for part in relative.parts
         ):
             raise RuntimeError('Non-runtime directory in package: ' + str(relative))
+        own_pdb = (relative.parent.as_posix() in {'bin', 'node/bin'}
+                   and relative.name in {*CHROMIUM_PDBS, *ENDPOINT_PDBS})
         if file.is_file() and (
-            file.name.lower() in {'cred.json', '.env'}
+            (file.suffix.lower() == '.pdb' and not own_pdb)
+            or file.name.lower() in {'cred.json', '.env'}
             or file.name.lower().endswith('.key')
             or file.suffix.lower()
             in {
-                '.pdb',
                 '.obj',
                 '.lib',
                 '.exp',
@@ -351,6 +364,7 @@ def package_runtime(args, node_runtime):
         include = source.suffix.lower() in {'.dll', '.pak', '.dat', '.bin'}
         if relative.parent == Path('locales') and relative.name not in {'zh-CN.pak', 'en-US.pak'}:
             include = False
+        include |= relative.as_posix() in CHROMIUM_PDBS
         include |= source.name == browser_name
         include |= source.name == 'vk_swiftshader_icd.json'
         if not include:
@@ -361,6 +375,8 @@ def package_runtime(args, node_runtime):
         selected[relative] = source
     for name in [
         browser_name,
+        'remotekit_sdk.dll',
+        *CHROMIUM_PDBS,
         'remotekit.pak',
         'locales/zh-CN.pak',
         'locales/en-US.pak',
@@ -420,6 +436,8 @@ def package_runtime(args, node_runtime):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
     copy_endpoint(endpoint, binary)
+    for name in ('endpoint_service.pdb', 'remotekit_snapshot.pdb', 'remotekit_node.pdb'):
+        shutil.copy2(endpoint.parent / name, binary / name)
     for source, relative in document_runtime_trees():
         shutil.copytree(source, binary / relative)
     shutil.copy2(endpoint.parent / 'remotekit_node.exe', binary / 'remotekit_node.exe')
@@ -451,7 +469,8 @@ def package_runtime(args, node_runtime):
     control_bin = package / 'bin'
     control_bin.mkdir()
     shutil.copy2(node, control_bin / 'node.exe')
-    for name in ('remotekit_control.exe', 'remotekit_node.exe'):
+    for name in ('remotekit_control.exe', 'remotekit_node.exe',
+                 'remotekit_control.pdb', 'remotekit_node.pdb'):
         shutil.copy2(endpoint.parent / name, control_bin / name)
     control = package / 'control'
     control.mkdir()
@@ -481,6 +500,11 @@ def package_runtime(args, node_runtime):
     licenses = package / 'licenses'
     licenses.mkdir()
     shutil.copy2(ROOT / 'build/dependencies/zstd-1.5.7/LICENSE', licenses / 'zstd-LICENSE')
+    hdiff = ROOT / 'build/dependencies/HDiffPatch-5.1.3'
+    shutil.copy2(hdiff / 'LICENSE', licenses / 'HDiffPatch-LICENSE')
+    divsufsort = (hdiff / 'libHDiffPatch/HDiff/private_diff/libdivsufsort/divsufsort.c.inc.h').read_text(encoding='utf-8')
+    notice = divsufsort[divsufsort.index('/*'):divsufsort.index('*/') + 2]
+    (licenses / 'libdivsufsort-LICENSE').write_text(notice, encoding='utf-8')
     for name in ['LICENSE', 'third-party-programs.txt']:
         shutil.copy2(
             ROOT / 'build/dependencies/libvpl-2.17.0' / name, licenses / ('libvpl-' + name)

@@ -20,6 +20,7 @@ struct Patch {
   Asset asset;
 };
 struct Manifest {
+  unsigned format = 2;
   std::string build_id, published;
   Payload payload;
   std::optional<Patch> patch;

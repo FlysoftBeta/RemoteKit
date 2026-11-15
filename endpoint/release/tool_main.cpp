@@ -1,12 +1,12 @@
+#include <charconv>
+#include <iostream>
+#include <thread>
 #include "asset.hpp"
 #include "codec.hpp"
 #include "executor.hpp"
 #include "options.hpp"
 #include "payload.hpp"
 #include "util/error_policy.hpp"
-#include <iostream>
-#include <thread>
-#include <charconv>
 
 namespace remotekit::release {
 namespace {
@@ -16,13 +16,13 @@ constexpr char kUsage[] =
     "remotekit_release pack --key=<file> --payload=<tar> --build=<id> --url-prefix=<url/> "
     "--out=<dir> "
     "[--base=<tar> --base-build=<id> --base-manifest=<url>] [--full] [--level=<n>] "
-    "[--patch-level=<n>]\n"
+    "[--format=1|2]\n"
     "remotekit_release fetch --key=<file> --manifest=<url> --out=<tar> [--base=<tar> "
     "--base-build=<id>]\n";
-int Level(const Options& options, const wchar_t* name) {
-  if (!options.Has(name))
+int Level(const Options& options) {
+  if (!options.Has(L"level"))
     return 19;
-  auto value = options.Text(name);
+  auto value = options.Text(L"level");
   int level = 0;
   auto [end, ec] = std::from_chars(value.data(), value.data() + value.size(), level);
   Require(
@@ -80,11 +80,16 @@ void SelfCheck(const Asset& asset,
           consume(plaintext);
         }
       },
-      decoded, payload, base, !base.empty());
+      decoded, payload, base, base.empty() ? fs::path{} : directory / "self-check.hdiff");
   Require(HashFile(decoded) == payload.sha256, "packed asset self-check SHA-256 mismatch");
   fs::remove(decoded);
 }
 void Pack(const Options& options) {
+  auto format = options.Has(L"format") ? options.Text(L"format") : "2";
+  Require(format == "1" || format == "2", "unsupported release format");
+  Require(format != "1" || (options.Has(L"full") && !options.Has(L"base") &&
+                            !options.Has(L"base-build") && !options.Has(L"base-manifest")),
+          "format 1 requires --full and rejects --base options");
   auto key = LoadKey(options.Path(L"key"));
   auto payload = options.Path(L"payload");
   auto id = options.Text(L"build");
@@ -99,11 +104,12 @@ void Pack(const Options& options) {
   bool has_base = options.Has(L"base");
   Require(has_base == options.Has(L"base-build") && has_base == options.Has(L"base-manifest"),
           "base, base-build and base-manifest are required together");
-  Manifest manifest{id, Now(), {fs::file_size(payload), HashFile(payload)}, {}, {}};
+  Manifest manifest{
+      format == "1" ? 1u : 2u, id, Now(), {fs::file_size(payload), HashFile(payload)}, {}, {}};
   Json upload = Json::array();
   if (!has_base || options.Has(L"full")) {
     auto compressed = directory / L"full.zst";
-    Compress(payload, compressed, {}, Level(options, L"level"),
+    Compress(payload, compressed, Level(options),
              std::max(1u, std::thread::hardware_concurrency()));
     manifest.full = PackAsset(compressed, directory, "control-full", prefix, key, upload);
     SelfCheck(*manifest.full, directory, prefix, key, manifest.payload, {});
@@ -115,8 +121,8 @@ void Pack(const Options& options) {
     auto previous_url = options.Text(L"base-manifest");
     Require(from != id && PayloadBuildId(base) == from && ValidUrl(previous_url),
             "invalid release base");
-    auto compressed = directory / L"patch.zst";
-    Compress(payload, compressed, base, Level(options, L"patch-level"), 0);
+    auto compressed = directory / L"patch.hdiff";
+    Diff(payload, compressed, base);
     manifest.patch = Patch{from, previous_url,
                            PackAsset(compressed, directory, "control-patch", prefix, key, upload)};
     SelfCheck(manifest.patch->asset, directory, prefix, key, manifest.payload, base);
@@ -126,7 +132,8 @@ void Pack(const Options& options) {
   upload.push_back(
       {{"name", "control.manifest"}, {"size", fs::file_size(directory / L"control.manifest")}});
   WriteText(directory / L"upload.json", upload.dump());
-  std::cout << Json{{"buildId", id},
+  std::cout << Json{{"format", manifest.format},
+                    {"buildId", id},
                     {"payload", manifest.payload.size},
                     {"full", manifest.full ? Json(manifest.full->size) : Json(nullptr)},
                     {"patch", manifest.patch ? Json(manifest.patch->asset.size) : Json(nullptr)}}
@@ -205,7 +212,7 @@ int ToolMain(int argc, wchar_t** argv) {
   } else if (command == L"pack") {
     Pack(Options(argc, argv,
                  {L"key", L"payload", L"build", L"url-prefix", L"out", L"base", L"base-build",
-                  L"base-manifest", L"level", L"patch-level"},
+                  L"base-manifest", L"level", L"format"},
                  {L"full"}));
   } else if (command == L"fetch") {
     FetchCommand(Options(argc, argv, {L"key", L"manifest", L"out", L"base", L"base-build"}));

@@ -264,7 +264,6 @@ async function pack(version, base, full = false) {
     '--url-prefix=' + prefix + `v${version}/`,
     '--out=' + directory,
     '--level=1',
-    '--patch-level=1',
     ...(previous
       ? [
           '--base=' + previous.payload,

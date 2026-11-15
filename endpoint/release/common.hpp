@@ -1,8 +1,8 @@
 #pragma once
-#include "../updater/platform.hpp"
-#include <fstream>
 #include <algorithm>
+#include <fstream>
 #include <set>
+#include "../updater/platform.hpp"
 
 namespace remotekit::release {
 namespace fs = std::filesystem;
@@ -85,6 +85,18 @@ inline std::string HexString(const Json& json) {
           "expected lowercase 64 hex digits");
   return json.get<std::string>();
 }
+inline void ActivatePath(const fs::path& source, const fs::path& destination, DWORD flags) {
+  // Scanners and indexers briefly open fresh files without FILE_SHARE_DELETE.
+  for (int attempt = 1;; ++attempt) {
+    if (MoveFileExW(source.c_str(), destination.c_str(), flags))
+      return;
+    const DWORD error = GetLastError();
+    if ((error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION) || attempt == 50)
+      Fail(ErrorCode::kUnavailable,
+           "cannot activate release path (Windows error " + std::to_string(error) + ")");
+    Sleep(20);
+  }
+}
 inline void AtomicText(const fs::path& path, const std::string& text) {
   auto temporary = fs::path(path.wstring() + L".tmp");
   WriteText(temporary, text);
@@ -93,29 +105,6 @@ inline void AtomicText(const fs::path& path, const std::string& text) {
   Io(file.value != INVALID_HANDLE_VALUE && FlushFileBuffers(file.value),
      "cannot flush release file");
   Io(CloseHandle(file.Release()) != FALSE, "cannot close flushed release file");
-  // Scanners and indexers briefly open fresh files without FILE_SHARE_DELETE.
-  for (int attempt = 1;; ++attempt) {
-    if (MoveFileExW(temporary.c_str(), path.c_str(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-      return;
-    const DWORD error = GetLastError();
-    if ((error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION) || attempt == 50)
-      Fail(ErrorCode::kUnavailable,
-           "cannot activate release file (Windows error " + std::to_string(error) + ")");
-    Sleep(20);
-  }
+  ActivatePath(temporary, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
 }
-class Mapping {
- public:
-  explicit Mapping(const fs::path& path, std::optional<uint64_t> output_size = {});
-  ~Mapping();
-  Mapping(const Mapping&) = delete;
-  Mapping& operator=(const Mapping&) = delete;
-  std::span<uint8_t> bytes() { return {data_, size_}; }
-
- private:
-  updater::Handle file_, mapping_;
-  uint8_t* data_ = nullptr;
-  size_t size_ = 0;
-};
 }  // namespace remotekit::release

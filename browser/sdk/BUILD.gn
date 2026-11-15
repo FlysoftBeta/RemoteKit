@@ -42,6 +42,9 @@ rtc_sources = [
 ]
 
 shared_library("remotekit_sdk") {
+  # RemoteKit code carries full symbols (types, locals); the rest of Chromium follows symbol_level.
+  configs -= [ "//build/config/compiler:default_symbols" ]
+  configs += [ "//build/config/compiler:symbols" ]
   configs -= [ "//build/config/clang:find_bad_constructs" ]
   output_name = "remotekit_sdk"
   sources = [

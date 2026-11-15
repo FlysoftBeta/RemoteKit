@@ -171,7 +171,7 @@ fs::path InstallPayload(const fs::path& root,
       fs::copy_file(tar, stage / L"payload.tar");
     WriteText(stage / L"payload.json", Json{{"size", size}, {"sha256", hash}}.dump());
     Require(!fs::exists(version), "version already installed");
-    fs::rename(stage, version);
+    ActivatePath(stage, version, MOVEFILE_WRITE_THROUGH);
     return version;
   } catch (...) {
     std::error_code ec;

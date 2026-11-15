@@ -163,12 +163,16 @@ try {
                 file.write_bytes(data)
 
             for file in ('remotekit_browser.exe', 'remotekit.pak', 'locales/zh-CN.pak',
-                         'locales/en-US.pak', 'icudtl.dat', 'v8_context_snapshot.bin', 'args.gn'):
+                         'locales/en-US.pak', 'icudtl.dat', 'v8_context_snapshot.bin', 'args.gn',
+                         'remotekit_sdk.dll', *packager.CHROMIUM_PDBS):
                 put(output / file)
+            put(output / 'third-party.pdb')
             put(chromium / 'third_party/hyphenation-patterns/LICENSE')
             put(endpoint)
-            for name in ('remotekit_node.exe', 'remotekit_control.exe', 'remotekit_snapshot.exe', 'libvpl.dll'):
+            for name in ('remotekit_node.exe', 'remotekit_control.exe', 'remotekit_snapshot.exe', 'libvpl.dll', *packager.ENDPOINT_PDBS):
                 put(endpoint.parent / name)
+            put(repo / 'build/dependencies/HDiffPatch-5.1.3/LICENSE')
+            put(repo / 'build/dependencies/HDiffPatch-5.1.3/libHDiffPatch/HDiff/private_diff/libdivsufsort/divsufsort.c.inc.h', b'/* license */')
             put(node)
             put(node.parent / 'LICENSE')
             for name in ('zstd-1.5.7/LICENSE', 'libvpl-2.17.0/LICENSE',
@@ -188,7 +192,7 @@ try {
                     return 'a' * 40
                 if command[0] == str(node):
                     return json.dumps({'version': 'v24.20.0', 'abi': '137'})
-                return json.dumps({command[3]: {'runtime_deps': []}})
+                return json.dumps({command[3]: {'runtime_deps': ['third-party.pdb', *packager.CHROMIUM_PDBS]}})
 
             args = argparse.Namespace(chromium_root=chromium, out='rel', endpoint=None,
                                       destination=root / 'packages', smoke=True)
@@ -214,14 +218,20 @@ try {
             tree = Path(result['directory'])
             self.assertEqual(tree.name, 'RemoteKit-control-' + result['buildId'][:12])
             self.assertEqual({file.name for file in (tree / 'bin').iterdir()},
-                             {'node.exe', 'remotekit_control.exe', 'remotekit_node.exe'})
+                             {'node.exe', 'remotekit_control.exe', 'remotekit_node.exe',
+                              'remotekit_control.pdb', 'remotekit_node.pdb'})
             self.assertTrue((tree / 'node/bin/msvcp140.dll').is_file())
+            for name in (*packager.CHROMIUM_PDBS, 'endpoint_service.pdb',
+                         'remotekit_snapshot.pdb', 'remotekit_node.pdb'):
+                self.assertTrue((tree / 'node/bin' / name).is_file())
             self.assertFalse((tree / 'release').exists())
             self.assertEqual(json.loads((tree / 'node/build.json').read_text())['buildId'], result['buildId'])
             recovery = (tree / 'recover-credentials.cmd').read_text()
             self.assertIn('%~dp0..\\..\\config\\control.json', recovery)
             manifest = json.loads((tree / 'manifest.json').read_text())
             self.assertNotIn('archive', manifest)
+            self.assertEqual(manifest['excluded_runtime_graph_entries'], ['third-party.pdb'])
+            self.assertFalse((tree / 'node/bin/third-party.pdb').exists())
             self.assertEqual(manifest['buildId'], result['buildId'])
             self.assertTrue(manifest['runtime_launched'])
             self.assertEqual(manifest['runtime_validation'], validation)
@@ -236,6 +246,25 @@ try {
                 self.assertEqual(payload.extractfile('manifest.json').read(), (tree / 'manifest.json').read_bytes())
             self.assertEqual(json.loads((tree.parent / 'payload.json').read_text())['sha256'], result['sha256'])
             self.assertEqual(list(tree.parent.glob('*.zst')), [])
+
+    def test_symbols_are_required_and_only_own_pdbs_are_allowed(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            root = Path(temporary)
+            binary = root / 'node/bin'
+            binary.mkdir(parents=True)
+            with self.assertRaisesRegex(RuntimeError, 'missing PDB'):
+                packager.check_freshness(root, binary)
+            with self.assertRaisesRegex(RuntimeError, 'missing PDB'):
+                packager.check_endpoint_freshness(root)
+            for name in packager.CHROMIUM_PDBS:
+                with self.assertRaisesRegex(RuntimeError, 'missing PDB'):
+                    packager.require_pdbs(binary, packager.CHROMIUM_PDBS, 'Chromium')
+                (binary / name).write_bytes(b'symbols')
+            packager.require_pdbs(binary, packager.CHROMIUM_PDBS, 'Chromium')
+            packager.validate_runtime_tree(root)
+            (binary / 'third_party.pdb').write_bytes(b'excluded')
+            with self.assertRaisesRegex(RuntimeError, 'Non-runtime file'):
+                packager.validate_runtime_tree(root)
 
     def test_override_endpoint_name(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:

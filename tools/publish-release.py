@@ -53,6 +53,8 @@ def should_include_full(manifests, patch_size, force=False):
         return True
     total = patch_size
     for manifest in manifests:
+        if manifest['format'] != 2:
+            return True
         if 'full' in manifest:
             return total > manifest['full']['size']
         if 'patch' not in manifest:
@@ -70,18 +72,24 @@ def latest_release(repo):
         raise
 
 
-def draft_release(repo, build_id):
+def releases(repo):
     pages = json.loads(gh('api', '--paginate', '--slurp', f'repos/{repo}/releases?per_page=100'))
-    matches = [release for page in pages for release in page
-               if release['draft'] and build_id in (release.get('body') or '').split()]
+    return [release for page in pages for release in page]
+
+
+def draft_release(repo, build_id, format):
+    matches = [release for release in releases(repo)
+               if release['draft'] and build_id in (release.get('body') or '').split()
+               and re.search(rf'(?m)^format {format}$', release.get('body') or '')]
     if len(matches) > 1:
-        raise RuntimeError('Multiple draft releases name this buildId')
+        raise RuntimeError('Multiple draft releases name this buildId and format')
     return matches[0] if matches else None
 
 
 class Publisher:
     def __init__(self, args):
         self.args = args
+        self.format = 1 if args.transition else 2
         self.cache = args.cache.resolve()
         self.package = args.package.resolve()
         self.tool = args.tool.resolve()
@@ -112,6 +120,25 @@ class Publisher:
             self.manifests[url] = self.invoke('inspect', manifest=file)
         return self.manifests[url]
 
+    def manifest_url(self, release):
+        return (f'https://github.com/{self.args.repo}/releases/download/'
+                f'{release["tag_name"]}/control.manifest')
+
+    def previous_release(self):
+        published = sorted((release for release in releases(self.args.repo) if not release['draft']),
+                           key=lambda release: release['published_at'], reverse=True)
+        for release in published:
+            if not any(asset['name'] == 'control.manifest' for asset in release['assets']):
+                continue
+            url = self.manifest_url(release)
+            try:
+                manifest = self.inspect(url)
+            except (subprocess.CalledProcessError, ValueError):
+                continue
+            if manifest['format'] == 2:
+                return manifest, url
+        return None, None
+
     def history(self, url):
         seen = set()
         for _ in range(64):
@@ -119,6 +146,8 @@ class Publisher:
             if manifest['buildId'] in seen:
                 return
             seen.add(manifest['buildId'])
+            if manifest['format'] != 2:
+                return
             yield manifest
             if 'full' in manifest or 'patch' not in manifest:
                 return
@@ -161,20 +190,31 @@ class Publisher:
             raise RuntimeError(f'Source commit {commit} is not on GitHub; push it first') from error
         payload = self.cache / 'payloads' / (build_id + '.tar')
         metadata = write_payload(self.package, payload)
-        latest = latest_release(self.args.repo)
-        previous_url = (f'https://github.com/{self.args.repo}/releases/download/'
-                        f'{latest["tag_name"]}/control.manifest') if latest else None
-        previous = self.inspect(previous_url) if previous_url else None
-        if previous and previous['buildId'] == build_id:
-            print('already published', flush=True)
-            return
-        draft = draft_release(self.args.repo, build_id)
-        output = self.cache / 'out' / build_id
+        previous = None
+        previous_url = None
+        if self.args.transition:
+            latest = latest_release(self.args.repo)
+            if latest:
+                try:
+                    current = self.inspect(self.manifest_url(latest))
+                except (subprocess.CalledProcessError, ValueError):
+                    current = None
+                if current and current['format'] == 1 and current['buildId'] == build_id:
+                    print('already published', flush=True)
+                    return
+        else:
+            previous, previous_url = self.previous_release()
+            if previous and previous['buildId'] == build_id:
+                print('already published', flush=True)
+                return
+        draft = draft_release(self.args.repo, build_id, self.format)
+        output = self.cache / 'out' / f'{build_id}-f{self.format}'
         state_file = output.with_suffix('.json')
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.exists():
             state = json.loads(state_file.read_text(encoding='utf-8'))
-            if state['repo'] != self.args.repo or state['payload'] != metadata:
+            if (state['repo'] != self.args.repo or state['payload'] != metadata
+                    or state['format'] != self.format):
                 raise RuntimeError('Cached publication does not match this package/repository')
             tag = state['tag']
             if draft and draft['tag_name'] != tag:
@@ -184,9 +224,10 @@ class Publisher:
         else:
             if draft:
                 raise RuntimeError('Draft exists but its packed assets are missing from the cache')
-            tag = 'control-' + datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + build_id[:8]
+            timestamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+            tag = f'control-{timestamp}-{build_id[:8]}-f{self.format}'
             base = self.base_payload(previous, previous_url)
-            options = dict(payload=payload, build=build_id,
+            options = dict(payload=payload, build=build_id, format=self.format,
                            url_prefix=f'https://github.com/{self.args.repo}/releases/download/{tag}/',
                            base=base, base_build=previous['buildId'] if previous else None,
                            base_manifest=previous_url)
@@ -203,8 +244,8 @@ class Publisher:
                     if full:
                         packed = Path(temporary) / 'packed-full'
                         summary = self.invoke('pack', out=packed, full=True, **options)
-                state = {'repo': self.args.repo, 'tag': tag, 'payload': metadata, 'full': full,
-                     'summary': summary}
+                state = {'repo': self.args.repo, 'tag': tag, 'format': self.format,
+                         'payload': metadata, 'full': full, 'summary': summary}
                 state_file.write_text(json.dumps(state, indent=2) + '\n', encoding='utf-8')
                 packed.rename(output)
         uploads = json.loads((output / 'upload.json').read_text(encoding='utf-8'))
@@ -219,9 +260,9 @@ class Publisher:
             files.append(file)
         if not files or files[-1].name != 'control.manifest':
             raise ValueError('upload.json must place control.manifest last')
-        files.extend(self.package / 'bin' / name
-                     for name in ('remotekit_control.exe', 'remotekit_node.exe'))
-        notes = (f'buildId: {build_id}\ncommit: {commit}\npayload: {metadata["size"]} bytes\n'
+        files[-1:-1] = [self.package / 'bin' / name
+                        for name in ('remotekit_control.exe', 'remotekit_node.exe')]
+        notes = (f'buildId: {build_id}\nformat {self.format}\ncommit: {commit}\npayload: {metadata["size"]} bytes\n'
                  + '\n'.join(f'{file.name}: {file.stat().st_size} bytes' for file in files))
         if not draft:
             print(f'Create draft {tag} at {commit}', flush=True)
@@ -229,10 +270,13 @@ class Publisher:
                 gh('release', 'create', tag, '--repo', self.args.repo, '--draft', '--target', commit,
                    '--title', 'Control ' + build_id[:12], '--notes', notes)
         upload_assets(self.args.repo, tag, files, draft['assets'] if draft else [], self.args.dry_run)
-        print(f'Publish {tag} as latest', flush=True)
+        kind = 'pre-release' if self.args.prerelease else 'latest'
+        print(f'Publish {tag} as {kind}', flush=True)
         if not self.args.dry_run:
-            gh('release', 'edit', tag, '--repo', self.args.repo, '--draft=false', '--latest')
-        print(f'https://github.com/{self.args.repo}/releases/latest/download/control.manifest', flush=True)
+            flags = ['--prerelease', '--latest=false'] if self.args.prerelease else ['--latest']
+            gh('release', 'edit', tag, '--repo', self.args.repo, '--draft=false', *flags)
+        print(self.manifest_url({'tag_name': tag}) if self.args.prerelease else
+              f'https://github.com/{self.args.repo}/releases/latest/download/control.manifest', flush=True)
 
 
 def main(arguments=None):
@@ -243,10 +287,17 @@ def main(arguments=None):
     parser.add_argument('--key', type=Path, default=cache / 'release.key')
     parser.add_argument('--cache', type=Path, default=cache)
     parser.add_argument('--full', action='store_true')
+    parser.add_argument('--transition', action='store_true',
+                        help='publish a format 1 full-only transition')
+    parser.add_argument('--prerelease', action='store_true',
+                        help='publish as a pre-release without changing latest')
     parser.add_argument('--tool', type=Path,
                         default=ROOT / 'build/endpoint-package/endpoint/remotekit_release.exe')
     parser.add_argument('--dry-run', action='store_true')
-    Publisher(parser.parse_args(arguments)).run()
+    args = parser.parse_args(arguments)
+    if args.transition and (args.prerelease or args.full):
+        parser.error('--transition is incompatible with --prerelease and --full')
+    Publisher(args).run()
 
 
 if __name__ == '__main__':

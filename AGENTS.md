@@ -63,7 +63,7 @@
 - 用户授权必要系统修改及 Windows sudo；不为已授权步骤重复确认。
 - 选择必要测试：迭代时只跑相关的测试文件/目标，完整套件最多在一批结束时跑一次；不反复跑已通过且无新疑点的组。计时 GPU 实验独占资源，不与 CPU 构建混跑；只清理自己创建的进程，不动用户/RDP/系统服务。
 - 默认 non-interactive，不使用 Computer Use 抢鼠标、键盘或切窗口。允许隔离的 headed Chrome89/自动化。
-- 打包工具为 `tools/package-runtime.py`，默认 `--out rel`（non-component、DCHECK-off），版本树与确定性 payload 输出在 `develop/tmp/<时间戳>/`。发布经 GitHub Releases：加密、zstd 增量、32 MiB 分片顺序上传，Control 主机由自更新的 `remotekit_control.exe` 按 manifest 更新，节点从 Control 更新。入口见[构建与发布 · 发布](docs/build.md#发布)。收集运行 DLL/Release CRT，不带 PDB、编译输入、开发 Profile 或凭据。
+- 打包工具为 `tools/package-runtime.py`，默认 `--out rel`（non-component、DCHECK-off），版本树与确定性 payload 输出在 `develop/tmp/<时间戳>/`。发布经 GitHub Releases：加密、HDiffPatch（zstd 压缩）增量、32 MiB 分片顺序上传，Control 主机由自更新的 `remotekit_control.exe` 按 manifest 更新，节点从 Control 更新。入口见[构建与发布 · 发布](docs/build.md#发布)。收集运行 DLL/Release CRT 与我们自己二进制（含 Browser、SDK）的 PDB；不带第三方 PDB、编译输入、开发 Profile 或凭据。Chromium 发布构建 `symbol_level = 1`，RemoteKit 目标完整符号。
 
 常用入口（详见 [构建与发布](docs/build.md)）：
 

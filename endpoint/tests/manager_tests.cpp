@@ -143,6 +143,21 @@ void DamageInstallation(const fs::path& root, const std::string& id, Damage dama
       return;
   }
 }
+void LockedActivation(const fs::path& root) {
+  const auto source = root / L"locked-stage";
+  const auto destination = root / L"activated-stage";
+  fs::create_directory(source);
+  updater::Handle lock(CreateFileW(source.c_str(), FILE_LIST_DIRECTORY,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                   FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+  Check(lock.value != INVALID_HANDLE_VALUE, "activation fixture directory opened");
+  Check(!MoveFileExW(source.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH),
+        "locked activation fixture unexpectedly moved");
+  std::jthread unlock(
+      [lock = std::move(lock)] { std::this_thread::sleep_for(std::chrono::milliseconds(100)); });
+  ActivatePath(source, destination, MOVEFILE_WRITE_THROUGH);
+  Check(fs::is_directory(destination) && !fs::exists(source), "locked activation retried");
+}
 void SelfHealing(const fs::path& scratch) {
   const std::string id(64, 'a');
   const auto payload = ControlPayload(id);
@@ -399,6 +414,7 @@ int wmain(int argc, wchar_t** argv) {
     ReadFailure(root, root / L"current");
     fs::remove(root / L"logs" / LocalLogDate() / L"manager.jsonl");
     ReadFailure(root, version / L"build.json");
+    LockedActivation(root);
     SelfHealing(root);
     RunningReadFailure(root);
     fs::remove_all(updater::ExtendedPath(root));

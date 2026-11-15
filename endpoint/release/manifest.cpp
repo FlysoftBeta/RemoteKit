@@ -1,6 +1,6 @@
 #include "manifest.hpp"
-#include "http.hpp"
 #include <chrono>
+#include "http.hpp"
 
 namespace remotekit::release {
 namespace {
@@ -49,9 +49,11 @@ void Published(const std::string& value) {
 Manifest ParseManifest(std::string_view text) {
   auto json = ParseJson(text);
   Keys(json, {"format", "buildId", "published", "payload"}, {"patch", "full"});
-  Require(Unsigned(json["format"]) == 1, "unsupported release format");
+  auto format = Unsigned(json["format"]);
+  Require(format == 1 || format == 2, "unsupported release format");
   Require(json["published"].is_string(), "invalid published timestamp");
   Manifest manifest;
+  manifest.format = static_cast<unsigned>(format);
   manifest.build_id = HexString(json["buildId"]);
   manifest.published = json["published"].get<std::string>();
   Published(manifest.published);
@@ -71,7 +73,8 @@ Manifest ParseManifest(std::string_view text) {
   return manifest;
 }
 Json ToJson(const Manifest& manifest) {
-  Json json{{"format", 1u},
+  Require(manifest.format == 1 || manifest.format == 2, "unsupported release format");
+  Json json{{"format", manifest.format},
             {"buildId", manifest.build_id},
             {"published", manifest.published},
             {"payload", {{"size", manifest.payload.size}, {"sha256", manifest.payload.sha256}}}};
@@ -84,6 +87,7 @@ Json ToJson(const Manifest& manifest) {
   return json;
 }
 Bytes EncryptManifest(const Manifest& manifest, const Key& key) {
+  Require(manifest.format != 1 || (manifest.full && !manifest.patch), "format 1 must be full-only");
   auto text = ToJson(manifest).dump();
   ParseManifest(text);
   Require(text.size() <= 1024 * 1024 - 53, "release manifest too large");

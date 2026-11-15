@@ -43,9 +43,9 @@ is_debug = false
 is_component_build = false
 is_official_build = false
 dcheck_always_on = false
-symbol_level = 0
-blink_symbol_level = 0
-v8_symbol_level = 0
+symbol_level = 1
+blink_symbol_level = 1
+v8_symbol_level = 1
 is_chrome_branded = false
 use_siso = true
 proprietary_codecs = true
@@ -57,7 +57,9 @@ root_extra_deps = [
 ]
 ```
 
-开发配置 `out/dev` 继续使用 `is_component_build = true`、`dcheck_always_on = true`、`symbol_level = 1`，其余功能参数与发布配置相同；两者都不配置额外 DRM 模块。`is_official_build = false` 保留本地非官方构建，发布包关闭 DCHECK 与调试符号。
+开发配置 `out/dev` 继续使用 `is_component_build = true`、`dcheck_always_on = true`、`symbol_level = 1`，其余功能参数与发布配置相同；两者都不配置额外 DRM 模块。`is_official_build = false` 保留本地非官方构建，发布包关闭 DCHECK。
+
+**符号**：Chromium 整体用 `symbol_level = 1`（函数、行号与内联帧，不含类型和局部变量）；`remotekit_browser` 与 `remotekit_sdk` 两个目标把 `//build/config/compiler:default_symbols` 换成 `:symbols`，RemoteKit 自己的代码带完整符号。符号不改变机器码。Endpoint 的 CMake Release 配置同样生成完整 PDB（`/Zi`，链接 `/DEBUG:FULL /OPT:REF /OPT:ICF`，后两项保持与不带调试信息时相同的裁剪）。发布包把这些 PDB 放在各自的二进制旁边（见下文版本树），节点上的崩溃处理与 Crashpad dump 可以直接符号化；第三方 DLL 不带 PDB。
 
 ## 运行
 
@@ -90,7 +92,7 @@ Control 只读一个环境变量 `REMOTEKIT_CONTROL_CONFIG`（默认 `control/da
 C:\src\depot_tools\python3.bat tools/release.py --publish
 ```
 
-`--full` 在 patch 之外强制附带 full 资产（见下文发布格式），只能与 `--publish` 一起用。
+`--full` 在 patch 之外强制附带 full 资产（见下文发布格式），只能与 `--publish` 一起用。`--prerelease` 把这次发布标成 GitHub 预发布而不是 latest；`--transition` 发布过渡版（见下文[格式过渡](#格式过渡)）。
 
 `tools/release.py` 是唯一的发布入口：工作树有未提交改动时拒绝；依次执行 stage、Chromium `out/rel` 构建（Browser + SDK）、SDK 导出、Endpoint 打包构建（含 `remotekit_control`、`remotekit_node`、`remotekit_release`）、Control 构建，再运行 `package-runtime.py --smoke`，`--publish` 时最后执行 `publish-release.py`。任一步失败即停止。
 
@@ -102,10 +104,10 @@ C:\src\depot_tools\python3.bat tools/release.py --publish
 build.json                 {buildId}
 manifest.json              来源与逐文件 hash
 recover-credentials.cmd
-bin/node.exe  bin/remotekit_control.exe  bin/remotekit_node.exe
+bin/node.exe  bin/remotekit_control.exe(.pdb)  bin/remotekit_node.exe(.pdb)
 control/dist/…  control/node_modules/…  control/runtime-manifest.json
 licenses/…
-node/…                     节点运行时：Endpoint、快照进程、Browser、SDK、oneVPL、CRT、文档与人脸依赖
+node/…                     节点运行时：Endpoint、快照进程、Browser、SDK（各带 PDB）、oneVPL、CRT、文档与人脸依赖
 ```
 
 **payload** 是这个树的确定性 PAX tar（按路径排序，mtime、uid/gid、属主名与权限固定），同样内容总是得到同样字节，这是增量能对齐的前提。构建 ID 由 `bin/`、`control/`、`node/bin/` 下文件的路径和 hash 计算。`remotekit_control.exe` 与 `remotekit_node.exe` 静态链接 CRT，各自是单个可执行文件；Endpoint 仍用 `/MD`，`node/bin/` 带 Release CRT。
@@ -122,7 +124,7 @@ Endpoint 编译直接包含仓库 `sdk/include` 公共头，不链接 SDK import
 
 每个 GitHub Release 带一个 `control.manifest` 和一或两个资产，每个资产切成不超过 32 MiB 的片：
 
-- **patch**：以上一版 payload 为原始内容前缀（`--patch-from` 方式：refPrefix、长距离匹配、窗口覆盖整个 payload）压缩新 payload 的单个 zstd frame。
+- **patch**：上一版 payload → 新 payload 的 HDiffPatch 单流压缩差分（single compressed diff，zstd 压缩插件），整个 payload tar 对 tar 做一次差分。HDiffPatch 按旧文件的绝对偏移引用，没有滑动窗口，payload 大小不受 zstd `windowLog` 31（2 GiB）的限制；应用端只需随机读旧 payload、顺序写新 payload，内存与 payload 大小无关。
 - **full**（可选）：新 payload 的普通 zstd 流。没有上一版、显式 `--full`、或自上一个 full 以来的 patch 累计超过那个 full 的大小时才带，使任何主机的下载量都不超过约两个 full。
 
 加密用发布密钥（32 字节随机数，base64 文件；发布机默认在 `%LOCALAPPDATA%/RemoteKit/release/release.key`，部署时由 `init` 写入主机的 `config/release.key`），每个 manifest 和资产各用随机 salt 经 HKDF-SHA256 派生自己的 AES-256-GCM 密钥：
@@ -132,7 +134,7 @@ Endpoint 编译直接包含仓库 `sdk/include` 公共头，不链接 SDK import
 
 ```json
 {
-  "format": 1, "buildId": "…", "published": "2026-11-09T12:00:00Z",
+  "format": 2, "buildId": "…", "published": "2026-11-09T12:00:00Z",
   "payload": { "size": 0, "sha256": "…" },
   "patch": { "from": "<上一版 buildId>", "manifest": "<上一版 manifest 的绝对 URL>", "asset": ASSET },
   "full": ASSET
@@ -140,17 +142,28 @@ Endpoint 编译直接包含仓库 `sdk/include` 公共头，不链接 SDK import
 ASSET = { "salt": "…", "size": <压缩后明文字节>, "slices": [ { "url": "<绝对 URL>", "size": 0 } ] }
 ```
 
-manifest 只含绝对 URL，管理器只认识配置里的一个 manifest URL（`https://github.com/FlysoftBeta/RemoteKit/releases/latest/download/control.manifest`），沿 `patch.manifest` 回溯；GitHub 的接口只出现在发布脚本里。校验严格：键集合固定、片数与片大小由 `size` 决定、至少有一个资产。
+manifest 只含绝对 URL，管理器只认识配置里的一个 manifest URL（`https://github.com/FlysoftBeta/RemoteKit/releases/latest/download/control.manifest`），沿 `patch.manifest` 回溯；GitHub 的接口只出现在发布脚本里。校验严格：键集合固定、片数与片大小由 `size` 决定、至少有一个资产。`patch.manifest` 指向的必须也是 format 2 manifest；回溯遇到 format 1 即视为链的起点。
+
+差分在发布机上生成：`remotekit_release pack` 链接 HDiffPatch 的 diff 端，管理器只链接 patch 端与 zstd 解码。差分的匹配方式与参数（全量后缀数组匹配或块匹配、zstd 级别）由发布机内存与实测的差分大小决定，写在 `remotekit_release pack` 里，不进 manifest：应用端对两种方式产出的差分一视同仁。
+
+#### 格式过渡
+
+format 1 的 patch 是 zstd `--patch-from` 帧，旧管理器严格解码，只认 format 1，读到 format 2 会整个解析失败。所以换格式分两步发布同一个构建：
+
+1. **过渡版**（`--transition`，发布为 latest）：format 1 manifest，只带 full，不带 patch（payload 带上 PDB 后可能超过 2 GiB，旧格式的 patch 做不出来）。旧管理器照常装上它，随之自更新为认识 format 2 的新管理器。
+2. **format 2 起点**（不带 `--transition`，这一次用 `--prerelease`）：同一 buildId 的 format 2 manifest，作为新链的起点只带 full。管理员确认各主机都装好过渡版后，自己在 GitHub 上把它设为 latest；已在该 buildId 的主机看到相同 buildId，什么也不做。之后的发布以它为上一版，出 HDiffPatch patch。
+
+新管理器解析 format 1 只为读取过渡版 manifest：只取其中的 full，从不使用 format 1 的 patch，zstd `--patch-from` 的编码与解码都已删除。latest 切到 format 2 之后，format 1 的解析与 `--transition` 一并删除。
 
 ### 上传
 
 `tools/publish-release.py --package <版本树>`（`release.py --publish` 调用它）：
 
 1. 生成确定性 payload 到缓存 `%LOCALAPPDATA%/RemoteKit/release/payloads/<buildId>.tar`。
-2. 用 `gh` 找到最新 Release，解密其 manifest 得到上一版 buildId；相同则停止。上一版 payload 不在缓存时用 `remotekit_release fetch` 按发布链从 GitHub 重建。
-3. `remotekit_release pack` 生成 patch（必要时加 full）、manifest 和上传清单，输出保留在 `cache/out/<buildId>/`：salt 是随机的，续传必须用同一批文件。打包后把每个资产解回去核对 payload hash。
-4. 建草稿 Release（tag `control-<UTC 时间>-<buildId 前 8 位>`，指向来源 commit），按清单逐个上传：先全部片，最后 manifest；不并行，每个文件独立重试（最多 8 次，5–60 秒退避），已存在且大小相同的跳过。重跑同一 buildId 会找到草稿继续。另外上传不加密的 `remotekit_control.exe` 与 `remotekit_node.exe` 供首次部署下载。
-5. 全部上传后把草稿发布为 latest，主机下一次检查即可看到。`--dry-run` 只做本地步骤并列出计划上传的文件。
+2. 用 `gh` 找上一版：已发布（含预发布）的 Release 里最新的 format 2 manifest；没有则这一版只带 full。上一版 buildId 相同则停止。上一版 payload 不在缓存时用 `remotekit_release fetch` 按发布链从 GitHub 重建。`--transition` 不找上一版，只在 latest 已是同一 buildId 的 format 1 时停止。
+3. `remotekit_release pack` 生成 patch（必要时加 full）、manifest 和上传清单，输出保留在 `cache/out/<buildId>-f<format>/`：salt 是随机的，续传必须用同一批文件。打包后把每个资产解回去核对 payload hash。
+4. 建草稿 Release（tag `control-<UTC 时间>-<buildId 前 8 位>-f<format>`，指向来源 commit），按清单逐个上传：先全部片，最后 manifest；不并行，每个文件独立重试（最多 8 次，5–60 秒退避），已存在且大小相同的跳过。重跑同一 buildId 与 format 会找到草稿继续（草稿说明里写 buildId 与 format）。另外上传不加密的 `remotekit_control.exe` 与 `remotekit_node.exe` 供首次部署下载。
+5. 全部上传后把草稿发布为 latest（`--prerelease` 时发布为预发布，不动 latest），主机下一次检查即可看到。`--dry-run` 只做本地步骤并列出计划上传的文件。
 
 `remotekit_release.exe` 是发布机工具（不进发布包）：`keygen` 生成密钥，`inspect` 解密并校验 manifest，`pack` 生成资产与 manifest，`fetch` 用与管理器相同的规划与解码代码重建 payload。
 
@@ -181,7 +194,7 @@ C:\RemoteKit\remotekit_control.exe install "--root=C:\RemoteKit" "--payload=D:\p
 
 **规划**：取最新 manifest；与当前 buildId 相同则无事。否则沿 `patch.manifest` 回溯，累计 patch 大小：遇到 `from` 等于当前版本且本地 `payload.tar` 可用，得到"全 patch"方案；途中每个带 full 的 manifest 给出"full + 其后 patch"方案；累计已超过最便宜方案、链断（manifest 404、解密或校验失败、buildId 不连贯、重复）、回溯 64 级时停止。取下载量最小的方案；都没有则等下一次检查。一次查询暂时失败（`unavailable`、`rate_limited`、`busy`）按[错误模型](errors.md)退避，不当作链断。
 
-**执行**：逐片顺序下载到 `work/assets/<salt>/`，断点用 HTTP Range 续传（206 追加，200 从头）；边解密边解码。full 流式解压；patch 把基准 payload 和预先定长的输出文件都内存映射，`ZSTD_d_stableOutBuffer` 让解码器直接用输出作窗口，不分配与 payload 等大的缓冲。每一步的结果按该 manifest 的 `payload.size/sha256` 校验。片 404 或认证失败时删除该片、排除该资产并立即重新规划（通常改用 full）；基准 payload 校验不过时放弃增量重新规划。
+**执行**：逐片顺序下载到 `work/assets/<salt>/`，断点用 HTTP Range 续传（206 追加，200 从头）。full 边解密边流式解压；patch 先逐片解密成 `work/patch-<salt>.hdiff`（差分本身不大），再以基准 payload 为旧文件、流式应用到预先定长的输出文件，应用后删除差分文件。每一步的结果按该 manifest 的 `payload.size/sha256` 校验。片 404 或认证失败时删除该片、排除该资产并立即重新规划（通常改用 full）；基准 payload 校验不过时放弃增量重新规划。
 
 **安装**：payload 中 `node/` 以外的条目解到 `work/stage-<id>/`；`node/` 下的 tar 记录原样流入多线程 zstd，生成 Control 分发给节点的 `release/node.tar.zst` 与 `release/node.json`；核对两处 `build.json`；payload 本身留作下一次增量的基准；最后改名为 `versions/<id>`。
 
@@ -196,7 +209,7 @@ C:\RemoteKit\remotekit_control.exe install "--root=C:\RemoteKit" "--payload=D:\p
 | 位置 | 内容 | 运行 |
 |---|---|---|
 | `control/test/` | Control 服务端与 Viewer 客户端的单元与集成测试 | `npm test`，或 `npx tsx --import ./test/css-stub.mjs --test test/<file>.test.ts`（组件 CSS 在测试中导入为空） |
-| `endpoint/tests/` | Endpoint 策略、文件、编码器状态机（注入式 NVENC）、集群通道（Noise 向量、通道、ClusterLink）、对象存储与节点间传输、checkpoint、updater（下载、解包、监管、自我替换）、发布格式（HKDF 向量、manifest 与分片加解密、严格校验、规划的各种链况、patch 往返、payload 安装）与管理器文件管理 | `tools\build-endpoint.cmd` 自带 CTest |
+| `endpoint/tests/` | Endpoint 策略、文件、编码器状态机（注入式 NVENC）、集群通道（Noise 向量、通道、ClusterLink）、对象存储与节点间传输、checkpoint、updater（下载、解包、监管、自我替换）、发布格式（HKDF 向量、manifest 与分片加解密、严格校验、规划的各种链况与 format 1 链起点、HDiffPatch patch 往返、payload 安装）与管理器文件管理 | `tools\build-endpoint.cmd` 自带 CTest |
 | `browser/*_probe.cc`、`*_tests.cc` | 直接运行生产代码与官方 Chromium 过滤器的确定性检查（BeginFrame 调度、手势包与仲裁、控制回复、Profile 隔离、渲染通道寿命、滚动策略、导航账本与错误页） | GN 目标，构建后运行 |
 | `sdk/` | SDK 消费者 smoke（控制、渲染、RTC、音频） | `tools\verify-sdk.cmd` |
 | `tools/tests/` | 构建工具（补丁管理、stage、打包布局）；schedlab 汇总（合成运行目录上的 RTP 关联、滚动起点、FPS 与分位数） | `python -m unittest`；`node --test tools/tests/schedlab-summarize.test.mjs` |

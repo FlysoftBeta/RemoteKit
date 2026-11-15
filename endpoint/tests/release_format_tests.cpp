@@ -1,10 +1,10 @@
-#include "release_fixtures.hpp"
-#include "release/asset.hpp"
-#include "release/codec.hpp"
-#include "release/planner.hpp"
-#include "release/http.hpp"
 #include <iostream>
 #include <map>
+#include "release/asset.hpp"
+#include "release/codec.hpp"
+#include "release/http.hpp"
+#include "release/planner.hpp"
+#include "release_fixtures.hpp"
 using namespace remotekit;
 using namespace remotekit::release;
 using namespace release_test;
@@ -22,7 +22,7 @@ Asset TestAsset(char salt, uint64_t size) {
   return asset;
 }
 Manifest TestManifest(char id, uint64_t full = 0) {
-  Manifest manifest{Id(id), "2026-11-09T12:00:00Z", {1024, Id('0')}, {}, {}};
+  Manifest manifest{2, Id(id), "2026-11-09T12:00:00Z", {1024, Id('0')}, {}, {}};
   if (full)
     manifest.full = TestAsset('1', full);
   return manifest;
@@ -44,6 +44,11 @@ void Crypto() {
   Reject([&] { DecryptManifest(encrypted, wrong); }, "wrong manifest key accepted");
   encrypted[40] ^= 1;
   Reject([&] { DecryptManifest(encrypted, key); }, "tampered manifest accepted");
+  manifest.format = 1;
+  encrypted = EncryptManifest(manifest, key);
+  Check(DecryptManifest(encrypted, key).format == 1, "format 1 round trip");
+  manifest.patch = Patch{Id('b'), "https://example.test/previous", TestAsset('3', 10)};
+  Reject([&] { EncryptManifest(manifest, key); }, "format 1 patch written");
   auto asset = TestAsset('2', kChunkSize + 3);
   Bytes plaintext(static_cast<size_t>(kChunkSize), 0x51);
   auto cipher = EncryptSlice(key, asset, 0, plaintext);
@@ -62,6 +67,9 @@ void Validation() {
     Reject([&] { ParseManifest(value.dump()); }, "invalid manifest accepted");
   };
   auto json = valid;
+  json["format"] = 3u;
+  invalid(json);
+  json = valid;
   json["extra"] = true;
   invalid(json);
   json = valid;
@@ -114,6 +122,26 @@ void Planning() {
   Check(
       plan.cost == 30 && plan.steps.size() == 3 && plan.steps.front().manifest.build_id == Id('b'),
       "chained patch plan");
+  manifests["c"].format = 1;
+  fetched.clear();
+  plan = MakePlan("latest", {Id('a'), true, {}}, fetch);
+  Check(plan.cost == 60 && plan.steps.size() == 2 && plan.steps.front().full &&
+            plan.steps.front().manifest.format == 1 && fetched.size() == 2,
+        "format 2 to format 1 full candidate and chain boundary");
+  manifests["latest"].format = 1;
+  fetched.clear();
+  plan = MakePlan("latest", {Id('c'), true, {}}, fetch);
+  Check(
+      plan.cost == 100 && plan.steps.size() == 1 && plan.steps.front().full && fetched.size() == 1,
+      "format 1 patch ignored");
+  plan = MakePlan("latest", {Id('d'), true, {}}, fetch);
+  Check(plan.steps.empty() && plan.cost == 0, "latest format 1 current build no-op");
+  auto legacy = ToJson(latest);
+  legacy["format"] = 1u;
+  legacy["patch"]["manifest"] = "https://example.test/c";
+  Check(ParseManifest(legacy.dump()).patch.has_value(), "format 1 patch strict decode");
+  manifests["latest"] = latest;
+  manifests["c"] = previous;
   manifests.erase("b");
   plan = MakePlan("latest", {Id('a'), true, {}}, fetch);
   Check(plan.cost == 60 && plan.steps.size() == 2 && plan.steps.front().full,
@@ -171,23 +199,39 @@ void Patches(const fs::path& root) {
   std::fill(target.begin() + 200, target.begin() + 250, 7);
   Write(root / L"target", target);
   Payload payload{target.size(), HashFile(root / L"target")};
-  Compress(root / L"target", root / L"patch", root / L"base", 1, 0);
+  Diff(root / L"target", root / L"patch", root / L"base");
   auto patch = Read(root / L"patch");
-  Check(patch.size() < target.size() / 10, "prefix patch did not reuse base");
+  Check(patch.size() < target.size() / 10, "HDiffPatch did not reuse base");
   auto input = [&](const Consume& consume) {
     for (size_t i = 0; i < patch.size(); i += 7)
       consume(std::span(patch).subspan(i, std::min<size_t>(7, patch.size() - i)));
   };
-  Decode(input, root / L"decoded", payload, root / L"base", true);
-  Check(HashFile(root / L"decoded") == payload.sha256, "stable output patch round trip");
+  Decode(input, root / L"decoded", payload, root / L"base", root / L"temporary.hdiff");
+  Check(HashFile(root / L"decoded") == payload.sha256, "single-stream patch round trip");
+  Check(!fs::exists(root / L"temporary.hdiff"), "applied diff left on disk");
+  auto rejected = [&](const Produce& producer) {
+    try {
+      Decode(producer, root / L"decoded", payload, root / L"base", root / L"temporary.hdiff");
+      throw std::runtime_error("corrupt diff accepted");
+    } catch (const Failure& failure) {
+      Check(failure.error.code == ErrorCode::kRejected, "corrupt diff rejection code");
+    }
+  };
+  auto corrupt = patch;
+  patch[0] ^= 1;
+  rejected(input);
+  Check(!fs::exists(root / L"temporary.hdiff"), "rejected diff left on disk");
+  patch = std::move(corrupt);
   patch.push_back(0);
-  Reject([&] { Decode(input, root / L"decoded", payload, root / L"base", true); },
-         "trailing patch input accepted");
+  Reject(
+      [&] { Decode(input, root / L"decoded", payload, root / L"base", root / L"temporary.hdiff"); },
+      "trailing patch input accepted");
   patch.pop_back();
   patch.pop_back();
-  Reject([&] { Decode(input, root / L"decoded", payload, root / L"base", true); },
-         "truncated patch accepted");
-  Compress(root / L"target", root / L"full", {}, 1, 2);
+  Reject(
+      [&] { Decode(input, root / L"decoded", payload, root / L"base", root / L"temporary.hdiff"); },
+      "truncated patch accepted");
+  Compress(root / L"target", root / L"full", 1, 2);
   auto full = Read(root / L"full");
   Payload doubled{payload.size * 2, {}};
   Decode(
@@ -195,7 +239,7 @@ void Patches(const fs::path& root) {
         consume(full);
         consume(full);
       },
-      root / L"decoded", doubled, {}, false);
+      root / L"decoded", doubled, {}, {});
   Check(Read(root / L"decoded").size() == doubled.size, "full concatenated zstd frames");
 }
 }  // namespace
