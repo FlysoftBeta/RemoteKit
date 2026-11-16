@@ -19,7 +19,6 @@ import type { WorkspaceStage } from './stage';
 import { SyncStatus } from './sync-status';
 import type { SystemControls } from './system-controls';
 import type { selectVisibility } from './visibility';
-import { useWindowFullscreen } from './window-fullscreen';
 import { waitForWorkspaceRevision, type WorkspaceCall } from './window-state';
 
 export function useWorkspaceOverlays() {
@@ -118,7 +117,7 @@ export function OverlayHost({
   stage: Pick<WorkspaceStage, 'shell' | 'snapshots' | 'call' | 'action'>;
   controls: Pick<
     SystemControls,
-    'shellReady' | 'browserReady' | 'lock' | 'audio' | 'sync' | 'browserFullscreen'
+    'shellReady' | 'browserReady' | 'lock' | 'audio' | 'sync' | 'browserFullscreen' | 'fullscreen'
   >;
   overlays: WorkspaceOverlays;
   foreground: ReturnType<typeof selectVisibility>['foreground'];
@@ -131,12 +130,11 @@ export function OverlayHost({
   const pending = workspace.pendingClose;
   const [failure, setFailure] = useState<RemoteKitError>();
   const report = (error: unknown) => setFailure(failureError(error));
-  const windowFullscreen = useWindowFullscreen();
   // The Start button stays out of the way of a page or window shown fullscreen; its exit control
-  // takes that place.
+  // takes that place, so both follow the same fullscreen decision.
   useFloatingAction(
     'start',
-    state.pageFullscreen || windowFullscreen
+    controls.fullscreen
       ? null
       : {
           order: 20,

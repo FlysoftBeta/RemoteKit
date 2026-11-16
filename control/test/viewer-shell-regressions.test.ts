@@ -82,6 +82,8 @@ const { useSystemControls } =
   require('../client/app/system-controls') as typeof import('../client/app/system-controls');
 const { FloatingActions } =
   require('../client/app/floating-actions') as typeof import('../client/app/floating-actions');
+const { FloatingDock } =
+  require('../client/app/floating-dock') as typeof import('../client/app/floating-dock');
 const { colorScheme, createViewerTheme, useViewerTheme } =
   require('../client/theme/theme') as typeof import('../client/theme/theme');
 const { setUiScale } = require('../client/app/ui-scale') as typeof import('../client/app/ui-scale');
@@ -755,6 +757,85 @@ test('system page fullscreen failures reach the global presentation owner', asyn
     notices.getSnapshot().find((notice) => notice.key === 'fullscreen:operation')?.presentation.errorId,
     'c-3333333333',
   );
+});
+
+test('a floating button withdrawn or disabled mid-drag is visible again afterwards', async () => {
+  const f = mount();
+  const floating = new FloatingActions();
+  const action = {
+    id: 'start',
+    order: 0,
+    anchor: 'bottom-left',
+    label: '开始',
+    icon: 'start',
+    run() {},
+  } as const;
+  floating.set('start', action);
+  await f.render(createElement(FloatingDock, { actions: floating }));
+  const button = () => f.host.querySelector<HTMLElement>('.dock-button:not(.dock-ghost)')!;
+  const startDrag = async () => {
+    box(f.host.querySelector<HTMLElement>('.floating-dock')!);
+    button().setPointerCapture = () => {};
+    await act(async () => {
+      for (const [type, x] of [
+        ['pointerdown', 10],
+        ['pointermove', 80],
+      ] as const) {
+        const event = new Event(type, { bubbles: true, cancelable: true });
+        Object.assign(event, { pointerId: 1, clientX: x, clientY: 20, isPrimary: true, button: 0 });
+        button().dispatchEvent(event);
+      }
+    });
+    assert.equal(button().style.visibility, 'hidden');
+    assert.ok(f.host.querySelector('.dock-ghost'));
+  };
+  await startDrag();
+  await act(async () => floating.set('start', undefined));
+  await act(async () => floating.set('start', action));
+  assert.equal(button().style.visibility, '');
+  assert.equal(f.host.querySelector('.dock-ghost'), null);
+
+  await startDrag();
+  await act(async () => floating.set('start', { ...action, disabled: true }));
+  await act(async () => floating.set('start', action));
+  assert.equal(button().style.visibility, '');
+  assert.equal(f.host.querySelector('.dock-ghost'), null);
+});
+
+test('the Start button is withdrawn only while a fullscreen exit control replaces it', async () => {
+  const f = mount();
+  const authorization = { browserReady: false };
+  const media = {
+    authorization: { getSnapshot: () => authorization, subscribe: () => () => {}, setAuthCamera() {} },
+    workspace: { shellReady: true, request: async () => {}, lock() {}, departureObserved() {} },
+    observations: { audio: { state: 'playing' } },
+    control: { request: async () => {} },
+    operations: { dismissUnknown() {} },
+  } as unknown as ViewerSession;
+  const floating = new FloatingActions();
+  const state = stateFor();
+  state.pageFullscreen = { windowId: 'w', target: 'page' } as never;
+  let controls!: ReturnType<typeof useSystemControls>;
+  function Probe() {
+    controls = useSystemControls({
+      media,
+      workspaceState: { auth: null, status: 'online' } as unknown as WorkspaceSnapshot,
+      operationState: { state, pending: [] } as unknown as OperationsSnapshot,
+      action: async () => ({}) as never,
+      showShell: true,
+      floatingActions: floating,
+    });
+    return null;
+  }
+  // The page's fullscreen projection is ignored while its Browser is not ready: no exit control,
+  // so nothing may take the Start button's place.
+  await f.render(createElement(Probe));
+  assert.equal(
+    floating.getSnapshot().some((entry) => entry.id === 'fullscreen'),
+    false,
+  );
+  assert.equal(controls.fullscreen, undefined);
+  assert.match(source('app/overlay-host.tsx'), /'start',\s+controls\.fullscreen\s+\? null/);
 });
 
 test('color preference updates the subscribed MUI palette and rereads current tokens', async () => {

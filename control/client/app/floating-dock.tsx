@@ -8,7 +8,7 @@ import {
   VolumeUpOutlined,
 } from '@mui/icons-material';
 import { ButtonBase, Tooltip } from '@mui/material';
-import React, { useRef, useState, useSyncExternalStore } from 'react';
+import React, { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { DockAnchor, FloatingAction, FloatingActions, FloatingIcon } from './floating-actions';
 
 const icons: Record<FloatingIcon, React.ReactNode> = {
@@ -46,13 +46,20 @@ export function FloatingDock({ actions }: { actions: FloatingActions }) {
   // sit under the finger and receive the tap's trailing click.
   const tapped = useRef<string | null>(null);
   const layer = useRef<HTMLDivElement>(null);
+  // A drag only lasts while its button can still receive the pointer: a withdrawn or disabled
+  // button gets no pointerup, and a leftover drag would keep it hidden when it comes back.
+  const draggable = (id: string) => list.some((action) => action.id === id && !action.disabled);
+  const dragged = dragging ? list.find((action) => action.id === dragging.id && !action.disabled) : undefined;
+  useLayoutEffect(() => {
+    if (drag.current && !draggable(drag.current.id)) drag.current = null;
+    if (dragging && !dragged) setDragging(null);
+  });
   if (!list.length) return null;
   const allowed = (action: FloatingAction) => action.anchors ?? ALL_ANCHORS;
   const anchorOf = (action: FloatingAction) => {
     const chosen = placement[action.id];
     return chosen && allowed(action).includes(chosen) ? chosen : action.anchor;
   };
-  const dragged = dragging && list.find((action) => action.id === dragging.id);
   const local = (event: React.PointerEvent) => {
     const box = layer.current!.getBoundingClientRect();
     const scale = layer.current!.offsetWidth ? box.width / layer.current!.offsetWidth : 1;
@@ -82,10 +89,10 @@ export function FloatingDock({ actions }: { actions: FloatingActions }) {
         className={[
           'dock-button',
           action.attention ? `attention-${action.attention}` : '',
-          dragging?.id === action.id ? 'dragging' : '',
+          dragged?.id === action.id ? 'dragging' : '',
           action.className ?? '',
         ].join(' ')}
-        style={dragging?.id === action.id ? { visibility: 'hidden' } : undefined}
+        style={dragged?.id === action.id ? { visibility: 'hidden' } : undefined}
         aria-label={action.label}
         disabled={action.disabled}
         onMouseDown={keepFocus}
@@ -112,8 +119,8 @@ export function FloatingDock({ actions }: { actions: FloatingActions }) {
         }}
         onPointerUp={(event) => {
           const current = drag.current;
-          drag.current = null;
           if (!current || current.pointer !== event.pointerId) return;
+          drag.current = null;
           if (!current.moved) {
             tapped.current = action.id;
             return;
@@ -125,6 +132,12 @@ export function FloatingDock({ actions }: { actions: FloatingActions }) {
         onPointerCancel={() => {
           drag.current = null;
           tapped.current = null;
+          setDragging(null);
+        }}
+        // Capture lost without a pointerup (pointerup clears the drag first): the drag is over.
+        onLostPointerCapture={(event) => {
+          if (drag.current?.pointer !== event.pointerId) return;
+          drag.current = null;
           setDragging(null);
         }}
         onClick={(event) => {
