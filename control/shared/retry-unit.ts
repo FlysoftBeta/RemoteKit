@@ -7,6 +7,7 @@ import {
   type ErrorCode,
   type WireError,
 } from './errors';
+import { randomUuid } from './random-uuid';
 
 export type RetryUnitState =
   | { phase: 'idle' }
@@ -36,7 +37,7 @@ export class RetryUnit {
   state: RetryUnitState = { phase: 'idle' };
   error?: RemoteKitError;
   private input = '';
-  private identityValue: string = globalThis.crypto.randomUUID();
+  private identityValue: string = randomUuid();
   get identity() {
     return this.identityValue;
   }
@@ -88,7 +89,7 @@ export class RetryUnit {
     if (this.closed) return false;
     if (input !== this.input) {
       this.input = input;
-      this.identityValue = globalThis.crypto.randomUUID();
+      this.identityValue = randomUuid();
       this.attempts = 0;
       this.state = { phase: 'idle' };
       this.error = undefined;
@@ -104,7 +105,7 @@ export class RetryUnit {
     if (!error.errorId && ['internal', 'unavailable', 'outcome_unknown'].includes(error.code))
       error.errorId =
         this.error?.errorId ??
-        `${typeof window === 'undefined' ? 'c' : 'v'}-${globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
+        `${typeof window === 'undefined' ? 'c' : 'v'}-${randomUuid().replace(/-/g, '').slice(0, 10)}`;
     this.streak = error.code !== 'canceled';
     this.error = error;
     const handling = errorHandling(error.code);
@@ -158,7 +159,7 @@ export class RetryUnit {
       if (this.error?.code === 'conflict') {
         await recompute?.();
         if (this.closed) return { ran: false as const, error: this.error };
-        this.identityValue = globalThis.crypto.randomUUID();
+        this.identityValue = randomUuid();
       }
       const value = await work(this.identityValue);
       this.succeed();

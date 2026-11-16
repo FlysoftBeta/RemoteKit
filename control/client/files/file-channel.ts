@@ -41,6 +41,21 @@ function checkAbort(signal: AbortSignal) {
   if (signal.aborted) throw new RemoteKitError('canceled', '');
 }
 
+// The built-in way to combine signals needs Chrome 116. The linked signal aborts with the first of `signals`;
+// release() detaches it from signals that outlive the call.
+function linkSignals(signals: AbortSignal[]) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  for (const signal of signals) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', abort);
+  }
+  return {
+    signal: controller.signal,
+    release: () => signals.forEach((signal) => signal.removeEventListener('abort', abort)),
+  };
+}
+
 /** File bytes and transaction commands share the current authenticated RTC peer.
  * A new peer interrupts the transfer; drafts are never silently resumed there. */
 export class FileChannel {
@@ -161,11 +176,20 @@ export class FileChannel {
     const scope = this.scope.signal;
     const binding = options?.binding ?? this.currentBinding();
     this.checkBinding(binding, options?.signal);
-    options = {
-      ...options,
-      binding,
-      signal: AbortSignal.any([scope, ...(options?.signal ? [options.signal] : [])]),
-    };
+    const linked = linkSignals(options?.signal ? [scope, options.signal] : [scope]);
+    try {
+      return await this.attempt<T>(method, params, { ...options, binding, signal: linked.signal }, scope);
+    } finally {
+      linked.release();
+    }
+  }
+  private async attempt<T>(
+    method: FileMethod,
+    params: Record<string, unknown>,
+    options: RequestOptions & { binding: Binding; signal: AbortSignal },
+    scope: AbortSignal,
+  ): Promise<T> {
+    const { binding } = options;
     const unit = new RetryUnit({ name: 'file_request' });
     const repeatable =
       ['asset.describe', 'asset.read', 'document.page', 'document.resource', 'photo.thumbnail'].includes(

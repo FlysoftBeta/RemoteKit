@@ -4,6 +4,7 @@ import { Box, Button, Checkbox, FormControlLabel, Paper, TextField, Typography }
 import { useState } from 'react';
 import type { AdminAnnouncement } from '../../../shared/admin';
 import { ANNOUNCEMENT_LIMITS } from '../../../shared/product';
+import { randomUuid } from '../../../shared/random-uuid';
 import {
   ConfirmDialog,
   LoadState,
@@ -114,7 +115,7 @@ function AnnouncementEditor({
   onSave(draft: { id: string; title: string; body: string; republish: boolean }): Promise<void>;
 }) {
   const autoFocusRef = useAutoFocus<HTMLInputElement>();
-  const [id] = useState(() => item?.id ?? crypto.randomUUID());
+  const [id] = useState(() => item?.id ?? randomUuid());
   const [title, setTitle] = useState(item?.title ?? ''),
     [body, setBody] = useState(item?.body ?? ''),
     [republish, setRepublish] = useState(false);

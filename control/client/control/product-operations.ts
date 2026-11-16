@@ -10,6 +10,7 @@ import {
   type ProductWorkspace,
   type WindowPlacement,
 } from '../../shared/product';
+import { randomUuid } from '../../shared/random-uuid';
 /** Product actions return execution receipts, never an authoritative workspace. */
 export type ProductActionHandler = (action: ProductAction) => Promise<OperationReceipt>;
 export function requireAcceptedReceipt(receipt: OperationReceipt): OperationReceipt {
@@ -231,21 +232,4 @@ export function snapshotNewer(next: ProductState, previous: ProductState | null)
   );
 }
 
-export function operationId(): string {
-  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6] & 15) | 64;
-  bytes[8] = (bytes[8] & 63) | 128;
-  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
-  return (
-    hex.slice(0, 8) +
-    '-' +
-    hex.slice(8, 12) +
-    '-' +
-    hex.slice(12, 16) +
-    '-' +
-    hex.slice(16, 20) +
-    '-' +
-    hex.slice(20)
-  );
-}
+export const operationId = randomUuid;
