@@ -68,5 +68,6 @@ Viewer 仍支持 Chrome 89（89.0.4389.90），因此：
 - 没有 `beforeinput` 时 IME 依赖 `input` 事件；89 的软键盘同时缩小 layout 与 visual viewport。
 - 把同一个 video 元素复用到新 peer 时可能出现只解码不回调 rVFC，所以新 peer/track 总是新建元素。
 - 89 的解码分发与 157 相同：一条远端 track 解码一次，分发给多个播放器。
+- 构建目标 `chrome89` 只降级语法，不补运行时 API。`client/` 与 `shared/` 不调用 89 之后才有的 API（`crypto.randomUUID`、`AbortSignal.any/timeout`、`structuredClone`、`Object.hasOwn`、`Array.prototype.at/findLast/toSorted` 等）：UUID 统一由 `shared/random-uuid.ts` 用 `getRandomValues` 生成（它在纯 HTTP 页面里也可用），合并 abort 信号自己接线。`test/viewer-compat.test.ts` 按源码扫描这份清单；启动路径上的一次调用就会让 Viewer 整页空白。
 
 API 存在或 SDP 被接受都不能证明硬件解码；要看实际的解码器实现和流是否正常播放。
