@@ -55,6 +55,14 @@ export function testGateway(
       profileKey: Buffer.alloc(32).toString('base64'),
     }),
     underPressure: () => false,
+    observeOpened: (placement) => {
+      placements.get(placement.tenant)!.dataState = 'dirty';
+    },
+    observeAbsent: (placement) => {
+      const current = placements.get(placement.tenant)!;
+      current.dataState = 'clean';
+      current.pendingCommit = null;
+    },
     beginStop: (tenant) => {
       const placement = placements.get(tenant);
       if (!placement || (placement.runState === 'stopped' && placement.dataState === 'clean'))
@@ -67,7 +75,6 @@ export function testGateway(
       const current = placements.get(placement.tenant);
       if (!current || current.placementEpoch !== placement.placementEpoch) return false;
       current.runState = 'running';
-      current.dataState = 'dirty';
       current.pendingCommit = null;
       return true;
     },

@@ -103,7 +103,7 @@ export class Placement {
     return version ? { id: version.id, manifestId: version.manifestId, takenAt: version.takenAt } : null;
   }
   // Moves a stopped Session to its newest complete version (none: blank browser data) and fences the
-  // old copy. A source that is online must have been stopped and committed first.
+  // old copy. An online dirty source must have been stopped and committed first.
   transfer(tenant: string, nodeId?: string) {
     return this.store.transaction(() => {
       const current = this.peek(tenant);
@@ -237,7 +237,7 @@ export class Placement {
             ...existing,
             nodeId: node.nodeId,
             runState: 'running',
-            dataState: 'dirty',
+            dataState: 'clean',
             pendingCommit: null,
             placementEpoch: existing.placementEpoch + (assigned && node.nodeId === existing.nodeId ? 0 : 1),
           }
@@ -248,7 +248,7 @@ export class Placement {
             placementEpoch: 1,
             keyCiphertext: this.store.atRestKey.seal(tenant, randomBytes(32)),
             runState: 'running',
-            dataState: 'dirty',
+            dataState: 'clean',
             pendingCommit: null,
             checkpointId: null,
             checkpoint: null,
@@ -281,12 +281,32 @@ export class Placement {
   keys(placement: SessionPlacement) {
     return tenantKeys(this.store.atRestKey.open(placement.tenant, placement.keyCiphertext));
   }
+  observeOpened(placement: SessionPlacement) {
+    this.store.db
+      .prepare(
+        `UPDATE session_placements SET data_state='dirty'
+        WHERE tenant=? AND session_id=? AND node_id=? AND placement_epoch=?`,
+      )
+      .run(placement.tenant, placement.sessionId, placement.nodeId, placement.placementEpoch);
+  }
+  // A node without a copy record for the current placement has no changes beyond checkpoint_id: the
+  // record is written before any Browser launch, so a commit requested from it has nothing to save.
+  observeAbsent(placement: SessionPlacement) {
+    this.store.db
+      .prepare(
+        `UPDATE session_placements SET data_state='clean',pending_commit=NULL
+        WHERE tenant=? AND session_id=? AND node_id=? AND placement_epoch=?
+          AND (data_state='dirty' OR pending_commit IS NOT NULL)`,
+      )
+      .run(placement.tenant, placement.sessionId, placement.nodeId, placement.placementEpoch);
+  }
   beginStop(tenant: string) {
     return this.store.transaction(() => {
       const placement = this.peek(tenant);
       if (!placement || (placement.runState === 'stopped' && placement.dataState === 'clean'))
         throw new RemoteKitError('conflict', '会话当前未运行');
-      const pendingCommit = placement.pendingCommit ?? randomUUID();
+      const pendingCommit =
+        placement.pendingCommit ?? (placement.dataState === 'dirty' ? randomUUID() : null);
       this.store.db
         .prepare("UPDATE session_placements SET run_state='stopped',pending_commit=? WHERE tenant=?")
         .run(pendingCommit, tenant);
@@ -297,8 +317,8 @@ export class Placement {
     return (
       this.store.db
         .prepare(
-          `UPDATE session_placements SET run_state='running',data_state='dirty',pending_commit=NULL
-      WHERE tenant=? AND node_id=? AND placement_epoch=? AND pending_commit=?`,
+          `UPDATE session_placements SET run_state='running',pending_commit=NULL
+      WHERE tenant=? AND node_id=? AND placement_epoch=? AND pending_commit IS ?`,
         )
         .run(placement.tenant, placement.nodeId, placement.placementEpoch, placement.pendingCommit).changes >
       0

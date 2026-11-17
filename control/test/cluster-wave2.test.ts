@@ -29,6 +29,350 @@ import type { ConfiguredAdminNode } from '../shared/admin';
 
 const id = (n: number) => n.toString(16).padStart(64, '0');
 
+test('assigned placements stay clean until a current opened-copy observation', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    const beta = await h.connect('beta', 0.6);
+    alpha.desiredHandler = (_desired, value) => {
+      value.browser = 'starting';
+      value.browserIncarnation = null;
+      value.data = null;
+      value.lastError = { code: 'unavailable', message: 'restore failed' };
+    };
+    const assigned = h.placement.resolve('tenant');
+    assert.equal(assigned.dataState, 'clean');
+    await h.gateway.published('tenant');
+    await alpha.barrier();
+    assert.equal(h.placement.peek('tenant')!.dataState, 'clean');
+    assert.equal(h.store.db.prepare('SELECT 1 FROM warm_session_copies').get(), undefined);
+    alpha.metrics.cpu = 0.8;
+    beta.metrics.cpu = 0.1;
+    alpha.publishMetrics();
+    beta.publishMetrics();
+    await Promise.all([alpha.barrier(), beta.barrier()]);
+    const next = h.placement.resolve('tenant');
+    assert.equal(next.nodeId, 'beta');
+    assert.equal(next.dataState, 'clean');
+    h.nodes.emit('session.observed', {
+      nodeId: 'alpha',
+      message: { ...alpha.observations.get('tenant')!, browser: 'running' },
+    });
+    assert.equal(h.placement.peek('tenant')!.dataState, 'clean');
+    h.nodes.emit('session.observed', {
+      nodeId: 'beta',
+      message: { ...alpha.observations.get('tenant')!, browser: 'running' },
+    });
+    assert.equal(h.placement.peek('tenant')!.dataState, 'clean');
+    await publishAndObserve(h.gateway, 'tenant');
+    assert.equal(h.placement.peek('tenant')!.dataState, 'dirty');
+  } finally {
+    await h.close();
+  }
+});
+
+test('online assigned transfer stops without a commit and fences the source', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.6);
+    alpha.desiredHandler = (desired, value) => {
+      value.browser = desired.run === 'running' ? 'starting' : 'stopped';
+      value.browserIncarnation = null;
+      value.data = null;
+      value.lastError = desired.run === 'running' ? { code: 'unavailable', message: 'restore failed' } : null;
+    };
+    h.placement.resolve('tenant');
+    await h.gateway.published('tenant');
+    await alpha.barrier();
+    const source = h.placement.peek('tenant')!;
+    const moved = await h.gateway.transfer('tenant', 'beta');
+    assert.equal(moved.nodeId, 'beta');
+    assert.equal(moved.placementEpoch, source.placementEpoch + 1);
+    assert.equal(moved.runState, 'stopped');
+    assert.equal(moved.dataState, 'clean');
+    assert.equal(moved.pendingCommit, null);
+    assert.ok(
+      alpha.requests.some((request) => request.method === 'session.desired' && request.run === 'stopped'),
+    );
+    assert.ok(
+      alpha.requests
+        .filter((request) => request.method === 'session.desired')
+        .every((request) => request.commit === null),
+    );
+    assert.deepEqual(
+      alpha.requests.filter((request) => request.method === 'node.desired').slice(-1)[0].sessions,
+      [],
+    );
+    assert.equal(h.placement.resolve('tenant').nodeId, 'beta');
+  } finally {
+    await h.close();
+  }
+});
+
+test('a dirty placement whose node reports no copy transfers without a commit', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.6);
+    alpha.desiredHandler = (desired, value) => {
+      value.browser = desired.run === 'running' ? 'starting' : 'stopped';
+      value.browserIncarnation = null;
+      value.data = null;
+      value.lastError = desired.run === 'running' ? { code: 'unavailable', message: 'restore failed' } : null;
+    };
+    h.placement.resolve('tenant');
+    h.store.db
+      .prepare(
+        "UPDATE session_placements SET run_state='stopped',data_state='dirty',pending_commit=? WHERE tenant=?",
+      )
+      .run('00000000-0000-4000-8000-000000000000', 'tenant');
+    await publishAndObserve(h.gateway, 'tenant');
+    assert.equal(h.placement.peek('tenant')!.dataState, 'clean');
+    assert.equal(h.placement.peek('tenant')!.pendingCommit, null);
+    const moved = await h.gateway.transfer('tenant', 'beta');
+    assert.equal(moved.nodeId, 'beta');
+    assert.equal(moved.dataState, 'clean');
+  } finally {
+    await h.close();
+  }
+});
+
+for (const opened of ['dirty copy', 'running Browser']) {
+  test(`an observed ${opened} marks an assigned placement dirty`, async () => {
+    const h = await harness();
+    try {
+      const alpha = await h.connect('alpha');
+      alpha.desiredHandler = (_desired, value) => {
+        if (opened === 'dirty copy') {
+          value.browser = 'starting';
+          value.browserIncarnation = null;
+        } else {
+          value.data = null;
+        }
+      };
+      const assigned = h.placement.resolve('tenant');
+      const stopping = h.placement.beginStop('tenant');
+      assert.equal(stopping.pendingCommit, null);
+      assert.equal(h.placement.cancelStop(stopping), true);
+      assert.equal(h.placement.peek('tenant')!.dataState, 'clean');
+      await publishAndObserve(h.gateway, 'tenant');
+      assert.equal(h.placement.peek('tenant')!.placementEpoch, assigned.placementEpoch);
+      assert.equal(h.placement.peek('tenant')!.dataState, 'dirty');
+    } finally {
+      await h.close();
+    }
+  });
+}
+
+test('transfer commits a copy that opens during the assigned source stop', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.6);
+    h.placement.resolve('tenant');
+    await h.commit(alpha, 'tenant', id(1));
+    alpha.desiredHandler = (desired, value) => {
+      if (desired.run === 'stopped' && desired.commit === null) {
+        value.data = {
+          state: 'dirty',
+          base: null,
+          stoppedCleanly: false,
+          changesAt: 1,
+          committed: null,
+          lastVersion: null,
+        };
+      }
+    };
+    const moved = await h.gateway.transfer('tenant', 'beta');
+    assert.equal(moved.checkpoint, id(1));
+    const stops = alpha.requests.filter(
+      (request) => request.method === 'session.desired' && request.run === 'stopped',
+    );
+    assert.equal(stops.length, 2);
+    assert.equal(stops[0].commit, null);
+    assert.ok(stops[1].commit);
+  } finally {
+    await h.close();
+  }
+});
+
+test('transfer accepts a node-initiated stopped checkpoint while awaiting its source stop', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.6);
+    await publishAndObserve(h.gateway, 'tenant');
+    await h.commit(alpha, 'tenant', id(1));
+    alpha.desiredHandler = (desired, value) => {
+      if (desired.commit) value.data!.committed!.requestId = 'node-shutdown';
+    };
+    assert.equal((await h.gateway.transfer('tenant', 'beta')).checkpoint, id(1));
+  } finally {
+    await h.close();
+  }
+});
+
+for (const dirty of [false, true]) {
+  for (const code of ['unavailable', 'busy', 'internal', 'rejected'] as const) {
+    test(`transfer surfaces ${code} from a ${dirty ? 'dirty' : 'clean'} source stop`, async () => {
+      const h = await harness();
+      try {
+        const alpha = await h.connect('alpha');
+        await h.connect('beta', 0.6);
+        if (dirty) await publishAndObserve(h.gateway, 'tenant');
+        else h.placement.resolve('tenant');
+        const source = h.placement.peek('tenant')!;
+        alpha.desiredHandler = (desired, value) => {
+          if (desired.run !== 'stopped') return;
+          value.converged = false;
+          value.lastError = { code, message: 'injected stop failure', errorId: 'e-0123456789' };
+          value.checkpoint = null;
+          value.data = dirty ? { ...alpha.observations.get('tenant')!.data! } : null;
+        };
+        await assert.rejects(h.gateway.transfer('tenant', 'beta'), { code, errorId: 'e-0123456789' });
+        const failed = h.placement.peek('tenant')!;
+        assert.equal(failed.nodeId, source.nodeId);
+        assert.equal(failed.placementEpoch, source.placementEpoch);
+        assert.equal(failed.runState, 'stopped');
+        assert.equal(failed.dataState, source.dataState);
+        assert.equal(!!failed.pendingCommit, dirty);
+        alpha.desiredHandler = undefined;
+        // A later observation can finish the same stop; no replacement placement was created.
+        if (dirty) {
+          await h.commit(alpha, 'tenant', id(1));
+          alpha.observe('tenant', {
+            browser: 'stopped',
+            lastError: null,
+            data: {
+              state: 'clean',
+              base: id(1),
+              stoppedCleanly: true,
+              changesAt: 0,
+              committed: { requestId: failed.pendingCommit!, manifestId: id(1) },
+              lastVersion: null,
+            },
+            checkpoint: { manifestId: id(1), objects: [id(1)], buildId: 'dev', kind: 'stopped', takenAt: 1 },
+          });
+          await alpha.barrier();
+        }
+        assert.equal((await h.gateway.transfer('tenant', 'beta')).nodeId, 'beta');
+      } finally {
+        await h.close();
+      }
+    });
+  }
+}
+
+test('transfer stop timeout reports outcome_unknown and keeps the source stop reconcilable', async (t) => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.6);
+    await publishAndObserve(h.gateway, 'tenant');
+    const source = h.placement.peek('tenant')!;
+    alpha.desiredHandler = (desired, value) => {
+      if (desired.run === 'stopped') {
+        value.browser = 'stopping';
+        value.data = { ...alpha.observations.get('tenant')!.data! };
+        value.checkpoint = null;
+      }
+    };
+    const wait = h.gateway.waitObserved.bind(h.gateway);
+    t.mock.method(h.gateway, 'waitObserved', (...[tenant, predicate, timeoutMs]: Parameters<typeof wait>) => {
+      assert.equal(timeoutMs, 180000);
+      return wait(tenant, predicate, 25);
+    });
+    await assert.rejects(h.gateway.transfer('tenant', 'beta'), { code: 'outcome_unknown' });
+    const pending = h.placement.peek('tenant')!;
+    assert.equal(pending.nodeId, source.nodeId);
+    assert.equal(pending.placementEpoch, source.placementEpoch);
+    assert.equal(pending.runState, 'stopped');
+    assert.equal(pending.dataState, 'dirty');
+    assert.ok(pending.pendingCommit);
+    alpha.desiredHandler = undefined;
+    await h.commit(alpha, 'tenant', id(1));
+    h.gateway.forget('tenant');
+    assert.equal((await h.gateway.transfer('tenant', 'beta')).nodeId, 'beta');
+  } finally {
+    await h.close();
+  }
+});
+
+for (const step of [
+  'preflight',
+  'stop intent',
+  'publication',
+  'selection',
+  'placement',
+  'source fencing',
+  'target fencing',
+]) {
+  test(`transfer failure at ${step} leaves a reachable state`, async (t) => {
+    const h = await harness();
+    try {
+      const alpha = await h.connect('alpha');
+      await h.connect('beta', 0.6);
+      await publishAndObserve(h.gateway, 'tenant');
+      await h.commit(alpha, 'tenant', id(1));
+      const source = h.placement.peek('tenant')!;
+      const failure = new RemoteKitError('unavailable', 'injected failure');
+      if (step === 'stop intent') {
+        t.mock.method(h.placement, 'beginStop', () => {
+          throw failure;
+        });
+      } else if (step === 'publication') {
+        t.mock.method(h.gateway, 'published', async () => {
+          throw failure;
+        });
+      } else if (step === 'placement') {
+        t.mock.method(h.placement, 'resolve', () => {
+          throw failure;
+        });
+      } else if (step === 'selection') {
+        t.mock.method(h.nodes.get('beta')!.metrics, 'latest', () => undefined);
+      } else if (step.endsWith('fencing')) {
+        const node = h.nodes.get(step === 'source fencing' ? 'alpha' : 'beta')!;
+        const coordinate = node.coordinate.bind(node);
+        t.mock.method(node, 'coordinate', async () => {
+          if (h.placement.peek('tenant')!.nodeId === 'beta') throw failure;
+          return coordinate();
+        });
+      }
+      await assert.rejects(h.gateway.transfer('tenant', step === 'preflight' ? 'missing' : 'beta'), {
+        code: 'unavailable',
+      });
+      const current = h.placement.peek('tenant')!;
+      if (step === 'preflight' || step === 'stop intent') {
+        assert.deepEqual(current, source);
+      } else if (step === 'publication') {
+        assert.equal(current.nodeId, source.nodeId);
+        assert.equal(current.placementEpoch, source.placementEpoch);
+        assert.equal(current.runState, 'stopped');
+        assert.equal(current.dataState, 'dirty');
+        assert.ok(current.pendingCommit);
+      } else {
+        assert.equal(current.runState, 'stopped');
+        assert.equal(current.dataState, 'clean');
+        assert.equal(current.pendingCommit, null);
+        assert.equal(current.checkpoint, id(1));
+        assert.equal(current.nodeId, step.endsWith('fencing') ? 'beta' : source.nodeId);
+        assert.equal(current.placementEpoch, source.placementEpoch + (step.endsWith('fencing') ? 1 : 0));
+      }
+      t.mock.restoreAll();
+      h.nodes.get('beta')!.diskDraining = false;
+      if (step.endsWith('fencing')) {
+        await Promise.all(h.nodes.all().map((node) => node.coordinate()));
+        assert.equal(h.placement.resolve('tenant').nodeId, 'beta');
+      } else {
+        assert.equal((await h.gateway.transfer('tenant', 'beta')).nodeId, 'beta');
+      }
+    } finally {
+      await h.close();
+    }
+  });
+}
+
 test('offline dirty copies wait until transfer restores a complete version and fences the source', async () => {
   const h = await harness();
   try {

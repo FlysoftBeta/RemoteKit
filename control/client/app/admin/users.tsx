@@ -24,7 +24,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import type { AdminSocketMethods, AdminUser, AdminNode, ConfiguredAdminNode } from '../../../shared/admin';
 import { RemoteKitError } from '../../../shared/errors';
 import { useAutoFocus } from '../../editing/local-autofocus';
@@ -152,6 +152,81 @@ function CreateUserDialog({
   );
 }
 
+export function TransferDialog({
+  open,
+  title,
+  disabled,
+  onConfirm,
+  onClose,
+  children,
+}: {
+  open: boolean;
+  title: string;
+  disabled?: boolean;
+  onConfirm: () => Promise<void>;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<RemoteKitError>();
+  return (
+    <Dialog open={open} onClose={() => !busy && onClose()} fullWidth maxWidth="xs">
+      <DialogTitle>{title}</DialogTitle>
+      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {busy && (
+          <Box role="status" aria-live="polite">
+            <LinearProgress />
+            <Typography sx={{ mt: 1 }}>正在停止源 Session 并转移，等待节点确认…</Typography>
+            <Typography variant="body2" color="text.secondary">
+              停止确认最长等待 180 秒。
+            </Typography>
+          </Box>
+        )}
+        {error && (
+          <Box role="alert">
+            <FailureNote
+              error={error}
+              context={{
+                operation: '转移 Session',
+                scope: 'surface',
+                resolved: true,
+                issue: 'configuration',
+              }}
+            />
+            <Typography variant="caption">错误代码：{error.code}</Typography>
+          </Box>
+        )}
+        <Box component="fieldset" disabled={busy} sx={{ border: 0, p: 0, m: 0, display: 'grid', gap: 2 }}>
+          {children}
+        </Box>
+      </DialogContent>
+      <DialogActions>
+        <Button disabled={busy} onClick={onClose}>
+          {error ? '关闭' : '取消'}
+        </Button>
+        <Button
+          variant="contained"
+          disabled={busy || disabled || !!error}
+          onClick={async () => {
+            setBusy(true);
+            setError(undefined);
+            try {
+              await onConfirm();
+              onClose();
+            } catch (cause) {
+              setError(failureError(cause));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? '转移中…' : '转移'}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 function ActionDialog({
   action,
   user,
@@ -221,10 +296,9 @@ function ActionDialog({
       );
     case 'move':
       return (
-        <ConfirmDialog
+        <TransferDialog
           {...common}
           title={`转移 ${username} 的 Session`}
-          confirmLabel="转移"
           disabled={user.session.state === 'none'}
           onConfirm={() => run('admin.transfer', { username, ...(nodeId ? { nodeId } : {}) })}
         >
@@ -233,7 +307,9 @@ function ActionDialog({
               ? user.session.checkpointAt === null
                 ? '源节点离线，且没有可用的完整版本。将从空白浏览器数据开始，源节点上的数据将丢失。'
                 : `源节点离线。将恢复最新完整版本（${formatTime(user.session.checkpointAt)}），此后的更改将丢失。`
-              : '将先停止并保存源节点上的 Session，再转移到目标节点。'}
+              : user.session.state !== 'none' && user.session.dataState === 'dirty'
+                ? '将先停止并保存源节点上的 Session，再转移到目标节点。'
+                : '将停止源节点上的 Session 并转移到目标节点；未打开的数据无需保存。'}
           </Typography>
           <TextField
             select
@@ -255,7 +331,7 @@ function ActionDialog({
                 </MenuItem>
               ))}
           </TextField>
-        </ConfirmDialog>
+        </TransferDialog>
       );
     case 'stop':
       return (

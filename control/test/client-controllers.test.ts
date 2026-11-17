@@ -461,7 +461,20 @@ test('control requests map send failures and structured errors without leaving d
     }),
   });
   await response;
+  let transferSettled = false;
+  const transfer = control.request('admin.transfer', { username: 'other', nodeId: 'beta' }).then(() => {
+    transferSettled = true;
+  });
   t.mock.timers.tick(20000);
+  await Promise.resolve();
+  assert.equal(transferSettled, false);
+  socket.onmessage?.({ data: JSON.stringify({ type: 'result', id: socket.sent[1].id, result: [] }) });
+  await transfer;
+  const transferTimeout = assert.rejects(control.request('admin.transfer', { username: 'other' }), {
+    code: 'outcome_unknown',
+  });
+  t.mock.timers.tick(240000);
+  await transferTimeout;
   control.close();
   assert.equal(control.getSnapshot().phase, 'stopped');
 });

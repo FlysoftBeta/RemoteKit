@@ -220,7 +220,7 @@ export class ControlSession {
       return Promise.reject(new RemoteKitError('internal', '控制请求编码失败', { detail: String(error) }));
     }
     return this.pending
-      .request(id, 20000, () => {
+      .request(id, method === 'admin.transfer' ? 240000 : 20000, () => {
         this.socket!.send(encoded);
       })
       .catch((error) => {

@@ -71,7 +71,7 @@
 Control 与所有节点之间、节点与节点之间用同一个握手：`Noise_IK_25519_AESGCM_SHA256`，prologue `remotekit-cluster-2`，节点是发起方并已知对方的静态公钥。
 
 - 第一条消息带发起方的静态公钥与载荷 `node.hello{role, nodeId, buildId, incarnation}`（role 为 `endpoint`、`updater` 或 `peer`）。Control 只在发起方静态公钥等于该 `nodeId` 已配置的公钥、且节点未被移除时继续；否则握手直接失败、不回复——密钥不对的一方得不到任何信息。第二条消息认证 Control 自己（`ee`、`se`），载荷是 `node.ready`（connectionEpoch、buildId、生效配置、configHash、对象密钥、该节点上的活跃会话清单、`peers`）、`node.release`（给 updater）或 `node.reject{code: build_mismatch | no_release}`。
-- **节点之间**：`node.ready` 带 `peers:[{nodeId, address, publicKey}]`（其他所有已配置、未移除的节点）；集合变化（管理员移除/重新加入）时 Control 向所有在线节点推 `node.peers`。对象传输的服务端只接受静态公钥在当前集合里的发起方，并用集合里的 ID 而不是对方自称的 ID；客户端按目标节点的公钥做 IK，连到错误的服务端会握手失败。服务期间每个请求都重新确认对方仍在集合里，所以移除节点对已建立的连接也立即生效。
+- **节点之间**：`node.ready` 带 `peers:[{nodeId, address, publicKey}]`（其他所有已配置、未移除的节点）；集合变化（管理员移除/重新加入）时 Control 向所有在线节点推 `node.peers`。对象传输的服务端只接受静态公钥在当前集合里的发起方，并用集合里的 ID 而不是对方自称的 ID；公钥不在集合里时回复 `node.reject{code: peer_not_admitted}`，buildId 不同时回复 `node.reject{code: build_mismatch}`，发起方据此报告 `unauthenticated` 或带双方 buildId 的 `unavailable`，`TCP connection closed` 只表示真正的传输断开。服务端每种拒绝（含握手失败）记一条 `peer.accept_rejected{reason, listenAddress, nodeId?, role?, buildId?}`，同样的拒绝在成功或原因改变之前不重复记；节点每次收到变化的集合记 `objects.peers_set{peers:[{nodeId, address}]}`；对象拉取失败的错误带目标 nodeId 与地址。客户端按目标节点的公钥做 IK，连到错误的服务端会握手失败。服务期间每个请求都重新确认对方仍在集合里，所以移除节点对已建立的连接也立即生效。
 - 握手后使用 Noise Split 得到的两个方向 AES-256-GCM 状态。与 Noise 规范的唯一差异：单条传输消息上限 4MiB（规范为 65535 字节）。nonce 用尽或任一次解密失败即断开。
 - 明文首字节区分 JSON（请求/回复/事件）与 BINARY（u32 头长度 + JSON 头 + 原始字节，用于更新包和对象数据）。
 - **大小上限是一份契约**：`protocol/limits.json` 是集群通道上所有大小与数量上限的唯一来源（传输消息、管理 JSON、`session.desired`、观察状态、事件正文与积压、剪贴板文本与 HTML、view 与站点数量等）。包括队列容量、工作队列、对象分块与 locate 批量、日志窗口、RTC 信令队列等通道预算。Endpoint 构建时由 CMake 从它生成头文件，Control 直接导入；两侧各有一个测试，在上限处接受、超过一字节拒绝。文档上限按实际发送的 UTF-8 JSON 计算，并为之后才加上的 `id`/`opId` 与帧预留 `managementEnvelopeBytes`，两侧用同一种量法。
@@ -168,8 +168,9 @@ Session 数据以**版本**（checkpoint）保存：一个版本是一份 manife
 
 **停止时的提交**。期望状态 `run:"stopped"`，`commit` 为提交请求 ID 或 null：
 
-1. 有阻塞项则 `conflict`（指明是哪一项）：未确认的自然关闭事件、未决原生选择、上传中、页面请求（对话框、文件选择）、下载中、RTC 连接存在、生命周期不确定、导航恢复未完成。计数由各自的所有者组件报告在快照的 `stopBlockers` 字段里。
-2. 优雅关闭 Browser：`BrowserRuntime::Shutdown()` 先导出所有导航状态有变化的 view（总计最多 20 秒），再发 `browser.shutdown`，等 Browser 作业中的进程全部退出（最多 30 秒）；只有退出码 0 且作业为空才算干净，不干净则 `unavailable`。强制终止只用于故障与 fencing。
+1. 有阻塞项则 `conflict`（指明是哪一项）：未确认的自然关闭事件、未决原生选择、上传中、页面请求（对话框、文件选择）、下载中、RTC 连接存在、view 生命周期不确定（打开或关闭中）、导航恢复未完成。计数由各自的所有者组件报告在快照的 `stopBlockers` 字段里。这些都是会自行结束的瞬时状态；副本 `stoppedCleanly:false` 不是阻塞项，见下面的恢复运行。
+2. 优雅关闭 Browser：`BrowserRuntime::Shutdown()` 先导出所有导航状态有变化的 view（总计最多 20 秒），再发 `browser.shutdown`，等 Browser 作业中的进程全部退出（最多 30 秒）。干净与否是退出本身的事实，由 `BrowserRuntime` 在一处判定：已发出 `browser.shutdown`、退出码 0、作业为空（在释放句柄之前检查）即为干净，不论是在等待期内、等待期过后，还是在观察 Session 时才看到退出。等待期内没退出则 `outcome_unknown`，下一轮收敛再看；退出但不干净则 `unavailable`。已经退出的进程不再按强制终止处理；强制终止只用于故障与 fencing。
+   **恢复运行**：要提交而副本是 `stoppedCleanly:false`（Endpoint 或 Browser 意外退出），无论 Session 是否还在内存里，都先按"同节点打开沿用本地副本"重新启动 Browser（不恢复 view），让 Chromium 恢复自己的数据库，再走这里的优雅关闭与提交。恢复运行的启动或关闭失败时副本保持原样，错误照常报告，下一轮收敛重来——不会因为"不确定"而永久拒绝。
 3. 不提交时到此为止：副本保持 `dirty`，`stoppedCleanly:true`。
 4. 提交时：删除上传草稿与暂存，关闭 `session.db`（之后任何写入都是缺陷），只扫描变更列表并把剩下的文件切块。排除名为 `Cache`、`Code Cache`、`GPUCache`、`DawnWebGPUCache`、`DawnGraphiteCache`、`Shared Dictionary`、`VideoDecodeStats`、`blob_storage` 的目录、LevelDB 的 `LOCK`/`LOG`/`LOG.old`、上传与文件库暂存目录；SQLite 的 `-journal`/`-wal` 保留——干净关闭才是一致性的前提。读取、hash、压缩、加密在有界工作池上并行；对象登记按批发出（`object.committed.batch`，每批 ≤1024 个、一个事务）。
 5. 生成 manifest 对象（版本 2：buildId、文件与块列表、目录），登记，然后写副本记录 `{state: clean, base: manifest, lastCommit: {requestId, manifestId}}` 并截断变更日志，在观察状态里报告 `data:{state, base, committed:{requestId, manifestId}}` 与 checkpoint 描述。manifest 里的 buildId 只记录生成它的构建；恢复只校验格式版本，不要求构建相同。
@@ -199,7 +200,9 @@ Session 数据以**版本**（checkpoint）保存：一个版本是一份 manife
 
 ### Control 侧
 
-放置是 `run_state × data_state`。停止并提交时先在事务里写 `pending_commit`（epoch 不变），然后发布带这个 requestId 的期望状态；不需要单独的请求、超时或补发——观察状态报告 `committed.requestId` 等于它时，校验对象、登记版本，改为 `stopped/clean`，下一份期望文档清除 `commit`。重连只是重发期望状态。未决提交期间认领受保护，不会被 GC。
+放置是 `run_state × data_state`。`data_state` 只由观察到的事实改变：新放置（包括转移或重新放置到另一个节点）是 `clean`——节点还没打开副本，数据仍等于 `checkpoint_id`；当前放置（同 sessionId、节点、epoch）的观察状态报告副本 `dirty` 或 Browser 运行中时才记为 `dirty`。当前放置的节点报告没有副本记录（`data: null`）且 Browser 已停止或失败时，记回 `clean` 并清除未决提交：副本记录在 Browser 启动之前写入，没有它就没有比 checkpoint 更新的更改（恢复从未成功的 Session 就是这样）。因此恢复失败的 Session 不会被钉在那个节点上。
+
+停止时只有 `dirty` 才提交：先在事务里写 `pending_commit`（epoch 不变），然后发布带这个 requestId 的期望状态；不需要单独的请求、超时或补发——观察状态报告 `committed.requestId` 等于它时，校验对象、登记版本，改为 `stopped/clean`，下一份期望文档清除 `commit`。重连只是重发期望状态。未决提交期间认领受保护，不会被 GC。
 
 **期望状态的发布**：`EndpointGateway` 唯一负责发布。改变期望状态的代码只调用 `invalidate(tenant)`；网关合并同一时刻的多次标记，在该用户所在节点就绪时编译并发送最新一份，节点每次就绪时重发它上面的全部放置。节点离线不是调用方要处理的错误：锁定、解锁等状态写在期望文档里，节点回来时生效。需要效果已经发生的调用方显式等待——`published(tenant)`（当前修订已送达）或按条件等待观察状态，二者都有期限；需要 Browser 的操作先检查浏览器可用性，不可用时以带原因的 `unavailable` 失败。发布失败与恢复只在状态切换时各记一条 warn。
 
@@ -211,7 +214,7 @@ Session 数据以**版本**（checkpoint）保存：一个版本是一份 manife
 
 **转移**（管理 App → 用户 → 转移，`admin.transfer{username, nodeId?}`）把一个用户的 Session 搬到另一个节点，用户先被强制下线：
 
-- 源节点在线：先在源节点停止并提交（不丢更改），再放到目标节点（epoch 加一）。没有其他在线节点时直接拒绝，不先停止。
+- 源节点在线：先在源节点停止——`dirty` 时同时提交（不丢更改），`clean` 时只停止、不提交——再放到目标节点（epoch 加一）。停止最长等 180 秒：Endpoint 报告的错误按它的错误码返回，超时为 `outcome_unknown`；管理 App 在等待期间显示进度，结束时要么成功、要么显示带错误码的失败，不会无声挂起。没有其他在线节点时直接拒绝，不先停止。
 - 源节点离线：尽力而为。epoch 加一，以最新的完整版本记为 `stopped/clean`，之后的更改丢失；一个完整版本都没有时从空白浏览器数据开始（按 Control 的有限产品信息重建工作区）。确认框写明恢复哪个时间的版本或将从空白开始。旧副本由 fencing 隔离：源节点回来时期望状态里已没有它。
 - 指定目标节点时记下这个选择（`transfer_pending`），下次打开优先放在那里且 epoch 不再加一；不指定时由下次打开按放置规则选择，源节点不在候选里。
 

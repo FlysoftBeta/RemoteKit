@@ -259,7 +259,7 @@ test('face templates, placements and profile keys survive a Control restart', as
     store.db.close();
     store = new ControlDatabase(path, { buildId: 'test' });
     placement = new Placement(store, nodes);
-    assert.deepEqual(placement.resolve('tenant'), assigned);
+    assert.deepEqual(placement.peek('tenant'), assigned);
     assert.equal(placement.keys(placement.resolve('tenant')).profileKey, profileKey);
     assert.deepEqual(store.security.faceVault.open('user', face, 'model'), template);
     nodes.stop();

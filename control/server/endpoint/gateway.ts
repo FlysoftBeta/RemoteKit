@@ -90,6 +90,8 @@ export class EndpointGateway {
       | 'forgetTenant'
       | 'checkpoints'
       | 'beginStop'
+      | 'observeOpened'
+      | 'observeAbsent'
       | 'cancelStop'
       | 'transfer'
       | 'newestComplete'
@@ -123,6 +125,17 @@ export class EndpointGateway {
       )
         return;
       const copy = message.data;
+      if (copy?.state === 'dirty' || message.browser === 'running') {
+        placement.observeOpened(placed);
+      } else if (
+        copy === null &&
+        BigInt(message.observedRevision) > 0n &&
+        (message.browser === 'stopped' || message.browser === 'failed')
+      ) {
+        // Only after the node applied a desired document for this placement does a missing
+        // copy record mean nothing diverged.
+        placement.observeAbsent(placed);
+      }
       if (
         message.checkpoint?.kind === 'running' &&
         copy?.state === 'dirty' &&
@@ -140,7 +153,7 @@ export class EndpointGateway {
       }
       if (
         message.checkpoint?.kind === 'stopped' &&
-        placed.dataState === 'dirty' &&
+        (placed.dataState === 'dirty' || placed.pendingCommit !== null) &&
         copy?.state === 'clean' &&
         copy.committed &&
         copy.base === copy.committed.manifestId &&
@@ -458,18 +471,29 @@ export class EndpointGateway {
     const fault = this.sessionFault(tenant);
     if (fault) throw fault;
     const placed = this.placement.beginStop(tenant);
-    this.invalidate(tenant);
+    const desired = await this.published(tenant);
     const observed = await this.waitObserved(
       tenant,
-      (value) =>
-        value.lastError !== null ||
-        (value.browser === 'stopped' &&
+      (value) => {
+        if (BigInt(value.observedRevision) < BigInt(desired.revision)) return false;
+        if (value.lastError) return true;
+        if (value.browser !== 'stopped') return false;
+        if (placed.pendingCommit === null) return true;
+        if (value.data === null && this.placement.peek(tenant)?.pendingCommit === null) return true;
+        const committed = value.data?.committed;
+        return (
           value.data?.state === 'clean' &&
           value.data.base !== null &&
-          (value.data.committed === null || value.data.committed.requestId === placed.pendingCommit)),
+          !!committed &&
+          (committed.requestId === placed.pendingCommit || committed.requestId.startsWith('node-'))
+        );
+      },
       180000,
     );
     if (observed.lastError) throw endpointError(observed.lastError);
+    // A copy can open while its non-commit stop is in flight.
+    if (placed.pendingCommit === null && this.placement.peek(tenant)?.dataState === 'dirty')
+      return this.stop(tenant);
     return this.placement.peek(tenant)?.checkpointId ?? 0;
   }
   async snapshot(tenant: string, args: { outputDiagnostics?: boolean } = {}): Promise<EndpointSnapshot> {

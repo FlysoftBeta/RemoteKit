@@ -157,10 +157,6 @@ export class Reconciler {
     this.services.lifecycle.observeWanted(this.context.store.workspaces.workspace(tenant), false);
     if (this.context.endpoint.placement.peek(tenant)?.pendingCommit) {
       this.context.endpoint.invalidate(tenant);
-      if (this.context.endpoint.placement.peek(tenant)?.dataState === 'clean') {
-        this.services.lifecycle.finishStop(tenant);
-        return;
-      }
       runtime.lastErrorKey = 'stopping';
       runtime.lastError = undefined;
       this.services.viewers.push(tenant);

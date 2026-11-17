@@ -152,7 +152,7 @@ export function installDesiredSource(gateway: EndpointGateway) {
   gateway.setDesiredSource(
     (tenant) => {
       const current = gateway.placement.peek(tenant);
-      const placement = current?.pendingCommit ? current : gateway.placement.resolve(tenant);
+      const placement = current ?? gateway.placement.resolve(tenant);
       const node = gateway.nodes.get(placement.nodeId)!;
       if (node.state.state !== 'ready') throw new Error('Node offline');
       const document = JSON.parse(
