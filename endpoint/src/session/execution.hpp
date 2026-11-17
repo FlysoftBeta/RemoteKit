@@ -42,6 +42,11 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
  private:
   friend class NativeErrorStateProbe;
   friend class NativeRetryOwnerProbe;
+  Result<Json> Stop(const Json& commit,
+                    bool check_blockers,
+                    PhaseClock::time_point deadline,
+                    bool deferred,
+                    const std::function<Result<void>(const Json&)>& prepare);
   Result<void> Sample(const std::function<Result<Json>()>& sample);
   Result<void> DeliverEvents(const std::function<Result<void>()>& deliver);
   Result<void> SendEvents();

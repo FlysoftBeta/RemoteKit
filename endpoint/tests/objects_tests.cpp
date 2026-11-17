@@ -191,13 +191,17 @@ void Peer(ObjectStore& source,
   Check(Read(target, keys, info.id) == plain, "resumed plaintext round trip");
   PeerClient mismatch(target, target_key, "target", std::string(64, 'a'), client_peers);
   auto rejected = mismatch.Fetch(info.id, "source");
-  Check(!rejected && rejected.error().code == remotekit::ErrorCode::kUnavailable,
+  Check(!rejected && rejected.error().code == remotekit::ErrorCode::kUnavailable &&
+            rejected.error().message.find(std::string(64, 'a')) != std::string::npos &&
+            rejected.error().message.find("dev") != std::string::npos,
         "peer build lock");
   PeerSet intruder_peers;
   Take(intruder_peers.Update(Json::array({TestPeer("source", server.Address(), source_key)})));
   PeerClient intruder(target, TestPrivateKey(9), "target", "dev", intruder_peers);
-  Check(!intruder.Fetch(info.id, "source"),
-        "non-member static key is rejected even with member claim");
+  const auto unadmitted = intruder.Fetch(info.id, "source");
+  Check(!unadmitted && unadmitted.error().code == ErrorCode::kUnauthenticated &&
+            unadmitted.error().message == "peer identity is not admitted by source",
+        "non-member static key receives an authenticated rejection despite its member claim");
   Take(server_peers.Update(Json::array()));
   server.Revoke();
   Check(!client.Fetch(info.id, "source"), "removed member is rejected");

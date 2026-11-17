@@ -139,13 +139,7 @@ Result<void> ViewController::Start() {
     auto stopped = stop_runtime();
     if (!stopped)
       return stopped.error();
-    const auto adapter_start = PhaseClock::now();
-    auto prepared = registry.PrepareAdapter();
-    browser.OpenPhase("adapter", PhaseMs(adapter_start));
-    if (!prepared)
-      return prepared.error();
-    auto adapter = registry.Adapter();
-    auto started = browser.Launch(options, id, directory, *adapter, trace);
+    auto started = launch_browser_();
     if (!started)
       return started.error();
     for (const auto& [view, config] : desired)
@@ -176,6 +170,14 @@ Result<void> ViewController::Start() {
   browser.MarkInitialized();
 
   return {};
+}
+
+Result<void> ViewController::LaunchBrowser() {
+  const auto adapter_start = PhaseClock::now();
+  RK_RETURN_IF_ERROR(registry.PrepareAdapter());
+  browser.OpenPhase("adapter", PhaseMs(adapter_start));
+  const auto adapter = registry.Adapter();
+  return browser.Launch(options, id, directory, *adapter, trace);
 }
 
 Result<ViewController::Geometry> ViewController::DesiredGeometry() {

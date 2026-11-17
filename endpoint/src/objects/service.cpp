@@ -52,8 +52,14 @@ Result<Json> ObjectService::Derivation(const std::string& id, const std::string&
   return reply;
 }
 Result<void> ObjectService::SetPeers(const Json& peers) {
-  RK_RETURN_IF_ERROR(peers_.Update(peers));
+  RK_ASSIGN_OR_RETURN(changed, peers_.Update(peers));
+  if (!changed)
+    return {};
   server_.Revoke();
+  Json addresses = Json::array();
+  for (const auto& peer : peers)
+    addresses.push_back({{"nodeId", peer.at("nodeId")}, {"address", peer.at("address")}});
+  LogEvent(LogLevel::kInfo, "objects.peers_set", {{"peers", std::move(addresses)}});
   return {};
 }
 Result<void> ObjectService::Start(const std::string& listen) {
@@ -194,6 +200,8 @@ Result<ObjectInfo> ObjectService::Fetch(const std::string& id, const Json& sourc
     auto fetched = client_.Fetch(id, source["nodeId"].get<std::string>());
     if (!fetched) {
       last = fetched.error();
+      last.message = "object source " + source.at("nodeId").get<std::string>() + " at " + address +
+                     ": " + last.message;
       std::lock_guard lock(sources_mutex_);
       auto& retry = source_retries_.at(unit);
       retry.Fail(last);

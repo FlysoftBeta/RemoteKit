@@ -19,7 +19,7 @@ bool Number(const Json& value) {
   return value.is_number_unsigned() || (value.is_number_integer() && value.get<int64_t>() >= 0);
 }
 }  // namespace
-Result<void> PeerSet::Update(const Json& peers) {
+Result<bool> PeerSet::Update(const Json& peers) {
   if (!peers.is_array())
     return Error{ErrorCode::kInvalidRequest, "invalid peer set"};
   std::map<std::string, PeerIdentity> next;
@@ -37,8 +37,10 @@ Result<void> PeerSet::Update(const Json& peers) {
     next.emplace(node, PeerIdentity{node, peer["address"].get<std::string>(), key.value()});
   }
   std::lock_guard lock(mutex_);
+  if (peers_ == next)
+    return false;
   peers_ = std::move(next);
-  return {};
+  return true;
 }
 std::optional<PeerIdentity> PeerSet::Find(const std::string& node) const {
   std::lock_guard lock(mutex_);
@@ -97,33 +99,66 @@ void PeerServer::Loop() {
       if (!carrier) {
         if (stopping_)
           break;
+        if (carrier.error().code != ErrorCode::kBusy)
+          Reject({}, "accept_failed", Json::object(), carrier.error());
         std::this_thread::sleep_for(20ms);
         continue;
       }
       std::optional<PeerIdentity> identity;
+      Json claimed = Json::object();
+      std::string rejection;
       auto established = cluster::AcceptCarrier(
           std::move(carrier).value(), key_,
           [&](const Json& hello, const Key& public_key) -> Result<Json> {
+            claimed = hello;
             identity = peers_.Find(public_key);
-            if (!identity || hello.value("type", Json()) != "node.hello" ||
-                hello.value("role", Json()) != "peer")
+            if (!identity) {
+              rejection = "peer_not_admitted";
+              return Json{{"type", "node.reject"},
+                          {"code", rejection},
+                          {"nodeId", node_},
+                          {"buildId", build_}};
+            }
+            if (hello.value("type", Json()) != "node.hello" ||
+                hello.value("role", Json()) != "peer") {
+              rejection = "invalid_hello";
               return Error{ErrorCode::kUnauthenticated, "peer identity is not admitted"};
-            if (hello.value("buildId", Json()) != build_)
+            }
+            if (hello.value("buildId", Json()) != build_) {
+              rejection = "build_mismatch";
               return Json{{"type", "node.reject"}, {"code", "build_mismatch"}, {"buildId", build_}};
+            }
             return Json{{"type", "node.ready"}, {"nodeId", node_}, {"buildId", build_}};
           });
-      if (!established || established.value().reply["type"] == "node.reject")
+      if (!established) {
+        Reject({}, rejection.empty() ? "handshake_failed" : rejection, claimed,
+               established.error());
         continue;
+      }
+      if (established.value().reply["type"] == "node.reject") {
+        Reject({}, rejection, claimed,
+               {rejection == "peer_not_admitted" ? ErrorCode::kUnauthenticated
+                                                 : ErrorCode::kUnavailable,
+                rejection == "peer_not_admitted"
+                    ? "peer identity is not admitted"
+                    : "peer build mismatch: local " + build_ + ", remote " +
+                          claimed.value("buildId", Json()).dump()});
+        continue;
+      }
       channel = std::move(established.value().channel);
       {
         std::lock_guard lock(mutex_);
         const auto current = peers_.Find(identity->node_id);
         if (stopping_ || !current || current->public_key != identity->public_key) {
+          if (!stopping_)
+            Reject({}, "peer_not_admitted", claimed,
+                   {ErrorCode::kUnauthenticated, "peer identity was revoked during admission"});
           channel->Close();
           continue;
         }
         channels_.emplace(channel, *identity);
       }
+      Accepted({});
       auto served = Serve(*channel);
       if (!served) {
         auto error = WireError(served.error());
@@ -150,6 +185,28 @@ void PeerServer::Loop() {
       channels_.erase(channel);
     }
   }
+}
+void PeerServer::Accepted(const std::string& remote_address) {
+  std::lock_guard lock(rejection_mutex_);
+  rejections_.erase(remote_address);
+}
+void PeerServer::Reject(const std::string& remote_address,
+                        const std::string& reason,
+                        const Json& hello,
+                        const Error& error) {
+  std::lock_guard lock(rejection_mutex_);
+  const auto identity = Json::array({reason, ErrorCodeName(error.code), error.message}).dump();
+  auto [entry, inserted] = rejections_.try_emplace(remote_address, identity);
+  if (!inserted && entry->second == identity)
+    return;
+  entry->second = identity;
+  Json fields{{"remoteAddress", remote_address.empty() ? Json() : Json(remote_address)},
+              {"listenAddress", Address()},
+              {"reason", reason}};
+  for (const auto* name : {"nodeId", "role", "buildId"})
+    if (hello.is_object() && hello.contains(name))
+      fields[name] = hello.at(name);
+  LogError(LogLevel::kWarn, "peer.accept_rejected", error, std::move(fields));
 }
 RetryUnit::Snapshot PeerServer::AcceptRetryStatus() const {
   std::lock_guard lock(accept_mutex_);
@@ -250,8 +307,16 @@ Result<ObjectInfo> PeerClient::Fetch(const std::string& id, const std::string& n
   RK_ASSIGN_OR_RETURN(connection,
                       cluster::ConnectCarrier(std::move(carrier), key_, peer->public_key,
                                               {"peer", node_, build_, {}}));
-  if (connection.reply.value("type", Json()) == "node.reject")
-    return Error{ErrorCode::kUnavailable, "Peer capability negotiation refused"};
+  if (connection.reply.value("type", Json()) == "node.reject") {
+    const auto code = connection.reply.value("code", Json());
+    if (code == "peer_not_admitted")
+      return Error{ErrorCode::kUnauthenticated, "peer identity is not admitted by " + node};
+    if (code == "build_mismatch")
+      return Error{ErrorCode::kUnavailable, "peer build mismatch with " + node + ": local " +
+                                                build_ + ", remote " +
+                                                connection.reply.value("buildId", Json()).dump()};
+    return Error{ErrorCode::kUnavailable, "peer rejected by " + node + ": " + code.dump()};
+  }
   if (connection.reply.value("buildId", Json()) != build_)
     return Invalid();
   auto& channel = *connection.channel;

@@ -230,7 +230,7 @@ const Entry kOwners[] = {
     {"object.source", "encrypted object peer", SourceDriver},
     {"browser.connection", "SDK Browser connect",
      [](const fs::path& root) { return SessionDriver(root, "browser.connection"); }, true},
-    {"session.convergence", "session execution stop",
+    {"session.convergence", "session execution stop and unclean-copy recovery",
      [](const fs::path&) { return CoordinatorDriver("session.convergence"); }},
     {"session.maintenance", "session execution maintenance",
      [](const fs::path&) { return CoordinatorDriver("session.maintenance"); }},

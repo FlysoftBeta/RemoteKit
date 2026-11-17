@@ -75,8 +75,12 @@ inline OwnerDriver SourceDriver(const fs::path& root) {
     void Tick() {
       auto result = owner.EnsureUncommitted(
           object.id, Json::array({{{"nodeId", peer}, {"address", listener->Address()}}}));
-      if (!result)
+      if (!result) {
         failure = result.error();
+        if (!failure->message.starts_with("object source " + peer + " at " + listener->Address() +
+                                          ": "))
+          throw std::runtime_error("object source failure omits target node or address");
+      }
       std::lock_guard lock(error_mutex);
       if (server_error)
         std::rethrow_exception(server_error);

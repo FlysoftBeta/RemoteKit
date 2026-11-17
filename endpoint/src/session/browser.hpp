@@ -64,11 +64,7 @@ class BrowserRuntime {
   void RestoredView(const std::string& view);
   void Presented(const std::string& view, int64_t at);
   const Json& ShutdownTiming() const { return shutdown_timing_; }
-  void ReleaseExited() {
-    if (shutdown_phase_ == ShutdownPhase::kDispatched && process_.WaitCleanExit(0))
-      shutdown_phase_ = ShutdownPhase::kClean;
-    process_.ReleaseExited();
-  }
+  void ReleaseExited();
   bool Alive() const { return process_.Alive(); }
   bool Exited() const { return process_.Exited(); }
   bool Present() const { return process_.Present(); }
@@ -88,6 +84,7 @@ class BrowserRuntime {
  private:
   friend class NativeErrorStateProbe;
   friend class NativeRetryOwnerProbe;
+  void ClassifyExit();
   BrowserProcess process_;
   BrowserRpc rpc_;
   const cluster::Key& profile_key_;
@@ -105,6 +102,7 @@ class BrowserRuntime {
   bool initialized_ = false;
   enum class ShutdownPhase { kClean, kRunning, kDispatched, kUnclean };
   ShutdownPhase shutdown_phase_ = ShutdownPhase::kClean;
+  bool shutdown_dispatched_ = false;
   bool crash_recorded_ = false;
   Json shutdown_timing_ = Json::object();
   Json open_timing_ = Json::object();

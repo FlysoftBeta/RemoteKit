@@ -45,6 +45,7 @@ class Session {
   Json AuthorizationSnapshot() const;
   Json LockSnapshot() const;
   void SetOpenTiming(Json phases) { browser.SetOpenTiming(std::move(phases)); }
+  Result<void> Start();
   Result<void> Stop();
   Result<void> Fence();
   Result<void> Shutdown();
@@ -111,6 +112,7 @@ class Session {
     kPublished
   };
   StopPhase stop_phase_ = StopPhase::kRunning;
+  bool recovery_required_ = false;
   std::optional<Json> stopped_checkpoint_;
   std::optional<std::string> pending_exit_cleanup_;
   RetryUnit exit_cleanup_retry_{"browser.exit_cleanup"};

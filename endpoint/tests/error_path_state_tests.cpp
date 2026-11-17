@@ -30,6 +30,7 @@ class Link : public ManagementLink {
   std::optional<Error> failure;
   std::atomic<unsigned> requests{0};
   std::string connection;
+  Disconnect disconnected;
   std::optional<ReadyState> ReadyConfiguration() override {
     if (connection.empty())
       return {};
@@ -39,7 +40,7 @@ class Link : public ManagementLink {
   bool Current(uint64_t) override { return true; }
   bool SendReply(uint64_t, const Json&) override { return true; }
   bool SendEvent(const Json&, uint64_t, DeliveryFlag = {}) override { return true; }
-  void OnDisconnect(Disconnect) override {}
+  void OnDisconnect(Disconnect callback) override { disconnected = std::move(callback); }
   Result<Json> Request(const std::string&, Json) override {
     ++requests;
     return failure ? Result<Json>{*failure} : Result<Json>{Json{{"ok", true}}};
@@ -75,7 +76,7 @@ class NativeErrorStateProbe {
  public:
   static void Launch(BrowserRuntime& browser,
                      const fs::path& root,
-                     const wchar_t* mode = L" --hold") {
+                     const std::wstring& mode = L" --hold") {
     browser.crash_directory_ = root / "crashes";
     browser.logs_root_ = root;
     browser.session_id_ = "test";
@@ -86,6 +87,7 @@ class NativeErrorStateProbe {
                                  browser.profile_key_));
     browser.incarnation_ = browser.process_incarnation_ = "browser";
     browser.shutdown_phase_ = BrowserRuntime::ShutdownPhase::kRunning;
+    browser.shutdown_dispatched_ = false;
   }
   static void BrowserState(const fs::path& root) {
     auto sdk = MakeSdk();
@@ -122,6 +124,173 @@ class NativeErrorStateProbe {
       return {};
     }));
     Check(browser.CheckpointReady(), "late clean exit resolves the same unknown shutdown");
+    browser.ReleaseExited();
+    Launch(browser, root, L" --fail");
+    browser.shutdown_phase_ = BrowserRuntime::ShutdownPhase::kDispatched;
+    browser.process_.WaitCleanExit(2000);
+    Take(browser.Stop());
+    Check(!browser.CheckpointReady(), "nonzero dispatched exit remains unclean");
+    browser.ReleaseExited();
+  }
+  static void ServicePeerLookup(const fs::path& root) {
+    Link link;
+    auto sdk = MakeSdk();
+    const auto options = Take(RuntimeOptions::FromConfig(TestConfig(), root, "dev", "test"));
+    Service service(sdk, options, link, {}, "endpoint");
+    service.fenced_generation_ = 1;
+    for (const auto* method : {"service.close", "service.face.capabilities"}) {
+      auto request = test::Rpc(method, {{"leaseId", "retired"}}, method);
+      request["sessionId"] = request["placementEpoch"] = nullptr;
+      const auto result = service.Dispatch(request, 1);
+      Check(!result && result.error().code == ErrorCode::kConflict &&
+                result.error().message == "Viewer service lease is retired" &&
+                service.service_peers_.empty(),
+            "an absent service lease never inserts an empty peer");
+      link.disconnected(1);
+    }
+    auto peer =
+        std::make_shared<ServicePeer>(sdk, options, link, service.objects_, "tenant", "current");
+    service.service_peers_.emplace("tenant", std::make_pair("current", peer));
+    auto request = test::Rpc("service.close", {{"leaseId", "retired"}}, "stale-close");
+    request["sessionId"] = request["placementEpoch"] = nullptr;
+    Check(!service.Dispatch(request, 1) && service.service_peers_.at("tenant").second == peer,
+          "a retired lease leaves the current peer intact");
+    link.disconnected(1);
+  }
+  static void StopRecovery(const fs::path& root) {
+    for (const auto scenario :
+         {"late", "persisted", "launch-failure", "shutdown-failure", "crash"}) {
+      NativeRetryClock clock;
+      Link link;
+      auto sdk = MakeSdk();
+      const auto options =
+          Take(RuntimeOptions::FromConfig(TestConfig(), root / scenario, "dev", "test"));
+      objects::ObjectService objects(options.data, link, {}, "test", "dev");
+      Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                              {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+      media::FrameAdmission admission;
+      const std::string id(32, 'a');
+      const auto directory = options.data / "sessions" / id;
+      {
+        Session seed(sdk, options, "tenant", id, 1, {}, link, objects, admission);
+        Take(seed.Initialize());
+        Take(seed.store.Close());
+      }
+      auto execution = std::make_shared<SessionExecution>(sdk, options, link, objects, admission,
+                                                          test::Placement(id), "endpoint");
+      auto desired = test::Desired(id);
+      desired["commit"] = "commit";
+      desired["views"] = Json::array({TestView()});
+      Take(execution->Authorize(desired, 1));
+      Check(!Take(execution->Observe()).at("blockers").at("lifecycleUncertain").get<bool>(),
+            "a persisted unclean copy is recoverable rather than blocked");
+      const auto event_name =
+          "Local\\RemoteKit-stop-" + std::to_string(GetCurrentProcessId()) + "-" + scenario;
+      HANDLE exit_event = CreateEventA(nullptr, TRUE, FALSE, event_name.c_str());
+      Check(exit_event != nullptr, "create controlled Browser exit");
+      struct CloseEvent {
+        HANDLE event;
+        ~CloseEvent() { CloseHandle(event); }
+      } close_event{exit_event};
+      unsigned launches = 0, shutdowns = 0;
+      dispatch = [&](const Json& command) -> Result<Json> {
+        const auto method = command.at("method").get<std::string>();
+        Check(method != "view.create" && method != "lifecycle" && method != "output.configure",
+              "commit recovery never restores Viewer state");
+        if (method == "snapshot")
+          return Json{{"sessions", Json::array({{{"views", Json::array()}}})}};
+        if (method == "clipboard.read" || method == "clipboard.write")
+          return Json{{"sequence", "0"}, {"baseRevision", "0"}, {"text", ""}, {"html", ""}};
+        if (method == "browser.shutdown") {
+          ++shutdowns;
+          SetEvent(exit_event);
+        }
+        return Json::object();
+      };
+      const auto prepare = [&](const Json& document) -> Result<void> {
+        Take(execution->Prepare(document));
+        auto session = execution->runtime_.load();
+        session->views.launch_browser_ = [&, session = session.get()]() -> Result<void> {
+          ++launches;
+          if (std::string_view(scenario) == "launch-failure" && launches == 1) {
+            session->browser.start_policy_ = BrowserStartPolicy();
+            return Error{ErrorCode::kUnavailable, "injected launch failure"};
+          }
+          ResetEvent(exit_event);
+          const bool fail = std::string_view(scenario) == "shutdown-failure" && launches == 1;
+          const auto mode =
+              Utf8Path(" --wait-event " + event_name + (fail ? " 3" : " 0")).wstring();
+          Launch(session->browser, root / scenario, mode);
+          session->browser.start_policy_ = BrowserStartPolicy();
+          Take(session->browser.Rpc().Connect("fake"));
+          return {};
+        };
+        return {};
+      };
+      if (std::string_view(scenario) == "late" || std::string_view(scenario) == "crash") {
+        Take(prepare(desired));
+        auto session = execution->runtime_.load();
+        session->recovery_required_ = false;
+        Launch(session->browser, root / scenario,
+               Utf8Path(" --wait-event " + event_name + " 0").wstring());
+        if (std::string_view(scenario) == "late")
+          session->browser.shutdown_phase_ = BrowserRuntime::ShutdownPhase::kDispatched;
+        Check(!session->browser.process_.WaitCleanExit(0),
+              "shutdown wait expires before Browser exit");
+        SetEvent(exit_event);
+        Check(session->browser.process_.WaitCleanExit(2000),
+              "Browser exits after the wait deadline");
+        Take(session->views.InactiveSnapshot());
+        Check(session->browser.CheckpointReady() == (std::string_view(scenario) == "late"),
+              "snapshot retirement classifies exit before releasing process handles");
+      }
+      std::optional<Result<Json>> result;
+      unsigned attempts = 0;
+      auto hooks = execution->Hooks();
+      hooks.stop = [&](const Json& commit) -> Result<Json> {
+        ++attempts;
+        result = execution->Stop(commit, true, PhaseClock::time_point::max(), false, prepare);
+        return *result;
+      };
+      hooks.maintain = []() -> Result<void> { return {}; };
+      std::atomic<uint64_t> sequence{0};
+      SessionCoordinator coordinator(test::Placement(id), "endpoint", sequence, std::move(hooks));
+      coordinator.Activate("connection", "1", 1);
+      Take(coordinator.Publish(desired, 1));
+      Take(coordinator.Execute([]() -> Result<Json> { return Json::object(); }));
+      Check(result.has_value(), "coordinator attempts the pending commit");
+      const bool failure = std::string_view(scenario) == "launch-failure" ||
+                           std::string_view(scenario) == "shutdown-failure";
+      if (failure) {
+        Check(!*result && result->error().code == ErrorCode::kUnavailable &&
+                  result->error().message == (std::string_view(scenario) == "launch-failure"
+                                                  ? "injected launch failure"
+                                                  : "unclean Browser shutdown"),
+              "recovery reports its normal launch or shutdown error");
+        const auto copy = Take(Checkpoints::Copy(directory));
+        Check(copy.at("state") == "dirty" && copy.at("stoppedCleanly") == false,
+              "failed recovery never publishes a clean copy");
+        Take(coordinator.Execute([]() -> Result<Json> { return Json::object(); }));
+        Check(attempts == 1, "unchanged recovery failure observes convergence backoff");
+        clock.Advance(std::chrono::minutes(5));
+        Take(coordinator.Execute([]() -> Result<Json> { return Json::object(); }));
+        Check(attempts == 2,
+              "the same pending commit retries through the existing convergence unit");
+      }
+      Take(std::move(*result));
+      const auto copy = Take(Checkpoints::Copy(directory));
+      Check(copy.at("state") == "clean" && copy.at("stoppedCleanly") == true &&
+                copy.at("lastCommit").at("requestId") == "commit" && !execution->runtime_.load(),
+            "recovery commits the same copy and retires the runtime");
+      Check(launches == (std::string_view(scenario) == "late" ? 0u
+                         : failure                            ? 2u
+                                                              : 1u) &&
+                shutdowns == (std::string_view(scenario) == "shutdown-failure" ? 2u
+                              : std::string_view(scenario) == "late"           ? 0u
+                                                                               : 1u),
+            "recovery uses one Browser per attempt and one graceful shutdown per launch");
+      dispatch = {};
+    }
   }
   static void ViewsAndOutput(const fs::path& root) {
     Link link;
@@ -412,6 +581,16 @@ class NativeErrorStateProbe {
 };
 }  // namespace remotekit
 int main(int argc, char** argv) {
+  if (argc > 1 && std::string_view(argv[1]) == "--fail")
+    return 3;
+  if (argc >= 4 && std::string_view(argv[1]) == "--wait-event") {
+    HANDLE event = OpenEventA(SYNCHRONIZE, FALSE, argv[2]);
+    if (!event)
+      return 4;
+    const auto waited = WaitForSingleObject(event, 10000);
+    CloseHandle(event);
+    return waited == WAIT_OBJECT_0 ? std::stoi(argv[3]) : 5;
+  }
   if (argc > 1 && std::string_view(argv[1]) == "--exit")
     return 0;
   if (argc > 1 && std::string_view(argv[1]) == "--hold") {
@@ -425,6 +604,8 @@ int main(int argc, char** argv) {
         fs::absolute(argv[1]) / ("error-path-state-" + std::to_string(GetCurrentProcessId()));
     fs::create_directories(root);
     NativeErrorStateProbe::BrowserState(root / "browser");
+    NativeErrorStateProbe::StopRecovery(root / "recovery");
+    NativeErrorStateProbe::ServicePeerLookup(root / "service-peers");
     NativeErrorStateProbe::ViewsAndOutput(root / "views");
     NativeErrorStateProbe::ShutdownOwnership(root / "shutdown");
     NativeErrorStateProbe::ReaderPublication(root / "reader");

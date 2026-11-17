@@ -261,6 +261,7 @@ Result<void> Session::Initialize() {
             {"base", nullptr}, {"state", "clean"},       {"stoppedCleanly", true},
             {"changesAt", 0},  {"lastCommit", nullptr}};
   RK_RETURN_IF_ERROR(checkpoint_cache.Start(config.directory));
+  recovery_required_ = !copy.at("stoppedCleanly").get<bool>();
   version_at_ = copy.contains("lastVersion") ? copy.at("lastVersion").at("takenAt").get<int64_t>()
                                              : VersionNow();
   copy["placementEpoch"] = config.placement_epoch;
@@ -321,6 +322,11 @@ void Session::DrainPeerResources() {
     if (!flushed)
       LogError(LogLevel::kWarn, "trace.flush_failed", flushed.error());
   }
+}
+Result<void> Session::Start() {
+  RK_RETURN_IF_ERROR(views.Start());
+  recovery_required_ = false;
+  return {};
 }
 Result<void> Session::Stop() {
   return CloseRuntime(false);
@@ -466,6 +472,14 @@ Result<Json> Session::StopAndCommit(const Json& request_id,
     details.update(
         {{"state", copy["state"]}, {"base", copy["base"]}, {"committed", copy["lastCommit"]}});
     return details;
+  }
+  if (stop_phase_ == StopPhase::kRunning) {
+    if (browser.Exited())
+      RK_RETURN_IF_ERROR(Stop());
+    if (recovery_required_ ||
+        (!browser.Alive() && !browser.Stopping() && !browser.CheckpointReady())) {
+      RK_RETURN_IF_ERROR(Start());
+    }
   }
   if (check_blockers && stop_phase_ == StopPhase::kRunning) {
     RK_ASSIGN_OR_RETURN(snapshot, Snapshot());

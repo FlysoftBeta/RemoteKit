@@ -161,7 +161,7 @@ Result<void> SessionExecution::Start() {
   starting_ = true;
   if (!session->Running())
     ++runtime_generation_;
-  auto result = session->Views().Start();
+  auto result = session->Start();
   starting_ = false;
   running_ = session->Running();
   return result;
@@ -176,6 +176,14 @@ Result<Json> SessionExecution::Stop(const Json& commit,
                                     bool check_blockers,
                                     PhaseClock::time_point deadline,
                                     bool deferred) {
+  return Stop(commit, check_blockers, deadline, deferred,
+              [this](const Json& desired) { return Prepare(desired); });
+}
+Result<Json> SessionExecution::Stop(const Json& commit,
+                                    bool check_blockers,
+                                    PhaseClock::time_point deadline,
+                                    bool deferred,
+                                    const std::function<Result<void>(const Json&)>& prepare) {
   if (auto session = runtime_.load()) {
     if (const auto document = desired_.load();
         document && !session->PersistenceClosed() &&
@@ -198,7 +206,7 @@ Result<Json> SessionExecution::Stop(const Json& commit,
     const auto desired = desired_.load();
     if (!desired)
       return Error{ErrorCode::kUnavailable, "Session desired state is missing"};
-    RK_RETURN_IF_ERROR(Prepare(*desired));
+    RK_RETURN_IF_ERROR(prepare(*desired));
     return Stop(commit, check_blockers, deadline, deferred);
   }
   if (copy.at("placementEpoch") != epoch_)
@@ -220,14 +228,16 @@ Result<Json> SessionExecution::Stop(const Json& commit,
   }
   if (copy.at("state") == "clean" || commit.is_null())
     return Json{{"state", copy.at("state")}, {"base", copy.at("base")}, {"committed", nullptr}};
-  if (!copy.at("stoppedCleanly").get<bool>())
-    return Error{ErrorCode::kConflict, "stop blocked: lifecycleUncertain"};
-  RK_ASSIGN_OR_RETURN(events, EventState());
-  if (events.at("streamId").is_null()) {
+  Json events;
+  if (copy.at("stoppedCleanly").get<bool>()) {
+    RK_ASSIGN_OR_RETURN(current, EventState());
+    events = std::move(current);
+  }
+  if (events.is_null() || events.at("streamId").is_null()) {
     const auto desired = desired_.load();
     if (!desired)
       return Error{ErrorCode::kUnavailable, "Session desired state is missing"};
-    RK_RETURN_IF_ERROR(Prepare(*desired));
+    RK_RETURN_IF_ERROR(prepare(*desired));
     return Stop(commit, check_blockers, deadline, deferred);
   }
   if (check_blockers && events.value("pending", int64_t(0)) != 0)
@@ -376,8 +386,6 @@ Result<Json> SessionExecution::Observe() try {
     blockers = snapshot.at("stopBlockers");
     authorization = session->AuthorizationSnapshot();
     lock = session->LockSnapshot();
-  } else if (!copy.is_null()) {
-    blockers["lifecycleUncertain"] = !copy.at("stoppedCleanly").get<bool>();
   }
   running_ = running;
   RK_ASSIGN_OR_RETURN(events, EventState());

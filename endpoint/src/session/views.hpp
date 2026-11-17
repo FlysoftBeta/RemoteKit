@@ -87,6 +87,8 @@ class ViewController : private ControllerContext {
  private:
   friend class NativeErrorStateProbe;
   friend class NativeRetryOwnerProbe;
+  Result<void> LaunchBrowser();
+  std::function<Result<void>()> launch_browser_ = [this] { return LaunchBrowser(); };
   std::function<Result<void>()> before_views;
   std::function<Result<void>()> stop_runtime;
   PeerController& peer_controller;

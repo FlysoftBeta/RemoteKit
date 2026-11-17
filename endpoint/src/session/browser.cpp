@@ -149,6 +149,7 @@ Result<void> BrowserRuntime::Start(const fs::path& executable,
   if (!launched)
     return launched.error();
   shutdown_phase_ = ShutdownPhase::kRunning;
+  shutdown_dispatched_ = false;
   control_channel_ = channel;
   connection_retry_.Input(process_incarnation_);
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
@@ -183,10 +184,30 @@ Result<void> BrowserRuntime::Start(const fs::path& executable,
   RecordCrash();
   return Unavailable(startup_error_->message);
 }
+void BrowserRuntime::ClassifyExit() {
+  if (!process_.Exited())
+    return;
+  shutdown_dispatched_ |= shutdown_phase_ == ShutdownPhase::kDispatched;
+  shutdown_phase_ = shutdown_dispatched_ && process_.ExitCode() == 0 && process_.JobEmpty()
+                        ? ShutdownPhase::kClean
+                        : ShutdownPhase::kUnclean;
+}
+void BrowserRuntime::ReleaseExited() {
+  ClassifyExit();
+  process_.ReleaseExited();
+}
 Result<void> BrowserRuntime::Stop() {
   RecordCrash();
-  if (process_.Present())
+  if (process_.Exited()) {
+    ClassifyExit();
+    incarnation_.clear();
+    rpc_.Invalidate();
+    return {};
+  }
+  if (process_.Alive()) {
     shutdown_phase_ = ShutdownPhase::kUnclean;
+    shutdown_dispatched_ = false;
+  }
   incarnation_.clear();
   rpc_.Invalidate();
   return process_.Terminate();
@@ -197,7 +218,6 @@ Result<void> BrowserRuntime::Shutdown(const std::function<Result<void>()>& expor
     return {};
   if (!process_.Present())
     return Error{ErrorCode::kUnavailable, "unclean Browser shutdown"};
-  bool clean = false;
   if (shutdown_phase_ == ShutdownPhase::kRunning && process_.Alive() && rpc_.Control()) {
     auto start = PhaseClock::now();
     const auto exported = export_navigation();
@@ -210,20 +230,22 @@ Result<void> BrowserRuntime::Shutdown(const std::function<Result<void>()>& expor
     if (!shutdown && shutdown.error().code != ErrorCode::kOutcomeUnknown)
       return shutdown.error();
     shutdown_phase_ = ShutdownPhase::kDispatched;
+    shutdown_dispatched_ = true;
   }
   if (shutdown_phase_ == ShutdownPhase::kDispatched) {
     const auto start = PhaseClock::now();
-    clean = process_.WaitCleanExit(30000, &shutdown_timing_);
+    process_.WaitCleanExit(30000, &shutdown_timing_);
     shutdown_timing_["processExitWait"] = PhaseMs(start);
   }
-  if (!clean) {
+  ClassifyExit();
+  if (shutdown_phase_ != ShutdownPhase::kClean) {
     return Error{shutdown_phase_ == ShutdownPhase::kDispatched ? ErrorCode::kOutcomeUnknown
                                                                : ErrorCode::kUnavailable,
-                 "Browser shutdown has not completed"};
+                 shutdown_phase_ == ShutdownPhase::kUnclean ? "unclean Browser shutdown"
+                                                            : "Browser shutdown has not completed"};
   }
   incarnation_.clear();
   rpc_.Invalidate();
-  shutdown_phase_ = ShutdownPhase::kClean;
   return {};
 }
 void BrowserRuntime::RestoredView(const std::string& view) {

@@ -174,15 +174,19 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
         std::shared_ptr<ServicePeer> peer;
         {
           std::lock_guard lock(mutex_);
-          auto& entry = service_peers_[tenant];
+          auto entry = service_peers_.find(tenant);
           const auto lease = Required(params, "leaseId");
-          if (method == "service.offer" && (!entry.second || entry.first != lease)) {
-            entry = {lease,
-                     std::make_shared<ServicePeer>(sdk_, options_, link_, objects_, tenant, lease)};
+          if (method == "service.offer" &&
+              (entry == service_peers_.end() || entry->second.first != lease)) {
+            auto created =
+                std::make_shared<ServicePeer>(sdk_, options_, link_, objects_, tenant, lease);
+            entry =
+                service_peers_.insert_or_assign(tenant, std::make_pair(lease, std::move(created)))
+                    .first;
           }
-          if (!entry.second || entry.first != lease)
+          if (entry == service_peers_.end() || entry->second.first != lease)
             return Error{ErrorCode::kConflict, "Viewer service lease is retired"};
-          peer = entry.second;
+          peer = entry->second.second;
         }
         auto result = peer->Command(method, params, generation);
         if (method == "service.close" && result) {

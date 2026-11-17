@@ -8,15 +8,17 @@
 #include <optional>
 namespace remotekit {
 class NativeRetryOwnerProbe;
-}
+class NativeErrorStateProbe;
+}  // namespace remotekit
 namespace remotekit::objects {
 struct PeerIdentity {
   std::string node_id, address;
   Key public_key;
+  bool operator==(const PeerIdentity&) const = default;
 };
 class PeerSet {
  public:
-  Result<void> Update(const Json& peers);
+  Result<bool> Update(const Json& peers);
   std::optional<PeerIdentity> Find(const std::string& node) const;
   std::optional<PeerIdentity> Find(const Key& key) const;
 
@@ -39,12 +41,20 @@ class PeerServer {
 
  private:
   friend class ::remotekit::NativeRetryOwnerProbe;
+  friend class ::remotekit::NativeErrorStateProbe;
+  void Accepted(const std::string& remote_address);
   Result<std::unique_ptr<cluster::Carrier>> AcceptOne(
       const std::string& input,
       const std::function<Result<std::unique_ptr<cluster::Carrier>>()>& accept);
   mutable std::mutex accept_mutex_;
   RetryUnit accept_retry_{"peer.accept"};
   void Loop();
+  void Reject(const std::string& remote_address,
+              const std::string& reason,
+              const Json& hello,
+              const Error& error);
+  std::mutex rejection_mutex_;
+  std::map<std::string, std::string> rejections_;
   Result<void> Serve(cluster::Channel& channel);
   ObjectStore& store_;
   Key key_;

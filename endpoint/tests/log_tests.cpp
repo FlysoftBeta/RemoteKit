@@ -10,6 +10,7 @@
 #include "service.hpp"
 #include "media/sdk_loader.hpp"
 #include "runtime_config_fixture.hpp"
+#include "peer_fixture.hpp"
 #include <windows.h>
 #include <winioctl.h>
 #include <io.h>
@@ -26,6 +27,16 @@ class NativeErrorStateProbe {
  public:
   static Result<Json> Dispatch(Service& service, const Json& request) {
     return service.Dispatch(request, 1);
+  }
+  static void PeerRejected(objects::PeerServer& server,
+                           const std::string& address,
+                           const std::string& reason,
+                           const Json& hello,
+                           const Error& error) {
+    server.Reject(address, reason, hello, error);
+  }
+  static void PeerAccepted(objects::PeerServer& server, const std::string& address) {
+    server.Accepted(address);
   }
 };
 }  // namespace remotekit
@@ -542,6 +553,48 @@ void Boundaries(const fs::path& root) {
   for (const auto& [id, count] : counts)
     Check(count == 1, "each error id logged once");
 }
+void PeerDiagnostics(const fs::path& root) {
+  fs::create_directories(root);
+  const auto path = root / "peer.jsonl";
+  {
+    Capture capture(path);
+    objects::ObjectStore store(root / "store");
+    objects::PeerSet peers;
+    objects::PeerServer server(store, {}, "source", "dev", peers);
+    const Json hello{{"nodeId", "claimed"}, {"role", "peer"}, {"buildId", "other-build"}};
+    const Error error{ErrorCode::kUnauthenticated, "peer identity is not admitted"};
+    for (unsigned i = 0; i < 3; ++i)
+      NativeErrorStateProbe::PeerRejected(server, "192.0.2.1", "peer_not_admitted", hello, error);
+    NativeErrorStateProbe::PeerRejected(server, "192.0.2.2", "peer_not_admitted", hello, error);
+    NativeErrorStateProbe::PeerRejected(server, "192.0.2.1", "build_mismatch", hello,
+                                        {ErrorCode::kUnavailable, "peer build mismatch"});
+    NativeErrorStateProbe::PeerAccepted(server, "192.0.2.1");
+    NativeErrorStateProbe::PeerRejected(server, "192.0.2.1", "build_mismatch", hello,
+                                        {ErrorCode::kUnavailable, "peer build mismatch"});
+    Link link;
+    objects::ObjectService service(root / "objects", link, {}, "target", "dev");
+    const auto members = Json::array({TestPeer("source", "192.0.2.1:3101", TestPrivateKey(1))});
+    Take(service.SetPeers(members));
+    Take(service.SetPeers(members));
+    Take(service.SetPeers(Json::array()));
+  }
+  const auto rows = Records(path);
+  Check(rows.size() == 6,
+        "rejections deduplicate by remote and reason, reset on success; peer changes log once");
+  for (size_t i = 0; i < 4; ++i) {
+    const auto& row = rows[i];
+    Check(row.at("ev") == "peer.accept_rejected" && row.at("lvl") == "warn" &&
+              row.at("nodeId") == "claimed" && row.at("role") == "peer" &&
+              row.at("buildId") == "other-build" && row.contains("remoteAddress") &&
+              row.at("err").contains("code") && row.at("err").contains("message"),
+          "rejection carries remote address, hello claims, and structured error");
+  }
+  Check(rows[4].at("ev") == "objects.peers_set" &&
+            rows[4].at("peers") ==
+                Json::array({{{"nodeId", "source"}, {"address", "192.0.2.1:3101"}}}) &&
+            rows[5].at("peers").empty(),
+        "peer set logs only identities and addresses, including removal");
+}
 void ParentOutputAndSdk(const fs::path& root) {
   InitLog(root, "node");
   {
@@ -579,6 +632,7 @@ int wmain(int argc, wchar_t** argv) {
     SearchSizeBoundary(root / "search-boundary");
     ServiceLogs(root / "service-api");
     Boundaries(root / "boundaries");
+    PeerDiagnostics(root / "peer-diagnostics");
     ParentOutputAndSdk(root / "parent");
     fs::remove_all(root);
     return 0;
