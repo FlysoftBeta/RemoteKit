@@ -47,6 +47,9 @@ test('worst-case escaped object locate reply fits half the management budget', (
 test('object locate bounds IDs, source count and source strings and picks the least pressure', async () => {
   const f = fixture();
   try {
+    const locate = (ids: string[]) =>
+      f.index.locate(f.nodes[0] as unknown as NodeLink, { tenantId: 'first', ids });
+    assert.deepEqual(locate([source]).sources[source], []);
     for (let i = 0; i < limits.objectLocateSources; i++) {
       const node = {
         ...f.nodes[0],
@@ -57,16 +60,14 @@ test('object locate bounds IDs, source count and source strings and picks the le
       f.store.db.prepare('INSERT INTO object_replicas VALUES (?,?)').run(source, node.nodeId);
     }
     f.store.db.prepare('INSERT INTO object_replicas VALUES (?,?)').run(source, 'beta');
-    const locate = (ids: string[]) =>
-      f.index.locate(f.nodes[0] as unknown as NodeLink, { tenantId: 'first', ids });
     const result = locate(Array(limits.objectLocateIds).fill(source));
     assert.equal(result.sources[source].length, limits.objectLocateSources);
     assert.deepEqual(
       result.sources[source].map((node) => node.nodeId),
-      ['alpha', 'beta', ...Array.from({ length: limits.objectLocateSources - 2 }, (_, i) => `replica-${i}`)],
+      ['beta', ...Array.from({ length: limits.objectLocateSources - 1 }, (_, i) => `replica-${i}`)],
     );
     assert.throws(() => locate(Array(limits.objectLocateIds + 1).fill(source)), { code: 'invalid_request' });
-    const first = f.nodes[0];
+    const first = f.nodes[1];
     f.store.db.prepare('DELETE FROM object_replicas WHERE node_id=?').run(first.nodeId);
     first.nodeId = 'n'.repeat(limits.objectSourceNodeIdBytes);
     first.config.peer.address = 'a'.repeat(limits.objectSourceAddressBytes);

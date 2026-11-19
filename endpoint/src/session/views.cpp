@@ -549,7 +549,6 @@ Result<Json> ViewController::ManageSessionStorageImport(const Json& request) {
   if (!browser.Alive() || !browser.Rpc().Control() || browser.Stopping())
     return Error{ErrorCode::kUnavailable, "Browser is not running"};
   auto reply = browser.Rpc().Request({{"method", protocol::kStorageImport},
-                                      {"session", id},
                                       {"importId", request["importId"]},
                                       {"cookies", request["cookies"]},
                                       {"localStorage", request["localStorage"]}});
@@ -563,9 +562,8 @@ Result<Json> ViewController::ManageSessionStorageImportStatus(const Json& reques
     return Error{ErrorCode::kInvalidRequest, "importId string required (1..128 characters)"};
   if (!browser.Alive() || !browser.Rpc().Control() || browser.Stopping())
     return Error{ErrorCode::kNotFound, "Storage import Browser exited"};
-  auto reply = browser.Rpc().Request({{"method", protocol::kStorageImportStatus},
-                                      {"session", id},
-                                      {"importId", request["importId"]}});
+  auto reply = browser.Rpc().Request(
+      {{"method", protocol::kStorageImportStatus}, {"importId", request["importId"]}});
   if (!reply)
     return reply.error();
   return StorageImportStatus(reply.value(), browser.Incarnation());
@@ -574,7 +572,7 @@ Result<Json> ViewController::ManageSessionStorageImportStatus(const Json& reques
 Result<Json> ViewController::ManageSessionIdentity(const Json&) {
   if (!browser.Alive() || !browser.Rpc().Control() || browser.Stopping())
     return Error{ErrorCode::kUnavailable, "Browser is not running"};
-  auto reply = browser.Rpc().Request({{"method", protocol::kIdentity}, {"session", id}});
+  auto reply = browser.Rpc().Request({{"method", protocol::kIdentity}});
   if (!reply)
     return reply.error();
   return Json{{"accepted", true},
@@ -654,15 +652,10 @@ Result<Json> ViewController::ManageViewClose(const Json& request) {
     identity["completed"] = true;
     return identity;
   }
-  auto page_requests_result =
-      browser.Rpc().Request({{"method", "page.requests"}, {"session", id}, {"view", view}});
-  if (!page_requests_result)
-    return page_requests_result.error();
-  auto requests = std::move(page_requests_result).value();
-  Json output = {{"accepted", true}, {"pageRequests", requests.value("requests", requests)}};
-  output.update(identity);
-  AddCloseRequest(output, requests);
-  return output;
+  // The view may retire immediately after acceptance. Observations carry closure
+  // evidence and any beforeunload prompt without another request to that view.
+  identity["accepted"] = true;
+  return identity;
 }
 
 Result<Json> ViewController::ManageViewCloseReply(const Json& request) {

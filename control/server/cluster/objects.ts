@@ -538,7 +538,7 @@ export class ObjectIndex {
     this.readFetches.set(node.nodeId, expected);
     const sources: Record<string, { nodeId: string; address: string }[]> = {};
     for (const id of message.ids) {
-      sources[id] = this.locateSources(id);
+      sources[id] = this.locateSources(id, node.nodeId);
       expected.add(id);
     }
     return { sources };
@@ -608,8 +608,9 @@ export class ObjectIndex {
         : [];
     });
   }
-  private locateSources(id: string) {
+  private locateSources(id: string, destinationNodeId: string) {
     const sources = this.sources(id)
+      .filter((source) => source.nodeId !== destinationNodeId)
       .sort(
         (a, b) =>
           (this.nodes.get(a.nodeId)!.metrics.latest()?.pressure ?? 1) -
@@ -780,8 +781,7 @@ export class ObjectIndex {
             });
           present.add(item.id);
           const indexed = this.store.db.prepare('SELECT * FROM objects WHERE id=?').get(item.id) as
-            | IndexedObject
-            | undefined;
+            IndexedObject | undefined;
           if (
             indexed &&
             indexed.stored_sha256 === item.storedSha256 &&
@@ -974,7 +974,7 @@ export class ObjectIndex {
         '',
         {
           ids: [object.id],
-          sources: { [object.id]: this.locateSources(object.id) },
+          sources: { [object.id]: this.locateSources(object.id, node.nodeId) },
         },
         undefined,
         unit.identity,

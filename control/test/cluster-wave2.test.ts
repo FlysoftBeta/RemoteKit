@@ -1377,10 +1377,7 @@ test('two nodes place by pressure, checkpoint, wake at epoch+1, fence reconnects
     assert.ok(beta.objects.has(id(1)));
     assert.deepEqual(await alpha.request('object.locate', 'tenant', { ids: [id(1)] }), {
       sources: {
-        [id(1)]: [
-          { nodeId: 'alpha', address: 'alpha:3101' },
-          { nodeId: 'beta', address: 'beta:3101' },
-        ],
+        [id(1)]: [{ nodeId: 'beta', address: 'beta:3101' }],
       },
     });
     alpha.desiredHandler = (document, value) => {

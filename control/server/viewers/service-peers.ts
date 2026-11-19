@@ -19,6 +19,7 @@ interface ServiceConnection {
   retirement: RetryUnit;
   node: NodeLink;
   nodeEpoch: string;
+  nodeIncarnation: string;
   tenant: string;
   lease: string;
   connectionId: string;
@@ -37,6 +38,7 @@ export class ServicePeers {
   }
 
   private readonly connections = new Map<string, ServiceConnection>();
+  private readonly pendingRetirements = new Set<ServiceConnection>();
   private readonly retirements = new Map<ServiceConnection, Promise<{ closed: boolean }>>();
   private readonly queue = new KeyedSerialQueue();
   private readonly subscriptions: (() => void)[];
@@ -52,7 +54,16 @@ export class ServicePeers {
   chooseNode(tenant: string) {
     const nodes = this.context.endpoint.nodes;
     const placement = this.context.endpoint.placement.peek(tenant);
-    const ready = nodes.all().filter((node) => node.state.state === 'ready' && !nodes.isRemoved(node.nodeId));
+    const ready = nodes
+      .all()
+      .filter(
+        (node) =>
+          node.state.state === 'ready' &&
+          !nodes.isRemoved(node.nodeId) &&
+          ![...this.pendingRetirements].some(
+            (connection) => connection.tenant === tenant && connection.node === node,
+          ),
+      );
     return (
       (placement?.runState === 'running' && ready.find((node) => node.nodeId === placement.nodeId)) ||
       ready.sort(
@@ -90,6 +101,8 @@ export class ServicePeers {
 
   private changed(connection: ServiceConnection) {
     if (this.closed || this.context.closed) return;
+    const active = this.connections.get(connection.tenant);
+    if (active && active !== connection) return;
     const viewer = this.context.tenants.get(connection.tenant).viewer;
     if (!viewer || viewer.id !== connection.lease) return;
     this.context.events.emit(
@@ -101,11 +114,18 @@ export class ServicePeers {
   }
   private clearFailure(connection: ServiceConnection) {
     const viewer = this.context.tenants.get(connection.tenant).viewer;
-    if (viewer?.id === connection.lease && viewer.security.face.error === connection.failure)
+    const active = this.connections.get(connection.tenant);
+    if (
+      (!active || active === connection) &&
+      viewer?.id === connection.lease &&
+      viewer.security.face.error === connection.failure
+    )
       delete viewer.security.face.error;
     delete connection.failure;
   }
   private setFailure(connection: ServiceConnection, cause: unknown) {
+    const active = this.connections.get(connection.tenant);
+    if (active && active !== connection) return;
     const viewer = this.context.tenants.get(connection.tenant).viewer;
     if (viewer?.id !== connection.lease) return;
     const failure = wireError(endpointError(cause));
@@ -158,7 +178,17 @@ export class ServicePeers {
       throw new RemoteKitError('invalid_request', '无效文件服务协商');
     return this.queue.run(tenant, async () => {
       this.services.viewers.assertViewer(tenant, lease);
-      await this.close(tenant);
+      const previous = this.connections.get(tenant);
+      if (
+        previous &&
+        (previous.node.state.state !== 'ready' || this.context.endpoint.nodes.isRemoved(previous.node.nodeId))
+      ) {
+        // Cleanup keeps its original target while the active peer can move to a ready node.
+        this.beginRetirement(previous);
+        this.connections.delete(tenant);
+        this.pendingRetirements.add(previous);
+        this.clearFailure(previous);
+      } else if (previous) await this.close(tenant);
       if (this.closed) throw new RemoteKitError('canceled', 'Service peers closed');
       const node = this.chooseNode(tenant);
       if (!node) throw new RemoteKitError('unavailable', '没有可用节点提供文件和人脸服务');
@@ -177,6 +207,7 @@ export class ServicePeers {
         }),
         node,
         nodeEpoch: node.state.connectionEpoch!,
+        nodeIncarnation: node.state.incarnation,
         tenant,
         lease,
         connectionId,
@@ -279,45 +310,59 @@ export class ServicePeers {
   }
 
   async close(tenant: string, connectionId?: string, lease?: string) {
-    const connection = this.connections.get(tenant);
-    if (
-      !connection ||
-      (connectionId && connectionId !== connection.connectionId) ||
-      (lease && lease !== connection.lease)
-    )
-      return { closed: true };
+    const connection = [this.connections.get(tenant), ...this.pendingRetirements].find(
+      (value) =>
+        value?.tenant === tenant &&
+        (!connectionId || connectionId === value.connectionId) &&
+        (!lease || lease === value.lease),
+    );
+    if (!connection) return { closed: true };
+    return this.closeConnection(connection);
+  }
+  private closeConnection(connection: ServiceConnection) {
     const current = this.retirements.get(connection);
     if (current) return current;
     const work = this.retireConnection(connection).finally(() => this.retirements.delete(connection));
     this.retirements.set(connection, work);
     return work;
   }
-  private async retireConnection(connection: ServiceConnection) {
+  private beginRetirement(connection: ServiceConnection) {
     const { tenant } = connection;
     connection.phase = 'retiring';
     clearTimeout(connection.answer?.timer);
     connection.answer?.reject(new RemoteKitError('unavailable', '文件服务已中断'));
+    connection.answer = undefined;
     const viewer = this.context.tenants.get(tenant).viewer;
     if (viewer?.security.servicePeer === connection.peer) {
       this.services.security.forgetServicePeer(tenant, viewer.security);
       this.changed(connection);
     }
+  }
+  private async retireConnection(connection: ServiceConnection) {
+    const { tenant } = connection;
+    this.beginRetirement(connection);
     const unit = connection.retirement;
     if (!unit.ready(JSON.stringify(connection.node.state))) throw unit.error;
     try {
-      await connection.node.request(
-        'service.close',
-        tenant,
-        { connectionId: connection.connectionId, leaseId: connection.lease },
-        undefined,
-        rpcId('service.close', connection.connectionId),
-      );
+      if (
+        connection.node.state.state !== 'ready' ||
+        connection.node.state.incarnation === connection.nodeIncarnation
+      )
+        await connection.node.request(
+          'service.close',
+          tenant,
+          { connectionId: connection.connectionId, leaseId: connection.lease },
+          undefined,
+          rpcId('service.close', connection.connectionId),
+        );
       unit.succeed();
       this.clearFailure(connection);
       this.changed(connection);
       this.offers.retire(tenant, connection.lease, connection.attemptId);
       if (this.connections.get(tenant) === connection) this.connections.delete(tenant);
+      this.pendingRetirements.delete(connection);
       connection.authorization.close();
+      connection.retirement.close();
     } catch (cause) {
       unit.fail(endpointError(cause));
       this.setFailure(connection, cause);
@@ -328,7 +373,8 @@ export class ServicePeers {
 
   async tick() {
     if (this.closed) return;
-    for (const [tenant, connection] of this.connections) {
+    for (const connection of [...this.connections.values(), ...this.pendingRetirements]) {
+      const { tenant } = connection;
       // A connected service peer stays on its node (moving it would cut off transfers in flight); only
       // losing that node moves it.
       try {
@@ -346,7 +392,7 @@ export class ServicePeers {
               signal: { type: 'error', error },
             });
           }
-          await this.close(tenant);
+          await this.closeConnection(connection);
         } else await this.authorize(tenant);
       } catch (cause) {
         this.setFailure(connection, cause);
@@ -394,11 +440,13 @@ export class ServicePeers {
     this.closed = true;
     this.subscriptions.forEach((unsubscribe) => unsubscribe());
     const results = await Promise.allSettled(
-      [...this.connections.keys()].map((tenant) => this.close(tenant)),
+      [...this.connections.values(), ...this.pendingRetirements].map((connection) =>
+        this.closeConnection(connection),
+      ),
     );
     await this.queue.drain();
     await Promise.allSettled(this.retirements.values());
-    for (const connection of this.connections.values()) {
+    for (const connection of [...this.connections.values(), ...this.pendingRetirements]) {
       connection.authorization.close();
       connection.retirement.close();
     }

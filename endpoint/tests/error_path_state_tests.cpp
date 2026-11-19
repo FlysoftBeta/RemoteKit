@@ -354,6 +354,47 @@ class NativeErrorStateProbe {
               "replacement enters explicit unknown only after possible delivery");
       }
     }
+    unsigned close_requests = 0;
+    dispatch = [&](const Json& request) -> Result<Json> {
+      if (request.at("method") == "snapshot")
+        return Json{{"sessions", Json::array({{{"views", Json::array({{{"view", "1"},
+                                                                       {"instance", "2"},
+                                                                       {"document", "3"}}})}}})}};
+      if (request.at("method") == "view.close") {
+        ++close_requests;
+        return Json{{"accepted", true}, {"completed", false}};
+      }
+      return Error{ErrorCode::kNotFound, "View retired after close acceptance"};
+    };
+    const auto closing =
+        Take(session.views.ManageViewClose({{"viewId", "1"}, {"browserIncarnation", "browser"}}));
+    Check(close_requests == 1 && closing == Json{{"accepted", true},
+                                                 {"browserIncarnation", "browser"},
+                                                 {"instance", "2"},
+                                                 {"document", "3"}},
+          "accepted close preserves identity without querying a retired view");
+    Check(session.views.desired.contains("1") && !session.navigation.recoveries.contains("1"),
+          "accepted close cancels recovery and awaits observed closure");
+
+    dispatch = [&](const Json& request) -> Result<Json> {
+      Check(!request.contains("session"),
+            "Browser storage and identity requests have no session field");
+      if (request.at("method") == "identity")
+        return Json{{"userAgent", "test-agent"}, {"metadata", Json::object()}};
+      Check(request.at("importId") == "import:0", "storage import retains job identity");
+      return Json{{"importId", "import:0"},
+                  {"state", "done"},
+                  {"cookies", {{"applied", 1}, {"rejected", 0}}},
+                  {"localStorage", {{"applied", 1}, {"rejected", 0}}}};
+    };
+    const auto imported = Take(session.views.ManageSessionStorageImport(
+        {{"importId", "import:0"}, {"cookies", Json::array()}, {"localStorage", Json::array()}}));
+    Check(imported ==
+              Take(session.views.ManageSessionStorageImportStatus({{"importId", "import:0"}})),
+          "storage import and status preserve the same result");
+    Check(Take(session.views.ManageSessionIdentity(Json::object())).at("userAgent") == "test-agent",
+          "Browser identity uses its strict request contract");
+
     unsigned configure = 0;
     dispatch = [&](const Json& request) -> Result<Json> {
       if (request.at("method") == "output.configure") {
