@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createViewerContext, instrumentViewer, launchBrowser, remoteInputReady } from './kit/viewer.mjs';
 
@@ -578,8 +579,8 @@ try {
       'local start tab',
     );
     const reply = await first.page.evaluate(
-      (tabId) => clusterQA.call('app.inspect', { tabId }, false, crypto.randomUUID()),
-      start.id,
+      ({ tabId, requestId }) => clusterQA.call('app.inspect', { tabId }, false, requestId),
+      { tabId: start.id, requestId: randomUUID() },
     );
     assert.equal(reply.error?.code, 'unavailable');
     errorId = reply.error.errorId;

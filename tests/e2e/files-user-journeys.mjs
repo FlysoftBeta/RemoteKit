@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { remoteInputReady, startJourney } from './kit/viewer.mjs';
 
@@ -319,14 +319,37 @@ try {
     );
     await j.open('我的文件');
     await button('page-notes.txt').waitFor({ timeout: 90000 });
-    const saved = page.waitForEvent('download', { timeout: 30000 });
-    await click(button('下载到本地 page-notes.txt'));
-    const file = await saved;
-    assert.equal(await file.failure(), null);
-    assert.equal(file.suggestedFilename(), 'page-notes.txt');
-    const chunks = [];
-    for await (const chunk of await file.createReadStream()) chunks.push(chunk);
-    assert.equal(Buffer.concat(chunks).toString('utf8'), 'Downloaded notes');
+    const directory = join(j.run, 'downloads');
+    mkdirSync(directory, { recursive: true });
+    const started = [];
+    const progress = [];
+    const onBegin = (event) => started.push(event);
+    const onProgress = (event) => progress.push(event);
+    // Page download events are available in both supported viewer engines.
+    j.cdp.on('Page.downloadWillBegin', onBegin);
+    j.cdp.on('Page.downloadProgress', onProgress);
+    try {
+      await j.cdp.send('Page.enable');
+      await j.cdp.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: directory });
+      await click(button('下载到本地 page-notes.txt'));
+      const saved = await j.until(
+        () => {
+          const download = started[0];
+          const terminal = progress.findLast(
+            (event) => event.guid === download?.guid && event.state !== 'inProgress',
+          );
+          return terminal && { ...download, ...terminal };
+        },
+        'local download completed',
+        30000,
+      );
+      assert.equal(saved.state, 'completed');
+      assert.equal(saved.suggestedFilename, 'page-notes.txt');
+      assert.equal(readFileSync(join(directory, saved.suggestedFilename), 'utf8'), 'Downloaded notes');
+    } finally {
+      j.cdp.off('Page.downloadWillBegin', onBegin);
+      j.cdp.off('Page.downloadProgress', onProgress);
+    }
   });
   await step('15-study-sign-in-browse-attachment', async () => {
     await j.open('学习');

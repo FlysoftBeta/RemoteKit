@@ -1,9 +1,9 @@
 import { createCdpInteraction } from './kit/cdp-interaction.mjs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { appendFile, mkdir, readFile, readdir } from 'node:fs/promises';
 import { startFixture } from './kit/fixtures.mjs';
 import { startStack } from './kit/stack.mjs';
-import { launchPersistentViewer, registerViewer } from './kit/viewer.mjs';
+import { launchPersistentViewer, registerViewer, remoteInputReady } from './kit/viewer.mjs';
 
 import { join, resolve } from 'node:path';
 import { zstdDecompressSync } from 'node:zlib';
@@ -31,9 +31,11 @@ const log = async (stage, value) => {
 };
 const archiveDirectory = join(run, 'diagnostics');
 let fixtureVisits = 0;
+let nativeWarnings = 0;
 // Keep fixture traffic available while Control restarts.
 const fixture = await startFixture('test-diagnostic-collection', port + 1, {
   onVisit: () => fixtureVisits++,
+  onNativeWarning: () => nativeWarnings++,
 });
 
 function readArchive(compressed) {
@@ -265,6 +267,10 @@ try {
     assert(current.videoReady && current.codecs?.includes('video/h264'));
   };
   await log('h264-ready', baseline);
+  await page.waitForFunction(remoteInputReady);
+  const viewport = await page.locator('.remote-viewport').boundingBox();
+  await page.mouse.click(viewport.x + viewport.width / 2, viewport.y + viewport.height / 2);
+  await until(() => nativeWarnings > 0, 'Native warning fixture was not requested');
   await page.getByRole('button', { name: '开始', exact: true }).click();
   await startScreen
     .locator('[data-tile-key]')
@@ -358,6 +364,7 @@ try {
       .map(([, text]) => text)
       .join('\n');
   assert.match(rawLog(/^logs\/node\/\d{4}-\d{2}-\d{2}\/browser-/), /"ev":"chromium\.log"/);
+  assert.match(rawLog(/^logs\/node\/\d{4}-\d{2}-\d{2}\/browser-/), /download cancelled: file_too_large/);
   assert.match(rawLog(/^logs\/node\/\d{4}-\d{2}-\d{2}\/browser-/), /diagnostic-fixture-console-marker/);
   assert.match(rawLog(/^logs\/node\/\d{4}-\d{2}-\d{2}\/endpoint/), /"ev":"browser\.launched"/);
   assert.match(rawLog(/^logs\/control\/\d{4}-\d{2}-\d{2}\/control/), /"ev":"control\.started"/);
@@ -437,7 +444,7 @@ try {
 
   assert.deepEqual(downloads, []);
   await read(`diagnosticQA.controlSocket.send(JSON.stringify({
-    id:'qa-save', method:'admin.diagnostics.save', params:{id:${JSON.stringify(complete.id)},operationId:crypto.randomUUID()}
+    id:'qa-save', method:'admin.diagnostics.save', params:{id:${JSON.stringify(complete.id)},operationId:${JSON.stringify(randomUUID())}}
   }))`);
   const saved = await until(
     () => read("diagnosticQA.replies.find(reply => reply.method === 'admin.diagnostics.save')"),

@@ -91,13 +91,20 @@ try {
   stack = await launchControl(1);
   control = stack.control;
   await verify(1);
-  const supervisor = await readFile(join(nodeRoot, 'logs/supervisor.log'), 'utf8');
+  const logFiles = (await readdir(join(nodeRoot, 'logs'), { recursive: true, withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name === 'node.jsonl')
+    .map((entry) => join(entry.parentPath, entry.name))
+    .sort();
+  assert(logFiles.length > 0, 'Node supervisor produced daily logs');
+  const supervisor = (await Promise.all(logFiles.map((path) => readFile(path, 'utf8')))).join('\n');
   const records = supervisor
     .trim()
     .split(/\r?\n/)
     .map((line) => JSON.parse(line));
   assert(
-    records.some((record) => record.ev === 'endpoint.exited' && record.exitCode === 3),
+    records.some(
+      (record) => record.ev === 'process.exited' && record.child === 'endpoint' && record.code === 3,
+    ),
     supervisor,
   );
   for (const release of releases)

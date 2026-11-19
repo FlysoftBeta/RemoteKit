@@ -1,4 +1,5 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { startStack, until } from './kit/stack.mjs';
 import { createViewerContext, launch, remoteInputReady, launchBrowser } from './kit/viewer.mjs';
@@ -184,12 +185,10 @@ async function prepare(browser, phone, first = false) {
     await page.getByRole('dialog', { name: '开始屏幕' }).waitFor({ state: 'hidden' });
   };
   const frame = async (app) => {
-    const s = await state();
-    const active = s.workspace.spaces.find((space) => space.id === s.workspace.activeSpaceId);
-    const win =
-      s.workspace.windows.find((w) => w.appId === app && active?.windowIds.includes(w.id)) ??
-      s.workspace.windows.find((w) => w.appId === app);
-    assert(win, app + ' exists');
+    const win = await waitState((s) => {
+      const active = s.workspace.spaces.find((space) => space.id === s.workspace.activeSpaceId);
+      return s.workspace.windows.find((w) => w.appId === app && w.id === active?.focusedWindowId);
+    }, app + ' focused');
     return page.locator(`[data-window-id="${win.id}"]`);
   };
   const alone = async (app) => {
@@ -496,9 +495,11 @@ try {
         uploadThroughput: 0,
       });
       // Chromium's Network domain leaves existing UDP/WS sessions alive. Close those
-      // transports under offline emulation to exercise a complete network loss.
+      // product transports under offline emulation to exercise a complete network loss.
       await page.evaluate(() => {
-        clusterQA.sockets.forEach((s) => s.close());
+        clusterQA.sockets
+          .filter((socket) => new URL(socket.url).pathname === '/api/socket')
+          .forEach((socket) => socket.close());
         clusterQA.peers.forEach((p) => p.close());
       });
       await page.keyboard.type(' while offline', { delay: 90 });
@@ -669,10 +670,15 @@ try {
       // A start tab has no Browser page. Its public inspection read returns an
       // unavailable with an ID without changing the member's hibernation flow.
       const reply = await r.page.evaluate(
-        (tabId) =>
+        ({ tabId, requestId }) =>
           new Promise((resolve, reject) => {
-            const id = 'error-lookup-' + crypto.randomUUID();
-            const socket = clusterQA.sockets.findLast((socket) => socket.readyState === WebSocket.OPEN);
+            const id = requestId;
+            const socket = clusterQA.sockets
+              .filter(
+                (socket) =>
+                  socket.readyState === WebSocket.OPEN && new URL(socket.url).pathname === '/api/socket',
+              )
+              .pop();
             const timer = setTimeout(() => {
               socket.removeEventListener('message', receive);
               reject(Error('Inspection reply timed out'));
@@ -687,7 +693,7 @@ try {
             socket.addEventListener('message', receive);
             socket.send(JSON.stringify({ id, method: 'app.inspect', params: { tabId } }));
           }),
-        start.id,
+        { tabId: start.id, requestId: 'error-lookup-' + randomUUID() },
       );
       assert.equal(reply.error?.code, 'unavailable');
       const id = reply.error.errorId;

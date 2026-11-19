@@ -51,6 +51,8 @@ test('viewer initialization rolls back every acquired resource on failure', asyn
     const page = { setDefaultTimeout() {}, close: async () => released.push('page') };
     const context = {
       close: async () => released.push('context'),
+      exposeBinding: async () => {},
+      addInitScript: async () => {},
       newPage: async () => {
         if (failure === 'page') throw Error('injected page');
         return page;
@@ -70,7 +72,12 @@ test('viewer initialization rolls back every acquired resource on failure', asyn
         return context;
       },
     };
-    const mock = t.mock.method(chromium, 'launchPersistentContext', async () => ({ browser: () => browser }));
+    const mock = t.mock.method(chromium, 'launchPersistentContext', async () => ({
+      browser: () => browser,
+      exposeBinding: async () => {},
+      addInitScript: async () => {},
+      close: async () => released.push('persistent'),
+    }));
     try {
       await assert.rejects(
         launch({ stack: { run, logs: { endpoint: endpointLog } }, initialAuth: false, pointer: 'touch' }),

@@ -635,7 +635,15 @@ try {
           ['momentumEnd', 'cancel'].includes(entry.message.event.action),
       );
     });
-    await pause(150);
+    await page.waitForFunction(() => {
+      const pending = new Set();
+      for (const { direction, message } of selectionQA.wire) {
+        if (direction === 'out' && message.type === 'input') pending.add(message.sequence);
+        else if (direction === 'in' && message.type === 'input.result')
+          pending.delete(message.clientSequence);
+      }
+      return pending.size === 0;
+    });
     result(`9 more ${close}`, { clicks: latest().clicks });
   }
   const readerText = Buffer.from('Reader alpha bravo charlie delta.\n');

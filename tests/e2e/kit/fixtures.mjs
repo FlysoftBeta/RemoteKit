@@ -521,15 +521,28 @@ const fixtureHandlers = {
     };
   },
   'test-diagnostic-collection':
-    ({ onVisit }) =>
+    ({ onVisit, onNativeWarning }) =>
     (request, response) => {
+      if (request.url === '/native-log-warning') {
+        onNativeWarning();
+        response.end();
+        return;
+      }
       if (request.url === '/') onVisit();
       response.setHeader('Content-Type', 'text/html; charset=utf-8');
       response.end(`<!doctype html><meta charset="utf-8"><title>Diagnostic collection fixture</title>
     <style>body { margin:24px; font:16px Arial; background:#d0e5fc; }</style>
     <h1>Diagnostic collection fixture</h1><canvas width="24" height="24"></canvas>
+    <a download="oversize.bin"
+       style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center">Oversize download</a>
     <script>
       console.warn('diagnostic-fixture-console-marker');
+      // Blob parts share one block while declaring a size above the native download limit.
+      let oversized = new Blob([new Uint8Array(1024 * 1024)]);
+      for (let i = 0; i < 8; i++) oversized = new Blob([oversized, oversized]);
+      const download = document.querySelector('a');
+      download.href = URL.createObjectURL(new Blob([oversized, 'x']));
+      download.onclick = () => fetch('/native-log-warning', { method: 'POST' });
       const ctx = document.querySelector('canvas').getContext('2d');
       let frame = 0;
       setInterval(() => {

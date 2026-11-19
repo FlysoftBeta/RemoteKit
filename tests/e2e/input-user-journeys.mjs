@@ -248,11 +248,55 @@ try {
     await page.waitForFunction(() => document.activeElement?.matches('.remote-input'), undefined, {
       timeout: 45000,
     });
-    await cdp.send('Input.imeSetComposition', { text: 'ni', selectionStart: 2, selectionEnd: 2 });
-    await pause(250);
-    await cdp.send('Input.imeSetComposition', { text: '你好', selectionStart: 2, selectionEnd: 2 });
-    await pause(300);
-    await cdp.send('Input.insertText', { text: '你好' });
+    if (engine === 'chrome89') {
+      await cdp.send('Input.dispatchKeyEvent', {
+        type: 'rawKeyDown',
+        windowsVirtualKeyCode: 229,
+        nativeVirtualKeyCode: 229,
+      });
+      try {
+        for (const [text, phase] of [
+          ['ni', 'start'],
+          ['你好', 'update'],
+          ['你好', 'end'],
+        ]) {
+          await page.evaluate(
+            ({ text, phase }) => {
+              const editor = document.activeElement;
+              if (!editor?.matches('.remote-input')) throw Error('Composition proxy is not focused');
+              const emit = (type, data) =>
+                editor.dispatchEvent(new CompositionEvent(type, { data, bubbles: true }));
+              if (phase === 'start') emit('compositionstart', '');
+              editor.value = text;
+              editor.setSelectionRange(text.length, text.length);
+              emit(phase === 'end' ? 'compositionend' : 'compositionupdate', text);
+              editor.dispatchEvent(
+                new InputEvent('input', {
+                  bubbles: true,
+                  data: text,
+                  inputType: phase === 'end' ? 'insertFromComposition' : 'insertCompositionText',
+                  isComposing: phase !== 'end',
+                }),
+              );
+            },
+            { text, phase },
+          );
+          await pause(250);
+        }
+      } finally {
+        await cdp.send('Input.dispatchKeyEvent', {
+          type: 'keyUp',
+          windowsVirtualKeyCode: 229,
+          nativeVirtualKeyCode: 229,
+        });
+      }
+    } else {
+      await cdp.send('Input.imeSetComposition', { text: 'ni', selectionStart: 2, selectionEnd: 2 });
+      await pause(250);
+      await cdp.send('Input.imeSetComposition', { text: '你好', selectionStart: 2, selectionEnd: 2 });
+      await pause(300);
+      await cdp.send('Input.insertText', { text: '你好' });
+    }
     await until(() => latest().values.name === '你好', 'Chinese name arrived', 30000);
     await shot('02-chinese-name');
     return { composition: 'committed', value: latest().values.name };

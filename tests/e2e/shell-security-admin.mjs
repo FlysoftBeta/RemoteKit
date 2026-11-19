@@ -109,15 +109,25 @@ await runScenario('shell-security-admin', async (v, stack) => {
     await f.getByText('公钥指纹', { exact: true }).waitFor();
     await v.shot('admin-node');
     await select('诊断');
-    const log = readFileSync(
-      join(stack.run, 'logs', new Date().toLocaleDateString('en-CA'), 'control.jsonl'),
-      'utf8',
-    )
-      .trim()
-      .split('\n')
-      .map(JSON.parse);
-    const error = log.filter((r) => r.errorId).at(-1);
-    assert(error, 'journey produced an error ID');
+    const errorId = await page.evaluate(async () => {
+      const { failureError, viewerErrors } = await import('/client/failures/reporting.ts');
+      return viewerErrors.identify(failureError(new Error('admin error lookup fixture')), {
+        scenario: 'shell-security-admin',
+      }).errorId;
+    });
+    const error = await v.until(() => {
+      const records = readFileSync(
+        join(stack.run, 'logs', new Date().toLocaleDateString('en-CA'), 'control.jsonl'),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map(JSON.parse);
+      return records.find((record) => record.errorId === errorId);
+    }, 'viewer error report persisted');
+    assert.equal(error.ev, 'viewer.error');
+    assert.equal(error.err.message, 'admin error lookup fixture');
+    assert.equal(error.context.scenario, 'shell-security-admin');
     await type(f.getByLabel('错误 ID'), error.errorId);
     await click(button('查找', f));
     await f.getByRole('cell', { name: error.ev, exact: true }).first().waitFor({ timeout: 90000 });

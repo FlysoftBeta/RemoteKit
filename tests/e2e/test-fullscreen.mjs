@@ -62,7 +62,8 @@ try {
   }, 'Fresh isolated Control did not start');
   context = await launchPersistentViewer(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
-    headless: true,
+    // Native fullscreen needs a platform window in the legacy headless engine.
+    headless: false,
     viewport: { width: 1152, height: 820 },
     deviceScaleFactor: 1,
     timeout: 15000,
@@ -144,7 +145,7 @@ try {
     probe.sample = () => {
       const visible = (el) => el.getClientRects().length && getComputedStyle(el).visibility === 'visible';
       const rect = (el) => el.getBoundingClientRect().toJSON();
-      const peer = probe.peers.at(-1);
+      const peer = probe.peers[probe.peers.length - 1];
       return {
         attempts: probe.attempts,
         events: probe.events,

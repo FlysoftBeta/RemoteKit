@@ -39,17 +39,19 @@ export async function recordStrictDecodeRejections(context, run) {
     const received = (transport, raw, channel) => {
       const reply = parse(raw);
       if (reply?.error?.code !== 'invalid_request') return;
-      const request = history(transport).findLast((message) =>
-        reply.focusRequestId
-          ? message.focusRequestId === reply.focusRequestId
-          : reply.clientSequence
-            ? message.sequence === reply.clientSequence
-            : reply.id
-              ? message.id === reply.id
-              : reply.requestId
-                ? message.requestId === reply.requestId
-                : false,
-      );
+      const request = history(transport)
+        .filter((message) =>
+          reply.focusRequestId
+            ? message.focusRequestId === reply.focusRequestId
+            : reply.clientSequence
+              ? message.sequence === reply.clientSequence
+              : reply.id
+                ? message.id === reply.id
+                : reply.requestId
+                  ? message.requestId === reply.requestId
+                  : false,
+        )
+        .pop();
       void window
         .__rkRecordStrictDecodeRejection({
           channel,

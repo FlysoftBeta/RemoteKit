@@ -60,7 +60,10 @@ export async function launch({
     page.setDefaultTimeout(45000);
     // Playwright's mouse drags call Input.setInterceptDrags, which Chrome 89 lacks.
     const cdp = touch || chrome89 ? await context.newCDPSession(page) : undefined;
-    if (cdp) resources.defer(() => cdp.detach());
+    if (cdp)
+      resources.defer(async () => {
+        if (!page.isClosed()) await cdp.detach();
+      });
     const mouseEvent = (type) =>
       cdp.send('Input.dispatchMouseEvent', {
         type,
@@ -588,7 +591,9 @@ export async function startJourney(browserName = 'edge', pointer = 'mouse') {
     const page = viewer.page;
     page.setDefaultTimeout(30000);
     const cdp = await context.newCDPSession(page);
-    resources.defer(() => cdp.detach());
+    resources.defer(async () => {
+      if (!page.isClosed()) await cdp.detach();
+    });
     await page.goto(stack.origin);
     await viewer.ready(90000);
     const log = (value) =>
@@ -766,7 +771,6 @@ export function launchPersistentViewer(profile, options) {
   return launchTestBrowser({
     profile,
     ...options,
-    headless: true,
     ...(viewport ? { viewport } : {}),
     ...(process.env.E2E_DPR ? { deviceScaleFactor: Number(process.env.E2E_DPR) } : {}),
     ...(process.env.E2E_POINTER ? { hasTouch: options.hasTouch || process.env.E2E_POINTER === 'touch' } : {}),

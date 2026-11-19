@@ -15,13 +15,18 @@ const evidence = fileURLToPath(new URL('../../../develop/tmp/e2e/', import.meta.
 mkdirSync(evidence, { recursive: true });
 
 function mockContext() {
-  return {
-    browser: () => ({
-      newBrowserCDPSession: async () => ({
-        send: async () => ({ processInfo: [{ type: 'browser', id: 987654 }] }),
-        detach: async () => {},
-      }),
+  const browser = {
+    newBrowserCDPSession: async () => ({
+      send: async () => ({ processInfo: [{ type: 'browser', id: 987654 }] }),
+      detach: async () => {},
     }),
+    newContext: async () => mockContext(),
+  };
+  return {
+    browser: () => browser,
+    exposeBinding: async () => {},
+    addInitScript: async () => {},
+    close: async () => {},
   };
 }
 
