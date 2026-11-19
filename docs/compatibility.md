@@ -6,7 +6,7 @@
 
 **UA 与 Client Hints**：复用当前 Chromium 版本的 `embedder_support` 生成 UA、版本、平台，保留官方的 GREASE 排列、Windows 平台探测和命令行覆盖语义，只把品牌设为 Google Chrome。不手工维护固定的版本字符串。Client Hints 的 opt-in 按 origin 写入 Profile 目录，Browser 重启后仍然有效，与 Chrome 的内容设置一致。
 
-**语言**：Browser 按简体中文版 Chrome 构建：界面 locale `zh-CN`，`locales/zh-CN.pak` 缺失的字符串回退到 `locales/en-US.pak`（ResourceBundle 次要 locale），两个 pak 缺一即启动失败、打包失败。Blink 自带文字（表单校验气泡、文件输入框、日期控件）、`Intl` 默认 locale 与错误页都是中文。语言偏好只有一份（`chrome_parity.h` 的 `zh-CN,zh,en-US,en`）：`Accept-Language` 用 Chrome 同样的展开与 q 值生成（`zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7`），页面和所有 worker 的 `navigator.languages` 是同一列表。
+**语言**：Browser 按简体中文版 Chrome 构建：界面 locale `zh-CN`，`locales/zh-CN.pak` 缺失的字符串回退到 `locales/en-US.pak`（ResourceBundle 次要 locale），两个 pak 缺一即启动失败、打包失败。不分语言的资源在 `remotekit.pak`；locale pak 里找不到的字符串 ResourceBundle 会回退到这里查，再找不到就是 renderer 里的 CHECK。所以 Chrome 放在 `resources.pak` 里的 `permission_element_generated_strings.pak`（`<camera>`/`<microphone>` 等能力元素按页面语言显示的文字，Google 搜索页经 origin trial 使用）也打进 `remotekit.pak`；缺少它时这些页面的 renderer 一插入元素就崩溃。Blink 自带文字（表单校验气泡、文件输入框、日期控件）、`Intl` 默认 locale 与错误页都是中文。语言偏好只有一份（`chrome_parity.h` 的 `zh-CN,zh,en-US,en`）：`Accept-Language` 用 Chrome 同样的展开与 q 值生成（`zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7`），页面和所有 worker 的 `navigator.languages` 是同一列表。
 
 **Chrome 默认偏好**（`chrome_parity.cc`，`OverrideWebPreferences`）：按 Windows 中文版 Chrome 的默认值硬编码——各书写系统的字体族（取自 Chrome 的 `prefs_tab_helper` 与 `locale_settings_win` zh-CN）、默认编码 GBK、最小逻辑字号 12px、Windows 焦点环颜色。输入能力不读服务器硬件：两种身份都表现为 Windows 触屏笔记本（10 触点、`ontouchstart` 存在、主指针 fine、可用指针 fine+coarse、hover），与 Viewer 实际注入的触控一致。配色固定为 light、无对比度偏好、无强制颜色，服务器的 Windows 主题不会泄露给页面。
 

@@ -38,6 +38,12 @@ std::string LocalLogDate(LogClock::time_point now) {
   strftime(date, sizeof(date), "%Y-%m-%d", &local);
   return date;
 }
+LogClock::time_point FileTimeToLogClock(int64_t ticks_since_1601) {
+  constexpr int64_t kUnixEpochTicks = 116444736000000000;
+  using Ticks = std::chrono::duration<int64_t, std::ratio<1, 10000000>>;
+  return LogClock::time_point(
+      std::chrono::duration_cast<LogClock::duration>(Ticks(ticks_since_1601 - kUnixEpochTicks)));
+}
 bool ValidLogDate(std::string_view date) {
   if (date.size() != 10 || date[4] != '-' || date[7] != '-')
     return false;
@@ -246,7 +252,7 @@ void PruneLogs(const fs::path& root,
       } else if (!crashpad || it->path().extension() == ".dmp" ||
                  it->path().filename() == "events.jsonl") {
         const auto time = it->last_write_time(ec);
-        if (!ec && std::chrono::clock_cast<LogClock>(time) < cutoff) {
+        if (!ec && FileTimeToLogClock(time.time_since_epoch().count()) < cutoff) {
           fs::remove(it->path(), ec);
           report("remove_crash", ec);
         }

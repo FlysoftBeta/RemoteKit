@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { Navigation } from '../server/workspace/navigation';
 import { Reconciler } from '../server/workspace/reconciler';
 import { TenantRegistry } from '../server/tenants/tenant-registry';
 import { ControlDatabase } from '../server/persistence/database';
@@ -105,6 +106,10 @@ export function driveReconciler(path: 'product' | 'reconnect' | 'ua' | 'reclaim'
       rtc: { checkReconnectedRtc: async () => {} },
       viewers: { push: noop },
     } as unknown as DomainServices;
+    if (path === 'ua') {
+      const navigation = new Navigation(context, services);
+      services.navigation.reloadForSiteIdentity = navigation.reloadForSiteIdentity.bind(navigation);
+    }
     const owner = new Reconciler(context, services);
     const result = operation();
     const run = () =>
@@ -123,10 +128,16 @@ export function driveReconciler(path: 'product' | 'reconnect' | 'ua' | 'reclaim'
         Object.defineProperty(store, 'buildId', { value: 'changed', configurable: true });
         const next = store.workspaces.workspace('tenant');
         next.revision++;
+        // A dropped reload is not retried; the next site UA change asks for a new one.
+        if (path === 'ua') next.tabs[0].pendingUaReloadOrigin = 'https://example.test';
         store.workspaces.writeWorkspace(next);
         run();
       },
-      error: () => (path === 'reclaim' ? owner.backgroundFailure : runtime.lastError),
+      error: () =>
+        path === 'reclaim'
+          ? owner.backgroundFailure
+          : (runtime.lastError ??
+            (path === 'ua' ? store.operations.recentOperations('tenant')[0]?.error : undefined)),
       dispose: async () => {
         await tenants.close();
         store.db.close();

@@ -77,7 +77,7 @@ Result<void> WalkFiles(const fs::path& root,
         RK_RETURN_IF_ERROR(WalkFiles(root, path, true, files, date, false));
       continue;
     }
-    if (!entry.is_regular_file(error) || (!recursive && !LogName(entry.path().filename().string())))
+    if (!entry.is_regular_file(error) || (!recursive && !LogName(Utf8(entry.path().filename()))))
       continue;
     // Directory enumeration caches size and mtime; files still open for append report stale
     // values there, so read both from the file itself.
@@ -91,13 +91,12 @@ Result<void> WalkFiles(const fs::path& root,
     }
     const auto ticks = (uint64_t(info.value().ftLastWriteTime.dwHighDateTime) << 32) |
                        info.value().ftLastWriteTime.dwLowDateTime;
-    const auto system = std::chrono::clock_cast<LogClock>(
-        fs::file_time_type(fs::file_time_type::duration(static_cast<int64_t>(ticks))));
+    const auto system = FileTimeToLogClock(static_cast<int64_t>(ticks));
     if (!whole_day && LocalLogDate(system) != date)
       continue;
     const uint64_t size = (uint64_t(info.value().nFileSizeHigh) << 32) | info.value().nFileSizeLow;
     files.push_back(
-        {{"path", path.generic_string()},
+        {{"path", Utf8(path.generic_path())},
          {"size", size},
          {"mtime", std::chrono::duration_cast<std::chrono::milliseconds>(system.time_since_epoch())
                        .count()}});
@@ -205,7 +204,7 @@ Result<Json> NodeLogDays(const fs::path& root) {
   RK_ASSIGN_OR_RETURN(entries, Entries(root, root));
   std::vector<std::string> days;
   for (const auto& entry : entries) {
-    const auto name = entry.path().filename().string();
+    const auto name = Utf8(entry.path().filename());
     if (!ValidLogDate(name))
       continue;
     const auto safe = NoReparsePoints(root, entry.path());
@@ -296,7 +295,7 @@ Result<Json> SearchErrorLogs(const fs::path& node_root, const std::string& error
     });
     for (const auto& entry : entries) {
       std::error_code error;
-      if (!LogName(entry.path().filename().string()) || !entry.is_regular_file(error))
+      if (!LogName(Utf8(entry.path().filename())) || !entry.is_regular_file(error))
         continue;
       auto safe = NoReparsePoints(root, entry.path());
       if (!safe) {
@@ -374,7 +373,7 @@ std::string LastBrowserFatal(const fs::path& root, const std::string& session_id
     std::vector<fs::path> files;
     const auto base = "browser-" + session_id;
     for (const auto& entry : entries.value()) {
-      const auto name = entry.path().filename().string();
+      const auto name = Utf8(entry.path().filename());
       if ((name == base + ".jsonl" || name.starts_with(base + ".")) && LogName(name) &&
           NoReparsePoints(root, entry.path()))
         files.push_back(entry.path());

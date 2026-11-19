@@ -33,6 +33,7 @@ class ProductEndpoint implements EndpointLink {
   onAdopt?: (args: any) => void;
   stopBeforeMaintenance = false;
   loseEnsureReply = false;
+  commandFailure?: RemoteKitError;
   guardedLifecycle?: (view: any, args: any) => Record<string, unknown>;
   observe(tenant: string) {
     return {
@@ -144,6 +145,44 @@ class ProductEndpoint implements EndpointLink {
     if (method === 'view.close.reply') {
       if (args.accept) views.get(args.viewId).close_state = 'closed';
       return { accepted: true, browser: { ok: true } };
+    }
+    if (method === 'view.command') {
+      // Mirrors Endpoint admission and Browser decoding of a navigation identity.
+      if (args.browserIncarnation !== 'browser-' + this.browserPid)
+        throw new RemoteKitError('conflict', 'RPC Browser is retired');
+      const identity = ['operationId', 'operationGeneration', 'operationSequence'];
+      if (
+        identity.some((key) => key in args) &&
+        !(
+          typeof args.operationId === 'string' &&
+          typeof args.operationGeneration === 'string' &&
+          /^[1-9]\d*$/.test(args.operationSequence)
+        )
+      )
+        throw new RemoteKitError('invalid_request', 'Invalid navigation operation identity');
+      if (this.commandFailure) throw this.commandFailure;
+      if (args.operationId)
+        Object.assign(views.get(args.viewId)!, {
+          navigationOperations: [
+            {
+              operationId: args.operationId,
+              operationGeneration: args.operationGeneration,
+              operationSequence: args.operationSequence,
+              state: 'committed',
+              documentCommitted: true,
+            },
+          ],
+        });
+      return { accepted: true };
+    }
+    if (method === 'view.navigation.ack') {
+      const view = views.get(args.viewId);
+      if (view)
+        view.navigationOperations = (view.navigationOperations ?? []).filter(
+          (entry: any) =>
+            entry.operationId !== args.operationId || entry.operationGeneration !== args.operationGeneration,
+        );
+      return { accepted: true };
     }
     if (method === 'rtc.offer') return { sdp: 'v=0\r\n' };
     return {};
@@ -824,6 +863,105 @@ test('UA table precedes Browser/view creation; failed application persists desir
   }
 });
 
+test('a site UA reload never wedges the tenant: legacy, stale, terminal and retryable outcomes', async () => {
+  const { store, endpoint, control, user } = await fixture();
+  const tenant = user.tenantId,
+    origin = 'https://example.test';
+  const reconcile = async () => {
+    control.tenants.get(tenant).reconciliation.retry.succeed();
+    await control.reconciler.reconcileProduct(tenant);
+  };
+  const pend = (identity?: {
+    operationId: string;
+    operationGeneration: string;
+    browserIncarnation: string;
+  }) => {
+    const state = store.workspaces.workspace(tenant);
+    state.tabs[0].pendingUaReloadOrigin = origin;
+    if (identity) state.tabs[0].pendingUaReloadIdentity = identity;
+    else delete state.tabs[0].pendingUaReloadIdentity;
+    store.workspaces.saveWorkspace(state);
+  };
+  const pending = () => store.workspaces.workspace(tenant).tabs[0];
+  const reloads = () => endpoint.calls.filter((c) => c.method === 'view.command');
+  try {
+    await control.viewers.attachViewer(
+      tenant,
+      'lease',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
+    await observedProductAction(
+      control,
+      tenant,
+      { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: origin + '/a' },
+      'lease',
+    );
+
+    // Written by the release that sent reloads without a sequence: no receipt backs it.
+    pend({
+      operationId: randomUUID(),
+      operationGeneration: store.operations.operationGeneration(tenant),
+      browserIncarnation: 'browser-' + endpoint.browserPid,
+    });
+    endpoint.calls = [];
+    await reconcile();
+    assert.equal(reloads().length, 1);
+    assert.match(reloads()[0].args.operationSequence, /^[1-9]\d*$/);
+    assert.equal(pending().pendingUaReloadOrigin, undefined);
+    assert.equal(pending().pendingUaReloadIdentity, undefined);
+    assert.equal(control.tenants.get(tenant).lastError, undefined);
+
+    // A Browser replaced after the identity was minted already applies the new UA.
+    pend({
+      operationId: randomUUID(),
+      operationGeneration: store.operations.operationGeneration(tenant),
+      browserIncarnation: 'browser-retired',
+    });
+    endpoint.calls = [];
+    await reconcile();
+    assert.equal(reloads().length, 0);
+    assert.equal(pending().pendingUaReloadOrigin, undefined);
+    assert.equal(control.tenants.get(tenant).lastError, undefined);
+
+    // A terminal failure ends the reload with a failed receipt instead of failing every reconcile.
+    pend();
+    endpoint.commandFailure = new RemoteKitError('limit_exceeded', 'Item exceeds atlas bounds');
+    endpoint.calls = [];
+    await reconcile();
+    const failed = reloads()[0].args;
+    assert.equal(store.operations.operation(tenant, failed.operationId)?.receipt.status, 'failed');
+    assert.equal(pending().pendingUaReloadOrigin, undefined);
+    assert.equal(control.tenants.get(tenant).lastError, undefined);
+    endpoint.calls = [];
+    await reconcile();
+    assert.equal(reloads().length, 0);
+
+    // A retryable failure keeps the identity and resends it unchanged.
+    pend();
+    endpoint.commandFailure = new RemoteKitError('unavailable', 'Browser is not running');
+    endpoint.calls = [];
+    await assert.rejects(reconcile(), { code: 'unavailable' });
+    const first = reloads()[0].args;
+    assert.equal(pending().pendingUaReloadIdentity?.operationId, first.operationId);
+    endpoint.commandFailure = undefined;
+    endpoint.calls = [];
+    await reconcile();
+    assert.deepEqual(
+      reloads().map((c) => [c.args.operationId, c.args.operationSequence]),
+      [[first.operationId, first.operationSequence]],
+    );
+    assert.equal(pending().pendingUaReloadIdentity, undefined);
+    await reconcile();
+    assert.equal(store.operations.operation(tenant, first.operationId)?.receipt.status, 'committed');
+  } finally {
+    await control.viewers.detachViewer(tenant, 'lease');
+    await control.close();
+    store.db.close();
+  }
+});
+
 test('auto keyboard persists globally, has a committed receipt, and leaves site UA preferences independent', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'rk-site-settings-')),
     path = join(dir, 'control.db');
@@ -910,9 +1048,18 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
     const applied = endpoint.calls.filter((c) => c.method === 'policy.sites.applied');
     assert.ok(applied.length);
     for (const call of applied) assert.deepEqual(call.args.sites, { [origin]: { tabletUa: true } });
+    const reloads = endpoint.calls.filter((c) => c.method === 'view.command');
     assert.deepEqual(
-      endpoint.calls.filter((c) => c.method === 'view.command').map((c) => c.args.command),
+      reloads.map((c) => c.args.command),
       ['reload'],
+    );
+    await control.reconciler.reconcileProduct(tenantId);
+    const reload = reloads[0].args;
+    assert.equal(store.operations.operation(tenantId, reload.operationId)?.receipt.status, 'committed');
+    assert.ok(
+      endpoint.calls.some(
+        (c) => c.method === 'view.navigation.ack' && c.args.operationId === reload.operationId,
+      ),
     );
 
     endpoint.calls = [];

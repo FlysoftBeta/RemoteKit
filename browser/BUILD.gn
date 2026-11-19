@@ -350,6 +350,10 @@ repack("pak") {
     "$root_gen_dir/net/net_resources.pak",
     "$root_gen_dir/third_party/blink/public/resources/blink_resources.pak",
     "$root_gen_dir/third_party/blink/public/resources/blink_scaled_resources_100_percent.pak",
+
+    # Language-independent strings of capability elements such as <camera> and <microphone>;
+    # Blink looks them up in the main pack and a missing one fails a CHECK in the renderer.
+    "$root_gen_dir/third_party/blink/public/strings/permission_element_generated_strings.pak",
     "$root_gen_dir/ui/resources/ui_resources_100_percent.pak",
   ]
   deps = [
@@ -359,6 +363,7 @@ repack("pak") {
     "//net:net_resources",
     "//third_party/blink/public:resources",
     "//third_party/blink/public:scaled_resources_100_percent",
+    "//third_party/blink/public/strings:permission_element_generated_strings",
     "//ui/resources",
   ]
   output = "$root_out_dir/remotekit.pak"

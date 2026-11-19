@@ -11,6 +11,10 @@ namespace remotekit {
 enum class LogLevel { kDebug, kInfo, kWarn, kError };
 using LogClock = std::chrono::system_clock;
 std::string LocalLogDate(LogClock::time_point now = LogClock::now());
+// File times are 100 ns ticks since 1601-01-01 UTC (FILETIME and MSVC file_clock alike).
+// std::chrono::clock_cast routes file_clock through utc_clock, whose leap-second lookup loads
+// the IANA database from ICU and throws on Windows builds that do not ship it.
+LogClock::time_point FileTimeToLogClock(int64_t ticks_since_1601);
 bool ValidLogDate(std::string_view date);
 class DailyLog {
  public:

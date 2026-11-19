@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { DomainServices } from '../application';
 import type { NodeRegistry } from '../cluster/node-link';
-import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import { RemoteKitError, endpointError } from '../../shared/errors';
 import type { LogPackageJob, LogDay } from '../../shared/admin';
 import { newErrorId, reportError } from '../log';
 import { encodeJson, type Decoded } from '../persistence/codec';
@@ -44,8 +44,7 @@ export class DiagnosticPackages {
             return {
               host: node.nodeId,
               days: [] as string[],
-              failed: reportError(toRemoteKitError(cause), 'logs.days_failed', { nodeId: node.nodeId })
-                .errorId,
+              failed: reportError(endpointError(cause), 'logs.days_failed', { nodeId: node.nodeId }).errorId,
             };
           }
         }),
@@ -101,7 +100,7 @@ export class DiagnosticPackages {
         };
       })
       .catch((cause) => {
-        const error = toRemoteKitError(cause);
+        const error = endpointError(cause);
         error.errorId ??= newErrorId();
         reportError(error, 'logs.package_failed', { date });
         entry.job = {
@@ -187,7 +186,7 @@ export class DiagnosticPackages {
             await rm(spool);
           }
         } catch (cause) {
-          const error = reportError(toRemoteKitError(cause), 'logs.host_failed', { host: host.host, date });
+          const error = reportError(endpointError(cause), 'logs.host_failed', { host: host.host, date });
           host.failed = `${error.code}${error.errorId ? ': ' + error.errorId : ''}`;
         }
       }

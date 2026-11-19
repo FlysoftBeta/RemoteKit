@@ -85,6 +85,7 @@ interface Binding {
   conflict?: (previous: unknown, next: unknown) => void;
   join?: boolean;
 }
+const uaReloadRetries = new Set<ErrorCode>(['busy', 'rate_limited', 'unavailable', 'outcome_unknown']);
 export const retryLoops: Record<string, Binding> = {
   'study-material-opening-recovery': {
     owner: 'client/learning/study/study-app.tsx',
@@ -936,9 +937,12 @@ export const retryLoops: Record<string, Binding> = {
     create: driveReconciler('reconnect'),
   },
   'pending-site-ua-reload': {
-    owner: 'server/workspace/reconciler.ts',
+    owner: 'server/workspace/navigation.ts',
     boundary: 'EndpointGateway.command(reload)',
-    event: 'reconciler.product',
+    // Only retryable codes fail the tenant's reconcile; any other result ends this one reload.
+    event: (code) => (uaReloadRetries.has(code) ? 'reconciler.product' : 'site.ua_reload'),
+    callScoped: (code) => !uaReloadRetries.has(code),
+    stopOn: ['conflict'],
     create: driveReconciler('ua'),
   },
   'dwell-flush-presence-pruning-heartbeat': {

@@ -204,6 +204,8 @@ Session 数据以**版本**（checkpoint）保存：一个版本是一份 manife
 
 停止时只有 `dirty` 才提交：先在事务里写 `pending_commit`（epoch 不变），然后发布带这个 requestId 的期望状态；不需要单独的请求、超时或补发——观察状态报告 `committed.requestId` 等于它时，校验对象、登记版本，改为 `stopped/clean`，下一份期望文档清除 `commit`。重连只是重发期望状态。未决提交期间认领受保护，不会被 GC。
 
+节点在关闭 Browser 之前拒绝停止时（停止条件未满足，例如 `stop blocked: lifecycleUncertain`；观察状态在该修订上仍是 `browser: running` 且带 `lastError`），什么都没有停下：`stop` 把放置改回 `running`、清除未决提交（`cancelStop`，按 epoch 与 pendingCommit 条件更新）并重新发布，再把错误返回给调用方，由调用方决定是否再试。保留停止期望会让节点每次收敛都重复拒绝，而 `lastError` 又让该用户的每轮对账失败，Session 一直卡在"正在停止"。Browser 已经停下后的失败（提交、写副本）不撤销，等观察状态完成同一次停止。
+
 **期望状态的发布**：`EndpointGateway` 唯一负责发布。改变期望状态的代码只调用 `invalidate(tenant)`；网关合并同一时刻的多次标记，在该用户所在节点就绪时编译并发送最新一份，节点每次就绪时重发它上面的全部放置。节点离线不是调用方要处理的错误：锁定、解锁等状态写在期望文档里，节点回来时生效。需要效果已经发生的调用方显式等待——`published(tenant)`（当前修订已送达）或按条件等待观察状态，二者都有期限；需要 Browser 的操作先检查浏览器可用性，不可用时以带原因的 `unavailable` 失败。发布失败与恢复只在状态切换时各记一条 warn。
 
 运行中的版本：观察状态里 `checkpoint.kind` 为 `running`、副本 `dirty`、Browser 运行中、且 `lastVersion` 与 checkpoint 一致时，同样校验对象并登记，只推进 `checkpoint_id`，`data_state` 保持 `dirty`。同一 manifest 与 `takenAt` 重复报告是幂等的。每个 Tenant 只保留**当前版本**（两种来源中最新的一个）；只有当前版本还没在 min(2, 已配置未移除节点数) 个节点上都有副本时，另外保留最新一个已有副本的版本作为退路，复制完成即释放。保留规则只在一处定义，提交时和每轮对象维护时都按它裁剪 `checkpoints` 与 `checkpoint_objects`；被裁掉的版本独有的块失去引用，按 GC 规则在 2 小时宽限后删除，从不提交的 Tenant 也由维护轮回收。旧版本没有别的用途：没有历史回滚，损坏时也不回退；增量产生与增量复制靠的是按内容去重，不靠保留旧版本。复制只追保留版本的块（当前版本优先）与非 checkpoint 对象，不复制已被取代的版本独有的块。判断能否打开时（`newestComplete`）只数就绪节点上的副本，判断保留时数所有已配置节点上的副本。

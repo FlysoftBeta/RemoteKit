@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { createReadStream } from 'node:fs';
 import limits from '../../../protocol/limits.json';
 import { createInterface } from 'node:readline';
-import { isErrorId, RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
+import { endpointError, isErrorId, RemoteKitError, wireError } from '../../shared/errors';
 import type { NodeRegistry } from '../cluster/node-link';
 import { log, reportError } from '../log';
 
@@ -65,7 +65,7 @@ export async function findError(
             failures.push({
               nodeId: node.nodeId,
               error: wireError(
-                reportError(toRemoteKitError(err), 'diagnostics.node_search_failed', {
+                reportError(endpointError(err), 'diagnostics.node_search_failed', {
                   nodeId: node.nodeId,
                   searchedErrorId: errorId,
                 }),

@@ -126,7 +126,7 @@ RPC 受理、导航开始、文档提交、资源加载完成是不同结果。
 
 ## 站点身份与全屏
 
-- **平板版网站**：按 origin 保存，切换 Android 平板身份（`mobile=false`），不改变 viewport、DPR、触控或指针特征。首次导航、redirect、history、reload 和 restore 在请求之前选择身份，子 frame 继承页面身份。只有 UA 实际变化才需要确认 Browser 已应用并刷新当前页，`beforeunload` 可以取消这次刷新。其他同站点页面下次导航生效。
+- **平板版网站**：按 origin 保存，切换 Android 平板身份（`mobile=false`），不改变 viewport、DPR、触控或指针特征。首次导航、redirect、history、reload 和 restore 在请求之前选择身份，子 frame 继承页面身份。只有 UA 实际变化才需要确认 Browser 已应用并刷新当前页，`beforeunload` 可以取消这次刷新。其他同站点页面下次导航生效。这次刷新是 Control 发起的 `tab.command reload`：先在操作收据表里登记一条收据（取得 `operationSequence`），把身份写进 Tab，再发送；Browser 的导航记录与用户的刷新一样由导航观察结算并 ACK。只有可重试的错误码（busy、rate_limited、unavailable、outcome_unknown）让本轮对账失败并以同一身份重发；其他结果（含 conflict，例如 Browser 已更换）只结束这次刷新、收据记为失败并记一条 `site.ua_reload_failed`，不让整个用户的对账卡住。Tab 上的身份属于已更换的 Browser 时直接放弃（新 Browser 创建页面时已用新身份）；没有对应的收据时重新登记。待刷新标记持久化在 Tab 上，所以任何不可重试的失败若仍抛出，都会让该用户此后每轮对账失败、所有操作显示浏览器不可用。
 - **网站设置**：Control 按 origin 持有兼容性选项、持久权限决定和协议处理器。`session.sitePreferences` 将 UA、权限和协议处理规则同步给 Endpoint 与 Browser。权限或协议处理器的持久决定先入库并应用，再按原请求身份回复页面。仅本次允许与关闭提示不写入设置，HTTP 登录凭据只经当次回复传递。
 - **Viewer 全屏**：设置"打开或激活时全屏"（默认关闭，Control 保存）。打开或回到前台时尝试 Fullscreen API；浏览器要求用户手势而拒绝时，等下一次可信的非 Esc 交互重试；用户主动退出后本次激活不再抢回。
 - **网页全屏**：网页自己的 Fullscreen API 只让该页面内容铺满整个 Viewer，隐藏外壳与其他 Window，不调用本地 Fullscreen API。状态绑定 browserIncarnation、instance、document，作为临时 `pageFullscreen` 投影，不写数据库。网页自己退出、悬浮退出按钮（×）、Esc 都可结束；显式退出携带当前目标身份，旧文档的退出不影响新页面。导航、关页、锁定、断线清除投影；Native 状态随约 1.5 秒的周期对账同步。

@@ -1,10 +1,17 @@
+import { randomUUID } from 'node:crypto';
+import { errorHandling } from '../../shared/error-policy';
 import { RetryUnit } from '../../shared/retry-unit';
 import { requireBrowser } from './browser-availability';
 import { RemoteKitError } from '../../shared/errors';
 import { endpointError } from '../endpoint/gateway';
 import { log, reportError } from '../log';
 import { wireError } from '../../shared/errors';
-import { isLocalTab, type ProductTab, type ProductWorkspace } from '../../shared/product';
+import {
+  isLocalTab,
+  type OperationReceipt,
+  type ProductTab,
+  type ProductWorkspace,
+} from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 import type { CommandEffect } from './commands';
 import { settle } from './operations';
@@ -19,7 +26,7 @@ export class Navigation {
 
   constructor(
     private readonly context: DomainContext,
-    private readonly services: Pick<DomainServices, 'policy' | 'workspace'>,
+    private readonly services: Pick<DomainServices, 'policy' | 'viewers' | 'workspace'>,
   ) {}
   async navigate(state: ProductWorkspace, effect: Extract<CommandEffect, { kind: 'navigate' }>) {
     requireBrowser(this.context, state.tenantId, true);
@@ -75,6 +82,86 @@ export class Navigation {
           }
         : {}),
     });
+  }
+
+  /**
+   * Reloads a tab after its site's UA changed. The reload is a receipt-backed tab.command, so
+   * its Browser navigation record has a sequence and is settled and acknowledged by `observe`.
+   * Only retryable failures are rethrown; anything else ends the reload, never the tenant.
+   */
+  async reloadForSiteIdentity(state: ProductWorkspace, t: ProductTab, current: unknown, browser: string) {
+    const tenant = state.tenantId;
+    const operations = this.context.store.operations;
+    const finish = (cause?: unknown) => {
+      delete t.pendingUaReloadOrigin;
+      delete t.pendingUaReloadIdentity;
+      const error = cause === undefined ? undefined : endpointError(cause);
+      if (error && error.code !== 'canceled')
+        reportError(error, 'site.ua_reload_failed', { tenant, tab: t.id });
+      this.context.store.workspaces.saveWorkspace(state);
+      this.services.viewers.push(tenant);
+    };
+    // A replacement Browser creates its views with the current site identity already applied.
+    if (
+      !current ||
+      !URL.canParse(t.url) ||
+      new URL(t.url).origin !== t.pendingUaReloadOrigin ||
+      (t.pendingUaReloadIdentity && t.pendingUaReloadIdentity.browserIncarnation !== browser)
+    )
+      return finish();
+    let receipt = t.pendingUaReloadIdentity
+      ? operations.operation(tenant, t.pendingUaReloadIdentity.operationId)?.receipt
+      : undefined;
+    if (
+      !receipt ||
+      receipt.operationGeneration !== t.pendingUaReloadIdentity!.operationGeneration ||
+      !receipt.operationSequence
+    ) {
+      const minted: OperationReceipt = {
+        operationId: randomUUID(),
+        operationGeneration: operations.operationGeneration(tenant),
+        status: 'accepted',
+        browserIncarnation: browser,
+      };
+      try {
+        if (
+          !operations.reserveOperation(
+            tenant,
+            { type: 'tab.command', tabId: t.id, command: 'reload' },
+            minted,
+          )
+        )
+          return finish(new RemoteKitError('conflict', '操作收据已轮换'));
+      } catch (cause) {
+        return finish(cause);
+      }
+      settle(minted, { status: 'applying' });
+      t.pendingUaReloadIdentity = {
+        operationId: minted.operationId,
+        operationGeneration: minted.operationGeneration,
+        browserIncarnation: browser,
+      };
+      operations.saveOperation(state, minted);
+      receipt = minted;
+    }
+    try {
+      await this.context.endpoint.command(tenant, {
+        viewId: t.webviewId,
+        command: 'reload',
+        browserIncarnation: browser,
+        operationId: receipt.operationId,
+        operationGeneration: receipt.operationGeneration,
+        operationSequence: receipt.operationSequence,
+      });
+    } catch (cause) {
+      const error = endpointError(cause);
+      if (['retry-soon', 'retry-after', 'backoff', 'reconcile'].includes(errorHandling(error.code)))
+        throw error;
+      settle(receipt, { status: 'failed', error: wireError(error) });
+      operations.saveOperation(state, receipt);
+      return finish(error);
+    }
+    finish();
   }
 
   observeRetired(state: ProductWorkspace, snapshot: any) {

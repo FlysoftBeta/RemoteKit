@@ -65,7 +65,8 @@
 Control 读取节点日志只用三个节点级方法（不属于任何 Session），返回的路径都相对节点日志根：
 
 - `node.logs.days` → `{days:["YYYY-MM-DD", ...]}`：存在的日期目录，新到旧。
-- `node.logs.list{date}` → `{files:[{path, size, mtime}]}`：该日期目录下的文件，加上较早日期目录与 `crashes/` 下最后修改时间落在这一天的文件。`size` 与 `mtime` 从文件句柄读取：目录枚举里的值对仍在追加的文件是旧的。
+- `node.logs.list{date}` → `{files:[{path, size, mtime}]}`：该日期目录下的文件，加上较早日期目录与 `crashes/` 下最后修改时间落在这一天的文件。`size` 与 `mtime` 从文件句柄读取：目录枚举里的值对仍在追加的文件是旧的。文件时间按 FILETIME（1601 年起的 100ns）直接换算成 `system_clock`（`FileTimeToLogClock`），不用 `std::chrono::clock_cast`：MSVC 经 `utc_clock` 查闰秒时会加载 ICU 的时区库，没有 ICU 的 Windows 版本上抛异常，整个列表请求变成 `outcome_unknown`（"RPC execution did not return a result"），该节点的日志从包里缺失。路径名按 UTF-8 输出。
+- 节点 RPC 失败时 Control 收到的是线上错误对象，打包、检索与采集都用 `endpointError` 转换，保留节点给出的 code、消息与错误 ID；用 `toRemoteKitError` 会把它变成 `internal` 与 `[object Object]`。
 - `node.logs.read{path, offset, length ≤ 512 KiB}` → 二进制帧 `{path, offset, size}` + 字节：`path` 必须是 `<date>/<文件>` 或 `crashes/<目录>/<文件>` 形式，不接受 `..`、绝对路径与日志根之下任何一级的 reparse point（日志根本身是配置值，可以位于联接之后）；`size` 是读取时的文件大小，调用者据此从尾部或头部分段读取，并发追加不影响已读部分。
 
 ## 诊断包

@@ -490,7 +490,13 @@ export class EndpointGateway {
       },
       180000,
     );
-    if (observed.lastError) throw endpointError(observed.lastError);
+    if (observed.lastError) {
+      // The node refused before shutting its Browser down (a stop blocker, for example), so
+      // nothing stopped. Keeping the stop desired would hold the Session behind a refusal the
+      // node repeats on every convergence; the caller decides whether to try again.
+      if (observed.browser === 'running' && this.placement.cancelStop(placed)) this.invalidate(tenant);
+      throw endpointError(observed.lastError);
+    }
     // A copy can open while its non-commit stop is in flight.
     if (placed.pendingCommit === null && this.placement.peek(tenant)?.dataState === 'dirty')
       return this.stop(tenant);

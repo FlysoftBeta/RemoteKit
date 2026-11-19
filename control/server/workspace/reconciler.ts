@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { BackgroundJob } from '../background';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import { EndpointSnapshotError, endpointError } from '../endpoint/gateway';
@@ -257,7 +256,8 @@ export class Reconciler {
           current,
           snapshot.browserIncarnation,
         );
-        if (current.recovery?.phase === 'failed' && current.recovery.error) {
+        // The failure is terminal for this Browser instance; convert (and log) it once.
+        if (current.recovery?.phase === 'failed' && current.recovery.error && !t.lifecycleRecoveryError) {
           t.lifecycleRecoveryError = this.services.lifecycle.lifecycleError(
             endpointError(current.recovery.error),
           );
@@ -396,27 +396,13 @@ export class Reconciler {
           );
           continue;
         }
-        if (t.pendingUaReloadOrigin && readyToShow) {
-          const requestedOrigin = t.pendingUaReloadOrigin;
-          if (current && new URL(t.url).origin === requestedOrigin) {
-            if (!t.pendingUaReloadIdentity) {
-              t.pendingUaReloadIdentity = {
-                operationId: randomUUID(),
-                operationGeneration: this.context.store.operations.operationGeneration(tenant),
-                browserIncarnation: snapshot.browserIncarnation!,
-              };
-              this.services.operations.saveWorkspace(state);
-            }
-            await this.context.endpoint.command(tenant, {
-              ...t.pendingUaReloadIdentity,
-              viewId: t.webviewId,
-              command: 'reload',
-            });
-          }
-          delete t.pendingUaReloadOrigin;
-          delete t.pendingUaReloadIdentity;
-          this.services.operations.saveWorkspace(state);
-        }
+        if (t.pendingUaReloadOrigin && readyToShow)
+          await this.services.navigation.reloadForSiteIdentity(
+            state,
+            t,
+            current,
+            snapshot.browserIncarnation!,
+          );
         await this.services.lifecycle.maintainBackgroundTab(
           state,
           t,

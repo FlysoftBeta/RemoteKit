@@ -264,6 +264,42 @@ for (const dirty of [false, true]) {
   }
 }
 
+test('a stop the node refuses before shutting its Browser down returns the Session to running', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.6);
+    await publishAndObserve(h.gateway, 'tenant');
+    const source = h.placement.peek('tenant')!;
+    let refusals = 0;
+    alpha.desiredHandler = (desired, value) => {
+      if (desired.run !== 'stopped') return;
+      refusals++;
+      value.converged = false;
+      const running = alpha.observations.get('tenant')!;
+      value.browser = 'running';
+      value.browserIncarnation = running.browserIncarnation;
+      value.browserPid = running.browserPid;
+      value.lastError = { code: 'conflict', message: 'stop blocked: lifecycleUncertain' };
+      value.checkpoint = null;
+      value.data = { ...alpha.observations.get('tenant')!.data! };
+    };
+    await assert.rejects(h.gateway.transfer('tenant', 'beta'), { code: 'conflict' });
+    assert.equal(refusals, 1);
+    const kept = h.placement.peek('tenant')!;
+    assert.equal(kept.nodeId, source.nodeId);
+    assert.equal(kept.placementEpoch, source.placementEpoch);
+    assert.equal(kept.runState, 'running');
+    assert.equal(kept.pendingCommit, null);
+    assert.equal((await h.gateway.published('tenant')).run, 'running');
+    alpha.desiredHandler = undefined;
+    await h.commit(alpha, 'tenant', id(1));
+    assert.equal((await h.gateway.transfer('tenant', 'beta')).nodeId, 'beta');
+  } finally {
+    await h.close();
+  }
+});
+
 test('transfer stop timeout reports outcome_unknown and keeps the source stop reconcilable', async (t) => {
   const h = await harness();
   try {

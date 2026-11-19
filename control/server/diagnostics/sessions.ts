@@ -7,7 +7,13 @@ import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import type { AdminDiagnostic } from '../../shared/admin';
-import { RemoteKitError, toRemoteKitError, wireError, type WireError } from '../../shared/errors';
+import {
+  endpointError,
+  RemoteKitError,
+  toRemoteKitError,
+  wireError,
+  type WireError,
+} from '../../shared/errors';
 import type { NodeLink } from '../cluster/node-link';
 import { nodeLogDays, nodeLogList, nodeLogRead, logReadBytes } from './node-logs';
 import { readHostFile, retentionBound, type LogFile } from './host-logs';
@@ -470,7 +476,7 @@ export class DiagnosticSessions {
       ]).finally(() => clearTimeout(timer));
     };
     const failure = (key: string, cause: unknown) => {
-      const error = reportError(toRemoteKitError(cause), 'diagnostics.log_read_failed', { source: key });
+      const error = reportError(endpointError(cause), 'diagnostics.log_read_failed', { source: key });
       const text =
         cause instanceof RemoteKitError
           ? `${error.code}: ${(error.detail ?? error.message).split(/\r?\n/)[0]}`
