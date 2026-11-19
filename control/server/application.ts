@@ -4,7 +4,7 @@ import { SessionEvents } from './workspace/session-events';
 import { compileDesired } from './workspace/desired';
 import { log } from './log';
 import { toRemoteKitError } from '../shared/errors';
-import { constants, fstatSync } from 'node:fs';
+import { constants, fstatSync, type Stats } from 'node:fs';
 import { Announcements } from './admin/announcements';
 import { UserAdmin } from './admin/users';
 import { NodeAdmin } from './cluster/node-admin';
@@ -262,6 +262,17 @@ export class ApplicationBackground {
   }
 }
 
+/**
+ * A supervisor owns this process through stdin: its end means shut down. Node's isFIFO() is false
+ * for Windows anonymous pipes, and Node's own POSIX child pipes are socket pairs, not FIFOs.
+ */
+export function stdinIsPipe(stat: Stats) {
+  return (
+    stat.isFIFO() ||
+    stat.isSocket() ||
+    (process.platform === 'win32' && (stat.mode & constants.S_IFMT) === constants.S_IFIFO)
+  );
+}
 export function startApplication(
   config: RuntimeConfig,
   store: ControlDatabase,
@@ -269,6 +280,7 @@ export function startApplication(
   control: DomainServices,
   server: ReturnType<typeof createHttp>,
 ) {
+  const pipedStdin = stdinIsPipe(fstatSync(0));
   let closing = false;
   const background = new ApplicationBackground(control, nodes);
   const endpointReady = (identity: { processChanged: boolean; nodeId: string }) => {
@@ -320,11 +332,6 @@ export function startApplication(
   function stdinClosed() {
     void close();
   }
-  const stdinStat = fstatSync(0);
-  // Node's Stats.isFIFO() always returns false on Windows, even for anonymous pipes.
-  const pipedStdin =
-    stdinStat.isFIFO() ||
-    (process.platform === 'win32' && (stdinStat.mode & constants.S_IFMT) === constants.S_IFIFO);
   if (pipedStdin) {
     process.stdin.once('end', stdinClosed);
     process.stdin.once('close', stdinClosed);

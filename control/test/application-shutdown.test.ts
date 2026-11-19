@@ -7,11 +7,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 const application = new URL('../server/application.ts', import.meta.url).href;
 const source = `
   import { EventEmitter } from 'node:events';
-  import { constants, fstatSync } from 'node:fs';
-  import { startApplication } from ${JSON.stringify(application)};
+  import { fstatSync } from 'node:fs';
+  import { startApplication, stdinIsPipe } from ${JSON.stringify(application)};
   const stat = fstatSync(0);
-  const piped = stat.isFIFO() || (process.platform === 'win32' && (stat.mode & constants.S_IFMT) === constants.S_IFIFO);
-  console.log(JSON.stringify({isFIFO: stat.isFIFO(), piped}));
+  console.log(JSON.stringify({isFIFO: stat.isFIFO(), piped: stdinIsPipe(stat)}));
   const nodes = Object.assign(new EventEmitter(), {
     start() { console.log('started'); },
     async stop() { console.log('nodes stopped'); },

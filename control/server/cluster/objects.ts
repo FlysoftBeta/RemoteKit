@@ -69,6 +69,8 @@ export class ObjectIndex {
   private readonly cleanupLedger: RetryLedger;
   private readonly commitSql: CommitStatements;
   private readonly fetches = new Map<string, Set<string>>();
+  /** Replication fetch per [node, object]; a later replication pass joins it instead of skipping. */
+  private readonly inflight = new Map<string, Promise<boolean>>();
   private readonly readFetches = new Map<string, Set<string>>();
   private readonly puts = new Map<
     string,
@@ -778,7 +780,8 @@ export class ObjectIndex {
             });
           present.add(item.id);
           const indexed = this.store.db.prepare('SELECT * FROM objects WHERE id=?').get(item.id) as
-            IndexedObject | undefined;
+            | IndexedObject
+            | undefined;
           if (
             indexed &&
             indexed.stored_sha256 === item.storedSha256 &&
@@ -888,6 +891,8 @@ export class ObjectIndex {
       if (
         claimed.has(object.id) ||
         current.all.has(object.id) ||
+        // A copy still arriving would outlive the deletion of every known replica.
+        [...this.inflight.keys()].some((pair) => JSON.parse(pair)[1] === object.id) ||
         Number(since.unreferenced_at) >= now - GRACE_MS
       )
         continue;
@@ -945,8 +950,15 @@ export class ObjectIndex {
         .run(orphan.node_id, orphan.id);
     }
   }
-  private async fetch(node: NodeLink, object: IndexedObject) {
+  private fetch(node: NodeLink, object: IndexedObject) {
     const pair = JSON.stringify([node.nodeId, object.id]);
+    const running = this.inflight.get(pair);
+    if (running) return running;
+    const work = this.fetchOnce(node, object, pair).finally(() => this.inflight.delete(pair));
+    this.inflight.set(pair, work);
+    return work;
+  }
+  private async fetchOnce(node: NodeLink, object: IndexedObject, pair: string) {
     const unit = this.replicaLedger.unit(pair);
     const input = JSON.stringify([node.state, this.store.buildId, object.created_at.toString()]);
     if (!unit.ready(input)) return false;
@@ -1007,6 +1019,10 @@ export class ObjectIndex {
         current: JSON.stringify(current),
       }) as IndexedObject[]) {
       if (this.retired.has(object.id)) continue;
+      for (const node of ready) {
+        const running = this.inflight.get(JSON.stringify([node.nodeId, object.id]));
+        if (running) jobs.push(running);
+      }
       const sources = this.sources(object.id);
       if (!sources.length) continue;
       let missing =
@@ -1022,7 +1038,7 @@ export class ObjectIndex {
               diskFloor(node, sample) &&
             !node.diskDraining &&
             !this.reconciling.has(node.nodeId) &&
-            !this.fetches.get(node.nodeId)?.has(object.id) &&
+            !this.inflight.has(JSON.stringify([node.nodeId, object.id])) &&
             !sources.some((source) => source.nodeId === node.nodeId)
           );
         })

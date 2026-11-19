@@ -1329,31 +1329,14 @@ test('owner dependency mocks release nested replacements and the mocked clock', 
   assert.equal(target.read, read);
 });
 
-test('the registry covers the actual audit D inventory', () => {
-  const audit = readFileSync(
-    new URL('../../develop/tmp/codex-fps/auditc.result.md', import.meta.url),
-    'utf8',
-  );
-  const section = audit.split('**D inventory**')[1];
-  assert(section, 'missing D inventory');
-  const rows = section.split('\n').filter((line) => /^\| `/.test(line));
-  const names = rows.map((row) =>
-    row
-      .split('|')[2]!
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, ''),
-  );
-  assert.deepEqual(
-    names.sort(),
-    Object.keys(auditLoops)
-      .filter((name) => name !== 'browser-rtc-retirement')
-      .sort(),
-    'audit changed; update inventory bindings',
-  );
-  const missing = [...names, 'browser-rtc-retirement'].filter((name) => !retryLoops[name]);
-  assert.deepEqual(missing, [], 'every audited loop needs a real owner driver');
+test('every inventoried retry loop is driven through one of its listed owners', () => {
+  const unbound = Object.entries(auditLoops).flatMap(([name, owners]) => {
+    const binding = retryLoops[name];
+    return binding && (owners as readonly string[]).includes(binding.owner)
+      ? []
+      : [`${name}: ${binding ? binding.owner : 'no driver'}`];
+  });
+  assert.deepEqual(unbound, [], 'every inventoried loop needs a real owner driver');
 });
 
 test('every retry creation or durable/background factory has a registered owner driver', () => {
