@@ -45,6 +45,7 @@ for (const name of [
   Object.defineProperty(globalThis, name, { value: (dom.window as any)[name], configurable: true });
 const resizeNotifications = new Set<() => void>();
 let viewportHeight = 700;
+let viewportWidth = 1100;
 Object.assign(globalThis, {
   IS_REACT_ACT_ENVIRONMENT: true,
   ResizeObserver: class {
@@ -59,7 +60,7 @@ Object.assign(globalThis, {
   requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
   cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
 });
-Object.defineProperty(dom.window.HTMLElement.prototype, 'clientWidth', { get: () => 1100 });
+Object.defineProperty(dom.window.HTMLElement.prototype, 'clientWidth', { get: () => viewportWidth });
 Object.defineProperty(dom.window.HTMLElement.prototype, 'clientHeight', { get: () => viewportHeight });
 dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({
   width: 1100,
@@ -401,6 +402,109 @@ test('Apps issue typed requests through a fake transport and react to subject an
     ),
   );
   await act(async () => root.unmount());
+});
+
+test('Study sync preserves the selected homework, pending attachment and open preview', async () => {
+  for (const width of [500, 1100]) {
+    viewportWidth = width;
+    const transport = new LearningFakeTransport();
+    let finishRefresh!: () => void;
+    const refresh = new Promise<typeof transport.library>((resolve) => {
+      finishRefresh = () => resolve(transport.library);
+    });
+    let pauseDetail = false;
+    let finishDetail!: () => void;
+    const detailRefresh = new Promise<void>((resolve) => {
+      finishDetail = resolve;
+    });
+    const call: typeof transport.request = async (method, params) => {
+      if (pauseDetail && method === 'study.homework.detail') await detailRefresh;
+      return transport.request(method, params);
+    };
+    transport.library.entries[0] = { ...transport.library.entries[0], available: false };
+    const library = {
+      online: true,
+      snapshot: transport.library,
+      apps: [],
+      rpc: new FileChannel(() => null),
+      refresh: () => refresh,
+      thumbnails: { get: () => undefined, subscribe: () => () => {} },
+    } as unknown as FileLibrary;
+    const container = document.getElementById('app')!;
+    const root = createRoot(container);
+    const props = {
+      windowId: 'learning-window',
+      state: transport.state,
+      call,
+      online: true,
+      transport: {} as ViewerSession,
+      action: async () => ({ operationId: 'x', operationGeneration: 'x', status: 'committed' as const }),
+      openFiles: async () => {},
+    };
+    const render = () =>
+      root.render(
+        createElement(FileLibraryContext.Provider, { value: library }, createElement(StudyApp, props)),
+      );
+    const sync = () => {
+      props.state = {
+        ...props.state,
+        learning: {
+          ...props.state.learning,
+          study: {
+            ...props.state.learning.study,
+            lastSyncAt: props.state.learning.study.lastSyncAt! + 1,
+          },
+        },
+      };
+      render();
+    };
+    try {
+      await act(render);
+      const homework = container.querySelectorAll<HTMLButtonElement>('.homework-card')[1];
+      await act(async () => homework.click());
+      const attachment = container.querySelector<HTMLButtonElement>('.material-row')!;
+      await act(async () => attachment.click());
+      assert.equal(attachment.disabled, true);
+      const detailRequests = transport.calls.filter((call) => call.method === 'study.homework.detail').length;
+      pauseDetail = true;
+      await act(sync);
+      assert.equal(container.querySelector('.material-row'), attachment);
+      if (width >= 960)
+        assert.equal(
+          container.querySelector('.homework-card.selected-card')?.textContent,
+          homework.textContent,
+        );
+      else assert.equal(container.querySelector('.learning-back strong')?.textContent, '作业详情');
+      await act(async () => finishRefresh());
+      assert.ok(container.querySelector('.study-preview-header'));
+      await act(async () => finishDetail());
+      assert.equal(
+        transport.calls.filter((call) => call.method === 'study.homework.detail').length,
+        detailRequests + 1,
+      );
+      pauseDetail = false;
+      await act(sync);
+      assert.ok(container.querySelector('.study-preview-header'));
+      if (width < 960) {
+        const back = container.querySelector<HTMLButtonElement>('[aria-label="返回列表"]')!;
+        await act(async () => back.click());
+        assert.equal(container.querySelector('.study-preview-header'), null);
+        await act(async () => back.click());
+        assert.ok(container.querySelector('.homework-card'));
+      } else {
+        const completed = [...container.querySelectorAll('button')].find(
+          (button) => button.textContent === '已完成',
+        )!;
+        await act(async () => completed.click());
+      }
+      assert.equal(container.querySelector('.study-preview-header'), null);
+    } finally {
+      finishRefresh();
+      finishDetail();
+      await act(async () => root.unmount());
+      viewportWidth = 1100;
+    }
+  }
 });
 
 test('sign-in card sends credentials once and clears the password after submission', async () => {

@@ -126,12 +126,17 @@ export function StudyApp(
     signed && online && section === 'materials' && !!materialSubject,
   );
   const detail = useQuery(
-    `detail:${selected?.kind === 'homework' ? selected.id : ''}:${revision}`,
+    `detail:${selected?.kind === 'homework' ? selected.id : ''}`,
     () => queries.get('study.homework.detail', { id: selected?.kind === 'homework' ? selected.id : '' }),
     selected?.kind === 'homework' && online,
+    revision,
   );
   const list = section === 'homework' ? homework : materials;
-  const selectionKey = section === 'homework' ? homeworkKey : materialsKey;
+  const selectionKey = JSON.stringify(
+    section === 'homework'
+      ? [section, bucket, subject, signed]
+      : [section, subject, materialState, type, signed],
+  );
   const previousSelectionKey = useRef(selectionKey);
   useEffect(() => {
     if (previousSelectionKey.current !== selectionKey) {

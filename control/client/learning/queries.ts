@@ -31,7 +31,7 @@ export class LearningQueries {
   }
 }
 
-export function useQuery<T>(key: string, load: () => Promise<T>, enabled = true) {
+export function useQuery<T>(key: string, load: () => Promise<T>, enabled = true, revision = 0) {
   const latest = useRef(load);
   latest.current = load;
   const [state, setState] = useState<{ key: string; value?: T; error?: RemoteKitError }>({
@@ -41,7 +41,7 @@ export function useQuery<T>(key: string, load: () => Promise<T>, enabled = true)
     if (!enabled) return;
     let active = true;
     const abort = new AbortController();
-    setState({ key });
+    setState((previous) => (previous.key === key ? { key, value: previous.value } : { key }));
     void recover(
       () => latest.current(),
       abort.signal,
@@ -61,7 +61,7 @@ export function useQuery<T>(key: string, load: () => Promise<T>, enabled = true)
       active = false;
       abort.abort();
     };
-  }, [key, enabled]);
+  }, [key, enabled, revision]);
   return {
     ...(state.key === key ? state : { key }),
   };
