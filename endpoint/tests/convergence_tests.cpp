@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
           ++configured;
           return {};
         },
-        .stop = [&](const Json&) -> Result<Json> {
+        .stop = [&](const Json&, bool) -> Result<Json> {
           if (blocked)
             return Error{ErrorCode::kConflict, "stop blocked: selection"};
           ++stopped;

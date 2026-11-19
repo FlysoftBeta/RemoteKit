@@ -16,7 +16,8 @@ class SessionCoordinator {
     std::function<Result<void>(const Json&)> clipboard;
     std::function<Result<void>()> start;
     std::function<Result<void>(const Json&)> views;
-    std::function<Result<Json>(const Json&)> stop;
+    // An administrator's forced stop skips the stop blockers.
+    std::function<Result<Json>(const Json& commit, bool force)> stop;
     std::function<Result<Json>()> observe;
     std::function<Result<void>()> maintain;
     // Drains queued Viewer channel traffic. Runs on Signal() without the full

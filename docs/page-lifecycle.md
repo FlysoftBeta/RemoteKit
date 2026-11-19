@@ -69,7 +69,7 @@ lifecycle_uncertain
 ```
 
 - 每一步在发送前持久化阶段；回执丢失时只从精确快照收敛，不重发未知变更，也不重放旧导航。
-- 15 秒内没有证据则显示 Tab 级错误，允许关闭后重新打开。
+- 15 秒内没有证据则显示 Tab 级错误。Tab 上的"重新打开"、刷新或地址导航换一个新的 WebView 打开该地址（见[Control · 导航](control-plane.md#导航)），也可以直接关闭。
 - 新的 Browser incarnation 让旧的恢复意图退役。
 - 恢复期间阻止临时空白 URL/标题/历史覆盖已保存的产品状态。
 
@@ -85,7 +85,7 @@ lifecycle_uncertain
 
 **节奏**：导出由 Endpoint 调度线程拥有，每 Session 同时一个传输，每次维护 tick 推进一块；候选最多 256 个、轮转选择；任务 60 秒期限，发布完整的替换文件之前重新校验身份。快照只观察和登记导出，不在快照里排空大导出（曾经这样做阻塞了其他工作）。pending/uncertain 的生命周期取消导出并保留上一个完整文件。
 
-**恢复**：同样分阶段推进（load → settling → unload → begin → chunks → commit → restore → waiting → visible → complete；settling 最多等 1 秒初始加载，waiting 最多 11 秒），每个维护 tick 只推进一个 view 的一个阶段，所以收敛不需要等每个页面的网络提交。普通失败转入 fallback：用产品 URL 发一个新的 GET。曾经 4 个慢页面每个同步恢复约 11 秒，超过 Control 请求超时，并通过全局调度线程阻塞其他 Tenant——加长超时不是解法。
+**恢复**：同样分阶段推进（load → settling → unload → begin → chunks → commit → restore → waiting → visible → complete；settling 最多等 1 秒初始加载，waiting 最多 11 秒），每个维护 tick 只推进一个 view 的一个阶段，所以收敛不需要等每个页面的网络提交。可重试的失败按重试单元重试；其他失败（含拒绝 POST 历史）记为该 view 的 `recovery.phase=failed`，Control 显示 Tab 级错误，不自动改发 GET，由用户的重新打开、刷新或地址导航换新实例。曾经 4 个慢页面每个同步恢复约 11 秒，超过 Control 请求超时，并通过全局调度线程阻塞其他 Tenant——加长超时不是解法。
 
 ## Profile 持久化
 

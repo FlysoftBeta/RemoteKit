@@ -137,6 +137,9 @@ int main(int argc, char** argv) {
     invalid["commit"] = "commit";
     Check(!coordination::ValidateDesired(invalid), "running commit rejected");
     invalid = desired;
+    invalid["forceStop"] = true;
+    Check(!coordination::ValidateDesired(invalid), "forced running rejected");
+    invalid = desired;
     invalid["views"].push_back(invalid["views"][0]);
     Check(!coordination::ValidateDesired(invalid), "duplicate views rejected");
     invalid = desired;

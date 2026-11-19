@@ -6,7 +6,7 @@ import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors
 import { retryDelay } from '../../shared/error-policy';
 import { recordedAction } from '../../shared/recorded-action';
 import type { ViewerAuthority } from '../viewers/viewer-hub';
-import { applyCommand } from './commands';
+import { applyCommand, replacesFailedInstance } from './commands';
 
 import type {
   OperationReceipt,
@@ -227,7 +227,10 @@ export class OperationPipeline {
       ids: [randomUUID(), randomUUID(), randomUUID(), randomUUID()],
       now: this.context.clock.wallMs(),
       appIcon: icon,
-      viewId: ['window.open', 'tab.create'].includes(body.type) ? this.context.store.workspaces.viewId() : '',
+      viewId:
+        ['window.open', 'tab.create'].includes(body.type) || replacesFailedInstance(before, body)
+          ? this.context.store.workspaces.viewId()
+          : '',
     });
     const state = plan.workspace;
     let application = plan.application;

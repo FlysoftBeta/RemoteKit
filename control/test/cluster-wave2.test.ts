@@ -300,6 +300,70 @@ test('a stop the node refuses before shutting its Browser down returns the Sessi
   }
 });
 
+test('an administrator stop is forced past stop blockers, keep-alive tabs and an online user', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    const { tenantId: tenant } = await registerUser(h.store, 'forced', 'password123');
+    await publishAndObserve(h.gateway, tenant);
+    const state = h.store.workspaces.workspace(tenant);
+    state.windows = [{ id: 'window', activeTabId: 'tab', appId: 'browser', lastActiveAt: 0 }];
+    state.tabs = [
+      {
+        id: 'tab',
+        windowId: 'window',
+        webviewId: '1',
+        url: 'https://example.test/',
+        title: '',
+        kind: 'remote',
+        idleKeepAlive: true,
+        idleKeepAliveState: { enabledAt: Date.now() },
+      },
+    ];
+    state.spaces = [
+      { id: 'space', windowIds: ['window'], weights: [1], focusedWindowId: 'window', lastActiveAt: 0 },
+    ];
+    state.activeSpaceId = 'space';
+    h.store.workspaces.writeWorkspace(state);
+    let revoked = '';
+    await h.control.viewers.attachViewer(
+      tenant,
+      'lease',
+      (reason: string) => (revoked = reason),
+      { identity: 'forced', valid: () => true },
+      true,
+    );
+    const forced: boolean[] = [];
+    alpha.desiredHandler = (desired, value) => {
+      if (desired.run !== 'stopped') return;
+      forced.push(desired.forceStop);
+      if (!desired.forceStop) {
+        const running = alpha.observations.get(tenant)!;
+        Object.assign(value, {
+          converged: false,
+          browser: 'running',
+          browserIncarnation: running.browserIncarnation,
+          browserPid: running.browserPid,
+          lastError: { code: 'conflict', message: 'stop blocked: pendingPageRequests' },
+          checkpoint: null,
+          data: { ...running.data! },
+        });
+      }
+    };
+    await h.commit(alpha, tenant, id(1));
+    await h.control.userAdmin.stop('forced');
+    assert.deepEqual(forced, [true]);
+    const stopped = h.placement.peek(tenant)!;
+    assert.equal(stopped.runState, 'stopped');
+    assert.equal(stopped.dataState, 'clean');
+    assert.equal(h.gateway.forcingStop(tenant), false);
+    assert.equal(revoked, 'logout');
+    assert.equal(h.control.tenants.get(tenant).viewer, undefined);
+  } finally {
+    await h.close();
+  }
+});
+
 test('transfer stop timeout reports outcome_unknown and keeps the source stop reconcilable', async (t) => {
   const h = await harness();
   try {

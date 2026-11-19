@@ -298,7 +298,20 @@ export function WindowFrame({
                   <SurfaceState
                     live
                     error={active.lifecycleRecoveryError}
-                    context={{ operation: '恢复页面', scope: 'surface', consequence: '原页面实例已不可用' }}
+                    context={{
+                      operation: '恢复页面',
+                      scope: 'surface',
+                      consequence: '原页面实例已不可用',
+                      action: {
+                        // A new instance loads this address; form data is never resubmitted.
+                        label: '重新打开',
+                        run: () => {
+                          void action({ type: 'tab.command', tabId: active.id, command: 'reload' }).catch(
+                            report,
+                          );
+                        },
+                      },
+                    }}
                   />
                 ) : (
                   !presentationError &&

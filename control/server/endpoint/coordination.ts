@@ -34,6 +34,8 @@ export interface SessionDesired extends SessionTarget {
   connectionEpoch: string;
   revision: string;
   run: 'running' | 'stopped';
+  /** An administrator's stop: the node skips its stop blockers. Never set while running. */
+  forceStop: boolean;
   commit: string | null;
   profileKey: string;
   checkpoint: string | null;
@@ -395,6 +397,7 @@ export function validateDesired(value: SessionDesired): void {
     'placementEpoch',
     'revision',
     'run',
+    'forceStop',
     'commit',
     'profileKey',
     'checkpoint',
@@ -414,6 +417,7 @@ export function validateDesired(value: SessionDesired): void {
   invalid(!/^[0-9a-f]{32}$/.test(value.sessionId), 'sessionId');
   invalid(!Number.isSafeInteger(value.placementEpoch) || value.placementEpoch < 1, 'placementEpoch');
   invalid(!['running', 'stopped'].includes(value.run), 'run');
+  invalid(typeof value.forceStop !== 'boolean' || (value.run === 'running' && value.forceStop), 'forceStop');
   invalid(
     value.commit !== null &&
       (value.run === 'running' ||

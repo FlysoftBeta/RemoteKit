@@ -204,6 +204,8 @@ Session 数据以**版本**（checkpoint）保存：一个版本是一份 manife
 
 停止时只有 `dirty` 才提交：先在事务里写 `pending_commit`（epoch 不变），然后发布带这个 requestId 的期望状态；不需要单独的请求、超时或补发——观察状态报告 `committed.requestId` 等于它时，校验对象、登记版本，改为 `stopped/clean`，下一份期望文档清除 `commit`。重连只是重发期望状态。未决提交期间认领受保护，不会被 GC。
 
+管理员的停止与转移是强制的：等待期间期望文档带 `forceStop: true`（只在 `run: stopped` 时可为真，不持久化；Control 重启后同一停止按普通停止继续），Endpoint 以不检查停止阻塞项的方式停止。普通停止（自动回收）仍检查阻塞项。
+
 节点在关闭 Browser 之前拒绝停止时（停止条件未满足，例如 `stop blocked: lifecycleUncertain`；观察状态在该修订上仍是 `browser: running` 且带 `lastError`），什么都没有停下：`stop` 把放置改回 `running`、清除未决提交（`cancelStop`，按 epoch 与 pendingCommit 条件更新）并重新发布，再把错误返回给调用方，由调用方决定是否再试。保留停止期望会让节点每次收敛都重复拒绝，而 `lastError` 又让该用户的每轮对账失败，Session 一直卡在"正在停止"。Browser 已经停下后的失败（提交、写副本）不撤销，等观察状态完成同一次停止。
 
 **期望状态的发布**：`EndpointGateway` 唯一负责发布。改变期望状态的代码只调用 `invalidate(tenant)`；网关合并同一时刻的多次标记，在该用户所在节点就绪时编译并发送最新一份，节点每次就绪时重发它上面的全部放置。节点离线不是调用方要处理的错误：锁定、解锁等状态写在期望文档里，节点回来时生效。需要效果已经发生的调用方显式等待——`published(tenant)`（当前修订已送达）或按条件等待观察状态，二者都有期限；需要 Browser 的操作先检查浏览器可用性，不可用时以带原因的 `unavailable` 失败。发布失败与恢复只在状态切换时各记一条 warn。

@@ -124,7 +124,7 @@ DataChannel 上的失败都是 `error:{code, message, reason?, retryAfterMs?}`�
           → node.ready{connectionEpoch, buildId, config, configHash, objectKey, objectIdKey, peers} | node.release{release} | node.reject{code, buildId}
 期望状态  node.desired{connectionEpoch, revision, sessions:[{tenantId, sessionId, placementEpoch, dataState}]}
           session.clipboard{tenantId, sessionId, placementEpoch, connectionEpoch, revision, value:{text, html}}
-          session.desired{tenantId, sessionId, placementEpoch, connectionEpoch, revision, run, commit, profileKey, checkpoint,
+          session.desired{tenantId, sessionId, placementEpoch, connectionEpoch, revision, run, forceStop, commit, profileKey, checkpoint,
                           sitePreferences, mediaPolicy, quality, clipboard, views, authorization, lock, library}
 观察状态  {event:"session.observed", tenantId, sessionId, placementEpoch, endpointIncarnation, nodeRevision, seq, observedRevision,
            converged, browser, browserIncarnation, browserRestart, data, checkpoint, applied, authorization, lock, views,
@@ -149,7 +149,7 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 
 | 字段 | 内容 |
 |---|---|
-| `run` / `commit` | `running` 或 `stopped`；`commit` 为提交请求 ID 或 null（`running` 带 commit 是 `invalid_request`） |
+| `run` / `forceStop` / `commit` | `running` 或 `stopped`；`forceStop` 为真时停止不检查停止阻塞项（管理员的停止与转移，`running` 时必须为 false）；`commit` 为提交请求 ID 或 null（`running` 带 commit 是 `invalid_request`） |
 | `profileKey` / `checkpoint` | Profile 密钥；打开时要恢复的已提交 checkpoint |
 | `sitePreferences` / `mediaPolicy` / `quality` | 完整站点规则表；`{degradationPreference, maxFps, audio}`；有效 DPR |
 | `clipboard` | `{revision}`（`"0"` 为空）；内容由 `session.clipboard` 单独送达，在任何 view 之前写入 Browser |

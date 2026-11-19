@@ -87,6 +87,10 @@ export function compileDesired(
     sessionId: placement.sessionId,
     placementEpoch: placement.placementEpoch,
     run: context.endpoint.sessionFault(tenant) ? 'stopped' : placement.runState,
+    forceStop:
+      !context.endpoint.sessionFault(tenant) &&
+      placement.runState === 'stopped' &&
+      context.endpoint.forcingStop(tenant),
     commit: context.endpoint.sessionFault(tenant) ? null : placement.pendingCommit,
     profileKey: context.endpoint.placement.keys(placement).profileKey,
     checkpoint: placement.checkpoint,

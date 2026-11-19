@@ -722,7 +722,7 @@ test('unconfirmed unload survives Control restart and is retired on Browser inca
   }
 });
 
-test('unsafe POST checkpoint leaves an explicit tab error and never repeats unload or restores', async () => {
+test('unsafe POST checkpoint leaves an explicit tab error that an explicit reload or navigation reopens', async () => {
   const f = await uncertainTab();
   try {
     f.endpoint.guardedLifecycle = () => {
@@ -740,6 +740,34 @@ test('unsafe POST checkpoint leaves an explicit tab error and never repeats unlo
     assert.equal(f.view.actual, 0);
     assert.equal(f.view.visible, false);
     assert.match(f.tabState().lifecycleRecoveryError!.message, /POST requires repost confirmation/);
+    // History cannot be restored, so back/forward stay final; nothing is resubmitted.
+    await assert.rejects(
+      f.control.operations.productAction(
+        f.tenant,
+        { type: 'tab.command', tabId: f.tab.id, command: 'back' },
+        'lease',
+      ),
+      { code: 'rejected' },
+    );
+    f.endpoint.calls = [];
+    await observedProductAction(
+      f.control,
+      f.tenant,
+      { type: 'tab.command', tabId: f.tab.id, command: 'reload' },
+      'lease',
+    );
+    const reopened = f.tabState();
+    assert.notEqual(reopened.webviewId, f.tab.webviewId);
+    assert.equal(reopened.lifecycleRecoveryError, undefined);
+    assert.equal(reopened.lifecycleRecovery, undefined);
+    const views = f.endpoint.views.get(f.tenant)!;
+    assert.equal(views.has(f.tab.webviewId), false);
+    assert.equal(views.get(reopened.webviewId).url, 'https://saved.test/');
+    assert.deepEqual(
+      f.endpoint.calls.filter((c) => ['view.command', 'view.lifecycle'].includes(c.method)),
+      [],
+    );
+    // A reopened tab behaves like any other: closing and reopening still works.
     await observedProductAction(f.control, f.tenant, { type: 'tab.close', tabId: f.tab.id }, 'lease');
     await observedProductAction(
       f.control,
@@ -860,6 +888,49 @@ test('UA table precedes Browser/view creation; failed application persists desir
     await control.viewers.detachViewer(user.tenantId, 'lease');
     await control.close();
     store.db.close();
+  }
+});
+
+test('a navigation recovery rejected for POST history reopens on the next address navigation', async () => {
+  const f = await uncertainTab();
+  try {
+    Object.assign(f.view, {
+      lifecycle_uncertain: false,
+      actual: 3,
+      pending: false,
+      recovery: {
+        pending: false,
+        phase: 'failed',
+        error: {
+          code: 'rejected',
+          message: 'Navigation history contains POST data; repost confirmation is required and unsupported',
+        },
+      },
+    });
+    await f.control.reconciler.reconcileProduct(f.tenant);
+    assert.equal(f.tabState().lifecycleRecoveryError?.code, 'rejected');
+    const calls = f.endpoint.calls.length;
+    await f.control.reconciler.reconcileProduct(f.tenant);
+    assert.equal(f.tabState().lifecycleRecoveryError?.code, 'rejected');
+    assert.equal(f.endpoint.calls.length, calls);
+    await observedProductAction(
+      f.control,
+      f.tenant,
+      { type: 'tab.navigate', tabId: f.tab.id, url: 'https://other.test/' },
+      'lease',
+    );
+    const reopened = f.tabState();
+    assert.notEqual(reopened.webviewId, f.tab.webviewId);
+    assert.equal(reopened.lifecycleRecoveryError, undefined);
+    assert.equal(reopened.url, 'https://other.test/');
+    assert.equal(f.endpoint.views.get(f.tenant)!.has(f.tab.webviewId), false);
+    assert.deepEqual(
+      f.endpoint.calls.filter((c) => c.method === 'view.navigate').map((c) => [c.args.viewId, c.args.url]),
+      [[reopened.webviewId, 'https://other.test/']],
+    );
+  } finally {
+    await f.control.close();
+    f.store.db.close();
   }
 });
 

@@ -163,6 +163,7 @@ export function installDesiredSource(gateway: EndpointGateway) {
         sessionId: placement.sessionId,
         placementEpoch: placement.placementEpoch,
         run: placement.runState,
+        forceStop: placement.runState === 'stopped' && gateway.forcingStop(tenant),
         commit: placement.pendingCommit,
         checkpoint: placement.checkpoint,
         views: [],

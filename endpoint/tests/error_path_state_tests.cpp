@@ -247,7 +247,7 @@ class NativeErrorStateProbe {
       std::optional<Result<Json>> result;
       unsigned attempts = 0;
       auto hooks = execution->Hooks();
-      hooks.stop = [&](const Json& commit) -> Result<Json> {
+      hooks.stop = [&](const Json& commit, bool) -> Result<Json> {
         ++attempts;
         result = execution->Stop(commit, true, PhaseClock::time_point::max(), false, prepare);
         return *result;

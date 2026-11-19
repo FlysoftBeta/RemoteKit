@@ -342,7 +342,8 @@ function ActionDialog({
           onConfirm={() => run('admin.stop', { username })}
         >
           <Typography>
-            关闭 {username} 的浏览器并保存检查点，释放节点资源。用户下次连接时会在合适的节点上恢复。
+            {`强制停止 ${username} 的浏览器并保存检查点，释放节点资源。`}
+            用户会被强制下线；挂机模式、未处理的页面请求与进行中的传输都不会阻止停止。用户下次连接时会在合适的节点上恢复。
           </Typography>
         </ConfirmDialog>
       );
@@ -562,11 +563,8 @@ export function AdminUsersSection({
           强制下线
         </MenuItem>
         <Divider />
-        <MenuItem
-          disabled={target?.session.state !== 'running' || target.online}
-          onClick={() => open('stop')}
-        >
-          <ListItemText primary="立即停止" secondary={target?.online ? '用户在线时不可用' : undefined} />
+        <MenuItem disabled={!other || target?.session.state !== 'running'} onClick={() => open('stop')}>
+          <ListItemText primary="立即停止" />
         </MenuItem>
         <MenuItem disabled={!target || target.session.state === 'none'} onClick={() => open('move')}>
           <ListItemText primary="转移" />

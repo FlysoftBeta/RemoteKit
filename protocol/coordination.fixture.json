@@ -6,6 +6,7 @@
   "placementEpoch": 1,
   "revision": "1",
   "run": "running",
+  "forceStop": false,
   "commit": null,
   "profileKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
   "checkpoint": null,

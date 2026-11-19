@@ -213,7 +213,7 @@ Result<void> SessionCoordinator::Converge(const Json& desired, const Scope& scop
   const auto revision = desired["revision"].get<std::string>();
   if (desired["run"] == "stopped") {
     if (stopped_revision_ != revision) {
-      auto stopped = hooks_.stop(desired["commit"]);
+      auto stopped = hooks_.stop(desired["commit"], desired["forceStop"].get<bool>());
       if (!stopped)
         return stopped.error();
       stopped_revision_ = revision;

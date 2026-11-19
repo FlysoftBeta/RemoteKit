@@ -87,6 +87,8 @@ export function FileBasketDialog({
   } = useLibrary();
   const transaction = request && checkout(request.id);
   const [chosen, setChosen] = useState<string | null>(null);
+  // Set when the user sends; the commit and its confirmation continue without the panel.
+  const [sent, setSent] = useState(false);
   const taskAbort = useRef(new AbortController());
   useEffect(() => () => taskAbort.current.abort(), []);
   const [error, setError] = useState<RemoteKitError | undefined>();
@@ -224,6 +226,7 @@ export function FileBasketDialog({
     });
   const submit = () => {
     if (!request || (!transaction && blocked)) return;
+    setSent(true);
     void run(async () => {
       await select(
         request.id,
@@ -311,6 +314,8 @@ export function FileBasketDialog({
           ? '页面接收结果未知，正在确认'
           : '等待页面确认文件'
       : '';
+  // The panel reappears only when the send failed or its outcome needs the user.
+  if (sent && !error && !transaction?.error && !outcome.uncertain) return null;
   return (
     <>
       <FloatingPanel

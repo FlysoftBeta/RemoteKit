@@ -91,7 +91,7 @@ class SessionDriver:
         if tenant not in self.desired:
             self.desired[tenant] = dict(method="session.desired", connectionEpoch=self.connection, tenantId=tenant,
                 sessionId=hashlib.sha256(tenant.encode()).hexdigest()[:32], placementEpoch=1, revision="0",
-                run="stopped", commit=None, profileKey="BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=", checkpoint=None,
+                run="stopped", forceStop=False, commit=None, profileKey="BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=", checkpoint=None,
                 sitePreferences=dict(sites={}), mediaPolicy=dict(maxFps=60,degradationPreference="balanced",audio=False),
                 quality=dict(effectiveDpr=1), clipboard=dict(revision="0",value=dict(text="",html="")), views=[],
                 authorization=dict(connectionId=None,epoch=0,unlocked=False,files=dict(requests=[])),

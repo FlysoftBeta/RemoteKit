@@ -49,6 +49,30 @@ export interface CommandContext {
   now?: number;
   appIcon?: { hash: string };
 }
+/**
+ * A tab whose page instance could not be recovered (for example history holding POST data, which
+ * is never resubmitted automatically) is reopened on the user's explicit navigation or reload:
+ * it gets a new WebView that loads the requested address, and the old instance is closed.
+ */
+export function replacesFailedInstance(workspace: ProductWorkspace, action: ProductAction) {
+  return (
+    (action.type === 'tab.navigate' || (action.type === 'tab.command' && action.command === 'reload')) &&
+    !!workspace.tabs.find((tab) => tab.id === action.tabId)?.lifecycleRecoveryError
+  );
+}
+function reopenFailedInstance(t: ProductTab, viewId: string) {
+  if (!viewId) throw new RemoteKitError('internal', '缺少新的页面实例标识');
+  t.webviewId = viewId;
+  delete t.lifecycleRecoveryError;
+  delete t.lifecycleRecovery;
+  delete t.residency;
+  delete t.usageDocument;
+  delete t.pendingUaReloadOrigin;
+  delete t.pendingUaReloadIdentity;
+  t.restoring = false;
+  t.canGoBack = false;
+  t.canGoForward = false;
+}
 export function applyCommand(workspace: ProductWorkspace, body: ProductAction, ctx: CommandContext) {
   const state = structuredClone(workspace),
     action = body as any;
@@ -330,11 +354,8 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       const t = tab(),
         address = navigationUrl(action.url),
         previousKind = t.kind ?? 'remote';
-      if (t.lifecycleRecovery || t.lifecycleRecoveryError)
-        throw new RemoteKitError(
-          t.lifecycleRecoveryError ? 'unavailable' : 'busy',
-          t.lifecycleRecoveryError?.message ?? '页面正在恢复',
-        );
+      if (replacesFailedInstance(state, action)) reopenFailedInstance(t, ctx.viewId);
+      else if (t.lifecycleRecovery) throw new RemoteKitError('busy', '页面正在恢复');
       if (ctx.execution) {
         t.navigation = {
           operationId: ctx.execution.operationId,
@@ -357,11 +378,14 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       if (!['back', 'forward', 'reload', 'stop'].includes(action.command))
         throw new RemoteKitError('invalid_request', '未知导航命令');
       if (isLocalTab(t)) break;
-      if (t.lifecycleRecovery || t.lifecycleRecoveryError)
-        throw new RemoteKitError(
-          t.lifecycleRecoveryError ? 'unavailable' : 'busy',
-          t.lifecycleRecoveryError?.message ?? '页面正在恢复',
-        );
+      if (replacesFailedInstance(state, action)) {
+        // The new instance loads the tab's address itself; there is no Browser command to send.
+        reopenFailedInstance(t, ctx.viewId);
+        break;
+      }
+      if (t.lifecycleRecoveryError)
+        throw new RemoteKitError('rejected', '页面历史无法恢复，请刷新或重新打开');
+      if (t.lifecycleRecovery) throw new RemoteKitError('busy', '页面正在恢复');
       if (ctx.execution && action.command !== 'stop')
         t.navigation = {
           operationId: ctx.execution.operationId,

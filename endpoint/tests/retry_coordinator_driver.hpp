@@ -28,7 +28,7 @@ inline OwnerDriver CoordinatorDriver(std::string loop) {
       if (!owner) {
         SessionCoordinator::Hooks hooks;
         hooks.authorization = [](const Json&, uint64_t) -> Result<void> { return {}; };
-        hooks.stop = [&](const Json&) { return Call("session.convergence", Json::object()); };
+        hooks.stop = [&](const Json&, bool) { return Call("session.convergence", Json::object()); };
         hooks.observe = [&] {
           return Call("session.observation",
                       {{"browser", "stopped"}, {"browserIncarnation", nullptr}});

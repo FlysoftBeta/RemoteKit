@@ -141,8 +141,8 @@ inline Result<void> ValidateClipboard(const Json& value) {
 inline Result<void> ValidateDesired(const Json& value) {
   if (!Keys(value,
             {"method", "connectionEpoch", "tenantId", "sessionId", "placementEpoch", "revision",
-             "run", "commit", "profileKey", "checkpoint", "sitePreferences", "mediaPolicy",
-             "quality", "clipboard", "views", "authorization", "lock"},
+             "run", "forceStop", "commit", "profileKey", "checkpoint", "sitePreferences",
+             "mediaPolicy", "quality", "clipboard", "views", "authorization", "lock"},
             {"id"}) ||
       value["method"] != "session.desired" || !value["connectionEpoch"].is_string() ||
       !Counter(value["revision"], true))
@@ -150,6 +150,8 @@ inline Result<void> ValidateDesired(const Json& value) {
   RK_RETURN_IF_ERROR(ValidateTarget(value));
   const auto& commit = value["commit"];
   if ((value["run"] != "running" && value["run"] != "stopped") ||
+      !value["forceStop"].is_boolean() ||
+      (value["run"] == "running" && value["forceStop"].get<bool>()) ||
       (!commit.is_null() && (!commit.is_string() || commit.get_ref<const std::string&>().empty() ||
                              commit.get_ref<const std::string&>().size() > limits::identityBytes ||
                              value["run"] == "running")) ||

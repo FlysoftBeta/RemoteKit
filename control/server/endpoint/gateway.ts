@@ -54,6 +54,8 @@ export class EndpointGateway {
   private readonly sent = new Map<string, string>();
   private readonly clipboardSent = new Map<string, string>();
   private readonly stale = new Set<string>();
+  /** Tenants whose stop an administrator forced; held only while that stop is awaited. */
+  private readonly forcedStops = new Set<string>();
   private readonly publishing = new Map<string, Promise<SessionDesired | undefined>>();
   private readonly publicationRetries = new Map<string, RetryUnit>();
   private scheduled = false;
@@ -453,7 +455,7 @@ export class EndpointGateway {
             node.state.state === 'ready',
         );
       if (!target) throw new RemoteKitError('unavailable', '没有可接收的在线节点');
-      await this.stop(tenant);
+      await this.stop(tenant, { force: true });
     }
     const placed = this.placement.transfer(tenant, nodeId);
     this.forget(tenant);
@@ -465,7 +467,21 @@ export class EndpointGateway {
     );
     return placed;
   }
-  async stop(tenant: string): Promise<number> {
+  forcingStop(tenant: string) {
+    return this.forcedStops.has(tenant);
+  }
+  /** `force` is an administrator's stop: the node skips its stop blockers (open requests, uncertain pages). */
+  async stop(tenant: string, options: { force?: boolean } = {}): Promise<number> {
+    if (!options.force || this.forcedStops.has(tenant)) return this.stopSession(tenant);
+    this.forcedStops.add(tenant);
+    try {
+      return await this.stopSession(tenant);
+    } finally {
+      // The next publication drops the flag; a stop still in flight on the node stays forced.
+      this.forcedStops.delete(tenant);
+    }
+  }
+  private async stopSession(tenant: string): Promise<number> {
     const current = this.placement.peek(tenant);
     if (current?.runState === 'stopped' && current.dataState === 'clean') return current.checkpointId ?? 0;
     const fault = this.sessionFault(tenant);
@@ -499,7 +515,7 @@ export class EndpointGateway {
     }
     // A copy can open while its non-commit stop is in flight.
     if (placed.pendingCommit === null && this.placement.peek(tenant)?.dataState === 'dirty')
-      return this.stop(tenant);
+      return this.stopSession(tenant);
     return this.placement.peek(tenant)?.checkpointId ?? 0;
   }
   async snapshot(tenant: string, args: { outputDiagnostics?: boolean } = {}): Promise<EndpointSnapshot> {

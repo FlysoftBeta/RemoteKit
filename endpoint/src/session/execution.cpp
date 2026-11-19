@@ -31,7 +31,7 @@ SessionCoordinator::Hooks SessionExecution::Hooks() {
       .clipboard = [self](const Json& value) { return self->clipboard_.Deliver(value); },
       .start = [self] { return self->Start(); },
       .views = [self](const Json& value) { return self->Views(value); },
-      .stop = [self](const Json& value) { return self->Stop(value); },
+      .stop = [self](const Json& commit, bool force) { return self->Stop(commit, !force); },
       .observe = [self] { return self->Observe(); },
       .maintain = [self]() -> Result<void> {
         self->Maintain();

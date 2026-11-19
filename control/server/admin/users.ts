@@ -139,19 +139,16 @@ export class UserAdmin {
     this.services.viewers.push(user.tenant);
     return this.list();
   }
+  /** An administrator's stop is forced: the user goes offline and no stop policy or blocker applies. */
   async stop(username: unknown) {
     const user = this.find(username);
+    const placement = this.context.endpoint.placement.peek(user.tenant);
+    if (placement?.runState !== 'running' && !placement?.pendingCommit)
+      throw new RemoteKitError('conflict', '会话未运行');
+    await this.disconnect(user.tenant);
     await this.context.tenants.serial(user.tenant, async () => {
-      if (this.context.endpoint.placement.peek(user.tenant)?.pendingCommit) {
-        await this.context.endpoint.stop(user.tenant);
-        this.services.lifecycle.finishStop(user.tenant);
-        return;
-      }
-      if (this.context.endpoint.placement.peek(user.tenant)?.runState !== 'running')
-        throw new RemoteKitError('conflict', '会话未运行');
-      if (this.context.tenants.get(user.tenant).viewer) throw new RemoteKitError('conflict', '用户在线');
-      const snapshot = await this.context.endpoint.snapshot(user.tenant);
-      await this.services.lifecycle.stop(user.tenant, snapshot, true);
+      await this.context.endpoint.stop(user.tenant, { force: true });
+      this.services.lifecycle.finishStop(user.tenant);
     });
     return this.list();
   }
