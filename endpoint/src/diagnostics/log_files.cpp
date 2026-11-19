@@ -96,7 +96,7 @@ Result<void> WalkFiles(const fs::path& root,
       continue;
     const uint64_t size = (uint64_t(info.value().nFileSizeHigh) << 32) | info.value().nFileSizeLow;
     files.push_back(
-        {{"path", Utf8(path.generic_path())},
+        {{"path", Utf8(path.generic_wstring())},
          {"size", size},
          {"mtime", std::chrono::duration_cast<std::chrono::milliseconds>(system.time_since_epoch())
                        .count()}});
