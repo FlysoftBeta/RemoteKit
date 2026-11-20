@@ -36,6 +36,7 @@ export async function launch({
   out,
   stack,
   initialAuth = true,
+  browserOptions = {},
 } = {}) {
   out = resolve(out ?? join(stack.run, 'shots'));
   mkdirSync(out, { recursive: true });
@@ -43,11 +44,12 @@ export async function launch({
   const touch = pointerType === 'touch';
   const resources = new ResourceScope();
   try {
-    const browser = await launchBrowser(
-      chrome89
+    const browser = await launchBrowser({
+      ...(chrome89
         ? { executablePath: 'C:/src/tmp/chrome89-google/app/chrome.exe', headless: true }
-        : { channel: 'msedge', headless: true },
-    );
+        : { channel: 'msedge', headless: true }),
+      ...browserOptions,
+    });
     resources.defer(() => browser.close());
     const context = await createViewerContext(browser, {
       viewport: parseViewport(process.env.E2E_VIEWPORT) ?? { width: 1600, height: 1000 },

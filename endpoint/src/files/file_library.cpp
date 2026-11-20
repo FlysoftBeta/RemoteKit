@@ -53,7 +53,7 @@ constexpr std::uint64_t kStagingBytes = 512 * kMiB;
 constexpr std::uint64_t kDraftBytes = 512 * kMiB;
 constexpr std::uint64_t kJpegDerivativeBytes = 24 * kMiB;
 constexpr std::uint64_t kPngDerivativeBytes = 64 * kMiB;
-constexpr std::size_t kAssets = 8192;
+constexpr std::size_t kAssets = kLibraryAssetLimit;
 constexpr std::size_t kDrafts = 1024;
 constexpr std::size_t kActiveDrafts = 32;
 constexpr std::size_t kSelections = 65536;
@@ -350,8 +350,6 @@ Result<void> FileLibrary::Initialize() {
       return Error{ErrorCode::kUnavailable, "unsafe_library_root"};
   }
   RK_ASSIGN_OR_RETURN(assets, store_.Load(LibraryTable::kAssets));
-  if (assets.size() > kAssets)
-    return CorruptState("library asset limit");
   for (const auto& [id, value] : assets) {
     entries_.emplace(
         id, Entry{Asset{id,

@@ -8,6 +8,7 @@
 #include "persistence/durable_json.hpp"
 #include "persistence/checkpoint.hpp"
 #include "persistence/session_db.hpp"
+#include "persistence/session_migrations.hpp"
 #include "util/file_io.hpp"
 #include "rtc/candidate_address.hpp"
 #include "platform/process.hpp"
@@ -441,6 +442,62 @@ void EventReplayPressure() {
       "refused events replay from durable stream");
   Check(bool(hooks.acknowledge(stream, 3)), "replayed prefix can be acknowledged");
 }
+void StoppedVersion5Read() {
+  TemporaryDirectory directory;
+  const auto options = RuntimeOptions::FromConfig(TestConfig(), directory.path, "dev", "test");
+  Check(bool(options), "stopped upgrade options");
+  const auto session_id = std::string(32, 'a');
+  const auto session_directory = options.value().data / "sessions" / session_id;
+  SessionDb database(session_directory);
+  Check(bool(database.Open()), "stopped upgrade database");
+  Check(bool(database.Events().Append("view.closed", {{"viewId", "1"}, {"reason", "script"}},
+                                      "event-1", "browser")),
+        "stopped upgrade event");
+  Check(bool(database.Events().State()) && bool(database.Close()),
+        "close stopped upgrade database");
+  {
+    sqlite::Database raw;
+    Check(bool(raw.Open(session_directory / "session.db")), "open raw database");
+    Check(bool(raw.Execute("ALTER TABLE views ADD COLUMN position INTEGER NOT NULL DEFAULT 0")),
+          "add v5 position column");
+    {
+      auto insert = raw.Prepare("INSERT INTO views VALUES(?,?,0)");
+      Check(bool(insert) && bool(insert.value().Bind(1, std::string("1"))) &&
+                bool(insert.value().Bind(2, TestView().dump())) && bool(insert.value().Step()) &&
+                bool(raw.Execute("PRAGMA user_version=5")),
+            "downgrade to v5");
+    }
+    Check(bool(raw.Close()), "close raw database");
+  }
+  Check(bool(Checkpoints::WriteCopy(session_directory, {{"version", 1},
+                                                        {"sessionId", session_id},
+                                                        {"placementEpoch", uint64_t(1)},
+                                                        {"base", nullptr},
+                                                        {"state", "dirty"},
+                                                        {"stoppedCleanly", true},
+                                                        {"changesAt", 0},
+                                                        {"lastCommit", nullptr}})),
+        "v5 database belongs to a stopped copy");
+  EventPressureLink link;
+  media::Sdk sdk;
+  objects::ObjectService objects(options.value().data, link, {}, "test", "dev");
+  media::FrameAdmission admission;
+  const auto execution = std::make_shared<SessionExecution>(
+      sdk, options.value(), link, objects, admission,
+      Json{{"tenantId", "tenant"}, {"sessionId", session_id}, {"placementEpoch", uint64_t(1)}},
+      "endpoint");
+  execution->Activate("connection", 7);
+  execution->Hooks().maintain();
+  Check(link.events.size() == 1 && link.events.back().at("seq") == "1",
+        "a stopped v5 Session is read after upgrade");
+  sqlite::Database upgraded;
+  Check(bool(upgraded.OpenReadOnly(session_directory / "session.db", false)),
+        "reopen upgraded copy");
+  auto version = upgraded.Prepare("PRAGMA user_version");
+  Check(bool(version) && bool(version.value().Step()) &&
+            version.value().Int64(0) == kSessionDbVersion,
+        "working copy is upgraded to the current schema");
+}
 }  // namespace
 int main(int argc, char** argv) {
   if (argc >= 4 && std::string_view(argv[1]) == "--spawn-job-child") {
@@ -501,6 +558,7 @@ int main(int argc, char** argv) {
     WorkerQueueBoundary();
     WorkerBusyReply();
     EventReplayPressure();
+    StoppedVersion5Read();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

@@ -273,6 +273,32 @@ void Documents(const fs::path& root) {
   }
 }
 
+void AssetLimitOpen(const fs::path& root) {
+  Control control;
+  remotekit::objects::ObjectService objects(root / "node", control, {}, "limit", "dev");
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  LibraryFixture first(root / "session", objects, "tenant");
+  Take(first.Initialize());
+  const auto count = remotekit::kLibraryAssetLimit + 1;
+  {
+    remotekit::sqlite::Database raw;
+    Take(raw.Open(root / "session" / "session.db"));
+    const auto sql =
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<" +
+        std::to_string(count) +
+        ") INSERT INTO library_assets SELECT printf('%064x',i),7,NULL,NULL,NULL FROM n";
+    Take(raw.Execute(sql.c_str()));
+    Take(raw.Close());
+  }
+  LibraryFixture over(root / "session", objects, "tenant");
+  Take(over.Initialize());
+  CHECK(Take(over.Describe(std::string(63, '0') + "1")).size == 7);
+  const remotekit::Json extra{{"assetId", std::string(64, 'f')}, {"size", 1}};
+  const auto rejected =
+      over.Database().Library().Save(remotekit::LibraryTable::kAssets, std::string(64, 'f'), extra);
+  CHECK(!rejected && rejected.error().code == remotekit::ErrorCode::kLimitExceeded);
+}
 void Puts(const fs::path& root) {
   using namespace remotekit;
   Control control;

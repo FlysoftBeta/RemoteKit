@@ -517,8 +517,6 @@ void UpgradeGeometry(const fs::path& path) {
   legacy["occludedBottom"] = 200;
   legacy["occlusionRevision"] = "99";
   legacy["adopt"] = {{"browserIncarnation", "browser"}, {"provisionalId", "provisional"}};
-  legacy["width"] = nullptr;
-  legacy["device"] = "discarded geometry";
   auto second = TestView("2");
   second["signIn"] = "changyan";
   Take(db.Execute("ALTER TABLE views ADD COLUMN position INTEGER NOT NULL DEFAULT 0"));
@@ -544,6 +542,20 @@ void UpgradeGeometry(const fs::path& path) {
   Check(!MigrateSessionDb(db, path, "dev") && Scalar(db, "PRAGMA user_version") == 5,
         "migration rejects unknown durable fields and rolls back");
   Take(db.Execute("UPDATE views SET config=json_remove(config,'$.unknown')"));
+  for (const char* corrupt :
+       {"UPDATE views SET config=json_remove(config,'$.width')",
+        "UPDATE views SET config=json_set(config,'$.device','discarded geometry')",
+        "UPDATE views SET config=json_set(config,'$.occludedBottom',9999)"}) {
+    Take(db.Execute("CREATE TEMP TABLE kept AS SELECT view_id,config FROM views"));
+    Take(db.Execute(corrupt));
+    const auto rejected = MigrateSessionDb(db, path, "dev");
+    Check(!rejected && rejected.error().reason == ErrorReason::kCorruptRecord &&
+              Scalar(db, "PRAGMA user_version") == 5,
+          "corrupt v5 view is rejected as corrupt before projection");
+    Take(db.Execute(
+        "UPDATE views SET config=(SELECT config FROM kept WHERE kept.view_id=views.view_id)"));
+    Take(db.Execute("DROP TABLE kept"));
+  }
   Take(MigrateSessionDb(db, path, "dev"));
   {
     auto query = Take(db.Prepare("SELECT config FROM views WHERE view_id='1'"));
@@ -564,6 +576,59 @@ void UpgradeGeometry(const fs::path& path) {
   Take(db.Close());
   SessionDb invalid(path);
   Check(!invalid.Open(), "startup rejects a current record containing transient geometry");
+}
+std::string AssetId(unsigned number) {
+  char buffer[65];
+  std::snprintf(buffer, sizeof(buffer), "%064x", number);
+  return buffer;
+}
+void FillAssets(sqlite::Database& db, unsigned count) {
+  const auto sql = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<" +
+                   std::to_string(count) +
+                   ") INSERT INTO library_assets SELECT printf('%064x',i),1,NULL,NULL,NULL FROM n";
+  Take(db.Execute(sql.c_str()));
+}
+void AssetLimit(const fs::path& path) {
+  {
+    SessionDb initial(path);
+    Take(initial.Open());
+    Take(initial.Close());
+  }
+  sqlite::Database inject;
+  Take(inject.Open(path / "session.db"));
+  FillAssets(inject, kLibraryAssetLimit - 1);
+  SessionDb store(path);
+  Take(store.Open());
+  const auto asset = [](unsigned number) {
+    return Json{{"assetId", AssetId(number)}, {"size", 2}};
+  };
+  const auto last = kLibraryAssetLimit;
+  Take(store.Library().Save(LibraryTable::kAssets, AssetId(last), asset(last)));
+  Check(Scalar(inject, "SELECT count(*) FROM library_assets") == last, "write reaches the cap");
+  const auto rejected =
+      store.Library().Save(LibraryTable::kAssets, AssetId(last + 1), asset(last + 1));
+  Check(!rejected && rejected.error().code == ErrorCode::kLimitExceeded,
+        "write beyond the cap reports limit_exceeded");
+  Check(Scalar(inject, "SELECT count(*) FROM library_assets") == last &&
+            Scalar(inject, ("SELECT count(*) FROM library_assets WHERE asset_id='" +
+                            AssetId(last + 1) + "'")
+                               .c_str()) == 0,
+        "rejected write leaves state unchanged");
+  Take(store.Library().Save(LibraryTable::kAssets, AssetId(1), asset(1)));
+  Take(store.Library().Erase(LibraryTable::kAssets, AssetId(2)));
+  Take(store.Library().Save(LibraryTable::kAssets, AssetId(last + 1), asset(last + 1)));
+  Take(store.Close());
+  Take(inject.Execute(
+      ("INSERT INTO library_assets VALUES('" + AssetId(last + 2) + "',1,NULL,NULL,NULL)").c_str()));
+  Take(inject.Close());
+  SessionDb over(path);
+  Take(over.Open());
+  Check(Take(over.Library().Load(LibraryTable::kAssets)).size() == last + 1,
+        "a store already over the cap stays readable");
+  const auto blocked =
+      over.Library().Save(LibraryTable::kAssets, AssetId(last + 3), asset(last + 3));
+  Check(!blocked && blocked.error().code == ErrorCode::kLimitExceeded,
+        "an over-cap store rejects new assets");
 }
 void PresentationOrderIsVolatile(const fs::path& path) {
   SessionDb store(path);
@@ -835,6 +900,7 @@ int wmain(int argc, wchar_t** argv) {
     DerivativeFailures(root / "cache-failures", "selection-transcode", 1024);
     UpgradeGeometry(root / "upgrade-geometry");
     GeometryIsVolatile(root / "geometry");
+    AssetLimit(root / "asset-limit");
     PresentationOrderIsVolatile(root / "order");
     Transactions(root / "transactions");
     EventTransactions(root / "events");

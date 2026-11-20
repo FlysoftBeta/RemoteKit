@@ -96,14 +96,16 @@ export type WireError = {
   capacity?: ErrorCapacity;
   retryAfterMs?: number;
   errorId?: string;
-  detail?: 'pending_close' | 'asset_unreadable' | 'selection_unknown' | 'entry_missing';
+  detail?: 'pending_close' | 'asset_unreadable' | 'selection_unknown' | 'entry_missing' | 'stale_generation';
 };
 export const PENDING_CLOSE_DETAIL = 'pending_close';
+export const STALE_GENERATION_DETAIL = 'stale_generation';
 export const errorDetails = [
   'pending_close',
   'asset_unreadable',
   'selection_unknown',
   'entry_missing',
+  'stale_generation',
 ] as const;
 function wireDetail(value: unknown): WireError['detail'] {
   return errorDetails.includes(value as NonNullable<WireError['detail']>)

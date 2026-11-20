@@ -60,7 +60,13 @@ export const errorCode = literal(
 export const wireError = object(
   { code: errorCode, message: s() },
   {
-    detail: literal('pending_close', 'asset_unreadable', 'selection_unknown', 'entry_missing'),
+    detail: literal(
+      'pending_close',
+      'asset_unreadable',
+      'selection_unknown',
+      'entry_missing',
+      'stale_generation',
+    ),
     capacity: literal(
       'storage',
       'basket',

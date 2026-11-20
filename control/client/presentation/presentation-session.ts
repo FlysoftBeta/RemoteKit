@@ -9,6 +9,7 @@ import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneS
 import { type Layout, type Surface, type VideoPresentation } from './types';
 import { VideoPlane } from './video-plane';
 import { barrierMatchesLayout, presentationBarrier, type PresentationBarrier } from './video-presentation';
+import { surfaceMatchesViewport } from './viewport-transition';
 
 import { RetryUnit } from '../../shared/retry-unit';
 import { RemoteKitError, toRemoteKitError, type ErrorCode } from '../../shared/errors';
@@ -555,9 +556,16 @@ export class PresentationSession {
     const plane = new VideoPlane(this.videoTrack, renderer, {
       resized: () => {
         if (!current()) return;
-        this.hideVideoPlane(renderer);
+        const bounds = renderer.canvas.getBoundingClientRect();
+        const scale = uiScale();
+        if (
+          !surfaceMatchesViewport(renderer.view, {
+            width: bounds.width / scale,
+            height: bounds.height / scale,
+          })
+        )
+          this.hideVideoPlane(renderer);
         this.positionVideoPlane(renderer);
-        this.requestPresentationRefresh();
         this.refreshWaitingVideoPlanes();
       },
       frame: (metadata) => {

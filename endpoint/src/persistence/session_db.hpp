@@ -70,6 +70,8 @@ class DownloadStore {
   SessionDb& db_;
 };
 enum class LibraryTable { kAssets, kDrafts, kSelections };
+// Writes beyond this many asset rows are rejected; a larger existing table stays readable.
+inline constexpr std::size_t kLibraryAssetLimit = 8192;
 class LibraryStore {
  public:
   explicit LibraryStore(SessionDb& db) : db_(db) {}

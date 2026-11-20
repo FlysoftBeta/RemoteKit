@@ -115,10 +115,11 @@ test('divider previews keep intermediate dimensions local and commit after relea
   owner.measure(800, 600, 1, true);
   owner.preview(true);
   owner.setGeometry('window', 400, 512);
+  owner.setGeometry('window', 500, 512);
   t.mock.timers.tick(200);
   assert.equal(sent.length, 1);
   owner.preview(false);
-  assert.equal(sent.length, 1);
+  assert.equal(sent.length, 2);
   owner.setGeometry('window', 500, 512);
   owner.flush();
   assert.equal(sent.length, 2);

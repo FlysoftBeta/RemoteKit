@@ -49,10 +49,10 @@ export class ViewportRequests extends Store<RemoteKitError | undefined> {
     this.schedule();
   }
   setGeometry = (id: string, width: number, height: number) => {
-    if (this.previewing) return;
     const previous = this.geometry.get(id);
     if (previous?.width === width && previous.height === height) return;
     this.geometry.set(id, { width, height });
+    if (this.previewing) return;
     this.schedule();
   };
   preview = (active: boolean) => {

@@ -465,6 +465,16 @@ Result<std::map<std::string, Json>> LibraryStore::Load(LibraryTable table) {
 }
 Result<void> SessionDb::PutLibrary(LibraryTable table, const std::string& id, const Json& value) {
   RK_RETURN_IF_ERROR(library_records::Validate(table, id, value));
+  if (table == LibraryTable::kAssets) {
+    RK_ASSIGN_OR_RETURN(
+        present, db_.Prepare("SELECT COUNT(*), COALESCE(SUM(asset_id=?1),0) FROM library_assets"));
+    RK_RETURN_IF_ERROR(present.Bind(1, id));
+    RK_ASSIGN_OR_RETURN(row, present.Step());
+    if (!row)
+      return CorruptState("library asset count");
+    if (!present.Int64(1) && present.Int64(0) >= static_cast<int64_t>(kLibraryAssetLimit))
+      return Error{ErrorCode::kLimitExceeded, "library_asset_limit"};
+  }
   const char* query = table == LibraryTable::kAssets
                           ? "INSERT OR REPLACE INTO library_assets VALUES(?,?,?,?,?)"
                       : table == LibraryTable::kDrafts

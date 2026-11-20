@@ -72,6 +72,8 @@ Control  按已认证的 Viewer 租约与 Control 授权代次准入；每 Tenan
          → 发布新的期望状态，Session 收敛
 ```
 
+**收据换代**：Control 对旧 `operationGeneration` 的提交与状态查询都回 `conflict` + detail `stale_generation`（换代时旧收据已删除，状态查询无法再回答），并推送新快照。Viewer 不重试这次提交，等到代次不同的第一个权威快照后决定：目标已达成即完成；从未发出过、目标仍在的，用新 ID 与当前代次重新提交，等待原 ID 的后续操作改挂到新 ID；可能已执行而目标未达成的，结算为 `outcome_unknown`；从未执行但引用对象已不存在的，按 `not_found` 失败。这一等待由快照推送驱动，没有定时器，作用域重置时取消。
+
 所有产品操作（包括设置与窗口视图状态）走这一条路径，没有旁路。一条 WS 连接是有序的，相互依赖的操作保持先后；远端输入仍然靠焦点、布局与输出屏障与之对齐。需要 Browser 执行的操作（`tab.navigate`、`tab.command`、页面回复、退出页面全屏）照常先提交产品意图，Browser 不可用时以 `unavailable` + 放置 reason 失败，显示在对应窗口上；关闭含有远端标签的窗口时 Session 不可达，就只在产品状态里关闭，Session 下次运行时按期望的视图列表清理，此时没有 beforeunload。
 
 收据状态：`accepted → applying → committed | failed | unknown`。`failed` 带结构化 `error:{code, message}`，调用方按 code 处理（见[错误模型](errors.md)）；generation 已轮换的旧收据是 `failed` + `conflict`。

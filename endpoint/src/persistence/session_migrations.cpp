@@ -40,6 +40,23 @@ Result<void> UpgradeToVersion5(sqlite::Database& db) {
   RK_RETURN_IF_ERROR(derivative_records::Trim(db));
   return db.Execute("DROP TABLE library_derivatives");
 }
+// The v5 view record: topology plus geometry that v6 no longer persists.
+void DecodeViewV5(const Json& value) {
+  using namespace persisted;
+  Keys(value,
+       {"viewId", "presence", "url", "width", "height", "visible", "device", "occludedBottom",
+        "occlusionRevision"},
+       {"signIn", "adopt"});
+  Unsigned(value.at("width"), 1, 8192);
+  const auto height = Unsigned(value.at("height"), 1, 8192);
+  Boolean(value.at("visible"));
+  Unsigned(value.at("occludedBottom"), 0, height);
+  session_documents::Counter(value.at("occlusionRevision"));
+  const auto& device = value.at("device");
+  Keys(device, {"mode", "deviceScaleFactor"});
+  Enum(device.at("mode"), {"desktop"});
+  Number(device.at("deviceScaleFactor"), 0.01, 16);
+}
 Result<void> UpgradeToVersion6(sqlite::Database& db) {
   RK_ASSIGN_OR_RETURN(query, db.Prepare("SELECT view_id,config FROM views"));
   std::vector<std::pair<std::string, Json>> views;
@@ -47,7 +64,16 @@ Result<void> UpgradeToVersion6(sqlite::Database& db) {
     RK_ASSIGN_OR_RETURN(row, query.Step());
     if (!row)
       break;
-    auto config = session_documents::ViewTopology(Json::parse(query.Text(1)));
+    auto v5 = Json::parse(query.Text(1), nullptr, false);
+    if (v5.is_discarded())
+      return CorruptRecord("invalid views.config");
+    Json config;
+    try {
+      DecodeViewV5(v5);
+      config = session_documents::ViewTopology(std::move(v5));
+    } catch (const std::exception& error) {
+      return CorruptRecord(std::string("v5 views.config: ") + error.what());
+    }
     if (config.at("viewId") != query.Text(0))
       return CorruptRecord("mismatched views.view_id");
     views.emplace_back(query.Text(0), std::move(config));

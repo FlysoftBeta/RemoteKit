@@ -85,6 +85,7 @@ function environment(t: TestContext) {
     }
   }
   const videos: Element[] = [],
+    resizes: ResizeObserverCallback[] = [],
     rafs = new Map<number, FrameRequestCallback>(),
     visibility = new Set<() => void>();
   let serial = 0;
@@ -102,6 +103,9 @@ function environment(t: TestContext) {
   const globals = {
     document,
     ResizeObserver: class {
+      constructor(callback: ResizeObserverCallback) {
+        resizes.push(callback);
+      }
       observe() {}
       disconnect() {}
     },
@@ -184,9 +188,25 @@ function environment(t: TestContext) {
     raf,
     authorize,
     visibility,
+    resizes,
     remove,
   };
 }
+test('matching resize observations retain the presented frame and input authority', (t) => {
+  const s = environment(t);
+  s.canvases[0].getBoundingClientRect = () => ({ left: 10, top: 20, width: 640, height: 480 });
+  s.authorize();
+  const frame = s.presentation.getLastPresentation('1');
+  assert.ok(frame);
+  s.sent.length = 0;
+  s.resizes[0]([], {} as ResizeObserver);
+  assert.equal(s.presentation.getLastPresentation('1'), frame);
+  assert.ok(s.presentation.canInput('1'));
+  assert.deepEqual(s.sent, []);
+  s.canvases[0].getBoundingClientRect = () => ({ left: 10, top: 20, width: 600, height: 480 });
+  s.resizes[0]([], {} as ResizeObserver);
+  assert.equal(s.presentation.canInput('1'), null);
+});
 test('video crop scales only atlas ROI against actual client bounds, including nonuniform resize', () => {
   assert.deepEqual(videoPlaneGeometry(second, layout, { width: 320, height: 180 }), {
     width: 648,

@@ -3,6 +3,7 @@ import { RetryUnit } from '../../shared/retry-unit';
 import {
   PENDING_CLOSE_DETAIL,
   RemoteKitError,
+  STALE_GENERATION_DETAIL,
   parseWireError,
   toRemoteKitError,
   wireError,
@@ -19,6 +20,7 @@ import {
   createdIds,
   targetIds,
   operationId,
+  operationStanding,
   projectOperations,
   snapshotNewer,
   type PendingOperation,
@@ -45,6 +47,11 @@ export interface OperationsPort {
   status(operation: Pick<ProductOperation, 'operationId' | 'operationGeneration'>): Promise<OperationReceipt>;
 }
 
+function isStaleGeneration(receipt: OperationReceipt) {
+  const failure = receipt.status === 'failed' ? parseWireError(receipt.error) : undefined;
+  return failure?.code === 'conflict' && failure.detail === STALE_GENERATION_DETAIL;
+}
+
 export class OperationsStore extends Store<OperationsSnapshot> {
   private readonly requests = new RequestTracker<OperationReceipt>();
   private timer?: ReturnType<typeof setTimeout>;
@@ -59,6 +66,13 @@ export class OperationsStore extends Store<OperationsSnapshot> {
   private readonly queryUnits = new Map<string, RetryUnit>();
   private readonly dependencyUnits = new Map<string, RetryUnit>();
   private readonly acknowledgments = new Map<string, Acknowledgment>();
+  /** Operations whose submission may have executed before their receipt generation went stale. */
+  private readonly maybeExecuted = new Set<string>();
+  private readonly generationWaiters = new Set<{
+    generation: string;
+    resolve(state: ProductState): void;
+    reject(error: RemoteKitError): void;
+  }>();
   private unit(units: Map<string, RetryUnit>, id: string) {
     let unit = units.get(id);
     if (!unit) {
@@ -128,6 +142,11 @@ export class OperationsStore extends Store<OperationsSnapshot> {
       })
       .filter((entry) => this.retain(entry, state));
     this.update(pending, state, error);
+    for (const waiter of [...this.generationWaiters])
+      if (state.operationGeneration && state.operationGeneration !== waiter.generation) {
+        this.generationWaiters.delete(waiter);
+        waiter.resolve(state);
+      }
   }
 
   private retain(entry: OperationIntent, state: ProductState | null) {
@@ -257,6 +276,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
           } else receipt = { ...operation, status: 'failed', error: wireError(failure) };
         }
         if (scope !== this.scope) throw new RemoteKitError('locked', '授权已改变');
+        if (receipt.status !== 'failed') this.maybeExecuted.add(operation.operationId);
         if (receipt.status === 'unknown' && !receipt.resolved) {
           this.receipt(receipt);
           const failure = parseWireError(receipt.error);
@@ -271,6 +291,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
           receipt = await this.query(operation);
         }
         const failure = parseWireError(receipt.error);
+        if (isStaleGeneration(receipt)) return await this.supersede(operation, command);
         if (
           receipt.status === 'failed' &&
           failure?.code === 'conflict' &&
@@ -313,6 +334,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
   private retryReceipt(entry: OperationIntent, receipt: OperationReceipt) {
     if (receipt.error?.code === 'conflict' && receipt.error.detail === PENDING_CLOSE_DETAIL) return false;
     if (this.executing.has(entry.operationId) || receipt.status !== 'failed') return false;
+    if (isStaleGeneration(receipt)) return false;
     const delay = this.unit(this.submissionUnits, entry.operationId).fail(receipt.error).delay;
     const command = this.commands.get(entry.operationId);
     if (delay === undefined || !command) return false;
@@ -322,6 +344,78 @@ export class OperationsStore extends Store<OperationsSnapshot> {
       if (errorHandling(failure.code) !== 'canceled') this.publish({ ...this.getSnapshot(), error: failure });
     });
     return true;
+  }
+
+  private supersedeInBackground(entry: OperationIntent, command: ProductAction) {
+    if (this.executing.has(entry.operationId)) return;
+    this.executing.add(entry.operationId);
+    void this.supersede(entry, command)
+      .catch((error: unknown) => {
+        const failure = toRemoteKitError(error);
+        diagnostics.record('product-retry', failure);
+        if (errorHandling(failure.code) !== 'canceled')
+          this.publish({ ...this.getSnapshot(), error: failure });
+      })
+      .finally(() => {
+        this.executing.delete(entry.operationId);
+        this.cleanCommands();
+      });
+  }
+
+  /**
+   * A submission carrying a retired generation can never be accepted. It ends here and the
+   * operation is judged against the first state of the new generation: a reached target completes,
+   * one that provably never executed is reissued under a new identity, anything else fails.
+   */
+  private async supersede(operation: OperationIntent, command: ProductAction): Promise<OperationReceipt> {
+    const scope = this.scope;
+    const authoritative = this.getSnapshot().authoritative;
+    const state =
+      authoritative?.operationGeneration &&
+      authoritative.operationGeneration !== operation.operationGeneration
+        ? authoritative
+        : await new Promise<ProductState>((resolve, reject) => {
+            this.generationWaiters.add({ generation: operation.operationGeneration, resolve, reject });
+          });
+    if (scope !== this.scope) throw new RemoteKitError('canceled', '');
+    const standing = operationStanding(state, command);
+    if (standing === 'reached') {
+      const receipt: OperationReceipt = {
+        ...operation,
+        status: 'committed',
+        revision: state.workspace.revision,
+      };
+      this.receipt(receipt);
+      return receipt;
+    }
+    if (this.maybeExecuted.has(operation.operationId)) {
+      const error = new RemoteKitError('outcome_unknown', '操作结果无法确认，请核对当前工作区');
+      const receipt: OperationReceipt = {
+        ...operation,
+        status: 'unknown',
+        resolved: true,
+        error: wireError(error),
+      };
+      this.receipt(receipt);
+      return receipt;
+    }
+    if (standing === 'void')
+      throw operationFailure(new RemoteKitError('not_found', '操作目标已不存在'), command.type, command);
+    const next: OperationIntent = {
+      operationId: operationId(),
+      operationGeneration: state.operationGeneration!,
+      action: operation.action,
+      phase: 'unsent',
+    };
+    const acknowledgment = this.acknowledgments.get(operation.operationId) ?? {};
+    this.acknowledgments.set(next.operationId, acknowledgment);
+    this.acknowledgments.delete(operation.operationId);
+    this.commands.delete(operation.operationId);
+    this.commands.set(next.operationId, command);
+    this.update(
+      this.getSnapshot().pending.map((entry) => (entry.operationId === operation.operationId ? next : entry)),
+    );
+    return this.execute(next, command);
   }
 
   private async wait(delay: number, scope: number) {
@@ -349,7 +443,10 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     this.queryUnits.clear();
     this.dependencyUnits.clear();
     this.acknowledgments.clear();
+    this.maybeExecuted.clear();
     this.executing.clear();
+    for (const waiter of this.generationWaiters) waiter.reject(new RemoteKitError('canceled', ''));
+    this.generationWaiters.clear();
     this.publish({ authoritative: null, state: null, pending: [] });
   }
 
@@ -411,6 +508,8 @@ export class OperationsStore extends Store<OperationsSnapshot> {
       }
     for (const id of this.acknowledgments.keys())
       if (!pending.has(id) && !this.executing.has(id)) this.acknowledgments.delete(id);
+    for (const id of this.maybeExecuted)
+      if (!pending.has(id) && !this.executing.has(id)) this.maybeExecuted.delete(id);
   }
 
   private async query({
@@ -471,7 +570,9 @@ export class OperationsStore extends Store<OperationsSnapshot> {
                 continue;
               }
               const { entry, receipt } = result.value;
-              if (!this.retryReceipt(entry, receipt)) this.receipt(receipt);
+              const command = this.commands.get(entry.operationId);
+              if (isStaleGeneration(receipt) && command) this.supersedeInBackground(entry, command);
+              else if (!this.retryReceipt(entry, receipt)) this.receipt(receipt);
             }
         } finally {
           if (this.pollingScope === scope) this.pollingScope = undefined;

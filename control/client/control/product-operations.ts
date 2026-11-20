@@ -19,6 +19,7 @@ import {
 } from '../../shared/product';
 import { randomUuid } from '../../shared/random-uuid';
 import type { RecordedAction } from '../../shared/recorded-action';
+import { canonicalJson } from '../util/canonical-json';
 /** Product actions return execution receipts, never an authoritative workspace. */
 export type ProductActionHandler = (action: ProductAction) => Promise<OperationReceipt>;
 export function requireAcceptedReceipt(receipt: OperationReceipt): OperationReceipt {
@@ -309,3 +310,79 @@ export function snapshotNewer(next: ProductState, previous: ProductState | null)
 }
 
 export const operationId = randomUuid;
+
+const projectedTypes = new Set<string>([
+  'window.open',
+  'window.focus',
+  'window.place',
+  'space.activate',
+  'space.layout',
+  'window.state',
+  'settings.update',
+  'favorite.add',
+  'favorite.remove',
+  'app.update',
+  'app.install',
+  'site.set',
+  'tab.create',
+  'tab.activate',
+  'tab.move',
+  'tab.close',
+  'window.close',
+  'space.close',
+]);
+const removalTypes = new Set<string>(['favorite.remove', 'tab.close', 'window.close', 'space.close']);
+
+/** Entities an action refers to but does not create, as `kind:id`. */
+function referencedEntities(action: ProductAction): string[] {
+  const fields = action as unknown as Record<string, unknown>;
+  const created = new Set<string>(creationIdFields(action));
+  const refs: string[] = [];
+  const add = (kind: string, value: unknown) => {
+    if (typeof value === 'string') refs.push(`${kind}:${value}`);
+  };
+  if (!created.has('windowId')) add('window', fields.windowId);
+  if (!created.has('tabId')) add('tab', fields.tabId);
+  if (!created.has('spaceId')) add('space', fields.spaceId);
+  if (Array.isArray(fields.spaceIds)) for (const id of fields.spaceIds) add('space', id);
+  if (action.type === 'favorite.remove') add('favorite', action.id);
+  if (typeof fields.appId === 'string' && fields.appId.startsWith('web:') && !created.has('appId'))
+    add('app', fields.appId.slice(4));
+  const placement = fields.placement as WindowPlacement | undefined;
+  if (placement?.mode === 'split') add('window', placement.besideWindowId);
+  if (placement?.mode === 'replace') add('window', placement.windowId);
+  return refs;
+}
+
+/**
+ * Judges an operation that never executed against fresh state: whether its target is already
+ * reached, whether the intent still has everything it refers to, or neither.
+ */
+export function operationStanding(
+  state: ProductState,
+  action: ProductAction,
+): 'reached' | 'applicable' | 'void' {
+  const w = state.workspace;
+  const present = new Set<string>([
+    ...w.windows.map((item) => `window:${item.id}`),
+    ...w.tabs.map((item) => `tab:${item.id}`),
+    ...w.spaces.map((item) => `space:${item.id}`),
+    ...w.apps.map((item) => `app:${item.id}`),
+    ...w.favorites.map((item) => `favorite:${item.id}`),
+  ]);
+  const refs = referencedEntities(action);
+  if (removalTypes.has(action.type)) return refs.every((ref) => !present.has(ref)) ? 'reached' : 'applicable';
+  const referencesPresent = refs.every((ref) => present.has(ref));
+  const fields = action as unknown as Record<string, unknown>;
+  const created = creationIdFields(action).map((field) => fields[field]);
+  if (created.length) {
+    const exists = created.some((id) =>
+      ['window', 'tab', 'space', 'app', 'favorite'].some((kind) => present.has(`${kind}:${id}`)),
+    );
+    return exists ? 'reached' : referencesPresent ? 'applicable' : 'void';
+  }
+  if (!referencesPresent) return 'void';
+  if (!projectedTypes.has(action.type)) return 'applicable';
+  const projected = projectOperations(state, [{ operationId: '', operationGeneration: '', action }]);
+  return canonicalJson(projected?.workspace) === canonicalJson(w) ? 'reached' : 'applicable';
+}

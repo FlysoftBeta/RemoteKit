@@ -1,7 +1,7 @@
 import { requireBrowser } from './browser-availability';
 import { operationPayload } from '../persistence/operations';
 import { reportError } from '../log';
-import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
+import { RemoteKitError, STALE_GENERATION_DETAIL, toRemoteKitError, wireError } from '../../shared/errors';
 import { retryDelay } from '../../shared/error-policy';
 import { recordedAction } from '../../shared/recorded-action';
 import type { ViewerAuthority } from '../viewers/viewer-hub';
@@ -43,7 +43,11 @@ export class OperationPipeline {
       return {
         ...operation,
         status: 'failed',
-        error: { code: 'conflict', message: '操作收据代次已过期，请核对当前工作区' },
+        error: {
+          code: 'conflict',
+          message: '操作收据代次已过期，请核对当前工作区',
+          detail: STALE_GENERATION_DETAIL,
+        },
       };
     return (
       this.context.store.operations.operation(tenant, operation.operationId)?.receipt ?? {
@@ -71,13 +75,15 @@ export class OperationPipeline {
         throw new RemoteKitError('invalid_request', '无效产品操作');
       if (JSON.stringify(operation.action).length > 32768)
         throw new RemoteKitError('limit_exceeded', '产品操作超出大小限制');
-      if (operation.operationGeneration !== this.context.store.operations.operationGeneration(tenant))
+      if (operation.operationGeneration !== this.context.store.operations.operationGeneration(tenant)) {
+        this.services.viewers.push(tenant);
         return {
           operationId: operation.operationId,
           operationGeneration: operation.operationGeneration,
           status: 'failed',
-          error: { code: 'conflict', message: '操作收据代次已过期' },
+          error: { code: 'conflict', message: '操作收据代次已过期', detail: STALE_GENERATION_DETAIL },
         };
+      }
       const recorded = recordedAction(operation.action);
       let payload: string;
       try {
@@ -120,7 +126,11 @@ export class OperationPipeline {
         return {
           ...receipt,
           status: 'failed',
-          error: { code: 'conflict', message: '操作收据已轮换，请核对工作区' },
+          error: {
+            code: 'conflict',
+            message: '操作收据已轮换，请核对工作区',
+            detail: STALE_GENERATION_DETAIL,
+          },
         };
       }
       settle(receipt, { status: 'applying' });

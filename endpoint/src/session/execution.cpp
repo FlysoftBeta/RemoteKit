@@ -312,6 +312,13 @@ Result<Json> SessionExecution::EventState() try {
     if (copy.is_null() || !fs::exists(directory_ / "session.db"))
       return Json{{"streamId", nullptr}, {"ackedThrough", "0"}, {"lastSeq", "0"}, {"pending", 0}};
     if (!reader_) {
+      // The working copy may predate this build; upgrade it before the first read. Published
+      // checkpoints are immutable and never opened here.
+      {
+        SessionDb upgrade(directory_, options_.build_id);
+        RK_RETURN_IF_ERROR(upgrade.Open());
+        RK_RETURN_IF_ERROR(upgrade.Close());
+      }
       auto reader = std::make_unique<SessionDb>(directory_);
       RK_RETURN_IF_ERROR(
           reader->OpenReadOnly(!copy.is_null() && copy.at("stoppedCleanly").get<bool>()));

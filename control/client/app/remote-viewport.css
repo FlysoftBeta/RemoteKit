@@ -17,7 +17,7 @@
   visibility: hidden;
 }
 .remote-viewport.resize-waiting .remote-video-plane {
-  visibility: hidden !important;
+  opacity: 0 !important;
 }
 .remote-viewport canvas.remote-resize-freeze {
   pointer-events: none;

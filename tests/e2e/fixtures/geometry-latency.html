@@ -1,0 +1,56 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Geometry fixture</title>
+<style>
+  html,
+  body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: rgb(40, 90, 160);
+  }
+  #footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 12px;
+    background: rgb(220, 20, 180);
+  }
+  #right {
+    position: fixed;
+    top: 0;
+    bottom: 12px;
+    right: 0;
+    width: 12px;
+    background: rgb(20, 220, 40);
+  }
+  #motion {
+    position: absolute;
+    top: 200px;
+    width: 40px;
+    height: 40px;
+    background: white;
+  }
+</style>
+<div id="footer"></div>
+<div id="right"></div>
+<div id="motion"></div>
+<script>
+  const report = (details) =>
+    fetch('/event', {
+      method: 'POST',
+      body: JSON.stringify({ path: location.pathname, width: innerWidth, height: innerHeight, ...details }),
+    });
+  addEventListener('resize', () => report({ type: 'resize' }));
+  addEventListener('pointerdown', (e) => report({ type: 'pointer', x: e.clientX, y: e.clientY }));
+  report({ type: 'ready' });
+  if (location.pathname === '/dynamic') {
+    function animate(t) {
+      motion.style.left = ((t / 3) % Math.max(1, innerWidth - 40)) + 'px';
+      requestAnimationFrame(animate);
+    }
+    requestAnimationFrame(animate);
+  }
+</script>
