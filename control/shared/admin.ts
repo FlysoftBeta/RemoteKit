@@ -45,10 +45,11 @@ export interface UnknownAdminNodeIdentity {
 }
 export type AdminNode = ConfiguredAdminNode | UnknownAdminNodeIdentity;
 export type AdminSessionState =
-  | { state: 'none' }
+  | { state: 'none'; boundNodeId: string | null }
   | {
       state: 'running' | 'stopped';
       nodeId: string;
+      boundNodeId: string | null;
       dataState: 'clean' | 'dirty';
       nodeOffline: boolean;
       checkpointAt: number | null;
@@ -127,6 +128,14 @@ export interface AdminAnnouncement {
 }
 type User = { username: string };
 type AnnouncementDraft = { title: string; body: string };
+/** Longest wait for a node to confirm a Session stop (and its commit). */
+export const sessionStopWaitMs = 180000;
+/** Admin methods that wait for a Session stop; the Viewer request must outlast that wait. */
+export const sessionStopAdminMethods: readonly string[] = [
+  'admin.stop',
+  'admin.transfer',
+  'admin.resetSession',
+];
 export interface AdminSocketMethods {
   'admin.overview': { params: Record<string, never>; result: AdminOverview };
   'admin.users': { params: Record<string, never>; result: AdminUser[] };
@@ -137,7 +146,7 @@ export interface AdminSocketMethods {
   'admin.setDisabled': { params: User & { disabled: boolean }; result: AdminUser[] };
   'admin.transferAdmin': { params: User; result: AdminUser[] };
   'admin.stop': { params: User; result: AdminUser[] };
-  'admin.transfer': { params: User & { nodeId?: string }; result: AdminUser[] };
+  'admin.transfer': { params: User & { nodeId?: string; bind: boolean }; result: AdminUser[] };
   'admin.resetSession': { params: User; result: AdminUser[] };
   'admin.deleteUser': { params: User; result: AdminUser[] };
   'admin.storage': { params: Record<string, never>; result: AdminStorage };

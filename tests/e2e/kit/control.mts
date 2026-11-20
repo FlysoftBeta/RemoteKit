@@ -99,7 +99,16 @@ process.on('message', (message: any) => {
       store.security.saveSecurity(viewer.user.id, record);
       return { model };
     }
-    if (message.method === 'stop') return control.userAdmin.stop(message.username);
+    if (message.method === 'stop') {
+      const user = store.accounts.byUsername(message.username)!;
+      await control.tenants.serial(user.tenant, async () => {
+        if (control.tenants.get(user.tenant).viewer)
+          throw new Error('Viewer must detach before fixture stop');
+        await gateway.stop(user.tenant, { force: true });
+        control.lifecycle.finishStop(user.tenant);
+      });
+      return control.userAdmin.list();
+    }
     if (message.method === 'pausePublications') {
       pausedPublication = {
         desired: (gateway as any).desiredSource,

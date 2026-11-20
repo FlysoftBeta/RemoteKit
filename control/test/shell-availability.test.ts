@@ -196,7 +196,7 @@ test('service peer admits files and face enroll, verify and presence without ope
   });
   const peer = await f.serviceOffer();
   assert.equal(f.gateway.placement.peek(f.tenant), undefined);
-  assert.equal(f.control.objects.locate(node, { tenantId: f.tenant, ids: [id] }).sources[id].length, 1);
+  assert.deepEqual(f.control.objects.locate(node, { tenantId: f.tenant, ids: [id] }).sources[id], []);
   await f.request('auth.face.begin', { purpose: 'enroll', currentPassword: 'password123' });
   f.endpoint.faceStatus = 'enrolled';
   await f.control.viewers.pollFaceAuth();

@@ -182,6 +182,12 @@ export class ViewerSecurity {
     viewer.peer = undefined;
   }
 
+  clearSecondFactors(tenant: string, viewer: ViewerSecurityState) {
+    this.clearChallenge(tenant, viewer);
+    this.store.security.clearSecondFactors(viewer.user.id);
+    this.changed(tenant, viewer, false);
+  }
+
   forgetServicePeer(tenant: string, viewer: ViewerSecurityState) {
     this.clearChallenge(tenant, viewer, false, false);
     this.capabilityRetries.get(viewer)?.cancel();

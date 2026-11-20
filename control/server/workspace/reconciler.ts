@@ -120,30 +120,36 @@ export class Reconciler {
     if (this.closed || this.context.closed) return;
     const runtimes = this.runtimesForNode(nodeId);
     for (const runtime of runtimes) {
-      if (runtime.viewer) this.services.security.forgetPeer(runtime.tenantId, runtime.viewer.security);
-      const generation = this.context.tenants.mediaGeneration(runtime.tenantId) + 1;
-      runtime.resetEndpoint();
-      runtime.mediaGeneration = generation;
+      this.resetTenantEndpoint(runtime.tenantId);
     }
     for (const runtime of runtimes.filter((runtime) => runtime.viewer)) {
       const tenant = runtime.tenantId;
       await this.context.tenants
         .serial(tenant, async () => {
-          const viewer = this.context.tenants.get(tenant).viewer;
-          if (viewer?.security) {
-            this.context.events.emit(
-              'auth',
-              tenant,
-              viewer.id,
-              this.services.viewers.authState(tenant, viewer.security),
-            );
-            void this.services.security.capabilities(tenant, viewer.security);
-          }
-          await this.reconcileProduct(tenant);
-          this.services.viewers.push(tenant);
+          await this.resumeTenant(tenant);
         })
         .catch((err) => log.warn('reconciler.product_failed', { tenant, err }));
     }
+  }
+  resetTenantEndpoint(tenant: string, generation = this.context.tenants.mediaGeneration(tenant) + 1) {
+    const runtime = this.context.tenants.get(tenant);
+    if (runtime.viewer) this.services.security.forgetPeer(tenant, runtime.viewer.security);
+    runtime.resetEndpoint();
+    runtime.mediaGeneration = generation;
+  }
+  async resumeTenant(tenant: string) {
+    const viewer = this.context.tenants.get(tenant).viewer;
+    if (viewer) {
+      this.context.events.emit(
+        'auth',
+        tenant,
+        viewer.id,
+        this.services.viewers.authState(tenant, viewer.security),
+      );
+      void this.services.security.capabilities(tenant, viewer.security);
+      await this.reconcileProduct(tenant);
+    }
+    this.services.viewers.push(tenant);
   }
   async reconcileProduct(tenant: string) {
     if (this.closed || this.context.closed) return;
@@ -162,6 +168,10 @@ export class Reconciler {
       return;
     }
     if (runtime.viewer && this.context.endpoint.placement.peek(tenant)?.runState !== 'running') {
+      if (!this.services.viewers.productAllowed(tenant, runtime.viewer.id)) {
+        this.services.viewers.push(tenant);
+        return;
+      }
       try {
         this.context.endpoint.placement.resolve(tenant);
       } catch (error) {

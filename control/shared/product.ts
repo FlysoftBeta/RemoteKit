@@ -1,6 +1,6 @@
 import type { AdminSocketMethods } from './admin';
 import type { DiagnosticMethods } from './diagnostics';
-import type { NativeErrorReason, WireError } from './errors';
+import type { ErrorReason, WireError } from './errors';
 import type { LibraryMethods } from './file-library';
 import type { LearningProvider, LearningSocketMethods, LearningState } from './learning';
 import type { AuthMessage, AuthSocketMethods } from './security';
@@ -362,7 +362,7 @@ export interface BackgroundTask {
 }
 export type BrowserAvailability = {
   state: 'available' | 'starting' | 'unavailable';
-  reason?: NativeErrorReason | 'browser_unavailable';
+  reason?: ErrorReason | 'browser_unavailable';
   errorId?: string;
 };
 export interface ProductState {

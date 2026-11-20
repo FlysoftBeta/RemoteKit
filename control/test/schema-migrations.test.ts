@@ -28,6 +28,21 @@ const schema = (db: Sqlite.Database) =>
     )
     .all();
 
+test('v25 migrates bindings as an empty table and rejects malformed schema versions', () => {
+  const db = new Sqlite(':memory:');
+  const options = { backupDirectory: '', buildId: 'test', atRestKey: new AtRestKey(null) };
+  try {
+    db.exec('CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (25)');
+    migrate(db, options);
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').all(), [{ version: 26 }]);
+    assert.deepEqual(db.prepare('SELECT * FROM session_node_bindings').all(), []);
+    db.prepare('UPDATE schema_version SET version=?').run('26bad');
+    assert.throws(() => migrate(db, options), { reason: 'corrupt_state' });
+  } finally {
+    db.close();
+  }
+});
+
 test('release v23 migrates durable retry state and keeps a verified backup', () => {
   const directory = mkdtempSync(join(tmpdir(), 'rk-v23-'));
   const path = join(directory, 'control.db');
@@ -40,9 +55,9 @@ test('release v23 migrates durable retry state and keeps a verified backup', () 
     const store = new ControlDatabase(path, { buildId: 'test' });
     try {
       assert(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='retry_units'").get());
-      assert.equal(schema(store.db).length, before.length + 2);
+      assert.equal(schema(store.db).length, before.length + 3);
       assert(Number(store.db.pragma('schema_version', { simple: true })) > Number(version));
-      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 25n }]);
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 26n }]);
       assert.equal(existsSync(join(directory, 'backups')), true);
     } finally {
       store.db.close();
@@ -67,7 +82,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
   }
   writeFileSync(join(backupDirectory, 'keep.txt'), 'keep');
   migrations.push({
-    version: 26,
+    version: 27,
     name: 'future-test',
     up(database) {
       database.exec('CREATE TABLE future_step(id TEXT)');
@@ -84,7 +99,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
     const copy = new Sqlite(
       join(
         backupDirectory,
-        readdirSync(backupDirectory).find((name) => /^control-v23-to-v26-test-.*T.*Z\.db$/.test(name))!,
+        readdirSync(backupDirectory).find((name) => /^control-v23-to-v27-test-.*T.*Z\.db$/.test(name))!,
       ),
       { readonly: true },
     );

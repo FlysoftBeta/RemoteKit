@@ -41,7 +41,7 @@ Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、�
 
 **两种就绪**：`shellReady` = WS 在线 + Control 侧已解锁 + 有权威的产品快照，开始屏幕、窗口管理、设置、我的文件、学习、管理、公告都只看它；`browserReady` = Session peer 已授权且产品 DataChannel 已打开，只约束远端页面的交互、页面请求、原生全屏与媒体控制。RTC 断开或 peer 代次变化不会锁定外壳、不清空产品快照与操作队列，只撤销属于那条连接的东西（输入、媒体、它的文件授权）。
 
-**浏览器可用性**：`ProductState.browser = {state: 'available' | 'starting' | 'unavailable', reason?, errorId?}`，与放置分开发布：`viewer.attach` 与快照推送从不等待放置或 Browser 对账。`unavailable` 的 reason 为 `session_data_on_offline_node`（数据所在节点离线，等它回来）、`no_eligible_node`（没有可用节点）或最近一次 Browser 失败的 reason；远端页面区域在原处显示一句状态文字（A 类：自动恢复，没有重试按钮，管理员可以[转移](cluster.md#control-侧)）。
+**浏览器可用性**：`ProductState.browser = {state: 'available' | 'starting' | 'unavailable', reason?, errorId?}`，与放置分开发布：`viewer.attach` 与快照推送从不等待放置或 Browser 对账。`unavailable` 的 reason 为 `session_data_on_offline_node`（数据所在节点离线，等它回来）、`session_bound_node_offline`（绑定的节点离线，等它回来）、`no_eligible_node`（没有可用节点）或最近一次 Browser 失败的 reason；远端页面区域在原处显示一句状态文字（A 类：自动恢复，没有重试按钮，管理员可以[转移](cluster.md#control-侧)）。
 
 **Control ↔ Endpoint**：集群通道（Noise 握手 + AES-GCM，见[多节点 · 集群通道](cluster.md#集群通道)）上的 JSON 请求/回复/事件。本地节点由 Control 启动，走 stdio；远端节点主动连接 `/api/node`（WebSocket）。请求超时 20 秒，JSON 消息上限 1MiB，5 秒握手期限，每节点最多 256 个在途请求。
 
@@ -136,12 +136,12 @@ RPC 受理、导航开始、文档提交、资源加载完成是不同结果。
 
 没有公开注册。空库时登录页变为"创建管理员账户"（`/api/auth/setup`），第一个账户成为管理员；之后 setup 返回 forbidden，并发的两次 setup 由提交事务内的再次检查保证只有一个成功。其余账户都由管理员在"管理 App → 用户"中用用户名和初始密码创建（可随机生成），登录页只提供登录。管理员唯一（`users` 上的部分唯一索引），可以转让，转让后原管理员立即失去权限。
 
-管理是一个内置 App（`appId: 'admin'`），像设置一样是单例、在 Window 里本地渲染，只出现在管理员的开始屏幕（以及管理员空工作区的入口）。`window.open{appId:'admin'}` 在操作管线入口按数据库里的管理员身份检查，非管理员得到 forbidden。转让管理员时，Control 在返回前关闭原管理员工作区里的管理窗口。窗口宽度不足 640px 时分区导航变为顶部标签；当前分区是窗口 `state` 的 `section`。每个分区在可见时每 5–15 秒刷新。所有 `admin.*` 方法都要求当前未锁定的产品租约，并在服务端按数据库里的管理员身份检查；参数用用户名指定目标，不能携带 tenant/user 字段，也不能对自己执行停用、删除、强制下线等操作。
+管理是一个内置 App（`appId: 'admin'`），像设置一样是单例、在 Window 里本地渲染，只出现在管理员的开始屏幕（以及管理员空工作区的入口）。`window.open{appId:'admin'}` 在操作管线入口按数据库里的管理员身份检查，非管理员得到 forbidden。转让管理员时，Control 在返回前关闭原管理员工作区里的管理窗口。窗口宽度不足 640px 时分区导航变为顶部标签；当前分区是窗口 `state` 的 `section`。每个分区在可见时每 5–15 秒刷新。所有 `admin.*` 方法都要求当前未锁定的产品租约，并在服务端按数据库里的管理员身份检查；参数用用户名指定目标，不能携带 tenant/user 字段。对自己可以执行重置密码、清除 PIN 与人脸、强制下线、立即停止、转移与重置浏览器数据；不能对自己执行停用、转让管理员与删除。
 
 | 分区 | 内容与操作 |
 |---|---|
 | 概览 | 节点在线数、用户与在线数、运行中/已停止的会话（其中有未提交更改的数量）、对象总量；Control 与发布包版本；节点离线、版本不一致、副本不足、待清理会话等提示 |
-| 用户 | 在线状态、会话位置、存储用量（设置了配额时显示占比）、最近登录。新建；重置密码（撤销该用户所有 token 并断开 Viewer）；清除 PIN 与人脸；强制下线；立即停止并提交（强制：先强制下线，不受挂机模式与回收策略约束，期望状态带 `forceStop`，节点跳过停止阻塞项；不能停止自己的会话）；重置浏览器数据（仅已停止：删除放置与全部 checkpoint，下次从空白 Profile 按 URL 恢复标签页，"我的文件"与设置保留）；停用/启用（停用账户的 token 不再有效，登录返回"账户已停用"）；转让管理员；删除用户（输入用户名确认） |
+| 用户 | 在线状态、会话位置、存储用量（设置了配额时显示占比）、最近登录。新建；重置密码（撤销该用户所有 token 并断开 Viewer；对自己则保留当前这次登录、撤销其他登录）；清除 PIN 与人脸（对自己不断开，推送新的认证状态）；强制下线；立即停止并提交（强制：不受挂机模式与回收策略约束，期望状态带 `forceStop`，节点跳过停止阻塞项；不断开 Viewer，用户在线且客户端激活时对账随即重新启动 Browser，因此对自己就是"重启浏览器"）；转移（在线，见[多节点 · 转移](cluster.md#control-侧)，可绑定节点）；重置浏览器数据（在线：运行中先强制停止，删除放置与全部 checkpoint，用户在线时从空白 Profile 按 URL 重新载入标签页，"我的文件"、设置与节点绑定保留）；停用/启用（停用账户的 token 不再有效，登录返回"账户已停用"）；转让管理员；删除用户（输入用户名确认） |
 | 公告 | 发布、编辑、删除；每条显示发布/修改时间与"已读/启用用户数"。编辑可选"重新提醒已读的用户" |
 | 节点 | 见[多节点 · 管理 App](cluster.md#管理-app) |
 | 存储 | 对象数、内容与单副本占用、副本不足、孤立副本与待清理会话；每个用户的存储用量（及配额）、文件数与最近 checkpoint |
@@ -164,7 +164,7 @@ Control 保存每用户一份最新剪贴板，Browser 是本地粘贴缓存；�
 - Viewer 用 `clipboard.get {}` 恢复应用缓存，返回 `{revision,text}`；本地选择操作不依赖设备同步开关。`clipboard.set` 接受设备或本地选择写入，返回 `{revision}`。`library.snippet {id}` 按 Tenant 读取全文；复制片段返回 `{revision,text}`，保留原始来源。
 - 片段只记录非空纯文本，按用户+SHA-256 去重，重复复制更新时间和来源。`library_snippets(entry_id,tenant,text,hash,origin,copied_at)` 保存正文；目录带 `kind:snippet`、字节大小和首个非空行的 ≤200 字符预览。未整理保留最新 200 条，移入分区的保留；排除 `clipboard/''` 来源停止收集，清除来源删除未整理片段，已整理的保留。
 - “与本机剪贴板同步”（`clipboardSync`）默认开启。远端新值写设备剪贴板，未聚焦时只保留最新待写值；设备粘贴事件先同步再投远端。回到前台仅在 clipboard-read 已 granted 时读取，不自动请求权限；显式远端粘贴可发起读取。本地选择粘贴只在已授权时刷新设备，其余用应用缓存。scope/revision/文本 hash 防止跨账号和回声。
-- “重置浏览器数据”要求 Session 已停止，清除最新剪贴板；历史片段仍由文件库管理。删除用户同时删除最新值与片段。
+- “重置浏览器数据”清除最新剪贴板；历史片段仍由文件库管理。删除用户同时删除最新值与片段。
 - 集群通道上的上限都来自 `protocol/limits.json`（见[多节点 · 集群通道](cluster.md#集群通道)）；Viewer WS 普通请求仍为 1 MiB，`clipboard.set` 可容纳 1 MiB 纯文本。
 
 

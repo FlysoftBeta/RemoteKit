@@ -12,6 +12,7 @@ import {
 } from './coordination';
 import { rpcId } from './rpc-results';
 import { log } from '../log';
+import { sessionStopWaitMs } from '../../shared/admin';
 import { RemoteKitError, isRemoteKitError, endpointError as convertEndpointError } from '../../shared/errors';
 import type { SelectionState } from '../../shared/file-library';
 import type {
@@ -81,6 +82,9 @@ export class EndpointGateway {
     readonly placement: Pick<
       Placement,
       | 'peek'
+      | 'boundNodeId'
+      | 'canReceive'
+      | 'deleteTenant'
       | 'resolve'
       | 'keys'
       | 'commitCheckpoint'
@@ -231,7 +235,12 @@ export class EndpointGateway {
     if (fault) return fault;
     const placed = this.placement.peek(tenant);
     return new RemoteKitError('unavailable', 'Session node is offline', {
-      reason: placed?.dataState === 'dirty' ? 'session_data_on_offline_node' : 'no_eligible_node',
+      reason:
+        this.placement.boundNodeId(tenant) !== null
+          ? 'session_bound_node_offline'
+          : placed?.dataState === 'dirty'
+            ? 'session_data_on_offline_node'
+            : 'no_eligible_node',
     });
   }
   private publishTenant(tenant: string): Promise<SessionDesired | undefined> {
@@ -378,6 +387,9 @@ export class EndpointGateway {
   }
   isReady(tenant: string) {
     const placed = this.placement.peek(tenant);
+    const boundNodeId = this.placement.boundNodeId(tenant);
+    if (placed?.dataState !== 'dirty' && boundNodeId !== null)
+      return this.nodes.get(boundNodeId)?.state.state === 'ready';
     return placed?.dataState === 'dirty'
       ? this.nodes.get(placed.nodeId)?.state.state === 'ready'
       : this.nodes.all().some((node) => node.state.state === 'ready');
@@ -442,9 +454,11 @@ export class EndpointGateway {
   identity(tenant: string): Promise<BrowserIdentity> {
     return this.invoke('session.identity', tenant);
   }
-  async transfer(tenant: string, nodeId?: string) {
+  async transfer(tenant: string, nodeId?: string, bind = false) {
     const source = this.placement.peek(tenant);
     if (!source) throw new RemoteKitError('not_found', '用户没有 Session');
+    if (bind && !nodeId) throw new RemoteKitError('invalid_request', '绑定需要目标节点');
+    if (nodeId === source.nodeId) return this.placement.transfer(tenant, nodeId, bind);
     if (this.nodes.get(source.nodeId)?.state.state === 'ready') {
       const target = this.nodes
         .all()
@@ -452,12 +466,12 @@ export class EndpointGateway {
           (node) =>
             node.nodeId !== source.nodeId &&
             (nodeId === undefined || node.nodeId === nodeId) &&
-            node.state.state === 'ready',
+            this.placement.canReceive(tenant, node.nodeId, bind),
         );
       if (!target) throw new RemoteKitError('unavailable', '没有可接收的在线节点');
       await this.stop(tenant, { force: true });
     }
-    const placed = this.placement.transfer(tenant, nodeId);
+    const placed = this.placement.transfer(tenant, nodeId, bind);
     this.forget(tenant);
     await Promise.all(
       this.nodes
@@ -504,7 +518,7 @@ export class EndpointGateway {
           (committed.requestId === placed.pendingCommit || committed.requestId.startsWith('node-'))
         );
       },
-      180000,
+      sessionStopWaitMs,
     );
     if (observed.lastError) {
       // The node refused before shutting its Browser down (a stop blocker, for example), so

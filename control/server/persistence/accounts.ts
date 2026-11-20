@@ -78,6 +78,9 @@ export class AccountsRepository {
   revokeUser(userId: string) {
     this.db.prepare('DELETE FROM auth_tokens WHERE user_id=?').run(userId);
   }
+  revokeUserExcept(userId: string, loginIdentity: string) {
+    this.db.prepare('DELETE FROM auth_tokens WHERE user_id=? AND hash<>?').run(userId, loginIdentity);
+  }
   hasUsers() {
     return !!this.db.prepare('SELECT 1 FROM users').get();
   }

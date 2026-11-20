@@ -103,7 +103,7 @@ export class SecurityRepository {
   clearSecondFactors(user: string) {
     const record = this.security(user);
     this.saveSecurity(user, {
-      settings: { ...record.settings, faceEnabled: false },
+      settings: { ...record.settings, faceEnabled: false, lockOnDeparture: false },
       pin: undefined,
       face: undefined,
     });

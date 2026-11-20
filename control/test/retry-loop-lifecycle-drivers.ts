@@ -71,7 +71,7 @@ export function driveLifecycle(path: 'pressure' | 'idle' | 'ordinary' | 'uncerta
       tenants,
       endpoint: {
         nodes: { all: () => [node], get: () => node, isRemoved: () => false },
-        placement: { peek: () => placement, activeTenants: () => ['tenant'] },
+        placement: { peek: () => placement, activeTenants: () => ['tenant'], boundNodeId: () => null },
         isPlacedOn: () => true,
         snapshot: () =>
           path === 'pressure' ? boundary.call({ tenant: 'tenant' }, snapshot) : Promise.resolve(snapshot),
@@ -180,7 +180,7 @@ export const driveCloseBatch: OwnerFactory = (boundary) => {
     },
     endpoint: {
       sessionFault: () => undefined,
-      placement: { peek: () => ({ nodeId: 'node' }) },
+      placement: { peek: () => ({ nodeId: 'node' }), boundNodeId: () => null },
       nodes: {
         get: () => ({ state: { state: 'ready' } }),
         all: () => [{ nodeId: 'node', state: { state: 'ready' } }],

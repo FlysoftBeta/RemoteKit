@@ -1,6 +1,7 @@
 import { accountsFor, registerUser, requestViewer, testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createApplication } from '../server/application';
 import { ControlDatabase } from '../server/persistence/database';
 import type { EndpointLink } from '../server/endpoint/link';
@@ -25,7 +26,10 @@ async function stack() {
       account.tenantId,
       lease,
       (reason) => revoked.push(account.tenantId + ':' + reason),
-      { identity: account.token, valid: () => true },
+      {
+        identity: createHash('sha256').update(account.token).digest('hex'),
+        valid: () => !!store.accounts.identity(account.token),
+      },
       true,
     );
   await attach(admin);
@@ -152,7 +156,7 @@ test('password reset, sign-out and disabling revoke every login of that user onl
     await h.call('admin.setDisabled', { username: 'ordinary', disabled: false });
     await accountsFor(h.store).login('ordinary', 'replacement-secret');
 
-    for (const method of ['admin.resetPassword', 'admin.signOut', 'admin.setDisabled', 'admin.deleteUser'])
+    for (const method of ['admin.setDisabled', 'admin.transferAdmin', 'admin.deleteUser'])
       await assert.rejects(h.call(method, { username: 'administrator', password, disabled: true }), {
         code: 'forbidden',
       });
@@ -160,6 +164,23 @@ test('password reset, sign-out and disabling revoke every login of that user onl
   } finally {
     await h.close();
   }
+});
+
+test('self sign-out revokes every login before disconnecting Viewer', async (t) => {
+  const h = await stack();
+  t.after(() => h.close());
+  const user = h.store.accounts.byUsername('administrator')!;
+  const otherToken = h.store.accounts.issueToken(user.id);
+  const viewer = h.control.tenants.get(user.tenant).viewer!;
+  const revoke = viewer.revoke;
+  viewer.revoke = (reason) => {
+    assert.equal(h.store.accounts.identity(h.admin.token), undefined);
+    assert.equal(h.store.accounts.identity(otherToken), undefined);
+    revoke(reason);
+  };
+  await h.call('admin.signOut', { username: user.username });
+  assert.deepEqual(h.revoked, [user.tenant + ':logout']);
+  assert.equal(h.control.tenants.get(user.tenant).viewer, undefined);
 });
 
 test('clearing second factors removes PIN and face and disables face verification', async () => {
@@ -187,6 +208,46 @@ test('clearing second factors removes PIN and face and disables face verificatio
   }
 });
 
+test('self password reset preserves this login and clearing factors publishes auth without revoking Viewer', async (t) => {
+  const h = await stack();
+  t.after(() => h.close());
+  const user = h.store.accounts.byUsername('administrator')!;
+  const otherToken = h.store.accounts.issueToken(user.id);
+  await h.call('admin.resetPassword', { username: user.username, password: 'replacement-password' });
+  assert.ok(h.store.accounts.identity(h.admin.token));
+  assert.equal(h.store.accounts.identity(otherToken), undefined);
+  await assert.rejects(accountsFor(h.store).login(user.username, password), { code: 'unauthenticated' });
+  await accountsFor(h.store).login(user.username, 'replacement-password');
+  const security = h.store.security.security(user.id);
+  h.store.security.saveSecurity(user.id, {
+    ...security,
+    settings: { ...security.settings, faceEnabled: true, lockOnDeparture: true },
+    pin: { salt: 'salt', hash: 'hash' },
+    face: {
+      sealed: h.store.security.faceVault.seal(user.id, [1, ...Array(127).fill(0)], 'model'),
+      modelVersion: 'model',
+    },
+  });
+  const states: any[] = [];
+  h.control.events.on('auth', (_tenant, _lease, state) => states.push(state));
+  await h.call('admin.clearSecondFactors', { username: user.username });
+  assert.equal(states[states.length - 1].methods.pin, false);
+  assert.equal(states[states.length - 1].face.enrolled, false);
+  assert.equal(states[states.length - 1].settings.lockOnDeparture, false);
+  assert.deepEqual(h.revoked, []);
+  assert.equal(h.control.tenants.get(user.tenant).viewer?.id, h.admin.tenantId);
+});
+
+test('transfer requires a boolean bind and an explicit node when binding', async (t) => {
+  const h = await stack();
+  t.after(() => h.close());
+  for (const params of [{}, { bind: 'true' }, { bind: null }, { bind: true }, { bind: false, nodeId: '' }])
+    await assert.rejects(h.call('admin.transfer', { username: 'administrator', ...params }), {
+      code: 'invalid_request',
+    });
+  assert.deepEqual(h.revoked, []);
+});
+
 test('transferring the administrator role demotes the current administrator', async () => {
   const h = await stack();
   try {
@@ -206,7 +267,7 @@ test('transferring the administrator role demotes the current administrator', as
   }
 });
 
-test('reset browser data refuses a running Session, then clears clipboard and purges once stopped', async () => {
+test('reset browser data stops a running Session, clears clipboard and purges it', async () => {
   const h = await stack();
   try {
     await h.call('admin.createUser', { username: 'reset-user', password });
@@ -214,11 +275,6 @@ test('reset browser data refuses a running Session, then clears clipboard and pu
     const placement = h.control.endpoint.placement.resolve(user.tenant);
     h.store.clipboards.record(user.id, { text: 'private clipboard', html: '<p>private</p>' });
     h.store.clipboards.record(user.id, { text: 'latest clipboard', html: '' });
-    await assert.rejects(h.call('admin.resetSession', { username: user.username }), /需先停止/);
-    assert.equal(h.store.clipboards.latest(user.id)?.text, 'latest clipboard');
-    assert.equal(h.control.endpoint.placement.peek(user.tenant)?.sessionId, placement.sessionId);
-    placement.runState = 'stopped';
-    placement.dataState = 'clean';
     await h.call('admin.resetSession', { username: user.username });
     assert.equal(h.store.clipboards.latest(user.id), undefined);
     assert.equal(h.control.endpoint.placement.peek(user.tenant), undefined);
@@ -329,7 +385,7 @@ test('deleting a user removes every row of its tenant and queues node data delet
   }
 });
 
-test('a Session starting during reset retirement leaves all learning records intact', async (t) => {
+test('a Session starting during reset retirement is stopped before forgetting data', async (t) => {
   const h = await stack();
   t.after(() => h.close());
   await h.call('admin.createUser', { username: 'reset-race', password });
@@ -339,16 +395,19 @@ test('a Session starting during reset retirement leaves all learning records int
   t.mock.method(h.control.learning, 'retireTenant', async () => {
     h.control.endpoint.placement.resolve(user.tenant);
   });
-  await assert.rejects(h.call('admin.resetSession', { username: user.username }), { code: 'conflict' });
+  await h.call('admin.resetSession', { username: user.username });
   assert.equal(
     (
       h.store.db
         .prepare('SELECT retention_days FROM learning_settings WHERE tenant=?')
         .get(user.tenant) as any
     ).retention_days,
-    13n,
+    7n,
   );
-  assert(h.store.db.prepare('SELECT 1 FROM document_progress WHERE tenant=?').get(user.tenant));
+  assert.equal(
+    h.store.db.prepare('SELECT 1 FROM document_progress WHERE tenant=?').get(user.tenant),
+    undefined,
+  );
   assert.doesNotThrow(() => h.control.learning.state(user.tenant));
 });
 

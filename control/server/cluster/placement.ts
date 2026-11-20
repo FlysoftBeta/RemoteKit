@@ -14,6 +14,7 @@ import {
 } from '../persistence/object-references';
 import { tenantKeys } from './keys';
 import type { NodeRegistry } from './node-link';
+import { corruptRecord, string } from '../persistence/codec';
 
 export interface SessionPlacement {
   tenant: string;
@@ -80,6 +81,28 @@ export class Placement {
         .all(nodeId) as { tenant: string }[]
     ).map((row) => row.tenant);
   }
+  boundNodeId(tenant: string): string | null {
+    const row = this.store.db
+      .prepare('SELECT node_id FROM session_node_bindings WHERE tenant=?')
+      .get(tenant) as { node_id: unknown } | undefined;
+    if (!row) return null;
+    try {
+      return string({ min: 1 }).read(row.node_id, '$.node_id');
+    } catch (error) {
+      throw corruptRecord('session_node_bindings.' + tenant, error);
+    }
+  }
+  private bind(tenant: string, nodeId: string | null) {
+    if (nodeId === null)
+      this.store.db.prepare('DELETE FROM session_node_bindings WHERE tenant=?').run(tenant);
+    else
+      this.store.db.prepare('INSERT OR REPLACE INTO session_node_bindings VALUES (?,?)').run(tenant, nodeId);
+  }
+  deleteTenant(tenant: string) {
+    const sessionId = this.forgetTenant(tenant);
+    this.bind(tenant, null);
+    return sessionId;
+  }
   activeSessions(nodeId: string) {
     const row = this.store.db
       .prepare("SELECT count(*) AS count FROM session_placements WHERE node_id=? AND run_state='running'")
@@ -87,6 +110,7 @@ export class Placement {
     return Number(row.count);
   }
   evacuate(nodeId: string) {
+    this.store.db.prepare('DELETE FROM session_node_bindings WHERE node_id=?').run(nodeId);
     const tenants = this.store.db
       .prepare('SELECT tenant FROM session_placements WHERE node_id=?')
       .all(nodeId) as { tenant: string }[];
@@ -104,11 +128,13 @@ export class Placement {
   }
   // Moves a stopped Session to its newest complete version (none: blank browser data) and fences the
   // old copy. An online dirty source must have been stopped and committed first.
-  transfer(tenant: string, nodeId?: string) {
+  transfer(tenant: string, nodeId?: string, bind = false) {
     return this.store.transaction(() => {
       const current = this.peek(tenant);
       if (!current) throw new RemoteKitError('not_found', '用户没有 Session');
-      if (nodeId === current.nodeId) throw new RemoteKitError('conflict', '目标节点必须与源节点不同');
+      if (bind && !nodeId) throw new RemoteKitError('invalid_request', '绑定需要目标节点');
+      this.bind(tenant, bind ? nodeId! : null);
+      if (nodeId === current.nodeId) return current;
       const sourceReady = this.nodes.get(current.nodeId)?.state.state === 'ready';
       if (sourceReady && current.dataState !== 'clean')
         throw new RemoteKitError('conflict', '转移前需要停止并保存 Session');
@@ -163,12 +189,37 @@ export class Placement {
     const placement = this.peek(tenant);
     return !!placement && !!this.nodes.get(placement.nodeId)?.metrics.underPressure();
   }
+  canReceive(tenant: string, nodeId: string, bound: boolean, now = Date.now()) {
+    const node = this.nodes.get(nodeId);
+    if (!node || node.state.state !== 'ready' || this.nodes.isRemoved(nodeId)) return false;
+    if (bound) return true;
+    const sample = node.metrics.latest(now);
+    return (
+      !!sample &&
+      !node.diskDraining &&
+      this.nodes.fencing(nodeId).filter((target) => target.tenantId !== tenant).length <
+        coordinationLimits.sessions &&
+      Math.max(this.activeSessions(nodeId), sample.value.sessions) <
+        Math.min(node.limits.maxSessions ?? coordinationLimits.sessions, coordinationLimits.sessions) &&
+      sample.value.disk.free >= diskFloor(node, sample) &&
+      (node.limits.sessionMemoryBytes === null ||
+        sample.value.memory.available >= node.limits.sessionMemoryBytes)
+    );
+  }
   resolve(tenant: string, targetNodeId?: string, excludedNodeId?: string): SessionPlacement {
     return this.store.transaction(() => {
       let existing = this.peek(tenant);
       if (existing?.pendingCommit) {
         throw new RemoteKitError('unavailable', '正在提交会话，请稍候');
       }
+      const boundNodeId = this.boundNodeId(tenant);
+      if (
+        boundNodeId !== null &&
+        (this.nodes.get(boundNodeId)?.state.state !== 'ready' || this.nodes.isRemoved(boundNodeId))
+      )
+        throw new RemoteKitError('unavailable', '会话绑定的节点离线，恢复后自动继续', {
+          reason: 'session_bound_node_offline',
+        });
       if (existing?.dataState === 'dirty') {
         if (this.nodes.get(existing.nodeId)?.state.state !== 'ready')
           throw new RemoteKitError('unavailable', '会话数据所在节点离线，恢复后自动继续', {
@@ -192,21 +243,14 @@ export class Placement {
       }
       const now = Date.now();
       const candidates = this.nodes.all().flatMap((node) => {
-        const sample = node.metrics.latest(now);
+        if (boundNodeId !== null)
+          return node.nodeId === boundNodeId && node.nodeId !== excludedNodeId
+            ? [{ node, predicted: node.metrics.predicted(now) ?? 0, score: 0 }]
+            : [];
         const eligible =
-          node.state.state === 'ready' &&
           node.nodeId !== excludedNodeId &&
           (!targetNodeId || node.nodeId === targetNodeId) &&
-          !node.diskDraining &&
-          !this.nodes.isRemoved(node.nodeId) &&
-          sample &&
-          this.nodes.fencing(node.nodeId).filter((target) => target.tenantId !== tenant).length <
-            coordinationLimits.sessions &&
-          Math.max(this.activeSessions(node.nodeId), sample.value.sessions) <
-            Math.min(node.limits.maxSessions ?? coordinationLimits.sessions, coordinationLimits.sessions) &&
-          sample.value.disk.free >= diskFloor(node, sample) &&
-          (node.limits.sessionMemoryBytes === null ||
-            sample.value.memory.available >= node.limits.sessionMemoryBytes);
+          this.canReceive(tenant, node.nodeId, false, now);
         if (!eligible) return [];
         const predicted = node.metrics.predicted(now)!;
         const warm =

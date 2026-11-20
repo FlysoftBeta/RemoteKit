@@ -10,11 +10,7 @@ export function compileDesired(
   tenant: string,
 ): SessionDesired {
   const runtime = context.tenants.get(tenant);
-  const previous = context.endpoint.placement.peek(tenant);
-  const placement =
-    previous && !(runtime.viewer && previous.runState === 'stopped' && previous.pendingCommit === null)
-      ? previous
-      : context.endpoint.placement.resolve(tenant);
+  const placement = context.endpoint.placement.peek(tenant) ?? context.endpoint.placement.resolve(tenant);
   const node = context.endpoint.nodes.get(placement.nodeId);
   if (node?.state.state !== 'ready') throw new RemoteKitError('unavailable', 'Session node is offline');
   const state = context.store.workspaces.workspace(tenant);

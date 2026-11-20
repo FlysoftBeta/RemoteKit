@@ -237,6 +237,7 @@ export class UncertainRecovery {
   private async relieveNode(node: NodeLink, state: ReliefState, reason: StopReason) {
     const candidates = this.context.endpoint.placement
       .activeTenants(node.nodeId)
+      .filter((tenant) => this.context.endpoint.placement.boundNodeId(tenant) === null)
       .map((tenant) => this.context.tenants.get(tenant))
       .filter(
         (runtime) => !runtime.viewer && this.context.clock.monotonicMs() - runtime.viewerAbsentSince >= 60000,

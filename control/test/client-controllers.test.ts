@@ -462,19 +462,52 @@ test('control requests map send failures and structured errors without leaving d
   });
   await response;
   let transferSettled = false;
-  const transfer = control.request('admin.transfer', { username: 'other', nodeId: 'beta' }).then(() => {
-    transferSettled = true;
-  });
+  const transfer = control
+    .request('admin.transfer', { username: 'other', nodeId: 'beta', bind: false })
+    .then(() => {
+      transferSettled = true;
+    });
   t.mock.timers.tick(20000);
   await Promise.resolve();
   assert.equal(transferSettled, false);
   socket.onmessage?.({ data: JSON.stringify({ type: 'result', id: socket.sent[1].id, result: [] }) });
   await transfer;
-  const transferTimeout = assert.rejects(control.request('admin.transfer', { username: 'other' }), {
+  const transferTimeout = assert.rejects(
+    control.request('admin.transfer', { username: 'other', bind: false }),
+    {
+      code: 'outcome_unknown',
+    },
+  );
+  t.mock.timers.tick(240000);
+  await transferTimeout;
+  let resetSettled = false;
+  const reset = control.request('admin.resetSession', { username: 'other' }).then(() => {
+    resetSettled = true;
+  });
+  t.mock.timers.tick(20000);
+  await Promise.resolve();
+  assert.equal(resetSettled, false);
+  socket.onmessage?.({ data: JSON.stringify({ type: 'result', id: socket.sent[3].id, result: [] }) });
+  await reset;
+  const resetTimeout = assert.rejects(control.request('admin.resetSession', { username: 'other' }), {
     code: 'outcome_unknown',
   });
   t.mock.timers.tick(240000);
-  await transferTimeout;
+  await resetTimeout;
+  let stopSettled = false;
+  const stop = control.request('admin.stop', { username: 'other' }).then(() => {
+    stopSettled = true;
+  });
+  t.mock.timers.tick(20000);
+  await Promise.resolve();
+  assert.equal(stopSettled, false);
+  socket.onmessage?.({ data: JSON.stringify({ type: 'result', id: socket.sent[5].id, result: [] }) });
+  await stop;
+  const stopTimeout = assert.rejects(control.request('admin.stop', { username: 'other' }), {
+    code: 'outcome_unknown',
+  });
+  t.mock.timers.tick(240000);
+  await stopTimeout;
   control.close();
   assert.equal(control.getSnapshot().phase, 'stopped');
 });

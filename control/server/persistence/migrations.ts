@@ -66,9 +66,16 @@ export const migrations: Migration[] = [
         INSERT INTO server_settings VALUES (1,'{"version":1,"logRetentionDays":30}');`);
     },
   },
+  {
+    version: 26,
+    name: 'session node bindings',
+    up(db) {
+      db.exec('CREATE TABLE session_node_bindings (tenant TEXT PRIMARY KEY, node_id TEXT NOT NULL)');
+    },
+  },
 ];
 
-export const currentVersion = 25;
+export const currentVersion = 26;
 export interface MigrationOptions extends MigrationContext {
   backupDirectory: string;
   buildId: string;

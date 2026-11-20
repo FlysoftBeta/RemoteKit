@@ -29,6 +29,366 @@ import type { ConfiguredAdminNode } from '../shared/admin';
 
 const id = (n: number) => n.toString(16).padStart(64, '0');
 
+for (const mode of ['self', 'other', 'offline', 'locked'] as const) {
+  test(`administrator stop ${mode} preserves Viewer and restarts only an active user`, async (t) => {
+    const h = await harness();
+    t.after(() => h.close());
+    const alpha = await h.connect('alpha');
+    let running = false;
+    let incarnation = 0;
+    alpha.desiredHandler = (desired, observed) => {
+      if (desired.run === 'running') {
+        if (!running) incarnation++;
+        observed.browserIncarnation = `browser-${incarnation}`;
+      }
+      running = desired.run === 'running';
+    };
+    const admin = await registerUser(h.store, 'stop-admin', 'stop-admin-password');
+    const target = mode === 'self' ? admin : await registerUser(h.store, 'stop-user', 'stop-user-password');
+    const revoked: string[] = [];
+    await h.control.viewers.attachViewer(
+      admin.tenantId,
+      'admin-viewer',
+      (reason) => revoked.push(reason),
+      { identity: 'admin-login', valid: () => true },
+      true,
+    );
+    if (mode === 'other' || mode === 'locked')
+      await h.control.viewers.attachViewer(
+        target.tenantId,
+        'target-viewer',
+        (reason) => revoked.push(reason),
+        { identity: 'target-login', valid: () => true },
+        mode !== 'locked',
+      );
+    await publishAndObserve(h.gateway, target.tenantId);
+    await h.commit(alpha, target.tenantId, id(1));
+    const source = h.placement.peek(target.tenantId)!;
+    const before = h.gateway.observation(target.tenantId)!.browserIncarnation;
+    const viewer = h.control.tenants.get(target.tenantId).viewer;
+    await requestViewer(h.control, admin.tenantId, 'admin-viewer', 'admin.stop', {
+      username: mode === 'self' ? 'stop-admin' : 'stop-user',
+    });
+    const active = mode === 'self' || mode === 'other';
+    if (active)
+      await h.gateway.waitObserved(
+        target.tenantId,
+        (observed) => observed.browser === 'running' && observed.browserIncarnation !== before,
+      );
+    await alpha.barrier();
+    assert.deepEqual(revoked, []);
+    assert.equal(h.control.tenants.get(target.tenantId).viewer, viewer);
+    assert.equal(h.placement.peek(target.tenantId)?.nodeId, source.nodeId);
+    assert.equal(h.placement.peek(target.tenantId)?.runState, active ? 'running' : 'stopped');
+    assert(
+      alpha.requests.some(
+        (request) => request.method === 'session.desired' && request.run === 'stopped' && request.forceStop,
+      ),
+    );
+    if (active) {
+      assert.notEqual(h.gateway.observation(target.tenantId)?.browserIncarnation, before);
+      assert.equal(h.gateway.observation(target.tenantId)?.browser, 'running');
+    } else {
+      await h.control.tenants.serial(target.tenantId, () =>
+        h.control.reconciler.reconcileProduct(target.tenantId),
+      );
+      assert.equal(h.placement.peek(target.tenantId)?.runState, 'stopped');
+      if (mode === 'locked') {
+        await requestViewer(h.control, target.tenantId, 'target-viewer', 'auth.verify', {
+          method: 'password',
+          secret: 'stop-user-password',
+        });
+        await h.control.tenants.serial(target.tenantId, () =>
+          h.control.reconciler.reconcileProduct(target.tenantId),
+        );
+        await h.gateway.waitObserved(
+          target.tenantId,
+          (observed) => observed.browser === 'running' && observed.browserIncarnation !== before,
+        );
+      }
+    }
+  });
+}
+
+test('bindings constrain placement, survive reset, bypass capacity, and disappear on deletion or evacuation', async (t) => {
+  const h = await harness();
+  t.after(() => h.close());
+  const alpha = await h.connect('alpha');
+  await h.connect('beta', 0.6);
+  const source = h.placement.resolve('tenant');
+  const unchanged = await h.gateway.transfer('tenant', 'alpha', true);
+  assert.deepEqual(unchanged, source);
+  assert.equal(
+    alpha.requests.some((request) => request.method === 'session.desired'),
+    false,
+  );
+  assert.equal(h.placement.boundNodeId('tenant'), 'alpha');
+  h.nodes.get('alpha')!.diskDraining = true;
+  Object.defineProperty(h.nodes.get('alpha')!, 'limits', {
+    value: { maxSessions: 0, diskReserveBytes: 100, sessionMemoryBytes: 100 },
+  });
+  h.placement.forgetTenant('tenant');
+  assert.equal(h.placement.boundNodeId('tenant'), 'alpha');
+  assert.equal(h.placement.resolve('tenant').nodeId, 'alpha');
+  const offline = once(h.nodes.get('alpha')!, 'offline');
+  alpha.close();
+  await offline;
+  assert.throws(() => h.placement.resolve('tenant'), {
+    code: 'unavailable',
+    reason: 'session_bound_node_offline',
+  });
+  h.placement.forgetTenant('tenant');
+  assert.throws(() => h.placement.resolve('tenant'), { reason: 'session_bound_node_offline' });
+  h.placement.evacuate('alpha');
+  assert.equal(h.placement.boundNodeId('tenant'), null);
+  assert.equal(h.placement.resolve('tenant').nodeId, 'beta');
+  h.placement.transfer('tenant', 'beta', true);
+  h.placement.deleteTenant('tenant');
+  assert.equal(h.placement.boundNodeId('tenant'), null);
+  assert.equal(h.placement.peek('tenant'), undefined);
+});
+
+test('binding updates are atomic with transfer and same-node unbinding leaves epoch unchanged', async (t) => {
+  const h = await harness();
+  t.after(() => h.close());
+  await h.connect('alpha');
+  await h.connect('beta', 0.6);
+  const source = h.placement.resolve('tenant');
+  h.placement.transfer('tenant', 'alpha', true);
+  assert.throws(() => h.placement.transfer('tenant', 'missing', true), {
+    reason: 'session_bound_node_offline',
+  });
+  assert.equal(h.placement.boundNodeId('tenant'), 'alpha');
+  assert.deepEqual(h.placement.peek('tenant'), source);
+  h.placement.transfer('tenant', 'alpha', false);
+  assert.equal(h.placement.boundNodeId('tenant'), null);
+  assert.deepEqual(h.placement.peek('tenant'), source);
+});
+
+test('binding rows are decoded strictly without a read-time default', async (t) => {
+  const h = await harness();
+  t.after(() => h.close());
+  for (const invalid of ['', Buffer.from('node')]) {
+    h.store.db.prepare('INSERT OR REPLACE INTO session_node_bindings VALUES (?,?)').run('tenant', invalid);
+    assert.throws(() => h.placement.boundNodeId('tenant'), { reason: 'corrupt_record' });
+    assert.throws(() => h.placement.resolve('tenant'), { reason: 'corrupt_record' });
+  }
+});
+
+test('admin list preserves a binding without placement and user deletion removes it', async (t) => {
+  const h = await harness();
+  t.after(() => h.close());
+  await h.connect('alpha');
+  const admin = await registerUser(h.store, 'binding-admin', 'binding-admin-password');
+  const user = await registerUser(h.store, 'binding-user', 'binding-user-password');
+  h.placement.resolve(user.tenantId);
+  h.placement.transfer(user.tenantId, 'alpha', true);
+  h.placement.forgetTenant(user.tenantId);
+  assert.deepEqual(h.control.userAdmin.list().find((entry) => entry.username === 'binding-user')?.session, {
+    state: 'none',
+    boundNodeId: 'alpha',
+  });
+  await h.control.userAdmin.delete(admin.tenantId, 'binding-user');
+  assert.equal(h.placement.boundNodeId(user.tenantId), null);
+});
+
+test('forced online transfer serializes reconciliation and desired never restarts the source during stop', async (t) => {
+  const h = await harness();
+  t.after(() => h.close());
+  const alpha = await h.connect('alpha');
+  await h.connect('beta', 0.6);
+  const account = await registerUser(h.store, 'serial-admin', 'serial-admin-password');
+  await h.control.viewers.attachViewer(
+    account.tenantId,
+    'viewer',
+    () => assert.fail('Viewer revoked'),
+    { identity: 'login', valid: () => true },
+    true,
+  );
+  await publishAndObserve(h.gateway, account.tenantId);
+  await h.commit(alpha, account.tenantId, id(1));
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let stopping!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    stopping = resolve;
+  });
+  alpha.desiredHandler = async (desired) => {
+    if (desired.run === 'stopped') {
+      stopping();
+      await held;
+    }
+  };
+  const transfer = h.control.userAdmin.transfer('serial-admin', 'beta', true);
+  await entered;
+  assert.equal(h.gateway.forcingStop(account.tenantId), true);
+  assert.equal(h.placement.peek(account.tenantId)?.runState, 'stopped');
+  let reconciled = false;
+  const reconcile = h.control.tenants.serial(account.tenantId, async () => {
+    reconciled = true;
+    await h.control.reconciler.reconcileProduct(account.tenantId);
+  });
+  h.gateway.invalidate(account.tenantId);
+  await h.gateway.published(account.tenantId);
+  assert.equal(reconciled, false);
+  assert.equal(h.placement.peek(account.tenantId)?.nodeId, 'alpha');
+  const documents = alpha.requests.filter((request) => request.method === 'session.desired');
+  const firstStop = documents.findIndex((request) => request.run === 'stopped');
+  assert(documents.slice(firstStop).every((request) => request.run === 'stopped' && request.forceStop));
+  release();
+  await Promise.all([transfer, reconcile]);
+  assert.equal(h.placement.peek(account.tenantId)?.nodeId, 'beta');
+});
+
+test('bound tenants are excluded from pressure relief and rebalance', async (t) => {
+  const h = await harness();
+  t.after(() => h.close());
+  await h.connect('alpha');
+  await h.connect('beta', 0.6);
+  h.placement.resolve('tenant');
+  h.placement.transfer('tenant', 'alpha', true);
+  h.clock.advance(60001);
+  t.mock.method(h.control.lifecycle as any, 'needsRelief', () => true);
+  let stopped = false;
+  t.mock.method(h.gateway, 'stop', async () => {
+    stopped = true;
+    return 0;
+  });
+  await (h.control.lifecycle as any).relieveNode(h.nodes.get('alpha'), {}, 'rebalance');
+  assert.equal(stopped, false);
+});
+
+for (const operation of ['stop', 'transfer', 'resetSession'] as const) {
+  test(`online ${operation} with uncertain stop keeps Viewer and pending source commit`, async (t) => {
+    const h = await harness();
+    t.after(() => h.close());
+    const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.6);
+    const account = await registerUser(h.store, 'uncertain-admin', 'uncertain-admin-password');
+    const revoked: string[] = [];
+    await h.control.viewers.attachViewer(
+      account.tenantId,
+      'viewer',
+      (reason) => revoked.push(reason),
+      { identity: 'login', valid: () => true },
+      true,
+    );
+    await publishAndObserve(h.gateway, account.tenantId);
+    await h.commit(alpha, account.tenantId, id(1));
+    const source = h.placement.peek(account.tenantId)!;
+    alpha.desiredHandler = (desired, value) => {
+      if (desired.run !== 'stopped') return;
+      value.browser = 'stopping';
+      value.data = { ...alpha.observations.get(account.tenantId)!.data! };
+      value.checkpoint = null;
+    };
+    t.mock.method(h.gateway, 'waitObserved', async () => {
+      throw new RemoteKitError('outcome_unknown', 'injected stop timeout');
+    });
+    await assert.rejects(
+      requestViewer(h.control, account.tenantId, 'viewer', `admin.${operation}`, {
+        username: 'uncertain-admin',
+        ...(operation === 'transfer' ? { nodeId: 'beta', bind: true } : {}),
+      }),
+      { code: 'outcome_unknown' },
+    );
+    await alpha.barrier();
+    const current = h.placement.peek(account.tenantId)!;
+    assert.equal(current.nodeId, source.nodeId);
+    assert.equal(current.placementEpoch, source.placementEpoch);
+    assert.equal(current.runState, 'stopped');
+    assert.equal(current.dataState, 'dirty');
+    assert.ok(current.pendingCommit);
+    assert.equal(h.placement.boundNodeId(account.tenantId), null);
+    assert.deepEqual(revoked, []);
+    assert.equal(h.control.tenants.get(account.tenantId).viewer?.id, 'viewer');
+  });
+  for (const step of ['stop', 'persist', 'finishStop', 'reconcile'] as const) {
+    if (operation === 'stop' && step === 'persist') continue;
+    test(`online ${operation} failure at ${step} preserves Viewer and can recover`, async (t) => {
+      const h = await harness();
+      t.after(() => h.close());
+      const alpha = await h.connect('alpha');
+      await h.connect('beta', 0.6);
+      const account = await registerUser(h.store, 'fault-admin', 'fault-admin-password');
+      const revoked: string[] = [];
+      await h.control.viewers.attachViewer(
+        account.tenantId,
+        'viewer',
+        (reason) => revoked.push(reason),
+        { identity: 'login', valid: () => true },
+        true,
+      );
+      await publishAndObserve(h.gateway, account.tenantId);
+      await h.commit(alpha, account.tenantId, id(1));
+      const source = h.placement.peek(account.tenantId)!;
+      const fault = () => {
+        throw new Error('injected ' + step);
+      };
+      if (step === 'stop') t.mock.method(h.gateway, 'stop', fault);
+      if (step === 'persist') {
+        if (operation === 'transfer') t.mock.method(h.placement, 'transfer', fault);
+        else t.mock.method(h.placement, 'forgetTenant', fault);
+      }
+      if (step === 'finishStop') t.mock.method(h.control.lifecycle, 'finishStop', fault);
+      if (step === 'reconcile') t.mock.method(h.control.reconciler, 'reconcileProduct', fault);
+      const call = () =>
+        requestViewer(h.control, account.tenantId, 'viewer', `admin.${operation}`, {
+          username: 'fault-admin',
+          ...(operation === 'transfer' ? { nodeId: 'beta', bind: true } : {}),
+        });
+      await assert.rejects(call(), { code: 'internal' });
+      assert.deepEqual(revoked, []);
+      assert.equal(h.control.tenants.get(account.tenantId).viewer?.id, 'viewer');
+      if (step === 'stop') assert.deepEqual(h.placement.peek(account.tenantId), source);
+      if (step === 'persist') assert.equal(h.placement.peek(account.tenantId)?.nodeId, 'alpha');
+      t.mock.restoreAll();
+      if (h.placement.peek(account.tenantId)?.runState === 'stopped') {
+        h.control.reconciler.resetTenantEndpoint(account.tenantId);
+        await h.control.tenants.serial(account.tenantId, () =>
+          h.control.reconciler.resumeTenant(account.tenantId),
+        );
+      }
+      await call();
+      assert.equal(h.placement.peek(account.tenantId)?.runState, 'running');
+      assert.deepEqual(revoked, []);
+      await h.control.sessionPurge.flush();
+    });
+  }
+}
+
+for (const operation of ['transfer', 'resetSession'] as const) {
+  test(`administrator ${operation} keeps its online Viewer and restarts the Session`, async (t) => {
+    const h = await harness();
+    t.after(() => h.close());
+    const alpha = await h.connect('alpha');
+    await h.connect('beta', 0.6);
+    const admin = await registerUser(h.store, 'online-admin', 'online-admin-password');
+    const revoked: string[] = [];
+    await h.control.viewers.attachViewer(
+      admin.tenantId,
+      'viewer',
+      (reason) => revoked.push(reason),
+      { identity: 'login', valid: () => true },
+      true,
+    );
+    await publishAndObserve(h.gateway, admin.tenantId);
+    await h.commit(alpha, admin.tenantId, id(1));
+    const source = h.placement.peek(admin.tenantId)!;
+    await requestViewer(h.control, admin.tenantId, 'viewer', `admin.${operation}`, {
+      username: 'online-admin',
+      ...(operation === 'transfer' ? { nodeId: 'beta', bind: true } : {}),
+    });
+    assert.deepEqual(revoked, []);
+    assert.equal(h.control.tenants.get(admin.tenantId).viewer?.id, 'viewer');
+    assert.equal(h.placement.peek(admin.tenantId)?.runState, 'running');
+    if (operation === 'transfer') assert.equal(h.placement.peek(admin.tenantId)?.nodeId, 'beta');
+    else assert.notEqual(h.placement.peek(admin.tenantId)?.sessionId, source.sessionId);
+  });
+}
+
 test('assigned placements stay clean until a current opened-copy observation', async () => {
   const h = await harness();
   try {
@@ -354,11 +714,10 @@ test('an administrator stop is forced past stop blockers, keep-alive tabs and an
     await h.control.userAdmin.stop('forced');
     assert.deepEqual(forced, [true]);
     const stopped = h.placement.peek(tenant)!;
-    assert.equal(stopped.runState, 'stopped');
-    assert.equal(stopped.dataState, 'clean');
+    assert.equal(stopped.runState, 'running');
     assert.equal(h.gateway.forcingStop(tenant), false);
-    assert.equal(revoked, 'logout');
-    assert.equal(h.control.tenants.get(tenant).viewer, undefined);
+    assert.equal(revoked, '');
+    assert.equal(h.control.tenants.get(tenant).viewer?.id, 'lease');
   } finally {
     await h.close();
   }
@@ -443,7 +802,7 @@ for (const step of [
         code: 'unavailable',
       });
       const current = h.placement.peek('tenant')!;
-      if (step === 'preflight' || step === 'stop intent') {
+      if (step === 'preflight' || step === 'stop intent' || step === 'selection') {
         assert.deepEqual(current, source);
       } else if (step === 'publication') {
         assert.equal(current.nodeId, source.nodeId);
@@ -492,7 +851,7 @@ test('offline dirty copies wait until transfer restores a complete version and f
       code: 'unavailable',
       reason: 'session_data_on_offline_node',
     });
-    await h.control.userAdmin.transfer('dirty-owner', 'beta');
+    await h.control.userAdmin.transfer('dirty-owner', 'beta', false);
     const moved = h.placement.peek(user.tenantId)!;
     assert.equal(moved.nodeId, 'beta');
     assert.equal(moved.checkpoint, id(1));

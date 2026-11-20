@@ -20,6 +20,7 @@ const positional = [
   'test-fullscreen',
   'test-diagnostic-collection',
   'test-cluster-nodes',
+  'test-admin-online-session',
   'test-coordination-reconnect',
 ];
 const touch = new Set([
@@ -32,6 +33,7 @@ const touch = new Set([
   'test-native-gestures',
 ]);
 const serial = new Set([
+  'test-admin-online-session',
   'test-node-updater',
   'test-cluster-nodes',
   'cluster-user-journeys',
@@ -87,7 +89,10 @@ export const scenarios = [
   serial: entry.serial || serial.has(entry.name),
   chrome89: chrome89.has(entry.name),
   group:
-    entry.name.includes('cluster') || entry.name.includes('coordination') || entry.kind === 'node'
+    entry.name.includes('cluster') ||
+    entry.name === 'test-admin-online-session' ||
+    entry.name.includes('coordination') ||
+    entry.kind === 'node'
       ? 'cluster'
       : /files|file-library|camera|learning/.test(entry.name)
         ? 'files'

@@ -1,5 +1,5 @@
 import type { BrowserAvailability } from '../../shared/product';
-import { RemoteKitError, nativeReasonMessage, type NativeErrorReason } from '../../shared/errors';
+import { RemoteKitError, errorReasonMessage, type ErrorReason } from '../../shared/errors';
 import type { DomainContext } from '../application';
 
 export function browserAvailability(context: DomainContext, tenant: string): BrowserAvailability {
@@ -7,6 +7,9 @@ export function browserAvailability(context: DomainContext, tenant: string): Bro
   if (fault) return { state: 'unavailable', reason: 'browser_unavailable', errorId: fault.errorId };
   const placement = context.endpoint.placement.peek(tenant);
   const nodes = context.endpoint.nodes;
+  const boundNodeId = context.endpoint.placement.boundNodeId(tenant);
+  if (boundNodeId !== null && nodes.get(boundNodeId)?.state.state !== 'ready')
+    return { state: 'unavailable', reason: 'session_bound_node_offline' };
   if (placement?.dataState === 'dirty' && nodes.get(placement.nodeId)?.state.state !== 'ready')
     return { state: 'unavailable', reason: 'session_data_on_offline_node' };
   if (!nodes.all().some((node) => node.state.state === 'ready' && !nodes.isRemoved(node.nodeId)))
@@ -15,7 +18,7 @@ export function browserAvailability(context: DomainContext, tenant: string): Bro
   if (error)
     return {
       state: 'unavailable',
-      reason: nativeReasonMessage(error.reason) ? (error.reason as NativeErrorReason) : 'browser_unavailable',
+      reason: errorReasonMessage(error.reason) ? (error.reason as ErrorReason) : 'browser_unavailable',
       errorId: error.errorId,
     };
   return { state: context.endpoint.observation(tenant)?.browser === 'running' ? 'available' : 'starting' };
@@ -26,11 +29,13 @@ export function requireBrowser(context: DomainContext, tenant: string, allowStar
   if (browser.state === 'available' || (allowStarting && browser.state === 'starting')) return;
   throw new RemoteKitError(
     'unavailable',
-    browser.reason === 'session_data_on_offline_node'
-      ? '浏览器暂不可用：数据所在节点离线，恢复后自动继续'
-      : browser.reason === 'no_eligible_node'
-        ? '浏览器暂不可用：没有可用的节点，恢复后自动继续'
-        : '浏览器暂不可用，恢复后自动继续',
+    browser.reason === 'session_bound_node_offline'
+      ? '会话绑定的节点离线，恢复后自动继续'
+      : browser.reason === 'session_data_on_offline_node'
+        ? '浏览器暂不可用：数据所在节点离线，恢复后自动继续'
+        : browser.reason === 'no_eligible_node'
+          ? '浏览器暂不可用：没有可用的节点，恢复后自动继续'
+          : '浏览器暂不可用，恢复后自动继续',
     { reason: browser.reason, errorId: browser.errorId },
   );
 }

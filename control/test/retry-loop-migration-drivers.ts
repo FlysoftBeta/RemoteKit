@@ -11,7 +11,9 @@ export const driveFailureMigration: OwnerFactory = (boundary, t) => {
     db = new Sqlite(':memory:');
     db.defaultSafeIntegers(true);
     db.exec(baseline);
-    db.exec('DROP TABLE retry_units; DROP TABLE server_settings; UPDATE schema_version SET version=23');
+    db.exec(
+      'DROP TABLE retry_units; DROP TABLE server_settings; DROP TABLE session_node_bindings; UPDATE schema_version SET version=23',
+    );
     const prepare = db.prepare.bind(db);
     t.mock.method(db, 'prepare', (sql: string) => {
       const statement = prepare(sql);

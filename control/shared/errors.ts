@@ -92,7 +92,7 @@ export const httpStatus: Record<ErrorCode, number> = {
 export type WireError = {
   code: ErrorCode;
   message: string;
-  reason?: NativeErrorReason;
+  reason?: ErrorReason;
   capacity?: ErrorCapacity;
   retryAfterMs?: number;
   errorId?: string;
@@ -116,7 +116,7 @@ export function parseWireError(value: unknown): RemoteKitError | undefined {
     capacity: capacities.includes(wire.capacity as ErrorCapacity)
       ? (wire.capacity as ErrorCapacity)
       : undefined,
-    reason: nativeReasonMessage(wire.reason) ? (wire.reason as NativeErrorReason) : undefined,
+    reason: errorReasonMessage(wire.reason) ? (wire.reason as ErrorReason) : undefined,
     retryAfterMs: validRetryHint(wire.retryAfterMs) ? wire.retryAfterMs : undefined,
     errorId: isErrorId(wire.errorId) ? wire.errorId : undefined,
   });
@@ -126,7 +126,7 @@ export function wireError(error: RemoteKitError): WireError {
     code: error.code,
     message: error.message,
     ...(error.capacity ? { capacity: error.capacity } : {}),
-    ...(nativeReasonMessage(error.reason) ? { reason: error.reason as NativeErrorReason } : {}),
+    ...(errorReasonMessage(error.reason) ? { reason: error.reason as ErrorReason } : {}),
     ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
     ...(error.errorId === undefined ? {} : { errorId: error.errorId }),
   };
@@ -152,9 +152,11 @@ export type NativeErrorReason =
   | 'corrupt_record'
   | 'session_data_on_offline_node'
   | 'no_eligible_node';
-const nativeMessages: Record<NativeErrorReason, string> = {
+export type ErrorReason = NativeErrorReason | 'session_bound_node_offline';
+const reasonMessages: Record<ErrorReason, string> = {
   corrupt_record: '数据记录已损坏，请联系管理员',
   no_eligible_node: '没有可用的节点，恢复后自动继续',
+  session_bound_node_offline: '会话绑定的节点离线，恢复后自动继续',
   session_data_on_offline_node: '会话数据所在节点离线，恢复后自动继续',
   browser_crashed: '浏览器异常退出，正在恢复…',
   browser_restarting: '浏览器正在恢复，请稍候…',
@@ -186,9 +188,9 @@ const codeMessages: Record<ErrorCode, string> = {
   internal: '服务内部错误',
 };
 
-export function nativeReasonMessage(reason: unknown): string | undefined {
-  return typeof reason === 'string' && Object.prototype.hasOwnProperty.call(nativeMessages, reason)
-    ? nativeMessages[reason as NativeErrorReason]
+export function errorReasonMessage(reason: unknown): string | undefined {
+  return typeof reason === 'string' && Object.prototype.hasOwnProperty.call(reasonMessages, reason)
+    ? reasonMessages[reason as ErrorReason]
     : undefined;
 }
 export function errorCodeMessage(code: ErrorCode): string {
@@ -199,8 +201,8 @@ export function nativeError(wire: unknown): RemoteKitError {
   const parsed = parseWireError(wire);
   const code = parsed?.code ?? 'outcome_unknown';
   const value = wire && typeof wire === 'object' ? (wire as Record<string, unknown>) : undefined;
-  const message = nativeReasonMessage(value?.reason);
-  const reason = message === undefined ? undefined : (value?.reason as NativeErrorReason);
+  const message = errorReasonMessage(value?.reason);
+  const reason = message === undefined ? undefined : (value?.reason as ErrorReason);
   return new RemoteKitError(code, message ?? errorCodeMessage(code), {
     detail: typeof value?.message === 'string' ? value.message : String(wire),
     reason,

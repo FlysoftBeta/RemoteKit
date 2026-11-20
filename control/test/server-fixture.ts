@@ -30,6 +30,13 @@ export function testGateway(
   if (link.onSignal) node.onSignal = link.onSignal.bind(link);
   const placements = new Map<string, SessionPlacement>();
   const gateway = new EndpointGateway(nodes, {
+    boundNodeId: () => null,
+    canReceive: () => true,
+    deleteTenant: (tenant) => {
+      const sessionId = placements.get(tenant)?.sessionId;
+      placements.delete(tenant);
+      return sessionId;
+    },
     peek: (tenant) => placements.get(tenant),
     resolve: (tenant) => {
       if (node.state.state !== 'ready') throw new RemoteKitError('unavailable', 'Fixture offline');

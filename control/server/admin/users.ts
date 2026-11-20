@@ -1,5 +1,5 @@
 import { log } from '../log';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type { AdminSessionState, AdminStorage, AdminUser } from '../../shared/admin';
 import type { DomainContext, DomainServices } from '../application';
 import { validPassword } from '../auth/accounts';
@@ -17,6 +17,8 @@ type Services = Pick<
   | 'sessionImporter'
   | 'operations'
   | 'learning'
+  | 'reconciler'
+  | 'security'
 >;
 
 export class UserAdmin {
@@ -36,9 +38,11 @@ export class UserAdmin {
   }
   private session(tenant: string): AdminSessionState {
     const placement = this.context.endpoint.placement.peek(tenant);
-    if (!placement) return { state: 'none' };
+    const boundNodeId = this.context.endpoint.placement.boundNodeId(tenant);
+    if (!placement) return { state: 'none', boundNodeId };
     return {
       state: placement.runState,
+      boundNodeId,
       nodeId: placement.nodeId,
       dataState: placement.dataState,
       nodeOffline: this.context.endpoint.nodes.get(placement.nodeId)?.state.state !== 'ready',
@@ -92,25 +96,31 @@ export class UserAdmin {
     viewer.revoke('logout');
     await this.services.viewers.detachViewer(tenant, viewer.id);
   }
-  async resetPassword(actor: string, username: unknown, password: unknown) {
-    const user = this.other(actor, username);
+  async resetPassword(actor: string, loginIdentity: string, username: unknown, password: unknown) {
+    const user = this.find(username);
     validPassword(password);
     const secret = await hashSecret(password);
     this.context.store.transaction(() => {
       this.context.store.accounts.setPassword(user.id, secret.salt, secret.hash);
-      this.context.store.accounts.revokeUser(user.id);
+      if (user.tenant === actor) this.context.store.accounts.revokeUserExcept(user.id, loginIdentity);
+      else this.context.store.accounts.revokeUser(user.id);
     });
-    await this.disconnect(user.tenant);
+    if (user.tenant !== actor) await this.disconnect(user.tenant);
     return this.list();
   }
   async clearSecondFactors(actor: string, username: unknown) {
-    const user = this.other(actor, username);
-    this.context.store.security.clearSecondFactors(user.id);
-    await this.disconnect(user.tenant);
+    const user = this.find(username);
+    if (user.tenant === actor) {
+      const viewer = this.context.tenants.get(actor).viewer!;
+      this.services.security.clearSecondFactors(actor, viewer.security);
+    } else {
+      this.context.store.security.clearSecondFactors(user.id);
+      await this.disconnect(user.tenant);
+    }
     return this.list();
   }
-  async signOut(actor: string, username: unknown) {
-    const user = this.other(actor, username);
+  async signOut(username: unknown) {
+    const user = this.find(username);
     this.context.store.accounts.revokeUser(user.id);
     await this.disconnect(user.tenant);
     return this.list();
@@ -139,27 +149,73 @@ export class UserAdmin {
     this.services.viewers.push(user.tenant);
     return this.list();
   }
-  /** An administrator's stop is forced: the user goes offline and no stop policy or blocker applies. */
   async stop(username: unknown) {
     const user = this.find(username);
-    const placement = this.context.endpoint.placement.peek(user.tenant);
-    if (placement?.runState !== 'running' && !placement?.pendingCommit)
-      throw new RemoteKitError('conflict', '会话未运行');
-    await this.disconnect(user.tenant);
     await this.context.tenants.serial(user.tenant, async () => {
-      await this.context.endpoint.stop(user.tenant, { force: true });
-      this.services.lifecycle.finishStop(user.tenant);
+      const placement = this.context.endpoint.placement.peek(user.tenant);
+      if (placement?.runState !== 'running' && !placement?.pendingCommit)
+        throw new RemoteKitError('conflict', '会话未运行');
+      await this.rebuildSession(user.tenant, () => this.context.endpoint.stop(user.tenant, { force: true }));
     });
     return this.list();
   }
-  async transfer(username: unknown, nodeId: unknown) {
-    if (nodeId !== undefined && (typeof nodeId !== 'string' || !nodeId))
-      throw new RemoteKitError('invalid_request', '目标节点无效');
+  private restarting(tenant: string) {
+    this.context.tenants.get(tenant).lastError = new RemoteKitError(
+      'unavailable',
+      '浏览器正在恢复，请稍候…',
+      { reason: 'browser_restarting' },
+    );
+    this.services.viewers.push(tenant);
+  }
+  private async resume(tenant: string, generation: number) {
+    this.services.lifecycle.finishStop(tenant);
+    this.services.reconciler.resetTenantEndpoint(tenant, generation);
+    this.services.viewers.push(tenant);
+    await this.services.reconciler.resumeTenant(tenant);
+  }
+  private async rebuildSession(tenant: string, change: () => Promise<unknown>) {
+    const source = this.context.endpoint.placement.peek(tenant);
+    const generation = this.context.tenants.mediaGeneration(tenant) + 1;
+    this.restarting(tenant);
+    let resuming = false;
+    try {
+      await change();
+      resuming = true;
+      await this.resume(tenant, generation);
+    } catch (error) {
+      const current = this.context.endpoint.placement.peek(tenant);
+      if (
+        !resuming &&
+        current &&
+        (current.placementEpoch !== source?.placementEpoch || current.runState === 'stopped')
+      )
+        // The change's own error is what the caller reports; a failed resume leaves the
+        // reconciler's next pass to start the Session.
+        await this.resume(tenant, generation).catch((resumeError) =>
+          log.warn('admin.resume_failed', { tenant, err: resumeError }),
+        );
+      this.context.tenants.get(tenant).lastError = toRemoteKitError(error);
+      this.services.viewers.push(tenant);
+      throw error;
+    }
+  }
+  async transfer(username: unknown, nodeId: unknown, bind: unknown) {
+    if (
+      typeof bind !== 'boolean' ||
+      (bind && !nodeId) ||
+      (nodeId !== undefined && (typeof nodeId !== 'string' || !nodeId))
+    )
+      throw new RemoteKitError('invalid_request', '目标节点或绑定状态无效');
     const user = this.find(username);
-    await this.disconnect(user.tenant);
     await this.context.tenants.serial(user.tenant, async () => {
-      await this.context.endpoint.transfer(user.tenant, nodeId as string | undefined);
-      this.services.lifecycle.finishStop(user.tenant);
+      const source = this.context.endpoint.placement.peek(user.tenant);
+      if (source && source.nodeId === nodeId) {
+        await this.context.endpoint.transfer(user.tenant, nodeId as string, bind);
+        return;
+      }
+      await this.rebuildSession(user.tenant, () =>
+        this.context.endpoint.transfer(user.tenant, nodeId as string | undefined, bind),
+      );
     });
     return this.list();
   }
@@ -167,29 +223,29 @@ export class UserAdmin {
     const user = this.find(username);
     await this.services.learning.retireTenant(user.tenant);
     await this.context.tenants.serial(user.tenant, async () => {
-      // A running Browser still owns live pages and RTC; reset only discards a stopped Session.
-      const placement = this.context.endpoint.placement.peek(user.tenant);
-      if (placement && placement.runState !== 'stopped') throw new RemoteKitError('conflict', '需先停止');
-      this.services.learning.forgetTenantData(
-        user.tenant,
-        () => {
-          this.context.store.clipboards.clear(user.id);
-          this.context.store.coordination.deleteTenant(user.tenant);
-          const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);
-          if (sessionId) this.services.sessionPurge.enqueue(sessionId);
-          const workspace = this.context.store.workspaces.workspace(user.tenant);
-          for (const tab of workspace.tabs)
-            if (!isLocalTab(tab)) {
-              tab.residency = 'discarded';
-              tab.restoring = false;
-            }
-          this.context.store.workspaces.saveWorkspace(workspace);
-        },
-        true,
-      );
-      this.context.endpoint.forget(user.tenant);
-      this.context.tenants.get(user.tenant).resetEndpoint();
-      this.services.viewers.push(user.tenant);
+      await this.rebuildSession(user.tenant, async () => {
+        const placement = this.context.endpoint.placement.peek(user.tenant);
+        if (placement?.runState === 'running' || placement?.pendingCommit)
+          await this.context.endpoint.stop(user.tenant, { force: true });
+        this.services.learning.forgetTenantData(
+          user.tenant,
+          () => {
+            this.context.store.clipboards.clear(user.id);
+            this.context.store.coordination.deleteTenant(user.tenant);
+            const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);
+            if (sessionId) this.services.sessionPurge.enqueue(sessionId);
+            const workspace = this.context.store.workspaces.workspace(user.tenant);
+            for (const tab of workspace.tabs)
+              if (!isLocalTab(tab)) {
+                tab.residency = 'discarded';
+                tab.restoring = false;
+              }
+            this.context.store.workspaces.saveWorkspace(workspace);
+          },
+          true,
+        );
+        this.context.endpoint.forget(user.tenant);
+      });
     });
     void this.services.sessionPurge.flush();
     return this.list();
@@ -205,7 +261,7 @@ export class UserAdmin {
     await this.context.tenants.serial(user.tenant, async () => {
       const store = this.context.store;
       const importMail = store.transaction(() => {
-        const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);
+        const sessionId = this.context.endpoint.placement.deleteTenant(user.tenant);
         if (sessionId) this.services.sessionPurge.enqueue(sessionId);
         this.services.objects.forgetTenant(user.tenant);
         store.coordination.deleteTenant(user.tenant);

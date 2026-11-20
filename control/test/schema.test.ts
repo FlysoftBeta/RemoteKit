@@ -9,7 +9,7 @@ import { ControlDatabase } from '../server/persistence/database';
 test('fresh schema includes workspace spaces, installed apps, favorites and usage', () => {
   const store = new ControlDatabase(':memory:', { buildId: 'test' });
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 25n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 26n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
@@ -19,6 +19,7 @@ test('fresh schema includes workspace spaces, installed apps, favorites and usag
       'users',
       'clipboards',
       'auth_tokens',
+      'session_node_bindings',
       'workspaces',
       'workspace_spaces',
       'installed_apps',

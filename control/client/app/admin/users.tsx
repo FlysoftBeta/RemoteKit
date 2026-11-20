@@ -4,6 +4,9 @@ import {
   Box,
   Button,
   Chip,
+  Checkbox,
+  FormControlLabel,
+  FormHelperText,
   Dialog,
   DialogActions,
   DialogContent,
@@ -57,8 +60,9 @@ type Action =
   | 'delete';
 
 function sessionText(user: AdminUser) {
-  if (user.session.state === 'none') return '未启动';
-  return `${user.session.nodeId} · ${user.session.state === 'running' ? '运行中' : '已停止'} · ${user.session.dataState === 'dirty' ? '有新更改' : '已保存'} · 完整版本 ${formatTime(user.session.checkpointAt)}`;
+  const binding = user.session.boundNodeId ? ` · 已绑定 ${user.session.boundNodeId}` : '';
+  if (user.session.state === 'none') return `未启动${binding}`;
+  return `${user.session.nodeId}${binding} · ${user.session.state === 'running' ? '运行中' : '已停止'} · ${user.session.dataState === 'dirty' ? '有新更改' : '已保存'} · 完整版本 ${formatTime(user.session.checkpointAt)}`;
 }
 
 function PasswordField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
@@ -155,6 +159,7 @@ function CreateUserDialog({
 export function TransferDialog({
   open,
   title,
+  confirmLabel = '转移',
   disabled,
   onConfirm,
   onClose,
@@ -162,6 +167,7 @@ export function TransferDialog({
 }: {
   open: boolean;
   title: string;
+  confirmLabel?: string;
   disabled?: boolean;
   onConfirm: () => Promise<void>;
   onClose: () => void;
@@ -220,7 +226,7 @@ export function TransferDialog({
             }
           }}
         >
-          {busy ? '转移中…' : '转移'}
+          {busy ? '转移中…' : confirmLabel}
         </Button>
       </DialogActions>
     </Dialog>
@@ -244,13 +250,15 @@ function ActionDialog({
 }) {
   const [password, setPassword] = useState(''),
     [typed, setTyped] = useState(''),
-    [nodeId, setNodeId] = useState('');
+    [nodeId, setNodeId] = useState(''),
+    [bind, setBind] = useState(false);
   if (!user || !action) return null;
   const username = user.username;
   const close = () => {
     setPassword('');
     setTyped('');
     setNodeId('');
+    setBind(false);
     onClose();
   };
   const common = { open: true, onClose: close };
@@ -264,7 +272,11 @@ function ActionDialog({
           disabled={password.length < 8}
           onConfirm={() => run('admin.resetPassword', { username, password })}
         >
-          <Typography color="text.secondary">该用户的所有登录会立即失效，需使用新密码重新登录。</Typography>
+          <Typography color="text.secondary">
+            {username === self
+              ? '当前登录保留，其他登录立即失效，之后需使用新密码。'
+              : '该用户的所有登录会立即失效，需使用新密码重新登录。'}
+          </Typography>
           <PasswordField value={password} onChange={setPassword} />
         </ConfirmDialog>
       );
@@ -290,7 +302,9 @@ function ActionDialog({
           onConfirm={() => run('admin.signOut', { username })}
         >
           <Typography>
-            断开 {username} 当前的连接，并让其所有设备上的登录失效。浏览器会话与标签页保留。
+            {username === self
+              ? '你将退出所有设备，需要重新登录。浏览器会话与标签页保留。'
+              : `断开 ${username} 当前的连接，并让其所有设备上的登录失效。浏览器会话与标签页保留。`}
           </Typography>
         </ConfirmDialog>
       );
@@ -299,8 +313,12 @@ function ActionDialog({
         <TransferDialog
           {...common}
           title={`转移 ${username} 的 Session`}
-          disabled={user.session.state === 'none'}
-          onConfirm={() => run('admin.transfer', { username, ...(nodeId ? { nodeId } : {}) })}
+          disabled={
+            user.session.state === 'none' ||
+            (nodeId === user.session.nodeId && bind === (user.session.boundNodeId === nodeId))
+          }
+          confirmLabel={user.session.state !== 'none' && nodeId === user.session.nodeId ? '保存' : '转移'}
+          onConfirm={() => run('admin.transfer', { username, bind, ...(nodeId ? { nodeId } : {}) })}
         >
           <Typography>
             {user.session.state !== 'none' && user.session.nodeOffline
@@ -311,26 +329,43 @@ function ActionDialog({
                 ? '将先停止并保存源节点上的 Session，再转移到目标节点。'
                 : '将停止源节点上的 Session 并转移到目标节点；未打开的数据无需保存。'}
           </Typography>
+          <Typography>用户保持在线，所有标签页会在目标节点重新载入。</Typography>
           <TextField
             select
             label="目标节点"
             value={nodeId}
-            onChange={(event) => setNodeId(event.target.value)}
+            onChange={(event) => {
+              const selected = event.target.value;
+              setNodeId(selected);
+              setBind(!!selected && user.session.boundNodeId === selected);
+            }}
           >
             <MenuItem value="">自动选择</MenuItem>
             {nodes
               .filter(
                 (node): node is ConfiguredAdminNode =>
-                  node.state === 'ready' &&
-                  user.session.state !== 'none' &&
-                  node.nodeId !== user.session.nodeId,
+                  node.nodeId !== null &&
+                  (node.state === 'ready' ||
+                    (user.session.state !== 'none' && node.nodeId === user.session.nodeId)),
               )
               .map((node) => (
                 <MenuItem key={node.nodeId} value={node.nodeId}>
                   {node.nodeId}
+                  {user.session.state !== 'none' && node.nodeId === user.session.nodeId ? '（当前）' : ''}
                 </MenuItem>
               ))}
           </TextField>
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={!!nodeId && bind}
+                disabled={!nodeId}
+                onChange={(event) => setBind(event.target.checked)}
+              />
+            }
+            label="绑定到该节点"
+          />
+          <FormHelperText>绑定后该用户的会话只在这个节点运行，节点离线时等待其恢复</FormHelperText>
         </TransferDialog>
       );
     case 'stop':
@@ -342,8 +377,8 @@ function ActionDialog({
           onConfirm={() => run('admin.stop', { username })}
         >
           <Typography>
-            {`强制停止 ${username} 的浏览器并保存检查点，释放节点资源。`}
-            用户会被强制下线；挂机模式、未处理的页面请求与进行中的传输都不会阻止停止。用户下次连接时会在合适的节点上恢复。
+            {`强制停止 ${username} 的浏览器并保存检查点。`}
+            挂机模式、未处理的页面请求与进行中的传输都不会阻止停止。用户在线时浏览器会随即重新启动、标签页重新载入，可用于浏览器异常时恢复。
           </Typography>
         </ConfirmDialog>
       );
@@ -358,7 +393,7 @@ function ActionDialog({
         >
           <Typography>
             删除 {username}{' '}
-            的浏览器数据：Cookie、网站登录状态、本地存储和历史记录。标签页、设置与“我的文件”保留，下次打开时从空白状态重新载入。
+            的浏览器数据：Cookie、网站登录状态、本地存储和历史记录。标签页、设置与“我的文件”保留。用户保持在线，标签页从空白状态重新载入。
           </Typography>
         </ConfirmDialog>
       );
@@ -550,30 +585,27 @@ export function AdminUsersSection({
         </Box>
       )}
       <Menu anchorEl={scaledAnchor(menu?.anchor)} open={!!menu} onClose={() => setMenu(null)}>
-        <MenuItem disabled={!other} onClick={() => open('password')}>
+        <MenuItem disabled={!target} onClick={() => open('password')}>
           重置密码
         </MenuItem>
         <MenuItem
-          disabled={!other || !(target?.secondFactors.pin || target?.secondFactors.face)}
+          disabled={!(target?.secondFactors.pin || target?.secondFactors.face)}
           onClick={() => open('factors')}
         >
           清除 PIN 与人脸
         </MenuItem>
-        <MenuItem disabled={!other} onClick={() => open('signOut')}>
+        <MenuItem disabled={!target} onClick={() => open('signOut')}>
           强制下线
         </MenuItem>
         <Divider />
-        <MenuItem disabled={!other || target?.session.state !== 'running'} onClick={() => open('stop')}>
+        <MenuItem disabled={target?.session.state !== 'running'} onClick={() => open('stop')}>
           <ListItemText primary="立即停止" />
         </MenuItem>
         <MenuItem disabled={!target || target.session.state === 'none'} onClick={() => open('move')}>
           <ListItemText primary="转移" />
         </MenuItem>
-        <MenuItem disabled={target?.session.state !== 'stopped'} onClick={() => open('resetSession')}>
-          <ListItemText
-            primary="重置浏览器数据"
-            secondary={target?.session.state === 'running' ? '需先停止' : undefined}
-          />
+        <MenuItem disabled={!target} onClick={() => open('resetSession')}>
+          <ListItemText primary="重置浏览器数据" />
         </MenuItem>
         <Divider />
         {target?.disabled ? (
@@ -600,6 +632,7 @@ export function AdminUsersSection({
         }}
       />
       <ActionDialog
+        key={`${action?.user.username}:${action?.action}`}
         action={action?.action ?? null}
         user={action?.user ?? null}
         self={self}

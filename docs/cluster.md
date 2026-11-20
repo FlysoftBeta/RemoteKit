@@ -216,11 +216,14 @@ Session 数据以**版本**（checkpoint）保存：一个版本是一份 manife
 
 **放置规则**：`clean` 的 Session 可以放到任何合格节点（恢复最新的完整版本，或沿用同一 manifest 的本地副本）。`dirty` 的 Session 只能在持有它的节点上运行——那个节点上的目录比任何版本都新；节点离线时就等它回来，Session 是 `unavailable`，reason `session_data_on_offline_node`（Viewer："会话数据所在节点离线，恢复后自动继续"）。再平衡只移动 `clean` 的 Session。
 
-**转移**（管理 App → 用户 → 转移，`admin.transfer{username, nodeId?}`）把一个用户的 Session 搬到另一个节点，用户先被强制下线：
+**绑定节点**：管理员可以把一个用户的 Session 绑定到某个节点（`session_node_bindings(tenant, node_id)`，由 Placement 独占）。绑定后放置的候选只有这个节点，只要它就绪、未移除就放置，不看压力、磁盘排空与容量上限——这是管理员的显式决定；它不就绪时 `unavailable`，reason `session_bound_node_offline`（Viewer："会话绑定的节点离线，恢复后自动继续"）。缓解与再平衡不停止已绑定的 Session。绑定属于用户而不是某个放置：重置浏览器数据删除放置但保留绑定；删除用户时删除；移除节点时删除绑定到它的记录（移除即放弃绑定）。
+
+**转移**（管理 App → 用户 → 转移，`admin.transfer{username, nodeId?, bind}`）把一个用户的 Session 搬到另一个节点。转移是在线操作：用户不下线，Viewer 显示"浏览器正在恢复"（`browser_restarting`），转移完成后 Control 重置该用户的 Endpoint 运行态（媒体代次加一），在线 Viewer 照常对账，Session 在新放置上启动，标签页按导航恢复流程重新载入、RTC 与新节点重新协商。整个过程在该用户的 serial 里，停止等待期间对账不会把 Session 在源节点重新拉起。失败时如果源已经停下或放置已经改变，同样恢复对账，再把错误返回给管理员。管理员也可以转移自己的 Session。
 
 - 源节点在线：先在源节点停止——`dirty` 时同时提交（不丢更改），`clean` 时只停止、不提交——再放到目标节点（epoch 加一）。停止最长等 180 秒：Endpoint 报告的错误按它的错误码返回，超时为 `outcome_unknown`；管理 App 在等待期间显示进度，结束时要么成功、要么显示带错误码的失败，不会无声挂起。没有其他在线节点时直接拒绝，不先停止。
 - 源节点离线：尽力而为。epoch 加一，以最新的完整版本记为 `stopped/clean`，之后的更改丢失；一个完整版本都没有时从空白浏览器数据开始（按 Control 的有限产品信息重建工作区）。确认框写明恢复哪个时间的版本或将从空白开始。旧副本由 fencing 隔离：源节点回来时期望状态里已没有它。
 - 指定目标节点时记下这个选择（`transfer_pending`），下次打开优先放在那里且 epoch 不再加一；不指定时由下次打开按放置规则选择，源节点不在候选里。
+- `bind`：为真时必须指定 `nodeId`，绑定写为目标节点；为假时删除已有绑定。绑定与放置变更在同一事务里写入。目标就是当前节点时只改绑定，不停止、不重建、epoch 不变。已绑定时"有没有可接收节点"只要求目标就绪。
 
 转移只针对 Session 数据；文件库对象与放置无关，不需要转移。
 

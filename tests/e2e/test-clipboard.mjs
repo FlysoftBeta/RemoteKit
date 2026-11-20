@@ -390,30 +390,17 @@ try {
   }
   result('4 oversize remains local', { bytes: Buffer.byteLength(large), revision: revision() });
   if (stage !== 'oversize') {
-    await assert.rejects(admin.call('admin.resetSession', { username: 'clipboard-user' }), /需先停止/);
-    assert.deepEqual(row(), retained);
-    await user.context.close();
-    await until(
-      async () =>
-        !(await admin.call('admin.users')).find((entry) => entry.username === 'clipboard-user').online,
-      'viewer detached before reset',
-    );
-    await until(
-      async () => {
-        const users = await admin.call('admin.stop', { username: 'clipboard-user' });
-        return users.find((entry) => entry.username === 'clipboard-user').session.state === 'stopped';
-      },
-      'Session hibernated before reset',
-      90000,
-    );
     await admin.call('admin.resetSession', { username: 'clipboard-user' });
     assert.equal(row(), undefined);
-    user = await connect('clipboard-user');
+    assert.equal(
+      (await admin.call('admin.users')).find((entry) => entry.username === 'clipboard-user').online,
+      true,
+    );
     await ready();
     await until(() => latest().pasted === '', 'fresh reset page');
     assert.equal(await paste(), '');
     assert.equal(row(), undefined);
-    result('5 admin reset', { row: null, pasted: '', afterReconnect: true });
+    result('5 admin reset', { row: null, pasted: '', online: true });
   }
   result('privacy after oversize', await privacy());
   const media = await user.media();

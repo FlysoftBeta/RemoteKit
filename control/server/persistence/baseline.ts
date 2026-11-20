@@ -80,6 +80,7 @@ CREATE TABLE popup_receipts (tenant TEXT NOT NULL, provisional_id TEXT NOT NULL,
 CREATE TABLE removed_nodes (node_id TEXT PRIMARY KEY, removed_at INTEGER NOT NULL);
 CREATE TABLE retry_units (owner TEXT NOT NULL, unit TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY(owner,unit));
 CREATE TABLE schema_version (version INTEGER NOT NULL);
+CREATE TABLE session_node_bindings (tenant TEXT PRIMARY KEY, node_id TEXT NOT NULL);
 CREATE TABLE server_settings (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);
 CREATE TABLE session_deletions (
         session_id TEXT NOT NULL, node_id TEXT NOT NULL, error_code TEXT, error_message TEXT, PRIMARY KEY(session_id,node_id));
@@ -145,6 +146,6 @@ CREATE UNIQUE INDEX single_admin ON users(is_admin) WHERE is_admin=1;
 CREATE INDEX usage_events_context ON usage_events(tenant,window_id,context,at,id);
 CREATE INDEX usage_events_tenant ON usage_events(tenant,at,id);
 CREATE INDEX viewer_presence_tenant ON viewer_presence(tenant,connected_at);
-INSERT INTO schema_version VALUES (25);
+INSERT INTO schema_version VALUES (26);
 INSERT INTO server_settings VALUES (1,'{"version":1,"logRetentionDays":30}');
 `;

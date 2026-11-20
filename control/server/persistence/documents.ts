@@ -85,6 +85,7 @@ export const wireError = object(
       'corrupt_state',
       'corrupt_record',
       'session_data_on_offline_node',
+      'session_bound_node_offline',
       'no_eligible_node',
     ),
     retryAfterMs: integer({ min: 0, max: 86400000 }),

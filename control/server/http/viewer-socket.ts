@@ -204,14 +204,17 @@ Object.assign(handlers, {
     services.userAdmin.create(params.username, params.password),
   ),
   'admin.resetPassword': admin(({ services, authority }, params) =>
-    services.userAdmin.resetPassword(authority.tenantId, params.username, params.password),
+    services.userAdmin.resetPassword(
+      authority.tenantId,
+      services.tenants.get(authority.tenantId).viewer!.authentication.identity,
+      params.username,
+      params.password,
+    ),
   ),
   'admin.clearSecondFactors': admin(({ services, authority }, params) =>
     services.userAdmin.clearSecondFactors(authority.tenantId, params.username),
   ),
-  'admin.signOut': admin(({ services, authority }, params) =>
-    services.userAdmin.signOut(authority.tenantId, params.username),
-  ),
+  'admin.signOut': admin(({ services }, params) => services.userAdmin.signOut(params.username)),
   'admin.setDisabled': admin(({ services, authority }, params) =>
     services.userAdmin.setDisabled(authority.tenantId, params.username, params.disabled),
   ),
@@ -219,7 +222,7 @@ Object.assign(handlers, {
     services.userAdmin.transferAdmin(authority.tenantId, params.username),
   ),
   'admin.transfer': admin(({ services }, params) =>
-    services.userAdmin.transfer(params.username, params.nodeId),
+    services.userAdmin.transfer(params.username, params.nodeId, params.bind),
   ),
   'admin.stop': admin(({ services }, params) => services.userAdmin.stop(params.username)),
   'admin.resetSession': admin(({ services }, params) => services.userAdmin.resetSession(params.username)),
@@ -566,6 +569,7 @@ export function attachViewerSocket(
                   req.headers.host,
                   { directory: options.logDir, nodes: options.nodes ?? { all: () => [] } },
                 );
+                if (ws.readyState !== WebSocket.OPEN) return;
                 if (
                   !maintenance &&
                   (!control.viewers.productAllowed(peer.tenant, lease) ||

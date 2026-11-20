@@ -12,7 +12,7 @@ import {
   errorCodeMessage,
   httpStatus,
   nativeError,
-  nativeReasonMessage,
+  errorReasonMessage,
   parseWireError,
   toRemoteKitError,
   wireError,
@@ -31,7 +31,16 @@ test('native and Control reason sets stay in sync', () => {
       .matchAll(/'([a-z_]+)'/g),
   ].map((match) => match[1]);
   assert.deepEqual(nativeReasons.sort(), sharedReasons.sort());
-  for (const reason of nativeReasons) assert.ok(nativeReasonMessage(reason));
+  for (const reason of nativeReasons) assert.ok(errorReasonMessage(reason));
+});
+
+test('Control binding reasons survive wire decoding and Viewer presentation', () => {
+  const reason = 'session_bound_node_offline';
+  const message = '会话绑定的节点离线，恢复后自动继续';
+  const wire = wireError(new RemoteKitError('unavailable', message, { reason }));
+  assert.equal(wire.reason, reason);
+  assert.equal(parseWireError(wire)?.reason, reason);
+  assert.equal(errorReasonMessage(reason), message);
 });
 
 test('wire errors validate every code and restrict retry hints without leaking diagnosis', () => {
@@ -114,7 +123,7 @@ test('shared native display messages recognize only the closed reason set', (t) 
     ['document_unsupported', '不支持此文档格式'],
     ['document_too_complex', '文档过于复杂，超出处理限制'],
   ]) {
-    assert.equal(nativeReasonMessage(reason), message);
+    assert.equal(errorReasonMessage(reason), message);
     const wire = { code: 'rejected', message: 'English diagnosis', reason };
     const error = nativeError(wire);
     assert.equal(endpointError(wire).message, error.message);
@@ -124,7 +133,7 @@ test('shared native display messages recognize only the closed reason set', (t) 
     assert.deepEqual(wireError(error), { code: 'rejected', message, reason });
   }
   for (const reason of ['future_reason', 'toString', '', null, 1]) {
-    assert.equal(nativeReasonMessage(reason), undefined);
+    assert.equal(errorReasonMessage(reason), undefined);
     const error = nativeError({ code: 'rejected', message: 'diagnosis', reason });
     assert.equal(error.message, errorCodeMessage('rejected'));
     assert.equal(error.reason, undefined);

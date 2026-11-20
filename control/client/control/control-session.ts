@@ -1,6 +1,7 @@
 import { errorHandling } from '../../shared/error-policy';
 import { RetryUnit } from '../../shared/retry-unit';
 import { RemoteKitError, parseWireError } from '../../shared/errors';
+import { sessionStopAdminMethods, sessionStopWaitMs } from '../../shared/admin';
 import type { LibrarySnapshot } from '../../shared/file-library';
 import type { ProductState, RtcServerSignal, SocketMessage } from '../../shared/product';
 import type { AuthState } from '../../shared/security';
@@ -220,7 +221,7 @@ export class ControlSession {
       return Promise.reject(new RemoteKitError('internal', '控制请求编码失败', { detail: String(error) }));
     }
     return this.pending
-      .request(id, method === 'admin.transfer' ? 240000 : 20000, () => {
+      .request(id, sessionStopAdminMethods.includes(method) ? sessionStopWaitMs + 60000 : 20000, () => {
         this.socket!.send(encoded);
       })
       .catch((error) => {
