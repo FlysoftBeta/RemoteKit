@@ -18,6 +18,7 @@ const KEEP_VISIBLE = 64;
 // scaled <body>); pointer deltas are visual px and are divided by the UI scale.
 export function FloatingPanel({
   label,
+  hidden = false,
   placement,
   width,
   maxHeight,
@@ -26,6 +27,7 @@ export function FloatingPanel({
   onEscape,
 }: {
   label: string;
+  hidden?: boolean;
   placement?: PanelPlacement;
   width: number;
   maxHeight: number;
@@ -64,7 +66,7 @@ export function FloatingPanel({
       aria-modal={false}
       aria-label={label}
       elevation={0}
-      style={{ ...position, maxHeight }}
+      style={{ ...position, maxHeight, display: hidden ? 'none' : undefined }}
       onKeyDown={(event) => {
         if (event.key !== 'Escape' || !onEscape) return;
         event.stopPropagation();

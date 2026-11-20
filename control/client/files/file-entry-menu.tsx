@@ -42,6 +42,7 @@ export function FileEntryMenu({
   onClose,
   onOpen,
   onSelect,
+  onDetails,
   onDeleted,
 }: {
   entry?: LibraryEntry;
@@ -50,6 +51,7 @@ export function FileEntryMenu({
   onClose(): void;
   onOpen?(entry: LibraryEntry): void;
   onSelect?(entry: LibraryEntry): void;
+  onDetails?(entry: LibraryEntry): void;
   onDeleted?(): void;
 }) {
   const { snapshot, online, mutate, copySnippet, download } = useLibrary();
@@ -77,6 +79,7 @@ export function FileEntryMenu({
   return (
     <>
       <Menu
+        disableRestoreFocus
         anchorEl={scaledAnchor(anchor)}
         open={!!anchor && !!entry}
         onClose={onClose}
@@ -133,8 +136,8 @@ export function FileEntryMenu({
             </ListItemText>
           </MenuItem>
         )}
-        {onOpen && entry?.photo && (
-          <MenuItem disabled={disabled || unavailable} onClick={() => choose(onOpen)}>
+        {onDetails && entry?.kind === 'file' && entry.type.startsWith('image/') && (
+          <MenuItem disabled={disabled || unavailable} onClick={() => choose(onDetails)}>
             <ListItemIcon>
               <TuneOutlined fontSize="small" />
             </ListItemIcon>

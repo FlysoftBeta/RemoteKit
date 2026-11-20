@@ -194,7 +194,7 @@ export class ObjectIndex {
         detail: 'Tenant has no object reference or claim',
       });
     if (!this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(id))
-      throw new RemoteKitError('not_found', '文件不可用', { detail: 'Object is not available' });
+      throw new RemoteKitError('not_found', '文件不可用', { detail: 'asset_unreadable' });
   }
   checkQuota(tenant: string) {
     if (this.tenantObjectBytes !== null && this.bytes(tenant) > this.tenantObjectBytes)
@@ -202,7 +202,10 @@ export class ObjectIndex {
         detail: 'Tenant object quota exceeded',
       });
   }
-  derived(sourceId: string, kind: 'thumbnail' | 'document'): string | undefined {
+  derived(
+    sourceId: string,
+    kind: 'thumbnail' | 'preview' | 'photo' | 'selection-transcode' | 'document',
+  ): string | undefined {
     const row = this.store.db
       .prepare(
         'SELECT d.id FROM object_derivations d JOIN objects o ON o.id=d.id WHERE source_id=? AND kind=? ORDER BY o.created_at,d.id LIMIT 1',
@@ -441,7 +444,9 @@ export class ObjectIndex {
       storedSize < 0 ||
       !objectId(storedSha256) ||
       (derivedFrom !== undefined &&
-        (!objectId(derivedFrom) || derivedFrom === id || !['thumbnail', 'document'].includes(kind))) ||
+        (!objectId(derivedFrom) ||
+          derivedFrom === id ||
+          !['thumbnail', 'preview', 'photo', 'selection-transcode', 'document'].includes(kind))) ||
       (kind !== undefined && derivedFrom === undefined)
     )
       throw new RemoteKitError('invalid_request', '文件元数据格式无效', {

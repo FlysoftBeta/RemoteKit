@@ -205,7 +205,7 @@ export class LibraryRepository {
     const row = this.db
       .prepare('SELECT manifest,terminal FROM file_library_selections WHERE tenant=? AND id=?')
       .get(tenant, selectionId) as { manifest: string; terminal: TerminalState | null } | undefined;
-    if (!row) throw new RemoteKitError('not_found', '文件选择不存在');
+    if (!row) throw new RemoteKitError('not_found', '文件选择不存在', { detail: 'selection_unknown' });
     return {
       manifest: decodeJson(
         row.manifest,

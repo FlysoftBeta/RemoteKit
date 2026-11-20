@@ -8,7 +8,7 @@ import type { Asset, LibraryMethods, LibrarySnapshot } from '../shared/file-libr
 import { RemoteKitError } from '../shared/errors';
 import { FileLibraryContext, type FileLibrary } from '../client/files/file-library-state';
 import { FilesWindow } from '../client/files/files-window';
-import type { FilesWindowState } from '../client/files/files-app-state';
+import type { FilesWindowState } from '../shared/files-state';
 
 const dom = new JSDOM('<html><body><div id="app"></div></body></html>', {
   url: 'http://localhost',
@@ -149,6 +149,12 @@ test('upload failures stay in queue items and collapse to one note below the too
   const window = await mount();
   try {
     await window.add(2);
+    assert.equal(document.querySelector('[data-upload-job]'), null);
+    assert(document.querySelector('[data-upload-queue] [role=progressbar]'));
+    const expand = [...document.querySelectorAll<HTMLButtonElement>('[data-upload-queue] button')].find(
+      (button) => button.textContent === '展开上传队列',
+    )!;
+    await act(async () => expand.click());
     assert(document.querySelector('[data-upload-job] [role=progressbar]'));
     await act(async () => {
       window.pending[0].reject(new RemoteKitError('internal', 'upload failed'));

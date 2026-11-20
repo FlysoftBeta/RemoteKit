@@ -29,16 +29,15 @@ import type { LibraryEntry } from '../../shared/file-library';
 import { OverflowText } from '../app/overflow-text';
 import { scaledAnchor } from '../app/ui-scale';
 import { formatFileSize } from './file-format';
-import { canPreviewFile, FileImagePreview } from './file-image-preview';
+import { canPreviewFile } from './file-image-preview';
 import { useLibrary } from './file-library-state';
 import { FileRow, FileTile, type FileStatus } from './file-tile';
 import { BasketPartitionMenu } from './partition-menu';
 import type { PhotoJob } from './photo-job-store';
 import { PhotoOptions } from './photo-options';
-import { PhotoRotateButton } from './photo-rotate-button';
 import { SortableFileItems, type FileView } from './sortable-file-items';
 
-export type BasketPanel = { id: string; view: 'photo' | 'image' };
+export type BasketPanel = { id: string };
 
 interface BasketItem {
   id: string;
@@ -52,8 +51,8 @@ export function photoStatus(entry?: LibraryEntry, job?: PhotoJob): FileStatus | 
   if (state === 'choice') return { label: '待选片', tone: 'warning' };
   if (state === 'scan-error' || state === 'error')
     return {
-      label: '',
-      tone: 'progress',
+      label: state === 'scan-error' ? '扫描失败' : '处理失败',
+      tone: 'warning',
       failure: presentFailure(
         job?.error ??
           entry?.photo?.processingFailure ??
@@ -63,7 +62,16 @@ export function photoStatus(entry?: LibraryEntry, job?: PhotoJob): FileStatus | 
     };
   if (state)
     return {
-      label: job?.replace && job.rotationTurns === undefined ? '重拍处理中' : '处理中',
+      label:
+        state === 'sampling'
+          ? '正在取帧'
+          : state === 'committing'
+            ? '正在保存'
+            : job?.progress !== undefined && job.progress < 1
+              ? `正在上传 ${Math.round(job.progress * 100)}%`
+              : job?.replace && job.rotationTurns === undefined
+                ? '重拍处理中'
+                : '处理中',
       tone: 'progress',
     };
   if (entry?.photo?.advisory) return { label: '可能不清晰', tone: 'warning' };
@@ -86,6 +94,9 @@ export function BasketItems({
   onDragging,
   panel,
   setPanel,
+  onPreview,
+  requestId,
+  windowId,
   onChange,
   onInsert,
   onRetake,
@@ -102,6 +113,9 @@ export function BasketItems({
   onDragging: (value: boolean) => void;
   panel?: BasketPanel;
   setPanel: (panel?: BasketPanel) => void;
+  onPreview(id: string, details?: boolean, assetId?: string): void;
+  requestId?: string;
+  windowId?: string;
   onChange: (ids: string[], revision: number) => Promise<void>;
   onInsert: (afterId: string, anchor: HTMLElement) => void;
   onRetake: (entry: LibraryEntry) => void;
@@ -145,8 +159,9 @@ export function BasketItems({
   const open = (item: BasketItem, anchor: HTMLElement) => {
     const state = item.job?.state ?? item.entry?.photo?.pending;
     if (item.entry && !item.entry.available) return;
+    if (!item.entry && state !== 'choice' && state !== 'scan-error' && state !== 'error') return;
     if (!item.entry || state === 'choice' || state === 'scan-error' || state === 'error')
-      setPanel(panel?.id === item.id ? undefined : { id: item.id, view: 'photo' });
+      setPanel(panel?.id === item.id ? undefined : { id: item.id });
     else setMenu({ id: item.id, anchor });
   };
   const startDrag = React.useCallback(
@@ -239,11 +254,7 @@ export function BasketItems({
                   <>
                     {entry && canPreviewFile(entry) && !entry.photo?.pending && (
                       <Tooltip title="查看大图">
-                        <IconButton
-                          aria-label="查看"
-                          disabled={locked}
-                          onClick={() => setPanel({ id: item.id, view: 'image' })}
-                        >
+                        <IconButton aria-label="查看" disabled={locked} onClick={() => onPreview(item.id)}>
                           <VisibilityOutlined fontSize="small" />
                         </IconButton>
                       </Tooltip>
@@ -276,6 +287,7 @@ export function BasketItems({
         />
       )}
       <Menu
+        disableRestoreFocus
         anchorEl={scaledAnchor(menu?.anchor)}
         open={!!menuItem?.entry && !locked}
         onClose={() => setMenu(undefined)}
@@ -295,7 +307,7 @@ export function BasketItems({
               key="view"
               onClick={() => {
                 setMenu(undefined);
-                setPanel({ id: menuItem.id, view: 'image' });
+                onPreview(menuItem.id);
               }}
             >
               <ListItemIcon>
@@ -326,7 +338,7 @@ export function BasketItems({
               key="photo"
               onClick={() => {
                 setMenu(undefined);
-                setPanel({ id: menuItem.id, view: 'photo' });
+                onPreview(menuItem.id, true);
               }}
             >
               <ListItemIcon>
@@ -385,41 +397,21 @@ export function BasketItems({
             <OverflowText variant="subtitle2" sx={{ flex: 1, minWidth: 0 }}>
               {active.name}
             </OverflowText>
-            {panel?.view === 'image' && active.entry && (
-              <PhotoRotateButton entry={active.entry} destination="basket" disabled={locked} />
-            )}
+
             <IconButton aria-label="收起项目" onClick={() => setPanel(undefined)}>
               <Close fontSize="small" />
             </IconButton>
           </Box>
-          {panel?.view === 'image' && active.entry?.kind === 'file' ? (
-            <>
-              <FileImagePreview
-                key={active.entry.assetId}
-                inline
-                showRotation={false}
-                entry={active.entry}
-                onClose={() => setPanel(undefined)}
-              />
-              {active.job?.state === 'error' && (
-                <PhotoPanel
-                  item={active}
-                  locked={locked}
-                  onRemove={() => remove(active)}
-                  onRetake={onRetake}
-                  onClose={() => setPanel(undefined)}
-                />
-              )}
-            </>
-          ) : (
-            <PhotoPanel
-              item={active}
-              locked={locked}
-              onRemove={() => remove(active)}
-              onRetake={onRetake}
-              onClose={() => setPanel(undefined)}
-            />
-          )}
+          <PhotoPanel
+            item={active}
+            requestId={requestId}
+            windowId={windowId}
+            locked={locked}
+            onRemove={() => remove(active)}
+            onRetake={onRetake}
+            onPreview={(assetId) => onPreview(active.id, true, assetId)}
+            onClose={() => setPanel(undefined)}
+          />
         </Box>
       )}
     </>
@@ -432,12 +424,18 @@ function PhotoPanel({
   onRemove,
   onRetake,
   onClose,
+  onPreview,
+  requestId,
+  windowId,
 }: {
   item: BasketItem;
   locked: boolean;
   onRemove: () => void;
   onRetake: (entry: LibraryEntry) => void;
   onClose: () => void;
+  onPreview(assetId: string): void;
+  requestId?: string;
+  windowId?: string;
 }) {
   const { photos } = useLibrary();
   const { entry, job } = item;
@@ -446,10 +444,13 @@ function PhotoPanel({
       {(entry || job) && (
         <PhotoOptions
           key={entry?.id ?? job?.id}
+          requestId={requestId}
+          windowId={windowId}
           entry={entry}
           job={job}
           destination="basket"
           disabled={locked}
+          onPreview={onPreview}
         />
       )}
       <Box sx={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 0.5, mt: 1 }}>

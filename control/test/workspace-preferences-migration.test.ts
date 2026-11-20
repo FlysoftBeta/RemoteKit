@@ -91,7 +91,7 @@ test('v29 spaces, settings and saved actions migrate once into strict v30 docume
     );
     migrate(db, options);
     assert.deepEqual(db.prepare('SELECT id,payload FROM operation_receipts ORDER BY id').all(), rows);
-    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 30 });
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 31 });
   } finally {
     db.close();
   }
@@ -116,7 +116,7 @@ for (const table of ['workspaces', 'workspace_spaces', 'user_settings', 'operati
       );
       db.exec('DROP TRIGGER fail_migration');
       migrate(db, options);
-      assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 30 });
+      assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 31 });
     } finally {
       db.close();
     }

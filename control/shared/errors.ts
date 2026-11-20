@@ -96,9 +96,20 @@ export type WireError = {
   capacity?: ErrorCapacity;
   retryAfterMs?: number;
   errorId?: string;
-  detail?: typeof PENDING_CLOSE_DETAIL;
+  detail?: 'pending_close' | 'asset_unreadable' | 'selection_unknown' | 'entry_missing';
 };
 export const PENDING_CLOSE_DETAIL = 'pending_close';
+export const errorDetails = [
+  'pending_close',
+  'asset_unreadable',
+  'selection_unknown',
+  'entry_missing',
+] as const;
+function wireDetail(value: unknown): WireError['detail'] {
+  return errorDetails.includes(value as NonNullable<WireError['detail']>)
+    ? (value as WireError['detail'])
+    : undefined;
+}
 function supportsRetryHint(code: ErrorCode) {
   return code === 'busy' || code === 'rate_limited' || code === 'unavailable';
 }
@@ -115,7 +126,7 @@ export function parseWireError(value: unknown): RemoteKitError | undefined {
   )
     return;
   return new RemoteKitError(wire.code as ErrorCode, wire.message, {
-    detail: wire.detail === PENDING_CLOSE_DETAIL ? PENDING_CLOSE_DETAIL : undefined,
+    detail: wireDetail(wire.detail),
     capacity: capacities.includes(wire.capacity as ErrorCapacity)
       ? (wire.capacity as ErrorCapacity)
       : undefined,
@@ -128,7 +139,7 @@ export function wireError(error: RemoteKitError): WireError {
   return {
     code: error.code,
     message: error.message,
-    ...(error.detail === PENDING_CLOSE_DETAIL ? { detail: PENDING_CLOSE_DETAIL } : {}),
+    ...(wireDetail(error.detail) ? { detail: wireDetail(error.detail) } : {}),
     ...(error.capacity ? { capacity: error.capacity } : {}),
     ...(errorReasonMessage(error.reason) ? { reason: error.reason as ErrorReason } : {}),
     ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
@@ -208,7 +219,7 @@ export function nativeError(wire: unknown): RemoteKitError {
   const message = errorReasonMessage(value?.reason);
   const reason = message === undefined ? undefined : (value?.reason as ErrorReason);
   return new RemoteKitError(code, message ?? errorCodeMessage(code), {
-    detail: typeof value?.message === 'string' ? value.message : String(wire),
+    detail: parsed?.detail ?? (typeof value?.message === 'string' ? value.message : String(wire)),
     reason,
     retryAfterMs: parsed?.retryAfterMs,
     errorId: parsed?.errorId,

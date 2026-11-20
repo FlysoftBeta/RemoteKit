@@ -25,6 +25,7 @@ import { operationId } from '../../control/product-operations';
 import { failureError, FailureNote, SurfaceState } from '../../failures';
 import { recover, recoverRead } from '../../failures/recovery';
 import { useLibrary } from '../../files/file-library-state';
+import { isPreviewImage } from '../../files/files-app-state';
 import { FilePreview } from '../../files/file-preview';
 import { VirtualList } from '../../ui/virtual-list';
 import { day, LoadingRows, Segments, SubjectChip, SubjectDot, time, useContentWidth } from '../common';
@@ -580,7 +581,10 @@ export function StudyApp(
                         key={attachment.key}
                         attachment={attachment}
                         call={call}
-                        open={setPreview}
+                        open={(entry) => {
+                          if (isPreviewImage(entry)) void run(() => openFiles(entry.id));
+                          else setPreview(entry);
+                        }}
                       />
                     ))
                   ) : (

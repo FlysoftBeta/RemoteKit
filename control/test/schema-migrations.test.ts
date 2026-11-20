@@ -34,7 +34,7 @@ const schema = (db: Sqlite.Database) =>
 test('every supported starting version migrates partition ID ownership exactly once', () => {
   const options = { backupDirectory: '', buildId: 'test', atRestKey: new AtRestKey(null) };
   const id = '12345678-1234-4234-8234-123456789abc';
-  for (const version of [23, 24, 25, 26, 27, 28, 29]) {
+  for (const version of [23, 24, 25, 26, 27, 28, 29, 30]) {
     const db = new Sqlite(':memory:');
     try {
       db.exec(fixture);
@@ -49,7 +49,7 @@ test('every supported starting version migrates partition ID ownership exactly o
         db.prepare('UPDATE schema_version SET version=?').run(step.version);
       }
       migrate(db, options);
-      assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 30 });
+      assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 31 });
       assert.deepEqual(db.prepare('SELECT * FROM library_partition_ids').all(), [{ tenant: 'tenant', id }]);
       const schemaVersion = db.pragma('schema_version', { simple: true });
       migrate(db, options);
@@ -83,7 +83,7 @@ test('v28 reserves existing partition IDs and keeps operation hashes unchanged i
       'opaque-hash',
     );
     migrate(db, options);
-    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 30 });
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 31 });
     assert.deepEqual(db.prepare('SELECT * FROM library_partition_ids').all(), [{ tenant: 'tenant', id }]);
     assert.deepEqual(db.prepare('SELECT payload FROM file_library_operations').get(), {
       payload: 'opaque-hash',
@@ -194,8 +194,11 @@ test('v25 migrates bindings as an empty table and rejects malformed schema versi
     db.exec(
       'CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (25); CREATE TABLE user_security (user_id TEXT, face_ciphertext TEXT, face_model TEXT); CREATE TABLE operation_receipts (tenant TEXT, id TEXT, payload TEXT); CREATE TABLE library_partitions (tenant TEXT, id TEXT); CREATE TABLE workspace_spaces (tenant TEXT, id TEXT, data TEXT); CREATE TABLE user_settings (tenant TEXT, data TEXT); CREATE TABLE workspaces (tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL, active_space TEXT, pending TEXT)',
     );
+    db.exec(
+      "CREATE TABLE object_derivations (id TEXT NOT NULL,source_id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('thumbnail','document')),PRIMARY KEY(id,source_id,kind))",
+    );
     migrate(db, options);
-    assert.deepEqual(db.prepare('SELECT version FROM schema_version').all(), [{ version: 30 }]);
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').all(), [{ version: 31 }]);
     assert.deepEqual(db.prepare('SELECT * FROM session_node_bindings').all(), []);
     db.prepare('UPDATE schema_version SET version=?').run('26bad');
     assert.throws(() => migrate(db, options), { reason: 'corrupt_state' });
@@ -218,7 +221,7 @@ test('release v23 migrates durable retry state and keeps a verified backup', () 
       assert(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='retry_units'").get());
       assert.equal(schema(store.db).length, before.length + 4);
       assert(Number(store.db.pragma('schema_version', { simple: true })) > Number(version));
-      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 30n }]);
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 31n }]);
       assert.equal(existsSync(join(directory, 'backups')), true);
     } finally {
       store.db.close();
@@ -243,7 +246,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
   }
   writeFileSync(join(backupDirectory, 'keep.txt'), 'keep');
   migrations.push({
-    version: 31,
+    version: 32,
     name: 'future-test',
     up(database) {
       database.exec('CREATE TABLE future_step(id TEXT)');
@@ -260,7 +263,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
     const copy = new Sqlite(
       join(
         backupDirectory,
-        readdirSync(backupDirectory).find((name) => /^control-v23-to-v31-test-.*T.*Z\.db$/.test(name))!,
+        readdirSync(backupDirectory).find((name) => /^control-v23-to-v32-test-.*T.*Z\.db$/.test(name))!,
       ),
       { readonly: true },
     );
@@ -344,5 +347,29 @@ test('current-schema opens do no DDL and foreign-key problems are reported', () 
     );
   } finally {
     store.db.close();
+  }
+});
+
+test('v31 retains ambiguous thumbnails and admits each current derivative kind', () => {
+  const db = new Sqlite(':memory:');
+  try {
+    db.exec(fixture);
+    db.prepare('INSERT INTO object_derivations VALUES (?,?,?)').run('old', 'source', 'thumbnail');
+    migrate(db, { backupDirectory: '', buildId: 'test', atRestKey: new AtRestKey(null) });
+    assert.deepEqual(db.prepare('SELECT * FROM object_derivations').get(), {
+      id: 'old',
+      source_id: 'source',
+      kind: 'thumbnail',
+    });
+    for (const kind of ['preview', 'photo', 'selection-transcode', 'document'])
+      db.prepare('INSERT INTO object_derivations VALUES (?,?,?)').run(kind, 'source', kind);
+    assert.throws(() =>
+      db.prepare('INSERT INTO object_derivations VALUES (?,?,?)').run('bad', 'source', 'scan'),
+    );
+    assert(
+      db.prepare("SELECT 1 FROM sqlite_schema WHERE type='index' AND name='object_derivations_source'").get(),
+    );
+  } finally {
+    db.close();
   }
 });

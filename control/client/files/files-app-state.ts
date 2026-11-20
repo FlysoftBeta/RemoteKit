@@ -1,23 +1,15 @@
 import { filesLaunch, filesState, filesView, readWindowState } from '../../shared/persisted-window-state';
-import type { LibrarySnapshot, LibrarySource } from '../../shared/file-library';
+import type {
+  LibrarySnapshot,
+  LibrarySource,
+  LibraryEntry,
+  LibraryFileEntry,
+  LibrarySnippetEntry,
+  SnippetOrigin,
+} from '../../shared/file-library';
 import { BUILTIN_APP_TITLES, isBuiltinApp } from '../../shared/product';
 
-export type FilesView =
-  'all' | 'recent' | 'clipboard' | 'settings' | { partition: string } | { source: LibrarySource };
-export type FilesTab =
-  | { id: string; kind: 'library'; view: FilesView; query: string }
-  | { id: string; kind: 'document'; entryId: string; from?: FilesView };
-export interface FilesLaunch {
-  requestId: string;
-  entryId?: string;
-  view?: FilesView;
-}
-export interface FilesWindowState {
-  tabs: FilesTab[];
-  activeTabId: string;
-  layout: 'grid' | 'list';
-  launch?: FilesLaunch;
-}
+import type { FilesView, FilesTab, FilesLaunch, FilesWindowState } from '../../shared/files-state';
 export const MAX_FILES_TABS = 16;
 const MAX_STATE_BYTES = 8192;
 export const filesTabId = () => Math.random().toString(36).slice(2, 10).padEnd(8, '0');
@@ -58,19 +50,22 @@ export function readFilesWindowState(value: unknown): FilesWindowState {
 }
 
 // Keep tab identity and views when trimming search drafts to fit the wire budget.
+function clearTabQuery(tab: FilesTab): FilesTab {
+  if (tab.kind === 'library') return { ...tab, query: '' };
+  const { fromQuery: _, ...rest } = tab;
+  return rest;
+}
 export function fitFilesWindowState(next: FilesWindowState, previous: FilesWindowState): FilesWindowState {
   let state = next;
   if (bytes(state) > MAX_STATE_BYTES)
     state = {
       ...state,
-      tabs: state.tabs.map((tab) =>
-        tab.kind === 'library' && tab.id !== state.activeTabId ? { ...tab, query: '' } : tab,
-      ),
+      tabs: state.tabs.map((tab) => (tab.id !== state.activeTabId ? clearTabQuery(tab) : tab)),
     };
   if (bytes(state) > MAX_STATE_BYTES)
     state = {
       ...state,
-      tabs: state.tabs.map((tab) => (tab.kind === 'library' ? { ...tab, query: '' } : tab)),
+      tabs: state.tabs.map(clearTabQuery),
     };
   return bytes(state) <= MAX_STATE_BYTES ? state : previous;
 }
@@ -103,7 +98,13 @@ export function openFilesEntry(state: FilesWindowState, tabId: string, entryId: 
       ...state,
       tabs: state.tabs.map((tab) =>
         tab.id === tabId
-          ? { id: tab.id, kind: 'document', entryId, from: tab.kind === 'library' ? tab.view : tab.from }
+          ? {
+              id: tab.id,
+              kind: 'document',
+              entryId,
+              from: tab.kind === 'library' ? tab.view : tab.from,
+              fromQuery: tab.kind === 'library' ? tab.query : tab.fromQuery,
+            }
           : tab,
       ),
     },
@@ -114,10 +115,35 @@ export function backFilesTab(state: FilesWindowState, tabId: string): FilesWindo
   return {
     ...state,
     tabs: state.tabs.map((tab) =>
-      tab.id === tabId && tab.kind === 'document'
-        ? { id: tab.id, kind: 'library', view: tab.from ?? 'all', query: '' }
+      tab.id === tabId && tab.kind !== 'library'
+        ? { id: tab.id, kind: 'library', view: tab.from ?? 'all', query: tab.fromQuery ?? '' }
         : tab,
     ),
+  };
+}
+export function openPhotosTab(
+  state: FilesWindowState,
+  tabId: string,
+  entryId: string,
+  id = filesTabId(),
+): FilesWindowState {
+  const source = state.tabs.find((tab) => tab.id === tabId);
+  if (!source) return state;
+  return appendFilesTab(
+    { ...state, activeTabId: tabId },
+    {
+      id,
+      kind: 'photos',
+      entryId,
+      from: source.kind === 'library' ? source.view : (source.from ?? 'all'),
+      fromQuery: source.kind === 'library' ? source.query : source.fromQuery,
+    },
+  );
+}
+export function updatePhotoEntry(state: FilesWindowState, id: string, entryId: string): FilesWindowState {
+  return {
+    ...state,
+    tabs: state.tabs.map((tab) => (tab.id === id && tab.kind === 'photos' ? { ...tab, entryId } : tab)),
   };
 }
 function appendFilesTab(state: FilesWindowState, tab: FilesTab): FilesWindowState {
@@ -162,10 +188,13 @@ export function applyFilesLaunch(
   launch: FilesLaunch,
   id: string,
   hadTabs = true,
+  image = false,
 ): FilesWindowState {
   const { launch: _, ...rest } = state;
   const tab: FilesTab = launch.entryId
-    ? { id, kind: 'document', entryId: launch.entryId, from: launch.view ?? 'all' }
+    ? image
+      ? { id, kind: 'photos', entryId: launch.entryId, from: launch.view ?? 'all' }
+      : { id, kind: 'document', entryId: launch.entryId, from: launch.view ?? 'all' }
     : { id, kind: 'library', view: launch.view ?? 'all', query: '' };
   return hadTabs ? appendFilesTab(rest, tab) : { ...rest, tabs: [tab], activeTabId: id };
 }
@@ -217,4 +246,71 @@ export function removalCounts(
       ('partition' in target ? entry.collected && entry.source !== null : entry.partitionId !== null),
   ).length;
   return { deleted: entries.length - kept, kept };
+}
+
+export function snippetOriginLabel(
+  origin: SnippetOrigin,
+  apps: readonly { id: string; name: string }[] = [],
+) {
+  if (origin.kind === 'device') return '本机';
+  if (origin.kind === 'app') return sourceAppName(origin.app, apps);
+  try {
+    return new URL(origin.url).host || sourceAppName(origin.app, apps);
+  } catch {
+    return sourceAppName(origin.app, apps);
+  }
+}
+
+export function snippetSearchText(entry: LibrarySnippetEntry, apps: readonly { id: string; name: string }[]) {
+  const origin = entry.origin;
+  return [
+    entry.preview,
+    snippetOriginLabel(origin, apps),
+    origin.kind === 'page' ? origin.url : '',
+    origin.kind === 'page' ? origin.title : '',
+    origin.kind !== 'device' ? sourceAppName(origin.app, apps) : '本机',
+  ].join(' ');
+}
+
+export function filteredFiles(
+  snapshot: LibrarySnapshot,
+  view: FilesView,
+  query: string,
+  apps: readonly { id: string; name: string }[] = [],
+  now = Date.now(),
+): LibraryEntry[] {
+  const needle = query.trim().toLowerCase();
+  return filesInView(snapshot, view, now, !!needle).filter(
+    (entry) =>
+      !needle ||
+      (entry.kind === 'snippet' && snippetSearchText(entry, apps).toLowerCase().includes(needle)) ||
+      [
+        entry.name,
+        entry.detail,
+        entry.source ? `${sourceAppName(entry.source.app, apps)} › ${sourceChannelName(entry.source)}` : '',
+      ].some((value) => value?.toLowerCase().includes(needle)),
+  );
+}
+export function isPreviewImage(entry: LibraryEntry): boolean {
+  return entry.kind === 'file' && entry.type.startsWith('image/') && !entry.photo?.pending;
+}
+export function photoSequence(
+  snapshot: LibrarySnapshot,
+  from: FilesView | 'basket',
+  query = '',
+  apps: readonly { id: string; name: string }[] = [],
+): LibraryFileEntry[] {
+  const entries =
+    from === 'basket'
+      ? snapshot.basket.flatMap((id) => snapshot.entries.find((entry) => entry.id === id) ?? [])
+      : filteredFiles(snapshot, from, query, apps);
+  return entries.filter((entry): entry is LibraryFileEntry => isPreviewImage(entry));
+}
+export function nextPhotoIndex(
+  entries: readonly { id: string }[],
+  entryId: string,
+  previousIndex: number,
+): number {
+  const found = entries.findIndex((entry) => entry.id === entryId);
+  return found >= 0 ? found : Math.min(previousIndex, entries.length - 1);
 }

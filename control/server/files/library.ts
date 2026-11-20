@@ -91,8 +91,16 @@ function importOrigin(value: unknown): Params<'library.import'>['origin'] {
 function photoMetadata(value: unknown): PhotoMetadata | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== 'object') throw invalid('无效的照片信息');
-  const { mode, pending, advisory, processingFailure, candidateAssetIds, quarterTurns } =
-    value as Partial<PhotoMetadata>;
+  const {
+    mode,
+    pending,
+    advisory,
+    processingFailure,
+    candidateAssetIds,
+    quarterTurns,
+    orientation,
+    geometry,
+  } = value as Partial<PhotoMetadata>;
   if (mode !== 'photo' && mode !== 'scan') throw invalid('无效的拍摄模式');
   if (quarterTurns !== undefined && ![1, 2, 3].includes(quarterTurns)) throw invalid('无效的照片旋转角度');
   if (pending !== undefined && pending !== 'choice' && pending !== 'scan-error')
@@ -100,8 +108,26 @@ function photoMetadata(value: unknown): PhotoMetadata | undefined {
   if (advisory !== undefined && advisory !== 'low-quality') throw invalid('无效的照片提示');
   if (processingFailure !== undefined && !parseWireError(processingFailure))
     throw invalid('无效的照片处理状态');
+  if (
+    orientation !== undefined &&
+    (!orientation ||
+      Object.keys(orientation).some((key) => !['turns', 'state'].includes(key)) ||
+      ![0, 1, 2, 3].includes(orientation.turns) ||
+      !['confident', 'uncertain', 'none'].includes(orientation.state))
+  )
+    throw invalid('无效的照片方向');
+  if (
+    geometry !== undefined &&
+    (!geometry ||
+      Object.keys(geometry).some((key) => !['kind', 'cropped'].includes(key)) ||
+      !['perspective', 'deskew', 'unchanged'].includes(geometry.kind) ||
+      typeof geometry.cropped !== 'boolean')
+  )
+    throw invalid('无效的照片矫正信息');
   return {
     mode,
+    ...(orientation ? { orientation } : {}),
+    ...(geometry ? { geometry } : {}),
     ...(quarterTurns !== undefined ? { quarterTurns } : {}),
     ...(candidateAssetIds !== undefined ? { candidateAssetIds: ids(candidateAssetIds, 2) } : {}),
     ...(pending !== undefined ? { pending } : {}),
@@ -145,7 +171,7 @@ function entries(snapshot: LibrarySnapshot, entryIds: string[]) {
   const catalog = new Map(snapshot.entries.map((entry) => [entry.id, entry]));
   return entryIds.map((entryId) => {
     const entry = catalog.get(entryId);
-    if (!entry) throw new RemoteKitError('not_found', '文件不存在');
+    if (!entry) throw new RemoteKitError('not_found', '文件不存在', { detail: 'entry_missing' });
     return entry;
   });
 }

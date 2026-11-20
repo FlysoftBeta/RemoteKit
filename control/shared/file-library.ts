@@ -13,6 +13,8 @@ export interface Asset extends AssetDescription {
 export interface PhotoMetadata {
   mode: 'photo' | 'scan';
   quarterTurns?: 1 | 2 | 3;
+  orientation?: { turns: 0 | 1 | 2 | 3; state: 'confident' | 'uncertain' | 'none' };
+  geometry?: { kind: 'perspective' | 'deskew' | 'unchanged'; cropped: boolean };
   candidateAssetIds?: string[];
   pending?: 'choice' | 'scan-error';
   advisory?: 'low-quality';

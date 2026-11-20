@@ -7,7 +7,7 @@ import { FileLibrary } from '../server/files/library';
 import { FILE_LIMITS } from '../shared/product';
 import type { SnippetOrigin } from '../shared/file-library';
 import { filesInView } from '../client/files/files-app-state';
-import { snippetOriginLabel, snippetSearchText } from '../client/files/snippet-view';
+import { snippetOriginLabel, snippetSearchText } from '../client/files/files-app-state';
 
 const page: SnippetOrigin = {
   kind: 'page',

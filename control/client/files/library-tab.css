@@ -4,16 +4,27 @@
   color: var(--text-primary);
   background: var(--surface);
 }
-
 .library-virtual-list {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  scrollbar-gutter: stable;
+  padding: 4px 4px calc(84px + env(safe-area-inset-bottom));
+  scroll-padding-top: 38px;
 }
 .library-virtual-list [data-file-row] {
   height: 72px;
 }
 .library-virtual-list .virtual-list-sticky > div {
-  padding: 10px 0;
   background: var(--surface);
+  box-sizing: border-box;
+  height: 38px;
+  padding: 11px 0;
+}
+.library-short > :first-child {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+.library-short [data-upload-queue-area] .upload-jobs {
+  max-height: 64px;
 }

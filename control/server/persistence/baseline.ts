@@ -55,7 +55,7 @@ CREATE TABLE library_state (tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL, 
 CREATE TABLE object_claims (
         tenant TEXT NOT NULL, id TEXT NOT NULL, claimed_at INTEGER NOT NULL, PRIMARY KEY(tenant,id));
 CREATE TABLE object_derivations (
-        id TEXT NOT NULL, source_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('thumbnail','document')),
+        id TEXT NOT NULL, source_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('thumbnail','preview','photo','selection-transcode','document')),
         PRIMARY KEY(id,source_id,kind));
 CREATE TABLE object_gc (id TEXT PRIMARY KEY, unreferenced_at INTEGER NOT NULL);
 CREATE TABLE object_inventory_orphans (
@@ -147,6 +147,6 @@ CREATE UNIQUE INDEX single_admin ON users(is_admin) WHERE is_admin=1;
 CREATE INDEX usage_events_context ON usage_events(tenant,window_id,context,at,id);
 CREATE INDEX usage_events_tenant ON usage_events(tenant,at,id);
 CREATE INDEX viewer_presence_tenant ON viewer_presence(tenant,connected_at);
-INSERT INTO schema_version VALUES (30);
+INSERT INTO schema_version VALUES (31);
 INSERT INTO server_settings VALUES (1,'{"version":1,"logRetentionDays":30}');
 `;

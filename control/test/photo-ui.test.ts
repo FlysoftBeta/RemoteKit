@@ -106,7 +106,7 @@ function fixture() {
   };
 }
 
-function basket(panel?: { id: string; view: 'image' | 'photo' }) {
+function basket(panel?: { id: string }) {
   return createElement(BasketItems, {
     entries: [entry],
     pending: [],
@@ -118,6 +118,7 @@ function basket(panel?: { id: string; view: 'image' | 'photo' }) {
     onDragging() {},
     panel,
     setPanel() {},
+    onPreview() {},
     onChange: async () => {},
     onInsert() {},
     onRetake() {},
@@ -145,51 +146,38 @@ test('basket photo menu places clockwise rotation after large preview and closes
   }
 });
 
-test('basket preview and thumbnail show pending turns and its header accepts repeated taps', async () => {
+test('basket large preview delegates to the window viewer without an inline image panel', async () => {
   const f = fixture();
+  const opened: string[] = [];
   try {
-    f.library.photos.jobs = [
-      {
-        id: 'rotation',
-        replace: entry,
-        state: 'processing',
-        mode: 'scan',
-        rotationTurns: 1,
-        destination: 'basket',
-        origin: { kind: 'files', channel: 'camera', partitionId: null },
-      },
-    ];
-    await f.render(basket({ id: entry.id, view: 'image' }));
-    assert.ok(f.thumbnailRequests.includes(entry.assetId));
-    const button = f.container.querySelector<HTMLButtonElement>('button[aria-label="向右旋转"]')!;
-    const close = f.container.querySelector('button[aria-label="收起项目"]')!;
-    assert.ok(button.compareDocumentPosition(close) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING);
-    await act(async () => {
-      button.click();
-      button.click();
-    });
-    assert.equal(f.rotations.length, 2);
-    const images = [...f.container.querySelectorAll('img')];
-    assert.equal(images.length, 2);
-    for (const image of images) {
-      const style = getComputedStyle(image);
-      assert.ok(style.transform.includes('rotate(90deg)'));
-      assert.equal(style.width, '80px');
-      assert.equal(style.height, '120px');
-      assert.equal(style.objectFit, 'contain');
-    }
-    const image = images.find((image) => image.alt === entry.name)!;
-    Object.defineProperty(image, 'naturalWidth', { value: 400 });
-    Object.defineProperty(image, 'naturalHeight', { value: 300 });
-    await act(async () => image.dispatchEvent(new dom.window.Event('load')));
-    assert.equal(getComputedStyle(image.parentElement!.parentElement!).aspectRatio, '300 / 400');
-    f.library.photos.jobs = [];
-    await f.render(basket({ id: entry.id, view: 'image' }));
-    assert.ok(
-      [...f.container.querySelectorAll('img')].every((image) =>
-        getComputedStyle(image).transform.includes('rotate(0deg)'),
-      ),
+    await f.render(
+      createElement(BasketItems, {
+        entries: [entry],
+        pending: [],
+        revision: 1,
+        mode: 'cards',
+        ordered: true,
+        disabled: false,
+        dragging: false,
+        onDragging() {},
+        setPanel() {},
+        onPreview: (id) => {
+          opened.push(id);
+        },
+        onChange: async () => {},
+        onInsert() {},
+        onRetake() {},
+      }),
     );
+    await act(async () =>
+      f.container.querySelector<HTMLButtonElement>(`button[aria-label="${entry.name}"]`)!.click(),
+    );
+    const view = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (item) => item.textContent === '查看大图',
+    )!;
+    await act(async () => view.click());
+    assert.deepEqual(opened, [entry.id]);
+    assert.equal(f.container.querySelector('button[aria-label="收起项目"]'), null);
   } finally {
     await f.close();
   }
@@ -207,7 +195,7 @@ test('shared image preview rotates library camera photos and photo details reder
     await f.render(createElement(PhotoOptions, { entry, destination: 'library', disabled: false }));
     assert.equal(f.container.querySelector('img'), null);
     assert.ok(
-      [...f.container.querySelectorAll('button')].some((button) => button.textContent === '查看原图'),
+      [...f.container.querySelectorAll('button')].some((button) => button.textContent === '文档扫描'),
     );
     const original = [...f.container.querySelectorAll<HTMLButtonElement>('button')].find(
       (button) => button.textContent === '使用原图',
@@ -215,7 +203,15 @@ test('shared image preview rotates library camera photos and photo details reder
     await act(async () => original.click());
     assert.deepEqual(f.resolutions, [[entry, 'library', entry.originalAssetId, true]]);
     f.library.photos.jobs = [
-      { id: 'rotation', replace: entry, mode: 'scan', state: 'processing', rotationTurns: 1 } as PhotoJob,
+      {
+        id: 'rotation',
+        replace: entry,
+        mode: 'scan',
+        state: 'processing',
+        rotationTurns: 1,
+        destination: 'library',
+        origin: { kind: 'files', channel: 'camera', partitionId: null },
+      },
     ];
     await f.render(
       createElement(PhotoOptions, {
@@ -239,7 +235,7 @@ test('shared image preview rotates library camera photos and photo details reder
       false,
     );
     assert.ok(
-      [...f.container.querySelectorAll('button')].some((button) => button.textContent === '查看原图'),
+      [...f.container.querySelectorAll('button')].some((button) => button.textContent === '文档扫描'),
     );
   } finally {
     await f.close();
@@ -267,4 +263,46 @@ test('an open file becomes unavailable without fetching a preview or exposing a 
   assert.equal(f.container.querySelectorAll('button').length, 0);
   assert.deepEqual(f.thumbnailRequests, []);
   await f.close();
+});
+
+test('basket candidate preview forwards the selected original into the window viewer', async () => {
+  const f = fixture();
+  const opened: unknown[][] = [];
+  const pending: LibraryFileEntry = {
+    ...entry,
+    assetId: 'original',
+    type: 'image/jpeg',
+    photo: { mode: 'scan', pending: 'choice', candidateAssetIds: ['original', 'alternate'] },
+  };
+  try {
+    await f.render(
+      createElement(BasketItems, {
+        entries: [pending],
+        pending: [],
+        revision: 1,
+        mode: 'cards',
+        ordered: true,
+        disabled: false,
+        dragging: false,
+        onDragging() {},
+        panel: { id: pending.id },
+        setPanel() {},
+        onPreview: (...args) => {
+          opened.push(args);
+        },
+        onChange: async () => {},
+        onInsert() {},
+        onRetake() {},
+      }),
+    );
+    await act(async () =>
+      f.container.querySelector<HTMLButtonElement>('button[aria-label="候选 2"]')!.click(),
+    );
+    await act(async () =>
+      f.container.querySelector<HTMLButtonElement>('button[aria-label="查看候选大图"]')!.click(),
+    );
+    assert.deepEqual(opened, [[pending.id, true, 'alternate']]);
+  } finally {
+    await f.close();
+  }
 });

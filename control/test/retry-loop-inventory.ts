@@ -93,6 +93,7 @@ export const auditLoops = {
     'client/documents/channel-source.ts',
     'client/documents/document-viewer.tsx',
   ],
+  'photo-viewer-read-recovery': ['client/files/photo-viewer.tsx'],
   'thumbnail-per-subscribed-asset': ['client/files/file-thumbnails.ts'],
   'upload-then-library-import-per-queued-file': ['client/files/import-queue.ts'],
   'upload-process-commit-photo-task': ['client/files/photo-job-store.ts'],

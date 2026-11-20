@@ -130,18 +130,34 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
           if (devicePreferences().compatibility) input.accept = 'image/*';
           input.onchange = () => {
             const files = Array.from(input.files ?? []);
+            if (!files.length) return;
+            const sourceRequest =
+              context.requestId &&
+              media.operations
+                .getSnapshot()
+                .state?.fileRequests.find(
+                  (request) => request.id === context.requestId && request.windowId === context.ownerKey,
+                );
+            if (context.requestId && !sourceRequest) return;
             try {
               library
-                .importQueue('library')
-                .enqueue(files, 0, { kind: 'files', channel: 'upload', partitionId: null });
+                .importQueue(sourceRequest ? 'basket' : 'library', context.ownerKey)
+                .enqueue(
+                  files,
+                  library.snapshot?.basket.length ?? 0,
+                  sourceRequest
+                    ? { kind: 'request', requestId: sourceRequest.id }
+                    : { kind: 'files', channel: 'upload', partitionId: null },
+                );
+              if (!sourceRequest)
+                void stage
+                  .action(buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }))
+                  .catch((error) => setDragFailure(failureError(error)));
             } catch (error) {
               setDragFailure(failureError(error));
             }
           };
           input.click();
-          void stage
-            .action(buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }))
-            .catch((error) => setDragFailure(failureError(error)));
         } else if (kind === 'files')
           void stage
             .action(buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }))
@@ -172,7 +188,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
             .catch((error) => setDragFailure(failureError(error)));
         } else if (kind === 'windows') overlays.openLauncher();
       }),
-    [media, stage.action, expired, library.importQueue],
+    [media, stage.action, expired, library.importQueue, library.snapshot],
   );
   useEffect(() => {
     const error =

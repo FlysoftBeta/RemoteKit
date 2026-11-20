@@ -11,6 +11,7 @@ export type FileMethod =
   | 'photo.burst.begin'
   | 'photo.burst.end'
   | 'photo.burst.cancel'
+  | 'photo.preview'
   | 'photo.thumbnail'
   | 'photo.process'
   | 'selection.cancel'

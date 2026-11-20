@@ -1059,3 +1059,24 @@ test('availability timer contains corrupt-record failure in its tenant job', asy
   assert.equal(jobs.get('tenant')?.retry.state.phase, 'faulted');
   assert.equal(jobs.get('tenant')?.retry.error?.code, 'internal');
 });
+
+test('processed orientation and geometry persist with the library entry', async (t) => {
+  const f = fixture('image/webp');
+  t.after(() => f.db.close());
+  const photo = {
+    mode: 'scan',
+    orientation: { turns: 1, state: 'uncertain' },
+    geometry: { kind: 'perspective', cropped: true },
+  };
+  const saved = await f.add(ASSETS.photo, 'library', { photo, originalAssetId: ASSETS.original });
+  assert.deepEqual(saved.entries[0].photo, photo);
+  f.reopen();
+  assert.deepEqual((await f.run('get')).entries[0].photo, photo);
+  for (const invalid of [
+    { ...photo, orientation: { turns: 4, state: 'confident' } },
+    { ...photo, orientation: { turns: 0, state: 'text' } },
+    { ...photo, geometry: { kind: 'deskew', cropped: 'yes' } },
+    { ...photo, geometry: { kind: 'unchanged', cropped: false, extra: true } },
+  ])
+    await assert.rejects(f.add(ASSETS.extra, 'library', { photo: invalid }), { code: 'invalid_request' });
+});

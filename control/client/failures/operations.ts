@@ -49,6 +49,7 @@ const operations: Record<string, string> = {
   'library.snippet': '读取剪贴片段',
   'library.copySnippet': '复制剪贴片段',
   'library.prepare': '准备发送文件',
+  'selection.commit': '提交文件到页面',
   'library.finish': '确认文件接收结果',
   'learning.signIn': '登录学习账户',
   'learning.signInCancel': '取消学习账户登录',

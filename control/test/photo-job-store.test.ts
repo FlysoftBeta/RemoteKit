@@ -14,9 +14,9 @@ const result: ProcessedPhoto = {
   size: 12,
   width: 4,
   height: 3,
-  geometry: 'unchanged',
+  geometry: { kind: 'unchanged', cropped: false },
   quarterTurns: 0,
-  orientation: 'none',
+  orientation: { turns: 0, state: 'none' },
 };
 const burst: CapturedBurst = {
   frames: [
@@ -118,7 +118,7 @@ function fixture(t: TestContext, target?: LibraryFileEntry) {
 for (const mode of ['photo', 'scan'] as const) {
   test(`${mode} processes the JPEG original and saves a WebP derivative with its applied turns`, async (t) => {
     const f = fixture(t);
-    f.setProcess(async () => ({ ...result, quarterTurns: 2, orientation: 'text' }));
+    f.setProcess(async () => ({ ...result, quarterTurns: 2, orientation: { turns: 2, state: 'confident' } }));
     const job = f.store.reserve(destination, mode)!;
     f.store.capture(job.id, Promise.resolve(burst));
     await flush();
@@ -177,7 +177,6 @@ test('scan failure saves a pending JPEG, releases its slot and resolves to a pho
     processingFailure: {
       code: 'rejected',
       message: 'no document',
-      reason: undefined,
       errorId: saved.photo!.processingFailure!.errorId,
     },
   });
@@ -411,4 +410,64 @@ test('use original preserves the displayed orientation while switching a scan to
   assert.equal(f.calls[0].turns, 3);
   assert.equal(f.mutations[0].params.photo?.quarterTurns, 3);
   assert.equal(f.mutations[0].params.photo?.mode, 'photo');
+});
+
+test('two captures prepare concurrently while import waits for shutter order', async (t) => {
+  const f = fixture(t);
+  const pending: ((photo: ProcessedPhoto) => void)[] = [];
+  f.setProcess(() => new Promise((done) => pending.push(done)));
+  const first = f.store.reserve(destination, 'photo')!;
+  f.store.capture(first.id, Promise.resolve(burst));
+  await flush();
+  const second = f.store.reserve(destination, 'photo')!;
+  f.store.capture(second.id, Promise.resolve(burst));
+  await flush();
+  assert.equal(f.uploads.length, 2);
+  assert.equal(pending.length, 2);
+  pending[1](result);
+  await flush();
+  assert.equal(f.mutations.length, 0);
+  pending[0](result);
+  await flush();
+  assert.deepEqual(
+    f.mutations.map((mutation) => mutation.params.operationId),
+    [first.id, second.id],
+  );
+  assert.deepEqual(f.mutations[0].params.photo?.orientation, result.orientation);
+  assert.deepEqual(f.mutations[0].params.photo?.geometry, result.geometry);
+});
+
+test('an encoded frame uploads while the burst is still encoding its other candidate', async (t) => {
+  const f = fixture(t);
+  const job = f.store.reserve(destination, 'photo')!;
+  let complete!: (value: CapturedBurst) => void;
+  f.store.capture(
+    job.id,
+    new Promise((done) => {
+      complete = done;
+    }),
+  );
+  f.store.encoded(job.id, burst.frames[0]);
+  await flush();
+  assert.equal(f.uploads.length, 1);
+  assert.equal(f.calls.length, 0);
+  complete(burst);
+  await flush();
+  assert.equal(f.uploads.length, 1);
+  assert.equal(f.calls.length, 1);
+});
+
+test('a failed earlier capture holds final import, and cancellation releases the ready successor', async (t) => {
+  const f = fixture(t);
+  const first = f.store.reserve(destination, 'photo')!;
+  f.store.capture(first.id, Promise.reject(new RemoteKitError('rejected', 'encoding failed')));
+  f.store.update(first.id, { state: 'processing' });
+  const second = f.store.reserve(destination, 'photo')!;
+  f.store.capture(second.id, Promise.resolve(burst));
+  await flush();
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.mutations.length, 0);
+  f.store.cancel(first.id);
+  await flush();
+  assert.equal(f.mutations[0].params.operationId, second.id);
 });

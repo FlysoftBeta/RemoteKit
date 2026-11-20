@@ -91,11 +91,11 @@ export async function fakeLearningProvider(
         expired = true;
         return json({ ok: true });
       }
-      if (url.pathname === '/files-journey')
+      if (['/files-journey', '/photo-workflows'].includes(url.pathname))
         return res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(`<!doctype html>
         <meta name="viewport" content="width=device-width,initial-scale=1"><title>Device upload journey</title>
         <style>body{margin:16px;font:18px system-ui;background:#eaf2fc}input,button{display:block;width:280px;height:44px;margin:20px 0}</style>
-        <h2>Files journey</h2><input id="single" type="file" accept=".txt"><input id="multiple" type="file" multiple><input id="images" type="file" accept="image/*" multiple><button id="download">Download notes</button>
+        <h2>Files journey</h2><input id="single" type="file" accept=".txt"><input id="multiple" type="file" multiple><input id="images" ${url.pathname === '/photo-workflows' ? 'autofocus' : ''} type="file" accept="image/*" multiple><input id="jpeg" type="file" accept="image/jpeg" multiple><button id="download">Download notes</button>
         <script>
         const report=e=>fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(e)});
         const inputs=[...document.querySelectorAll('input,button')];

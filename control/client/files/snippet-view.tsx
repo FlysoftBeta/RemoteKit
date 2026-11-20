@@ -1,33 +1,9 @@
 import { useRef } from 'react';
 import { Box, ButtonBase, Checkbox, IconButton, Typography } from '@mui/material';
 import { MoreVert } from '@mui/icons-material';
-import type { LibrarySnippetEntry, SnippetOrigin } from '../../shared/file-library';
-import { sourceAppName } from './files-app-state';
+import type { LibrarySnippetEntry } from '../../shared/file-library';
+import { snippetOriginLabel } from './files-app-state';
 import { usePress } from './file-tile';
-
-export function snippetOriginLabel(
-  origin: SnippetOrigin,
-  apps: readonly { id: string; name: string }[] = [],
-) {
-  if (origin.kind === 'device') return '本机';
-  if (origin.kind === 'app') return sourceAppName(origin.app, apps);
-  try {
-    return new URL(origin.url).host || sourceAppName(origin.app, apps);
-  } catch {
-    return sourceAppName(origin.app, apps);
-  }
-}
-
-export function snippetSearchText(entry: LibrarySnippetEntry, apps: readonly { id: string; name: string }[]) {
-  const origin = entry.origin;
-  return [
-    entry.preview,
-    snippetOriginLabel(origin, apps),
-    origin.kind === 'page' ? origin.url : '',
-    origin.kind === 'page' ? origin.title : '',
-    origin.kind !== 'device' ? sourceAppName(origin.app, apps) : '本机',
-  ].join(' ');
-}
 
 export function snippetRelativeTime(at: number, now = Date.now()) {
   const minutes = Math.max(0, Math.floor((now - at) / 60000));

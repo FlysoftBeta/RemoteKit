@@ -206,9 +206,23 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 31,
+    name: 'photo object derivative kinds',
+    up(db) {
+      db.exec(`CREATE TABLE object_derivations_next (
+        id TEXT NOT NULL, source_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('thumbnail','preview','photo','selection-transcode','document')),
+        PRIMARY KEY(id,source_id,kind));
+        INSERT INTO object_derivations_next SELECT id,source_id,kind FROM object_derivations;
+        DROP TABLE object_derivations;
+        ALTER TABLE object_derivations_next RENAME TO object_derivations;
+        CREATE INDEX object_derivations_source ON object_derivations(source_id,kind);`);
+    },
+  },
 ];
 
-export const currentVersion = 30;
+export const currentVersion = 31;
 export interface MigrationOptions extends MigrationContext {
   backupDirectory: string;
   buildId: string;

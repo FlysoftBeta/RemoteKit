@@ -60,7 +60,7 @@ export const errorCode = literal(
 export const wireError = object(
   { code: errorCode, message: s() },
   {
-    detail: literal('pending_close'),
+    detail: literal('pending_close', 'asset_unreadable', 'selection_unknown', 'entry_missing'),
     capacity: literal(
       'storage',
       'basket',
@@ -382,6 +382,11 @@ export const libraryEntry = union(
         { mode: literal('photo', 'scan') },
         {
           quarterTurns: literal(1, 2, 3),
+          orientation: object({
+            turns: literal(0, 1, 2, 3),
+            state: literal('confident', 'uncertain', 'none'),
+          }),
+          geometry: object({ kind: literal('perspective', 'deskew', 'unchanged'), cropped: b() }),
           candidateAssetIds: array(s()),
           pending: literal('choice', 'scan-error'),
           advisory: literal('low-quality'),

@@ -23,9 +23,9 @@ const processed: ProcessedPhoto = {
   assetId: 'b'.repeat(64),
   size: 1,
   type: 'image/webp',
-  geometry: 'unchanged',
+  geometry: { kind: 'unchanged', cropped: false },
   quarterTurns: 0,
-  orientation: 'none',
+  orientation: { turns: 0, state: 'none' },
 };
 function libraryPort() {
   return {
@@ -33,7 +33,7 @@ function libraryPort() {
     uploadAsset: async () => asset,
     processPhoto: async () => processed,
     commitSelection: async (_requestId: string, selectionId: string) => ({
-      state: 'unknown' as const,
+      state: 'unknown' as SelectionState,
       selectionId,
     }),
     cancelSelection: async () => ({ state: 'unknown' as SelectionState }),
@@ -489,4 +489,129 @@ test('photo scope reset ignores a late capture and publishes immutable job snaps
   assert.equal(uploads, 0);
   assert.deepEqual(store.getSnapshot(), []);
   store.dispose();
+});
+
+for (const disposition of ['retry', 'query'] as const) {
+  test(`checkout ${disposition} preserves its selection identity and commit error`, async (t) => {
+    t.mock.timers.enable({ apis: ['setInterval', 'Date'] });
+    const { SelectionCommitFailure } = await import('../client/files/file-channel');
+    let commits = 0;
+    let prepares = 0;
+    let finishes = 0;
+    let fail = true;
+    const port = libraryPort();
+    port.commitSelection = async (_requestId, selectionId) => {
+      commits++;
+      assert.equal(selectionId, 'same-selection');
+      if (fail)
+        throw new SelectionCommitFailure(
+          disposition,
+          new RemoteKitError(
+            disposition === 'retry' ? 'not_found' : 'outcome_unknown',
+            'original commit failure',
+            { detail: 'asset_unreadable' },
+          ),
+        );
+      return { state: 'selected', selectionId };
+    };
+    const request = (async (method: string) => {
+      if (method === 'library.prepare') {
+        prepares++;
+        return { selectionId: 'same-selection' };
+      }
+      if (method === 'library.finish') {
+        finishes++;
+        return { state: fail ? 'pending' : 'selected', snapshot: snapshot(finishes + 1) };
+      }
+      return snapshot(0);
+    }) as LibraryRequest;
+    const store = new LibraryStore(request, port);
+    t.after(store.dispose);
+    store.configure(true, true, 'viewer', ['request']);
+    await assert.rejects(store.select('request', ['entry']), { message: 'original commit failure' });
+    assert.equal(finishes, 0);
+    assert.equal(store.getSnapshot().checkouts.request.error?.detail, 'asset_unreadable');
+    t.mock.timers.tick(3000);
+    await flush();
+    assert.equal(store.getSnapshot().checkouts.request.error?.message, 'original commit failure');
+    fail = false;
+    await store.select('request', ['different-entry']);
+    if (disposition === 'query') {
+      t.mock.timers.tick(3000);
+      await flush();
+    }
+    assert.equal(commits, disposition === 'retry' ? 2 : 1);
+    assert.equal(prepares, 1);
+    assert.deepEqual(store.getSnapshot().checkouts.request.entryIds, ['entry']);
+    assert.equal(store.getSnapshot().checkouts.request.state, 'selected');
+  });
+}
+
+test('an unacknowledged prepare retries its frozen operation before any native dispatch', async (t) => {
+  let prepares = 0;
+  let commits = 0;
+  const operations: string[] = [];
+  const port = libraryPort();
+  port.commitSelection = async (_requestId, selectionId) => {
+    commits++;
+    return { state: 'selected', selectionId };
+  };
+  const request = (async (method: string, params: { operationId: string; entryIds: string[] }) => {
+    if (method === 'library.prepare') {
+      operations.push(params.operationId);
+      assert.deepEqual(params.entryIds, ['entry']);
+      if (++prepares === 1) throw new RemoteKitError('outcome_unknown', 'prepare acknowledgment lost');
+      return { selectionId: 'selection' };
+    }
+    if (method === 'library.finish') return { state: 'selected', snapshot: snapshot(1) };
+    return snapshot(0);
+  }) as LibraryRequest;
+  const store = new LibraryStore(request, port);
+  t.after(store.dispose);
+  store.configure(true, true, 'viewer', ['request']);
+  await assert.rejects(store.select('request', ['entry']), { code: 'outcome_unknown' });
+  assert.equal(commits, 0);
+  assert.equal(store.getSnapshot().checkouts.request.commit, 'retry');
+  await store.select('request', ['changed']);
+  assert.equal(commits, 1);
+  assert.equal(operations[0], operations[1]);
+  assert.equal(store.getSnapshot().checkouts.request.state, 'selected');
+});
+
+test('canceling a rejected commit confirms its terminal receipt and releases the checkout', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'] });
+  const { SelectionCommitFailure } = await import('../client/files/file-channel');
+  let cancelled = false;
+  let finishes = 0;
+  const port = libraryPort();
+  port.commitSelection = async () => {
+    throw new SelectionCommitFailure(
+      'retry',
+      new RemoteKitError('not_found', 'asset missing', { detail: 'asset_unreadable' }),
+    );
+  };
+  port.cancelSelection = async () => {
+    cancelled = true;
+    return { state: 'cancelled' };
+  };
+  const request = (async (method: string) => {
+    if (method === 'library.prepare') return { selectionId: 'selection' };
+    if (method === 'library.finish') {
+      finishes++;
+      return { state: cancelled ? 'cancelled' : 'pending', snapshot: snapshot(finishes) };
+    }
+    return snapshot(finishes);
+  }) as LibraryRequest;
+  const store = new LibraryStore(request, port);
+  t.after(store.dispose);
+  store.configure(true, true, 'viewer', ['request']);
+  await assert.rejects(store.select('request', ['entry']), { code: 'not_found' });
+  assert.equal(await store.cancelSelection('request'), 'cancelled');
+  assert.equal(finishes, 1);
+  assert.equal(store.getSnapshot().checkouts.request.state, 'cancelled');
+  assert.equal(store.getSnapshot().checkouts.request.error, undefined);
+  store.configure(true, true, 'viewer', []);
+  t.mock.timers.tick(1500);
+  await flush();
+  assert.equal(store.getSnapshot().checkouts.request, undefined);
 });

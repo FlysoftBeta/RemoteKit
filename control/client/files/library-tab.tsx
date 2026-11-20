@@ -53,14 +53,15 @@ import { basketEntries, FileDropZone, PartitionPicker, useDeviceImport } from '.
 import { useLibrary } from './file-library-state';
 import { FileRow, FileTile } from './file-tile';
 import { FileViewToggle } from './file-view';
-import { filesInView, sourceAppName, sourceChannelName, type FilesView } from './files-app-state';
+import { filteredFiles, isPreviewImage, sourceAppName, sourceChannelName } from './files-app-state';
+import type { FilesView } from '../../shared/files-state';
 import { FilesOrganization } from './files-organization';
 import type { ImportControls } from './import-queue';
 import './library-tab.css';
 import type { PhotoJob } from './photo-job-store';
 import { PhotoCapture } from './photo-library-capture';
-import { PhotoOptions } from './photo-options';
-import { snippetOriginLabel, snippetRelativeTime, snippetSearchText, SnippetView } from './snippet-view';
+import { snippetRelativeTime, SnippetView } from './snippet-view';
+import { snippetOriginLabel } from './files-app-state';
 
 const MAX_BASKET = 64;
 
@@ -83,22 +84,13 @@ export function LibraryTab({
   onView(view: FilesView): void;
   onQuery(query: string): void;
   onLayout(layout: 'grid' | 'list'): void;
-  onOpen(entry: LibraryEntry): void;
+  onOpen(entry: LibraryEntry, details?: boolean): void;
 }): JSX.Element {
-  const {
-    snapshot,
-    error: loadError,
-    online,
-    refresh,
-    mutate,
-    photos,
-    recordUsage,
-    apps,
-    copySnippet,
-  } = useLibrary();
+  const { snapshot, error: loadError, online, refresh, mutate, photos, apps, copySnippet } = useLibrary();
   const [copied, setCopied] = useState(false);
   const pane = useRef<HTMLDivElement>(null);
   const [paneWidth, setPaneWidth] = useState(Infinity);
+  const [paneHeight, setPaneHeight] = useState(Infinity);
   // narrow: chips replace the side navigation; compact: header actions become icons.
   const narrow = paneWidth < 600;
   const compact = paneWidth < 900;
@@ -110,7 +102,6 @@ export function LibraryTab({
   const [uploadMenu, setUploadMenu] = useState<HTMLElement>();
   const [camera, setCamera] = useState<{ partitionId?: string | null; replace?: LibraryEntry }>();
   const [showBasket, setShowBasket] = useState(false);
-  const [photo, setPhoto] = useState<string>();
   const [move, setMove] = useState<string[]>();
   const [deletion, setDeletion] = useState<{ ids: string[]; operationId: string }>();
 
@@ -119,16 +110,7 @@ export function LibraryTab({
   const inBasket = new Set(basket.map((entry) => entry.id));
   const catalog = snapshot?.entries ?? [];
   const needle = query.trim().toLowerCase();
-  const entries = (snapshot ? filesInView(snapshot, filter, Date.now(), !!needle) : []).filter(
-    (entry) =>
-      !needle ||
-      (entry.kind === 'snippet' && snippetSearchText(entry, apps).toLowerCase().includes(needle)) ||
-      [
-        entry.name,
-        entry.detail,
-        entry.source ? `${sourceAppName(entry.source.app, apps)} › ${sourceChannelName(entry.source)}` : '',
-      ].some((value) => value?.toLowerCase().includes(needle)),
-  );
+  const entries = snapshot ? filteredFiles(snapshot, filter, query, apps) : [];
   const currentPartition =
     typeof filter === 'object' && 'partition' in filter
       ? partitions.find((item) => item.id === filter.partition)
@@ -155,8 +137,6 @@ export function LibraryTab({
   const selecting = selected !== undefined;
   const chosen = new Set(selected);
   const menuEntry = catalog.find((entry) => entry.id === menu?.id);
-  const photoEntry = catalog.find((entry) => entry.id === photo);
-  const photoJob = photos.jobs.find((job) => job.id === photo || job.replace?.id === photo);
   const reportError = useCallback((error: RemoteKitError | undefined) => setError(error), []);
   const upload = useDeviceImport({
     uploads,
@@ -168,7 +148,10 @@ export function LibraryTab({
   useEffect(() => {
     const node = pane.current;
     if (!node || typeof ResizeObserver === 'undefined') return;
-    const resize = new ResizeObserver(([entry]) => setPaneWidth(entry.contentRect.width));
+    const resize = new ResizeObserver(([entry]) => {
+      setPaneWidth(entry.contentRect.width);
+      setPaneHeight(entry.contentRect.height);
+    });
     resize.observe(node);
     return () => resize.disconnect();
   }, []);
@@ -258,10 +241,7 @@ export function LibraryTab({
                   .join(' › ');
   const openPreview = (entry: LibraryEntry) => {
     if (entry.kind === 'file' && !entry.available) return;
-    if (entry.photo) {
-      setPhoto(entry.id);
-      void recordUsage(entry.id, windowId).catch((failure) => diagnostics.record('file-usage', failure));
-    } else onOpen(entry);
+    onOpen(entry);
   };
   const openEntry = (entry: LibraryEntry, anchor: HTMLElement) => {
     if (entry.kind === 'file' && !entry.available) return;
@@ -271,8 +251,7 @@ export function LibraryTab({
         await copySnippet(entry.id);
         setCopied(true);
       });
-    else if (entry.photo?.pending || photos.jobs.some((job) => job.replace?.id === entry.id))
-      openPreview(entry);
+    else if (isPreviewImage(entry) || entry.photo?.pending) onOpen(entry, !!entry.photo?.pending);
     else setMenu({ anchor, id: entry.id });
   };
   const entryMeta = (entry: LibraryEntry) =>
@@ -300,8 +279,6 @@ export function LibraryTab({
         if (entry) latestActions.current.openEntry(entry, anchor);
       },
       select: (id: string) => latestActions.current.toggleSelected(id),
-      longPress: (id: string) =>
-        setSelected((current = []) => (current.includes(id) ? current : [...current, id])),
       basket: (id: string) =>
         latestActions.current.catalog.some((entry) => entry.id === id) &&
         (basketRef.current.has(id)
@@ -316,8 +293,10 @@ export function LibraryTab({
   const listViewport = useRef<VirtualViewport>(null);
   const [listWidth, setListWidth] = useState(0);
   const columns =
-    effectiveLayout === 'list' ? 1 : Math.max(1, Math.floor((listWidth + 12) / ((narrow ? 136 : 160) + 12)));
-  const cardHeight = ((listWidth - (columns - 1) * 12) / columns) * 0.75 + 46;
+    effectiveLayout === 'list'
+      ? 1
+      : Math.max(1, Math.floor((listWidth - 8 + 12) / ((narrow ? 136 : 160) + 12)));
+  const cardHeight = ((listWidth - 8 - (columns - 1) * 12) / columns) * 0.75 + 46;
   const virtualRows: LibraryRow[] = [];
   for (const [label, section] of sections) {
     virtualRows.push({ key: label, label, header: true, entries: [], jobs: [] });
@@ -413,11 +392,15 @@ export function LibraryTab({
         <Typography variant="h6" sx={{ fontWeight: 600, lineHeight: 1.3, minWidth: 0 }} noWrap>
           {heading}
         </Typography>
-        {snapshot && filter !== 'settings' && (
-          <Typography variant="body2" color="text.secondary" sx={{ flex: 'none' }}>
-            {entries.length} 项
-          </Typography>
-        )}
+        {snapshot &&
+          filter !== 'settings' &&
+          ((typeof filter === 'object' && 'source' in filter) ||
+            (narrow && filter !== 'clipboard') ||
+            (!selecting && !!entries.length && !narrow)) && (
+            <Typography variant="body2" color="text.secondary" sx={{ flex: 'none' }}>
+              {entries.length} 项
+            </Typography>
+          )}
       </Box>
       {narrow ? (
         <Tooltip title="搜索">
@@ -479,7 +462,7 @@ export function LibraryTab({
   return (
     <Box
       ref={pane}
-      className="library-tab"
+      className={`library-tab${paneHeight < 520 ? ' library-short' : ''}`}
       sx={{
         display: 'flex',
         flexDirection: 'column',
@@ -504,7 +487,7 @@ export function LibraryTab({
         }}
       >
         {header}
-        {narrow && searching && !selecting && (
+        {narrow && (searching || !!query) && !selecting && (
           <Box sx={{ pt: 1 }}>
             <SearchField value={query} onChange={setQuery} autoFocus fullWidth />
           </Box>
@@ -520,7 +503,7 @@ export function LibraryTab({
           label="松开以上传到我的文件"
           disabled={disabled || filter === 'settings'}
           onFiles={upload.add}
-          sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}
+          sx={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}
         >
           <Box
             sx={{
@@ -549,18 +532,24 @@ export function LibraryTab({
                 <Button onClick={() => void run(refresh)}>加载我的文件</Button>
               </Box>
             )}
-            {snapshot && filter !== 'settings' && (
-              <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 1, pt: 1.5, pb: 0.5 }}>
-                <FilesOrganization mode="source" view={filter} onView={selectFilter} />
-                <Box sx={{ flex: 1 }} />
-                {narrow && filter !== 'clipboard' && <FileViewToggle mode={view.mode} onChange={view.set} />}
-                {!selecting && !!entries.length && !narrow && (
-                  <Button size="small" startIcon={<CheckBoxOutlined />} onClick={() => setSelected([])}>
-                    选择
-                  </Button>
-                )}
-              </Box>
-            )}
+            {snapshot &&
+              filter !== 'settings' &&
+              ((typeof filter === 'object' && 'source' in filter) ||
+                (narrow && filter !== 'clipboard') ||
+                (!selecting && !!entries.length && !narrow)) && (
+                <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 1, pt: 1.5, pb: 0.5 }}>
+                  <FilesOrganization mode="source" view={filter} onView={selectFilter} />
+                  <Box sx={{ flex: 1 }} />
+                  {narrow && filter !== 'clipboard' && (
+                    <FileViewToggle mode={view.mode} onChange={view.set} />
+                  )}
+                  {!selecting && !!entries.length && !narrow && (
+                    <Button size="small" startIcon={<CheckBoxOutlined />} onClick={() => setSelected([])}>
+                      选择
+                    </Button>
+                  )}
+                </Box>
+              )}
             {snapshot && filter === 'clipboard' && !entries.length && (
               <Typography color="text.secondary" sx={{ py: 6, textAlign: 'center' }}>
                 还没有剪贴片段
@@ -624,7 +613,27 @@ export function LibraryTab({
                             localOnly
                             meta={partitionOf(job.origin.kind === 'files' ? job.origin.partitionId : null)}
                             status={photoStatus(undefined, job)}
-                            onOpen={() => setPhoto(job.id)}
+                            onOpen={
+                              job.state === 'error' || job.state === 'choice' || job.state === 'scan-error'
+                                ? () =>
+                                    onOpen(
+                                      {
+                                        kind: 'file',
+                                        id: job.id,
+                                        assetId: job.originalId ?? job.id,
+                                        available: true,
+                                        name: '照片',
+                                        type: 'image/jpeg',
+                                        size: job.preview?.size ?? 0,
+                                        createdAt: Date.now(),
+                                        source: null,
+                                        partitionId: null,
+                                        collected: false,
+                                      },
+                                      true,
+                                    )
+                                : undefined
+                            }
                           />
                         );
                       })}
@@ -642,7 +651,6 @@ export function LibraryTab({
                           basketFull={basket.length >= MAX_BASKET}
                           onOpen={entryActions.open}
                           onSelect={entryActions.select}
-                          onLongPress={entryActions.longPress}
                           onBasket={entryActions.basket}
                           onMenu={entryActions.menu}
                         />
@@ -693,6 +701,7 @@ export function LibraryTab({
         windowId={windowId}
         onClose={() => setMenu(undefined)}
         onOpen={openPreview}
+        onDetails={(entry) => onOpen(entry, true)}
         onSelect={(entry) => setSelected([entry.id])}
       />
       <Snackbar
@@ -781,18 +790,6 @@ export function LibraryTab({
             </Button>
           </DialogActions>
         </Dialog>
-      )}
-      {(photoEntry || photoJob) && (
-        <PhotoDialog
-          entry={photoEntry}
-          job={photoJob}
-          disabled={disabled}
-          onRetake={(entry) => {
-            setPhoto(undefined);
-            setCamera({ replace: entry, partitionId: entry.partitionId });
-          }}
-          onClose={() => setPhoto(undefined)}
-        />
       )}
       {showBasket && <FileBasketDialog windowId={windowId} onClose={() => setShowBasket(false)} />}
     </Box>
@@ -918,55 +915,6 @@ function EmptyLibrary({
   );
 }
 
-export function PhotoDialog({
-  entry,
-  job,
-  disabled,
-  onRetake,
-  onClose,
-}: {
-  entry?: LibraryEntry;
-  job?: PhotoJob;
-  disabled: boolean;
-  onRetake: (entry: LibraryEntry) => void;
-  onClose: () => void;
-}) {
-  const { photos } = useLibrary();
-  return (
-    <Dialog open fullWidth maxWidth="xs" onClose={onClose}>
-      <DialogTitle sx={{ overflowWrap: 'anywhere' }}>{entry?.name ?? '照片'}</DialogTitle>
-      <DialogContent>
-        <PhotoOptions
-          key={entry?.id ?? job?.id}
-          entry={entry}
-          job={job}
-          destination="library"
-          disabled={disabled}
-        />
-      </DialogContent>
-      <DialogActions>
-        {job && (
-          <Button
-            disabled={job.state === 'committing'}
-            onClick={() => {
-              photos.cancel(job.id);
-              if (!entry) onClose();
-            }}
-          >
-            {entry ? '取消照片任务' : '移除照片'}
-          </Button>
-        )}
-        {entry && !job && (
-          <Button disabled={disabled} startIcon={<PhotoCameraOutlined />} onClick={() => onRetake(entry)}>
-            重拍
-          </Button>
-        )}
-        <Button onClick={onClose}>完成</Button>
-      </DialogActions>
-    </Dialog>
-  );
-}
-
 interface LibraryRow {
   key: string;
   label: string;
@@ -986,7 +934,6 @@ interface LibraryEntryProps {
   basketFull: boolean;
   onOpen(id: string, anchor: HTMLElement): void;
   onSelect(id: string): void;
-  onLongPress(id: string): void;
   onBasket(id: string): void;
   onMenu(id: string, anchor: HTMLElement): void;
 }
@@ -1003,7 +950,6 @@ const LibraryEntryView = memo(
     basketFull,
     onOpen,
     onSelect,
-    onLongPress,
     onBasket,
     onMenu,
   }: LibraryEntryProps) {
@@ -1071,6 +1017,7 @@ const LibraryEntryView = memo(
         name={entry.name}
         type={entry.type}
         assetId={entry.assetId}
+        blob={job?.preview}
         meta={meta}
         status={unavailable ? undefined : photoStatus(entry, job)}
         selected={selected}
@@ -1078,10 +1025,23 @@ const LibraryEntryView = memo(
         open={open}
         disabled={disabled || unavailable}
         marker={basketMarker(entry)}
-        corner={<FileDownloadButton entry={entry} disabled={disabled || unavailable} />}
+        corner={
+          <>
+            <FileDownloadButton entry={entry} disabled={disabled || unavailable} />
+            <IconButton
+              aria-label={`更多操作 ${entry.name}`}
+              aria-haspopup="menu"
+              disabled={disabled}
+              onClick={(event) => onMenu(entry.id, event.currentTarget)}
+            >
+              <MoreVert fontSize="small" />
+            </IconButton>
+          </>
+        }
         start={entryCheckbox(entry, true)}
         onOpen={(anchor) => onOpen(entry.id, anchor)}
-        onLongPress={() => onLongPress(entry.id)}
+        onMenu={(anchor) => onMenu(entry.id, anchor)}
+        onLongPress={(anchor) => onMenu(entry.id, anchor)}
       />
     ) : (
       <FileRow
@@ -1089,6 +1049,7 @@ const LibraryEntryView = memo(
         name={entry.name}
         type={entry.type}
         assetId={entry.assetId}
+        blob={job?.preview}
         meta={meta}
         detail={entry.detail}
         status={unavailable ? undefined : photoStatus(entry, job)}
@@ -1097,7 +1058,8 @@ const LibraryEntryView = memo(
         disabled={disabled || unavailable}
         leading={entryCheckbox(entry, false)}
         onOpen={(anchor) => onOpen(entry.id, anchor)}
-        onLongPress={() => onLongPress(entry.id)}
+        onMenu={(anchor) => onMenu(entry.id, anchor)}
+        onLongPress={(anchor) => onMenu(entry.id, anchor)}
         trailing={
           !selecting && (
             <>

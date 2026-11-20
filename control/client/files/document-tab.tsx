@@ -15,8 +15,9 @@ import { basketEntries } from './file-library-controls';
 import { useLibrary } from './file-library-state';
 import { FilePreview } from './file-preview';
 import { FileTypeIcon } from './file-thumbnail';
-import { sourceAppName, sourceChannelName, type FilesTab } from './files-app-state';
-import { snippetOriginLabel } from './snippet-view';
+import { sourceAppName, sourceChannelName } from './files-app-state';
+import type { FilesTab } from '../../shared/files-state';
+import { snippetOriginLabel } from './files-app-state';
 
 export function DocumentTab({
   tab,

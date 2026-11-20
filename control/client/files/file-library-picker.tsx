@@ -5,7 +5,8 @@ import type { LibraryEntry } from '../../shared/file-library';
 import { formatFileSize } from './file-format';
 import { FileTile } from './file-tile';
 import { useLibrary } from './file-library-state';
-import { filesInView, sourceAppName, sourceChannelName, sourceKey, type FilesView } from './files-app-state';
+import { filesInView, sourceAppName, sourceChannelName, sourceKey } from './files-app-state';
+import type { FilesView } from '../../shared/files-state';
 
 const PAGE = 48;
 

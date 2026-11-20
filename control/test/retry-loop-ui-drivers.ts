@@ -8,6 +8,7 @@ import { SessionImportSettings } from '../client/app/session-import';
 import { useWindowState } from '../client/app/window-state';
 import { Launcher } from '../client/app/launcher';
 import { InstallDialog } from '../client/app/app-editor';
+import { PhotoViewer } from '../client/files/photo-viewer';
 import { FileImagePreview } from '../client/files/file-image-preview';
 import { DocumentTab } from '../client/files/document-tab';
 import { FilePreview } from '../client/files/file-preview';
@@ -37,6 +38,7 @@ export function driveUi(
     | 'launcher'
     | 'inspect'
     | 'image'
+    | 'photo'
     | 'snippet'
     | 'media'
     | 'attachment'
@@ -67,9 +69,15 @@ export function driveUi(
       value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
     });
     if (
-      ['document', 'page', 'progress', 'progress-save', 'study-material', 'study-material-save'].includes(
-        path,
-      )
+      [
+        'photo',
+        'document',
+        'page',
+        'progress',
+        'progress-save',
+        'study-material',
+        'study-material-save',
+      ].includes(path)
     ) {
       Object.defineProperty(dom.window.HTMLElement.prototype, 'clientWidth', {
         configurable: true,
@@ -85,8 +93,12 @@ export function driveUi(
       });
     }
     const restore: (() => void)[] = [];
+    if (path === 'photo') dom.window.HTMLElement.prototype.scrollIntoView = () => {};
     class Observer {
-      observe() {}
+      constructor(private readonly callback?: ResizeObserverCallback) {}
+      observe() {
+        if (path === 'photo') this.callback?.([], this as unknown as ResizeObserver);
+      }
       unobserve() {}
       disconnect() {}
     }
@@ -117,6 +129,8 @@ export function driveUi(
       innerWidth: 1024,
       innerHeight: 768,
       getComputedStyle: dom.window.getComputedStyle,
+      requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
+      cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
       IS_REACT_ACT_ENVIRONMENT: true,
       fetch: async (url: string) => {
         try {
@@ -286,6 +300,12 @@ export function driveUi(
         basketPartitionId: null,
       },
       photos: { jobs: [] },
+      thumbnails: {
+        subscribe: (_id: string, show: (value: object) => void) => {
+          show({});
+          return noop;
+        },
+      },
       importQueue: () => queue,
       cancellations,
       checkout: () => undefined,
@@ -300,8 +320,22 @@ export function driveUi(
           ? boundary.call({ entryId: 'entry' }, { entries: [entry] })
           : Promise.resolve({ entries: [entry] }),
       rpc: {
+        photoPreview: async (assetId: string) => ({
+          assetId,
+          size: 1,
+          type: 'image/jpeg',
+          width: 800,
+          height: 600,
+        }),
+        describeAsset: async (assetId: string) => ({
+          assetId,
+          size: 1,
+          type: 'image/jpeg',
+          width: 800,
+          height: 600,
+        }),
         readPhoto: (asset: unknown) =>
-          path === 'image'
+          path === 'image' || path === 'photo'
             ? boundary.call({ asset }, new Blob(['image']))
             : Promise.resolve(new Blob(['image'])),
         readAsset: (asset: unknown) =>
@@ -468,6 +502,17 @@ export function driveUi(
             snapshots: {} as never,
             action: noop as never,
             report: noop,
+          }),
+        );
+      if (path === 'photo')
+        return provided(
+          createElement(PhotoViewer, {
+            key: boundary.version,
+            entries: [entry] as never,
+            entryId: 'entry',
+            windowId: 'window',
+            onEntry: noop,
+            onClose: noop,
           }),
         );
       if (path === 'image')

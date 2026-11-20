@@ -21,6 +21,7 @@ export const creationBindings: Record<string, string | string[]> = {
   'client/documents/document-viewer.tsx#recoverRead:2': 'document-viewer-open-recovery',
   'client/failures/recovery.ts#recover:1': 'generic-recovery-callback',
   'client/files/file-chooser-dialog.tsx#recover:1': 'file-chooser-operation-recovery',
+  'client/files/photo-viewer.tsx#recoverRead:1': 'photo-viewer-read-recovery',
   'client/files/file-image-preview.tsx#recoverRead:1': 'image-read-recovery',
   'client/files/file-preview.tsx#recoverRead:1': 'asset-media-read-recovery',
   'client/files/file-preview.tsx#recoverRead:2': 'document-progress-read-recovery',

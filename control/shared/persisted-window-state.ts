@@ -1,3 +1,4 @@
+import type { FilesView, FilesLaunch, FilesTab, FilesWindowState } from './files-state';
 import {
   array,
   corruptRecord,
@@ -18,13 +19,13 @@ const source: typeof sourceShape = {
     return result;
   },
 };
-export const filesView = union(
+export const filesView: Codec<FilesView> = union(
   literal('all', 'recent', 'clipboard', 'settings'),
   object({ partition: identifier }),
   object({ source }),
 );
 const launchShape = object({ requestId: identifier }, { entryId: identifier, view: filesView });
-export const filesLaunch: typeof launchShape = {
+export const filesLaunch: Codec<FilesLaunch> = {
   read(value, path) {
     const launch = launchShape.read(value, path);
     if (launch.entryId === undefined && launch.view === undefined)
@@ -33,15 +34,22 @@ export const filesLaunch: typeof launchShape = {
   },
 };
 const tabId = string({ pattern: /^[a-z0-9]{8}$/ });
-const filesTab = union(
+const filesTab: Codec<FilesTab> = union(
   object({ id: tabId, kind: literal('library'), view: filesView, query: string({ max: 256 }) }),
-  object({ id: tabId, kind: literal('document'), entryId: identifier }, { from: filesView }),
+  object(
+    { id: tabId, kind: literal('document'), entryId: identifier },
+    { from: filesView, fromQuery: string({ max: 256 }) },
+  ),
+  object(
+    { id: tabId, kind: literal('photos'), entryId: identifier, from: filesView },
+    { fromQuery: string({ max: 256 }) },
+  ),
 );
 const filesShape = object(
   { tabs: array(filesTab, { min: 1, max: 16 }), activeTabId: tabId, layout: literal('grid', 'list') },
   { launch: filesLaunch },
 );
-export const filesState: typeof filesShape = {
+export const filesState: Codec<FilesWindowState> = {
   read(value, path) {
     const state = filesShape.read(value, path);
     const ids = new Set(state.tabs.map((tab) => tab.id));
@@ -76,7 +84,7 @@ export const windowState: Codec<Record<string, unknown>> = {
     const state = stateShape.read(value, path);
     if (new TextEncoder().encode(JSON.stringify(state)).length > 8192)
       throw new Error(`${path} expected at most 8192 bytes`);
-    return state;
+    return { ...state };
   },
 };
 export function readWindowState(value: unknown): Record<string, unknown> {

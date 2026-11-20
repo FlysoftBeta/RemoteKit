@@ -27,7 +27,7 @@ const enumerations: Record<string, readonly (string | bigint)[]> = {
   'library_entries.kind': ['file', 'snippet'],
   'file_library_selections.terminal': ['selected', 'cancelled'],
   'file_library_selections.checked': [0n, 1n],
-  'object_derivations.kind': ['thumbnail', 'document'],
+  'object_derivations.kind': ['thumbnail', 'preview', 'photo', 'selection-transcode', 'document'],
   'object_render_failures.state': ['failed', 'unknown'],
 };
 

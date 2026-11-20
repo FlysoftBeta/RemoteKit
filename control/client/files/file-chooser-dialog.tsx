@@ -1,3 +1,6 @@
+import { createPortal } from 'react-dom';
+import { PhotoViewer, PhotoDecisionViewer } from './photo-viewer';
+import { photoSequence } from './files-app-state';
 import { recover } from '../failures/recovery';
 import {
   Add,
@@ -98,6 +101,13 @@ export function FileBasketDialog({
   const [camera, setCamera] = useState<Camera>();
   const [step, setStep] = useState<Step>();
   const [panel, setPanel] = useState<BasketPanel>();
+  const [viewer, setViewer] = useState<{ id: string; details?: boolean; assetId?: string }>();
+  const ownerId = request?.windowId ?? windowId;
+  const viewingEntry = snapshot?.entries.find((entry) => entry.id === viewer?.id);
+  const viewingJob = photos.jobs.find((job) => job.id === viewer?.id || job.replace?.id === viewer?.id);
+  const ownerContent = [...document.querySelectorAll<HTMLElement>('[data-window-id]')]
+    .find((node) => node.dataset.windowId === ownerId)
+    ?.querySelector<HTMLElement>('.files-window-content, .window-content, .local-app-content');
   const [addMenu, setAddMenu] = useState<AddMenu>();
   const [moreMenu, setMoreMenu] = useState<HTMLElement>();
   const [afterId, setAfterId] = useState<string>();
@@ -290,39 +300,45 @@ export function FileBasketDialog({
       run: () => setStep('library'),
     },
   ];
-  const sendLabel = transaction
-    ? '正在确认结果…'
-    : blocked
-      ? `还有 ${blocked} 项处理中或待确认`
-      : request?.multiple
-        ? `按顺序发送全部 ${selection.length} 项`
-        : selection.length
-          ? '发送选中的文件'
-          : '先选择一个文件';
+  const sendLabel =
+    transaction?.commit === 'retry'
+      ? '重试发送'
+      : transaction
+        ? '正在确认结果…'
+        : blocked
+          ? `还有 ${blocked} 项处理中或待确认`
+          : request?.multiple
+            ? `按顺序发送全部 ${selection.length} 项`
+            : selection.length
+              ? '发送选中的文件'
+              : '先选择一个文件';
   const sendDisabled =
     disabled ||
     final ||
-    !!transaction ||
+    (!!transaction && transaction.commit !== 'retry') ||
     dragging ||
     (!transaction && (waiting || !selection.length || blocked > 0));
   const expanded = !!panel || !!step;
   const maxHeight = Math.min(expanded ? 600 : 380, position?.maxHeight ?? Math.max(0, viewportHeight - 16));
   const closeLabel = request ? '取消文件选择' : '关闭文件篮';
   const statusText =
-    final || waiting
-      ? final
-        ? outcome.selected
-          ? '文件已交给页面'
-          : '文件选择已关闭'
-        : outcome.uncertain
-          ? '页面接收结果未知，正在确认'
-          : '等待页面确认文件'
-      : '';
+    transaction?.commit === 'retry'
+      ? '文件尚未交给页面，可重试发送'
+      : final || waiting
+        ? final
+          ? outcome.selected
+            ? '文件已交给页面'
+            : '文件选择已关闭'
+          : outcome.uncertain
+            ? '页面接收结果未知，正在确认'
+            : '等待页面确认文件'
+        : '';
   // The panel reappears only when the send failed or its outcome needs the user.
   if (sent && !error && !transaction?.error && !outcome.uncertain) return null;
   return (
     <>
       <FloatingPanel
+        hidden={!!viewer}
         label="文件篮"
         placement={position}
         width={position?.width ?? 420}
@@ -383,6 +399,8 @@ export function FileBasketDialog({
                   </Box>
                 ) : basket.length || pending.length ? (
                   <BasketItems
+                    windowId={ownerId}
+                    requestId={request?.id}
                     entries={basket}
                     pending={pending}
                     revision={snapshot.revision}
@@ -393,6 +411,7 @@ export function FileBasketDialog({
                     disabled={editingDisabled}
                     dragging={dragging}
                     onDragging={setDragging}
+                    onPreview={(id, details, assetId) => setViewer({ id, details, assetId })}
                     panel={panel}
                     setPanel={(next) => {
                       setPanel(next);
@@ -401,7 +420,7 @@ export function FileBasketDialog({
                         owner &&
                         next &&
                         snapshot.entries.some((entry) => entry.id === next.id) &&
-                        (next.id !== panel?.id || next.view !== panel.view)
+                        next.id !== panel?.id
                       ) {
                         void recordUsage(next.id, owner).catch((failure) =>
                           diagnostics.record('file-usage', failure),
@@ -441,7 +460,13 @@ export function FileBasketDialog({
                     >
                       <span>
                         <IconButton
-                          aria-label={transaction ? '正在确认结果…' : '发送'}
+                          aria-label={
+                            transaction?.commit === 'retry'
+                              ? '重试发送'
+                              : transaction
+                                ? '正在确认结果…'
+                                : '发送'
+                          }
                           disabled={sendDisabled}
                           onClick={beginSelection}
                           sx={{
@@ -506,8 +531,10 @@ export function FileBasketDialog({
                 operation: '发送文件',
                 scope: 'surface',
                 input: true,
+                requestId: request?.id,
+                ownerKey: request?.windowId ?? windowId,
                 capacity: 'selection',
-                action: { label: '调整所选内容', run: () => setError(undefined) },
+                ...(transaction?.commit === 'retry' ? { action: { label: '重试发送', run: submit } } : {}),
               }}
             />
           )}
@@ -592,6 +619,35 @@ export function FileBasketDialog({
           <ListItemText>{closeLabel}</ListItemText>
         </MenuItem>
       </Menu>
+      {viewer &&
+        ownerContent &&
+        createPortal(
+          <div className="photo-window-overlay" data-photo-overlay>
+            {viewingEntry?.photo?.pending || (!viewingEntry && viewingJob) ? (
+              <PhotoDecisionViewer
+                initialAssetId={viewer.assetId}
+                entry={viewingEntry?.kind === 'file' ? viewingEntry : undefined}
+                job={viewingJob}
+                destination="basket"
+                windowId={ownerId!}
+                requestId={request?.id}
+                onClose={() => setViewer(undefined)}
+              />
+            ) : (
+              <PhotoViewer
+                requestId={request?.id}
+                entries={snapshot ? photoSequence(snapshot, 'basket') : []}
+                entryId={viewer.id}
+                windowId={ownerId!}
+                destination="basket"
+                initialDetails={viewer.details}
+                onEntry={(id) => setViewer((current) => current && { ...current, id })}
+                onClose={() => setViewer(undefined)}
+              />
+            )}
+          </div>,
+          ownerContent,
+        )}
       {camera && (
         <PhotoCapture
           requestId={request?.id}

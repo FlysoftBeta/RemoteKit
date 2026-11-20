@@ -1,7 +1,7 @@
 import { RetryUnit } from '../../shared/retry-unit';
 import { isDocumentOpenParams } from '../../../protocol/file_requests';
 import { RemoteKitError, nativeError } from '../../shared/errors';
-import type { Asset, AssetDescription, SelectionState } from '../../shared/file-library';
+import type { Asset, AssetDescription, SelectionState, PhotoMetadata } from '../../shared/file-library';
 import { operationId } from '../control/product-operations';
 import type { DocumentInfo } from '../documents/document-source';
 import { diagnostics } from '../media/diagnostics';
@@ -10,9 +10,9 @@ import { RequestTracker } from '../util/request-tracker';
 
 export interface ProcessedPhoto extends Asset {
   type: 'image/webp';
-  geometry: 'perspective' | 'deskew' | 'unchanged';
+  geometry: NonNullable<PhotoMetadata['geometry']>;
   quarterTurns: 0 | 1 | 2 | 3;
-  orientation: 'text' | 'manual' | 'none';
+  orientation: NonNullable<PhotoMetadata['orientation']>;
 }
 
 export interface PhotoBurstDecision {
@@ -35,6 +35,7 @@ type RequestOptions = {
   signal?: AbortSignal;
   skipWhenBusy?: boolean;
   finishSentRequest?: boolean;
+  onSent?: () => void;
 };
 
 function checkAbort(signal: AbortSignal) {
@@ -58,9 +59,23 @@ function linkSignals(signals: AbortSignal[]) {
 
 /** File bytes and transaction commands share the current authenticated RTC peer.
  * A new peer interrupts the transfer; drafts are never silently resumed there. */
+export class SelectionCommitFailure extends RemoteKitError {
+  constructor(
+    readonly disposition: 'retry' | 'query',
+    error: RemoteKitError,
+  ) {
+    super(disposition === 'query' ? 'outcome_unknown' : error.code, error.message, {
+      detail: error.detail,
+      reason: error.reason,
+      errorId: error.errorId,
+      cause: error,
+    });
+  }
+}
 export class FileChannel {
   private readonly pending = new RequestTracker<unknown>();
   private binding?: Binding;
+  private readonly replies = new WeakSet<Error>();
   private scope = new AbortController();
   private photoBursts = new Map<string, Binding>();
   private assetChunksInFlight = 0;
@@ -73,7 +88,11 @@ export class FileChannel {
     if (message.type !== 'files.result') return false;
     this.syncScope();
     if (message.ok) this.pending.resolve(message.requestId, message.result);
-    else this.pending.reject(message.requestId, nativeError(message.error));
+    else {
+      const error = nativeError(message.error);
+      this.replies.add(error);
+      this.pending.reject(message.requestId, error);
+    }
     return true;
   }
   disconnect() {
@@ -142,7 +161,10 @@ export class FileChannel {
     const response = this.pending.request(
       requestId,
       20000,
-      () => channel.send(encoded),
+      () => {
+        channel.send(encoded);
+        options.onSent?.();
+      },
       signal,
     ) as Promise<T>;
     return { response };
@@ -192,9 +214,15 @@ export class FileChannel {
     const { binding } = options;
     const unit = new RetryUnit({ name: 'file_request' });
     const repeatable =
-      ['asset.describe', 'asset.read', 'document.page', 'document.resource', 'photo.thumbnail'].includes(
-        method,
-      ) ||
+      [
+        'asset.describe',
+        'asset.read',
+        'document.page',
+        'document.resource',
+        'photo.thumbnail',
+        'photo.preview',
+        'photo.process',
+      ].includes(method) ||
       typeof params.operationId === 'string' ||
       typeof params.uploadId === 'string' ||
       typeof params.burstId === 'string' ||
@@ -226,7 +254,12 @@ export class FileChannel {
       }
     }
   }
-  async uploadAsset(file: File, operationId: string, signal: AbortSignal): Promise<Asset> {
+  async uploadAsset(
+    file: File,
+    operationId: string,
+    signal: AbortSignal,
+    onProgress?: (completed: number, total: number) => void,
+  ): Promise<Asset> {
     const binding = this.currentBinding();
     const check = () => this.checkBinding(binding, signal);
     check();
@@ -253,6 +286,7 @@ export class FileChannel {
       check();
       if (typeof uploadId !== 'string' || !Number.isSafeInteger(offset) || offset < 0 || offset > file.size)
         throw new RemoteKitError('outcome_unknown', '文件发送状态无效');
+      let completed = offset;
       const window: Promise<void>[] = [];
       for (let position = offset; position < file.size;) {
         if (window.length === 4) await Promise.race([window.shift(), aborted]);
@@ -286,6 +320,8 @@ export class FileChannel {
         const ack = response
           .then((result) => {
             if (result?.offset !== next) throw new RemoteKitError('outcome_unknown', '文件接收进度不一致');
+            completed += bytes.length;
+            onProgress?.(completed, file.size);
           })
           .finally(() => {
             this.assetChunksInFlight--;
@@ -323,38 +359,54 @@ export class FileChannel {
       throw new RemoteKitError('limit_exceeded', '照片预览大小超出限制', { capacity: 'file' });
     return this.readAsset(asset, signal);
   }
-  async readAsset(asset: AssetDescription, signal: AbortSignal): Promise<Blob> {
+  async readAsset(
+    asset: AssetDescription,
+    signal: AbortSignal,
+    onProgress?: (completed: number, total: number) => void,
+  ): Promise<Blob> {
     const binding = this.currentBinding();
     const parts: Uint8Array<ArrayBuffer>[] = [];
     if (!Number.isSafeInteger(asset.size) || asset.size < 0)
       throw new RemoteKitError('invalid_request', '文件大小无效');
     if (asset.size > 256 * 1024 * 1024)
       throw new RemoteKitError('limit_exceeded', '文件预览大小超出限制', { capacity: 'file' });
-    for (let offset = 0; offset < asset.size;) {
-      const part = await this.call<{ data: string; offset: number; total: number }>(
-        'asset.read',
-        {
-          ...libraryBinding,
-          assetId: asset.assetId,
-          offset,
-        },
-        { binding, signal },
-      );
-      const binary = atob(part.data);
-      if (
-        !binary.length ||
-        binary.length > 16384 ||
-        part.offset !== offset + binary.length ||
-        part.total !== asset.size ||
-        part.offset > part.total
-      )
-        throw new RemoteKitError('internal', '文件预览数据无效');
-      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-      parts.push(bytes);
-      offset = part.offset;
-    }
+    const count = Math.ceil(asset.size / chunkBytes);
+    let next = 0;
+    let completed = 0;
+    const read = async () => {
+      while (next < count) {
+        const index = next++;
+        const offset = index * chunkBytes;
+        const part = await this.call<{ data: string; offset: number; total: number }>(
+          'asset.read',
+          { ...libraryBinding, assetId: asset.assetId, offset },
+          { binding, signal },
+        );
+        const binary = atob(part.data);
+        if (
+          binary.length !== Math.min(chunkBytes, asset.size - offset) ||
+          part.offset !== offset + binary.length ||
+          part.total !== asset.size
+        )
+          throw new RemoteKitError('internal', '文件预览数据无效');
+        parts[index] = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+        completed += binary.length;
+        onProgress?.(completed, asset.size);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, count) }, read));
     this.checkBinding(binding, signal);
     return new Blob(parts, { type: asset.type });
+  }
+  async photoPreview(assetId: string, maxSide: 1280 | 2560, signal: AbortSignal): Promise<AssetDescription> {
+    const preview = await this.call<AssetDescription>(
+      'photo.preview',
+      { ...libraryBinding, assetId, maxSide },
+      { signal },
+    );
+    if (!preview || !preview.assetId || !preview.width || !preview.height || !preview.type)
+      throw new RemoteKitError('internal', '文件预览数据无效');
+    return { ...(await this.describeAsset(preview.assetId, signal)), ...preview };
   }
   documentOpen(assetId: string, type: string, signal: AbortSignal) {
     const params = { ...libraryBinding, assetId, type };
@@ -501,11 +553,30 @@ export class FileChannel {
   cancelSelection(requestId: string): Promise<{ state: SelectionState }> {
     return this.call('selection.cancel', { requestId });
   }
-  commitSelection(
+  async commitSelection(
     requestId: string,
     selectionId: string,
   ): Promise<{ state: SelectionState; selectionId: string }> {
-    return this.call('selection.commit', { requestId, selectionId });
+    let sent = false;
+    try {
+      const request = await this.send<{ state: SelectionState; selectionId: string }>(
+        'selection.commit',
+        { requestId, selectionId },
+        {
+          onSent: () => {
+            sent = true;
+          },
+        },
+      );
+      return await request.response;
+    } catch (cause) {
+      const error =
+        cause instanceof RemoteKitError ? cause : new RemoteKitError('internal', '文件提交失败', { cause });
+      throw new SelectionCommitFailure(
+        !sent || (this.replies.has(error) && error.code !== 'outcome_unknown') ? 'retry' : 'query',
+        error,
+      );
+    }
   }
   onChannel = (event: import('../rtc/endpoint-channel').ChannelEvent) => {
     if (event.type === 'bound' || event.type === 'closed') this.disconnect();

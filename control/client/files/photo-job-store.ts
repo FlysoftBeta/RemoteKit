@@ -1,5 +1,5 @@
 import { RetryUnit } from '../../shared/retry-unit';
-import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import type {
   Asset,
   LibraryEntry,
@@ -12,7 +12,7 @@ import { notices, presentFailure } from '../failures';
 import { recoveryDelay } from '../failures/recovery';
 import { diagnostics } from '../media/diagnostics';
 import { Store } from '../util/store';
-import type { CapturedBurst } from './camera-capture';
+import type { CapturedBurst, CapturedFrame } from './camera-capture';
 import type { FileChannel, ProcessedPhoto } from './file-channel';
 
 export interface PhotoServices {
@@ -46,13 +46,15 @@ export interface PhotoJob extends PhotoDestination {
   originalId?: string;
   error?: RemoteKitError;
   advisory?: 'low-quality';
+  progress?: number;
+  canRetry?: boolean;
   rotationTurns?: number;
 }
 
 interface Task extends PhotoJob {
   controller: AbortController;
   burst?: CapturedBurst;
-  uploads?: Map<string, { operationId: string; assetId?: string }>;
+  uploads?: Map<string, { operationId: string; assetId?: string; pending?: Promise<string> }>;
   process?: () => Promise<void>;
   rotationTimer?: ReturnType<typeof setTimeout>;
   resume?: () => Promise<void>;
@@ -68,7 +70,6 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
   }
   private tasks = new Map<string, Task>();
   private readonly retries = new Map<string, RetryUnit>();
-  private chain = Promise.resolve();
   private available = false;
   private identity?: string;
   constructor(private readonly services: PhotoServices) {
@@ -96,7 +97,6 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     for (const unit of this.retries.values()) unit.cancel();
     this.retries.clear();
     this.tasks.clear();
-    this.chain = Promise.resolve();
     this.available = false;
     this.emit();
   };
@@ -111,6 +111,8 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
             operation: '处理照片',
             scope: 'global',
             targetId: task.id,
+            requestId: task.origin.kind === 'request' ? task.origin.requestId : undefined,
+            ownerKey: task.windowId,
           }),
         );
     }
@@ -118,6 +120,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
       [...this.tasks.values()].map(
         ({ controller, burst, process, rotationTimer, resume, waiting, uploads, ...job }) => ({
           ...job,
+          canRetry: !!(burst || process || resume),
           origin: { ...job.origin },
           insertion: job.insertion && { ...job.insertion },
           candidates: job.candidates && [...job.candidates],
@@ -173,7 +176,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     this.disposeTask(task);
     this.tasks.delete(id);
     this.emit();
-    this.advance(task.destination);
+    this.advance();
   };
 
   private valid(task: Task) {
@@ -187,6 +190,11 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     originalAssetId: string,
   ) {
     if (!this.valid(task)) return;
+    const first = this.tasks.values().next().value;
+    if (first !== task) {
+      task.waiting = () => this.save(task, asset, photo, originalAssetId);
+      return;
+    }
     const latest = this.services.latestSnapshot();
     const target = task.replace;
     if (target) {
@@ -239,13 +247,27 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     this.update(task.id, { state: 'committing' });
     await task.resume();
     if (this.valid(task)) {
+      this.disposeTask(task);
       this.tasks.delete(task.id);
       notices.resolve('task:photo:' + task.id);
-      if (!this.visible) notices.post('task:photo:' + task.id, { class: 'B', text: '照片已保存到我的文件' });
+      if (!this.visible)
+        notices.post('task:photo:' + task.id, {
+          class: 'B',
+          text: task.destination === 'basket' ? '照片已加入文件篮' : '照片已保存到我的文件',
+        });
       this.emit();
-      this.advance(task.destination);
+      this.advance();
     }
   }
+  retry = (id: string) => {
+    const task = this.tasks.get(id);
+    if (!task || task.state !== 'error' || !(task.burst || task.process || task.resume)) return;
+    this.retries.get(id)?.succeed();
+    void this.execute(task, () =>
+      task.resume ? this.commit(task) : task.process ? task.process() : this.upload(task),
+    );
+  };
+
   private async finish(task: Task, originalId: string, quarterTurns?: 0 | 1 | 2 | 3) {
     let asset: ProcessedPhoto;
     try {
@@ -275,12 +297,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
           {
             mode: task.mode,
             pending: 'scan-error',
-            processingFailure: {
-              code: error.code,
-              message: error.message,
-              reason: error.reason as import('../../shared/errors').NativeErrorReason,
-              errorId: error.errorId,
-            },
+            processingFailure: wireError(error),
           },
           originalId,
         );
@@ -291,6 +308,8 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     const photo: PhotoMetadata = {
       mode: task.mode,
       advisory: task.advisory,
+      orientation: asset.orientation,
+      geometry: asset.geometry,
       ...(asset.quarterTurns ? { quarterTurns: asset.quarterTurns } : {}),
     };
     await this.save(task, asset, photo, originalId);
@@ -327,11 +346,11 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
   }
 
   private enqueue(task: Task, action: () => Promise<void>) {
-    this.chain = this.chain.then(() => this.execute(task, action));
+    void this.execute(task, action);
   }
 
-  private advance(destination: PhotoDestination['destination']) {
-    const task = [...this.tasks.values()].find((item) => !item.replace && item.destination === destination);
+  private advance() {
+    const task = this.tasks.values().next().value;
     if (!task?.waiting) return;
     const action = task.waiting;
     task.waiting = undefined;
@@ -368,17 +387,42 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
       await settled;
       if (!this.valid(task)) return;
       if (failure) throw failure;
-      // A failed predecessor holds its insertion place until retried or removed.
-      const first = [...this.tasks.values()].find(
-        (item) => !item.replace && item.destination === task.destination,
-      );
-      if (!task.replace && first !== task) {
-        task.waiting = () => this.upload(task);
-        return;
-      }
       await this.upload(task);
     });
   };
+  encoded = (id: string, frame: CapturedFrame) => {
+    const task = this.tasks.get(id);
+    if (!task || !this.valid(task)) return;
+    void this.uploadFrame(task, frame).catch((error) => diagnostics.record('photo-frame-upload', error));
+  };
+  private uploadFrame(task: Task, frame: CapturedFrame): Promise<string> {
+    task.uploads ??= new Map();
+    let upload = task.uploads.get(frame.frameId);
+    if (!upload) {
+      upload = { operationId: operationId() };
+      task.uploads.set(frame.frameId, upload);
+    }
+    if (upload.assetId) return Promise.resolve(upload.assetId);
+    if (upload.pending) return upload.pending;
+    const current = upload;
+    current.pending = this.services.rpc
+      .uploadAsset(
+        new File([frame.blob], 'photo.jpg', { type: 'image/jpeg' }),
+        current.operationId,
+        task.controller.signal,
+        (completed, total) => {
+          if (this.valid(task)) this.update(task.id, { progress: completed / Math.max(1, total) });
+        },
+      )
+      .then((asset) => {
+        current.assetId = asset.assetId;
+        return asset.assetId;
+      })
+      .finally(() => {
+        current.pending = undefined;
+      });
+    return current.pending;
+  }
   private async uploadFrames(task: Task) {
     const burst = task.burst;
     if (!burst) return;
@@ -386,22 +430,9 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     const assets = new Map<string, string>();
     for (const frame of frames) {
       if (!this.valid(task)) return;
-      task.uploads ??= new Map();
-      let upload = task.uploads.get(frame.frameId);
-      if (!upload) {
-        upload = { operationId: operationId() };
-        task.uploads.set(frame.frameId, upload);
-      }
-      const asset = upload.assetId
-        ? { assetId: upload.assetId }
-        : await this.services.rpc.uploadAsset(
-            new File([frame.blob], 'photo.jpg', { type: 'image/jpeg' }),
-            upload.operationId,
-            task.controller.signal,
-          );
+      const assetId = await this.uploadFrame(task, frame);
       if (!this.valid(task)) return;
-      upload.assetId = asset.assetId;
-      assets.set(frame.frameId, asset.assetId);
+      assets.set(frame.frameId, assetId);
     }
     task.burst = undefined;
     const originalId = assets.get(decision.selectedFrameId);
@@ -442,6 +473,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     assetId: string,
     useOriginal = false,
     id?: string,
+    mode?: PhotoMetadata['mode'],
   ) => {
     const existing = id && this.tasks.get(id);
     if (existing && existing.state !== 'choice' && existing.state !== 'scan-error') return;
@@ -466,6 +498,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
       };
     }
     this.tasks.set(task.id, task);
+    if (mode) task.mode = mode;
     if (useOriginal) task.mode = 'photo';
     this.update(task.id, { state: 'processing', error: undefined });
     const quarterTurns = useOriginal ? (entry.photo?.quarterTurns ?? 0) : undefined;

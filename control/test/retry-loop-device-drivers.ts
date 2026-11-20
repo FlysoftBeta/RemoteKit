@@ -29,9 +29,9 @@ export function drivePhotoStage(stage: 'upload' | 'commit'): OwnerFactory {
         processPhoto: async () => ({
           ...asset,
           type: 'image/webp',
-          geometry: 'unchanged',
+          geometry: { kind: 'unchanged', cropped: false },
           quarterTurns: 0,
-          orientation: 'none',
+          orientation: { turns: 0, state: 'none' },
         }),
       },
       mutate: (method, params) =>
@@ -103,9 +103,9 @@ export const drivePhoto: OwnerFactory = (boundary) => {
             size: 1,
             width: 4,
             height: 3,
-            geometry: 'unchanged',
+            geometry: { kind: 'unchanged', cropped: false },
             quarterTurns: turns ?? 0,
-            orientation: 'none',
+            orientation: { turns: 0, state: 'none' },
           },
         ),
     },

@@ -222,6 +222,7 @@ export function PhotoCapture({
       viewportWidth: view.width,
       viewportHeight: view.height,
       onPreview: (preview) => photos.update(id, { preview }),
+      onEncoded: (frame) => photos.encoded(id, frame),
       onSamplingEnd: (stats) => {
         if (active.current?.id !== id) return;
         active.current = undefined;
@@ -332,6 +333,8 @@ export function PhotoCapture({
           error={error}
           context={{
             operation: '拍摄照片',
+            requestId,
+            ownerKey: windowId,
             scope: 'surface',
             input: error.code === 'invalid_request',
             issue: error.reason === 'camera_permission' ? 'permission' : undefined,

@@ -42,14 +42,8 @@ import { operationId } from '../control/product-operations';
 import { useAutoFocus } from '../editing/local-autofocus';
 import { failureError, FailureNote } from '../failures';
 import { useLibrary } from './file-library-state';
-import {
-  filesInView,
-  removalCounts,
-  sourceAppName,
-  sourceChannelName,
-  sourceKey,
-  type FilesView,
-} from './files-app-state';
+import { filesInView, removalCounts, sourceAppName, sourceChannelName, sourceKey } from './files-app-state';
+import type { FilesView } from '../../shared/files-state';
 
 export function FilesOrganization({
   mode,
@@ -167,7 +161,10 @@ export function FilesOrganization({
               label={`${item.section && item.section !== '分区' ? item.section + ' › ' : ''}${item.label} ${item.count}`}
               color={selected(item.view) ? 'primary' : 'default'}
               variant={selected(item.view) ? 'filled' : 'outlined'}
-              sx={{ color: item.muted ? 'text.disabled' : undefined }}
+              ref={(node) => {
+                if (node && selected(item.view)) node.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+              }}
+              sx={{ color: item.muted ? 'text.disabled' : undefined, maxWidth: '85vw' }}
               onClick={() => onView(item.view)}
             />
           ))}
@@ -191,10 +188,21 @@ export function FilesOrganization({
             borderColor: 'divider',
             display: 'flex',
             flexDirection: 'column',
+            minHeight: 0,
             p: 1,
+            pb: 'calc(76px + env(safe-area-inset-bottom))',
           }}
         >
-          <List dense sx={{ flex: 1, overflowY: 'auto', py: 0 }}>
+          <List
+            dense
+            sx={{
+              flex: 1,
+              minHeight: 0,
+              overflowY: 'auto',
+              py: 0,
+              pb: 1,
+            }}
+          >
             {items
               .filter((item) => !item.section)
               .map((item) => (

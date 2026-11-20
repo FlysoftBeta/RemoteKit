@@ -9,8 +9,7 @@ import { diagnostics } from '../media/diagnostics';
 import { useLibrary } from './file-library-state';
 import { useImportQueue } from './import-state';
 import { FileTypeIcon } from './file-thumbnail';
-import { LibraryTab, PhotoDialog } from './library-tab';
-import { PhotoCapture } from './photo-library-capture';
+import { LibraryTab } from './library-tab';
 import {
   applyFilesLaunch,
   backFilesTab,
@@ -22,6 +21,10 @@ import {
   MAX_FILES_TABS,
   newFilesTab,
   openFilesEntry,
+  openPhotosTab,
+  updatePhotoEntry,
+  photoSequence,
+  isPreviewImage,
   readFilesLaunch,
   readFilesWindowState,
   reorderFilesTab,
@@ -30,10 +33,10 @@ import {
   selectFilesTab,
   updateFilesLibraryTab,
   setFilesLayout,
-  type FilesView,
-  type FilesWindowState,
 } from './files-app-state';
+import type { FilesView, FilesWindowState } from '../../shared/files-state';
 import './files-window.css';
+import { PhotoViewer, PhotoDecisionViewer } from './photo-viewer';
 import type { RemoteKitError } from '../../shared/errors';
 import { SurfaceState } from '../failures';
 
@@ -63,8 +66,7 @@ export function FilesWindow({
   const uploads = useImportQueue('library', windowId);
   const appliedLaunch = useRef<string>(undefined);
   const [menu, setMenu] = useState<{ anchor: HTMLElement; id: string }>();
-  const [photo, setPhoto] = useState<string>();
-  const [camera, setCamera] = useState<LibraryEntry>();
+  const [detailsTab, setDetailsTab] = useState<string>();
   const write = (next: FilesWindowState) => onState(fitFilesWindowState(next, restored));
   const recordOpen = (entry: LibraryEntry) =>
     void recordUsage(entry.id, windowId).catch((failure) => diagnostics.record('file-usage', failure));
@@ -87,21 +89,15 @@ export function FilesWindow({
       : undefined;
     if (request.entryId && !entry) return;
     appliedLaunch.current = request.requestId;
-    if (entry?.photo) {
-      const next = applyFilesLaunch(
-        restored,
-        { requestId: request.requestId, view: request.view ?? 'all' },
-        filesTabId(),
-        hasValidFilesTabs(state),
-      );
-      write(next);
-      setPhoto(entry.id);
-      recordOpen(entry);
-    } else {
-      const next = applyFilesLaunch(restored, request, filesTabId(), hasValidFilesTabs(state));
-      write(next);
-      if (entry) recordOpen(entry);
-    }
+    const next = applyFilesLaunch(
+      restored,
+      request,
+      filesTabId(),
+      hasValidFilesTabs(state),
+      !!entry && isPreviewImage(entry),
+    );
+    write(next);
+    if (entry) recordOpen(entry);
   }, [state, launch, snapshot]);
   const active = restored.tabs.find((tab) => tab.id === restored.activeTabId)!;
   const viewTitle = (view: FilesView): string =>
@@ -111,8 +107,12 @@ export function FilesWindow({
         ? (snapshot?.partitions.find((item) => item.id === view.partition)?.name ?? '分区')
         : [sourceAppName(view.source.app, apps), sourceChannelName(view.source)].filter(Boolean).join(' › ');
   const close = (id: string) => write(closeFilesTab(restored, id, filesTabId()));
-  const photoEntry = snapshot?.entries.find((entry) => entry.id === photo);
-  const photoJob = photos.jobs.find((job) => job.id === photo || job.replace?.id === photo);
+  const activeEntry =
+    active.kind !== 'library' ? snapshot?.entries.find((entry) => entry.id === active.entryId) : undefined;
+  const activeJob =
+    active.kind !== 'library'
+      ? photos.jobs.find((job) => job.id === active.entryId || job.replace?.id === active.entryId)
+      : undefined;
   return (
     <>
       <div className="tab-bar">
@@ -123,7 +123,7 @@ export function FilesWindow({
           activeId={restored.activeTabId}
           items={restored.tabs.map((tab) => {
             const entry =
-              tab.kind === 'document' ? snapshot?.entries.find((item) => item.id === tab.entryId) : undefined;
+              tab.kind !== 'library' ? snapshot?.entries.find((item) => item.id === tab.entryId) : undefined;
             return {
               id: tab.id,
               title:
@@ -131,7 +131,8 @@ export function FilesWindow({
                   ? viewTitle(tab.view)
                   : entry?.kind === 'snippet'
                     ? '剪贴片段'
-                    : (entry?.name ?? '文件已删除'),
+                    : (entry?.name ??
+                      (photos.jobs.some((job) => job.id === tab.entryId) ? '照片' : '文件已删除')),
               icon:
                 tab.kind === 'library' ? (
                   <FolderOutlined className="tab-icon" />
@@ -170,11 +171,38 @@ export function FilesWindow({
             onView={(view) => write(updateFilesLibraryTab(restored, active.id, { view }))}
             onQuery={(query) => write(updateFilesLibraryTab(restored, active.id, { query }))}
             onLayout={(layout) => write(setFilesLayout(restored, layout))}
-            onOpen={(entry) => {
-              write(openFilesEntry(restored, active.id, entry.id));
-              recordOpen(entry);
+            onOpen={(entry, details) => {
+              if (
+                isPreviewImage(entry) ||
+                entry.photo?.pending ||
+                photos.jobs.some((job) => job.id === entry.id)
+              ) {
+                const next = openPhotosTab(restored, active.id, entry.id);
+                if (details) setDetailsTab(next.activeTabId);
+                write(next);
+              } else write(openFilesEntry(restored, active.id, entry.id));
+              if (snapshot?.entries.some((item) => item.id === entry.id)) recordOpen(entry);
             }}
           />
+        ) : active.kind === 'photos' ? (
+          activeEntry?.photo?.pending || (!activeEntry && activeJob) ? (
+            <PhotoDecisionViewer
+              windowId={windowId}
+              entry={activeEntry?.kind === 'file' ? activeEntry : undefined}
+              job={activeJob}
+              onClose={() => write(backFilesTab(restored, active.id))}
+            />
+          ) : (
+            <PhotoViewer
+              key={active.id}
+              entries={snapshot ? photoSequence(snapshot, active.from, active.fromQuery, apps) : []}
+              entryId={active.entryId}
+              windowId={windowId}
+              initialDetails={detailsTab === active.id}
+              onEntry={(entryId) => write(updatePhotoEntry(restored, active.id, entryId))}
+              onClose={() => write(backFilesTab(restored, active.id))}
+            />
+          )
         ) : (
           <Suspense
             fallback={
@@ -224,27 +252,6 @@ export function FilesWindow({
           关闭其他标签页
         </MenuItem>
       </Menu>
-      {(photoEntry || photoJob) && (
-        <PhotoDialog
-          entry={photoEntry}
-          job={photoJob}
-          disabled={!online}
-          onClose={() => setPhoto(undefined)}
-          onRetake={(entry) => {
-            setPhoto(undefined);
-            setCamera(entry);
-          }}
-        />
-      )}
-      {camera && (
-        <PhotoCapture
-          windowId={windowId}
-          destination="library"
-          replace={camera}
-          partitionId={camera.partitionId}
-          onClose={() => setCamera(undefined)}
-        />
-      )}
     </>
   );
 }

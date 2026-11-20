@@ -180,7 +180,7 @@ export function FileDropZone({
   const depth = useRef(0);
   return (
     <Box
-      sx={[{ position: 'relative' }, ...(Array.isArray(sx) ? sx : [sx ?? {}])]}
+      sx={[{ position: 'relative', minHeight: 0, minWidth: 0 }, ...(Array.isArray(sx) ? sx : [sx ?? {}])]}
       onDragEnter={(event) => {
         if (!hasFiles(event)) return;
         event.preventDefault();
@@ -233,7 +233,7 @@ export function FileDropZone({
   );
 }
 
-type UploadJob = { id: string; name: string; error?: RemoteKitError };
+type UploadJob = ReturnType<ImportControls['getSnapshot']>['jobs'][number];
 
 export function UploadQueueView({
   jobs,
@@ -244,7 +244,7 @@ export function UploadQueueView({
   busy: boolean;
   onDiscard?: () => void;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const failed = jobs.find((job) => job.error);
   return (
     <div data-upload-queue className="upload-queue">
@@ -275,6 +275,8 @@ export function UploadQueueView({
                 scope: 'surface',
                 targetId: failed.id,
                 itemName: failed.name,
+                requestId: failed.requestId,
+                ownerKey: failed.windowId,
               }}
             />
           ) : busy ? (
@@ -298,7 +300,14 @@ export function UploadJobNote({ job, busy = false }: { job: UploadJob; busy?: bo
       {busy && !job.error && <LinearProgress aria-label={`正在上传 ${job.name}`} />}
       <FailureNote
         error={job.error}
-        context={{ operation: '导入文件', scope: 'item', targetId: job.id, itemName: job.name }}
+        context={{
+          operation: '导入文件',
+          scope: 'item',
+          targetId: job.id,
+          itemName: job.name,
+          requestId: job.requestId,
+          ownerKey: job.windowId,
+        }}
       />
     </div>
   );

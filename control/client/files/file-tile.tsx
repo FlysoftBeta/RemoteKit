@@ -1,4 +1,4 @@
-import { FailureNote, type Presentation } from '../failures';
+import { type Presentation } from '../failures';
 import { Box, ButtonBase, CircularProgress, Typography } from '@mui/material';
 import React, { useRef } from 'react';
 import { FileThumbnail } from './file-thumbnail';
@@ -16,17 +16,21 @@ const MOVE_SLOP = 6;
 
 // Press tracking shared by tiles and rows: a click after the pointer travelled (a swipe or a
 // drag) is not an activation, and a touch held still opens `onLongPress` instead of a click.
-export function usePress(onOpen?: (anchor: HTMLElement) => void, onLongPress?: () => void) {
+export function usePress(
+  onOpen?: (anchor: HTMLElement) => void,
+  onLongPress?: (anchor: HTMLElement) => void,
+) {
   const press = useRef<{ x: number; y: number; moved: boolean; long: boolean; timer?: number }>(undefined);
   const clear = () => window.clearTimeout(press.current?.timer);
   return {
     onPointerDown(event: React.PointerEvent<HTMLElement>) {
       clear();
+      const anchor = event.currentTarget;
       const state = { x: event.clientX, y: event.clientY, moved: false, long: false, timer: 0 };
       if (onLongPress && event.pointerType === 'touch')
         state.timer = window.setTimeout(() => {
           state.long = true;
-          onLongPress();
+          onLongPress(anchor);
         }, LONG_PRESS_MS);
       press.current = state;
     },
@@ -104,6 +108,7 @@ export function FileTile({
   activator,
   onOpen,
   onLongPress,
+  onMenu,
 }: {
   id: string;
   name: string;
@@ -124,14 +129,22 @@ export function FileTile({
   marker?: React.ReactNode;
   activator?: SortActivator;
   onOpen?: (anchor: HTMLElement) => void;
-  onLongPress?: () => void;
+  onLongPress?: (anchor: HTMLElement) => void;
+  onMenu?: (anchor: HTMLElement) => void;
 }) {
   const press = usePress(onOpen, onLongPress);
   return (
     <Box
       data-file-card={id}
+      onContextMenu={(event) => {
+        if (onMenu) {
+          event.preventDefault();
+          onMenu(event.currentTarget);
+        }
+      }}
       sx={{
         position: 'relative',
+        height: '100%',
         borderRadius: '10px',
         bgcolor: 'background.paper',
         boxShadow: selected
@@ -176,7 +189,7 @@ export function FileTile({
             size={compact ? 'small' : 'large'}
             sx={compact ? { height: 84 } : { aspectRatio: '4 / 3' }}
           />
-          {status && !status.failure && (
+          {status && (
             <Box sx={{ position: 'absolute', left: 6, right: 6, bottom: 6, display: 'flex' }}>
               <StatusBadge status={status} />
             </Box>
@@ -197,7 +210,6 @@ export function FileTile({
           </Typography>
         </Box>
       </ButtonBase>
-      {status?.failure && <FailureNote presentation={status.failure} />}
       {index !== undefined && (
         <Box
           component="span"
@@ -251,6 +263,7 @@ export function FileRow({
   trailing,
   onOpen,
   onLongPress,
+  onMenu,
 }: {
   id: string;
   name: string;
@@ -267,7 +280,8 @@ export function FileRow({
   leading?: React.ReactNode;
   trailing?: React.ReactNode;
   onOpen?: (anchor: HTMLElement) => void;
-  onLongPress?: () => void;
+  onLongPress?: (anchor: HTMLElement) => void;
+  onMenu?: (anchor: HTMLElement) => void;
 }) {
   const press = usePress(onOpen, onLongPress);
   const body = (
@@ -290,7 +304,7 @@ export function FileRow({
           </Typography>
         )}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}>
-          {status && !status.failure && <StatusBadge status={status} />}
+          {status && <StatusBadge status={status} />}
           <Typography noWrap color="text.secondary" sx={{ fontSize: 12, lineHeight: '18px' }}>
             {meta}
           </Typography>
@@ -313,6 +327,12 @@ export function FileRow({
   return (
     <Box
       data-file-row={id}
+      onContextMenu={(event) => {
+        if (onMenu) {
+          event.preventDefault();
+          onMenu(event.currentTarget);
+        }
+      }}
       sx={{
         display: 'flex',
         alignItems: 'center',
@@ -339,7 +359,6 @@ export function FileRow({
       ) : (
         <Box sx={bodySx}>{body}</Box>
       )}
-      {status?.failure && <FailureNote presentation={status.failure} />}
       {trailing && <Box sx={{ display: 'flex', alignItems: 'center', flex: 'none' }}>{trailing}</Box>}
     </Box>
   );

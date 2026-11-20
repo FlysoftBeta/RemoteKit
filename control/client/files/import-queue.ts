@@ -22,7 +22,13 @@ interface ImportState {
   readonly remaining: number;
   readonly busy: boolean;
   readonly error?: RemoteKitError;
-  readonly jobs: { id: string; name: string; error?: RemoteKitError }[];
+  readonly jobs: {
+    id: string;
+    name: string;
+    error?: RemoteKitError;
+    requestId?: string;
+    windowId?: string;
+  }[];
 }
 interface ImportServices {
   rpc: Pick<FileChannel, 'uploadAsset'>;
@@ -51,6 +57,7 @@ export class ImportQueue extends Store<ImportState> {
   constructor(
     private readonly services: ImportServices,
     private readonly destination: 'library' | 'basket',
+    private readonly windowId?: string,
   ) {
     super({ remaining: 0, busy: false, jobs: [] });
   }
@@ -183,6 +190,8 @@ export class ImportQueue extends Store<ImportState> {
               scope: 'global',
               targetId: job.operationId,
               itemName: job.file.name,
+              ownerKey: this.windowId,
+              requestId: batch.origin.kind === 'request' ? batch.origin.requestId : undefined,
             }),
           );
       }
@@ -194,6 +203,8 @@ export class ImportQueue extends Store<ImportState> {
         batch.jobs.map((job, index) => ({
           id: job.operationId,
           name: job.file.name,
+          ...(this.windowId ? { windowId: this.windowId } : {}),
+          ...(batch.origin.kind === 'request' ? { requestId: batch.origin.requestId } : {}),
           error: batchIndex === 0 && index === 0 ? this.error : undefined,
         })),
       ),

@@ -12,7 +12,7 @@ export interface CaptureStats {
   sourceHeight: number;
 }
 
-interface CapturedFrame {
+export interface CapturedFrame {
   frameId: string;
   blob: Blob;
   preview: Blob;
@@ -31,6 +31,7 @@ interface CaptureOptions {
   viewportHeight: number;
   onSamplingEnd?: (stats: CaptureStats) => void;
   onPreview?: (blob: Blob) => void;
+  onEncoded?: (frame: CapturedFrame) => void;
 }
 
 const sampleIntervalMs = 50;
@@ -338,7 +339,9 @@ export async function capturePhotoBurst(
       const blob = await Promise.race([encode(snapshot.canvas, 'image/jpeg', 0.92), aborted]);
       release(snapshot.canvas);
       snapshots.delete(frameId);
-      frames.push({ frameId, blob, preview: snapshot.preview!, width: crop.width, height: crop.height });
+      const frame = { frameId, blob, preview: snapshot.preview!, width: crop.width, height: crop.height };
+      frames.push(frame);
+      options.onEncoded?.(frame);
     }
     return { frames, decision, stats: finalStats };
   } finally {

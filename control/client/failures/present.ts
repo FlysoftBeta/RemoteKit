@@ -15,6 +15,7 @@ export interface FailureContext {
   operation: string;
   scope: FailureScope;
   ownerKey?: string;
+  requestId?: string;
   targetId?: string;
   itemName?: string;
   field?: string;
@@ -123,7 +124,12 @@ export function presentFailure(value: RemoteKitError | WireError, context: Failu
     error = parseWireError(value)!;
     parsedErrors.set(value, error);
   }
-  context = { ...context, ...failureContext(error) };
+  context = {
+    ...context,
+    ...Object.fromEntries(
+      Object.entries(failureContext(error) ?? {}).filter(([, value]) => value !== undefined),
+    ),
+  };
   if (['internal', 'unavailable', 'outcome_unknown'].includes(error.code))
     viewerErrors.identify(error, {
       operation: context.operation,
@@ -204,6 +210,15 @@ export function presentFailure(value: RemoteKitError | WireError, context: Failu
       text: error.message,
       ...(context.action ? { action: context.action } : {}),
     };
+  if (error.code === 'not_found') {
+    const messages: Record<string, string> = {
+      asset_unreadable: '文件内容暂时无法读取，请重新拍摄或选择文件',
+      selection_unknown: '文件选择请求已失效，请在页面重新选择',
+      entry_missing: '该文件条目已被删除，请重新选择',
+    };
+    const text = messages[error.detail ?? ''];
+    if (text) return user(text, '查看当前内容', 'current');
+  }
   if (error.code === 'conflict' || error.code === 'not_found')
     return user(
       context.text ?? (error.code === 'not_found' ? failureText.missing : failureText.changed),

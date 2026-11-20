@@ -370,6 +370,14 @@ export const retryLoops: Record<string, Binding> = {
     callScoped: true,
     presentation: true,
   },
+  'photo-viewer-read-recovery': {
+    owner: 'client/files/photo-viewer.tsx',
+    boundary: 'PhotoViewer preview cache read',
+    event: 'recovery',
+    create: driveUi('photo'),
+    callScoped: true,
+    presentation: true,
+  },
   'image-read-recovery': {
     owner: 'client/files/file-image-preview.tsx',
     boundary: 'FileImagePreview FileChannel.readPhoto',

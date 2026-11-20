@@ -2,7 +2,6 @@ import { Box, Button, ButtonBase, CircularProgress, Typography } from '@mui/mate
 import { useState } from 'react';
 import type { LibraryEntry } from '../../shared/file-library';
 import { FailureNote } from '../failures';
-import { FileImagePreview } from './file-image-preview';
 import { useLibrary } from './file-library-state';
 import { FileThumbnail } from './file-thumbnail';
 import type { PhotoDestination, PhotoJob } from './photo-job-store';
@@ -12,15 +11,24 @@ export function PhotoOptions({
   job,
   destination,
   disabled,
+  onPreview,
+  requestId,
+  windowId,
 }: {
   entry?: LibraryEntry;
   job?: PhotoJob;
   destination: PhotoDestination['destination'];
   disabled: boolean;
+  onPreview?(assetId: string): void;
+  requestId?: string;
+  windowId?: string;
 }) {
   const { photos } = useLibrary();
+  const context = {
+    requestId: requestId ?? (job?.origin.kind === 'request' ? job.origin.requestId : undefined),
+    ownerKey: windowId ?? job?.windowId,
+  };
   const [chosen, setChosen] = useState<string>();
-  const [preview, setPreview] = useState<string>();
   if (entry?.kind === 'snippet') return null;
   const candidates = job?.candidates ?? entry?.photo?.candidateAssetIds ?? [];
   const pending = job ? job.state : entry?.photo?.pending;
@@ -34,17 +42,17 @@ export function PhotoOptions({
       </Typography>
     );
   }
-  if (preview)
-    return (
-      <FileImagePreview
-        key={preview}
-        entry={{ assetId: preview, name: '照片原图' }}
-        inline
-        onClose={() => setPreview(undefined)}
-      />
-    );
   if (pending === 'error')
-    return <FailureNote error={job?.error} context={{ operation: '处理照片', scope: 'surface' }} />;
+    return (
+      <>
+        <FailureNote error={job?.error} context={{ ...context, operation: '处理照片', scope: 'surface' }} />
+        {job?.canRetry && (
+          <Button disabled={disabled} onClick={() => photos.retry(job.id)}>
+            重试处理
+          </Button>
+        )}
+      </>
+    );
   if (!entry) return null;
   if (pending === 'choice' && selected)
     return (
@@ -52,7 +60,7 @@ export function PhotoOptions({
         <ButtonBase
           aria-label="查看候选大图"
           disabled={disabled}
-          onClick={() => setPreview(selected)}
+          onClick={() => onPreview?.(selected)}
           sx={{ display: 'block', width: '100%' }}
         >
           <FileThumbnail
@@ -102,7 +110,7 @@ export function PhotoOptions({
       <>
         <FailureNote
           error={job?.error ?? entry?.photo?.processingFailure}
-          context={{ operation: '生成扫描件', scope: 'item' }}
+          context={{ ...context, operation: '生成扫描件', scope: 'item' }}
         />
         <Button
           disabled={disabled}
@@ -114,12 +122,29 @@ export function PhotoOptions({
     );
   return (
     <>
+      {entry.originalAssetId && !job && (
+        <Box sx={{ display: 'flex', flexWrap: 'wrap' }}>
+          <Button
+            disabled={disabled || entry.photo?.mode === 'photo'}
+            onClick={() =>
+              photos.resolve(entry, destination, entry.originalAssetId!, false, undefined, 'photo')
+            }
+          >
+            普通照片
+          </Button>
+          <Button
+            disabled={disabled || entry.photo?.mode === 'scan'}
+            onClick={() =>
+              photos.resolve(entry, destination, entry.originalAssetId!, false, undefined, 'scan')
+            }
+          >
+            文档扫描
+          </Button>
+        </Box>
+      )}
       {entry?.photo?.advisory && <p>照片可能不够清晰，原图已保留</p>}
       {entry?.originalAssetId && (
         <>
-          <Button disabled={disabled} onClick={() => setPreview(entry.originalAssetId)}>
-            查看原图
-          </Button>
           {entry.photo?.mode === 'scan' && (
             <Button
               disabled={disabled || !!job}

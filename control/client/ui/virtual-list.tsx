@@ -117,7 +117,11 @@ export function VirtualScroller<T>({
         const node = scroll.current!;
         const focusRow = (index: number) => {
           if (index < 0 || index >= items.length) return;
-          node.scrollTop = sizes.prefix(index);
+          node.scrollTop = Math.max(
+            0,
+            sizes.prefix(index) -
+              (node.querySelector<HTMLElement>('.virtual-list-sticky > div')?.offsetHeight ?? 0),
+          );
           updateRange(node);
           requestAnimationFrame(() => {
             const target = [...node.querySelectorAll<HTMLElement>('[data-virtual-key]')].find(
@@ -125,7 +129,7 @@ export function VirtualScroller<T>({
             );
             const candidates = target?.querySelectorAll<HTMLElement>(selector);
             const control = direction < 0 ? candidates?.[candidates.length - 1] : candidates?.[0];
-            if (control) control.focus();
+            if (control) control.focus({ preventScroll: true });
             else focusRow(index + direction);
           });
         };

@@ -1,0 +1,231 @@
+﻿.photo-viewer {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #000;
+  color: #fff;
+  outline: none;
+}
+.photo-narrow {
+  flex-direction: column;
+}
+.photo-viewport {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.photo-gesture,
+.photo-rail,
+.photo-transform {
+  position: absolute;
+  inset: 0;
+}
+.photo-gesture {
+  touch-action: none;
+  user-select: none;
+}
+.photo-transform {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  will-change: transform;
+}
+.photo-transform img {
+  flex: none;
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+  pointer-events: none;
+}
+.photo-placeholder {
+  filter: blur(3px);
+}
+.photo-neighbor {
+  position: absolute;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.photo-overlay {
+  position: absolute;
+  opacity: 1;
+  transition: opacity 180ms;
+}
+.photo-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+.photo-top {
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 6px 28px;
+  background: linear-gradient(#000b, #0000);
+}
+.photo-top .MuiIconButton-root {
+  color: #fff;
+  width: 40px;
+  height: 40px;
+}
+.photo-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.photo-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+.photo-title small {
+  font-size: 12px;
+  opacity: 0.8;
+}
+.photo-film {
+  height: 56px;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 4px max(8px, calc(50% - 32px));
+  box-sizing: border-box;
+  background: #0008;
+  scrollbar-width: none;
+}
+.photo-film button {
+  padding: 0;
+  flex: none;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #222;
+  cursor: pointer;
+}
+.photo-film button[aria-current] {
+  border-color: #fff;
+}
+.photo-edge {
+  position: absolute;
+  top: calc(50% - 44px);
+  width: 56px;
+  height: 88px;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  border: 0;
+  border-radius: 8px;
+  background: #0006;
+  color: #fff;
+  cursor: pointer;
+  transition: opacity 150ms;
+}
+.photo-previous {
+  left: 0;
+}
+.photo-next {
+  right: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  .photo-edge:hover:not(:disabled),
+  .photo-edge:focus-visible {
+    opacity: 1;
+  }
+}
+.photo-details {
+  flex: 0 0 320px;
+  width: 320px;
+  box-sizing: border-box;
+  padding: 12px 16px calc(84px + env(safe-area-inset-bottom));
+  overflow: auto;
+  background: var(--surface);
+  color: var(--text-primary);
+  overscroll-behavior: contain;
+}
+.photo-details-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.photo-details dl {
+  margin: 4px 0;
+  font-size: 13px;
+}
+.photo-details dt {
+  margin-top: 12px;
+  color: var(--text-secondary);
+}
+.photo-details dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.photo-narrow .photo-details {
+  flex: 0 1 45%;
+  width: 100%;
+  min-height: 80px;
+}
+.photo-drawer-handle {
+  height: 18px;
+  touch-action: none;
+  cursor: ns-resize;
+}
+.photo-drawer-handle::after {
+  content: '';
+  display: block;
+  margin: auto;
+  width: 36px;
+  height: 4px;
+  border-radius: 4px;
+  background: var(--text-muted);
+}
+.photo-error {
+  position: absolute;
+  top: 80px;
+  left: 16px;
+  right: 16px;
+}
+.photo-window-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  z-index: 20;
+}
+@media (prefers-reduced-motion: reduce) {
+  .photo-overlay,
+  .photo-edge {
+    transition: none;
+  }
+}
+.photo-compact .photo-top {
+  gap: 0;
+  padding-left: 2px;
+  padding-right: 2px;
+}
+.photo-compact .photo-top .MuiIconButton-root {
+  width: 34px;
+}
+@media (hover: none) {
+  .photo-edge {
+    display: none;
+  }
+}
+.photo-tiny .photo-top {
+  flex-wrap: wrap;
+}
+.photo-tiny .photo-title {
+  flex-basis: calc(100% - 44px);
+}

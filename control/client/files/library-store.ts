@@ -14,7 +14,7 @@ import { recover, recoverRead } from '../failures/recovery';
 import { diagnostics } from '../media/diagnostics';
 import { Store } from '../util/store';
 import { randomUuid } from '../../shared/random-uuid';
-import type { FileChannel } from './file-channel';
+import { SelectionCommitFailure, type FileChannel } from './file-channel';
 import { FileThumbnails } from './file-thumbnails';
 import { ImportQueue } from './import-queue';
 import { PhotoJobStore } from './photo-job-store';
@@ -36,6 +36,7 @@ interface Checkout {
   entryIds: string[];
   selectionId?: string;
   state: SelectionState;
+  commit?: 'retry' | 'query';
   active: boolean;
   nextCheck: number;
   retry: RetryUnit;
@@ -90,6 +91,7 @@ export class LibraryStore extends Store<LibraryState> {
       queue = new ImportQueue(
         { rpc: this.rpc, mutate: (method, params) => this.mutate(method, params, windowId) },
         destination,
+        windowId,
       );
       queue.configure(this.online && this.enabled, this.identity);
       this.imports.set(key, queue);
@@ -375,21 +377,30 @@ export class LibraryStore extends Store<LibraryState> {
             this.checkouts.get(requestId) === transaction
           )
             this.checkouts.delete(requestId);
+          else transaction.commit = 'retry';
           throw error;
         }
       }
       if (!this.current(epoch)) return;
-      if (submit) {
-        // Even a lost RTC response can correspond to a successful native callback.
-        await this.rpc
-          .commitSelection(requestId, transaction.selectionId)
-          .catch((error) => diagnostics.record('file-library-state', error));
+      if (submit && transaction.commit !== 'query') {
+        try {
+          await this.rpc.commitSelection(requestId, transaction.selectionId);
+          transaction.commit = 'query';
+        } catch (failure) {
+          transaction.commit = failure instanceof SelectionCommitFailure ? failure.disposition : 'query';
+          if (transaction.commit === 'query') transaction.state = 'unknown';
+          diagnostics.record('selection.commit', failure);
+          throw operationFailure(failure, 'selection.commit', {
+            requestId,
+            selectionId: transaction.selectionId,
+          });
+        }
       }
       if (!this.current(epoch)) return;
       const result = await this.request('library.finish', { selectionId: transaction.selectionId });
       if (!this.current(epoch)) return;
       transaction.state = result.state;
-      transaction.error = undefined;
+      if (result.state !== 'pending' && result.state !== 'unknown') transaction.error = undefined;
       transaction.retry.succeed();
       this.accept(result.snapshot, epoch);
     } catch (value) {
@@ -421,20 +432,23 @@ export class LibraryStore extends Store<LibraryState> {
       };
       this.checkouts.set(requestId, transaction);
     }
+    if (transaction.commit === 'retry' && !transaction.active) transaction.retry.succeed();
     await this.confirm(requestId, transaction, true);
     return transaction.state;
   };
 
   cancelSelection = async (requestId: string) => {
     const epoch = this.epoch;
+    const transaction = this.checkouts.get(requestId);
+    if (transaction) transaction.commit = 'query';
     const result = await this.rpc.cancelSelection(requestId);
     if (!this.current(epoch)) return result.state;
     this.cancellations.set(requestId, result.state);
     this.emit();
-    const transaction = this.checkouts.get(requestId);
     if (transaction) {
       // Finish even a selected checkout to reconcile its library entries.
 
+      transaction.retry.succeed();
       transaction.nextCheck = 0;
       if (transaction.selectionId)
         await this.confirm(requestId, transaction, false).catch((error) =>
@@ -453,7 +467,13 @@ export class LibraryStore extends Store<LibraryState> {
         this.checkouts.delete(id);
         this.cancellations.delete(id);
         changed = true;
-      } else if (!terminal && checkout.selectionId && !checkout.active && Date.now() >= checkout.nextCheck) {
+      } else if (
+        !terminal &&
+        checkout.selectionId &&
+        (checkout.commit !== 'retry' || !live) &&
+        !checkout.active &&
+        Date.now() >= checkout.nextCheck
+      ) {
         void this.confirm(id, checkout, false).catch((error) =>
           diagnostics.record('library-reconcile', error),
         );

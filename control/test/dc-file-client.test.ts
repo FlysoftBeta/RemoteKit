@@ -9,9 +9,9 @@ test('photo processing sends the selected mode and optional absolute turns with 
     assetId: 'b'.repeat(64),
     type: 'image/webp',
     size: 12,
-    geometry: 'unchanged',
+    geometry: { kind: 'unchanged', cropped: false },
     quarterTurns: 0,
-    orientation: 'manual',
+    orientation: { turns: 0, state: 'confident' },
   };
   const channel = {
     readyState: 'open',
@@ -228,7 +228,12 @@ test('original preview permits PNGs through 64 MiB while thumbnails remain limit
   await assert.rejects(client.readPhoto(original, signal), /文件预览数据无效/);
   await assert.rejects(client.readPhoto({ ...original, size: original.size + 1 }, signal), /大小超出限制/);
   await assert.rejects(client.photoThumbnail('b'.repeat(64), signal), /缩略图数据无效/);
-  assert.deepEqual(sent, ['asset.describe', 'asset.describe', 'asset.read', 'photo.thumbnail']);
+  assert.deepEqual(sent, [
+    'asset.describe',
+    'asset.describe',
+    ...Array(4).fill('asset.read'),
+    'photo.thumbnail',
+  ]);
 });
 
 test('hash-only asset descriptions omit media type and byte reads do not fabricate one', async () => {

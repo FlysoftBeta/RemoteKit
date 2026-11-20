@@ -17,8 +17,8 @@ import {
   selectFilesTab,
   setFilesLayout,
   updateFilesLibraryTab,
-  type FilesWindowState,
 } from '../client/files/files-app-state';
+import type { FilesWindowState } from '../shared/files-state';
 
 const initial = () => defaultFilesWindowState('aaaaaaaa');
 function expectDefault(value: unknown) {
@@ -77,12 +77,13 @@ test('open and back preserve tab identity and originating view; queries and layo
     kind: 'document',
     entryId: 'entry',
     from: { partition: 'work' },
+    fromQuery: 'x'.repeat(256),
   });
   assert.deepEqual(backFilesTab(document, 'aaaaaaaa').tabs[0], {
     id: 'aaaaaaaa',
     kind: 'library',
     view: { partition: 'work' },
-    query: '',
+    query: 'x'.repeat(256),
   });
   assert.equal(document.layout, 'list');
   const withoutFrom: FilesWindowState = {
