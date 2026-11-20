@@ -12,7 +12,7 @@ export const defaultSettings = () => ({
   workspace: {
     qualityPreference: 'auto' as const,
     uiScale: 1,
-    topDeadZone: 'off' as const,
+    reduceMotion: false,
     showStats: false,
     autoFullscreen: false,
     autoKeyboard: false,

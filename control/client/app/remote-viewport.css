@@ -68,3 +68,8 @@
   color: var(--text-secondary);
   background: var(--surface);
 }
+
+:root[data-reduce-motion] .remote-viewport canvas.remote-resize-freeze {
+  filter: none;
+  transform: none;
+}

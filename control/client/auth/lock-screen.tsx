@@ -5,11 +5,11 @@ import type { AuthCamera } from './auth-camera';
 import { FaceBadge, useFaceUnlock, type FaceUnlock } from './face-unlock';
 
 const tapGapMs = 500;
+const REVEAL_TAPS = 5;
 const tapSlopPx = 40;
 
-// Three quick taps (or Enter presses) close together reveal the unlock form. The gesture grants
-// nothing; it only decides whether the form is shown.
-export class TripleTap {
+// The gesture only reveals the form; it does not grant access.
+export class RapidTaps {
   private taps: { x: number; y: number; at: number }[] = [];
   reset() {
     this.taps = [];
@@ -19,20 +19,24 @@ export class TripleTap {
     const first = this.taps[0];
     if (!last || now - last.at > tapGapMs || Math.hypot(x - first.x, y - first.y) > tapSlopPx) this.taps = [];
     this.taps.push({ x, y, at: now });
-    if (this.taps.length < 3) return false;
+    if (this.taps.length < REVEAL_TAPS) return false;
     this.reset();
     return true;
   }
 }
 
-export function BlankScreen({ children }: { children?: React.ReactNode }) {
-  return <div className="viewer-lock-blank">{children}</div>;
+export function BlankScreen({ children, onClick }: { children?: React.ReactNode; onClick?: () => void }) {
+  return (
+    <div className="viewer-lock-blank" onClick={onClick}>
+      {children}
+    </div>
+  );
 }
 
 function useReveal() {
   const [open, setOpen] = useState(false);
   useEffect(() => {
-    const reveal = new TripleTap();
+    const reveal = new RapidTaps();
     let tap: { id: number; x: number; y: number; at: number } | undefined;
     const reset = () => {
       reveal.reset();
@@ -64,14 +68,9 @@ function useReveal() {
       event.preventDefault();
       push(0, 0);
     };
-    const onFace = (event: Event) => event.target instanceof Element && !!event.target.closest('.lock-face');
     const down = (event: PointerEvent) => {
       tap = undefined;
       if (open || document.hidden || !event.isPrimary || event.button !== 0) return;
-      if (onFace(event)) {
-        reset();
-        return;
-      }
       tap = { id: event.pointerId, x: event.clientX, y: event.clientY, at: performance.now() };
     };
     const moved = (event: PointerEvent) => {
@@ -137,5 +136,13 @@ export function LockScreen({
         }, face)}
       </>
     );
-  return <BlankScreen>{face.usable && <FaceBadge face={face} />}</BlankScreen>;
+  return (
+    <BlankScreen
+      onClick={() => {
+        if (face.usable && face.phase !== 'scanning') face.begin();
+      }}
+    >
+      {face.usable && <FaceBadge face={face} />}
+    </BlankScreen>
+  );
 }

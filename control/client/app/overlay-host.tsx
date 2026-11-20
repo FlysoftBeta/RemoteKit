@@ -1,3 +1,4 @@
+import { useReduceMotion } from './motion-preference';
 import { Button, Dialog, DialogActions, DialogContent, DialogTitle } from '@mui/material';
 import { useEffect, useRef, useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
@@ -22,6 +23,7 @@ import type { selectVisibility } from './visibility';
 import type { WorkspaceCall } from './window-state';
 
 export function useWorkspaceOverlays() {
+  const reduceMotion = useReduceMotion();
   const [overlay, setOverlay] = useState<{ kind: 'launcher' }>();
   const [visibleLauncher, setVisibleLauncher] = useState<typeof overlay>();
   useEffect(() => {
@@ -29,9 +31,13 @@ export function useWorkspaceOverlays() {
       setVisibleLauncher(overlay);
       return;
     }
+    if (reduceMotion) {
+      setVisibleLauncher(undefined);
+      return;
+    }
     const timer = setTimeout(() => setVisibleLauncher(undefined), overlay ? 0 : 160);
     return () => clearTimeout(timer);
-  }, [overlay]);
+  }, [overlay, reduceMotion]);
   useEffect(() => {
     if (!overlay) return;
     const escape = (event: KeyboardEvent) => {
@@ -43,7 +49,7 @@ export function useWorkspaceOverlays() {
     };
     document.addEventListener('keydown', escape, true);
     return () => document.removeEventListener('keydown', escape, true);
-  }, [overlay]);
+  }, [overlay, reduceMotion]);
   return {
     launcherOpen: overlay?.kind === 'launcher',
     launcherVisible: visibleLauncher?.kind === 'launcher',
@@ -197,9 +203,9 @@ export function OverlayHost({
         />
       )}
       <Dialog
-        open={browserReady && !!pending && !pending.awaiting}
+        open={shellReady && !!pending && !pending.awaiting}
         onClose={() =>
-          browserReady &&
+          shellReady &&
           pending &&
           void action({
             type: 'tab.close',

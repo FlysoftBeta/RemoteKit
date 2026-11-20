@@ -24,8 +24,8 @@ function workspace(): ProductWorkspace {
     // Interleaved on purpose: a window's order is the global order filtered by window.
     tabs: [tab('a', 'w1'), tab('x', 'w2'), tab('b', 'w1'), tab('c', 'w1'), tab('y', 'w2')],
     spaces: [
-      { id: 's1', windowIds: ['w1'], weights: [1], focusedWindowId: 'w1', lastActiveAt: 1 },
-      { id: 's2', windowIds: ['w2'], weights: [1], focusedWindowId: 'w2', lastActiveAt: 1 },
+      { name: null, id: 's1', windowIds: ['w1'], weights: [1], focusedWindowId: 'w1', lastActiveAt: 1 },
+      { name: null, id: 's2', windowIds: ['w2'], weights: [1], focusedWindowId: 'w2', lastActiveAt: 1 },
     ],
     activeSpaceId: 's1',
   };

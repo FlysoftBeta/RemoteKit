@@ -1,5 +1,5 @@
 import { VolumeOffOutlined, VolumeUpOutlined } from '@mui/icons-material';
-import { Button, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material';
+import { Button, ToggleButton, ToggleButtonGroup } from '@mui/material';
 import { RemoteKitError } from '../../shared/errors';
 import { FailureNote } from '../failures';
 import type { AudioChannels, AudioPlaybackState } from '../media/audio-output';
@@ -39,7 +39,6 @@ export function AudioControls({
     if (value.left || value.right) resume();
     save(value);
   };
-  const status = busy ? '正在保存声音设置…' : silent ? '声音已关闭' : '声音已开启';
   return (
     <div className="menu-audio">
       <div className="menu-audio-row">
@@ -63,11 +62,6 @@ export function AudioControls({
         </ToggleButtonGroup>
       </div>
       <FailureNote error={error} context={{ operation: '保存声音设置', scope: 'field' }} />
-      {!error && (
-        <Typography variant="caption" className="menu-audio-status">
-          {status}
-        </Typography>
-      )}
       {!silent && playback === 'blocked' && (
         <Button size="small" startIcon={<VolumeUpOutlined />} onClick={resume}>
           点击开启声音

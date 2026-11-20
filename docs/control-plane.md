@@ -135,6 +135,8 @@ RPC 受理、导航开始、文档提交、资源加载完成是不同结果。
 
 - alert/confirm/prompt 和导航 beforeunload 是临时的 `pageDialogs`。对话框身份绑定不可复用的 browserIncarnation、view、instance、document 和原生请求号；公开 ID 是完整身份的 hash，原生请求号只在服务端保存（PID 和本地计数器会重复）。回复前刷新快照校验，Endpoint 只发给同一个运行实例，Browser 执行点再校验一次。可见 activeTab 的请求用 MUI Dialog 处理，后台 Tab 显示待处理标记。
 - 关闭 Tab 的 beforeunload 走 pendingClose 流程（避免重复对话框）：`无 → 等待 prompt → 等待用户 → 等待关闭证据`。取消不删 Tab；离线或 Browser 替换时取消旧的关闭意图并保留 Tab。只有明确的关闭回复、状态或持久事件才删除 Tab。
+- 每个关闭阶段都有终态，pending 不会无限挡住后续关闭：同一 browserIncarnation 下 `view.close` 返回 `not_found/view_not_in_session`、或完整观察里已没有该 View，即关闭目标已达成，删除产品 Tab；产品 Tab 已不存在则直接推进批次；等待用户时原生请求已消失而页面仍打开，旧确认失效，批次与收据结算为 `canceled`；身份不完整的 pending 记录结算为 `outcome_unknown`。等待 prompt 与等待关闭证据各有 10 秒截止，到期先按最新观察核验一次，仍无结果则清除 pending 并结算 `outcome_unknown`，不重发 `view.close`。清除 pending 与结算收据在同一次保存里完成。
+- 再次关闭正在等待用户确认的同一目标时复用现有请求，客户端重新弹出"离开此页面？"；关闭其他目标被挡住（`conflict` + `pending_close` detail）时同样把用户带到这个确认。确认框只要 Control 在线就显示，回复走 Control WS，不依赖 Endpoint 数据通道。
 - **自然关闭**（`window.close`）是可重放的持久事件：Browser 产生 `view.closed`；Endpoint 先持久化事件和期望 view 移除，再 ACK Browser；Control 先持久化产品删除，再 ACK Endpoint。重放幂等。未确认事件达到 256 时拒绝新建 view，不静默丢事件。Browser 删除完整墓碑后保留本进程的紧凑关闭 ID 集合，防止旧 ID 复活。
 - **弹窗**：`window.open` 产生的真实 WebContents 先进入 pending 容器（不进入普通 orphan 集合），记录 provisionalId、opener view、disposition、URL、是否有用户手势。Control 先持久化产品 Tab/Window 和分配的 viewId 以及收养收据，再 `view.adopt` 绑定这个真实对象，保留 opener 和 sessionStorage。前台/后台 Tab 进入 opener 所在 Window；new window/popup 产生新 Window。pending 上限 16、30 秒过期；过期或已关闭的对象不会按 URL 重新打开来冒充收养成功——重新打开会丢失 opener/WindowProxy 和克隆的 sessionStorage。无用户手势的弹窗被阻止。真实的 about:blank 弹窗保持 remote（可以被 document.write），不会被识别成起始页。
 
@@ -184,4 +186,4 @@ Control 保存每用户一份最新剪贴板，Browser 是本地粘贴缓存；�
 
 ## 设置
 
-设置统一在"更多 → 设置"，全部由 Control 保存：质量（优先高画质 / 自动 / 优先流畅）、界面缩放、顶部留空、搜索引擎、左右声道（多选；"不播放"即清空）、音视频同步（默认关闭）、打开时全屏、锁定策略、统计叠层。当前站点的偏好与权限在"更多 → 网站设置"。Control 下发给 Endpoint 的媒体策略是 `{degradationPreference, maxFps, audio}`：maxFps 来自 Viewer 显式上报的刷新能力，未知时 60；audio 为左右声道至少选中一个。音视频同步不属于运行期策略，而是 peer 的创建参数：Control 在转发 offer 时读取当时的设置传给 Endpoint，Endpoint 在应答中回显该 peer 实际采用的值；Viewer 发现权威设置与当前 peer 不一致时立即重建 RTC 连接（不计入失败重试、不经过退避）。
+设置统一在"更多 → 设置"，除设备级的兼容模式（见[呈现 · 界面缩放与顶部空白](presentation.md#界面缩放与顶部空白)）外全部由 Control 保存：质量（优先高画质 / 自动 / 优先流畅）、界面缩放、减弱动态效果、搜索引擎、左右声道（多选；"不播放"即清空）、音视频同步（默认关闭）、打开时全屏、锁定策略、统计叠层。当前站点的偏好与权限在"更多 → 网站设置"。Control 下发给 Endpoint 的媒体策略是 `{degradationPreference, maxFps, audio}`：maxFps 来自 Viewer 显式上报的刷新能力，未知时 60；audio 为左右声道至少选中一个。音视频同步不属于运行期策略，而是 peer 的创建参数：Control 在转发 offer 时读取当时的设置传给 Endpoint，Endpoint 在应答中回显该 peer 实际采用的值；Viewer 发现权威设置与当前 peer 不一致时立即重建 RTC 连接（不计入失败重试、不经过退避）。

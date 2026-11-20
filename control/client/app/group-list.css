@@ -37,7 +37,7 @@
 }
 .launcher-space-badge {
   position: absolute;
-  top: 12px;
+  top: 38px;
   right: 12px;
   z-index: var(--z-content);
   padding: 1px 8px;
@@ -104,4 +104,13 @@
 }
 :root.layout-compact .launcher-space-preview {
   height: 68px;
+}
+
+.launcher-space-title {
+  font-size: 12px;
+  line-height: 22px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

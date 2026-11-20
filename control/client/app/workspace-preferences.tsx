@@ -1,34 +1,14 @@
 import { Add, Remove } from '@mui/icons-material';
-import {
-  Button,
-  FormControlLabel,
-  IconButton,
-  InputAdornment,
-  Radio,
-  RadioGroup,
-  TextField,
-  ToggleButton,
-  ToggleButtonGroup,
-  Typography,
-} from '@mui/material';
+import { Button, FormControlLabel, IconButton, Radio, RadioGroup, Typography } from '@mui/material';
 import { useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import type { ProductState, WorkspaceSettings } from '../../shared/product';
-import { DEAD_ZONE_MAX } from '../../shared/product';
 import { failureError, FailureNote } from '../failures';
 import type { Action } from './product-dialogs';
 import { SettingRow, SettingSection, SettingSwitch } from './setting-layout';
-import { deadZoneHeight, useTopInsetProbe } from './top-inset';
 import { UI_SCALE_STEPS } from './ui-scale';
 import './workspace-preferences.css';
-function deadZoneDescription(height: number, safeArea: number) {
-  const base = '在界面上方留出不响应操作的区域';
-  if (height === 0) return base;
-  return safeArea > 0
-    ? base + `，当前 ${height}px（不少于系统安全区 ${safeArea}px）`
-    : base + `，当前 ${height}px`;
-}
-
+import { useDevicePreferences, setCompatibility } from './device-preferences';
 export function WorkspacePreferences({
   online,
   state,
@@ -41,13 +21,10 @@ export function WorkspacePreferences({
   section: string;
 }) {
   const settings = state.workspace.settings.workspace;
-  const insets = useTopInsetProbe();
-  const [deadZone, setDeadZone] = useState(
-      typeof settings.topDeadZone === 'number' ? String(settings.topDeadZone) : '24',
-    ),
-    [result, setResult] = useState<Record<string, import('../../shared/errors').RemoteKitError | undefined>>(
-      {},
-    ),
+  const { compatibility } = useDevicePreferences();
+  const [result, setResult] = useState<
+      Record<string, import('../../shared/errors').RemoteKitError | undefined>
+    >({}),
     [busy, setBusy] = useState<Record<string, boolean>>({});
   const save = async (key: string, value: Partial<WorkspaceSettings>) => {
     if (!online) return;
@@ -76,10 +53,6 @@ export function WorkspacePreferences({
     const next = UI_SCALE_STEPS[Math.max(0, Math.min(UI_SCALE_STEPS.length - 1, index + direction))];
     if (next !== settings.uiScale) void save('scale', { uiScale: next });
   };
-  const deadZoneMode = typeof settings.topDeadZone === 'number' ? 'custom' : settings.topDeadZone;
-  const customDeadZone = Number(deadZone);
-  const deadZoneValid =
-    Number.isInteger(customDeadZone) && customDeadZone >= 1 && customDeadZone <= DEAD_ZONE_MAX;
   return (
     <div className="settings-content">
       {section === 'appearance' && (
@@ -118,58 +91,19 @@ export function WorkspacePreferences({
               </Button>
             </SettingRow>
             {note('scale')}
-            <SettingRow
-              title="顶部留空"
-              description={deadZoneDescription(deadZoneHeight(settings.topDeadZone, insets), insets.safeArea)}
+            <SettingSwitch
+              title="兼容模式"
+              description="仅对此设备生效。顶部留出空白，上传文件时使用图片选择器。"
+              checked={compatibility}
+              onChange={setCompatibility}
             />
-            <ToggleButtonGroup
-              exclusive
-              fullWidth
-              size="small"
-              color="primary"
-              aria-label="顶部留空"
-              value={deadZoneMode}
-              disabled={!online || busy.deadZone}
-              onChange={(_, mode: 'off' | 'auto' | 'custom' | null) => {
-                if (!mode || mode === deadZoneMode) return;
-                void save('deadZone', {
-                  topDeadZone: mode === 'custom' ? (deadZoneValid ? customDeadZone : 24) : mode,
-                });
-              }}
-            >
-              <ToggleButton value="off">关闭</ToggleButton>
-              <ToggleButton value="auto">跟随系统</ToggleButton>
-              <ToggleButton value="custom">自定义</ToggleButton>
-            </ToggleButtonGroup>
-            {deadZoneMode === 'custom' && (
-              <div className="scale-row">
-                <TextField
-                  size="small"
-                  label="高度"
-                  type="number"
-                  className="dead-zone-field"
-                  disabled={!online}
-                  value={deadZone}
-                  error={!deadZoneValid}
-                  onChange={(e) => setDeadZone(e.target.value)}
-                  helperText={`1–${DEAD_ZONE_MAX}`}
-                  slotProps={{
-                    htmlInput: { min: 1, max: DEAD_ZONE_MAX, step: 1 },
-                    input: { endAdornment: <InputAdornment position="end">px</InputAdornment> },
-                  }}
-                />
-                <Button
-                  variant="outlined"
-                  disabled={
-                    !online || busy.deadZone || !deadZoneValid || customDeadZone === settings.topDeadZone
-                  }
-                  onClick={() => void save('deadZone', { topDeadZone: customDeadZone })}
-                >
-                  应用
-                </Button>
-              </div>
-            )}
-            {note('deadZone')}
+            <SettingSwitch
+              title="减弱动态效果"
+              checked={settings.reduceMotion}
+              disabled={!online || busy.motion}
+              onChange={(checked) => void save('motion', { reduceMotion: checked })}
+            />
+            {note('motion')}
           </SettingSection>
           <SettingSection title="全屏">
             {' '}

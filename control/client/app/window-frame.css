@@ -21,7 +21,7 @@
   min-width: 0;
   overflow: hidden;
 }
-.window-frame[data-window-replace]::before {
+.window-replacement::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -30,7 +30,7 @@
   border: 2px solid var(--primary);
   pointer-events: none;
 }
-.window-frame[data-window-replace]::after {
+.window-replacement::after {
   content: '替换此窗口';
   position: absolute;
   top: 50%;
@@ -46,4 +46,11 @@
   box-shadow: 0 4px 16px var(--shadow-replace);
   white-space: nowrap;
   pointer-events: none;
+}
+
+.window-frame[data-window-drag-source] {
+  opacity: 0.35;
+}
+.window-replacement {
+  display: contents;
 }

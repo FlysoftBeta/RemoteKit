@@ -76,7 +76,7 @@ export function productSnapshot(): import('../shared/product').ProductState {
         workspace: {
           qualityPreference: 'auto',
           uiScale: 1,
-          topDeadZone: 'off',
+          reduceMotion: false,
           showStats: false,
           autoFullscreen: false,
           autoKeyboard: false,

@@ -2,11 +2,12 @@ import { buildAction } from '../control/action-builder';
 import './window-handle.css';
 import { ChevronRight, DragHandle } from '@mui/icons-material';
 import { IconButton, Menu, MenuItem } from '@mui/material';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState } from 'react';
 import type { ProductState, ProductWindow } from '../../shared/product';
 import type { Action } from './product-dialogs';
 import { scaledAnchor } from './ui-scale';
 import { useWindowDrag } from './window-drag';
+import { useHandleActivation } from './handle-activation';
 import { appName } from './app-icon';
 
 export function WindowHandle({
@@ -22,19 +23,21 @@ export function WindowHandle({
   action: Action;
   report(error: unknown): void;
 }) {
-  const [menu, setMenu] = useState<HTMLElement | null>(null);
   const [groupsMenu, setGroupsMenu] = useState<HTMLElement | null>(null);
   const begin = useWindowDrag();
-  // The menu waits out the double-click interval; a second click closes the window instead.
-  const pendingMenu = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => () => clearTimeout(pendingMenu.current), []);
   const space = state.workspace.spaces.find((space) => space.windowIds.includes(win.id));
   const index = space?.windowIds.indexOf(win.id) ?? -1;
   const run = (command: Parameters<Action>[0]) => {
-    setMenu(null);
+    activation.closeMenu();
     setGroupsMenu(null);
     void action(command).catch(report);
   };
+  const activation = useHandleActivation({
+    disabled: !online,
+    onMenu: () => setGroupsMenu(null),
+    onDouble: () => run({ type: 'window.close', windowId: win.id }),
+  });
+  const menu = activation.menuAnchor;
   return (
     <>
       <IconButton
@@ -42,27 +45,11 @@ export function WindowHandle({
         disabled={!online}
         className="window-handle"
         onPointerDown={(event) => begin(event, { windowId: win.id })}
-        onClick={(event) => {
-          const anchor = event.currentTarget;
-          if (event.detail === 0) {
-            setMenu(anchor);
-            return;
-          }
-          if (pendingMenu.current !== undefined) {
-            clearTimeout(pendingMenu.current);
-            pendingMenu.current = undefined;
-            run({ type: 'window.close', windowId: win.id });
-            return;
-          }
-          pendingMenu.current = setTimeout(() => {
-            pendingMenu.current = undefined;
-            setMenu(anchor);
-          }, DOUBLE_CLICK_MS);
-        }}
+        {...activation.buttonProps}
       >
         <DragHandle fontSize="small" />
       </IconButton>
-      <Menu open={!!menu} anchorEl={scaledAnchor(menu)} onClose={() => setMenu(null)}>
+      <Menu open={!!menu} anchorEl={scaledAnchor(menu)} onClose={activation.closeMenu}>
         <MenuItem
           onClick={() =>
             run(buildAction({ type: 'window.place', windowId: win.id, placement: { mode: 'space' } }))
@@ -125,12 +112,13 @@ export function WindowHandle({
                 )
               }
             >
-              {group.windowIds
-                .map((id) => {
-                  const window = state.workspace.windows.find((window) => window.id === id)!;
-                  return appName(state.workspace, window);
-                })
-                .join(' · ')}
+              {group.name ??
+                group.windowIds
+                  .map((id) => {
+                    const window = state.workspace.windows.find((window) => window.id === id)!;
+                    return appName(state.workspace, window);
+                  })
+                  .join(' · ')}
             </MenuItem>
           ))}
         {state.workspace.spaces.length < 2 && <MenuItem disabled>没有其他窗口组</MenuItem>}
@@ -138,5 +126,3 @@ export function WindowHandle({
     </>
   );
 }
-
-const DOUBLE_CLICK_MS = 250;

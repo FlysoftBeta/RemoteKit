@@ -39,7 +39,14 @@ const samples: Record<string, unknown> = {
   wireError: { code: 'internal', message: 'failure' },
   windowState: { section: 'apps' },
   tab: { id: 'tab', windowId: 'window', webviewId: '1', title: '', url: '', idleKeepAlive: false },
-  space: { id: 'space', windowIds: ['window'], weights: [1], focusedWindowId: 'window', lastActiveAt: 1 },
+  space: {
+    name: null,
+    id: 'space',
+    windowIds: ['window'],
+    weights: [1],
+    focusedWindowId: 'window',
+    lastActiveAt: 1,
+  },
   settings: defaultSettings(),
   site: { tabletUa: true },
   app: {

@@ -6,24 +6,27 @@ import { scaledAnchor } from './ui-scale';
 
 export interface SyncSummary {
   pending: number;
+  closing?: boolean;
   unknown: boolean;
   controlReady: boolean;
   dismissUnknown(): void;
 }
 
 /** The one place that shows whether workspace operations have reached Control. */
-export function SyncStatus({ pending, unknown, controlReady, dismissUnknown }: SyncSummary) {
+export function SyncStatus({ pending, closing, unknown, controlReady, dismissUnknown }: SyncSummary) {
   const [anchor, setAnchor] = useState<HTMLElement>();
   const label = unknown
     ? `${pending} 个操作结果未知，请核对工作区`
-    : pending > 0
-      ? `${pending} 个操作正在同步${controlReady ? '' : '，等待 Control 连接'}`
-      : controlReady
-        ? '已同步'
-        : 'Control 未连接';
+    : closing
+      ? '正在关闭…'
+      : pending > 0
+        ? `${pending} 个操作正在同步${controlReady ? '' : '，等待 Control 连接'}`
+        : controlReady
+          ? '已同步'
+          : 'Control 未连接';
   const icon = unknown ? (
     <ErrorOutline color="warning" />
-  ) : pending > 0 ? (
+  ) : pending > 0 || closing ? (
     <Badge badgeContent={pending} color="primary" max={99}>
       <CloudSyncOutlined color="primary" />
     </Badge>

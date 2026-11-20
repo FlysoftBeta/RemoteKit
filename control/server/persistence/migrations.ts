@@ -9,7 +9,8 @@ import { RemoteKitError, type ErrorCode } from '../../shared/errors';
 import { RetryUnit } from '../../shared/retry-unit';
 import { log } from '../log';
 import { baseline } from './baseline';
-import { corruptState, decodeJson } from './codec';
+import { corruptState, decodeJson, encodeJson } from './codec';
+import { space as spaceCodec, settings as settingsCodec, pending as pendingCodec } from './documents';
 import { faceTemplate, sealFaceGallery } from './sealed-documents';
 import type { AtRestKey } from '../auth/crypto';
 
@@ -142,9 +143,72 @@ export const migrations: Migration[] = [
         INSERT INTO library_partition_ids SELECT tenant,id FROM library_partitions;`);
     },
   },
+  {
+    version: 30,
+    name: 'named spaces and motion preferences',
+    up(db) {
+      const enteredAt = Date.now();
+      const savePending = db.prepare('UPDATE workspaces SET pending=? WHERE tenant=?');
+      for (const row of db.prepare('SELECT tenant,pending FROM workspaces').all() as {
+        tenant: string;
+        pending: string;
+      }[]) {
+        const pending = JSON.parse(row.pending);
+        if (!pending.pendingClose) continue;
+        Object.assign(pending.pendingClose, {
+          enteredAt,
+          observationEpoch: '',
+          observationSequence: '0',
+        });
+        savePending.run(encodeJson(pending, pendingCodec, `workspaces.pending ${row.tenant}`), row.tenant);
+      }
+      const saveSpace = db.prepare('UPDATE workspace_spaces SET data=? WHERE tenant=? AND id=?');
+      for (const row of db.prepare('SELECT tenant,id,data FROM workspace_spaces').all() as {
+        tenant: string;
+        id: string;
+        data: string;
+      }[]) {
+        const space = JSON.parse(row.data);
+        saveSpace.run(
+          encodeJson({ ...space, name: null }, spaceCodec, `workspace_spaces.data ${row.tenant}/${row.id}`),
+          row.tenant,
+          row.id,
+        );
+      }
+      const saveSettings = db.prepare('UPDATE user_settings SET data=? WHERE tenant=?');
+      for (const row of db.prepare('SELECT tenant,data FROM user_settings').all() as {
+        tenant: string;
+        data: string;
+      }[]) {
+        const settings = JSON.parse(row.data);
+        delete settings.workspace.topDeadZone;
+        settings.workspace.reduceMotion = false;
+        saveSettings.run(encodeJson(settings, settingsCodec, `user_settings.data ${row.tenant}`), row.tenant);
+      }
+      const saveAction = db.prepare('UPDATE operation_receipts SET payload=? WHERE tenant=? AND id=?');
+      for (const row of db.prepare('SELECT tenant,id,payload FROM operation_receipts').all() as {
+        tenant: string;
+        id: string;
+        payload: string;
+      }[]) {
+        const action = JSON.parse(row.payload);
+        if (action.type === 'space.close') {
+          action.spaceIds = [action.spaceId];
+          delete action.spaceId;
+        } else if (action.type === 'settings.update' && action.settings.workspace) {
+          delete action.settings.workspace.topDeadZone;
+        } else continue;
+        saveAction.run(
+          operationPayload(action, `operation_receipts.payload ${row.tenant}/${row.id}`),
+          row.tenant,
+          row.id,
+        );
+      }
+    },
+  },
 ];
 
-export const currentVersion = 29;
+export const currentVersion = 30;
 export interface MigrationOptions extends MigrationContext {
   backupDirectory: string;
   buildId: string;

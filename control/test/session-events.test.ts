@@ -108,6 +108,7 @@ test('closed tabs commit before cumulative ack and restored source events do not
     const workspace = f.store.workspaces.workspace('tenant');
     workspace.windows.push({ id: 'window', appId: 'browser', activeTabId: 'tab', lastActiveAt: 0 });
     workspace.spaces.push({
+      name: null,
       id: 'space',
       windowIds: ['window'],
       weights: [1],

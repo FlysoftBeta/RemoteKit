@@ -44,7 +44,9 @@ test('one foreground modal uses active visible window; background requests wait'
   const state = {
     workspace: {
       activeSpaceId: 'space',
-      spaces: [{ id: 'space', windowIds: ['w1', 'w2'], weights: [0.5, 0.5], focusedWindowId: 'w2' }],
+      spaces: [
+        { name: null, id: 'space', windowIds: ['w1', 'w2'], weights: [0.5, 0.5], focusedWindowId: 'w2' },
+      ],
       windows: [
         { id: 'w1', activeTabId: 'a' },
         { id: 'w2', activeTabId: 'b' },
@@ -67,7 +69,14 @@ function promptState() {
   ];
   state.workspace.activeSpaceId = 'space';
   state.workspace.spaces = [
-    { id: 'space', windowIds: ['w', 'other'], weights: [0.5, 0.5], focusedWindowId: 'w', lastActiveAt: 1 },
+    {
+      name: null,
+      id: 'space',
+      windowIds: ['w', 'other'],
+      weights: [0.5, 0.5],
+      focusedWindowId: 'w',
+      lastActiveAt: 1,
+    },
   ];
   const identity = { tabId: 'a', windowId: 'w', origin: request.origin };
   state.pageDialogs = [

@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from 'react';
+import { memo, useLayoutEffect, useRef } from 'react';
 
 export function captureWindow(frame: HTMLElement | undefined, maxWidth = 320, maxHeight = 240) {
   const video = frame?.querySelector<HTMLVideoElement>('.remote-video-plane video');
@@ -54,7 +54,7 @@ export class SpaceSnapshots {
   }
 }
 
-export function SnapshotImage({ source }: { source: HTMLCanvasElement }) {
+export const SnapshotImage = memo(function SnapshotImage({ source }: { source: HTMLCanvasElement }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   useLayoutEffect(() => {
     const target = canvas.current!;
@@ -63,4 +63,4 @@ export function SnapshotImage({ source }: { source: HTMLCanvasElement }) {
     target.getContext('2d')?.drawImage(source, 0, 0);
   }, [source]);
   return <canvas ref={canvas} className="space-snapshot" aria-hidden />;
-}
+});

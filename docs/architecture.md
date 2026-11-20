@@ -77,7 +77,7 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 | 对象存储文件 | 文件头 `RKO2` 与头版本 | `endpoint/src/objects/store.cpp` | 文件头版本 |
 | 诊断归档 manifest 与 `.reason` | 文件内版本 | `control/server/diagnostics/formats.ts` | — |
 
-发布与更新的 manifest、载荷、签名与增量有各自的严格协议（见[构建与发布 · 发布](build.md#发布)）。Viewer 只持久化用户 token（Cookie），不使用 localStorage、sessionStorage 或 IndexedDB 保存产品状态。
+发布与更新的 manifest、载荷、签名与增量有各自的严格协议（见[构建与发布 · 发布](build.md#发布)）。Viewer 只持久化用户 token（Cookie）和设备级的兼容模式偏好（localStorage），不在浏览器存储里保存产品状态。
 
 ## 代码结构
 

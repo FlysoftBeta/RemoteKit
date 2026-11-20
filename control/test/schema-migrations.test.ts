@@ -49,7 +49,7 @@ test('every supported starting version migrates partition ID ownership exactly o
         db.prepare('UPDATE schema_version SET version=?').run(step.version);
       }
       migrate(db, options);
-      assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 29 });
+      assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 30 });
       assert.deepEqual(db.prepare('SELECT * FROM library_partition_ids').all(), [{ tenant: 'tenant', id }]);
       const schemaVersion = db.pragma('schema_version', { simple: true });
       migrate(db, options);
@@ -83,7 +83,7 @@ test('v28 reserves existing partition IDs and keeps operation hashes unchanged i
       'opaque-hash',
     );
     migrate(db, options);
-    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 29 });
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 30 });
     assert.deepEqual(db.prepare('SELECT * FROM library_partition_ids').all(), [{ tenant: 'tenant', id }]);
     assert.deepEqual(db.prepare('SELECT payload FROM file_library_operations').get(), {
       payload: 'opaque-hash',
@@ -192,10 +192,10 @@ test('v25 migrates bindings as an empty table and rejects malformed schema versi
   const options = { backupDirectory: '', buildId: 'test', atRestKey: new AtRestKey(null) };
   try {
     db.exec(
-      'CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (25); CREATE TABLE user_security (user_id TEXT, face_ciphertext TEXT, face_model TEXT); CREATE TABLE operation_receipts (tenant TEXT, id TEXT, payload TEXT); CREATE TABLE library_partitions (tenant TEXT, id TEXT)',
+      'CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (25); CREATE TABLE user_security (user_id TEXT, face_ciphertext TEXT, face_model TEXT); CREATE TABLE operation_receipts (tenant TEXT, id TEXT, payload TEXT); CREATE TABLE library_partitions (tenant TEXT, id TEXT); CREATE TABLE workspace_spaces (tenant TEXT, id TEXT, data TEXT); CREATE TABLE user_settings (tenant TEXT, data TEXT); CREATE TABLE workspaces (tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL, active_space TEXT, pending TEXT)',
     );
     migrate(db, options);
-    assert.deepEqual(db.prepare('SELECT version FROM schema_version').all(), [{ version: 29 }]);
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').all(), [{ version: 30 }]);
     assert.deepEqual(db.prepare('SELECT * FROM session_node_bindings').all(), []);
     db.prepare('UPDATE schema_version SET version=?').run('26bad');
     assert.throws(() => migrate(db, options), { reason: 'corrupt_state' });
@@ -218,7 +218,7 @@ test('release v23 migrates durable retry state and keeps a verified backup', () 
       assert(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='retry_units'").get());
       assert.equal(schema(store.db).length, before.length + 4);
       assert(Number(store.db.pragma('schema_version', { simple: true })) > Number(version));
-      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 29n }]);
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 30n }]);
       assert.equal(existsSync(join(directory, 'backups')), true);
     } finally {
       store.db.close();
@@ -243,7 +243,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
   }
   writeFileSync(join(backupDirectory, 'keep.txt'), 'keep');
   migrations.push({
-    version: 30,
+    version: 31,
     name: 'future-test',
     up(database) {
       database.exec('CREATE TABLE future_step(id TEXT)');
@@ -260,7 +260,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
     const copy = new Sqlite(
       join(
         backupDirectory,
-        readdirSync(backupDirectory).find((name) => /^control-v23-to-v30-test-.*T.*Z\.db$/.test(name))!,
+        readdirSync(backupDirectory).find((name) => /^control-v23-to-v31-test-.*T.*Z\.db$/.test(name))!,
       ),
       { readonly: true },
     );

@@ -28,8 +28,9 @@ import type { Action } from './product-dialogs';
 import { RemoteViewport } from './remote-viewport';
 import { StartPage } from './start-page';
 import { useViewerSessionSelector } from './use-viewer-session';
-import { useDropTarget, useWindowDragging } from './window-drag';
+import { useDropRegistration, WindowDragDecoration } from './window-drag';
 import './window-frame.css';
+import { SpaceHandle } from './space-handle';
 import { WindowHandle } from './window-handle';
 import { WindowMenus, useWindowMenus } from './window-menus';
 import { useWindowState, type WorkspaceCall } from './window-state';
@@ -49,6 +50,7 @@ export function WindowFrame({
   onGeometry,
   visible,
   fullscreen,
+  groupHandle,
   surfaceFailure,
 }: {
   win: ProductWindow;
@@ -67,6 +69,7 @@ export function WindowFrame({
   onGeometry: (id: string, width: number, height: number) => void;
   visible: boolean;
   fullscreen: boolean;
+  groupHandle: boolean;
   surfaceFailure?: { error: RemoteKitError; operation: string };
 }) {
   const [windowFailure, setWindowFailure] = useState<RemoteKitError>();
@@ -95,9 +98,15 @@ export function WindowFrame({
   const productLocked = useViewerSessionSelector(transport, (snapshot) => snapshot.authorization.locked);
   const browserReady = useViewerSessionSelector(transport, (snapshot) => snapshot.authorization.browserReady);
   const presentationError = useViewerSessionSelector(transport, (snapshot) => snapshot.presentation.error);
-  const drop = useDropTarget('window', win.id);
-  const dragging = useWindowDragging();
-  const source = dragging && 'windowId' in dragging && dragging.windowId === win.id;
+  const drop = useDropRegistration('window', win.id);
+  const frame = useRef<HTMLElement | null>(null);
+  const frameRef = useCallback(
+    (element: HTMLElement | null) => {
+      frame.current = element;
+      drop.ref(element);
+    },
+    [drop.ref],
+  );
   const windowTabs = state.workspace.tabs.filter((t) => t.windowId === win.id),
     tabs = windowTabs.filter((tab) => !tab.signIn),
     active = windowTabs.find((t) => t.id === win.activeTabId),
@@ -161,17 +170,25 @@ export function WindowFrame({
     (dialog) => dialog.windowId === win.id && dialog.tabId === active?.id,
   );
   const { submit } = navigation;
-  const handle = <WindowHandle win={win} state={state} online={shellReady} action={action} report={report} />;
+  const space = state.workspace.spaces.find((space) => space.windowIds.includes(win.id));
+  const handle = (
+    <>
+      {groupHandle && space && (
+        <SpaceHandle space={space} state={state} online={shellReady} action={action} report={report} />
+      )}
+      <WindowHandle win={win} state={state} online={shellReady} action={action} report={report} />
+    </>
+  );
   return (
     <section
-      ref={drop.ref}
-      data-window-replace={drop.replace ? 'true' : undefined}
+      ref={frameRef}
       className={`window-frame ${focused ? 'focused-window' : ''}`}
-      style={{ flexGrow: weight, display: visible ? undefined : 'none', opacity: source ? 0.35 : undefined }}
+      style={{ flexGrow: weight, display: visible ? undefined : 'none' }}
       data-window-id={win.id}
       aria-label={`${title}窗口`}
       onPointerDownCapture={activate}
     >
+      <WindowDragDecoration windowId={win.id} frame={frame} />
       {win.appId === 'files' ? (
         <FilesWindow
           windowId={win.id}

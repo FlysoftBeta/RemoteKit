@@ -54,12 +54,31 @@ input,
 textarea {
   font: inherit;
 }
+:root[data-reduce-motion] *,
+:root[data-reduce-motion] *::before,
+:root[data-reduce-motion] *::after {
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+:root[data-reduce-motion]
+  *:not(.MuiCircularProgress-root):not(.MuiCircularProgress-circle):not(.MuiLinearProgress-bar):not(
+    .MuiLinearProgress-dashed
+  ):not(.failure-spinner):not(.learning-spinning):not(.lock-face-scan):not(.lock-face-mark),
+:root[data-reduce-motion] *::before,
+:root[data-reduce-motion] *::after {
+  animation: none !important;
+}
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;
+  }
+  *:not(.MuiCircularProgress-root):not(.MuiCircularProgress-circle):not(.MuiLinearProgress-bar):not(
+      .MuiLinearProgress-dashed
+    ):not(.failure-spinner):not(.learning-spinning):not(.lock-face-scan):not(.lock-face-mark) {
     animation: none !important;
   }
 }
+
 .visually-hidden {
   position: absolute;
   width: 1px;

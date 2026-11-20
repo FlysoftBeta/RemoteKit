@@ -37,6 +37,7 @@ export function createdIds(action: RecordedAction): string[] {
 }
 
 export function targetIds(action: ProductAction): string[] {
+  if (action.type === 'space.close') return action.spaceIds;
   const created = new Set<string>(creationIdFields(action));
   const ids = Object.entries(action)
     .filter(([key]) => (key === 'id' || key.endsWith('Id')) && !created.has(key))
@@ -260,12 +261,17 @@ export function projectOperations(
         if (tab && !a.cancel && (a.confirm || !awaitingUser(w, [tab.id]))) removeTab(w, tab);
         break;
       }
+      case 'space.rename': {
+        const space = w.spaces.find((space) => space.id === a.spaceId);
+        if (space) space.name = a.name.trim() || null;
+        break;
+      }
       case 'space.close':
       case 'window.close': {
         const ids =
           a.type === 'window.close'
             ? [a.windowId]
-            : [...(w.spaces.find((space) => space.id === a.spaceId)?.windowIds ?? [])];
+            : w.spaces.filter((space) => a.spaceIds.includes(space.id)).flatMap((space) => space.windowIds);
         // A page asking to stay keeps its window on screen beside the leave dialog.
         for (const windowId of ids)
           if (

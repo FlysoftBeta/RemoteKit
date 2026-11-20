@@ -147,7 +147,14 @@ test('Session protection accrues only while eligible; every automatic stop commi
     state.tabs = [tab()];
     state.windows = [{ id: 'window', appId: 'browser', activeTabId: 'tab', lastActiveAt: 0 }];
     state.spaces = [
-      { id: 'space', windowIds: ['window'], focusedWindowId: 'window', weights: [1], lastActiveAt: 0 },
+      {
+        name: null,
+        id: 'space',
+        windowIds: ['window'],
+        focusedWindowId: 'window',
+        weights: [1],
+        lastActiveAt: 0,
+      },
     ];
     state.activeSpaceId = 'space';
     state.tabs[0].idleKeepAliveState = { enabledAt: clock.wallMs() };

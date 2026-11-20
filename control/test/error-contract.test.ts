@@ -8,6 +8,7 @@ import { log } from '../server/log';
 import { mailError } from '../server/session-import/mail-error';
 import { errorHandling, retryDelay } from '../shared/error-policy';
 import {
+  PENDING_CLOSE_DETAIL,
   RemoteKitError,
   errorCodeMessage,
   httpStatus,
@@ -17,6 +18,16 @@ import {
   toRemoteKitError,
   wireError,
 } from '../shared/errors';
+
+test('only the public pending-close detail survives a wire round trip', () => {
+  const publicError = wireError(new RemoteKitError('conflict', 'pending', { detail: PENDING_CLOSE_DETAIL }));
+  assert.equal(publicError.detail, PENDING_CLOSE_DETAIL);
+  assert.equal(parseWireError(publicError)?.detail, PENDING_CLOSE_DETAIL);
+  assert.equal(
+    wireError(new RemoteKitError('internal', 'failed', { detail: 'private diagnostic' })).detail,
+    undefined,
+  );
+});
 
 test('native and Control reason sets stay in sync', () => {
   const native = readFileSync(new URL('../../protocol/errors.h', import.meta.url), 'utf8');

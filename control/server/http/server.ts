@@ -45,7 +45,7 @@ export function createHttp(
             settings: {
               qualityPreference: settings.workspace.qualityPreference,
               uiScale: settings.workspace.uiScale,
-              topDeadZone: settings.workspace.topDeadZone,
+              reduceMotion: settings.workspace.reduceMotion,
               autoFullscreen: settings.workspace.autoFullscreen,
               avSync: settings.workspace.avSync,
               audioChannels: settings.workspace.audioChannels,

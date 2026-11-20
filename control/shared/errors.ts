@@ -96,7 +96,9 @@ export type WireError = {
   capacity?: ErrorCapacity;
   retryAfterMs?: number;
   errorId?: string;
+  detail?: typeof PENDING_CLOSE_DETAIL;
 };
+export const PENDING_CLOSE_DETAIL = 'pending_close';
 function supportsRetryHint(code: ErrorCode) {
   return code === 'busy' || code === 'rate_limited' || code === 'unavailable';
 }
@@ -113,6 +115,7 @@ export function parseWireError(value: unknown): RemoteKitError | undefined {
   )
     return;
   return new RemoteKitError(wire.code as ErrorCode, wire.message, {
+    detail: wire.detail === PENDING_CLOSE_DETAIL ? PENDING_CLOSE_DETAIL : undefined,
     capacity: capacities.includes(wire.capacity as ErrorCapacity)
       ? (wire.capacity as ErrorCapacity)
       : undefined,
@@ -125,6 +128,7 @@ export function wireError(error: RemoteKitError): WireError {
   return {
     code: error.code,
     message: error.message,
+    ...(error.detail === PENDING_CLOSE_DETAIL ? { detail: PENDING_CLOSE_DETAIL } : {}),
     ...(error.capacity ? { capacity: error.capacity } : {}),
     ...(errorReasonMessage(error.reason) ? { reason: error.reason as ErrorReason } : {}),
     ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),

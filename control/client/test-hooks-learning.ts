@@ -84,6 +84,7 @@ export function installLearningMock() {
       const spaceId = `mock-space-${id}`;
       if (!fake.state.workspace.spaces.some((space) => space.id === spaceId))
         fake.state.workspace.spaces.push({
+          name: null,
           id: spaceId,
           windowIds: [id],
           weights: [1],

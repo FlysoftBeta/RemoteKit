@@ -44,7 +44,16 @@ function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
       tabs: tab ? [tab] : [],
       activeSpaceId: win ? 's1' : null,
       spaces: win
-        ? [{ id: 's1', windowIds: [win.id], weights: [1], focusedWindowId: win.id, lastActiveAt: 1 }]
+        ? [
+            {
+              name: null,
+              id: 's1',
+              windowIds: [win.id],
+              weights: [1],
+              focusedWindowId: win.id,
+              lastActiveAt: 1,
+            },
+          ]
         : [],
     },
     pageDialogs: [],
@@ -111,6 +120,7 @@ function Frame({
       weight: 1,
       onGeometry: unexpected,
       visible: true,
+      groupHandle: true,
       fullscreen: false,
     }),
   );

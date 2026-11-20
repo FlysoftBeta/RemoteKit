@@ -16,6 +16,7 @@ const operations: Record<string, string> = {
   'window.close': '关闭窗口',
   'window.state': '保存查看状态',
   'space.activate': '切换窗口组',
+  'space.rename': '命名窗口组',
   'space.close': '关闭窗口组',
   'space.weights': '保存分栏比例',
   'favorite.toggle': '保存收藏',

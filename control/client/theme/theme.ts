@@ -1,3 +1,4 @@
+import { useReduceMotion } from '../app/motion-preference';
 import { createTheme } from '@mui/material';
 import { useMemo, useSyncExternalStore } from 'react';
 
@@ -14,10 +15,24 @@ export const colorScheme = {
   },
 };
 
-export function createViewerTheme(mode = colorScheme.getSnapshot()) {
+export function createViewerTheme(mode = colorScheme.getSnapshot(), reduceMotion = false) {
   const tokens = getComputedStyle(document.documentElement);
   const token = (name: string) => tokens.getPropertyValue(`--${name}`).trim();
   return createTheme({
+    transitions: reduceMotion
+      ? {
+          getAutoHeightDuration: () => 0,
+          duration: {
+            shortest: 0,
+            shorter: 0,
+            short: 0,
+            standard: 0,
+            complex: 0,
+            enteringScreen: 0,
+            leavingScreen: 0,
+          },
+        }
+      : undefined,
     palette: {
       mode,
       primary: { main: token('primary') },
@@ -28,14 +43,16 @@ export function createViewerTheme(mode = colorScheme.getSnapshot()) {
     typography: { fontFamily: token('font-family'), fontSize: 14 },
     shape: { borderRadius: Number.parseFloat(token('radius-md')) },
     components: {
+      MuiButtonBase: { defaultProps: { disableRipple: reduceMotion } },
       MuiIconButton: { defaultProps: { size: 'small' } },
       MuiButton: { defaultProps: { disableElevation: true } },
-      MuiDialog: { defaultProps: { transitionDuration: 150 } },
+      MuiDialog: { defaultProps: { transitionDuration: reduceMotion ? 0 : 150 } },
     },
   });
 }
 
 export function useViewerTheme() {
   const mode = useSyncExternalStore(colorScheme.subscribe, colorScheme.getSnapshot);
-  return useMemo(() => createViewerTheme(mode), [mode]);
+  const reduceMotion = useReduceMotion();
+  return useMemo(() => createViewerTheme(mode, reduceMotion), [mode, reduceMotion]);
 }

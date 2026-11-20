@@ -162,7 +162,7 @@ for (const status of ['accepted', 'applying', 'committed'] as const) {
       buildAction({ type: 'window.place', windowId: action.windowId, placement: { mode: 'space' } }),
       { type: 'tab.navigate', tabId: action.tabId!, url: 'https://new.test/' },
       buildAction({ type: 'tab.create', windowId: action.windowId }),
-      { type: 'space.close', spaceId: action.spaceId! },
+      { type: 'space.close', spaceIds: [action.spaceId!] },
       { type: 'window.close', windowId: action.windowId },
     ];
     const dependents = commands.map((command) => store.action(command));

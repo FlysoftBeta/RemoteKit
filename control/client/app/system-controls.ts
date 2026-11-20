@@ -237,6 +237,7 @@ export function useSystemControls({
       : null,
     sync: {
       pending: pendingOperations.length,
+      closing: !!state?.workspace.pendingClose || !!state?.workspace.pendingWindowCloseId,
       unknown: pendingOperations.some((entry) => entry.receipt?.status === 'unknown'),
       controlReady: shellReady,
       dismissUnknown: () => media.operations.dismissUnknown(),

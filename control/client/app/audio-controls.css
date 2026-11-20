@@ -1,5 +1,5 @@
 .menu-audio {
-  padding: 8px 12px 8px 16px;
+  padding: 8px 16px;
 }
 .menu-audio-row {
   display: flex;
@@ -9,13 +9,6 @@
 .menu-audio-row .MuiToggleButton-root {
   padding: 4px 8px;
   white-space: nowrap;
-}
-.menu-audio-status {
-  display: block;
-  padding: 4px 0 0 32px;
-}
-.menu-audio-status:empty {
-  padding: 0;
 }
 .launcher-audio .menu-audio {
   padding: 0;

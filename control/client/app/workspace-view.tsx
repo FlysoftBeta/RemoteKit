@@ -1,5 +1,16 @@
+import { setReduceMotion } from './motion-preference';
+import { getSnapshot as devicePreferences } from './device-preferences';
 import { buildAction } from '../control/action-builder';
-import { Suspense, lazy, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import { BlankScreen, LockScreen } from '../auth/lock-screen';
 import { UnlockView } from '../auth/unlock-view';
@@ -34,6 +45,18 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
   const identity = useRef<string | undefined>(undefined);
   if (auth?.user.id) identity.current = auth.user.id;
   const { state } = operationState;
+  useEffect(() => {
+    if (operationState.error)
+      notices.post(
+        'workspace:operation',
+        presentFailure(operationState.error, { operation: '更新工作区', scope: 'global' }),
+      );
+  }, [operationState.error]);
+  const reduceMotion = state?.workspace.settings.workspace.reduceMotion ?? false;
+  useLayoutEffect(() => {
+    setReduceMotion(reduceMotion);
+  }, [reduceMotion]);
+  useLayoutEffect(() => () => setReduceMotion(false), []);
   const showShell = !!state && !localLock && auth?.locked === false;
   useWorkspaceClipboard(showShell && status === 'online' ? auth.user.id : undefined, media.control);
   useEffect(() => {
@@ -104,6 +127,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
         else if (kind === 'choose-file') {
           const input = document.createElement('input');
           input.type = 'file';
+          if (devicePreferences().compatibility) input.accept = 'image/*';
           input.onchange = () => {
             const files = Array.from(input.files ?? []);
             try {

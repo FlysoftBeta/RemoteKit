@@ -30,7 +30,9 @@ test('axis constraints lower real DPR without shrinking DIP; minimum failure is 
   const state = emptyWorkspace('t');
   state.settings.workspace.qualityPreference = 'quality';
   state.windows = [{ id: 'w', appId: 'browser', activeTabId: 't', lastActiveAt: 1 }];
-  state.spaces = [{ id: 'space', windowIds: ['w'], weights: [1], focusedWindowId: 'w', lastActiveAt: 1 }];
+  state.spaces = [
+    { name: null, id: 'space', windowIds: ['w'], weights: [1], focusedWindowId: 'w', lastActiveAt: 1 },
+  ];
   state.activeSpaceId = 'space';
   const viewport = {
     devicePixelRatio: 4,

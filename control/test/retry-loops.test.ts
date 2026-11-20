@@ -467,6 +467,7 @@ export const retryLoops: Record<string, Binding> = {
     boundary: 'EndpointGateway.closeView second item after first closed',
     event: 'page.close_batch',
     create: driveCloseBatch,
+    stopOn: ['outcome_unknown'],
   },
   'viewport-reset-publication': {
     owner: 'client/control/viewport-requests.ts',

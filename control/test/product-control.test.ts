@@ -334,13 +334,13 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
         user.tenantId,
         {
           type: 'settings.update',
-          settings: { workspace: { uiScale: 1.5, topDeadZone: 32, qualityPreference: 'smooth' } },
+          settings: { workspace: { uiScale: 1.5, reduceMotion: true, qualityPreference: 'smooth' } },
         },
         'lease',
       )
     ).state;
     assert.equal(state.workspace.settings.workspace.uiScale, 1.5);
-    assert.equal(state.workspace.settings.workspace.topDeadZone, 32);
+    assert.equal(state.workspace.settings.workspace.reduceMotion, true);
     assert.ok(
       endpoint.calls
         .filter((c) => c.method === 'view.configured')
@@ -349,9 +349,8 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
     for (const settings of [
       { uiScale: 5 },
       { uiScale: 0.25 },
-      { topDeadZone: 0 },
-      { topDeadZone: 12.5 },
-      { topDeadZone: 'top' },
+      { reduceMotion: 0 },
+      { reduceMotion: 'yes' },
       { clientScaleOverride: 1.5 },
     ])
       await assert.rejects(
@@ -1533,6 +1532,9 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
     const state = store.workspaces.workspace(user.tenantId);
     state.pendingClose = {
       id: tab.id,
+      enteredAt: Date.now(),
+      observationEpoch: '',
+      observationSequence: '0',
       requestId: 'opaque-9',
       nativeRequestId: '9',
       browserIncarnation: 'browser-' + endpoint.browserPid,

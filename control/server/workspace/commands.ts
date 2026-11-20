@@ -1,7 +1,6 @@
 import { readWindowState } from '../../shared/persisted-window-state';
-import { RemoteKitError } from '../../shared/errors';
+import { PENDING_CLOSE_DETAIL, RemoteKitError } from '../../shared/errors';
 import {
-  DEAD_ZONE_MAX,
   creationIdFields,
   isBuiltinApp,
   isLocalTab,
@@ -149,9 +148,21 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
     focusWindow(state, windowId, now);
   };
   const closeWindows = (ids: string[]) => {
+    if (
+      state.pendingClose &&
+      !state.pendingClose.awaiting &&
+      ids.every(
+        (id) =>
+          id === state.pendingClose?.windowId ||
+          id === state.pendingWindowCloseId ||
+          state.pendingWindowCloseIds?.includes(id),
+      ) &&
+      ids.some((id) => state.tabs.some((tab) => tab.id === state.pendingClose?.id && tab.windowId === id))
+    )
+      return;
     if (state.pendingWindowCloseId || state.pendingClose || state.pendingWindowCloseIds?.length)
       throw new RemoteKitError('conflict', '请先处理待确认的关闭请求', {
-        detail: 'Resolve the pending close request first',
+        detail: PENDING_CLOSE_DETAIL,
       });
     state.pendingWindowCloseIds = [...ids];
     state.pendingWindowCloseId = state.pendingWindowCloseIds.shift() ?? null;
@@ -286,9 +297,23 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
     case 'window.close':
       closeWindows([window().id]);
       break;
-    case 'space.close':
-      closeWindows(findSpace(state, action.spaceId).windowIds);
+    case 'space.rename': {
+      if (typeof action.name !== 'string' || action.name.trim().length > 40)
+        throw new RemoteKitError('invalid_request', '窗口组名称最多 40 个字符');
+      findSpace(state, action.spaceId).name = action.name.trim() || null;
       break;
+    }
+    case 'space.close': {
+      if (
+        !Array.isArray(action.spaceIds) ||
+        !action.spaceIds.length ||
+        action.spaceIds.some((id: unknown) => typeof id !== 'string' || !id)
+      )
+        throw new RemoteKitError('invalid_request', '请选择窗口组');
+      const spaces = [...new Set<string>(action.spaceIds)].map((id) => findSpace(state, id));
+      closeWindows(spaces.flatMap((space) => space.windowIds));
+      break;
+    }
     case 'app.install': {
       const id = action.appId;
       state.apps.push({
@@ -512,7 +537,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
             ![
               'qualityPreference',
               'uiScale',
-              'topDeadZone',
+              'reduceMotion',
               'showStats',
               'audioChannels',
               'autoFullscreen',
@@ -540,16 +565,8 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
           workspaceSettings.uiScale > UI_SCALE_MAX)
       )
         throw new RemoteKitError('invalid_request', `界面缩放需在 ${UI_SCALE_MIN}–${UI_SCALE_MAX} 之间`);
-      if (
-        'topDeadZone' in workspaceSettings &&
-        workspaceSettings.topDeadZone !== 'off' &&
-        workspaceSettings.topDeadZone !== 'auto' &&
-        (typeof workspaceSettings.topDeadZone !== 'number' ||
-          !Number.isInteger(workspaceSettings.topDeadZone) ||
-          workspaceSettings.topDeadZone < 1 ||
-          workspaceSettings.topDeadZone > DEAD_ZONE_MAX)
-      )
-        throw new RemoteKitError('invalid_request', `顶部留空需为 1–${DEAD_ZONE_MAX} px`);
+      if ('reduceMotion' in workspaceSettings && typeof workspaceSettings.reduceMotion !== 'boolean')
+        throw new RemoteKitError('invalid_request', '???请选择窗口组');
       if ('avSync' in workspaceSettings && typeof workspaceSettings.avSync !== 'boolean')
         throw new RemoteKitError('invalid_request', '无效的音视频同步设置');
       if ('autoFullscreen' in workspaceSettings && typeof workspaceSettings.autoFullscreen !== 'boolean')

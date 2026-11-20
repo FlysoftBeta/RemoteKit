@@ -154,6 +154,7 @@ export class Reconciler {
   async reconcileProduct(tenant: string) {
     if (this.closed || this.context.closed) return;
     const runtime = this.context.tenants.get(tenant);
+    this.services.pageRequests.observePendingClose(this.context.store.workspaces.workspace(tenant));
     this.context.endpoint.invalidate(tenant);
     if (!this.context.endpoint.isReady(tenant) || this.context.endpoint.sessionFault(tenant)) {
       this.services.viewers.push(tenant);
@@ -227,12 +228,7 @@ export class Reconciler {
       }
       await this.services.popups.observePopups(state, snapshot);
       this.context.store.operations.prunePopupReceipts(tenant);
-      if (state.pendingClose)
-        this.services.pageRequests.observePendingClose(
-          state,
-          snapshot,
-          actual.find((v) => v.viewId === state.tabs.find((t) => t.id === state.pendingClose?.id)?.webviewId),
-        );
+      this.services.pageRequests.observePendingClose(state);
       let writtenTitles = this.writtenTitles.get(runtime);
       if (!writtenTitles) this.writtenTitles.set(runtime, (writtenTitles = new Map()));
       const tabIds = new Set(state.tabs.map((tab) => tab.id));
@@ -320,6 +316,7 @@ export class Reconciler {
       }
       await this.services.pageRequests.continueWindowClose(state);
       for (const pending of this.context.store.operations.pendingOperations(tenant)) {
+        if (pending.receipt.resolved) continue;
         const a = pending.action;
         if (
           !pending.receipt.resolved &&
@@ -350,7 +347,7 @@ export class Reconciler {
         const removed =
           (a.type === 'tab.close' && !state.tabs.some((tab) => tab.id === a.tabId)) ||
           (a.type === 'window.close' && !state.windows.some((window) => window.id === a.windowId)) ||
-          (a.type === 'space.close' && !state.spaces.some((space) => space.id === a.spaceId)) ||
+          (a.type === 'space.close' && !state.spaces.some((space) => a.spaceIds.includes(space.id))) ||
           (a.type === 'app.uninstall' && !state.apps.some((app) => 'web:' + app.id === a.appId));
         if (removed) {
           settle(pending.receipt, { status: 'committed' });
@@ -455,6 +452,7 @@ export class Reconciler {
   }
   async observeOffline(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
+    this.services.pageRequests.observePendingClose(this.context.store.workspaces.workspace(tenant));
     this.context.endpoint.invalidate(tenant);
     if (!this.context.endpoint.isReady(tenant) || this.context.endpoint.sessionFault(tenant)) {
       this.services.viewers.push(tenant);
@@ -486,12 +484,7 @@ export class Reconciler {
     );
     this.services.pageRequests.clearTransient(tenant);
     if (state.pendingClose) {
-      const tab = state.tabs.find((t) => t.id === state.pendingClose?.id);
-      this.services.pageRequests.observePendingClose(
-        state,
-        snapshot,
-        (snapshot.views ?? []).find((v: any) => v.viewId === tab?.webviewId),
-      );
+      this.services.pageRequests.observePendingClose(state);
       this.services.operations.saveWorkspace(state);
     }
     if (snapshot.status)

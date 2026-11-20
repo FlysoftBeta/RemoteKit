@@ -21,7 +21,7 @@ function empty(): ProductWorkspace {
       workspace: {
         qualityPreference: 'auto',
         uiScale: 1,
-        topDeadZone: 'off',
+        reduceMotion: false,
         showStats: false,
         autoFullscreen: false,
         autoKeyboard: false,
@@ -496,4 +496,37 @@ test('navigation size errors keep their code through workspace commands', () => 
       ),
     { code: 'limit_exceeded' },
   );
+});
+
+test('space names trim, clear, validate and project without changing windows', () => {
+  let workspace = open(empty());
+  const spaceId = workspace.spaces[0].id;
+  assert.equal(workspace.spaces[0].name, null);
+  for (const [name, expected] of [
+    ['  工作  ', '工作'],
+    ['x'.repeat(40), 'x'.repeat(40)],
+    ['', null],
+    ['  ', null],
+  ]) {
+    workspace = command(workspace, { type: 'space.rename', spaceId, name: name! }).workspace;
+    assert.equal(workspace.spaces[0].name, expected);
+  }
+  for (const name of ['x'.repeat(41), 1, null])
+    assert.throws(() => command(workspace, { type: 'space.rename', spaceId, name } as ProductAction), {
+      code: 'invalid_request',
+    });
+  assert.throws(() => command(workspace, { type: 'space.rename', spaceId: 'missing', name: 'name' }), {
+    code: 'not_found',
+  });
+});
+test('space close validates every group before queueing a deduplicated batch', () => {
+  const workspace = open(open(empty()));
+  const spaceIds = workspace.spaces.map((space) => space.id);
+  for (const ids of [[], ['missing'], [spaceIds[0], 'missing'], [null], 'space']) {
+    assert.throws(() => command(workspace, { type: 'space.close', spaceIds: ids } as ProductAction));
+    assert.equal(workspace.pendingWindowCloseId, undefined);
+  }
+  const next = command(workspace, { type: 'space.close', spaceIds: [...spaceIds, spaceIds[0]] }).workspace;
+  assert.equal(next.pendingWindowCloseId, workspace.windows[0].id);
+  assert.deepEqual(next.pendingWindowCloseIds, [workspace.windows[1].id]);
 });

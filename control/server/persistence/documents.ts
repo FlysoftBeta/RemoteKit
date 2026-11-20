@@ -60,6 +60,7 @@ export const errorCode = literal(
 export const wireError = object(
   { code: errorCode, message: s() },
   {
+    detail: literal('pending_close'),
     capacity: literal(
       'storage',
       'basket',
@@ -167,6 +168,7 @@ export const tab = object(
   },
 ) satisfies Codec<ProductTab>;
 export const space = object({
+  name: nullable(s({ min: 1, max: 40, pattern: /^\S(?:[\s\S]*\S)?$/u })),
   id: s(),
   windowIds: array(s({ min: 1, max: 128 }), { min: 1, max: 3 }),
   weights: array(number({ min: Number.MIN_VALUE, max: Number.MAX_SAFE_INTEGER }), { min: 1, max: 3 }),
@@ -176,7 +178,7 @@ export const space = object({
 const workspaceFields = {
   qualityPreference: literal('quality', 'auto', 'smooth'),
   uiScale: number({ min: 0.5, max: 2 }),
-  topDeadZone: union(literal('off', 'auto'), integer({ min: 1, max: 200 })),
+  reduceMotion: b(),
   showStats: b(),
   autoFullscreen: b(),
   autoKeyboard: b(),
@@ -229,7 +231,7 @@ export const app = object(
 ) satisfies Codec<InstalledApp>;
 export const favorite = object({ id: s(), url: s(), title: s(), createdAt: n() }) satisfies Codec<Favorite>;
 const pendingClose = object(
-  { id: s() },
+  { id: s(), enteredAt: n(), observationEpoch: s(), observationSequence: s() },
   {
     windowId: s(),
     requestId: s(),
@@ -299,7 +301,8 @@ const actionShape = union(
   object({ type: literal('window.close'), windowId: s() }),
   object({ type: literal('window.state'), windowId: s(), state: windowState }),
   object({ type: literal('space.activate'), spaceId: s() }, source),
-  object({ type: literal('space.close'), spaceId: s() }),
+  object({ type: literal('space.close'), spaceIds: array(s({ min: 1 }), { min: 1 }) }),
+  object({ type: literal('space.rename'), spaceId: s(), name: s() }),
   object({ type: literal('space.layout'), spaceId: s(), weights: array(n()) }),
   object(
     { type: literal('app.install'), appId: s(), name: s(), startUrl: s() },

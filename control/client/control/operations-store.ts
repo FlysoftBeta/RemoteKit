@@ -1,6 +1,12 @@
 import { errorHandling } from '../../shared/error-policy';
 import { RetryUnit } from '../../shared/retry-unit';
-import { RemoteKitError, parseWireError, toRemoteKitError, wireError } from '../../shared/errors';
+import {
+  PENDING_CLOSE_DETAIL,
+  RemoteKitError,
+  parseWireError,
+  toRemoteKitError,
+  wireError,
+} from '../../shared/errors';
 import type { OperationReceipt, ProductAction, ProductOperation, ProductState } from '../../shared/product';
 import { recordedAction, type RecordedAction } from '../../shared/recorded-action';
 import { operationFailure, resolvedFailure } from '../failures/operations';
@@ -84,6 +90,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     const content = canonicalJson({ ...state, snapshotSequence: undefined });
     if (content === this.acceptedContent) return;
     this.acceptedContent = content;
+    let error = previous.error;
     const pending = previous.pending
       .map((entry) => {
         const receipt = state.operationReceipts?.find(
@@ -102,10 +109,25 @@ export class OperationsStore extends Store<OperationsSnapshot> {
         )
           return { ...entry, receipt: undefined, phase: 'unsent' as const };
         if (receipt?.status === 'failed' && !this.executing.has(entry.operationId)) this.acknowledge(receipt);
+        if (
+          receipt &&
+          !this.executing.has(entry.operationId) &&
+          (receipt.status === 'failed' || (receipt.status === 'unknown' && receipt.resolved))
+        ) {
+          const failure = parseWireError(receipt.error);
+          if (
+            failure &&
+            failure.code !== 'canceled' &&
+            !(failure.code === 'conflict' && failure.detail === PENDING_CLOSE_DETAIL)
+          ) {
+            if (receipt.resolved) resolvedFailure(failure);
+            error = operationFailure(failure, entry.action.type, this.commands.get(entry.operationId));
+          }
+        }
         return receipt ? { ...entry, receipt, phase: receipt.status } : entry;
       })
       .filter((entry) => this.retain(entry, state));
-    this.update(pending, state);
+    this.update(pending, state, error);
   }
 
   private retain(entry: OperationIntent, state: ProductState | null) {
@@ -249,6 +271,14 @@ export class OperationsStore extends Store<OperationsSnapshot> {
           receipt = await this.query(operation);
         }
         const failure = parseWireError(receipt.error);
+        if (
+          receipt.status === 'failed' &&
+          failure?.code === 'conflict' &&
+          failure.detail === PENDING_CLOSE_DETAIL
+        ) {
+          this.receipt(receipt);
+          return receipt;
+        }
         const submission = this.unit(this.submissionUnits, operation.operationId);
         const delay = failure && receipt.status === 'failed' ? submission.fail(failure).delay : undefined;
         if (receipt.status === 'failed' && delay !== undefined) {
@@ -281,6 +311,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
   }
 
   private retryReceipt(entry: OperationIntent, receipt: OperationReceipt) {
+    if (receipt.error?.code === 'conflict' && receipt.error.detail === PENDING_CLOSE_DETAIL) return false;
     if (this.executing.has(entry.operationId) || receipt.status !== 'failed') return false;
     const delay = this.unit(this.submissionUnits, entry.operationId).fail(receipt.error).delay;
     const command = this.commands.get(entry.operationId);
@@ -339,7 +370,9 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     if (failure && command) operationFailure(failure, command.type, command);
     const handling = failure && errorHandling(failure.code);
     const error =
-      receipt.status === 'failed' && handling !== 'canceled'
+      receipt.status === 'failed' &&
+      handling !== 'canceled' &&
+      !(failure?.code === 'conflict' && failure.detail === PENDING_CLOSE_DETAIL)
         ? failure
         : receipt.status === 'unknown' && receipt.resolved
           ? failure

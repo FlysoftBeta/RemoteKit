@@ -110,6 +110,7 @@ export function placeWindow(
   if (placement.mode === 'space') {
     target = {
       id: spaceId,
+      name: null,
       windowIds: [windowId],
       weights: [1],
       focusedWindowId: windowId,
@@ -141,6 +142,7 @@ export function replaceWindow(
   space.windowIds[index] = windowId;
   workspace.spaces.push({
     id: spaceId,
+    name: null,
     windowIds: [replacedId],
     weights: [1],
     focusedWindowId: replacedId,

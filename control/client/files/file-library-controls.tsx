@@ -1,3 +1,4 @@
+import { useDevicePreferences } from '../app/device-preferences';
 import { FileUploadOutlined } from '@mui/icons-material';
 import {
   Box,
@@ -113,6 +114,7 @@ export function useDeviceImport({
   onError: (error: RemoteKitError | undefined) => void;
 }) {
   const { snapshot } = useLibrary();
+  const { compatibility } = useDevicePreferences();
   const input = useRef<HTMLInputElement>(null);
   const { remaining, busy, jobs } = useSyncExternalStore(
     queue.subscribe,
@@ -145,7 +147,7 @@ export function useDeviceImport({
         hidden
         type="file"
         multiple
-        accept={accept?.join(',') || undefined}
+        accept={accept?.join(',') || (compatibility ? 'image/*' : undefined)}
         onChange={(event) => {
           const files = Array.from(event.target.files ?? []);
           event.target.value = '';

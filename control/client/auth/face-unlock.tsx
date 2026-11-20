@@ -1,5 +1,5 @@
 import './lock-screen.css';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { parseWireError, RemoteKitError } from '../../shared/errors';
 import type { AuthState } from '../../shared/security';
 import { failureError } from '../failures';
@@ -18,6 +18,7 @@ const finished = new Set(['failed', 'expired', 'absent']);
 // shows as scanning too; an attempt that ends without unlocking stays failed until the user retries.
 export function useFaceUnlock(auth: AuthState | null, camera: AuthCamera) {
   const [attempt, setAttempt] = useState<Attempt>({ kind: 'idle' });
+  const starting = useRef(false);
   const face = auth?.face;
   const usable = !!auth?.locked && auth.methods.face && !!face?.available;
   useEffect(() => {
@@ -47,10 +48,23 @@ export function useFaceUnlock(auth: AuthState | null, camera: AuthCamera) {
     return () => document.removeEventListener('visibilitychange', hidden);
   }, []);
   const begin = useCallback(() => {
-    if (!usable) return;
+    if (
+      !usable ||
+      starting.current ||
+      attempt.kind === 'starting' ||
+      attempt.kind === 'scanning' ||
+      (face?.purpose === 'verify' && face.status === 'pending')
+    )
+      return;
+    starting.current = true;
     setAttempt({ kind: 'starting', previous: face?.challengeId });
-    camera.start('verify').catch((error) => setAttempt({ kind: 'failed', error: failureError(error) }));
-  }, [usable, face?.challengeId, camera]);
+    camera
+      .start('verify')
+      .catch((error) => setAttempt({ kind: 'failed', error: failureError(error) }))
+      .finally(() => {
+        starting.current = false;
+      });
+  }, [usable, face?.challengeId, face?.purpose, face?.status, camera, attempt.kind]);
   const stop = useCallback(() => {
     if (camera.explicit === 'verify') camera.cancel();
     setAttempt({ kind: 'idle' });
@@ -98,7 +112,8 @@ export function FaceBadge({ face, prominent }: { face: FaceUnlock; prominent?: b
       className={`lock-face ${prominent ? 'prominent' : 'quiet'} ${face.phase}`}
       aria-label={caption}
       aria-busy={face.phase === 'scanning'}
-      onClick={() => {
+      onClick={(event) => {
+        event.stopPropagation();
         if (face.phase !== 'scanning') face.begin();
       }}
     >

@@ -107,6 +107,7 @@ test('Control restart removes interrupted sign-in tabs before any navigation res
   const state = store.workspaces.workspace(user.tenantId);
   state.windows.push({ id: 'questions', appId: 'questions', activeTabId: null, lastActiveAt: 1 });
   state.spaces.push({
+    name: null,
     id: 'space',
     windowIds: ['questions'],
     weights: [1],

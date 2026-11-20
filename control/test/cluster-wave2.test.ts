@@ -681,7 +681,14 @@ test('an administrator stop is forced past stop blockers, keep-alive tabs and an
       },
     ];
     state.spaces = [
-      { id: 'space', windowIds: ['window'], weights: [1], focusedWindowId: 'window', lastActiveAt: 0 },
+      {
+        name: null,
+        id: 'space',
+        windowIds: ['window'],
+        weights: [1],
+        focusedWindowId: 'window',
+        lastActiveAt: 0,
+      },
     ];
     state.activeSpaceId = 'space';
     h.store.workspaces.writeWorkspace(state);

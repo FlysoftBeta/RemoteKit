@@ -144,7 +144,14 @@ test('wanted-visible dwell excludes locked viewers, hidden windows, background t
     }));
     state.windows = [{ id: 'window', appId: 'browser', activeTabId: 'tab-0', lastActiveAt: 0 }];
     state.spaces = [
-      { id: 'space', windowIds: ['window'], focusedWindowId: 'window', weights: [1], lastActiveAt: 0 },
+      {
+        name: null,
+        id: 'space',
+        windowIds: ['window'],
+        focusedWindowId: 'window',
+        weights: [1],
+        lastActiveAt: 0,
+      },
     ];
     state.activeSpaceId = 'space';
     control.lifecycle.observeWanted(state);

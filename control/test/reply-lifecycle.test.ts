@@ -194,7 +194,7 @@ test('reply execution rejects Browser replacement after snapshot even when PID a
   }
 });
 
-test('close replies bind full identity, reject stale UI tokens and require explicit closed evidence', async () => {
+test('close replies bind full identity, reject stale UI tokens and accept complete missing-view evidence', async () => {
   const { store, endpoint, control, tenant, tab } = await fixture();
   try {
     const close = () =>
@@ -228,7 +228,7 @@ test('close replies bind full identity, reject stale UI tokens and require expli
     assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
     endpoint.view = undefined;
     await control.reconciler.tick();
-    assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
+    assert.equal(store.workspaces.workspace(tenant).tabs.length, 0);
     const placed = control.endpoint.placement.peek(tenant)!;
     control.endpoint.nodes.emit('session.event', {
       nodeId: 'fixture',

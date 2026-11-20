@@ -5,7 +5,9 @@ import { emptyWorkspace } from '../server/persistence/workspaces';
 const workspace = () => ({
   ...emptyWorkspace('tenant'),
   windows: [{ id: 'w', appId: 'browser', activeTabId: 'tab', lastActiveAt: 1 }],
-  spaces: [{ id: 'space', windowIds: ['w'], weights: [1], focusedWindowId: 'w', lastActiveAt: 1 }],
+  spaces: [
+    { name: null, id: 'space', windowIds: ['w'], weights: [1], focusedWindowId: 'w', lastActiveAt: 1 },
+  ],
   activeSpaceId: 'space',
 });
 const viewport = {

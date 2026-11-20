@@ -2,10 +2,16 @@ import { browserAvailability } from './browser-availability';
 import { RetryUnit } from '../../shared/retry-unit';
 import { endpointError } from '../endpoint/gateway';
 import { createHash } from 'node:crypto';
-import { parseWireError, RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
+import {
+  PENDING_CLOSE_DETAIL,
+  parseWireError,
+  RemoteKitError,
+  toRemoteKitError,
+  wireError,
+} from '../../shared/errors';
 import { SITE_PERMISSIONS, type FileRequest, type PageDialogReply } from '../../shared/product';
 import type { DownloadEvent, FileBinding, PageIdentity, PageReplyFields } from '../endpoint/types';
-import { log, reportError } from '../log';
+import { log } from '../log';
 import { removeWindow } from './model';
 import { settle } from './operations';
 import { ensureSite, pruneSite, validProtocolHandler, validSiteOrigin } from './site-policy';
@@ -302,7 +308,7 @@ export class PageRequests {
     if (state.pendingClose?.id === tab.id) state.pendingClose = null;
     this.services.lifecycle.remove(state.tenantId, tab.webviewId);
   }
-  pendingClose(tab: ProductTab, result: any): PendingClose {
+  pendingClose(tab: ProductTab, result: any, timing: CloseTiming): PendingClose {
     const { id, windowId } = tab;
     if (
       typeof result.browserIncarnation !== 'string' ||
@@ -323,6 +329,8 @@ export class PageRequests {
           phase: 'awaitingUser',
           tabId: id,
           identity,
+          ...timing,
+          enteredAt: this.context.clock.wallMs(),
           windowId,
           nativeRequestId,
           requestId: this.closeToken(
@@ -333,7 +341,14 @@ export class PageRequests {
             nativeRequestId,
           ),
         }
-      : { phase: 'awaitingPrompt', tabId: id, identity, windowId };
+      : {
+          phase: 'awaitingPrompt',
+          tabId: id,
+          identity,
+          windowId,
+          ...timing,
+          enteredAt: this.context.clock.wallMs(),
+        };
     return projectClose(flow)!;
   }
   closeToken(browser: string, tab: string, instance: string, document: string, request: string) {
@@ -341,39 +356,246 @@ export class PageRequests {
       .update(JSON.stringify([browser, tab, instance, document, request]))
       .digest('hex');
   }
-  observePendingClose(state: ProductWorkspace, snapshot: any, view: any) {
-    const tab = state.tabs.find((tab) => tab.id === state.pendingClose?.id);
-    const flow = readClose(state.pendingClose, tab?.webviewId ?? '');
-    if (flow.phase === 'none') return;
-    const { identity } = flow;
-    if (
-      snapshot.running === false ||
-      snapshot.browserIncarnation !== identity.browserIncarnation ||
-      (view && (String(view.instance) !== identity.instance || String(view.document) !== identity.document))
-    ) {
-      state.pendingClose = null;
-      state.pendingWindowCloseId = null;
-      delete state.pendingWindowCloseIds;
-      delete state.pendingAppUninstallId;
+  private closeTiming(tenant: string) {
+    const observation = this.context.endpoint.observation(tenant);
+    return {
+      enteredAt: this.context.clock.wallMs(),
+      observationEpoch: observation
+        ? `${observation.endpointIncarnation}:${observation.connectionEpoch}`
+        : '',
+      observationSequence: observation?.seq ?? '0',
+    };
+  }
+  private closeOperations(state: ProductWorkspace, target?: ProductTab) {
+    const tabId = state.pendingClose?.id ?? target?.id;
+    const windows = new Set([
+      state.pendingWindowCloseId,
+      ...(state.pendingWindowCloseIds ?? []),
+      state.pendingClose?.windowId,
+      target?.windowId,
+    ]);
+    return this.context.store.operations.pendingOperations(state.tenantId).filter(({ action, receipt }) => {
+      if (receipt.resolved) return false;
+      return (
+        (action.type === 'tab.close' && action.tabId === tabId) ||
+        (action.type === 'window.close' && windows.has(action.windowId)) ||
+        (state.pendingWindowCloseId && action.type === 'space.close') ||
+        (action.type === 'app.uninstall' && action.appId === `web:${state.pendingAppUninstallId}`)
+      );
+    });
+  }
+  private logClose(
+    state: ProductWorkspace,
+    before: ProductWorkspace,
+    event: 'close.phase_changed' | 'close.completed' | 'close.failed',
+    reason: string,
+    operationIds: string[],
+    target?: ProductTab,
+    failure?: RemoteKitError,
+  ) {
+    const previous = before.pendingClose;
+    const tab = target ?? before.tabs.find((tab) => tab.id === previous?.id);
+    const oldPhase = readClose(previous, tab?.webviewId ?? '').phase;
+    const newPhase = failure
+      ? failure.code === 'outcome_unknown'
+        ? 'unknown'
+        : failure.code === 'canceled'
+          ? 'canceled'
+          : 'failed'
+      : event === 'close.completed'
+        ? 'completed'
+        : readClose(state.pendingClose, tab?.webviewId ?? '').phase;
+    for (const operationId of operationIds.length ? operationIds : [null]) {
+      const fields = {
+        tenant: state.tenantId,
+        operationId,
+        windowId: previous?.windowId ?? tab?.windowId ?? before.pendingWindowCloseId ?? null,
+        tabId: previous?.id ?? tab?.id ?? null,
+        viewId: tab?.webviewId ?? null,
+        oldPhase,
+        newPhase,
+        reason,
+        ...(failure ? { code: failure.code } : {}),
+      };
+      if (event === 'close.failed') log.warn(event, fields);
+      else log.info(event, fields);
+    }
+  }
+  private saveCloseChange(
+    state: ProductWorkspace,
+    change: () => void,
+    reason: string,
+    failure?: RemoteKitError,
+    excludeOperationId?: string,
+    target?: ProductTab,
+  ) {
+    const before = structuredClone(state);
+    const related = this.closeOperations(state, target).filter(
+      ({ receipt }) => receipt.operationId !== excludeOperationId,
+    );
+    try {
+      this.context.store.transaction(() => {
+        change();
+        if (failure) {
+          state.pendingClose = null;
+          state.pendingWindowCloseId = null;
+          delete state.pendingWindowCloseIds;
+          delete state.pendingAppUninstallId;
+        }
+        for (const pending of this.context.store.operations.pendingOperations(state.tenantId)) {
+          if (pending.receipt.resolved) continue;
+          const a = pending.action;
+          const completed =
+            (a.type === 'tab.close' && !a.cancel && !state.tabs.some((tab) => tab.id === a.tabId)) ||
+            (a.type === 'window.close' && !state.windows.some((win) => win.id === a.windowId)) ||
+            (a.type === 'space.close' && !state.spaces.some((space) => a.spaceIds.includes(space.id))) ||
+            (a.type === 'app.uninstall' && !state.apps.some((app) => `web:${app.id}` === a.appId));
+          if (failure && related.some(({ receipt }) => receipt.operationId === pending.receipt.operationId)) {
+            settle(pending.receipt, {
+              status: failure.code === 'outcome_unknown' ? 'unknown' : 'failed',
+              error: wireError(failure),
+              ...(failure.code === 'outcome_unknown' ? { resolved: true } : {}),
+            });
+          } else if (completed) settle(pending.receipt, { status: 'committed' });
+          else continue;
+          this.context.store.operations.saveOperation(state, pending.receipt);
+        }
+        this.context.store.workspaces.saveWorkspace(state);
+      });
+    } catch (error) {
+      for (const key of Object.keys(state)) delete (state as unknown as Record<string, unknown>)[key];
+      Object.assign(state, before);
+      throw error;
+    }
+    this.logClose(
+      state,
+      before,
+      failure ? 'close.failed' : state.pendingClose ? 'close.phase_changed' : 'close.completed',
+      reason,
+      related.map(({ receipt }) => receipt.operationId),
+      target,
+      failure,
+    );
+    this.context.endpoint.invalidate(state.tenantId);
+    this.services.viewers.push(state.tenantId);
+  }
+  private completeTabClose(state: ProductWorkspace, tab: ProductTab, reason: string) {
+    this.saveCloseChange(state, () => this.removeProductTab(state, tab), reason, undefined, undefined, tab);
+  }
+  observePendingClose(state: ProductWorkspace) {
+    if (!state.pendingClose) return;
+    const tab = state.tabs.find((tab) => tab.id === state.pendingClose!.id);
+    if (!tab) {
+      this.saveCloseChange(
+        state,
+        () => {
+          state.pendingClose = null;
+        },
+        'tab_missing',
+      );
       return;
     }
-    const request = view?.pending_close?.requestId;
-    if (request !== undefined && flow.phase !== 'awaitingCloseEvidence') {
-      const nativeRequestId = String(request);
-      state.pendingClose = projectClose({
-        phase: 'awaitingUser',
-        tabId: flow.tabId,
-        identity,
-        windowId: flow.windowId,
-        nativeRequestId,
-        requestId: this.closeToken(
-          identity.browserIncarnation,
-          flow.tabId,
-          identity.instance,
-          identity.document,
-          nativeRequestId,
-        ),
-      });
+    const flow = readClose(state.pendingClose, tab.webviewId);
+    if (flow.phase === 'none') {
+      this.saveCloseChange(
+        state,
+        () => {},
+        'invalid_identity',
+        new RemoteKitError('outcome_unknown', '关闭请求缺少页面身份', { detail: 'close_identity_missing' }),
+      );
+      return;
+    }
+    const observed = this.context.endpoint.observation(state.tenantId);
+    const view = observed?.views.find((view) => view.viewId === tab.webviewId);
+    const currentEpoch = observed ? `${observed.endpointIncarnation}:${observed.connectionEpoch}` : '';
+    const fresh =
+      !!observed &&
+      (currentEpoch !== flow.observationEpoch || BigInt(observed.seq) > BigInt(flow.observationSequence));
+    const revision = this.context.store.coordination.desiredRevision(state.tenantId);
+    const complete =
+      !!observed &&
+      fresh &&
+      observed.browser === 'running' &&
+      observed.converged &&
+      !observed.lastError &&
+      revision !== undefined &&
+      BigInt(observed.observedRevision) >= BigInt(revision) &&
+      BigInt(observed.applied.viewsRevision) >= BigInt(revision);
+    if (
+      observed &&
+      (observed.browser === 'stopped' ||
+        (observed.browserIncarnation && observed.browserIncarnation !== flow.identity.browserIncarnation) ||
+        (fresh &&
+          view &&
+          (view.instance !== flow.identity.instance || view.document !== flow.identity.document)))
+    ) {
+      this.saveCloseChange(
+        state,
+        () => {},
+        'target_retired',
+        new RemoteKitError('outcome_unknown', '原页面实例已结束，关闭结果未知'),
+      );
+      return;
+    }
+    if (observed?.browserIncarnation === flow.identity.browserIncarnation) {
+      if ((complete && !view) || (fresh && view?.close_state === 'closed')) {
+        this.completeTabClose(state, tab, 'view_missing_or_closed');
+        return;
+      }
+      const request = view?.pending_close?.requestId;
+      if (
+        complete &&
+        flow.phase === 'awaitingUser' &&
+        view?.close_state === 'open' &&
+        String(request) !== flow.nativeRequestId &&
+        !view.pageRequests?.pending.some((pending) => String(pending.request) === flow.nativeRequestId)
+      ) {
+        this.saveCloseChange(
+          state,
+          () => {},
+          'request_disappeared',
+          new RemoteKitError('canceled', '页面关闭确认已失效', { detail: 'close_request_disappeared' }),
+        );
+        return;
+      }
+      if (
+        fresh &&
+        request !== undefined &&
+        flow.phase !== 'awaitingCloseEvidence' &&
+        (flow.phase !== 'awaitingUser' || flow.nativeRequestId !== String(request))
+      ) {
+        const nativeRequestId = String(request);
+        this.saveCloseChange(
+          state,
+          () => {
+            state.pendingClose = projectClose({
+              ...flow,
+              ...this.closeTiming(state.tenantId),
+              phase: 'awaitingUser',
+              nativeRequestId,
+              requestId: this.closeToken(
+                flow.identity.browserIncarnation,
+                tab.id,
+                flow.identity.instance,
+                flow.identity.document,
+                nativeRequestId,
+              ),
+            });
+          },
+          'prompt_observed',
+        );
+        return;
+      }
+    }
+    if (flow.phase !== 'awaitingUser' && this.context.clock.wallMs() - flow.enteredAt >= 10_000) {
+      this.saveCloseChange(
+        state,
+        () => {},
+        'phase_timeout',
+        new RemoteKitError('outcome_unknown', '页面关闭结果未能在期限内确认', {
+          detail: 'close_phase_timeout',
+        }),
+      );
     }
   }
   async replyClose(tenant: string, viewId: string, pending: PendingClose, accept: boolean) {
@@ -392,8 +614,14 @@ export class PageRequests {
     return result;
   }
   async closeProductTab(state: ProductWorkspace, tab: ProductTab) {
+    if (!state.tabs.some((current) => current.id === tab.id)) return;
+    if (
+      state.pendingClose?.id === tab.id &&
+      readClose(state.pendingClose, tab.webviewId).phase === 'awaitingUser'
+    )
+      return;
     if (browserAvailability(this.context, state.tenantId).state !== 'available') {
-      this.removeProductTab(state, tab);
+      this.completeTabClose(state, tab, 'browser_unavailable');
       return;
     }
     if (tab.signIn) {
@@ -407,18 +635,47 @@ export class PageRequests {
       return;
     }
     if (state.pendingClose && state.pendingClose.id !== tab.id)
-      throw new RemoteKitError('conflict', '请先处理当前关闭请求');
+      throw new RemoteKitError('conflict', '请先处理当前关闭请求', { detail: PENDING_CLOSE_DETAIL });
     if (isLocalTab(tab) || (tab.popup && tab.popup.status !== 'adopted')) {
-      this.removeProductTab(state, tab);
+      this.completeTabClose(state, tab, 'local_target');
       return;
     }
-    const result = await this.context.endpoint.closeView(state.tenantId, {
-      viewId: tab.webviewId,
-      force: false,
-    });
-    if (result.closed === true) this.removeProductTab(state, tab);
-    else if (result.accepted || result.pending) state.pendingClose = this.pendingClose(tab, result);
-    else throw new RemoteKitError('outcome_unknown', 'Endpoint 尚未确认页面关闭');
+    const browserIncarnation = this.context.endpoint.observation(state.tenantId)?.browserIncarnation;
+    const timing = this.closeTiming(state.tenantId);
+    try {
+      const result = await this.context.endpoint.closeView(state.tenantId, {
+        viewId: tab.webviewId,
+        browserIncarnation,
+        force: false,
+      });
+      if (result.closed === true) this.completeTabClose(state, tab, 'native_completed');
+      else if (result.accepted || result.pending)
+        this.saveCloseChange(
+          state,
+          () => {
+            state.pendingClose = this.pendingClose(tab, result, timing);
+          },
+          'native_accepted',
+          undefined,
+          undefined,
+          tab,
+        );
+      else throw new RemoteKitError('outcome_unknown', 'Endpoint 尚未确认页面关闭');
+    } catch (error) {
+      const failure = toRemoteKitError(error);
+      if (failure.code === 'outcome_unknown') {
+        this.saveCloseChange(state, () => {}, 'native_outcome_unknown', failure, undefined, tab);
+        throw error;
+      }
+      if (
+        failure.code !== 'not_found' ||
+        failure.detail !== 'view_not_in_session' ||
+        !browserIncarnation ||
+        this.context.endpoint.observation(state.tenantId)?.browserIncarnation !== browserIncarnation
+      )
+        throw error;
+      this.completeTabClose(state, tab, 'view_not_in_session');
+    }
   }
   async continueWindowClose(state: ProductWorkspace) {
     if (!state.pendingWindowCloseId) return;
@@ -427,75 +684,67 @@ export class PageRequests {
       unit = new RetryUnit({ name: 'page.close_batch' });
       this.closeRetries.set(state.tenantId, unit);
     }
-    const input = JSON.stringify([
-      state.pendingWindowCloseId,
-      state.pendingWindowCloseIds,
-      state.pendingAppUninstallId,
-      this.context.tenants.get(state.tenantId).browserIncarnation,
-      this.context.store.operations
-        .pendingOperations(state.tenantId)
-        .map((operation) => operation.receipt.operationId),
-    ]);
-    if (!unit.ready(input)) return;
-    const windowIds = new Set([state.pendingWindowCloseId, ...(state.pendingWindowCloseIds ?? [])]);
-    const spaceIds = new Set(
-      state.spaces
-        .filter((space) => space.windowIds.some((id) => windowIds.has(id)))
-        .map((space) => space.id),
-    );
-    const appId = state.pendingAppUninstallId;
+    const input = () =>
+      JSON.stringify([
+        state.pendingWindowCloseId,
+        state.pendingWindowCloseIds,
+        state.pendingAppUninstallId,
+        this.context.tenants.get(state.tenantId).browserIncarnation,
+        this.context.store.operations
+          .pendingOperations(state.tenantId)
+          .map((operation) => operation.receipt.operationId),
+      ]);
+    if (!unit.ready(input())) return;
     try {
       await this.advanceWindowClose(state);
       unit.succeed();
     } catch (error) {
       const failure = toRemoteKitError(error);
+      // An earlier window can finish before a later one fails; retries belong to the remaining queue.
+      unit.ready(input());
       const { delay } = unit.fail(failure);
       if (delay === undefined && failure.code !== 'outcome_unknown') {
-        state.pendingWindowCloseId = null;
-        delete state.pendingWindowCloseIds;
-        delete state.pendingAppUninstallId;
-        for (const pending of this.context.store.operations.pendingOperations(state.tenantId)) {
-          const action = pending.action;
-          if (
-            (action.type === 'window.close' && windowIds.has(action.windowId)) ||
-            (action.type === 'space.close' && spaceIds.has(action.spaceId)) ||
-            (action.type === 'app.uninstall' && action.appId === 'web:' + appId)
-          ) {
-            settle(pending.receipt, {
-              status: 'failed',
-              error: wireError(
-                reportError(failure, 'page.close_failed', {
-                  tenant: state.tenantId,
-                  operation: pending.receipt.operationId,
-                }),
-              ),
-            });
-            this.context.store.operations.saveOperation(state, pending.receipt);
-          }
-        }
-        this.services.operations.saveWorkspace(state);
+        this.saveCloseChange(state, () => {}, 'batch_failed', failure);
       }
       throw error;
     }
   }
   private async advanceWindowClose(state: ProductWorkspace) {
     if (state.pendingClose && browserAvailability(this.context, state.tenantId).state === 'available') return;
-    state.pendingClose = null;
+    if (state.pendingClose)
+      this.saveCloseChange(
+        state,
+        () => {
+          state.pendingClose = null;
+        },
+        'browser_unavailable',
+      );
     while (state.pendingWindowCloseId) {
       const id = state.pendingWindowCloseId;
       for (const tab of state.tabs.filter((t) => t.windowId === id)) {
         await this.closeProductTab(state, tab);
-        this.services.operations.saveWorkspace(state);
         if (state.pendingClose) return;
       }
-      removeWindow(state, id);
-      state.pendingWindowCloseId = state.pendingWindowCloseIds?.shift() ?? null;
+      this.saveCloseChange(
+        state,
+        () => {
+          removeWindow(state, id);
+          state.pendingWindowCloseId = state.pendingWindowCloseIds?.shift() ?? null;
+        },
+        'window_completed',
+      );
     }
-    delete state.pendingWindowCloseIds;
-    if (state.pendingAppUninstallId) {
-      state.apps = state.apps.filter((app) => app.id !== state.pendingAppUninstallId);
-      delete state.pendingAppUninstallId;
-    }
+    this.saveCloseChange(
+      state,
+      () => {
+        delete state.pendingWindowCloseIds;
+        if (state.pendingAppUninstallId) {
+          state.apps = state.apps.filter((app) => app.id !== state.pendingAppUninstallId);
+          delete state.pendingAppUninstallId;
+        }
+      },
+      'batch_completed',
+    );
   }
   collectDialogs(tenant: string, state: ProductWorkspace, snapshot: any) {
     const runtime = this.context.tenants.get(tenant);
@@ -713,33 +962,44 @@ export class PageRequests {
   async confirmClose(state: ProductWorkspace, tabId: string, accept: boolean, operationId?: string) {
     const tab = state.tabs.find((t) => t.id === tabId)!;
     const pending = state.pendingClose!;
-    await this.replyClose(state.tenantId, tab.webviewId, pending, accept);
+    const timing = this.closeTiming(state.tenantId);
+    try {
+      await this.replyClose(state.tenantId, tab.webviewId, pending, accept);
+    } catch (error) {
+      const failure = toRemoteKitError(error);
+      if (failure.code === 'outcome_unknown')
+        this.saveCloseChange(state, () => {}, 'reply_outcome_unknown', failure);
+      throw error;
+    }
     if (accept) {
       const flow = readClose(pending, tab.webviewId);
       if (flow.phase !== 'awaitingUser') throw new RemoteKitError('conflict', '关闭请求已失效');
-      state.pendingClose = projectClose({ ...flow, phase: 'awaitingCloseEvidence' });
+      this.saveCloseChange(
+        state,
+        () => {
+          state.pendingClose = projectClose({
+            ...flow,
+            ...timing,
+            enteredAt: this.context.clock.wallMs(),
+            phase: 'awaitingCloseEvidence',
+          });
+        },
+        'user_accepted',
+      );
     } else {
-      const windowId = state.pendingWindowCloseId;
-      state.pendingClose = null;
-      state.pendingWindowCloseId = null;
-      delete state.pendingWindowCloseIds;
-      delete state.pendingAppUninstallId;
-      for (const saved of this.context.store.operations.pendingOperations(state.tenantId)) {
-        if (saved.receipt.operationId === operationId) continue;
-        if (
-          (saved.action.type === 'tab.close' && saved.action.tabId === tabId) ||
-          (saved.action.type === 'window.close' && saved.action.windowId === windowId) ||
-          ['space.close', 'app.uninstall'].includes(saved.action.type)
-        ) {
-          settle(saved.receipt, { status: 'failed', error: { code: 'canceled', message: '用户取消关闭' } });
-          this.context.store.operations.saveOperation(state, saved.receipt);
-        }
-      }
+      this.saveCloseChange(
+        state,
+        () => {},
+        'user_canceled',
+        new RemoteKitError('canceled', '用户取消关闭'),
+        operationId,
+      );
     }
   }
 }
 
-type CloseTarget = { tabId: string; identity: PageIdentity; windowId?: string };
+type CloseTiming = Pick<PendingClose, 'enteredAt' | 'observationEpoch' | 'observationSequence'>;
+type CloseTarget = { tabId: string; identity: PageIdentity; windowId?: string } & CloseTiming;
 export type TabCloseFlow =
   | { phase: 'none' }
   | (CloseTarget & { phase: 'awaitingPrompt' })
@@ -750,6 +1010,9 @@ export function readClose(pending: PendingClose | null | undefined, viewId: stri
     return { phase: 'none' };
   const target = {
     tabId: pending.id,
+    enteredAt: pending.enteredAt,
+    observationEpoch: pending.observationEpoch,
+    observationSequence: pending.observationSequence,
     identity: {
       viewId,
       browserIncarnation: pending.browserIncarnation,
@@ -771,6 +1034,9 @@ function projectClose(flow: TabCloseFlow): PendingClose | null {
   const { identity, windowId } = flow;
   return {
     id: flow.tabId,
+    enteredAt: flow.enteredAt,
+    observationEpoch: flow.observationEpoch,
+    observationSequence: flow.observationSequence,
     windowId,
     browserIncarnation: identity.browserIncarnation,
     instance: identity.instance,

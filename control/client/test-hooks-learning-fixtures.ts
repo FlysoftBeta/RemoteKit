@@ -122,6 +122,7 @@ export function learningProductFixture(appId = 'study', signed = true): ProductS
       tabs: [],
       spaces: [
         {
+          name: null,
           id: 'learning-space',
           windowIds: ['learning-window'],
           weights: [1],
@@ -137,7 +138,7 @@ export function learningProductFixture(appId = 'study', signed = true): ProductS
         workspace: {
           qualityPreference: 'auto',
           uiScale: 1,
-          topDeadZone: 'off',
+          reduceMotion: false,
           autoKeyboard: false,
           clipboardSync: false,
           showStats: false,

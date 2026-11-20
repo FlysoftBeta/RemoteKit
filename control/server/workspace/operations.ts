@@ -136,8 +136,9 @@ export class OperationPipeline {
         };
         const result = await this.run(ctx, operation.action);
         const observed = this.context.store.operations.operation(tenant, receipt.operationId)?.receipt;
-        if (observed && ['committed', 'failed'].includes(observed.status)) settle(receipt, observed);
-        if (!['committed', 'failed'].includes(receipt.status)) {
+        if (observed && (observed.resolved || ['committed', 'failed'].includes(observed.status)))
+          settle(receipt, observed);
+        if (!receipt.resolved && !['committed', 'failed'].includes(receipt.status)) {
           settle(receipt, {
             status:
               ['tab.navigate', 'tab.command'].includes(operation.action.type) && result.application
@@ -150,7 +151,7 @@ export class OperationPipeline {
           if (
             (a.type === 'tab.close' && !a.cancel && current.tabs.some((tab) => tab.id === a.tabId)) ||
             (a.type === 'window.close' && current.windows.some((window) => window.id === a.windowId)) ||
-            (a.type === 'space.close' && current.spaces.some((space) => space.id === a.spaceId)) ||
+            (a.type === 'space.close' && current.spaces.some((space) => a.spaceIds.includes(space.id))) ||
             (a.type === 'app.uninstall' && current.apps.some((app) => 'web:' + app.id === a.appId))
           ) {
             settle(receipt, { status: 'applying' });
@@ -159,7 +160,7 @@ export class OperationPipeline {
         }
       } catch (error) {
         const durable = this.context.store.operations.operation(tenant, operation.operationId)?.receipt;
-        if (durable && ['committed', 'failed'].includes(durable.status)) {
+        if (durable && (durable.resolved || ['committed', 'failed'].includes(durable.status))) {
           settle(receipt, durable);
         } else {
           const failure = reportError(toRemoteKitError(error), 'operation.failed', {
@@ -289,7 +290,7 @@ export class OperationPipeline {
     const closePending =
       (action.type === 'tab.close' && !action.cancel && state.tabs.some((t) => t.id === action.tabId)) ||
       (action.type === 'window.close' && state.windows.some((w) => w.id === action.windowId)) ||
-      (action.type === 'space.close' && state.spaces.some((space) => space.id === action.spaceId)) ||
+      (action.type === 'space.close' && state.spaces.some((space) => action.spaceIds.includes(space.id))) ||
       (action.type === 'app.uninstall' && state.apps.some((app) => 'web:' + app.id === action.appId));
     if (receipt && !['tab.navigate', 'tab.command'].includes(action.type) && !closePending)
       settle(receipt, { status: 'committed', application });

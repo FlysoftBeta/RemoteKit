@@ -27,7 +27,14 @@ export function driveReconciler(path: 'product' | 'reconnect' | 'ua' | 'reclaim'
       state.windows = [{ id: 'window', activeTabId: 'tab', appId: 'browser', lastActiveAt: 0 }];
       state.tabs = [{ ...tab, pendingUaReloadOrigin: 'https://example.test' }];
       state.spaces = [
-        { id: 'space', windowIds: ['window'], weights: [1], focusedWindowId: 'window', lastActiveAt: 0 },
+        {
+          name: null,
+          id: 'space',
+          windowIds: ['window'],
+          weights: [1],
+          focusedWindowId: 'window',
+          lastActiveAt: 0,
+        },
       ];
       state.activeSpaceId = 'space';
     }
@@ -98,6 +105,7 @@ export function driveReconciler(path: 'product' | 'reconnect' | 'ua' | 'reclaim'
       learning: { signIn: { reconcile: noop } },
       pageRequests: {
         clear: noop,
+        observePendingClose: noop,
         continueWindowClose: async () => {},
         observeFullscreen: () => false,
         collectDialogs: noop,

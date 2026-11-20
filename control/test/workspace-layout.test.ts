@@ -28,8 +28,15 @@ function workspace() {
     url: 'https://example.test/',
   }));
   state.workspace.spaces = [
-    { id: 'one', windowIds: ['a', 'b'], weights: [0.7, 0.3], focusedWindowId: 'b', lastActiveAt: 1 },
-    { id: 'two', windowIds: ['c'], weights: [1], focusedWindowId: 'c', lastActiveAt: 2 },
+    {
+      name: null,
+      id: 'one',
+      windowIds: ['a', 'b'],
+      weights: [0.7, 0.3],
+      focusedWindowId: 'b',
+      lastActiveAt: 1,
+    },
+    { name: null, id: 'two', windowIds: ['c'], weights: [1], focusedWindowId: 'c', lastActiveAt: 2 },
   ];
   state.workspace.activeSpaceId = 'one';
   return state;
@@ -102,6 +109,10 @@ test('space projection handles split, focus, detach, proportions and settings si
   assert.deepEqual(detached.spaces[0].windowIds, ['b']);
   assert.deepEqual(detached.spaces[0].weights, [1]);
   assert.equal(detached.activeSpaceId, detach.spaceId);
+  const renamed = project([{ type: 'space.rename', spaceId: 'one', name: '  工作  ' }]);
+  assert.equal(renamed.spaces[0].name, '工作');
+  assert.equal(project([{ type: 'space.rename', spaceId: 'one', name: ' ' }]).spaces[0].name, null);
+  assert.equal(project([{ type: 'space.close', spaceIds: ['one', 'two', 'one'] }]).windows.length, 0);
   const focused = project([{ type: 'window.focus', windowId: 'c' }]);
   assert.equal(focused.activeSpaceId, 'two');
   assert.equal(focused.spaces[1].focusedWindowId, 'c');

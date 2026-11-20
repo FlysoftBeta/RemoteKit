@@ -453,7 +453,7 @@ for (const target of ['space', 'app'] as const) {
         operationGeneration: f.store.operations.operationGeneration(f.user.tenantId),
         action:
           target === 'space'
-            ? { type: 'space.close', spaceId: state.spaces[0].id }
+            ? { type: 'space.close', spaceIds: [state.spaces[0].id] }
             : { type: 'app.uninstall', appId },
       };
       const receipt = await f.control.operations.submitOperation(f.user.tenantId, operation, 'lease');
@@ -614,7 +614,7 @@ test('web App popups split beside their opener, overflow into a space and route 
   }
 });
 
-test('space close and App uninstall stop at beforeunload, preserve cancelled targets and continue sequentially on retry', async () => {
+test('multi-space close and App uninstall stop at beforeunload, preserve cancelled targets and continue sequentially on retry', async () => {
   const f = await fixture();
   try {
     await f.action(
@@ -632,7 +632,7 @@ test('space close and App uninstall stop at beforeunload, preserve cancelled tar
         type: 'window.open',
         appId: 'browser',
         url: 'https://second.test/',
-        placement: { mode: 'split', besideWindowId: firstWindow.id, side: 'right' },
+        placement: { mode: 'space' },
       }),
     );
     state = f.store.workspaces.workspace(f.user.tenantId);
@@ -647,7 +647,10 @@ test('space close and App uninstall stop at beforeunload, preserve cancelled tar
       await f.control.operations.submitOperation(f.user.tenantId, operation, 'lease');
       return operation;
     };
-    const closeSpace = await submit({ type: 'space.close', spaceId: state.spaces[0].id });
+    const closeSpace = await submit({
+      type: 'space.close',
+      spaceIds: [...state.spaces.map((space) => space.id), state.spaces[0].id],
+    });
     state = f.store.workspaces.workspace(f.user.tenantId);
     assert.equal(state.windows.length, 1);
     assert.equal(state.pendingClose?.id, secondTab.id);
@@ -665,7 +668,7 @@ test('space close and App uninstall stop at beforeunload, preserve cancelled tar
     assert.equal(state.windows.length, 1);
     assert.equal(f.control.operations.operationStatus(f.user.tenantId, closeSpace).status, 'failed');
     f.endpoint.pendingClose.clear();
-    await f.action({ type: 'space.close', spaceId: state.spaces[0].id });
+    await f.action({ type: 'space.close', spaceIds: [state.spaces[0].id] });
     const installed = await f.action(
       buildAction({
         type: 'app.install',

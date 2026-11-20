@@ -1,9 +1,8 @@
-import { Menu, MenuItem } from '@mui/material';
 import { useEffect, useRef, useState } from 'react';
 import type { ProductState } from '../../shared/product';
 import type { Action } from './product-dialogs';
 import type { SpaceSnapshots } from './space-snapshots';
-import { scaledAnchor } from './ui-scale';
+import { SpaceMenu } from './space-menu';
 import { GroupList } from './group-list';
 export function LauncherSpaces({
   state,
@@ -24,7 +23,7 @@ export function LauncherSpaces({
   close(): void;
   report(error: unknown): void;
 }) {
-  const [menu, setMenu] = useState<{ id: string; anchor: HTMLElement }>();
+  const [menu, setMenu] = useState<{ id: string; anchor: HTMLElement | null }>();
   const hold = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const gesture = useRef({ x: 0, y: 0, consumed: false });
   useEffect(() => () => clearTimeout(hold.current), []);
@@ -70,16 +69,16 @@ export function LauncherSpaces({
         onPointerCancel: () => clearTimeout(hold.current),
       })}
     >
-      <Menu open={!!menu} anchorEl={scaledAnchor(menu?.anchor)} onClose={() => setMenu(undefined)}>
-        <MenuItem
-          onClick={() => {
-            if (menu) run({ type: 'space.close', spaceId: menu.id });
-            setMenu(undefined);
-          }}
-        >
-          关闭窗口组
-        </MenuItem>
-      </Menu>
+      {menu && state.workspace.spaces.some((space) => space.id === menu.id) && (
+        <SpaceMenu
+          space={state.workspace.spaces.find((space) => space.id === menu.id)!}
+          state={state}
+          anchor={menu.anchor}
+          close={() => setMenu((current) => (current ? { ...current, anchor: null } : undefined))}
+          action={action}
+          report={report}
+        />
+      )}
     </GroupList>
   );
 }

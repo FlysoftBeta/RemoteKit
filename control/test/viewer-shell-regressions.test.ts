@@ -3,7 +3,7 @@ import { createRequire, Module } from 'node:module';
 import test, { afterEach } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
-import { act, createElement, type ReactNode } from 'react';
+import { act, createElement, useRef, type ReactNode } from 'react';
 import type { Root } from 'react-dom/client';
 import type { ProductState, ProductTab, ProductWindow, LauncherItem } from '../shared/product';
 import type { ViewerSession } from '../client/viewer-session';
@@ -16,6 +16,7 @@ for (const name of [
   'window',
   'document',
   'navigator',
+  'localStorage',
   'HTMLElement',
   'HTMLInputElement',
   'Element',
@@ -132,7 +133,15 @@ const deferred = <T = void>() => {
 };
 function pointer(target: EventTarget, type: string, x: number, y = 20, pointerType = 'mouse') {
   const event = new Event(type, { bubbles: true, cancelable: true });
-  Object.assign(event, { pointerId: 1, clientX: x, clientY: y, pointerType, buttons: 1, button: 0 });
+  Object.assign(event, {
+    pointerId: 1,
+    clientX: x,
+    clientY: y,
+    pointerType,
+    buttons: 1,
+    button: 0,
+    isPrimary: true,
+  });
   target.dispatchEvent(event);
 }
 const rect = (left: number, width = 200) => new DOMRect(left, 0, width, 100);
@@ -259,7 +268,7 @@ function stateFor(tabs = [tabA, tabB]): ProductState {
       favorites: [],
       apps: [],
       sites: {},
-      spaces: [{ id: 'space', windowIds: ['w'], weights: [1] }],
+      spaces: [{ name: null, id: 'space', windowIds: ['w'], weights: [1] }],
       activeSpaceId: 'space',
       settings: { workspace: { audioChannels: { left: true, right: true } } },
     },
@@ -477,7 +486,9 @@ async function windowDragFixture() {
   const targetWindow = { ...win, id: 'target' };
   let state = stateFor();
   state.workspace.windows = [sourceWindow, targetWindow];
-  state.workspace.spaces = [{ id: 'space', windowIds: ['source', 'target'], weights: [0.5, 0.5] } as never];
+  state.workspace.spaces = [
+    { name: null, id: 'space', windowIds: ['source', 'target'], weights: [0.5, 0.5] } as never,
+  ];
   const calls: { owner: string; value: unknown }[] = [];
   let owner = 'old';
   const snapshots = new SpaceSnapshots();
@@ -579,7 +590,7 @@ test('window drag drop recalculates placement from the current active group', as
   const next = structuredClone(f.state);
   next.workspace.windows.push({ ...win, id: 'new-target' });
   next.workspace.spaces = [
-    { id: 'other', windowIds: ['new-target', 'target'], weights: [0.5, 0.5] } as never,
+    { name: null, id: 'other', windowIds: ['new-target', 'target'], weights: [0.5, 0.5] } as never,
   ];
   next.workspace.activeSpaceId = 'other';
   f.setState(next);
@@ -931,4 +942,296 @@ test('waiting for a workspace revision subscribes without creating an unused abo
   assert.equal((await waiting).revision, 2);
   assert.equal(removed, 1);
   assert.equal(controller.mock.callCount(), 0);
+});
+
+const { WindowHandle } =
+  require('../client/app/window-handle') as typeof import('../client/app/window-handle');
+const { LockScreen } = require('../client/auth/lock-screen') as typeof import('../client/auth/lock-screen');
+const { setCompatibility, getSnapshot: deviceSnapshot } =
+  require('../client/app/device-preferences') as typeof import('../client/app/device-preferences');
+
+for (const pointerType of ['mouse', 'touch'])
+  test(`handle opens immediately and captures a second ${pointerType} press on the backdrop`, async () => {
+    const f = mount();
+    const calls: unknown[] = [];
+    await f.render(
+      createElement(WindowHandle, {
+        win,
+        state: stateFor(),
+        online: true,
+        action: async (command) => {
+          calls.push(command);
+          return {} as never;
+        },
+        report: assert.fail,
+      }),
+    );
+    const handle = f.host.querySelector('button')!;
+    box(handle, 100, 28);
+    await act(async () => handle.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })));
+    assert.ok(document.querySelector('[role="menu"]'), 'menu opens in the same turn');
+    const backdrop = document.querySelector('.MuiBackdrop-root')!;
+    let leaked = 0;
+    backdrop.addEventListener('pointerdown', () => leaked++);
+    backdrop.addEventListener('click', () => leaked++);
+    await act(async () => {
+      pointer(backdrop, 'pointerdown', 95, 20, pointerType);
+      pointer(backdrop, 'pointerup', 95, 20, pointerType);
+      backdrop.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 2 }));
+    });
+    assert.deepEqual(calls, [{ type: 'window.close', windowId: win.id }]);
+    assert.equal(leaked, 0);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    assert.equal(!!document.querySelector('[role="menu"]'), false);
+  });
+test('keyboard activation has no double press capture; outlying and expired presses propagate', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { useHandleActivation } =
+    require('../client/app/handle-activation') as typeof import('../client/app/handle-activation');
+  const f = mount();
+  let menus = 0,
+    doubles = 0,
+    down = 0;
+  function Probe() {
+    const activation = useHandleActivation({ onMenu: () => menus++, onDouble: () => doubles++ });
+    return createElement('button', { ...activation.buttonProps, onPointerDown: () => down++ });
+  }
+  await f.render(createElement(Probe));
+  const button = f.host.querySelector('button')!;
+  box(button, 100, 28);
+  await act(async () => button.click());
+  await act(async () => pointer(button, 'pointerdown', 110));
+  assert.equal(down, 1);
+  await act(async () => button.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })));
+  await act(async () => pointer(button, 'pointerdown', 300));
+  await act(async () => pointer(button, 'pointerdown', 110));
+  assert.equal(down, 3);
+  await act(async () => button.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })));
+  t.mock.timers.tick(251);
+  await act(async () => pointer(button, 'pointerdown', 110));
+  assert.equal(down, 4);
+  assert.equal(menus, 3);
+  assert.equal(doubles, 0);
+});
+test('lock blank taps start one face attempt and the fifth tap reveals the form with that attempt', async () => {
+  const f = mount();
+  const started = deferred<void>();
+  let starts = 0;
+  const camera = {
+    explicit: 'verify',
+    start: () => {
+      starts++;
+      return started.promise;
+    },
+    cancel() {},
+  } as unknown as import('../client/auth/auth-camera').AuthCamera;
+  const auth = {
+    locked: true,
+    methods: { face: true },
+    face: { available: true },
+  } as import('../shared/security').AuthState;
+  await f.render(
+    createElement(LockScreen, {
+      auth,
+      camera,
+      children: (_close, face) => createElement('div', { 'data-unlock-form': true }, face.phase),
+    }),
+  );
+  const tap = async () =>
+    act(async () => {
+      const blank = f.host.querySelector('.viewer-lock-blank')!;
+      pointer(blank, 'pointerdown', 100);
+      pointer(blank, 'pointerup', 100);
+      blank.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+    });
+  for (let index = 0; index < 4; index++) await tap();
+  assert.equal(starts, 1);
+  assert.equal(f.host.querySelector('[data-unlock-form]'), null);
+  await tap();
+  assert.ok(f.host.querySelector('[data-unlock-form]'));
+  assert.equal(starts, 1);
+  await act(async () => started.resolve());
+});
+test('device preferences reject invalid formats, persist compatibility and tolerate storage failures', (t) => {
+  for (const value of [
+    null,
+    {},
+    { v: 2, compatibility: false },
+    { v: 1, compatibility: 'false' },
+    { v: 1, compatibility: false, extra: true },
+  ]) {
+    localStorage.setItem('remotekit.device.preferences', JSON.stringify(value));
+    window.dispatchEvent(new dom.window.StorageEvent('storage', { key: 'remotekit.device.preferences' }));
+    assert.equal(deviceSnapshot().compatibility, true);
+  }
+  setCompatibility(false);
+  assert.deepEqual(JSON.parse(localStorage.getItem('remotekit.device.preferences')!), {
+    v: 1,
+    compatibility: false,
+  });
+  const setItem = t.mock.method(dom.window.Storage.prototype, 'setItem', () => {
+    throw new Error('blocked');
+  });
+  assert.doesNotThrow(() => setCompatibility(true));
+  assert.equal(deviceSnapshot().compatibility, true);
+  setItem.mock.restore();
+});
+
+test('Start group menu keeps its name dialog mounted after closing the menu', async () => {
+  const { LauncherSpaces } =
+    require('../client/app/launcher-spaces') as typeof import('../client/app/launcher-spaces');
+  const f = mount();
+  const state = stateFor();
+  state.workspace.spaces[0].name = '工作';
+  const calls: unknown[] = [];
+  await f.render(
+    createElement(LauncherSpaces, {
+      state,
+      snapshots: new SpaceSnapshots(),
+      online: true,
+      newTarget: false,
+      targetNew() {},
+      close() {},
+      report: assert.fail,
+      action: async (command) => {
+        calls.push(command);
+        return {} as never;
+      },
+    }),
+  );
+  const card = f.host.querySelector('[data-space-card]')!;
+  await act(async () =>
+    card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })),
+  );
+  const rename = [...document.querySelectorAll('[role="menuitem"]')].find(
+    (item) => item.textContent === '命名…',
+  ) as HTMLElement;
+  await act(async () => rename.click());
+  const input = document.querySelector<HTMLInputElement>('[role="dialog"] input')!;
+  assert.equal(input.value, '工作');
+  await act(async () =>
+    input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })),
+  );
+  assert.deepEqual(calls, [{ type: 'space.rename', spaceId: 'space', name: '工作' }]);
+});
+test('five separate Enter presses reveal the unlock form', async () => {
+  const { RevealScreen } =
+    require('../client/auth/lock-screen') as typeof import('../client/auth/lock-screen');
+  const f = mount();
+  await f.render(
+    createElement(RevealScreen, { children: () => createElement('div', { 'data-keyboard-form': true }) }),
+  );
+  for (let index = 0; index < 4; index++)
+    await act(async () =>
+      window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })),
+    );
+  assert.equal(f.host.querySelector('[data-keyboard-form]'), null);
+  await act(async () =>
+    window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })),
+  );
+  assert.ok(f.host.querySelector('[data-keyboard-form]'));
+});
+test('reduced motion sets the root, removes MUI durations and disables ripple', () => {
+  const { setReduceMotion } =
+    require('../client/app/motion-preference') as typeof import('../client/app/motion-preference');
+  const { createViewerTheme } = require('../client/theme/theme') as typeof import('../client/theme/theme');
+  setReduceMotion(true);
+  assert.ok(document.documentElement.hasAttribute('data-reduce-motion'));
+  for (const [key, value] of Object.entries({
+    primary: '#245db5',
+    'surface-background': '#eee',
+    surface: '#fff',
+    'text-primary': '#123',
+    'text-secondary': '#456',
+    border: '#ccc',
+    'font-family': 'sans-serif',
+    'radius-md': '8px',
+  }))
+    document.documentElement.style.setProperty('--' + key, value);
+  const reduced = createViewerTheme('light', true);
+  assert.ok(Object.values(reduced.transitions.duration).every((duration) => duration === 0));
+  assert.equal(reduced.components?.MuiButtonBase?.defaultProps?.disableRipple, true);
+  assert.equal(reduced.components?.MuiDialog?.defaultProps?.transitionDuration, 0);
+  setReduceMotion(false);
+  assert.equal(document.documentElement.hasAttribute('data-reduce-motion'), false);
+});
+
+test('compatibility top inset keeps the safe area and reserves 24px only when enabled', () => {
+  const { topInsetHeight } = require('../client/app/top-inset') as typeof import('../client/app/top-inset');
+  assert.equal(topInsetHeight(true, { safeArea: 0 }), 24);
+  assert.equal(topInsetHeight(false, { safeArea: 0 }), 0);
+  assert.equal(topInsetHeight(true, { safeArea: 36 }), 36);
+  assert.equal(topInsetHeight(false, { safeArea: 36 }), 36);
+});
+
+test('drag source and replacement decoration update without rendering workspace children', async () => {
+  const { useDropRegistration, WindowDragDecoration } =
+    require('../client/app/window-drag') as typeof import('../client/app/window-drag');
+  const f = mount();
+  let renders = 0;
+  function Workspace() {
+    renders++;
+    const stage = useDropRegistration('stage', undefined);
+    const target = useDropRegistration('window', 'w');
+    const frame = useRef<HTMLElement | null>(null);
+    const windowDrag = useWindowDrag();
+    const itemDrag = useItemDrag();
+    return createElement(
+      'div',
+      {
+        ref: (element: HTMLDivElement | null) => {
+          if (element) box(element, 0, 600);
+          stage.ref(element);
+        },
+        style: { overflow: 'visible' },
+      },
+      createElement('button', {
+        'data-source-handle': true,
+        onPointerDown: (event: React.PointerEvent<HTMLElement>) => windowDrag(event, { windowId: 'w' }),
+      }),
+      createElement('button', {
+        'data-source-item': true,
+        onPointerDown: (event: React.PointerEvent<HTMLElement>) =>
+          itemDrag(event, { kind: 'app', appId: 'files', title: 'Files' } as LauncherItem),
+      }),
+      createElement(
+        'section',
+        {
+          className: 'window-frame',
+          ref: (element: HTMLElement | null) => {
+            frame.current = element;
+            if (element) box(element, 0, 600);
+            target.ref(element);
+          },
+          style: { overflow: 'visible' },
+        },
+        createElement(WindowDragDecoration, { windowId: 'w', frame }),
+      ),
+    );
+  }
+  await f.render(
+    createElement(WindowDragProvider, {
+      state: stateFor(),
+      snapshots: new SpaceSnapshots(),
+      action: async () => ({}) as never,
+      report: assert.fail,
+      openItem: async () => {},
+      children: createElement(Workspace),
+    }),
+  );
+  const initialRenders = renders;
+  await act(async () => {
+    pointer(f.host.querySelector('[data-source-handle]')!, 'pointerdown', 10);
+    pointer(window, 'pointermove', 300);
+  });
+  assert.equal(renders, initialRenders);
+  assert.ok(f.host.querySelector('[data-window-drag-source]'));
+  await act(async () => pointer(window, 'pointerup', 300));
+  assert.equal(!!f.host.querySelector('[data-window-drag-source]'), false);
+  await act(async () => pointer(f.host.querySelector('[data-source-item]')!, 'pointerdown', 300));
+  assert.ok(f.host.querySelector('.window-replacement'));
+  assert.equal(renders, initialRenders);
+  await act(async () => pointer(window, 'pointerup', 300));
+  assert.equal(!!f.host.querySelector('.window-replacement'), false);
+  assert.equal(renders, initialRenders);
 });

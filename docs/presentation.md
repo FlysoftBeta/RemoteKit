@@ -21,7 +21,7 @@ Viewer 收到一路 H.264 atlas 视频和一路 Opus 音频。本文讲视频如
 
 视频是唯一的串流呈现后端。MSTP、共享 WebGL、Canvas2D 绘制路径和按超时切换后端的回退已删除。尺寸过渡快照、拍照、测试像素读回使用 canvas，但它们不是串流后端。
 
-## 界面缩放与顶部留空
+## 界面缩放与顶部空白
 
 画面始终按设备物理像素串流。设置里的界面缩放（50%–200%）把外壳和网页内容一起放大或缩小，不改变编码像素密度：
 
@@ -32,7 +32,11 @@ Viewer 收到一路 H.264 atlas 视频和一路 Opus 音频。本文讲视频如
 - 提示一律用 MUI `Tooltip`，不用原生 `title` 属性：原生提示不跟界面缩放与主题，触屏上也不出现。图标按钮用 `Tooltip` 包裹并给同样的 `aria-label`（窗口工具栏用封装好的 `Tool`）；单行截断文字用 `OverflowText`，只在文字确实被截断时显示全文；`pointer-events: none` 的叠层（连接统计）不放提示，指标含义写在[诊断](diagnostics.md)里。
 - 其他按视觉 px 量、按布局 px 写的地方同样要换算：dnd-kit 的排序位移除以 scale；它的拖拽浮层按视觉 rect 定位，所以挂在 `<body>` 之外的 `unscaledLayer()`，内容自己 `scale()`（React 19 会把指向 `<html>` 本身的 portal 移进 `<body>`，所以这一层是单独的元素）；悬浮面板拖动的指针增量除以 scale；`scrollLeft`、分隔条比例同理。下拉选择统一用 `ScaledSelect`（菜单经 `scaledAnchor` 定位），不用 MUI 自带 Select 的内部 Menu。高度用 `--layout-vh` 而不是 `vh`。
 
-顶部留空在界面上方留出不响应操作的条带，高度以视觉 px 计：关闭时等于 `env(safe-area-inset-top)`；跟随系统时取安全区与 `env(titlebar-area-height)` 的较大值；自定义 1–200px 时不低于安全区。页面声明 `viewport-fit=cover` 才能读到安全区，所以安全区始终由留空负责避开。外壳从条带下方开始排版，上报的内容区高度扣除条带。
+界面上方留出不响应操作的条带，高度以视觉 px 计：兼容模式开启时为 `max(env(safe-area-inset-top), 24px)`，关闭时等于安全区。页面声明 `viewport-fit=cover` 才能读到安全区，所以安全区始终由这条空白负责避开。外壳从条带下方开始排版，上报的内容区高度扣除条带。
+
+**兼容模式**是设备级偏好（默认开启），只存在本设备的 `localStorage`（`remotekit.device.preferences`，由 `client/app/device-preferences.ts` 独占读写，读不到按默认值），不进 Control：它描述的是这台设备的系统界面与文件选择器，而不是用户。开启时除了 24px 顶部空白，外壳自己的上传 input（我的文件等）在没有 accept 时使用字面量 `accept="image/*"`——部分设备只有在这个值下才弹出可用的选择器，不展开成具体格式列表。
+
+**减弱动态效果**是用户设置（Control 保存，默认关闭）：根元素带 `data-reduce-motion`，关闭 CSS 过渡与进出场动画、MUI 过渡与涟漪，JS 驱动的动效直接到终态；不确定进度指示保留转动。尺寸过渡只去掉动画，输入门禁不变。
 
 ## 布局屏障
 

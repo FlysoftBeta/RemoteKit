@@ -11,6 +11,12 @@ export class CoordinationRepository {
     private readonly db: Database.Database,
     private readonly key: AtRestKey,
   ) {}
+  desiredRevision(tenant: string): string | undefined {
+    return (
+      this.db.prepare('SELECT revision FROM session_desired WHERE tenant=?').get(tenant) as
+        { revision: string } | undefined
+    )?.revision;
+  }
   revision(desired: Omit<SessionDesired, 'revision'>): string {
     const { connectionEpoch, ...content } = desired;
     const fingerprint = createHash('sha256').update(canonical(content)).digest('hex');

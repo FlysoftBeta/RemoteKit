@@ -20,11 +20,12 @@ import type { Action } from './product-dialogs';
 import { SpaceSnapshots } from './space-snapshots';
 import './stage.css';
 import type { SystemControls } from './system-controls';
-import { deadZoneHeight, useTopInsetProbe } from './top-inset';
+import { topInsetHeight, useTopInsetProbe } from './top-inset';
+import { useDevicePreferences } from './device-preferences';
 import { setUiScale } from './ui-scale';
 import { selectVisibility } from './visibility';
 import { WindowDivider } from './window-divider';
-import { useDropTarget, useWindowDragging } from './window-drag';
+import { useDropRegistration } from './window-drag';
 import { WindowFrame } from './window-frame';
 import { useWindowFullscreen } from './window-fullscreen';
 import type { WorkspaceCall } from './window-state';
@@ -39,7 +40,8 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
   const fullscreen = !!state?.pageFullscreen || !!windowFullscreen;
   const scale = state?.workspace.settings.workspace.uiScale ?? 1;
   const insets = useTopInsetProbe();
-  const deadZone = deadZoneHeight(state?.workspace.settings.workspace.topDeadZone ?? 'off', insets);
+  const { compatibility } = useDevicePreferences();
+  const deadZone = topInsetHeight(compatibility, insets);
   useLayoutEffect(() => {
     setUiScale(scale);
   }, [scale]);
@@ -267,9 +269,8 @@ export function Stage({
     foreground?.kind === 'file'
       ? state.fileRequests.find((request) => request.id === foreground.id)
       : undefined;
-  const shellDrop = useDropTarget('shell', undefined);
-  const stageDrop = useDropTarget('stage', undefined);
-  const dragging = useWindowDragging();
+  const shellDrop = useDropRegistration('shell', undefined);
+  const stageDrop = useDropRegistration('stage', undefined);
   const shellRef = useCallback(
     (element: HTMLElement | null) => {
       shell.current = element;
@@ -279,7 +280,7 @@ export function Stage({
   );
   return (
     <main
-      className={`${dragging ? 'window-dragging ' : ''}viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}${windows.length ? '' : ' no-windows'}${!sideBySide && activeSpace && activeSpace.windowIds.length > 1 && !fullscreen ? ' window-pill-visible' : ''}`}
+      className={`viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}${windows.length ? '' : ' no-windows'}${!sideBySide && activeSpace && activeSpace.windowIds.length > 1 && !fullscreen ? ' window-pill-visible' : ''}`}
       ref={shellRef}
     >
       <DiagnosticCollectionView state={diagnosticState} dismiss={() => diagnostics.dismiss()} />
@@ -343,6 +344,7 @@ export function Stage({
 
                 onGeometry={onGeometry}
                 visible={visibility.visibleWindowIds.includes(w.id)}
+                groupHandle={visibility.visibleWindowIds[0] === w.id}
                 fullscreen={fullscreen?.windowId === w.id}
                 surfaceFailure={
                   w.id === activeSpace?.focusedWindowId && (interactionFailure ?? surfaceFailure)

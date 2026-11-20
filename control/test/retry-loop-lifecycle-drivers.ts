@@ -25,7 +25,14 @@ export function driveLifecycle(path: 'pressure' | 'idle' | 'ordinary' | 'uncerta
     workspace.tabs = [tab];
     workspace.windows = [{ id: 'window', activeTabId: 'tab', appId: 'browser', lastActiveAt: 0 }];
     workspace.spaces = [
-      { id: 'space', windowIds: ['window'], weights: [1], focusedWindowId: 'window', lastActiveAt: 0 },
+      {
+        name: null,
+        id: 'space',
+        windowIds: ['window'],
+        weights: [1],
+        focusedWindowId: 'window',
+        lastActiveAt: 0,
+      },
     ];
     workspace.activeSpaceId = 'space';
     store.workspaces.writeWorkspace(workspace);
@@ -149,36 +156,53 @@ export const driveNavigationAck: OwnerFactory = (boundary) => {
 };
 
 export const driveCloseBatch: OwnerFactory = (boundary) => {
+  const clock = { wallMs: () => Date.now(), monotonicMs: () => Date.now() };
+  const store = new ControlDatabase(':memory:', { buildId: 'test', clock });
   const workspace = emptyWorkspace('tenant');
   workspace.tabs = ['one', 'two'].map((id) => ({
     id,
     webviewId: id,
-    windowId: 'window',
+    windowId: 'window-' + id,
     kind: 'remote',
     url: 'https://example.test',
     title: '',
     idleKeepAlive: false,
   }));
-  workspace.windows = [{ id: 'window', activeTabId: 'one', appId: 'browser', lastActiveAt: 0 }];
-  workspace.spaces = [
-    { id: 'space', windowIds: ['window'], weights: [1], focusedWindowId: 'window', lastActiveAt: 0 },
-  ];
-  workspace.activeSpaceId = 'space';
-  workspace.pendingWindowCloseId = 'window';
-  const context = {
-    tenants: { get: () => ({ browserIncarnation: 'browser', pageRequests: {} }) },
-    store: {
-      operations: {
-        pendingOperations: () => [
-          {
-            action: { type: 'window.close', windowId: 'window' },
-            receipt: { operationId: 'operation-' + boundary.version, status: 'accepted' },
-          },
-        ],
-        saveOperation: () => {},
+  workspace.windows = ['one', 'two'].map((id) => ({
+    id: 'window-' + id,
+    activeTabId: id,
+    appId: 'browser',
+    lastActiveAt: 0,
+  }));
+  workspace.spaces = ['one', 'two'].map((id) => ({
+    name: null,
+    id: 'space-' + id,
+    windowIds: ['window-' + id],
+    weights: [1],
+    focusedWindowId: 'window-' + id,
+    lastActiveAt: 0,
+  }));
+  workspace.activeSpaceId = 'space-one';
+  workspace.pendingWindowCloseId = 'window-one';
+  workspace.pendingWindowCloseIds = ['window-two'];
+  store.workspaces.writeWorkspace(workspace);
+  const reserve = () =>
+    store.operations.reserveOperation(
+      'tenant',
+      { type: 'space.close', spaceIds: ['space-one', 'space-two'] },
+      {
+        operationId: 'operation-' + boundary.version,
+        operationGeneration: store.operations.operationGeneration('tenant'),
+        status: 'accepted',
       },
-    },
+    );
+  reserve();
+  const context = {
+    clock,
+    tenants: { get: () => ({ browserIncarnation: 'browser', pageRequests: {} }) },
+    store,
     endpoint: {
+      invalidate() {},
       sessionFault: () => undefined,
       placement: { peek: () => ({ nodeId: 'node' }), boundNodeId: () => null },
       nodes: {
@@ -186,7 +210,13 @@ export const driveCloseBatch: OwnerFactory = (boundary) => {
         all: () => [{ nodeId: 'node', state: { state: 'ready' } }],
         isRemoved: () => false,
       },
-      observation: () => ({ browser: 'running' }),
+      observation: () => ({
+        browser: 'running',
+        browserIncarnation: 'browser',
+        endpointIncarnation: 'endpoint',
+        connectionEpoch: 'connection',
+        seq: '1',
+      }),
       closeView: (_tenant: string, request: { viewId: string }) =>
         request.viewId === 'one'
           ? Promise.resolve({ closed: true })
@@ -195,6 +225,7 @@ export const driveCloseBatch: OwnerFactory = (boundary) => {
   } as unknown as DomainContext;
   const owner = new PageRequests(context, {
     lifecycle: { remove() {} },
+    viewers: { push() {} },
     operations: { saveWorkspace() {} },
   } as never);
   const result = operation();
@@ -204,10 +235,14 @@ export const driveCloseBatch: OwnerFactory = (boundary) => {
     drive: run,
     changeInput: () => {
       boundary.version++;
-      workspace.pendingWindowCloseId = 'window';
+      workspace.pendingWindowCloseId = 'window-two';
+      workspace.pendingWindowCloseIds = [];
+      reserve();
       run();
     },
     error: () => owner.failures()[0],
-    dispose: () => {},
+    dispose: () => {
+      store.db.close();
+    },
   };
 };

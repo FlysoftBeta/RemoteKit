@@ -7,6 +7,8 @@ import ts from 'typescript';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 export const errorHandlingAllowList: Record<string, string> = {
+  'client/app/device-preferences.ts#device-preferences':
+    'Device preferences remain usable in memory when localStorage rejects writes.',
   'client/files/file-channel.ts#pipelined-response':
     'Observe rejection immediately; the pipeline later awaits the original response.',
   'client/files/file-channel.ts#upload-abort':

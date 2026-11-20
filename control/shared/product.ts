@@ -45,14 +45,10 @@ export const SEARCH_ENGINES: { value: SearchEngine; label: string }[] = [
 // App-wide zoom of the Viewer shell and remote pages together; streaming stays at native pixels.
 export const UI_SCALE_MIN = 0.5;
 export const UI_SCALE_MAX = 2;
-// A reserved strip above the Viewer, never smaller than the safe area: off adds nothing, auto also
-// clears the title bar, a number is a fixed height in CSS px.
-export type TopDeadZone = 'off' | 'auto' | number;
-export const DEAD_ZONE_MAX = 200;
 export interface WorkspaceSettings {
   qualityPreference: 'quality' | 'auto' | 'smooth';
   uiScale: number;
-  topDeadZone: TopDeadZone;
+  reduceMotion: boolean;
   showStats: boolean;
   autoFullscreen: boolean;
   autoKeyboard: boolean;
@@ -154,6 +150,7 @@ export interface ProductWindow {
   lastActiveAt: number;
 }
 export interface ProductSpace {
+  name: string | null;
   id: string;
   windowIds: string[];
   weights: number[];
@@ -218,6 +215,9 @@ export interface AppInspectResult {
 /** Browser-local request IDs are never exposed as the user confirmation token. */
 export interface PendingClose {
   id: string;
+  enteredAt: number;
+  observationEpoch: string;
+  observationSequence: string;
   windowId?: string;
   requestId?: string;
   nativeRequestId?: string;
@@ -410,7 +410,8 @@ export type ProductAction =
   | { type: 'window.close'; windowId: string }
   | { type: 'window.state'; windowId: string; state: Record<string, unknown> }
   | { type: 'space.activate'; spaceId: string; source?: 'launcher' }
-  | { type: 'space.close'; spaceId: string }
+  | { type: 'space.close'; spaceIds: string[] }
+  | { type: 'space.rename'; spaceId: string; name: string }
   | { type: 'space.layout'; spaceId: string; weights: number[] }
   | ({ type: 'app.install'; appId: string } & AppDefinition)
   | ({ type: 'app.update'; appId: string } & Partial<AppDefinition>)
