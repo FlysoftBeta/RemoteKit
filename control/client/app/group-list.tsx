@@ -4,7 +4,7 @@ import { ButtonBase, Typography } from '@mui/material';
 import type React from 'react';
 import type { ProductSpace, ProductState } from '../../shared/product';
 import { AppIcon, appName } from './app-icon';
-import type { SpaceSnapshots } from './space-snapshots';
+import { SnapshotImage, type SpaceSnapshots } from './space-snapshots';
 import { useDropTarget, useWindowDragging } from './window-drag';
 type CardInteractions = Pick<
   React.HTMLAttributes<HTMLButtonElement>,
@@ -119,7 +119,7 @@ function GroupCard({
           return (
             <span key={id} className="launcher-window-preview" style={{ flexGrow: space.weights[index] }}>
               {image ? (
-                <img src={image} alt="" draggable={false} />
+                <SnapshotImage source={image} />
               ) : (
                 <AppIcon appId={win.appId} iconUrl={app?.iconUrl} />
               )}

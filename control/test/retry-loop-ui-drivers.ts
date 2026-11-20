@@ -446,6 +446,7 @@ export function driveUi(
         return provided(
           createElement(Launcher, {
             key: boundary.version,
+            home: { current: [] },
             state: productSnapshot(),
             call: call as never,
             online: true,

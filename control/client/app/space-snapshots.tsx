@@ -1,3 +1,5 @@
+import { useLayoutEffect, useRef } from 'react';
+
 export function captureWindow(frame: HTMLElement | undefined, maxWidth = 320, maxHeight = 240) {
   const video = frame?.querySelector<HTMLVideoElement>('.remote-video-plane video');
   const clip = video?.parentElement;
@@ -30,9 +32,10 @@ export function captureWindow(frame: HTMLElement | undefined, maxWidth = 320, ma
   return canvas;
 }
 
-/** One small atlas crop per window, captured only when leaving a space. */
+/** One small atlas crop per window, captured only when leaving a space. Kept as canvases: encoding
+ * an image on every capture stalls touch devices. */
 export class SpaceSnapshots {
-  private readonly images = new Map<string, string>();
+  private readonly images = new Map<string, HTMLCanvasElement>();
   get(windowId: string) {
     return this.images.get(windowId);
   }
@@ -43,10 +46,21 @@ export class SpaceSnapshots {
       );
       const canvas = captureWindow(frame);
       if (!canvas) continue;
-      this.images.set(windowId, canvas.toDataURL('image/jpeg', 0.7));
+      this.images.set(windowId, canvas);
     }
   }
   retain(windowIds: string[]) {
     for (const id of this.images.keys()) if (!windowIds.includes(id)) this.images.delete(id);
   }
+}
+
+export function SnapshotImage({ source }: { source: HTMLCanvasElement }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  useLayoutEffect(() => {
+    const target = canvas.current!;
+    target.width = source.width;
+    target.height = source.height;
+    target.getContext('2d')?.drawImage(source, 0, 0);
+  }, [source]);
+  return <canvas ref={canvas} className="space-snapshot" aria-hidden />;
 }

@@ -1,7 +1,7 @@
 import './window-handle.css';
 import { ChevronRight, DragHandle } from '@mui/icons-material';
 import { IconButton, Menu, MenuItem } from '@mui/material';
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { ProductState, ProductWindow } from '../../shared/product';
 import type { Action } from './product-dialogs';
 import { scaledAnchor } from './ui-scale';
@@ -24,6 +24,9 @@ export function WindowHandle({
   const [menu, setMenu] = useState<HTMLElement | null>(null);
   const [groupsMenu, setGroupsMenu] = useState<HTMLElement | null>(null);
   const begin = useWindowDrag();
+  // The menu waits out the double-click interval; a second click closes the window instead.
+  const pendingMenu = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(pendingMenu.current), []);
   const space = state.workspace.spaces.find((space) => space.windowIds.includes(win.id));
   const index = space?.windowIds.indexOf(win.id) ?? -1;
   const run = (command: Parameters<Action>[0]) => {
@@ -38,7 +41,23 @@ export function WindowHandle({
         disabled={!online}
         className="window-handle"
         onPointerDown={(event) => begin(event, { windowId: win.id })}
-        onClick={(event) => setMenu(event.currentTarget)}
+        onClick={(event) => {
+          const anchor = event.currentTarget;
+          if (event.detail === 0) {
+            setMenu(anchor);
+            return;
+          }
+          if (pendingMenu.current !== undefined) {
+            clearTimeout(pendingMenu.current);
+            pendingMenu.current = undefined;
+            run({ type: 'window.close', windowId: win.id });
+            return;
+          }
+          pendingMenu.current = setTimeout(() => {
+            pendingMenu.current = undefined;
+            setMenu(anchor);
+          }, DOUBLE_CLICK_MS);
+        }}
       >
         <DragHandle fontSize="small" />
       </IconButton>
@@ -112,3 +131,5 @@ export function WindowHandle({
     </>
   );
 }
+
+const DOUBLE_CLICK_MS = 250;

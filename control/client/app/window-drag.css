@@ -18,6 +18,9 @@
 }
 .window-drag-ghost {
   position: fixed;
+  left: 0;
+  top: 0;
+  will-change: transform;
   width: 180px;
   height: 124px;
   background: var(--surface-chrome);
@@ -38,7 +41,7 @@
   height: 44px;
   margin: auto;
 }
-.window-drag-ghost > img {
+.window-drag-ghost > .space-snapshot {
   width: 100%;
   flex: 1;
   min-height: 0;
@@ -94,7 +97,6 @@
   padding: 8px;
   border-radius: var(--radius-panel);
   background: var(--frosted-panel);
-  backdrop-filter: var(--frosted-panel-filter);
   box-shadow: var(--frosted-panel-shadow);
 }
 .window-drop-column > .launcher-spaces {

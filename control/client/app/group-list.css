@@ -67,7 +67,7 @@
 .launcher-window-preview + .launcher-window-preview {
   border-left: 2px solid var(--surface-preview);
 }
-.launcher-window-preview > img:not(.launcher-app-icon) {
+.launcher-window-preview > .space-snapshot {
   width: 100%;
   height: 100%;
   object-fit: contain;

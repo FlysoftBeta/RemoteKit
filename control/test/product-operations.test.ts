@@ -939,7 +939,7 @@ test('lease is checked at queued acceptance; fast clock does not queue behind a 
     f.store.db.close();
   }
 });
-test('no-op runtime snapshots retain sequence and pending close projection retains actual tab', async () => {
+test('no-op runtime snapshots retain sequence and pending close projection hides the tab at once', async () => {
   const f = await fixture();
   try {
     await observedProductAction(
@@ -955,7 +955,7 @@ test('no-op runtime snapshots retain sequence and pending close projection retai
     assert.equal(snapshotNewer(next, first), false);
     assert.strictEqual(next, first);
     const op = f.op({ type: 'tab.close', tabId: first.workspace.tabs[0].id });
-    assert.equal(projectOperations(first, [op])!.workspace.tabs.length, 1);
+    assert.equal(projectOperations(first, [op])!.workspace.tabs.length, 0);
     const create = f.op({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
     assert.equal(projectOperations(first, [create])!.workspace.windows.length, 2);
     const receipt = await observedOperation(f.control, f.tenant, create, 'lease'),

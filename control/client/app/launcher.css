@@ -3,7 +3,6 @@
   inset: 0;
   z-index: var(--z-workspace-overlay);
   background: var(--frosted-overlay);
-  backdrop-filter: var(--frosted-overlay-filter);
   color: var(--text-overlay);
   display: flex;
   flex-direction: column;
@@ -253,7 +252,6 @@
 .launcher.launcher-lifted {
   animation: none;
   background: transparent;
-  backdrop-filter: none;
   pointer-events: none;
 }
 .launcher-lifted .launcher-heading,
@@ -268,7 +266,6 @@
   align-self: flex-start;
   max-height: 100%;
   background: var(--frosted-panel);
-  backdrop-filter: var(--frosted-panel-filter);
   border-radius: var(--radius-panel);
   padding: 8px;
   box-shadow: var(--frosted-panel-shadow);

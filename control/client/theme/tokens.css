@@ -51,7 +51,7 @@
   --surface-tile: #ffffffa6;
   --text-tile-secondary: #162b5066;
   --primary-border: #245db54d;
-  --frosted-overlay: rgba(240, 243, 248, 0.86);
+  --frosted-overlay: rgba(240, 243, 248, 0.94);
   --frosted-panel: rgba(240, 243, 248, 0.94);
   --surface-translucent: rgba(255, 255, 255, 0.6);
   --surface-translucent-hover: rgba(255, 255, 255, 0.9);
@@ -104,8 +104,6 @@
   --z-workspace-overlay: 1300;
   --z-drag: 1500;
   --z-drop-column: 1600;
-  --frosted-overlay-filter: blur(24px) saturate(1.2);
-  --frosted-panel-filter: blur(16px);
   --frosted-panel-shadow: 0 8px 32px var(--shadow-frosted);
   --font-family: Segoe UI, Microsoft YaHei, sans-serif;
 }

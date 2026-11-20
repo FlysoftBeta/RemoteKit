@@ -59,6 +59,7 @@ export function Launcher({
   snapshots,
   action,
   report,
+  home,
 }: {
   state: ProductState;
   lock(): void;
@@ -77,16 +78,17 @@ export function Launcher({
   activate(item: LauncherItem, placement?: WindowPlacement, reuseExisting?: boolean): Promise<void>;
   navigate(value: string, placement?: WindowPlacement): Promise<void>;
   exiting?: boolean;
+  /** The unfiltered items, kept between openings so Start paints complete on its first frame. */
+  home: { current: LauncherItem[] };
 }) {
   const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const [newTarget, setNewTarget] = useState(false);
   useEffect(() => {
     if (!exiting) setNewTarget(false);
   }, [exiting]);
-  const [items, setItems] = useState<LauncherItem[]>([]);
+  const [loaded, setLoaded] = useState(() => ({ query: '', items: home.current }));
   const [query, setQuery] = useState('');
   const [error, setError] = useState<RemoteKitError | undefined>();
-  const [busy, setBusy] = useState(false);
   const [width, setWidth] = useState(1024);
   const [menu, setMenu] = useState<{ item: LauncherItem; anchor: HTMLElement }>();
   const host = useRef<HTMLDivElement>(null);
@@ -125,7 +127,8 @@ export function Launcher({
         void recover(() => call('launcher.get', query.trim() ? { query } : {}), abort.signal, setError)
           .then((result) => {
             if (!disposed) {
-              setItems(result.items);
+              setLoaded({ query, items: result.items });
+              if (!query) home.current = result.items;
               setError(undefined);
             }
           })
@@ -141,14 +144,12 @@ export function Launcher({
       clearTimeout(timer);
     };
   }, [call, query]);
-  const layout = launcherLayout(items, query, width);
+  const layout = launcherLayout(loaded.items, query, width);
+  // Start leaves at once; the projected window shows the result, and failures surface on the stage.
   const perform = (task: () => Promise<void>) => {
-    if (busy || !online) return;
-    setBusy(true);
-    void task()
-      .then(close)
-      .catch((error) => setError(failureError(error)))
-      .finally(() => setBusy(false));
+    if (!online) return;
+    close();
+    void task().catch(report);
   };
   const checkCapacity = (item?: LauncherItem, reuseExisting = false) => {
     const singleton =
@@ -161,11 +162,16 @@ export function Launcher({
     if (state.workspace.windows.length >= 16 && !singleton && !reuse)
       throw new RemoteKitError('limit_exceeded', '窗口已满，请先关闭一些窗口', { capacity: 'windows' });
   };
-  const open = (item: LauncherItem, target?: WindowPlacement, reuseExisting = false) =>
-    perform(async () => {
+  const open = (item: LauncherItem, target?: WindowPlacement, reuseExisting = false) => {
+    if (!online) return;
+    try {
       checkCapacity(item, reuseExisting);
-      await activate(item, target, reuseExisting);
-    });
+    } catch (error) {
+      setError(failureError(error));
+      return;
+    }
+    perform(() => activate(item, target, reuseExisting));
+  };
   const space = state.workspace.spaces.find((space) => space.id === state.workspace.activeSpaceId);
   const full = !!space && space.windowIds.length >= 3;
   const place = (target?: WindowPlacement, reuseExisting = false) => {
@@ -212,8 +218,9 @@ export function Launcher({
           event.preventDefault();
           if (!query.trim()) return;
           perform(async () => {
-            const result = await call('launcher.get', { query });
-            const first = launcherLayout(result.items, query).groups[0]?.tiles[0];
+            const items =
+              loaded.query === query ? loaded.items : (await call('launcher.get', { query })).items;
+            const first = launcherLayout(items, query).groups[0]?.tiles[0];
             checkCapacity(first);
             if (first) await activate(first, newTarget ? { mode: 'space' } : undefined);
             else await navigate(query.trim(), newTarget ? { mode: 'space' } : undefined);
@@ -297,7 +304,7 @@ export function Launcher({
                         imageFile={!!entry?.type.startsWith('image/')}
                         assetId={entry?.assetId}
                         fileType={entry?.type}
-                        disabled={!online || busy}
+                        disabled={!online}
                         open={() => open(tile, newTarget ? { mode: 'space' } : undefined)}
                         menu={(anchor) => setMenu({ item: tile, anchor })}
                         lift={(pointer) => {

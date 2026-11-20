@@ -225,6 +225,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
               action={stage.action}
               report={(error) => setDragFailure(failureError(error))}
               openItem={async (item, placement) => {
+                overlays.closeLauncher();
                 await openLauncherItem({
                   item,
                   placement,
@@ -233,7 +234,6 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
                   call: stage.call,
                   media,
                 });
-                overlays.closeLauncher();
               }}
             >
               <Stage

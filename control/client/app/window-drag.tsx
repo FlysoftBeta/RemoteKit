@@ -1,5 +1,14 @@
 import './window-drag.css';
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { DeleteOutline } from '@mui/icons-material';
 import type {
@@ -12,13 +21,14 @@ import type {
 import type { Action } from './product-dialogs';
 import { AppIcon, appName } from './app-icon';
 import { GroupList } from './group-list';
-import { SpaceSnapshots } from './space-snapshots';
+import { SnapshotImage, SpaceSnapshots } from './space-snapshots';
 import { uiScale } from './ui-scale';
 
 // A launcher item is not a window yet: dropping it opens a window at the chosen placement.
 type Source = { windowId: string } | { item: LauncherItem };
 type Target = { action?: ProductAction; placement?: WindowPlacement; marker?: number; replaceId?: string };
-type Drag = { source: Source; x: number; y: number; target?: Target; hovered?: Registration };
+// Rendered drag state changes only with its target; the pointer position stays outside React.
+type Drag = { source: Source; target?: Target; hovered?: Registration };
 export interface PointerStart {
   pointerId: number;
   clientX: number;
@@ -71,31 +81,61 @@ export function useDropTarget<K extends keyof DropPayload>(kind: K, payload: Dro
   };
 }
 
-function containsPoint(element: HTMLElement, x: number, y: number) {
-  if (!element.offsetWidth || getComputedStyle(element).pointerEvents === 'none') return false;
-  const rect = element.getBoundingClientRect();
-  if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return false;
-  // Scroll strips clip cards that extend beyond their visible region.
+type Box = { left: number; top: number; right: number; bottom: number };
+// The region of a target that receives drops; scroll strips clip cards beyond their visible region.
+function hitRegion(element: HTMLElement): Box | null {
+  if (!element.offsetWidth || getComputedStyle(element).pointerEvents === 'none') return null;
+  let { left, top, right, bottom } = element.getBoundingClientRect();
   for (let parent = element.parentElement; parent; parent = parent.parentElement) {
     const style = getComputedStyle(parent);
+    if (style.visibility === 'hidden') return null;
+    if (style.overflowX === 'visible' && style.overflowY === 'visible') continue;
     const bounds = parent.getBoundingClientRect();
-    if (style.visibility === 'hidden') return false;
-    if (style.overflowX !== 'visible' && (x < bounds.left || x >= bounds.right)) return false;
-    if (style.overflowY !== 'visible' && (y < bounds.top || y >= bounds.bottom)) return false;
+    if (style.overflowX !== 'visible') {
+      left = Math.max(left, bounds.left);
+      right = Math.min(right, bounds.right);
+    }
+    if (style.overflowY !== 'visible') {
+      top = Math.max(top, bounds.top);
+      bottom = Math.min(bottom, bounds.bottom);
+    }
   }
-  return true;
+  return left < right && top < bottom ? { left, top, right, bottom } : null;
 }
 
-function insertionPositions(stage: HTMLElement, space: ProductSpace, targets: Registration[]) {
-  const bounds = stage.getBoundingClientRect();
+/** Layout reads for one drag, reused across pointer moves until layout may have changed. */
+class DragGeometry {
+  private readonly regions = new Map<Registration, Box | null>();
+  private readonly rects = new Map<HTMLElement, DOMRect>();
+  invalidate() {
+    this.regions.clear();
+    this.rects.clear();
+  }
+  contains(target: Registration, x: number, y: number) {
+    if (!target.element) return false;
+    let region = this.regions.get(target);
+    if (region === undefined) this.regions.set(target, (region = hitRegion(target.element)));
+    return !!region && x >= region.left && x < region.right && y >= region.top && y < region.bottom;
+  }
+  rect(element: HTMLElement) {
+    let rect = this.rects.get(element);
+    if (!rect) this.rects.set(element, (rect = element.getBoundingClientRect()));
+    return rect;
+  }
+}
+
+function insertionPositions(
+  geometry: DragGeometry,
+  stage: HTMLElement,
+  space: ProductSpace,
+  targets: Registration[],
+) {
+  const bounds = geometry.rect(stage);
   const frames = space.windowIds
     .map((id) => targets.find((target) => target.kind === 'window' && target.payload === id)?.element)
     .filter((element): element is HTMLElement => !!element && element.offsetWidth > 0);
   if (frames.length === space.windowIds.length)
-    return [
-      frames[0].getBoundingClientRect().left,
-      ...frames.map((frame) => frame.getBoundingClientRect().right),
-    ];
+    return [geometry.rect(frames[0]).left, ...frames.map((frame) => geometry.rect(frame).right)];
   return [
     bounds.left,
     ...space.weights.map(
@@ -147,20 +187,39 @@ export function WindowDragProvider({
 }) {
   const [drag, setDrag] = useState<Drag>();
   const registry = useRef(new Set<Registration>());
-  const register = useCallback((target: Registration) => {
-    registry.current.add(target);
+  const [geometry] = useState(() => new DragGeometry());
+  const register = useCallback(
+    (target: Registration) => {
+      registry.current.add(target);
+      geometry.invalidate();
+      return () => {
+        registry.current.delete(target);
+        geometry.invalidate();
+      };
+    },
+    [geometry],
+  );
+  // Any render may move targets; scrolling and resizing move them without one.
+  useLayoutEffect(() => geometry.invalidate());
+  const dragging = !!drag;
+  useEffect(() => {
+    if (!dragging) return;
+    const invalidate = () => geometry.invalidate();
+    window.addEventListener('scroll', invalidate, { capture: true, passive: true });
+    window.addEventListener('resize', invalidate);
     return () => {
-      registry.current.delete(target);
+      window.removeEventListener('scroll', invalidate, true);
+      window.removeEventListener('resize', invalidate);
     };
-  }, []);
+  }, [dragging, geometry]);
+  const cursor = useRef({ x: 0, y: 0 });
+  const ghost = useRef<HTMLDivElement>(null);
   const targets = () => [...registry.current];
   const elementFor = (kind: keyof DropPayload) => targets().find((target) => target.kind === kind)?.element;
   const hitAt = (x: number, y: number) => {
     const priority: (keyof DropPayload)[] = ['close', 'group', 'new', 'panel', 'divider', 'window', 'stage'];
     for (const kind of priority) {
-      const target = targets().find(
-        (target) => target.kind === kind && target.element && containsPoint(target.element, x, y),
-      );
+      const target = targets().find((target) => target.kind === kind && geometry.contains(target, x, y));
       if (target) return target;
     }
   };
@@ -189,7 +248,7 @@ export function WindowDragProvider({
     if (!stage || !active || !hit || !['window', 'divider', 'stage'].includes(hit.kind)) return;
     const own = !!movingId && active.windowIds.includes(movingId);
 
-    const boundaries = insertionPositions(stage, active, targets());
+    const boundaries = insertionPositions(geometry, stage, active, targets());
     let slot = 0;
     boundaries.forEach((position, index) => {
       if (Math.abs(x - position) < Math.abs(x - boundaries[slot])) slot = index;
@@ -202,7 +261,7 @@ export function WindowDragProvider({
         // Over a separator: insert at the nearest boundary.
         if (active.windowIds.length >= 3 || hit.kind !== 'divider') return;
       } else {
-        const rect = frame.getBoundingClientRect();
+        const rect = geometry.rect(frame);
         const edge = Math.max(48 * uiScale(), Math.min(120 * uiScale(), rect.width / 5));
         const index = active.windowIds.indexOf(id);
         if (active.windowIds.length >= 3 || (x - rect.left > edge && rect.right - x > edge))
@@ -243,6 +302,8 @@ export function WindowDragProvider({
     if (shell && space) snapshots.capture(shell, space.windowIds);
     let previousTarget: Target | undefined;
     let hovered: Registration | undefined;
+    let shown: { hovered?: Registration; target: string } | undefined;
+    let frame = 0;
     const valid = (target = previousTarget) => {
       const { workspace } = latest.current;
       const hasWindow = (id: string) => workspace.windows.some((win) => win.id === id);
@@ -269,7 +330,12 @@ export function WindowDragProvider({
         return;
       }
       previousTarget = target;
-      setDrag({ source, x, y, target, hovered });
+      cursor.current = { x, y };
+      if (ghost.current) ghost.current.style.transform = ghostTransform(x, y);
+      const key = JSON.stringify(target ?? null);
+      if (shown && shown.hovered === hovered && shown.target === key) return;
+      shown = { hovered, target: key };
+      setDrag({ source, target, hovered });
     };
     const move = (next: PointerEvent) => {
       if (next.pointerId !== pointerId) return;
@@ -278,12 +344,21 @@ export function WindowDragProvider({
         return;
       }
       if (!moved && Math.hypot(next.clientX - startX, next.clientY - startY) / uiScale() > 4) moved = true;
-      if (moved) {
-        next.preventDefault();
-        update(next.clientX, next.clientY);
-      }
+      if (!moved) return;
+      next.preventDefault();
+      // The first move lifts the window at once; later moves coalesce into one per frame.
+      cursor.current = { x: next.clientX, y: next.clientY };
+      if (!shown) update(next.clientX, next.clientY);
+      else if (!frame)
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          update(cursor.current.x, cursor.current.y);
+        });
     };
     const cleanup = () => {
+      cancelAnimationFrame(frame);
+      frame = 0;
+      shown = undefined;
       window.removeEventListener('pointermove', move, true);
       window.removeEventListener('pointerup', up, true);
       window.removeEventListener('pointercancel', cancel, true);
@@ -333,6 +408,7 @@ export function WindowDragProvider({
     window.addEventListener('pointercancel', cancel, true);
     window.addEventListener('keydown', key, true);
     stop.current = cleanup;
+    geometry.invalidate();
     if (immediate) update(startX, startY);
   };
   const source = drag?.source;
@@ -341,9 +417,11 @@ export function WindowDragProvider({
   const win = workspace.windows.find((win) => win.id === id);
   const stageElement = drag && elementFor('stage');
   const stage = stageElement?.getBoundingClientRect();
-  const slots = stageElement && active ? insertionPositions(stageElement, active, targets()) : [];
+  const slots = stageElement && active ? insertionPositions(geometry, stageElement, active, targets()) : [];
+  const drop = useMemo(() => ({ register, drag }), [register, drag]);
+  const snapshot = win && snapshots.get(win.id);
   return (
-    <DropContext.Provider value={{ register, drag }}>
+    <DropContext.Provider value={drop}>
       <WindowDragContext.Provider value={begin}>
         <ItemDragContext.Provider value={beginItem}>
           <DraggingContext.Provider value={drag?.source}>
@@ -369,11 +447,12 @@ export function WindowDragProvider({
                 createPortal(
                   <>
                     <div
+                      ref={ghost}
                       className="window-drag-ghost"
-                      style={ghostPosition(drag.x / uiScale(), drag.y / uiScale())}
+                      style={{ transform: ghostTransform(cursor.current.x, cursor.current.y) }}
                     >
-                      {win && snapshots.get(win.id) ? (
-                        <img src={snapshots.get(win.id)} alt="" />
+                      {snapshot ? (
+                        <SnapshotImage source={snapshot} />
                       ) : win ? (
                         <AppIcon
                           appId={win.appId}
@@ -427,11 +506,11 @@ export function WindowDragProvider({
 
 const GHOST = { width: 180, height: 124, gap: 16 };
 // Above the pointer so neither the preview nor a finger covers the drop target under it.
-function ghostPosition(x: number, y: number) {
+function ghostTransform(clientX: number, clientY: number) {
+  const x = clientX / uiScale(),
+    y = clientY / uiScale();
   const width = window.innerWidth / uiScale();
   const above = y - GHOST.gap - GHOST.height;
-  return {
-    left: Math.max(0, Math.min(x - GHOST.width / 2, width - GHOST.width)),
-    top: above >= 0 ? above : y + GHOST.gap,
-  };
+  const left = Math.max(0, Math.min(x - GHOST.width / 2, width - GHOST.width));
+  return `translate3d(${left}px, ${above >= 0 ? above : y + GHOST.gap}px, 0)`;
 }

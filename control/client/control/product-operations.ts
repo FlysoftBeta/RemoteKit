@@ -1,4 +1,10 @@
-import { focusWindow, replaceWindow, placeWindow, windowClosing } from '../../server/workspace/model';
+import {
+  focusWindow,
+  placeWindow,
+  removeWindow,
+  replaceWindow,
+  windowClosing,
+} from '../../server/workspace/model';
 import { RemoteKitError, parseWireError } from '../../shared/errors';
 import {
   isSingletonApp,
@@ -36,6 +42,17 @@ function canPlace(workspace: ProductWorkspace, windowId: string, placement: Wind
     !windowClosing(workspace, placement.besideWindowId) &&
     (target.windowIds.includes(windowId) || target.windowIds.length < 3)
   );
+}
+function awaitingUser(workspace: ProductWorkspace, tabIds: string[]) {
+  const close = workspace.pendingClose;
+  return !!close && !close.awaiting && tabIds.includes(close.id);
+}
+function removeTab(workspace: ProductWorkspace, tab: ProductWorkspace['tabs'][number]) {
+  workspace.tabs = workspace.tabs.filter((t) => t.id !== tab.id);
+  const win = workspace.windows.find((win) => win.id === tab.windowId);
+  if (win?.activeTabId === tab.id)
+    win.activeTabId = workspace.tabs.find((t) => t.windowId === win.id)?.id ?? null;
+  if (win?.appId.startsWith('web:')) removeWindow(workspace, win.id);
 }
 /** Snapshots are the only product authority; projections live for this page only. */
 export function projectOperations(
@@ -195,18 +212,26 @@ export function projectOperations(
       }
       case 'tab.close': {
         const tab = w.tabs.find((t) => t.id === a.tabId);
-        if (tab) tab.title = tab.title.replace(/（待确认）$/, '') + '（待确认）';
+        if (tab && !a.cancel && (a.confirm || !awaitingUser(w, [tab.id]))) removeTab(w, tab);
         break;
       }
       case 'space.close':
-        for (const winId of w.spaces.find((space) => space.id === a.spaceId)?.windowIds ?? [])
-          for (const tab of w.tabs.filter((tab) => tab.windowId === winId))
-            tab.title = tab.title.replace(/（待确认）$/, '') + '（待确认）';
+      case 'window.close': {
+        const ids =
+          a.type === 'window.close'
+            ? [a.windowId]
+            : [...(w.spaces.find((space) => space.id === a.spaceId)?.windowIds ?? [])];
+        // A page asking to stay keeps its window on screen beside the leave dialog.
+        for (const windowId of ids)
+          if (
+            !awaitingUser(
+              w,
+              w.tabs.filter((tab) => tab.windowId === windowId).map((tab) => tab.id),
+            )
+          )
+            removeWindow(w, windowId);
         break;
-      case 'window.close':
-        for (const tab of w.tabs.filter((t) => t.windowId === a.windowId))
-          tab.title = tab.title.replace(/（待确认）$/, '') + '（待确认）';
-        break;
+      }
     }
   }
   const fullscreen = next.pageFullscreen;

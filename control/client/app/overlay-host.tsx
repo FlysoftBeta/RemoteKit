@@ -1,5 +1,5 @@
 import { Button, Dialog, DialogActions, DialogContent, DialogTitle } from '@mui/material';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import {
   isSingletonApp,
@@ -7,7 +7,7 @@ import {
   type ProductState,
   type WindowPlacement,
 } from '../../shared/product';
-import { SurfaceState, failureError, notices } from '../failures';
+import { SurfaceState, failureError, notices, presentFailure } from '../failures';
 import type { ViewerSession } from '../viewer-session';
 import { AnnouncementDialog } from './announcements';
 import { AudioControls } from './audio-controls';
@@ -129,7 +129,14 @@ export function OverlayHost({
   const activeSpace = workspace.spaces.find((space) => space.id === workspace.activeSpaceId);
   const pending = workspace.pendingClose;
   const [failure, setFailure] = useState<RemoteKitError>();
+  const launcherHome = useRef<LauncherItem[]>([]);
   const report = (error: unknown) => setFailure(failureError(error));
+  // Start has already closed when its actions settle, so their failures go to the global notices.
+  const reportStart = (error: unknown) =>
+    notices.post(
+      'start:action',
+      presentFailure(failureError(error), { operation: '从开始屏幕打开', scope: 'global' }),
+    );
   // The Start button stays out of the way of a page or window shown fullscreen; its exit control
   // takes that place, so both follow the same fullscreen decision.
   useFloatingAction(
@@ -171,7 +178,8 @@ export function OverlayHost({
           toggleFullscreen={controls.browserFullscreen.toggle}
           snapshots={snapshots}
           action={action}
-          report={report}
+          report={reportStart}
+          home={launcherHome}
           call={call}
           exiting={!overlays.launcherOpen}
           online={shellReady}
