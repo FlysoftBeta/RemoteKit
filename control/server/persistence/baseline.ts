@@ -45,6 +45,7 @@ CREATE TABLE library_basket (tenant TEXT NOT NULL, position INTEGER NOT NULL, en
 CREATE TABLE library_entries (tenant TEXT NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, kind TEXT NOT NULL, size INTEGER NOT NULL, data TEXT NOT NULL, position INTEGER NOT NULL, PRIMARY KEY(tenant,id));
 CREATE TABLE library_entry_objects (tenant TEXT NOT NULL, entry_id TEXT NOT NULL, object_id TEXT NOT NULL, role TEXT NOT NULL, PRIMARY KEY(tenant,entry_id,object_id,role), FOREIGN KEY(tenant,entry_id) REFERENCES library_entries(tenant,id) ON DELETE CASCADE);
 CREATE TABLE library_excluded_sources (tenant TEXT NOT NULL, source TEXT NOT NULL, position INTEGER NOT NULL, PRIMARY KEY(tenant,source));
+CREATE TABLE library_partition_ids (tenant TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(tenant,id));
 CREATE TABLE library_partitions (tenant TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(tenant,id));
 CREATE TABLE library_snippets (
     entry_id TEXT PRIMARY KEY, tenant TEXT NOT NULL, text TEXT NOT NULL,
@@ -146,6 +147,6 @@ CREATE UNIQUE INDEX single_admin ON users(is_admin) WHERE is_admin=1;
 CREATE INDEX usage_events_context ON usage_events(tenant,window_id,context,at,id);
 CREATE INDEX usage_events_tenant ON usage_events(tenant,at,id);
 CREATE INDEX viewer_presence_tenant ON viewer_presence(tenant,connected_at);
-INSERT INTO schema_version VALUES (27);
+INSERT INTO schema_version VALUES (29);
 INSERT INTO server_settings VALUES (1,'{"version":1,"logRetentionDays":30}');
 `;

@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import { registerUser } from './server-fixture';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -11,20 +12,13 @@ import { TestClock, accountsFor, testGateway } from './server-fixture';
 test('workspace planning is deterministic and leaves its input unchanged', () => {
   const workspace = emptyWorkspace('tenant');
   const before = structuredClone(workspace);
-  const context = { ids: ['window', 'space', 'tab'], viewId: '1', now: 1000 };
-  const first = applyCommand(
-    workspace,
-    { type: 'window.open', appId: 'browser', placement: { mode: 'space' } },
-    context,
-  );
-  const second = applyCommand(
-    workspace,
-    { type: 'window.open', appId: 'browser', placement: { mode: 'space' } },
-    context,
-  );
+  const context = { viewId: '1', now: 1000 };
+  const action = buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+  const first = applyCommand(workspace, action, context);
+  const second = applyCommand(workspace, action, context);
   assert.deepEqual(workspace, before);
   assert.deepEqual(first, second);
-  assert.equal(first.workspace.tabs[0].id, 'tab');
+  assert.equal(first.workspace.tabs[0].id, action.tabId);
   const execution = {
     tenantId: 'tenant',
     authority: { tenantId: 'tenant', leaseId: 'lease', epoch: 1 },
@@ -34,12 +28,18 @@ test('workspace planning is deterministic and leaves its input unchanged', () =>
   };
   const navigation = applyCommand(
     first.workspace,
-    { type: 'tab.navigate', tabId: 'tab', url: 'https://example.test/' },
+    { type: 'tab.navigate', tabId: action.tabId!, url: 'https://example.test/' },
     { ...context, execution, browserIncarnation: 'browser' },
   );
   assert.equal(first.workspace.tabs[0].kind, 'start');
   assert.deepEqual(navigation.effects, [
-    { kind: 'navigate', tabId: 'tab', url: 'https://example.test/', previousKind: 'start', ctx: execution },
+    {
+      kind: 'navigate',
+      tabId: action.tabId,
+      url: 'https://example.test/',
+      previousKind: 'start',
+      ctx: execution,
+    },
   ]);
 });
 

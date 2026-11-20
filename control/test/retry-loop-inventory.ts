@@ -58,7 +58,7 @@ export const auditLoops = {
     'client/auth/security-settings.tsx',
   ],
   'user-operation-wrappers': [
-    'client/app/admin/shared.tsx',
+    'client/app/admin/resource-store.ts',
     'client/app/session-import.tsx',
     'client/selection/selection-ui.tsx',
     'client/learning/study/study-app.tsx',
@@ -84,6 +84,7 @@ export const auditLoops = {
   ],
   'control-websocket-reconnect-auth-probe': ['client/control/control-session.ts'],
   'product-admission-submission': ['client/control/operations-store.ts'],
+  'product-creation-dependencies': ['client/control/operations-store.ts'],
   'product-receipt-queries': ['client/control/operations-store.ts'],
   'latest-viewport-publication': ['client/control/viewport-requests.ts'],
   'browser-service-rtc-establishment': ['client/rtc/rtc-session.ts'],

@@ -1,3 +1,4 @@
+import { buildAction } from '../control/action-builder';
 import {
   isSingletonApp,
   type LauncherItem,
@@ -24,17 +25,18 @@ export function launcherActions(
     .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
   const url = item.kind === 'page' ? item.url : undefined;
   if (existing && (reuseExisting || isSingletonApp(appId))) {
-    if (item.kind === 'page') return [{ type: 'tab.create', windowId: existing.id, url, source: 'launcher' }];
+    if (item.kind === 'page')
+      return [buildAction({ type: 'tab.create', windowId: existing.id, url, source: 'launcher' })];
     return [{ type: 'window.focus', windowId: existing.id, source: 'launcher' }];
   }
   return [
-    {
+    buildAction({
       type: 'window.open',
       appId,
       url,
       placement: placement ?? launcherPlacement(workspace),
       source: 'launcher',
-    },
+    }),
   ];
 }
 
@@ -45,11 +47,11 @@ export function launcherPlacement(workspace: ProductWorkspace): WindowPlacement 
 }
 
 export function launcherNavigation(url: string, placement: WindowPlacement): ProductAction {
-  return {
+  return buildAction({
     type: 'window.open',
     appId: 'browser',
     url,
     placement,
     source: 'launcher',
-  };
+  });
 }

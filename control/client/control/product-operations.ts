@@ -8,6 +8,7 @@ import {
 import { RemoteKitError, parseWireError } from '../../shared/errors';
 import {
   isSingletonApp,
+  creationIdFields,
   placeTab,
   type OperationReceipt,
   type ProductAction,
@@ -17,6 +18,7 @@ import {
   type WindowPlacement,
 } from '../../shared/product';
 import { randomUuid } from '../../shared/random-uuid';
+import type { RecordedAction } from '../../shared/recorded-action';
 /** Product actions return execution receipts, never an authoritative workspace. */
 export type ProductActionHandler = (action: ProductAction) => Promise<OperationReceipt>;
 export function requireAcceptedReceipt(receipt: OperationReceipt): OperationReceipt {
@@ -26,6 +28,41 @@ export function requireAcceptedReceipt(receipt: OperationReceipt): OperationRece
 }
 export interface PendingOperation extends ProductOperation {
   receipt?: OperationReceipt;
+}
+export function createdIds(action: RecordedAction): string[] {
+  const fields = action as unknown as Record<string, unknown>;
+  return creationIdFields(action)
+    .map((field) => fields[field])
+    .filter((id): id is string => typeof id === 'string');
+}
+
+export function targetIds(action: ProductAction): string[] {
+  const created = new Set<string>(creationIdFields(action));
+  const ids = Object.entries(action)
+    .filter(([key]) => (key === 'id' || key.endsWith('Id')) && !created.has(key))
+    .map(([, value]) => value);
+  if ('placement' in action) {
+    if (action.placement.mode === 'split') ids.push(action.placement.besideWindowId);
+    if (action.placement.mode === 'replace') ids.push(action.placement.windowId);
+  }
+  return ids.filter((id): id is string => typeof id === 'string');
+}
+
+export function isBeingCreated(
+  state: ProductState | null,
+  pending: { action: RecordedAction; receipt?: OperationReceipt }[],
+  id: string | null,
+): boolean {
+  if (!state || !id) return false;
+  if (
+    [...state.workspace.windows, ...state.workspace.tabs, ...state.workspace.spaces].some(
+      (item) => item.id === id,
+    )
+  )
+    return false;
+  return pending.some(
+    (operation) => operation.receipt?.status !== 'failed' && createdIds(operation.action).includes(id),
+  );
 }
 function canPlace(workspace: ProductWorkspace, windowId: string, placement: WindowPlacement) {
   if (windowClosing(workspace, windowId)) return false;
@@ -63,8 +100,7 @@ export function projectOperations(
   const next = JSON.parse(JSON.stringify(state)) as ProductState,
     w = next.workspace;
   for (const operation of pending) {
-    const a = operation.action,
-      id = 'pending-' + operation.operationId;
+    const a = operation.action;
     if (operation.receipt && ['failed'].includes(operation.receipt.status)) continue;
     if (
       operation.receipt &&
@@ -74,6 +110,8 @@ export function projectOperations(
       continue;
     switch (a.type) {
       case 'window.open': {
+        const id = a.windowId;
+        if (w.windows.some((win) => win.id === id)) break;
         const existing = isSingletonApp(a.appId) && w.windows.find((win) => win.appId === a.appId);
         if (existing) {
           focusWindow(w, existing.id);
@@ -81,12 +119,12 @@ export function projectOperations(
         }
         if (w.windows.length >= 16 || !canPlace(w, id, a.placement)) break;
         w.windows.push({ id, appId: a.appId, activeTabId: null, lastActiveAt: Date.now() });
-        if (a.placement.mode === 'replace') replaceWindow(w, id, a.placement.windowId, id + '-space');
-        else placeWindow(w, id, a.placement, id + '-space');
-        if (a.appId === 'browser' || a.appId.startsWith('web:')) {
+        if (a.placement.mode === 'replace') replaceWindow(w, id, a.placement.windowId, a.spaceId!);
+        else placeWindow(w, id, a.placement, a.spaceId!);
+        if (creationIdFields(a).includes('tabId')) {
           const url = a.url ?? w.apps.find((app) => `web:${app.id}` === a.appId)?.startUrl;
           w.tabs.push({
-            id: id + '-tab',
+            id: a.tabId!,
             windowId: id,
             idleKeepAlive: false,
             webviewId: '',
@@ -95,7 +133,7 @@ export function projectOperations(
             url: '',
             pendingUrl: url,
           });
-          w.windows.find((win) => win.id === id)!.activeTabId = id + '-tab';
+          w.windows.find((win) => win.id === id)!.activeTabId = a.tabId!;
         }
         break;
       }
@@ -104,7 +142,7 @@ export function projectOperations(
         break;
       case 'window.place':
         if (w.windows.some((win) => win.id === a.windowId) && canPlace(w, a.windowId, a.placement))
-          placeWindow(w, a.windowId, a.placement, id + '-space');
+          placeWindow(w, a.windowId, a.placement, a.spaceId!);
         break;
       case 'space.activate': {
         const space = w.spaces.find((space) => space.id === a.spaceId);
@@ -130,7 +168,7 @@ export function projectOperations(
         break;
       case 'favorite.add':
         if (!w.favorites.some((favorite) => favorite.url === a.url))
-          w.favorites.push({ id, title: a.title, url: a.url, createdAt: Date.now() });
+          w.favorites.push({ id: a.favoriteId, title: a.title, url: a.url, createdAt: Date.now() });
         break;
       case 'favorite.remove':
         w.favorites = w.favorites.filter((favorite) => favorite.id !== a.id);
@@ -145,8 +183,9 @@ export function projectOperations(
         w.pendingAppUninstallId = a.appId.slice(4);
         break;
       case 'app.install':
+        if (w.apps.some((app) => app.id === a.appId)) break;
         w.apps.push({
-          id,
+          id: a.appId,
           name: a.name,
           startUrl: a.startUrl,
           scope: a.scope ?? a.startUrl,
@@ -163,10 +202,11 @@ export function projectOperations(
         };
         break;
       case 'tab.create': {
+        if (w.tabs.some((tab) => tab.id === a.tabId)) break;
         const win = w.windows.find((win) => win.id === a.windowId);
         if (win) {
           w.tabs.push({
-            id,
+            id: a.tabId,
             windowId: win.id,
             idleKeepAlive: false,
             webviewId: '',
@@ -175,7 +215,7 @@ export function projectOperations(
             url: '',
             pendingUrl: a.url,
           });
-          win.activeTabId = id;
+          win.activeTabId = a.tabId;
           focusWindow(w, win.id);
         }
         break;
@@ -208,6 +248,11 @@ export function projectOperations(
           tab.pendingUrl = a.url;
           tab.loading = true;
         }
+        break;
+      }
+      case 'tab.command': {
+        const tab = w.tabs.find((tab) => tab.id === a.tabId);
+        if (tab) tab.loading = a.command !== 'stop';
         break;
       }
       case 'tab.close': {

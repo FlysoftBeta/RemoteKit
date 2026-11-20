@@ -1,3 +1,4 @@
+import { buildAction } from '../control/action-builder';
 import './window-drag.css';
 import React, {
   createContext,
@@ -233,7 +234,7 @@ export function WindowDragProvider({
     const movingId = 'windowId' in source ? source.windowId : undefined;
     const place = (placement: Exclude<WindowPlacement, { mode: 'replace' }>): Target =>
       'windowId' in source
-        ? { action: { type: 'window.place', windowId: source.windowId, placement } }
+        ? { action: buildAction({ type: 'window.place', windowId: source.windowId, placement }) }
         : { placement };
     if (movingId && hit?.kind === 'close') return { action: { type: 'window.close', windowId: movingId } };
     if (hit?.kind === 'group') {

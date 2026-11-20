@@ -1,3 +1,4 @@
+import { buildAction } from './kit/product-actions.mts';
 import { launchPersistentViewer } from './kit/viewer.mjs';
 
 import assert from 'node:assert/strict';
@@ -671,7 +672,7 @@ try {
     destination: 'library',
     origin: { kind: 'files', channel: 'upload', partitionId: null },
   });
-  await action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
+  await action(buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }));
   const file = page.getByRole('button', { name: 'Selection reader.txt', exact: true });
   await file.waitFor();
   const tile = await file.boundingBox();

@@ -1,3 +1,4 @@
+import { buildAction } from './kit/product-actions.mts';
 import {
   authorizedFrameReady,
   createViewerContext,
@@ -215,12 +216,14 @@ try {
   await admin.call('admin.createUser', { username: 'clipboard-user', password });
   user = await connect('clipboard-user');
   db = new Database(join(run, 'control.db'), { readonly: true });
-  await user.action({
-    type: 'window.open',
-    appId: 'browser',
-    placement: { mode: 'space' },
-    url: fixtureOrigin + '/',
-  });
+  await user.action(
+    buildAction({
+      type: 'window.open',
+      appId: 'browser',
+      placement: { mode: 'space' },
+      url: fixtureOrigin + '/',
+    }),
+  );
   await until(() => latest(), 'fixture ready');
   await ready();
   const layoutIdentity = () =>
@@ -280,7 +283,7 @@ try {
     );
     assert.deepEqual(deviceEntry?.origin, { kind: 'device' });
     const browserSpace = (await user.state()).workspace.activeSpaceId;
-    await user.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
+    await user.action(buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }));
     await user.page
       .getByRole('navigation', { name: '文件导航' })
       .getByText('剪贴板', { exact: true })

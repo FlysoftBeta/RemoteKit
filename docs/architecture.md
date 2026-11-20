@@ -159,7 +159,7 @@ tests/             e2e/（真实栈产品场景）、integration/（原生 Endpo
 ### Viewer 外壳约定
 
 - 样式与组件并置（`foo.tsx` 导入 `foo.css`），全局 `style.css` 只留重置与根布局；外壳颜色取 `theme/tokens.css` 的变量；字面色值只用于数据色（App 主题色、文件类型色）和压在相机画面上的叠层。
-- 拖放目标走一个注册表：`useDropTarget(kind, payload)` 返回 `{ref, hovered, replace}`，拖动方按指针位置查询登记的矩形，目标自行渲染高亮；开始屏幕的磁贴拖动与窗口把手拖动共用它。
+- 拖放目标走一个注册表：`useDropTarget(kind, payload)` 返回 `{ref, hovered, replace}`，拖动方按指针位置查询登记的矩形，目标自行渲染高亮；开始屏幕的磁贴拖动与窗口把手拖动共用它。一次拖动内目标的命中区域（含滚动容器裁剪）只测量一次，渲染、滚动、缩放或注册变化时失效；指针移动按帧合并，浮起的缩略图用 transform 直接移动，React 只在目标或悬停对象变化时重渲染——逐次移动读祖先样式与整树重渲染曾让平板上的拖动只有约 1 FPS。
 - 不常用的界面（管理 App、会话导入）按需 `import()` 成独立 chunk，核心包是 MUI + React + 舞台；Vite 的 chunk 告警阈值按核心包实际大小设置，超过即说明核心包在增长。
 - 自动化钩子 `window.__remotekitTest` 只在开发构建里由 `main.tsx` 动态导入（`import.meta.env.DEV`），发布产物不含它。
 

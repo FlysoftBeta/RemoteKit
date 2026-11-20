@@ -13,10 +13,18 @@ import { operationId } from '../control/product-operations';
 import { recover, recoverRead } from '../failures/recovery';
 import { diagnostics } from '../media/diagnostics';
 import { Store } from '../util/store';
+import { randomUuid } from '../../shared/random-uuid';
 import type { FileChannel } from './file-channel';
 import { FileThumbnails } from './file-thumbnails';
 import { ImportQueue } from './import-queue';
 import { PhotoJobStore } from './photo-job-store';
+import {
+  projectBasket,
+  projectLibrary,
+  type LibraryChange,
+  type LibraryMutationMethod,
+  type PendingLibraryChange,
+} from './library-operations';
 
 type ClientMethods = LibraryMethods & Pick<SocketMethods, 'usage.record'>;
 export type LibraryRequest = <K extends keyof ClientMethods>(
@@ -32,6 +40,9 @@ interface Checkout {
   nextCheck: number;
   retry: RetryUnit;
   error?: RemoteKitError;
+}
+interface PendingMutation extends PendingLibraryChange {
+  completion?: Promise<LibrarySnapshot>;
 }
 
 export interface LibraryState {
@@ -51,6 +62,8 @@ export class LibraryStore extends Store<LibraryState> {
   readonly photos: PhotoJobStore;
   private loadError?: RemoteKitError;
   private librarySnapshot?: LibrarySnapshot;
+  private pending: PendingMutation[] = [];
+  private mutationTail: Promise<unknown> = Promise.resolve();
   private checkouts = new Map<string, Checkout>();
   private cancellations = new Map<string, SelectionState>();
   private epoch = 0;
@@ -94,12 +107,14 @@ export class LibraryStore extends Store<LibraryState> {
     }
     const scopeChanged = this.identity !== identity;
     const connectionChanged = this.online !== online || this.enabled !== enabled;
-    if (scopeChanged) {
+    if (scopeChanged || (this.enabled && !enabled)) {
       this.taskAbort.abort();
       this.taskAbort = new AbortController();
       this.loadError = undefined;
       this.epoch++;
       this.librarySnapshot = undefined;
+      this.pending = [];
+      this.mutationTail = Promise.resolve();
       this.checkouts.clear();
       this.cancellations.clear();
       this.thumbnails.clear();
@@ -137,6 +152,7 @@ export class LibraryStore extends Store<LibraryState> {
     this.enabled = false;
     this.online = false;
     this.librarySnapshot = undefined;
+    this.pending = [];
     this.checkouts.clear();
     this.cancellations.clear();
     this.photos.dispose();
@@ -149,7 +165,13 @@ export class LibraryStore extends Store<LibraryState> {
   private emit() {
     this.publish({
       cancellations: Object.fromEntries(this.cancellations),
-      snapshot: this.librarySnapshot,
+      snapshot: projectLibrary(
+        this.librarySnapshot,
+        this.pending,
+        [...this.checkouts.values()].flatMap((checkout) =>
+          checkout.state === 'selected' || checkout.state === 'cancelled' ? [] : checkout.entryIds,
+        ),
+      ),
       error: this.loadError,
       online: this.online && this.enabled,
       scope: this.enabled ? `${this.identity}:${this.epoch}` : undefined,
@@ -173,68 +195,124 @@ export class LibraryStore extends Store<LibraryState> {
   receive = (next: LibrarySnapshot) => {
     if (this.online) this.accept(next, this.epoch);
   };
-  mutate = async <
-    K extends
-      | 'library.import'
-      | 'library.replace'
-      | 'library.basket'
-      | 'library.partition'
-      | 'library.partitionDelete'
-      | 'library.source'
-      | 'library.sourcePurge'
-      | 'library.basketPartition'
-      | 'library.move'
-      | 'library.delete',
-  >(
+  mutate = <K extends LibraryMutationMethod>(
     method: K,
     params: LibraryMethods[K]['params'],
     windowId?: string,
-  ) => {
+  ): Promise<LibrarySnapshot> => {
     const epoch = this.epoch;
-    const before = new Set(this.librarySnapshot?.basket);
-    try {
+    const signal = this.taskAbort.signal;
+    const change = { method, params: JSON.parse(JSON.stringify(params)) } as LibraryChange;
+    const partitionId =
+      (change.method === 'library.partition' && !change.params.create) ||
+      change.method === 'library.partitionDelete'
+        ? change.params.id
+        : change.method === 'library.move' || change.method === 'library.basketPartition'
+          ? change.params.partitionId
+          : change.method === 'library.import' && change.params.origin.kind === 'files'
+            ? change.params.origin.partitionId
+            : null;
+    const prerequisite = this.pending.find(
+      (item) =>
+        item.change.method === 'library.partition' &&
+        item.change.params.create &&
+        item.change.params.id === partitionId,
+    );
+    const pending: PendingMutation = {
+      change,
+      basketBefore: [...(this.getSnapshot().snapshot?.basket ?? [])],
+    };
+    const before = new Set(this.getSnapshot().snapshot?.basket);
+    this.pending.push(pending);
+    this.emit();
+    const execute = async () => {
+      if (prerequisite) await prerequisite.completion;
+      if (!this.current(epoch)) throw new RemoteKitError('canceled', '');
+      // Basket requests are serialized against the last accepted revision, while every edit is projected.
+      if (change.method === 'library.basket' || change.method === 'library.replace')
+        change.params.expectedRevision = this.librarySnapshot?.revision ?? change.params.expectedRevision;
+      const requestChange = JSON.parse(JSON.stringify(change)) as LibraryChange;
+      const rebaseBasket = () => {
+        if (requestChange.method === 'library.basket' && this.librarySnapshot) {
+          requestChange.params.expectedRevision = this.librarySnapshot.revision;
+          requestChange.params.ids = projectBasket(
+            this.librarySnapshot.basket,
+            (change.params as LibraryMethods['library.basket']['params']).ids,
+            pending.basketBefore!,
+          );
+        }
+      };
+      rebaseBasket();
+      const request = () => {
+        pending.visible = true;
+        this.emit();
+        return this.request(requestChange.method, requestChange.params);
+      };
       const next =
         method === 'library.import' || method === 'library.replace'
-          ? await this.request(method, params)
+          ? await request()
           : await recover(
-              () => this.request(method, params),
-              this.taskAbort.signal,
+              request,
+              signal,
               (error) => {
                 if (this.current(epoch)) {
+                  pending.visible = false;
                   this.loadError = operationFailure(error, method, params);
                   this.emit();
                 }
               },
               {
                 identity: params.operationId,
-                recompute: async () => {
-                  await this.refresh();
-                },
+                recompute:
+                  change.method === 'library.partition' && change.params.create
+                    ? undefined
+                    : async () => {
+                        await this.refresh();
+                        rebaseBasket();
+                      },
               },
             );
+      if (!this.current(epoch)) return next;
+      this.pending = this.pending.filter((item) => item !== pending);
       this.loadError = undefined;
       this.accept(next, epoch);
-      if (this.current(epoch)) this.emit();
-      if (windowId && this.current(epoch) && (method === 'library.import' || method === 'library.basket')) {
-        for (const id of next.basket.filter((id) => !before.has(id))) {
+      this.emit();
+      if (windowId && (method === 'library.import' || method === 'library.basket')) {
+        for (const id of next.basket.filter((id) => !before.has(id)))
           void this.recordUsage(id, windowId).catch((error) => diagnostics.record('file-usage', error));
-        }
       }
       return next;
-    } catch (error) {
-      this.loadError = toRemoteKitError(error);
-      this.emit();
-      if (
-        (method === 'library.basket' || method === 'library.replace') &&
-        error instanceof RemoteKitError &&
-        error.code === 'conflict'
-      ) {
-        if (!this.current(epoch)) throw error;
-        await this.refresh().catch((error) => diagnostics.record('file-library-state', error));
-        throw error;
+    };
+    const result = this.mutationTail.then(execute).catch(async (error) => {
+      if (this.current(epoch)) {
+        this.pending = this.pending.filter((item) => item !== pending);
+        this.loadError = operationFailure(error, method, params);
+        this.emit();
+        await this.refresh().catch((failure) => diagnostics.record('file-library-state', failure));
+        if (this.current(epoch)) {
+          this.loadError = operationFailure(error, method, params);
+          this.emit();
+        }
       }
       throw error;
-    }
+    });
+    pending.completion = result;
+    this.mutationTail = result.catch((error) => diagnostics.record('library-mutation', error));
+    return result;
+  };
+
+  createPartition = (name: string, ids?: string[]) => {
+    const partitionId = randomUuid();
+    const create = this.mutate('library.partition', {
+      operationId: operationId(),
+      id: partitionId,
+      name,
+      create: true,
+    });
+    const choose = ids
+      ? this.mutate('library.move', { operationId: operationId(), ids, partitionId })
+      : this.mutate('library.basketPartition', { operationId: operationId(), partitionId });
+    return Promise.all([create, choose]);
   };
 
   recordUsage = (entryId: string, windowId: string) =>

@@ -1,3 +1,4 @@
+import { buildAction } from '../control/action-builder';
 import { Add, AdminPanelSettingsOutlined, Logout, WebAssetOutlined } from '@mui/icons-material';
 import { Button, Typography } from '@mui/material';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -385,11 +386,13 @@ export function Stage({
                     startIcon={<AdminPanelSettingsOutlined />}
                     disabled={!shellReady}
                     onClick={() =>
-                      void action({
-                        type: 'window.open',
-                        appId: 'admin',
-                        placement: { mode: 'space' },
-                      }).catch(report)
+                      void action(
+                        buildAction({
+                          type: 'window.open',
+                          appId: 'admin',
+                          placement: { mode: 'space' },
+                        }),
+                      ).catch(report)
                     }
                   >
                     管理

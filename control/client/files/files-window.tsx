@@ -58,8 +58,8 @@ export function FilesWindow({
   failure?: RemoteKitError;
   failureOperation?: string;
 }) {
-  const restored = useMemo(() => readFilesWindowState(state), [state]);
   const { snapshot, online, refresh, recordUsage, apps, photos } = useLibrary();
+  const restored = useMemo(() => readFilesWindowState(state), [state]);
   const uploads = useImportQueue('library', windowId);
   const appliedLaunch = useRef<string>(undefined);
   const [menu, setMenu] = useState<{ anchor: HTMLElement; id: string }>();

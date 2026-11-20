@@ -1,3 +1,4 @@
+import { buildAction } from './kit/product-actions.mts';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
@@ -67,12 +68,14 @@ try {
     currentPassword: password,
     settings: { lockOnHidden: false, lockOnIdle: false },
   });
-  await viewer.action({
-    type: 'window.open',
-    appId: 'browser',
-    placement: { mode: 'space' },
-    url: 'http://127.0.0.1:' + (port + 1) + '/parent',
-  });
+  await viewer.action(
+    buildAction({
+      type: 'window.open',
+      appId: 'browser',
+      placement: { mode: 'space' },
+      url: 'http://127.0.0.1:' + (port + 1) + '/parent',
+    }),
+  );
   await viewer.media();
   await until(() => geometry, 'parent geometry');
   const viewport = viewer.page.locator('.remote-viewport').first();

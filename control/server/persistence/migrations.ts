@@ -1,4 +1,7 @@
 import type Database from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
+import { creationIdFields, type ProductAction } from '../../shared/product';
+import { operationPayload } from './operations';
 import Sqlite from 'better-sqlite3';
 import { mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -109,9 +112,39 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 28,
+    name: 'client assigned product object ids',
+    up(db) {
+      const save = db.prepare('UPDATE operation_receipts SET payload=? WHERE tenant=? AND id=?');
+      for (const row of db.prepare('SELECT tenant,id,payload FROM operation_receipts').all() as {
+        tenant: string;
+        id: string;
+        payload: string;
+      }[]) {
+        const action = JSON.parse(row.payload);
+        const fields = creationIdFields(action);
+        if (!fields.length) continue;
+        for (const field of fields) action[field] = randomUUID();
+        save.run(
+          operationPayload(action as ProductAction, `operation_receipts.payload ${row.tenant}/${row.id}`),
+          row.tenant,
+          row.id,
+        );
+      }
+    },
+  },
+  {
+    version: 29,
+    name: 'client assigned library partition ids',
+    up(db) {
+      db.exec(`CREATE TABLE library_partition_ids (tenant TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(tenant,id));
+        INSERT INTO library_partition_ids SELECT tenant,id FROM library_partitions;`);
+    },
+  },
 ];
 
-export const currentVersion = 27;
+export const currentVersion = 29;
 export interface MigrationOptions extends MigrationContext {
   backupDirectory: string;
   buildId: string;

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../shared/errors';
 import { AtRestKey } from '../server/auth/crypto';
 import { LibraryRepository } from '../server/persistence/library';
@@ -174,6 +175,71 @@ function fixture(assetType = 'image/jpeg') {
   };
 }
 
+test('partition creation requires an explicit operation and a lowercase version 4 UUID', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const valid = '12345678-1234-4234-8234-123456789abc';
+  for (const id of [
+    undefined,
+    null,
+    '',
+    'group',
+    valid.toUpperCase(),
+    valid.replace('-4234-', '-1234-'),
+    valid.replace('-8234-', '-7234-'),
+  ]) {
+    await assert.rejects(f.run('partition', { operationId: 'invalid', id, name: 'Group', create: true }), {
+      code: 'invalid_request',
+    });
+  }
+  for (const create of [undefined, null, 'true', 1]) {
+    await assert.rejects(f.run('partition', { operationId: 'invalid', id: valid, name: 'Group', create }), {
+      code: 'invalid_request',
+    });
+  }
+  await assert.rejects(
+    f.run('partition', { operationId: 'rename-missing', id: valid, name: 'Group', create: false }),
+    { code: 'not_found' },
+  );
+  assert.deepEqual((await f.run('get')).partitions, []);
+  const created = await f.run('partition', { operationId: 'create', id: valid, name: 'Group', create: true });
+  assert.deepEqual(created.partitions, [{ id: valid, name: 'Group' }]);
+});
+
+test('partition IDs reject reuse while operation replay remains idempotent through rename, deletion and reopen', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const id = randomUUID();
+  const create = { operationId: 'create', id, name: 'Group', create: true };
+  const created = await f.run('partition', create);
+  assert.deepEqual(await f.run('partition', create), created);
+  await assert.rejects(f.run('partition', { ...create, operationId: 'reuse' }), { code: 'conflict' });
+  await assert.rejects(f.run('partition', { ...create, name: 'Changed payload' }), { code: 'conflict' });
+  await assert.rejects(f.run('partition', { ...create, create: false }), { code: 'conflict' });
+  const renamed = await f.run('partition', { operationId: 'rename', id, name: 'Renamed', create: false });
+  f.reopen();
+  assert.deepEqual(await f.run('partition', create), renamed);
+  const deleted = await f.run('partitionDelete', { operationId: 'delete', id });
+  f.reopen();
+  assert.deepEqual(await f.run('partition', create), deleted);
+  await assert.rejects(f.run('partition', { ...create, operationId: 'reuse-deleted' }), { code: 'conflict' });
+  assert.deepEqual((await f.run('get')).partitions, []);
+  assert.deepEqual((await f.run('partition', create, 'other')).partitions, [{ id, name: 'Group' }]);
+});
+
+test('partition creation keeps distinct IDs for groups with identical names', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const first = randomUUID();
+  const second = randomUUID();
+  await f.run('partition', { operationId: 'one', id: first, name: 'Group', create: true });
+  const snapshot = await f.run('partition', { operationId: 'two', id: second, name: 'Group', create: true });
+  assert.deepEqual(snapshot.partitions, [
+    { id: first, name: 'Group' },
+    { id: second, name: 'Group' },
+  ]);
+});
+
 test('library entries require upload media types while hash-only references do not', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
@@ -188,7 +254,12 @@ test('library entries require upload media types while hash-only references do n
 test('file catalog validates scoped assets and ordered basket, prunes removed entries and preserves collected originals', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  const start = await f.run('partition', { operationId: 'group', name: '  Receipts  ' });
+  const start = await f.run('partition', {
+    operationId: 'group',
+    id: randomUUID(),
+    create: true,
+    name: '  Receipts  ',
+  });
   const partitionId = start.partitions[0].id;
   const direct = await f.add(ASSETS.photo, 'library', {
     originalAssetId: ASSETS.original,
@@ -247,14 +318,21 @@ test('file catalog validates scoped assets and ordered basket, prunes removed en
   assert.deepEqual(await f.add(ASSETS.draft), removed);
   const moved = await f.run('move', { operationId: 'move', ids: [collected], partitionId: null });
   assert.equal(moved.entries[0].partitionId, null);
-  const renamed = await f.run('partition', { operationId: 'rename', id: partitionId, name: 'Invoices' });
+  const renamed = await f.run('partition', {
+    operationId: 'rename',
+    id: partitionId,
+    create: false,
+    name: 'Invoices',
+  });
   assert.deepEqual(renamed.partitions, [{ id: partitionId, name: 'Invoices' }]);
 });
 
 test('prepared selection retries its immutable manifest and consumes only confirmed entry IDs after restart', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  const partitionId = (await f.run('partition', { operationId: 'group', name: 'Receipts' })).partitions[0].id;
+  const partitionId = (
+    await f.run('partition', { operationId: 'group', id: randomUUID(), create: true, name: 'Receipts' })
+  ).partitions[0].id;
   const first = await f.add(ASSETS.draft);
   const latest = await f.add(ASSETS.extra);
   const [draft, extra] = latest.basket;
@@ -380,7 +458,9 @@ test('explicit deletion is atomic and keeps assets referenced by another entry o
 test('photo choice and scan failure remain blocked until confirmed in place', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  const partitionId = (await f.run('partition', { operationId: 'group', name: 'Scans' })).partitions[0].id;
+  const partitionId = (
+    await f.run('partition', { operationId: 'group', id: randomUUID(), create: true, name: 'Scans' })
+  ).partitions[0].id;
   await f.add(ASSETS.draft);
   const photo = { mode: 'scan', pending: 'choice', candidateAssetIds: [ASSETS.photo, ASSETS.extra] };
   const initial = await f.add(ASSETS.photo, 'basket', {
@@ -600,8 +680,9 @@ test('request imports infer browser and web app sources and replay without the r
 test('source exclusion hides aggregate entries, supports undo, and permits explicit library uploads', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Saved' })).partitions[0]
-    .id;
+  const partitionId = (
+    await f.run('partition', { operationId: 'partition', id: randomUUID(), create: true, name: 'Saved' })
+  ).partitions[0].id;
   const first = (await f.add(ASSETS.photo, 'library')).entries[0];
   const second = (
     await f.add(ASSETS.extra, 'library', {
@@ -632,7 +713,9 @@ test('finish uses current exclusions and basket partition and settles exactly on
   const f = fixture();
   t.after(() => f.db.close());
   const source = { app: 'browser', channel: 'example.test' };
-  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Sent' })).partitions[0].id;
+  const partitionId = (
+    await f.run('partition', { operationId: 'partition', id: randomUUID(), create: true, name: 'Sent' })
+  ).partitions[0].id;
   const initial = await f.add(ASSETS.photo, 'basket', { origin: requestOrigin });
   const entryId = initial.entries[0].id;
   const selection = await prepare(f, entryId);
@@ -671,7 +754,9 @@ test('excluded consumed entries lose collection and vanish when their last refer
 test('purge clears source references, retains partition and basket references, and prunes the rest', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Kept' })).partitions[0].id;
+  const partitionId = (
+    await f.run('partition', { operationId: 'partition', id: randomUUID(), create: true, name: 'Kept' })
+  ).partitions[0].id;
   const discarded = (await f.add(ASSETS.photo, 'library')).entries[0];
   const organized = (
     await f.add(ASSETS.extra, 'library', {
@@ -701,7 +786,9 @@ test('purge clears source references, retains partition and basket references, a
 test('pending selections reject purge, partition deletion, and deletion atomically', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Kept' })).partitions[0].id;
+  const partitionId = (
+    await f.run('partition', { operationId: 'partition', id: randomUUID(), create: true, name: 'Kept' })
+  ).partitions[0].id;
   const initial = await f.add(ASSETS.photo, 'library', {
     origin: { kind: 'files', channel: 'upload', partitionId },
   });
@@ -726,7 +813,9 @@ test('pending selections reject purge, partition deletion, and deletion atomical
 test('partition deletion keeps source and basket references and clears basket destination', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Kept' })).partitions[0].id;
+  const partitionId = (
+    await f.run('partition', { operationId: 'partition', id: randomUUID(), create: true, name: 'Kept' })
+  ).partitions[0].id;
   const origin = { kind: 'files', channel: 'upload', partitionId };
   const collected = (await f.add(ASSETS.photo, 'library', { origin })).entries[0];
   const basket = (await f.add(ASSETS.extra, 'basket', { origin })).entries[0];
@@ -743,10 +832,11 @@ test('partition deletion keeps source and basket references and clears basket de
 test('new mutations freeze payloads and reject mismatched operation IDs before state validation', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Saved' })).partitions[0]
-    .id;
+  const partitionId = (
+    await f.run('partition', { operationId: 'partition', id: randomUUID(), create: true, name: 'Saved' })
+  ).partitions[0].id;
   const mutations = [
-    ['partition', { operationId: 'rename', id: partitionId, name: 'Sent' }, { name: 'Other' }],
+    ['partition', { operationId: 'rename', id: partitionId, create: false, name: 'Sent' }, { name: 'Other' }],
     [
       'move',
       { operationId: 'move', ids: [(await f.add(ASSETS.photo, 'library')).entries[0].id], partitionId },
@@ -813,8 +903,9 @@ test('object GC follows live entry assets, originals, candidates, and pending se
   );
   for (const assetId of [ASSETS.photo, ASSETS.original, ASSETS.extra, ASSETS.draft])
     f.db.prepare('INSERT INTO objects VALUES (?,?,?,?,?)').run(assetId, 3, 3, assetId, 0);
-  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Saved' })).partitions[0]
-    .id;
+  const partitionId = (
+    await f.run('partition', { operationId: 'partition', id: randomUUID(), create: true, name: 'Saved' })
+  ).partitions[0].id;
   const saved = await f.add(ASSETS.photo, 'library', {
     originalAssetId: ASSETS.original,
     origin: { kind: 'files', channel: 'upload', partitionId },
@@ -852,7 +943,9 @@ test('purged basket entries finish with only their partition reference', async (
     await f.run('sourcePurge', { operationId: 'purge', source: uploadSource });
     let partitionId: string | null = null;
     if (organize) {
-      partitionId = (await f.run('partition', { operationId: 'partition', name: 'Sent' })).partitions[0].id;
+      partitionId = (
+        await f.run('partition', { operationId: 'partition', id: randomUUID(), create: true, name: 'Sent' })
+      ).partitions[0].id;
       await f.run('basketPartition', { operationId: 'destination', partitionId });
     }
     const selection = await prepare(f, entryId);

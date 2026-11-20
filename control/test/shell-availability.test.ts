@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
@@ -17,6 +18,7 @@ class ServiceEndpoint {
   readonly calls: { method: string; params: any }[] = [];
   readonly signals = new Set<Parameters<NonNullable<EndpointLink['onSignal']>>[0]>();
   faceStatus = 'pending';
+  facePurpose?: string;
   statusGate?: Promise<void>;
   onSignal(listener: Parameters<NonNullable<EndpointLink['onSignal']>>[0]) {
     this.signals.add(listener);
@@ -35,13 +37,19 @@ class ServiceEndpoint {
     }
     if (method === 'service.authorize') return { applied: true, epoch: params.epoch };
     if (method === 'service.face.capabilities') return { available: true, modelVersion: 'models' };
+    if (method === 'service.face.begin') this.facePurpose = params.purpose;
     if (method === 'service.face.status') {
       await this.statusGate;
       return {
         challengeId: params.challengeId,
         status: this.faceStatus,
+        ...(this.facePurpose === 'enroll' && this.faceStatus === 'pending' ? { progress: 0 } : {}),
         ...(this.faceStatus === 'enrolled'
-          ? { template: Array.from({ length: 128 }, (_, i) => (i === 0 ? 1 : 0)) }
+          ? {
+              templates: Array.from({ length: 3 }, () =>
+                Array.from({ length: 128 }, (_, i) => (i === 0 ? 1 : 0)),
+              ),
+            }
           : {}),
       };
     }
@@ -146,7 +154,11 @@ test('WS envelopes dedupe and reject changed payloads without a Session; browser
       action,
     });
   const id = randomUUID();
-  const action: ProductAction = { type: 'window.open', appId: 'settings', placement: { mode: 'space' } };
+  const action: ProductAction = buildAction({
+    type: 'window.open',
+    appId: 'settings',
+    placement: { mode: 'space' },
+  });
   const receipt = await submit(action, id);
   assert.equal(receipt.status, 'committed');
   assert.deepEqual(await submit(action, id), receipt);
@@ -160,7 +172,7 @@ test('WS envelopes dedupe and reject changed payloads without a Session; browser
     ).status,
     'unknown',
   );
-  await submit({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+  await submit(buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }));
   const window = f.store.workspaces.workspace(f.tenant).windows.find((win) => win.appId === 'browser')!;
   const tab = f.store.workspaces.workspace(f.tenant).tabs.find((tab) => tab.id === window.activeTabId)!;
   const failed = await submit({ type: 'tab.navigate', tabId: tab.id, url: 'https://example.test/' });
@@ -310,7 +322,7 @@ test('queued WS operations recheck the Control authorization epoch', async (t) =
   const pending = f.request('operation.submit', {
     operationId: randomUUID(),
     operationGeneration: f.store.operations.operationGeneration(f.tenant),
-    action: { type: 'window.open', appId: 'settings', placement: { mode: 'space' } },
+    action: buildAction({ type: 'window.open', appId: 'settings', placement: { mode: 'space' } }),
   });
   const rejected = assert.rejects(pending, { code: 'locked' });
   await f.control.security.lock(f.tenant, f.control.tenants.get(f.tenant).viewer!.security, false, false);

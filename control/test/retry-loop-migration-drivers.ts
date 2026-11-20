@@ -12,7 +12,7 @@ export const driveFailureMigration: OwnerFactory = (boundary, t) => {
     db.defaultSafeIntegers(true);
     db.exec(baseline);
     db.exec(
-      'DROP TABLE retry_units; DROP TABLE server_settings; DROP TABLE session_node_bindings; UPDATE schema_version SET version=23',
+      'DROP TABLE library_partition_ids; DROP TABLE retry_units; DROP TABLE server_settings; DROP TABLE session_node_bindings; UPDATE schema_version SET version=23',
     );
     const prepare = db.prepare.bind(db);
     t.mock.method(db, 'prepare', (sql: string) => {

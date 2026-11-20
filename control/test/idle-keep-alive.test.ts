@@ -40,7 +40,7 @@ test('keep-alive operation and acknowledgment preserve newer outcomes', () => {
   state.tabs = [tab()];
   state.windows = [{ id: 'window', appId: 'browser', activeTabId: 'tab', lastActiveAt: 0 }];
   const command = (action: ProductAction) =>
-    applyCommand(state, action, { ids: [], viewId: '', now: 100 }).workspace.tabs[0];
+    applyCommand(state, action, { viewId: '', now: 100 }).workspace.tabs[0];
   const record = state.tabs[0].idleKeepAliveOutcome!;
   assert.ok(
     command({ type: 'tab.ackIdleKeepAliveOutcome', tabId: 'tab', at: 1, returnedAt: record.returnedAt! })
@@ -187,7 +187,7 @@ test('Session protection accrues only while eligible; every automatic stop commi
     const acknowledged = applyCommand(
       returned,
       { type: 'tab.ackIdleKeepAliveOutcome', tabId: 'tab', at: record.at, returnedAt: record.returnedAt! },
-      { ids: [], viewId: '', now: clock.wallMs() },
+      { viewId: '', now: clock.wallMs() },
     ).workspace;
     store.workspaces.saveWorkspace(acknowledged);
     control.lifecycle.observeWanted(store.workspaces.workspace(tenantId));

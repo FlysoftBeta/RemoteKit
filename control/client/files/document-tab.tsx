@@ -31,7 +31,7 @@ export function DocumentTab({
   onBack(): void;
   onClose(): void;
 }) {
-  const { snapshot, online, mutate, apps } = useLibrary();
+  const { snapshot, online, mutate, apps, error: libraryError } = useLibrary();
   const entry = snapshot?.entries.find((entry) => entry.id === tab.entryId);
   const host = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
@@ -42,13 +42,11 @@ export function DocumentTab({
     return () => observer.disconnect();
   }, [!!entry]);
   const [menu, setMenu] = useState<HTMLElement>();
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<RemoteKitError | undefined>();
   const basket = basketEntries(snapshot);
   const inBasket = basket.some((item) => item.id === tab.entryId);
   const toggleBasket = async (entry: LibraryEntry) => {
     if (!snapshot) return;
-    setBusy(true);
     setError(undefined);
     try {
       await mutate(
@@ -64,14 +62,13 @@ export function DocumentTab({
       );
     } catch (failure) {
       setError(failureError(failure));
-    } finally {
-      setBusy(false);
     }
   };
   if (!entry)
     return (
       <div className="document-tab-missing" role="status">
         <span>{snapshot ? '文件已删除' : '正在加载文件…'}</span>
+        <FailureNote error={libraryError} context={{ operation: '完成文件操作', scope: 'surface' }} />
         {snapshot && <Button onClick={onClose}>关闭标签页</Button>}
       </div>
     );
@@ -108,7 +105,7 @@ export function DocumentTab({
         {entry.kind === 'file' && (
           <Tool
             title={inBasket ? '从文件篮移除' : '加入文件篮'}
-            disabled={!online || busy || (!inBasket && (!entry.available || basket.length >= 64))}
+            disabled={!online || (!inBasket && (!entry.available || basket.length >= 64))}
             onClick={() => void toggleBasket(entry)}
           >
             <Badge variant="dot" color="primary" invisible={!inBasket}>
@@ -121,7 +118,11 @@ export function DocumentTab({
         </Tool>
       </div>
       <div className="document-tab-content">
-        <SurfaceState live error={error} context={{ operation: '读取阅读位置', scope: 'surface' }} />
+        <SurfaceState
+          live
+          error={error ?? libraryError}
+          context={{ operation: '完成文件操作', scope: 'surface' }}
+        />
         {entry.kind === 'snippet' ? (
           <SnippetDocument id={entry.id} />
         ) : (

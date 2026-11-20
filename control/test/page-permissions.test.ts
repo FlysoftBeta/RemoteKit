@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import { applyDesiredViews, publishAndObserve } from './coordination-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -59,7 +60,7 @@ async function fixture() {
   );
   await control.operations.productAction(
     tenant,
-    { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: origin },
+    buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: origin }),
     'lease',
   );
   await publishAndObserve(control.endpoint, tenant);

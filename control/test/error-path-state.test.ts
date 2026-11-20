@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { RemoteKitError } from '../shared/errors';
@@ -70,7 +71,7 @@ for (const code of ['internal', 'locked', 'forbidden', 'not_found', 'rejected'] 
     const snapshot = productSnapshot();
     store.acceptSnapshot(snapshot);
     const failed = assert.rejects(
-      store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
+      store.action(buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } })),
       { code },
     );
     await new Promise((resolve) => setImmediate(resolve));

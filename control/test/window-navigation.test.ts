@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createElement } from 'react';
@@ -6,7 +7,7 @@ import { ViewerAudioOutput } from '../client/media/audio-output';
 import { FileChannel } from '../client/files/file-channel';
 import { Events } from '../client/util/store';
 import { FileLibraryContext, useFileLibrary } from '../client/files/file-library-state';
-import { projectOperations } from '../client/control/product-operations';
+import { projectOperations, type PendingOperation } from '../client/control/product-operations';
 import type { ViewerSession } from '../client/viewer-session';
 import { WindowFrame } from '../client/app/window-frame';
 import { emptyWorkspace } from '../server/persistence/workspaces';
@@ -68,11 +69,24 @@ function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
   };
 }
 
-function Frame({ state, online }: { state: ProductState; online: boolean }) {
+function Frame({
+  state,
+  online,
+  authoritative,
+  pending,
+}: {
+  state: ProductState;
+  online: boolean;
+  authoritative: ProductState;
+  pending: PendingOperation[];
+}) {
   const unexpected = (): never => assert.fail('Rendering must not dispatch any operation');
   const transport = {
     authorization: { getSnapshot: () => ({ locked: false }) },
-    operations: { subscribe: () => () => {}, getSnapshot: () => ({ error: undefined }) },
+    operations: {
+      subscribe: () => () => {},
+      getSnapshot: () => ({ error: undefined, authoritative, pending }),
+    },
     presentation: { getSnapshot: () => ({ error: undefined }) },
     observations: { audio: new ViewerAudioOutput(unexpected) },
     files: new FileChannel(() => null),
@@ -104,9 +118,23 @@ function Frame({ state, online }: { state: ProductState; online: boolean }) {
 
 function checkNavigation(
   state: ProductState,
-  options: { inputs: number; disabled: boolean; creating?: boolean; online?: boolean },
+  options: {
+    inputs: number;
+    disabled: boolean;
+    creating?: boolean;
+    online?: boolean;
+    authoritative?: ProductState;
+    pending?: PendingOperation[];
+  },
 ) {
-  const html = renderToStaticMarkup(createElement(Frame, { state, online: options.online ?? true }));
+  const html = renderToStaticMarkup(
+    createElement(Frame, {
+      state,
+      online: options.online ?? true,
+      authoritative: options.authoritative ?? state,
+      pending: options.pending ?? [],
+    }),
+  );
   const inputs = html.match(/<input\b[^>]*aria-label="搜索或输入网址"[^>]*>/g) ?? [];
   assert.equal(inputs.length, options.inputs);
   for (const input of inputs) assert.equal(/\sdisabled(?:=""|\s|>)/.test(input), options.disabled);
@@ -116,29 +144,41 @@ function checkNavigation(
   );
 }
 
-test('projected window and tab cannot take navigation drafts before their IDs are confirmed', () => {
+test('projected windows and tabs accept navigation while showing creation progress', () => {
   const confirmed = snapshot(windowWithTab, startTab);
-  const pendingWindow = projectOperations(snapshot(), [
-    {
-      operationId: 'create-window',
-      operationGeneration: 'generation',
-      action: { type: 'window.open', appId: 'browser', placement: { mode: 'space' } },
-    },
-  ])!;
-  const pendingTab = projectOperations(confirmed, [
-    {
-      operationId: 'create-tab',
-      operationGeneration: 'generation',
-      action: { type: 'tab.create', windowId: windowWithTab.id },
-    },
-  ])!;
-  checkNavigation(pendingWindow, { inputs: 2, disabled: true, creating: true });
+  const windowOperation = {
+    operationId: 'create-window',
+    operationGeneration: 'generation',
+    action: buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
+  };
+  const tabOperation = {
+    operationId: 'create-tab',
+    operationGeneration: 'generation',
+    action: buildAction({ type: 'tab.create', windowId: windowWithTab.id }),
+  };
+  const pendingWindow = projectOperations(snapshot(), [windowOperation])!;
+  const pendingTab = projectOperations(confirmed, [tabOperation])!;
+  checkNavigation(pendingWindow, {
+    inputs: 2,
+    disabled: false,
+    creating: true,
+    authoritative: snapshot(),
+    pending: [windowOperation],
+  });
   checkNavigation(snapshot({ ...pendingWindow.workspace.windows[0], activeTabId: null }), {
     inputs: 2,
-    disabled: true,
+    disabled: false,
     creating: true,
+    authoritative: snapshot(),
+    pending: [windowOperation],
   });
-  checkNavigation(pendingTab, { inputs: 2, disabled: true, creating: true });
+  checkNavigation(pendingTab, {
+    inputs: 2,
+    disabled: false,
+    creating: true,
+    authoritative: confirmed,
+    pending: [tabOperation],
+  });
   checkNavigation(confirmed, { inputs: 2, disabled: false });
   checkNavigation(confirmed, { inputs: 2, disabled: true, online: false });
 });

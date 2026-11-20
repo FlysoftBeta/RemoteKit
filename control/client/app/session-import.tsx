@@ -1,3 +1,4 @@
+import { buildAction } from '../control/action-builder';
 import Close from '@mui/icons-material/Close';
 import ContentCopy from '@mui/icons-material/ContentCopy';
 import DeleteOutline from '@mui/icons-material/DeleteOutline';
@@ -259,7 +260,7 @@ function ImportDialog({
     canOpen: !disabled && !!windowId,
     openSite: (url: string) =>
       run(async () => {
-        await action({ type: 'tab.create', windowId: windowId!, url });
+        await action(buildAction({ type: 'tab.create', windowId: windowId!, url }));
         opened();
       }),
     discard: (id: string) =>

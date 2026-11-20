@@ -27,7 +27,7 @@ export function useWindowState(win: ProductWindow, action: Action, report: (erro
     }
   }, [win.state]);
   useEffect(() => {
-    if (!dirty.current || win.id.startsWith('pending-')) return;
+    if (!dirty.current) return;
     const abort = new AbortController();
     const timer = setTimeout(() => {
       const state = latest.current;

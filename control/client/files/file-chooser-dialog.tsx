@@ -134,7 +134,7 @@ export function FileBasketDialog({
     onError: reportError,
     onDone: clearInsertion,
   });
-  const disabled = !online || busy || upload.busy || !!transaction?.active;
+  const disabled = !online || busy || !!transaction?.active;
   const editingDisabled = disabled || !snapshot || waiting || final;
   const toolbarDisabled = editingDisabled || dragging;
   const canAdd = !toolbarDisabled && capacity > 0;
@@ -215,15 +215,19 @@ export function FileBasketDialog({
       await cancelSelection(request.id);
     });
   };
-  const saveBasket = (ids: string[], revision = snapshot?.revision) =>
-    run(async () => {
+  const saveBasket = async (ids: string[], revision = snapshot?.revision) => {
+    setError(undefined);
+    try {
       if (revision !== undefined)
         await mutate(
           'library.basket',
           { operationId: operationId(), ids, expectedRevision: revision },
           request?.windowId ?? windowId,
         );
-    });
+    } catch (failure) {
+      setError(failureError(failure));
+    }
+  };
   const submit = () => {
     if (!request || (!transaction && blocked)) return;
     setSent(true);

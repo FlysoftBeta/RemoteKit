@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import { observedProductAction, observedOperation, submitViewerAction } from './server-fixture';
 import { applyDesiredViews } from './coordination-fixture';
 import assert from 'node:assert/strict';
@@ -213,7 +214,12 @@ test('offline startup does not create Browsers; multi-window mutations preserve 
     let result = await observedProductAction(
       control,
       user.tenantId,
-      { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'https://a.test/' },
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'https://a.test/',
+      }),
       'lease',
     );
     const a = result.state.workspace.windows[0],
@@ -221,7 +227,12 @@ test('offline startup does not create Browsers; multi-window mutations preserve 
     result = await observedProductAction(
       control,
       user.tenantId,
-      { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'about:blank',
+      }),
       'lease',
     );
     const b = result.state.workspace.windows[1],
@@ -277,12 +288,12 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
       await observedProductAction(
         control,
         user.tenantId,
-        {
+        buildAction({
           type: 'window.open',
           appId: 'browser',
           placement: { mode: 'space' },
           url: 'https://EXAMPLE.com/path',
-        },
+        }),
         'lease',
       )
     ).state;
@@ -439,7 +450,12 @@ test('remote page fullscreen follows the live document, with a document-bound ex
     const { state } = await observedProductAction(
       control,
       tenantId,
-      { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'https://fullscreen.test' },
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'https://fullscreen.test',
+      }),
       'lease',
     );
     const [tab] = state.workspace.tabs,
@@ -521,7 +537,12 @@ test('automatic reclaim uses eligible background time and canDiscard; activating
     const created = await observedProductAction(
         control,
         user.tenantId,
-        { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
+        buildAction({
+          type: 'window.open',
+          appId: 'browser',
+          placement: { mode: 'space' },
+          url: 'about:blank',
+        }),
         'lease',
       ),
       tab = created.state.workspace.tabs[0],
@@ -585,7 +606,12 @@ async function uncertainTab() {
     await observedProductAction(
       f.control,
       tenant,
-      { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'https://saved.test/' },
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'https://saved.test/',
+      }),
       'lease',
     )
   ).state;
@@ -772,7 +798,12 @@ test('unsafe POST checkpoint leaves an explicit tab error that an explicit reloa
     await observedProductAction(
       f.control,
       f.tenant,
-      { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'https://saved.test/' },
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'https://saved.test/',
+      }),
       'lease',
     );
     assert.equal(f.tabState().lifecycleRecoveryError, undefined);
@@ -820,12 +851,12 @@ test('UA table precedes Browser/view creation; failed application persists desir
     const created = await observedProductAction(
         control,
         user.tenantId,
-        {
+        buildAction({
           type: 'window.open',
           appId: 'browser',
           placement: { mode: 'space' },
           url: 'https://example.test/a',
-        },
+        }),
         'lease',
       ),
       w = created.state.workspace.windows[0],
@@ -833,7 +864,7 @@ test('UA table precedes Browser/view creation; failed application persists desir
     const second = await observedProductAction(
         control,
         user.tenantId,
-        { type: 'tab.create', windowId: w.id, url: 'https://example.test/b' },
+        buildAction({ type: 'tab.create', windowId: w.id, url: 'https://example.test/b' }),
         'lease',
       ),
       b = second.state.workspace.tabs[1];
@@ -966,7 +997,12 @@ test('a site UA reload never wedges the tenant: legacy, stale, terminal and retr
     await observedProductAction(
       control,
       tenant,
-      { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: origin + '/a' },
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: origin + '/a',
+      }),
       'lease',
     );
 
@@ -1057,7 +1093,12 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
     const { state } = await observedProductAction(
       control,
       tenantId,
-      { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: origin + '/a' },
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: origin + '/a',
+      }),
       'lease',
     );
     const tabId = state.workspace.tabs[0].id;
@@ -1232,7 +1273,12 @@ test('popup adoption persists identity first; background stays unfocused, new wi
         await observedProductAction(
           control,
           user.tenantId,
-          { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'https://opener.test' },
+          buildAction({
+            type: 'window.open',
+            appId: 'browser',
+            placement: { mode: 'space' },
+            url: 'https://opener.test',
+          }),
           'lease',
         )
       ).state.workspace,
@@ -1335,7 +1381,12 @@ test('expired pending popup is never URL-recreated; closing its product tab does
       await observedProductAction(
         control,
         user.tenantId,
-        { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
+        buildAction({
+          type: 'window.open',
+          appId: 'browser',
+          placement: { mode: 'space' },
+          url: 'about:blank',
+        }),
         'lease',
       )
     ).state.workspace.tabs[0];
@@ -1393,7 +1444,12 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
       await observedProductAction(
         control,
         user.tenantId,
-        { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
+        buildAction({
+          type: 'window.open',
+          appId: 'browser',
+          placement: { mode: 'space' },
+          url: 'about:blank',
+        }),
         'lease',
       )
     ).state.workspace.tabs[0];
@@ -1514,7 +1570,12 @@ test('product media policy precedes ensure and feedback only updates diagnostic 
       await observedProductAction(
         control,
         user.tenantId,
-        { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
+        buildAction({
+          type: 'window.open',
+          appId: 'browser',
+          placement: { mode: 'space' },
+          url: 'about:blank',
+        }),
         'lease',
       )
     ).state.workspace;
@@ -1576,7 +1637,12 @@ test('quality preference updates only WebRTC degradation policy while client dis
       await observedProductAction(
         control,
         user.tenantId,
-        { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
+        buildAction({
+          type: 'window.open',
+          appId: 'browser',
+          placement: { mode: 'space' },
+          url: 'about:blank',
+        }),
         'lease',
       )
     ).state.workspace;
@@ -1637,7 +1703,12 @@ test('audio channel changes reapply the audio policy without replacing RTC', asy
     await observedProductAction(
       control,
       user.tenantId,
-      { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'about:blank',
+      }),
       'lease',
     );
     for (const [left, right] of [
@@ -1790,12 +1861,15 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     const opened = await a.request(
       '1',
       'operation.submit',
-      envelope(initialA.state.operationGeneration, {
-        type: 'window.open',
-        appId: 'browser',
-        placement: { mode: 'space' },
-        url: 'about:blank',
-      }),
+      envelope(
+        initialA.state.operationGeneration,
+        buildAction({
+          type: 'window.open',
+          appId: 'browser',
+          placement: { mode: 'space' },
+          url: 'about:blank',
+        }),
+      ),
     );
     assert.equal(opened.result.status, 'committed');
     const tenantA = store.accounts.authenticated(cookieA.split('=')[1])!;
@@ -1830,11 +1904,14 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     assert.equal(foreign.result.status, 'failed');
     assert.equal(foreign.result.error.code, 'not_found');
     const scope = await b.request('3', 'operation.submit', {
-      ...envelope(initialB.state.operationGeneration, {
-        type: 'window.open',
-        appId: 'browser',
-        placement: { mode: 'space' },
-      }),
+      ...envelope(
+        initialB.state.operationGeneration,
+        buildAction({
+          type: 'window.open',
+          appId: 'browser',
+          placement: { mode: 'space' },
+        }),
+      ),
       tenantId: stateA.workspace.tenantId,
     });
     assert.equal(scope.error.code, 'invalid_request');
@@ -1860,12 +1937,17 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     await replacement.request('unlock', 'auth.verify', { method: 'password', secret: 'password123' });
     await replacement.wait((m) => m.type === 'state');
     await assert.rejects(
-      submitViewerAction(control, stateA.workspace.tenantId, 'stale-lease', {
-        type: 'window.open',
-        appId: 'browser',
-        placement: { mode: 'space' },
-        url: 'about:blank',
-      }),
+      submitViewerAction(
+        control,
+        stateA.workspace.tenantId,
+        'stale-lease',
+        buildAction({
+          type: 'window.open',
+          appId: 'browser',
+          placement: { mode: 'space' },
+          url: 'about:blank',
+        }),
+      ),
     );
     await replacement.request('5', 'viewport', {
       devicePixelRatio: 1,
@@ -2009,7 +2091,7 @@ test('lease authentication is checked inside queued operations and late old clos
     const pending = observedProductAction(
       control,
       user.tenantId,
-      { type: 'window.open', appId: 'browser', placement: { mode: 'space' } },
+      buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
       'old',
     );
     valid = false;
@@ -2049,7 +2131,12 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
       await observedProductAction(
         control,
         user.tenantId,
-        { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
+        buildAction({
+          type: 'window.open',
+          appId: 'browser',
+          placement: { mode: 'space' },
+          url: 'about:blank',
+        }),
         'lease',
       )
     ).state.workspace;
@@ -2100,7 +2187,7 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
       await observedProductAction(
         control,
         user.tenantId,
-        { type: 'tab.create', windowId: w.id, url: 'about:blank' },
+        buildAction({ type: 'tab.create', windowId: w.id, url: 'about:blank' }),
         'lease',
       )
     ).state;
@@ -2154,7 +2241,7 @@ test('start tabs stay local, first navigation ensures the real target, and expli
       await observedProductAction(
         control,
         user.tenantId,
-        { type: 'window.open', appId: 'browser', placement: { mode: 'space' } },
+        buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
         'lease',
       )
     ).state.workspace;
@@ -2221,14 +2308,19 @@ test('start tabs stay local, first navigation ensures the real target, and expli
       await observedProductAction(
         control,
         user.tenantId,
-        { type: 'tab.create', windowId: win.id, url: 'about:blank' },
+        buildAction({ type: 'tab.create', windowId: win.id, url: 'about:blank' }),
         'lease',
       )
     ).state.workspace.tabs[1];
     assert.equal(blank.kind, 'remote');
     assert.equal(blank.url, 'about:blank');
     const start = (
-      await observedProductAction(control, user.tenantId, { type: 'tab.create', windowId: win.id }, 'lease')
+      await observedProductAction(
+        control,
+        user.tenantId,
+        buildAction({ type: 'tab.create', windowId: win.id }),
+        'lease',
+      )
     ).state.workspace.tabs[2];
     const closeCount = endpoint.calls.filter((c) => c.method === 'view.close').length;
     await observedProductAction(control, user.tenantId, { type: 'tab.close', tabId: start.id }, 'lease');
@@ -2263,7 +2355,12 @@ test('native file chooser anchor exposes only viewport bounds bound to the pendi
     const { state } = await observedProductAction(
       control,
       tenant,
-      { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'https://a.test/' },
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'https://a.test/',
+      }),
       lease,
     );
     const view = endpoint.views.get(tenant)!.get(state.workspace.tabs[0].webviewId);
@@ -2316,7 +2413,7 @@ test('viewport accepts all sixteen workspace windows and rejects a seventeenth o
       ({ state } = await observedProductAction(
         control,
         user.tenantId,
-        { type: 'window.open', appId: 'files', placement: { mode: 'space' } },
+        buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }),
         'lease',
       ));
       if ([7, 8, 15].includes(i))
@@ -2367,7 +2464,12 @@ test('viewport revisions reject stale occlusion without changing stable geometry
     const { state } = await observedProductAction(
       control,
       user.tenantId,
-      { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'about:blank',
+      }),
       'lease',
     );
     const win = state.workspace.windows[0];

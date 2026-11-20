@@ -85,6 +85,20 @@ Control  按已认证的 Viewer 租约与 Control 授权代次准入；每 Tenan
 
 **快照是权威**：WS 快照携带 `serverIncarnation` 和单调的 `snapshotSequence`（独立于 workspace.revision）。只有内容变化时序号才前进、快照才推送；不改变任何东西的 `viewer.viewport` 不产生新快照，Viewer 也不重发与上次确认相同的视口，收到内容相同的权威快照时不替换自己的快照对象。较旧的运行态快照不能覆盖较新的对话框、Endpoint 或 ready 观测。DC 回来的收据只更新对应 pending 操作的资格，不直接改 workspace。committed 的投影保留到权威 workspace revision 追上收据 revision。新 Viewer 不继承旧端的 pending 投影；已受理的旧操作可以完成，但迟到的结果不投给新 peer。UI 只在 committed 时显示"已保存"。
 
+### 即时反馈
+
+客户端的 pending 投影（`projectOperations`）让操作在提交时就显示结果：打开与放置窗口、切换窗口组、分隔比例、标签页、导航与 `tab.command`（后退/前进/刷新显示加载中，停止取消加载）、设置、收藏、App。关闭（`tab.close`、`window.close`、`space.close`）在投影里直接移除对象；只有页面已要求用户确认离开（`pendingClose` 且不再 `awaiting`）时对应窗口保留，确认对话框才有归属。关闭失败或用户选择留下时，投影随收据失败消失，对象回到权威快照的样子。
+
+### 客户端分配的 ID
+
+创建产品对象的操作自带新对象的 ID：`window.open` 的 `windowId`、`tabId`、`spaceId`，`tab.create` 的 `tabId`，`window.place` 到新组的 `spaceId`，`app.install` 的 `appId`，`favorite.add` 的 `favoriteId`。哪些字段必需由 `shared/product.ts` 的 `creationIdFields` 一处决定，客户端（`client/control/action-builder.ts`）据此生成 UUID，服务端据此校验：小写规范 UUID，不能与现有或历史对象重复（格式错误 `invalid_request`，重复 `conflict`）；同一 operationId 的重放由收据回答，不触发重复检查。
+
+所以投影里的新对象就是它最终的 ID，刚打开的窗口立刻可以拖动、关闭、加标签、导航，不存在临时 ID 与重映射。顺序由 `OperationsStore` 保证：目标 ID 由仍未结算的较早操作创建时，新操作等到创建者拿到服务端收据（accepted/applying/committed）才提交；创建者失败或以已结算的 unknown 结束时，依赖它的操作不发送，以创建者的错误码失败。文件库分区创建（`library.partition{create:true, id}`）用同样的规则。
+
+### 后台任务提示
+
+下载到我的文件等后台任务的结果（`backgroundTasks`）只在 Tenant 内存里保留最近 50 条。Viewer 在外壳可见且在线时显示提示，随即 `task.acknowledge{id}`，Control 删除该任务——否则每个新页面、每次重连都会重放全部旧提示。确认失败时任务留下，下次再显示。
+
 历史问题：创建 Window 的回复丢失后用户重试，会因为传输层请求 ID 只在连接内有效而创建出第二个 Window——加长超时解决不了重复副作用，稳定的操作 ID 和可查询的 unknown 才能。导航曾在 Control 保存地址意图之前就在 Endpoint 执行，崩溃窗口内执行与产品状态不一致——现在意图在外部执行之前持久化，之后的结算绑定到 Native 导航身份。
 
 ## 标签页顺序

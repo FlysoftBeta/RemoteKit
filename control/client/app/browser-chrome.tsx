@@ -1,3 +1,4 @@
+import { buildAction } from '../control/action-builder';
 import './browser-chrome.css';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
@@ -109,7 +110,7 @@ export function useBrowserNavigation({
       await perform(
         tabId
           ? { type: 'tab.navigate', tabId, url: value.trim() }
-          : { type: 'tab.create', windowId: win.id, url: value.trim() },
+          : buildAction({ type: 'tab.create', windowId: win.id, url: value.trim() }),
       );
       if (latest.current.activeId === tabId) input.current?.blur();
     } catch (failure) {
@@ -124,7 +125,7 @@ export function useBrowserNavigation({
   const createStartTab = () => {
     if (!online || busy) return;
     const tabId = active?.id;
-    void perform({ type: 'tab.create', windowId: win.id })
+    void perform(buildAction({ type: 'tab.create', windowId: win.id }))
       .then(() => {
         if (latest.current.activeId === tabId && window.matchMedia('(pointer: fine)').matches) {
           input.current?.focus({ preventScroll: true });
@@ -137,7 +138,7 @@ export function useBrowserNavigation({
   const favorited = !!favorite;
   const toggleFavorite = () => {
     if (favorite) run({ type: 'favorite.remove', id: favorite.id });
-    else if (active) run({ type: 'favorite.add', url: active.url, title: active.title });
+    else if (active) run(buildAction({ type: 'favorite.add', url: active.url, title: active.title }));
   };
   return {
     address,

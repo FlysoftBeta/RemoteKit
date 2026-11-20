@@ -3,6 +3,7 @@ import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AuthView } from '../client/app/product-dialogs';
 import { ConfirmDialog } from '../client/app/admin/shared';
+import { AdminResourceStore } from '../client/app/admin/resource-store';
 import { SessionImportSettings } from '../client/app/session-import';
 import { useWindowState } from '../client/app/window-state';
 import { Launcher } from '../client/app/launcher';
@@ -315,6 +316,7 @@ export function driveUi(
       },
       apps: [],
     };
+    const operation = new AdminResourceStore(async () => undefined);
     function WindowOwner() {
       [, update] = useWindowState({ id: 'window', state: {} } as never, action as never, report);
       return null;
@@ -373,8 +375,13 @@ export function driveUi(
           key: boundary.version,
           title: 'Confirm',
           open: true,
-          retryIdentity: 'operation-' + boundary.version,
-          onConfirm: () => boundary.call({ identity: 'operation-' + boundary.version }, undefined),
+          onConfirm: () => {
+            void operation.mutate(
+              () => undefined,
+              () => boundary.call({ identity: 'operation-' + boundary.version }, undefined),
+              { retry: true, identity: 'operation-' + boundary.version },
+            );
+          },
           onClose: () => {
             closed = true;
             root.render(null);
@@ -625,19 +632,22 @@ export function driveUi(
         await begin();
       },
       error: () =>
-        path === 'window'
-          ? error
-          : closed
-            ? undefined
-            : (
-                (path === 'selection' ? unscaledLayer() : dom.window.document).querySelector(
-                  '.failure-note',
-                ) ?? (path === 'chooser' ? unscaledLayer().querySelector('.failure-note') : null)
-              )?.textContent || undefined,
+        path === 'operation'
+          ? operation.getSnapshot().error
+          : path === 'window'
+            ? error
+            : closed
+              ? undefined
+              : (
+                  (path === 'selection' ? unscaledLayer() : dom.window.document).querySelector(
+                    '.failure-note',
+                  ) ?? (path === 'chooser' ? unscaledLayer().querySelector('.failure-note') : null)
+                )?.textContent || undefined,
       dispose: async () => {
         await act(async () => {
           root.unmount();
           queue.dispose();
+          operation.dispose();
           await settle();
         });
         restore.forEach((reset) => reset());

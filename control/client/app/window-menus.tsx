@@ -1,3 +1,4 @@
+import { buildAction } from '../control/action-builder';
 import './window-menus.css';
 import React, { useEffect, useState } from 'react';
 import {
@@ -105,8 +106,16 @@ export function WindowMenus({
     const target = [...state.workspace.windows]
       .filter((window) => window.appId === 'browser')
       .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
-    if (target) run({ type: 'tab.create', windowId: target.id, url: active?.url });
-    else run({ type: 'window.open', appId: 'browser', url: active?.url, placement: { mode: 'space' } });
+    if (target) run(buildAction({ type: 'tab.create', windowId: target.id, url: active?.url }));
+    else
+      run(
+        buildAction({
+          type: 'window.open',
+          appId: 'browser',
+          url: active?.url,
+          placement: { mode: 'space' },
+        }),
+      );
   };
   const fullscreenItem = {
     label: '全屏',
@@ -127,7 +136,8 @@ export function WindowMenus({
           label: '新建窗口',
           icon: <OpenInNew />,
           disabled: !online,
-          select: () => run({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
+          select: () =>
+            run(buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } })),
         },
         ...(origin
           ? [
@@ -226,7 +236,9 @@ export function WindowMenus({
               closeMore();
               if (browser) setBrowserSettings(true);
               else {
-                void action({ type: 'window.open', appId: 'settings', placement: { mode: 'space' } })
+                void action(
+                  buildAction({ type: 'window.open', appId: 'settings', placement: { mode: 'space' } }),
+                )
                   .then(async (receipt) => {
                     const workspace = await waitForWorkspaceRevision(
                       transport,
@@ -263,12 +275,14 @@ export function WindowMenus({
           disabled={!online}
           onClick={() => {
             if (tabMenu)
-              run({
-                type: 'window.open',
-                appId: 'browser',
-                placement: { mode: 'space' },
-                url: isLocalTab(tabMenu.tab) ? undefined : tabMenu.tab.url,
-              });
+              run(
+                buildAction({
+                  type: 'window.open',
+                  appId: 'browser',
+                  placement: { mode: 'space' },
+                  url: isLocalTab(tabMenu.tab) ? undefined : tabMenu.tab.url,
+                }),
+              );
             setTabMenu(null);
           }}
         >

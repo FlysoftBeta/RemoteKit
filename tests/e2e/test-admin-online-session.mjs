@@ -1,3 +1,4 @@
+import { buildAction } from './kit/product-actions.mts';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -46,7 +47,7 @@ try {
     currentPassword: 'online-admin-password',
     settings: { lockOnHidden: false, lockOnIdle: false },
   });
-  await viewer.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+  await viewer.action(buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }));
   const browserWindow = (await viewer.state()).workspace.windows.find((window) => window.appId === 'browser');
   const url = `http://127.0.0.1:${port + 1}/online-admin`;
   await viewer.action({ type: 'tab.navigate', tabId: browserWindow.activeTabId, url });
@@ -61,7 +62,7 @@ try {
       window.viewerSocketClosed = true;
     });
   });
-  await viewer.action({ type: 'window.open', appId: 'admin', placement: { mode: 'space' } });
+  await viewer.action(buildAction({ type: 'window.open', appId: 'admin', placement: { mode: 'space' } }));
   const app = viewer.page.locator('.admin-app:visible');
   await app.getByRole('button', { name: '用户', exact: true }).click();
   const openMenu = () => app.getByRole('button', { name: 'online-admin 的操作', exact: true }).click();

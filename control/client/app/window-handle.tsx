@@ -1,3 +1,4 @@
+import { buildAction } from '../control/action-builder';
 import './window-handle.css';
 import { ChevronRight, DragHandle } from '@mui/icons-material';
 import { IconButton, Menu, MenuItem } from '@mui/material';
@@ -63,7 +64,9 @@ export function WindowHandle({
       </IconButton>
       <Menu open={!!menu} anchorEl={scaledAnchor(menu)} onClose={() => setMenu(null)}>
         <MenuItem
-          onClick={() => run({ type: 'window.place', windowId: win.id, placement: { mode: 'space' } })}
+          onClick={() =>
+            run(buildAction({ type: 'window.place', windowId: win.id, placement: { mode: 'space' } }))
+          }
         >
           移到新窗口组
         </MenuItem>
@@ -76,15 +79,17 @@ export function WindowHandle({
             disabled={!space || (side === 'left' ? index <= 0 : index >= space.windowIds.length - 1)}
             onClick={() => {
               if (space)
-                run({
-                  type: 'window.place',
-                  windowId: win.id,
-                  placement: {
-                    mode: 'split',
-                    besideWindowId: space.windowIds[index + (side === 'left' ? -1 : 1)],
-                    side,
-                  },
-                });
+                run(
+                  buildAction({
+                    type: 'window.place',
+                    windowId: win.id,
+                    placement: {
+                      mode: 'split',
+                      besideWindowId: space.windowIds[index + (side === 'left' ? -1 : 1)],
+                      side,
+                    },
+                  }),
+                );
             }}
           >
             {side === 'left' ? '向左移' : '向右移'}
@@ -107,15 +112,17 @@ export function WindowHandle({
               key={group.id}
               disabled={group.windowIds.length >= 3}
               onClick={() =>
-                run({
-                  type: 'window.place',
-                  windowId: win.id,
-                  placement: {
-                    mode: 'split',
-                    besideWindowId: group.windowIds[group.windowIds.length - 1],
-                    side: 'right',
-                  },
-                })
+                run(
+                  buildAction({
+                    type: 'window.place',
+                    windowId: win.id,
+                    placement: {
+                      mode: 'split',
+                      besideWindowId: group.windowIds[group.windowIds.length - 1],
+                      side: 'right',
+                    },
+                  }),
+                )
               }
             >
               {group.windowIds

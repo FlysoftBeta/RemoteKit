@@ -1,7 +1,6 @@
 import { requireBrowser } from './browser-availability';
 import { operationPayload } from '../persistence/operations';
 import { reportError } from '../log';
-import { randomUUID } from 'node:crypto';
 import { RemoteKitError, toRemoteKitError, wireError } from '../../shared/errors';
 import { retryDelay } from '../../shared/error-policy';
 import { recordedAction } from '../../shared/recorded-action';
@@ -224,7 +223,7 @@ export class OperationPipeline {
     const plan = applyCommand(before, body, {
       execution,
       browserIncarnation: runtime.browserIncarnation,
-      ids: [randomUUID(), randomUUID(), randomUUID(), randomUUID()],
+      historicalIdUsed: (id) => this.context.store.workspaces.items.historicalIdUsed(tenant, id),
       now: this.context.clock.wallMs(),
       appIcon: icon,
       viewId:

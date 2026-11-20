@@ -1,3 +1,4 @@
+import { buildAction } from '../control/action-builder';
 import './window-divider.css';
 import { useDropTarget } from './window-drag';
 import { useRef } from 'react';
@@ -85,11 +86,13 @@ export function WindowDivider({
         drag.current = undefined;
         restore(event.currentTarget);
         if (next <= 0.15 || next >= 0.85)
-          void action({
-            type: 'window.place',
-            windowId: space.windowIds[index + (next >= 0.85 ? 1 : 0)],
-            placement: { mode: 'space' },
-          }).catch(report);
+          void action(
+            buildAction({
+              type: 'window.place',
+              windowId: space.windowIds[index + (next >= 0.85 ? 1 : 0)],
+              placement: { mode: 'space' },
+            }),
+          ).catch(report);
         else change(next);
         event.currentTarget.releasePointerCapture(event.pointerId);
       }}

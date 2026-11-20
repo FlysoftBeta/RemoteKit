@@ -27,11 +27,9 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { useState, type ReactNode } from 'react';
-import type { AdminSocketMethods, AdminUser, AdminNode, ConfiguredAdminNode } from '../../../shared/admin';
-import { RemoteKitError } from '../../../shared/errors';
+import { useState } from 'react';
+import type { AdminUser, AdminNode, ConfiguredAdminNode } from '../../../shared/admin';
 import { useAutoFocus } from '../../editing/local-autofocus';
-import { failureError, FailureNote } from '../../failures';
 import { scaledAnchor } from '../ui-scale';
 import {
   ConfirmDialog,
@@ -44,9 +42,8 @@ import {
   type AdminCall,
 } from './shared';
 
-type UserMethod = {
-  [K in keyof AdminSocketMethods]: AdminSocketMethods[K]['result'] extends AdminUser[] ? K : never;
-}[keyof AdminSocketMethods];
+import { projectUsers, type UserMethod } from './user-operations';
+
 type Action =
   | 'password'
   | 'factors'
@@ -93,45 +90,28 @@ function CreateUserDialog({
 }: {
   open: boolean;
   onClose: () => void;
-  create: (username: string, password: string) => Promise<void>;
+  create: (username: string, password: string) => void;
 }) {
   const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const [username, setUsername] = useState(''),
-    [password, setPassword] = useState(''),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState<RemoteKitError | undefined>();
+    [password, setPassword] = useState('');
   const close = () => {
-    if (busy) return;
     setUsername('');
     setPassword('');
-    setError(undefined);
     onClose();
   };
   return (
     <Dialog open={open} onClose={close} fullWidth maxWidth="xs">
       <Box
         component="form"
-        onSubmit={async (event) => {
+        onSubmit={(event) => {
           event.preventDefault();
-          setBusy(true);
-          setError(undefined);
-          try {
-            await create(username, password);
-            setBusy(false);
-            setUsername('');
-            setPassword('');
-            onClose();
-          } catch (e) {
-            setError(failureError(e));
-            setBusy(false);
-          }
+          create(username, password);
+          close();
         }}
       >
         <DialogTitle>新建用户</DialogTitle>
         <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: '8px !important' }}>
-          {error && (
-            <FailureNote error={error} context={{ operation: '更新用户', scope: 'surface', input: true }} />
-          )}
           <TextField
             inputRef={autoFocusRef}
             required
@@ -144,91 +124,12 @@ function CreateUserDialog({
           <PasswordField value={password} onChange={setPassword} />
         </DialogContent>
         <DialogActions>
-          <Button disabled={busy} onClick={close}>
-            取消
-          </Button>
-          <Button type="submit" variant="contained" disabled={busy || !username || password.length < 8}>
-            {busy ? '请稍候…' : '创建'}
+          <Button onClick={close}>取消</Button>
+          <Button type="submit" variant="contained" disabled={!username || password.length < 8}>
+            创建
           </Button>
         </DialogActions>
       </Box>
-    </Dialog>
-  );
-}
-
-export function TransferDialog({
-  open,
-  title,
-  confirmLabel = '转移',
-  disabled,
-  onConfirm,
-  onClose,
-  children,
-}: {
-  open: boolean;
-  title: string;
-  confirmLabel?: string;
-  disabled?: boolean;
-  onConfirm: () => Promise<void>;
-  onClose: () => void;
-  children: ReactNode;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<RemoteKitError>();
-  return (
-    <Dialog open={open} onClose={() => !busy && onClose()} fullWidth maxWidth="xs">
-      <DialogTitle>{title}</DialogTitle>
-      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {busy && (
-          <Box role="status" aria-live="polite">
-            <LinearProgress />
-            <Typography sx={{ mt: 1 }}>正在停止源 Session 并转移，等待节点确认…</Typography>
-            <Typography variant="body2" color="text.secondary">
-              停止确认最长等待 180 秒。
-            </Typography>
-          </Box>
-        )}
-        {error && (
-          <Box role="alert">
-            <FailureNote
-              error={error}
-              context={{
-                operation: '转移 Session',
-                scope: 'surface',
-                resolved: true,
-                issue: 'configuration',
-              }}
-            />
-            <Typography variant="caption">错误代码：{error.code}</Typography>
-          </Box>
-        )}
-        <Box component="fieldset" disabled={busy} sx={{ border: 0, p: 0, m: 0, display: 'grid', gap: 2 }}>
-          {children}
-        </Box>
-      </DialogContent>
-      <DialogActions>
-        <Button disabled={busy} onClick={onClose}>
-          {error ? '关闭' : '取消'}
-        </Button>
-        <Button
-          variant="contained"
-          disabled={busy || disabled || !!error}
-          onClick={async () => {
-            setBusy(true);
-            setError(undefined);
-            try {
-              await onConfirm();
-              onClose();
-            } catch (cause) {
-              setError(failureError(cause));
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          {busy ? '转移中…' : confirmLabel}
-        </Button>
-      </DialogActions>
     </Dialog>
   );
 }
@@ -245,7 +146,7 @@ function ActionDialog({
   user: AdminUser | null;
   self: string;
   nodes: AdminNode[];
-  run: (method: UserMethod, params: Record<string, unknown>) => Promise<void>;
+  run: (method: UserMethod, params: Record<string, unknown>) => void;
   onClose: () => void;
 }) {
   const [password, setPassword] = useState(''),
@@ -310,7 +211,7 @@ function ActionDialog({
       );
     case 'move':
       return (
-        <TransferDialog
+        <ConfirmDialog
           {...common}
           title={`转移 ${username} 的 Session`}
           disabled={
@@ -366,7 +267,7 @@ function ActionDialog({
             label="绑定到该节点"
           />
           <FormHelperText>绑定后该用户的会话只在这个节点运行，节点离线时等待其恢复</FormHelperText>
-        </TransferDialog>
+        </ConfirmDialog>
       );
     case 'stop':
       return (
@@ -467,13 +368,17 @@ export function AdminUsersSection({
   call: AdminCall;
   self: string;
 }) {
-  const { data, setData, error } = useAdminResource(online, () => call('admin.users', {}));
-  const { data: nodes } = useAdminResource(online, () => call('admin.nodes', {}));
+  const { data, mutate, error } = useAdminResource(online, 'admin.users', () => call('admin.users', {}));
+  const { data: nodes } = useAdminResource(online, 'admin.nodes', () => call('admin.nodes', {}));
   const [creating, setCreating] = useState(false),
     [menu, setMenu] = useState<{ anchor: HTMLElement; user: AdminUser } | null>(null),
     [action, setAction] = useState<{ action: Action; user: AdminUser } | null>(null);
-  const run = async (method: UserMethod, params: Record<string, unknown>) => {
-    setData(await call(method, params as never));
+  const run = (method: UserMethod, params: Record<string, unknown>) => {
+    void mutate(
+      (users) => projectUsers(users, method, params, self),
+      () => call(method, params as never),
+      { retry: method !== 'admin.transfer' && method !== 'admin.createUser' },
+    );
   };
   const open = (next: Action) => {
     if (menu) setAction({ action: next, user: menu.user });
@@ -491,7 +396,7 @@ export function AdminUsersSection({
           <Button
             variant="contained"
             startIcon={<Add />}
-            disabled={!online}
+            disabled={!online || !data}
             onClick={() => setCreating(true)}
           >
             新建用户
@@ -627,9 +532,7 @@ export function AdminUsersSection({
       <CreateUserDialog
         open={creating}
         onClose={() => setCreating(false)}
-        create={async (username, password) => {
-          setData(await call('admin.createUser', { username, password }));
-        }}
+        create={(username, password) => run('admin.createUser', { username, password })}
       />
       <ActionDialog
         key={`${action?.user.username}:${action?.action}`}

@@ -159,6 +159,8 @@ try {
   await stage('retention-preserves-partition', async () => {
     const partitioned = await first.call('library.partition', {
       operationId: randomUUID(),
+      id: randomUUID(),
+      create: true,
       name: '保留讲义',
     });
     await first.call('library.move', {

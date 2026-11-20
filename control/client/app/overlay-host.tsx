@@ -19,7 +19,7 @@ import type { WorkspaceStage } from './stage';
 import { SyncStatus } from './sync-status';
 import type { SystemControls } from './system-controls';
 import type { selectVisibility } from './visibility';
-import { waitForWorkspaceRevision, type WorkspaceCall } from './window-state';
+import type { WorkspaceCall } from './window-state';
 
 export function useWorkspaceOverlays() {
   const [overlay, setOverlay] = useState<{ kind: 'launcher' }>();
@@ -81,16 +81,17 @@ export async function openLauncherItem({
   for (const command of commands) {
     const receipt = await action(command);
     if (item.kind === 'file' && item.entryId) {
-      const authoritative = await waitForWorkspaceRevision(media, receipt.revision ?? workspace.revision);
-      const win = [...authoritative.windows]
-        .filter((win) => win.appId === 'files')
-        .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
-      if (win) {
+      const windowId =
+        command.type === 'window.open' || command.type === 'window.focus' ? command.windowId : undefined;
+      if (windowId) {
+        const win = media.operations
+          .getSnapshot()
+          .state?.workspace.windows.find((win) => win.id === windowId);
         await action({
           type: 'window.state',
-          windowId: win.id,
+          windowId,
           state: {
-            ...win.state,
+            ...win?.state,
             launch: { requestId: receipt.operationId, entryId: item.entryId },
           },
         });

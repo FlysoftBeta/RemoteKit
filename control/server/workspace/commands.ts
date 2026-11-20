@@ -2,6 +2,7 @@ import { readWindowState } from '../../shared/persisted-window-state';
 import { RemoteKitError } from '../../shared/errors';
 import {
   DEAD_ZONE_MAX,
+  creationIdFields,
   isBuiltinApp,
   isLocalTab,
   isSingletonApp,
@@ -44,7 +45,7 @@ export type CommandEffect =
 export interface CommandContext {
   execution?: ExecutionContext;
   browserIncarnation?: string;
-  ids: readonly string[];
+  historicalIdUsed?: (id: string) => boolean;
   viewId: string;
   now?: number;
   appIcon?: { hash: string };
@@ -79,11 +80,32 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
   const effects: CommandEffect[] = [];
   if (action.source !== undefined && action.source !== 'launcher')
     throw new RemoteKitError('invalid_request', '操作来源无效', { detail: 'Invalid action source' });
-  let idIndex = 0;
   const now = ctx.now ?? Date.now();
-  const nextId = () => ctx.ids[idIndex++];
+  const requiredIds = creationIdFields(action);
+  const suppliedIds = new Set(requiredIds);
+  if (action.type === 'window.open') {
+    if (action.tabId !== undefined) suppliedIds.add('tabId');
+    if (action.spaceId !== undefined) suppliedIds.add('spaceId');
+  } else if (action.type === 'window.place' && action.spaceId !== undefined) suppliedIds.add('spaceId');
+  const usedIds = new Set(
+    [...state.windows, ...state.tabs, ...state.spaces, ...state.apps, ...state.favorites].map(
+      (item) => item.id,
+    ),
+  );
+  for (const field of suppliedIds) {
+    const id = action[field];
+    if (
+      typeof id !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)
+    )
+      throw new RemoteKitError('invalid_request', `Invalid ${field}`);
+    if (usedIds.has(id) || ctx.historicalIdUsed?.(id))
+      throw new RemoteKitError('conflict', 'Object ID already used');
+    usedIds.add(id);
+  }
   const tab = () => findTab(state, action.tabId);
   if (
+    !suppliedIds.has('tabId') &&
     typeof action.tabId === 'string' &&
     tab().signIn &&
     action.type !== 'tab.activate' &&
@@ -113,7 +135,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       });
     const kind = address === undefined ? 'start' : 'remote';
     const next: ProductTab = {
-      id: nextId(),
+      id: action.tabId,
       idleKeepAlive: false,
       windowId,
       webviewId: ctx.viewId,
@@ -215,19 +237,19 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         throw new RemoteKitError('invalid_request', '此应用不支持网址', {
           detail: 'This App does not support URLs',
         });
-      const id = nextId();
+      const id = action.windowId;
       state.windows.push({ id, appId: action.appId, activeTabId: null, lastActiveAt: now });
       if (action.placement?.mode === 'replace')
-        replaceWindow(state, id, action.placement.windowId, nextId(), now);
-      else placeWindow(state, id, action.placement, nextId(), now);
-      if (installed || action.appId === 'browser') createTab(id, action.url ?? installed?.startUrl);
+        replaceWindow(state, id, action.placement.windowId, action.spaceId, now);
+      else placeWindow(state, id, action.placement, action.spaceId, now);
+      if (requiredIds.includes('tabId')) createTab(id, action.url ?? installed?.startUrl);
       break;
     }
     case 'window.focus':
       focusWindow(state, window().id, now);
       break;
     case 'window.place':
-      placeWindow(state, window().id, action.placement, nextId(), now);
+      placeWindow(state, window().id, action.placement, action.spaceId, now);
       break;
     case 'window.state': {
       const value = action.state;
@@ -268,7 +290,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       closeWindows(findSpace(state, action.spaceId).windowIds);
       break;
     case 'app.install': {
-      const id = nextId();
+      const id = action.appId;
       state.apps.push({
         id,
         ...appDefinition(action),
@@ -305,7 +327,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         throw new RemoteKitError('invalid_request', '参数值无效', { detail: 'Invalid value' });
       const existing = state.favorites.find((favorite) => favorite.url === url);
       if (existing) existing.title = action.title;
-      else state.favorites.push({ id: nextId(), url, title: action.title, createdAt: now });
+      else state.favorites.push({ id: action.favoriteId, url, title: action.title, createdAt: now });
       break;
     }
     case 'favorite.remove': {

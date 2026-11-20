@@ -180,7 +180,12 @@ const reasons: Record<string, string> = {
 };
 
 export function AdminDiagnosticsSection({ online, call }: { online: boolean; call: AdminCall }) {
-  const { data, setData, error } = useAdminResource(online, () => call('admin.diagnostics', {}), 15000);
+  const { data, mutate, error } = useAdminResource(
+    online,
+    'admin.diagnostics',
+    () => call('admin.diagnostics', {}),
+    15000,
+  );
   const [deleting, setDeleting] = useState<AdminDiagnostic | null>(null),
     [downloadError, setDownloadError] = useState<RemoteKitError | undefined>();
   const [saved, setSaved] = useState<string>();
@@ -285,8 +290,13 @@ export function AdminDiagnosticsSection({ online, call }: { online: boolean; cal
         title="删除诊断包"
         confirmLabel="删除"
         onClose={() => setDeleting(null)}
-        onConfirm={async () => {
-          setData(await call('admin.deleteDiagnostic', { id: deleting!.id }));
+        onConfirm={() => {
+          const id = deleting!.id;
+          void mutate(
+            (items) => items.filter((item) => item.id !== id),
+            () => call('admin.deleteDiagnostic', { id }),
+            { retry: true },
+          );
         }}
       >
         <Typography>删除诊断包 {deleting?.id}？</Typography>
@@ -296,25 +306,26 @@ export function AdminDiagnosticsSection({ online, call }: { online: boolean; cal
 }
 
 function LogsSection({ online, call }: { online: boolean; call: AdminCall }) {
-  const dates = useAdminResource(online, () => call('admin.logs.days', {}), 15000);
-  const jobs = useAdminResource(online, () => call('admin.logs.jobs', {}), 2000);
-  const settings = useAdminResource(online, () => call('admin.logs.settings', {}), 15000);
+  const dates = useAdminResource(online, 'admin.logs.days', () => call('admin.logs.days', {}), 15000);
+  const jobs = useAdminResource(online, 'admin.logs.jobs', () => call('admin.logs.jobs', {}), 2000);
+  const settings = useAdminResource(
+    online,
+    'admin.logs.settings',
+    () => call('admin.logs.settings', {}),
+    15000,
+  );
   const [days, setDays] = useState('30');
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<RemoteKitError>();
   useEffect(() => {
     if (settings.data) setDays(String(settings.data.logRetentionDays));
   }, [settings.data?.logRetentionDays]);
   const run = async (work: () => Promise<unknown>) => {
-    setBusy(true);
     setError(undefined);
     try {
       await work();
       await jobs.refresh();
     } catch (cause) {
       setError(failureError(cause));
-    } finally {
-      setBusy(false);
     }
   };
   return (
@@ -326,7 +337,10 @@ function LogsSection({ online, call }: { online: boolean; call: AdminCall }) {
         onSubmit={(event) => {
           event.preventDefault();
           void run(async () => {
-            settings.setData(await call('admin.logs.settings', { logRetentionDays: Number(days) }));
+            await settings.mutate(
+              () => ({ logRetentionDays: Number(days) }),
+              () => call('admin.logs.settings', { logRetentionDays: Number(days) }),
+            );
             await dates.refresh();
           });
         }}
@@ -342,15 +356,13 @@ function LogsSection({ online, call }: { online: boolean; call: AdminCall }) {
         <Button
           type="submit"
           variant="outlined"
-          disabled={
-            !online || busy || !Number.isInteger(Number(days)) || Number(days) < 1 || Number(days) > 365
-          }
+          disabled={!online || !Number.isInteger(Number(days)) || Number(days) < 1 || Number(days) > 365}
         >
           保存
         </Button>
       </Box>
       <LoadState
-        error={error ?? settings.error ?? dates.error ?? jobs.error}
+        error={settings.error ?? dates.error ?? jobs.error ?? error}
         loading={!dates.data || !settings.data}
       />
       {dates.data?.length === 0 && <Typography color="text.secondary">暂无日志</Typography>}
@@ -383,12 +395,22 @@ function LogsSection({ online, call }: { online: boolean; call: AdminCall }) {
                   <TableCell>
                     <Button
                       disabled={
-                        !online ||
-                        busy ||
-                        jobs.data?.some((job) => job.date === date && job.state === 'running')
+                        !online || jobs.data?.some((job) => job.date === date && job.state === 'running')
                       }
                       onClick={() =>
-                        void run(() => call('admin.logs.package', { date, operationId: operationId() }))
+                        void run(() => {
+                          const id = operationId();
+                          return jobs.mutate(
+                            (items) =>
+                              items.some((item) => item.operationId === id)
+                                ? items
+                                : [...items, { operationId: id, date, state: 'running', bytes: 0 }],
+                            async () => {
+                              await call('admin.logs.package', { date, operationId: id });
+                              return call('admin.logs.jobs', {});
+                            },
+                          );
+                        })
                       }
                     >
                       打包到我的文件

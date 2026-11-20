@@ -1,3 +1,5 @@
+import { assertActionShape } from './action-fixture';
+import { buildAction } from '../client/control/action-builder';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
@@ -20,7 +22,7 @@ const tab: ProductTab = {
 const items = (value: Partial<ContextMenu>) => contextMenuItems({ ...menu, ...value }, tab, 'bing');
 
 test('context menu link and image groups route URLs and commands to their owners', () => {
-  assert.deepEqual(
+  assertActionShape(
     items({
       link: { url: 'https://example.com/link', text: 'Link' },
       image: { src: 'https://example.com/image' },
@@ -29,14 +31,14 @@ test('context menu link and image groups route URLs and commands to their owners
       [
         {
           label: '在新标签页中打开链接',
-          action: { type: 'tab.create', windowId: 'window', url: 'https://example.com/link' },
+          action: buildAction({ type: 'tab.create', windowId: 'window', url: 'https://example.com/link' }),
         },
         { label: '复制链接地址', command: 'copyLinkAddress' },
       ],
       [
         {
           label: '在新标签页中打开图片',
-          action: { type: 'tab.create', windowId: 'window', url: 'https://example.com/image' },
+          action: buildAction({ type: 'tab.create', windowId: 'window', url: 'https://example.com/image' }),
         },
         { label: '复制图片', command: 'copyImage' },
         { label: '复制图片地址', command: 'copyImageAddress' },
@@ -72,11 +74,11 @@ test('selection search labels truncate after 16 code points and keep the complet
     const group = items({ selection })[0];
     const label =
       Array.from(selection).slice(0, 16).join('') + (Array.from(selection).length > 16 ? '…' : '');
-    assert.deepEqual(group, [
+    assertActionShape(group, [
       { label: '复制', command: 'copy' },
       {
         label: `使用Bing搜索"${label}"`,
-        action: { type: 'tab.create', windowId: 'window', query: selection },
+        action: buildAction({ type: 'tab.create', windowId: 'window', query: selection }),
       },
     ]);
   }
@@ -144,7 +146,7 @@ test('Browser commands close without dismiss and product actions send before a s
     assert.deepEqual(events, [command, 'closed']);
   }
   const { interaction: menu, events } = interaction();
-  const action: ProductAction = { type: 'tab.create', windowId: 'window', query: 'example.com' };
+  const action: ProductAction = buildAction({ type: 'tab.create', windowId: 'window', query: 'example.com' });
   menu.choose({ label: 'Search', action, disabled: true });
   assert.deepEqual(events, []);
   menu.choose({ label: 'Search', action });

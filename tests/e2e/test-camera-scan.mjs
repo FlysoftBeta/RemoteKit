@@ -1,3 +1,4 @@
+import { buildAction } from './kit/product-actions.mts';
 import { runCleanups } from './kit/cleanup.mjs';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -116,11 +117,13 @@ async function openViewer(sample) {
     settings: { lockOnHidden: false, lockOnIdle: false },
   });
   if (!win) {
-    await viewer.action({
-      type: 'window.open',
-      appId: 'browser',
-      placement: { mode: 'space' },
-    });
+    await viewer.action(
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+      }),
+    );
     win = (await viewer.state()).workspace.windows[0];
     await viewer.action({
       type: 'tab.navigate',

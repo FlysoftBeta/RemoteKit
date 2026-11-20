@@ -64,7 +64,7 @@ export function driveReact(
         boundary.call({ method, params }, { revision: '1', text: 'clipboard' }),
     };
     function Probe() {
-      if (path === 'admin') current = useAdminResource(online, load);
+      if (path === 'admin') current = useAdminResource(online, 'probe', load);
       else if (path === 'query') current = useQuery(String(boundary.version), load, online);
       else if (path === 'background') useBackgroundNotices(null, online, call);
       else if (path === 'clipboard') useWorkspaceClipboard(String(boundary.version), control as never);

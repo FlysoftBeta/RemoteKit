@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import { defaultFilesWindowState, updateFilesLibraryTab } from '../client/files/files-app-state';
 import { applyDesiredViews, publishAndObserve } from './coordination-fixture';
 import assert from 'node:assert/strict';
@@ -106,7 +107,9 @@ async function fixture() {
 test('workspace WS operation envelopes preserve bounded local state and split settings', async () => {
   const f = await fixture();
   try {
-    const opened = await f.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
+    const opened = await f.action(
+      buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }),
+    );
     const windowId = opened.state.workspace.windows[0].id;
     await f.request('operation.submit', {
       type: 'window.state',
@@ -151,11 +154,14 @@ test('workspace WS operation envelopes preserve bounded local state and split se
     const settings = f.store.workspaces.workspace(f.user.tenantId).settings;
     assert.equal(settings.workspace.showStats, true);
     assert.equal(settings.browser.searchEngine, 'bing');
-    await f.request('operation.submit', {
-      type: 'window.open',
-      appId: 'browser',
-      placement: { mode: 'space' },
-    });
+    await f.request(
+      'operation.submit',
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+      }),
+    );
     assert.equal(
       f.endpoint.calls.some((call) => call.method === 'view.created'),
       false,
@@ -169,12 +175,14 @@ test('app inspection binds expiring icon tokens to tenants and installed icons r
   const f = await fixture();
   let server: ReturnType<typeof createHttp> | undefined;
   try {
-    await f.action({
-      type: 'window.open',
-      appId: 'browser',
-      url: 'https://example.test/work/document',
-      placement: { mode: 'space' },
-    });
+    await f.action(
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        url: 'https://example.test/work/document',
+        placement: { mode: 'space' },
+      }),
+    );
     const tab = f.store.workspaces.workspace(f.user.tenantId).tabs[0];
     const info = await f.request('app.inspect', { tabId: tab.id });
     assert.deepEqual(
@@ -195,7 +203,7 @@ test('app inspection binds expiring icon tokens to tenants and installed icons r
     assert.equal(call.args.viewId, tab.webviewId);
     const other = await registerUser(f.store, 'other-user', 'password123');
     assert.throws(() => f.control.workspace.appIcon(other.tenantId, info.iconToken), { code: 'not_found' });
-    const installed = await f.action({ type: 'app.install', ...info });
+    const installed = await f.action(buildAction({ type: 'app.install', ...info }));
     const app = installed.state.workspace.apps[0];
     assert.ok(app.iconHash);
     assert.equal(app.iconUrl, `/api/apps/${app.id}/icon?h=${app.iconHash}`);
@@ -233,12 +241,14 @@ test('app inspection binds expiring icon tokens to tenants and installed icons r
 test('committed main-frame navigation records normalized pages, latest titles and launcher chain boundaries', async () => {
   const f = await fixture();
   try {
-    await f.action({
-      type: 'window.open',
-      appId: 'browser',
-      placement: { mode: 'space' },
-      url: 'https://initial.test/',
-    });
+    await f.action(
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'https://initial.test/',
+      }),
+    );
     const tab = f.store.workspaces.workspace(f.user.tenantId).tabs[0];
     const view = f.endpoint.views.get(tab.webviewId)!;
     await f.control.reconciler.tick();
@@ -309,7 +319,7 @@ test('committed main-frame navigation records normalized pages, latest titles an
 test('launcher adapter maps organized and hidden library entries and usage routes enforce file ownership', async () => {
   const f = await fixture();
   try {
-    await f.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
+    await f.action(buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }));
     const windowId = f.store.workspaces.workspace(f.user.tenantId).windows[0].id;
     const library = f.store.library.snapshot(f.user.tenantId);
     library.partitions = [{ id: 'partition', name: 'Organized' }];
@@ -359,12 +369,14 @@ test('launcher adapter maps organized and hidden library entries and usage route
 test('a committed passive primary document records usage while subresources remain loading', async () => {
   const f = await fixture();
   try {
-    await f.action({
-      type: 'window.open',
-      appId: 'browser',
-      url: 'https://initial.test/',
-      placement: { mode: 'space' },
-    });
+    await f.action(
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        url: 'https://initial.test/',
+        placement: { mode: 'space' },
+      }),
+    );
     const tab = f.store.workspaces.workspace(f.user.tenantId).tabs[0];
     const view = f.endpoint.views.get(tab.webviewId)!;
     await f.control.reconciler.tick();
@@ -405,28 +417,34 @@ for (const target of ['space', 'app'] as const) {
     try {
       let appId = 'browser';
       if (target === 'app') {
-        const installed = await f.action({
-          type: 'app.install',
-          name: 'App',
-          startUrl: 'https://app.test/',
-          scope: 'https://app.test/',
-          display: 'standalone',
-        });
+        const installed = await f.action(
+          buildAction({
+            type: 'app.install',
+            name: 'App',
+            startUrl: 'https://app.test/',
+            scope: 'https://app.test/',
+            display: 'standalone',
+          }),
+        );
         appId = 'web:' + installed.state.workspace.apps[0].id;
       }
-      await f.action({
-        type: 'window.open',
-        appId,
-        url: 'https://first.test/',
-        placement: { mode: 'space' },
-      });
+      await f.action(
+        buildAction({
+          type: 'window.open',
+          appId,
+          url: 'https://first.test/',
+          placement: { mode: 'space' },
+        }),
+      );
       let state = f.store.workspaces.workspace(f.user.tenantId);
-      await f.action({
-        type: 'window.open',
-        appId,
-        url: 'https://second.test/',
-        placement: { mode: 'split', besideWindowId: state.windows[0].id, side: 'right' },
-      });
+      await f.action(
+        buildAction({
+          type: 'window.open',
+          appId,
+          url: 'https://second.test/',
+          placement: { mode: 'split', besideWindowId: state.windows[0].id, side: 'right' },
+        }),
+      );
       state = f.store.workspaces.workspace(f.user.tenantId);
       const second = state.tabs[1];
       f.endpoint.rejectedClose.add(second.webviewId);
@@ -470,12 +488,14 @@ for (const target of ['space', 'app'] as const) {
 test('file request source resolves the owning browser hostname or installed web App', async () => {
   const f = await fixture();
   try {
-    await f.action({
-      type: 'window.open',
-      appId: 'browser',
-      url: 'https://source.test/page',
-      placement: { mode: 'space' },
-    });
+    await f.action(
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        url: 'https://source.test/page',
+        placement: { mode: 'space' },
+      }),
+    );
     const state = f.store.workspaces.workspace(f.user.tenantId);
     const tab = state.tabs[0];
     f.control.tenants.get(f.user.tenantId).pageRequests.files = [
@@ -516,15 +536,17 @@ test('file request source resolves the owning browser hostname or installed web 
 test('web App popups split beside their opener, overflow into a space and route other new tabs to the browser', async () => {
   const f = await fixture();
   try {
-    const installed = await f.action({
-      type: 'app.install',
-      name: 'App',
-      startUrl: 'https://app.test/',
-      scope: 'https://app.test/',
-      display: 'standalone',
-    });
+    const installed = await f.action(
+      buildAction({
+        type: 'app.install',
+        name: 'App',
+        startUrl: 'https://app.test/',
+        scope: 'https://app.test/',
+        display: 'standalone',
+      }),
+    );
     const appId = 'web:' + installed.state.workspace.apps[0].id;
-    await f.action({ type: 'window.open', appId, placement: { mode: 'space' } });
+    await f.action(buildAction({ type: 'window.open', appId, placement: { mode: 'space' } }));
     const original = f.store.workspaces.workspace(f.user.tenantId);
     const opener = original.tabs[0];
     const popup = async (id: string, disposition: number, openerViewId = opener.webviewId) => {
@@ -595,20 +617,24 @@ test('web App popups split beside their opener, overflow into a space and route 
 test('space close and App uninstall stop at beforeunload, preserve cancelled targets and continue sequentially on retry', async () => {
   const f = await fixture();
   try {
-    await f.action({
-      type: 'window.open',
-      appId: 'browser',
-      url: 'https://first.test/',
-      placement: { mode: 'space' },
-    });
+    await f.action(
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        url: 'https://first.test/',
+        placement: { mode: 'space' },
+      }),
+    );
     let state = f.store.workspaces.workspace(f.user.tenantId);
     const firstWindow = state.windows[0];
-    await f.action({
-      type: 'window.open',
-      appId: 'browser',
-      url: 'https://second.test/',
-      placement: { mode: 'split', besideWindowId: firstWindow.id, side: 'right' },
-    });
+    await f.action(
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        url: 'https://second.test/',
+        placement: { mode: 'split', besideWindowId: firstWindow.id, side: 'right' },
+      }),
+    );
     state = f.store.workspaces.workspace(f.user.tenantId);
     const secondTab = state.tabs.find((tab) => tab.windowId !== firstWindow.id)!;
     f.endpoint.pendingClose.add(secondTab.webviewId);
@@ -640,16 +666,18 @@ test('space close and App uninstall stop at beforeunload, preserve cancelled tar
     assert.equal(f.control.operations.operationStatus(f.user.tenantId, closeSpace).status, 'failed');
     f.endpoint.pendingClose.clear();
     await f.action({ type: 'space.close', spaceId: state.spaces[0].id });
-    const installed = await f.action({
-      type: 'app.install',
-      name: 'App',
-      startUrl: 'https://app.test/',
-      scope: 'https://app.test/',
-      display: 'standalone',
-    });
+    const installed = await f.action(
+      buildAction({
+        type: 'app.install',
+        name: 'App',
+        startUrl: 'https://app.test/',
+        scope: 'https://app.test/',
+        display: 'standalone',
+      }),
+    );
     const appId = 'web:' + installed.state.workspace.apps[0].id;
     for (let index = 0; index < 2; index++)
-      await f.action({ type: 'window.open', appId, placement: { mode: 'space' } });
+      await f.action(buildAction({ type: 'window.open', appId, placement: { mode: 'space' } }));
     state = f.store.workspaces.workspace(f.user.tenantId);
     const last = state.tabs[state.tabs.length - 1];
     f.endpoint.pendingClose.add(last.webviewId);
@@ -688,11 +716,13 @@ test('page previews share normalized usage keys, reject invalid images, and serv
   let server: ReturnType<typeof createHttp> | undefined;
   try {
     const image = 'data:image/jpeg;base64,' + jpeg.toString('base64');
-    await f.action({
-      type: 'favorite.add',
-      url: 'https://preview.test/page#favorite',
-      title: 'Preview page',
-    });
+    await f.action(
+      buildAction({
+        type: 'favorite.add',
+        url: 'https://preview.test/page#favorite',
+        title: 'Preview page',
+      }),
+    );
     assert.deepEqual(await f.request('page.preview', { url: 'https://preview.test/page#capture', image }), {
       saved: true,
     });
@@ -769,12 +799,14 @@ test('page previews share normalized usage keys, reject invalid images, and serv
 test('reconciliation writes titles only when a tab changes page or remembered title', async (t) => {
   const f = await fixture();
   try {
-    await f.action({
-      type: 'window.open',
-      appId: 'browser',
-      url: 'https://title.test/first',
-      placement: { mode: 'space' },
-    });
+    await f.action(
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        url: 'https://title.test/first',
+        placement: { mode: 'space' },
+      }),
+    );
     await f.control.reconciler.tick();
     const tab = f.store.workspaces.workspace(f.user.tenantId).tabs[0];
     const view = f.endpoint.views.get(tab.webviewId)!;

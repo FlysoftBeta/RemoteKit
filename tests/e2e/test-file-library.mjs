@@ -1,3 +1,4 @@
+import { buildAction } from './kit/product-actions.mts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
@@ -60,7 +61,7 @@ try {
     currentPassword: password,
     settings: { lockOnHidden: false, lockOnIdle: false },
   });
-  await viewer.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+  await viewer.action(buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }));
   const win = (await viewer.state()).workspace.windows[0];
   await viewer.action({ type: 'tab.navigate', tabId: win.activeTabId, url: fixtureOrigin });
   await viewer.media();
@@ -164,7 +165,7 @@ try {
       destination: 'library',
       origin: { kind: 'files', channel: 'upload', partitionId: null },
     });
-    await viewer.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
+    await viewer.action(buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }));
     await page.getByText('共享副本.txt', { exact: true }).waitFor();
     await page.screenshot({ path: join(run, 'file-library.png') });
     await mutate('delete', { ids: [entry.id] });

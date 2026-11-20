@@ -1,3 +1,4 @@
+import { buildAction } from './kit/product-actions.mts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import {
@@ -69,7 +70,7 @@ async function connect(name, context) {
   return viewer;
 }
 async function workspace(viewer, path) {
-  await viewer.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+  await viewer.action(buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }));
   await until(async () => (await viewer.state()).browser.state === 'available', 'browser available');
   const state = await viewer.state();
   const window = state.workspace.windows.at(-1);
@@ -156,7 +157,7 @@ try {
   await tap(first, '/first', 'store');
   await until(() => events.some((event) => event.type === 'stored'), 'persistent state set');
   const firstWindow = (await first.state()).workspace.windows[0];
-  await first.action({ type: 'tab.create', windowId: firstWindow.id });
+  await first.action(buildAction({ type: 'tab.create', windowId: firstWindow.id }));
   const tabs = (await first.state()).workspace.tabs;
   await first.action({ type: 'tab.navigate', tabId: tabs.at(-1).id, url: fixtureOrigin + '/second-tab' });
   await first.media();

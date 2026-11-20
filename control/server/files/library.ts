@@ -758,17 +758,26 @@ export class FileLibrary {
         return snapshot;
       }
       case 'library.partition': {
-        const partitionId = params.id === undefined ? undefined : id(params.id),
+        if (typeof params.create !== 'boolean') throw invalid('无效的分区操作');
+        const partitionId = id(params.id),
           name = partitionName(params.name);
+        if (
+          params.create &&
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(partitionId)
+        )
+          throw invalid('无效的分区标识');
         return this.repository.change(
           tenant,
           id(params.operationId),
-          operationHash('partition', partitionId, name),
+          operationHash('partition', params.create, partitionId, name),
           (snapshot) => {
-            if (partitionId === undefined) {
+            if (params.create) {
+              if (snapshot.partitions.some((item) => item.id === partitionId))
+                throw new RemoteKitError('conflict', '分区标识已使用');
+              this.repository.claimPartitionId(tenant, partitionId);
               if (snapshot.partitions.length >= MAX_PARTITIONS)
                 throw new RemoteKitError('limit_exceeded', '分区已达上限', { capacity: 'catalog' });
-              snapshot.partitions.push({ id: randomUUID(), name });
+              snapshot.partitions.push({ id: partitionId, name });
             } else {
               const item = snapshot.partitions.find((entry) => entry.id === partitionId);
               if (!item) throw new RemoteKitError('not_found', '分区不存在');

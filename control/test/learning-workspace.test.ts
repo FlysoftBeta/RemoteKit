@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import { applyDesiredViews } from './coordination-fixture';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -36,7 +37,7 @@ test('sign-in tabs pass purpose to Endpoint, skip usage, previews, popups and au
   try {
     await app.operations.productAction(
       user.tenantId,
-      { type: 'window.open', appId: 'questions', placement: { mode: 'space' } },
+      buildAction({ type: 'window.open', appId: 'questions', placement: { mode: 'space' } }),
       'lease',
     );
     const windowId = store.workspaces.workspace(user.tenantId).windows[0].id;
@@ -69,7 +70,7 @@ test('sign-in tabs pass purpose to Endpoint, skip usage, previews, popups and au
       applyCommand(
         state,
         { type: 'tab.navigate', tabId: tab.id, url: 'https://example.test' },
-        { ids: [], viewId: 'unused' },
+        { viewId: 'unused' },
       ),
     );
     await app.popups.observePopups(state, {

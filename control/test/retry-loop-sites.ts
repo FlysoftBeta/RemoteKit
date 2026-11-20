@@ -1,5 +1,5 @@
 export const creationBindings: Record<string, string | string[]> = {
-  'client/app/admin/shared.tsx#recover:1': 'user-operation-wrappers',
+  'client/app/admin/resource-store.ts#recover:1': 'user-operation-wrappers',
   'client/app/announcements.tsx#recover:1': 'announcement-read-marker-recovery',
   'client/app/app-editor.tsx#recoverRead:1': 'app-inspection-recovery',
   'client/app/launcher.tsx#recoverRead:1': 'launcher-query-recovery',
@@ -49,6 +49,7 @@ export const creationBindings: Record<string, string | string[]> = {
   'client/control/operations-store.ts#RetryUnit:1': [
     'product-admission-submission',
     'product-receipt-queries',
+    'product-creation-dependencies',
   ],
   'client/control/operations-store.ts#RetryUnit:2': 'product-admission-readiness',
   'client/control/viewport-requests.ts#RetryUnit:1': 'latest-viewport-publication',

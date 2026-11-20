@@ -35,6 +35,15 @@ function usageEvent(row: UsageRow): UsageEvent {
 export class WorkspaceItemsRepository {
   constructor(private readonly db: Database.Database) {}
 
+  historicalIdUsed(tenant: string, id: string): boolean {
+    return !!this.db
+      .prepare(
+        `SELECT 1 FROM usage_events WHERE tenant=? AND (window_id=? OR context=?)
+       UNION ALL SELECT 1 FROM popup_receipts WHERE tenant=? AND tab_id=? LIMIT 1`,
+      )
+      .get(tenant, id, `tab:${id}`, tenant, id);
+  }
+
   apps(tenant: string): InstalledApp[] {
     return (
       this.db.prepare('SELECT id,data FROM installed_apps WHERE tenant=? ORDER BY position').all(tenant) as {

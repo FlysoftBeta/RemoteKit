@@ -13,7 +13,7 @@ import './console.css';
 import { AdminDiagnosticsSection } from './diagnostics';
 import { AdminNodesSection } from './nodes';
 import { AdminOverviewSection } from './overview';
-import type { AdminCall } from './shared';
+import { AdminResourceProvider, type AdminCall } from './shared';
 import { AdminStorageSection } from './storage';
 import { AdminUsersSection } from './users';
 
@@ -95,7 +95,7 @@ export function AdminApp({
               context={{ operation: '读取管理内容', scope: 'surface' }}
             />
           )}
-          {content[section]}
+          <AdminResourceProvider>{content[section]}</AdminResourceProvider>
         </Box>
       </Box>
     </div>

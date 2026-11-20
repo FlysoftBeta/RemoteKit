@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { emptyWorkspace } from '../server/persistence/workspaces';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -121,7 +122,12 @@ test('snippet fetch, exclusion, source purge and file-selection barriers use lib
     await library.recordSnippet('tenant', 'second', page, 2);
     const [second, first] = store.library.snapshot('tenant').entries;
     assert.deepEqual(await call('library.snippet', { id: first.id }), { text: 'first', html: '' });
-    await call('library.partition', { operationId: 'partition', name: 'Saved' });
+    await call('library.partition', {
+      operationId: 'partition',
+      id: randomUUID(),
+      create: true,
+      name: 'Saved',
+    });
     const partitionId = store.library.snapshot('tenant').partitions[0].id;
     await call('library.move', { operationId: 'move', ids: [first.id], partitionId });
     await call('library.source', {

@@ -502,8 +502,8 @@ export const retryLoops: Record<string, Binding> = {
     presentation: true,
   },
   'user-operation-wrappers': {
-    owner: 'client/app/admin/shared.tsx',
-    boundary: 'ConfirmDialog onConfirm identified operation',
+    owner: 'client/app/admin/resource-store.ts',
+    boundary: 'AdminResourceStore identified operation',
     event: 'recovery',
     create: driveUi('operation'),
     callScoped: true,
@@ -741,6 +741,20 @@ export const retryLoops: Record<string, Binding> = {
     event: 'operation_query',
     create: driveOperations('query'),
     callScoped: true,
+  },
+  'product-creation-dependencies': {
+    owner: 'client/control/operations-store.ts',
+    boundary: 'creating OperationsPort.submit receipt before dependent submission',
+    event: (code) => (code === 'outcome_unknown' ? 'operation_query' : 'operation_submission'),
+    create: driveOperations('dependency'),
+    callScoped: true,
+    recoveryDelay: 100,
+    identity: (input) => {
+      const { operationId, operationGeneration } = (
+        input as { operation: { operationId: string; operationGeneration: string } }
+      ).operation;
+      return { operationId, operationGeneration };
+    },
   },
   'media-feedback-recovery': {
     owner: 'client/media/observations.ts',

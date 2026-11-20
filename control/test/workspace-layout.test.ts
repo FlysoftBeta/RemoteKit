@@ -1,3 +1,5 @@
+import { assertActionShape } from './action-fixture';
+import { buildAction } from '../client/control/action-builder';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { selectVisibility } from '../client/app/visibility';
@@ -81,20 +83,25 @@ test('space projection handles split, focus, detach, proportions and settings si
       actions.map((action, index) => ({ action, operationId: String(index), operationGeneration: 'g' })),
     )!.workspace;
   const next = project([
-    {
+    buildAction({
       type: 'window.open',
       appId: 'settings',
       placement: { mode: 'split', besideWindowId: 'b', side: 'right' },
-    },
-    { type: 'window.open', appId: 'settings', placement: { mode: 'space' } },
+    }),
+    buildAction({ type: 'window.open', appId: 'settings', placement: { mode: 'space' } }),
   ]);
   assert.equal(next.windows.filter((window) => window.appId === 'settings').length, 1);
-  assert.deepEqual(next.spaces[0].windowIds, ['a', 'b', 'pending-0']);
+  assert.deepEqual(next.spaces[0].windowIds, [
+    'a',
+    'b',
+    next.windows.find((window) => window.appId === 'settings')!.id,
+  ]);
   assert.deepEqual(next.spaces[0].weights, [0.7, 0.15, 0.15]);
-  const detached = project([{ type: 'window.place', windowId: 'a', placement: { mode: 'space' } }]);
+  const detach = buildAction({ type: 'window.place', windowId: 'a', placement: { mode: 'space' } });
+  const detached = project([detach]);
   assert.deepEqual(detached.spaces[0].windowIds, ['b']);
   assert.deepEqual(detached.spaces[0].weights, [1]);
-  assert.equal(detached.activeSpaceId, 'pending-0-space');
+  assert.equal(detached.activeSpaceId, detach.spaceId);
   const focused = project([{ type: 'window.focus', windowId: 'c' }]);
   assert.equal(focused.activeSpaceId, 'two');
   assert.equal(focused.spaces[1].focusedWindowId, 'c');
@@ -115,14 +122,14 @@ test('launcher appends to the target group, honors longest app scope and explici
     title: 'Page',
     url: 'https://example.test/app/note',
   };
-  assert.deepEqual(launcherActions(state, page), [
-    {
+  assertActionShape(launcherActions(state, page), [
+    buildAction({
       type: 'window.open',
       appId: 'browser',
       url: page.url,
       placement: { mode: 'split', besideWindowId: 'b', side: 'right' },
       source: 'launcher',
-    },
+    }),
   ]);
   state.apps = [
     {
@@ -140,41 +147,47 @@ test('launcher appends to the target group, honors longest app scope and explici
     'web:app',
   );
   const app: LauncherItem = { ...page, kind: 'app', appId: 'browser' };
-  assert.deepEqual(launcherActions(state, app), [
-    {
+  assertActionShape(launcherActions(state, app), [
+    buildAction({
       type: 'window.open',
       appId: 'browser',
       url: undefined,
       placement: { mode: 'split', besideWindowId: 'b', side: 'right' },
       source: 'launcher',
-    },
+    }),
   ]);
   const placement = { mode: 'split', besideWindowId: 'a', side: 'left' } as const;
-  assert.deepEqual(launcherActions(state, app, placement), [
-    { type: 'window.open', appId: 'browser', url: undefined, placement, source: 'launcher' },
+  assertActionShape(launcherActions(state, app, placement), [
+    buildAction({ type: 'window.open', appId: 'browser', url: undefined, placement, source: 'launcher' }),
   ]);
-  assert.deepEqual(launcherActions(state, page, undefined, true), [
-    { type: 'tab.create', windowId: 'c', url: page.url, source: 'launcher' },
+  assertActionShape(launcherActions(state, page, undefined, true), [
+    buildAction({ type: 'tab.create', windowId: 'c', url: page.url, source: 'launcher' }),
   ]);
   const file: LauncherItem = { ...page, kind: 'file', entryId: 'file' };
   assert.equal(launcherActions(state, file)[0].type, 'window.open');
   assert.deepEqual(launcherActions(state, file, undefined, true), [
     { type: 'window.focus', windowId: 'b', source: 'launcher' },
   ]);
-  assert.deepEqual(launcherNavigation(page.url!, { mode: 'space' }), {
-    type: 'window.open',
-    appId: 'browser',
-    placement: { mode: 'space' },
-    url: page.url,
-    source: 'launcher',
-  });
-  assert.deepEqual(launcherNavigation('two words', { mode: 'space' }), {
-    type: 'window.open',
-    appId: 'browser',
-    url: 'two words',
-    placement: { mode: 'space' },
-    source: 'launcher',
-  });
+  assertActionShape(
+    launcherNavigation(page.url!, { mode: 'space' }),
+    buildAction({
+      type: 'window.open',
+      appId: 'browser',
+      placement: { mode: 'space' },
+      url: page.url,
+      source: 'launcher',
+    }),
+  );
+  assertActionShape(
+    launcherNavigation('two words', { mode: 'space' }),
+    buildAction({
+      type: 'window.open',
+      appId: 'browser',
+      url: 'two words',
+      placement: { mode: 'space' },
+      source: 'launcher',
+    }),
+  );
 });
 
 test('a stale placement target cannot break authoritative snapshot projection', () => {
@@ -183,11 +196,11 @@ test('a stale placement target cannot break authoritative snapshot projection', 
     {
       operationId: 'stale',
       operationGeneration: 'g',
-      action: {
+      action: buildAction({
         type: 'window.place',
         windowId: 'a',
         placement: { mode: 'split', besideWindowId: 'retired', side: 'left' },
-      },
+      }),
     },
   ])!;
   assert.deepEqual(projected.workspace.spaces, state.workspace.spaces);
@@ -195,32 +208,33 @@ test('a stale placement target cannot break authoritative snapshot projection', 
 
 test('replace projection preserves the slot and proportions and detaches the replaced window', () => {
   const state = workspace();
+  const action = buildAction({
+    type: 'window.open',
+    appId: 'files',
+    placement: { mode: 'replace', windowId: 'a' },
+  });
   const projected = projectOperations(state, [
     {
       operationId: 'replace',
       operationGeneration: 'g',
-      action: {
-        type: 'window.open',
-        appId: 'files',
-        placement: { mode: 'replace', windowId: 'a' },
-      },
+      action,
     },
   ])!.workspace;
-  assert.deepEqual(projected.spaces[0].windowIds, ['pending-replace', 'b']);
+  assert.deepEqual(projected.spaces[0].windowIds, [action.windowId, 'b']);
   assert.deepEqual(projected.spaces[0].weights, [0.7, 0.3]);
   assert.deepEqual(projected.spaces[2].windowIds, ['a']);
   assert.equal(projected.activeSpaceId, 'one');
-  assert.equal(projected.spaces[0].focusedWindowId, 'pending-replace');
+  assert.equal(projected.spaces[0].focusedWindowId, action.windowId);
   assert.deepEqual(
     projectOperations(state, [
       {
         operationId: 'stale',
         operationGeneration: 'g',
-        action: {
+        action: buildAction({
           type: 'window.open',
           appId: 'files',
           placement: { mode: 'replace', windowId: 'retired' },
-        },
+        }),
       },
     ])!.workspace.spaces,
     state.workspace.spaces,

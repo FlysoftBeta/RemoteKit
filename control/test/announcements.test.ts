@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import { randomUUID } from 'node:crypto';
 import { accountsFor, registerUser, requestViewer, testGateway } from './server-fixture';
 import test from 'node:test';
@@ -42,7 +43,7 @@ async function stack() {
   };
 }
 
-const openAdmin = { type: 'window.open', appId: 'admin', placement: { mode: 'space' } } as const;
+const openAdmin = () => buildAction({ type: 'window.open', appId: 'admin', placement: { mode: 'space' } });
 const adminWindows = (h: Awaited<ReturnType<typeof stack>>, tenant: string) =>
   h.store.workspaces.workspace(tenant).windows.filter((win) => win.appId === 'admin');
 
@@ -63,7 +64,7 @@ test('a publication identity returns the existing announcement after a lost repl
 test('the admin App opens only for the administrator, once, and closes when the role moves', async () => {
   const h = await stack();
   try {
-    await assert.rejects(h.control.operations.productAction(h.user.tenantId, openAdmin), {
+    await assert.rejects(h.control.operations.productAction(h.user.tenantId, openAdmin()), {
       code: 'forbidden',
     });
     assert.equal(adminWindows(h, h.user.tenantId).length, 0);
@@ -72,16 +73,16 @@ test('the admin App opens only for the administrator, once, and closes when the 
     assert.equal(launcher(h.admin.tenantId), true);
     assert.equal(launcher(h.user.tenantId), false);
 
-    await h.control.operations.productAction(h.admin.tenantId, openAdmin);
-    await h.control.operations.productAction(h.admin.tenantId, openAdmin);
+    await h.control.operations.productAction(h.admin.tenantId, openAdmin());
+    await h.control.operations.productAction(h.admin.tenantId, openAdmin());
     assert.equal(adminWindows(h, h.admin.tenantId).length, 1);
 
     await h.call(h.admin.tenantId, 'admin.transferAdmin', { username: 'ordinary' });
     assert.equal(adminWindows(h, h.admin.tenantId).length, 0);
-    await assert.rejects(h.control.operations.productAction(h.admin.tenantId, openAdmin), {
+    await assert.rejects(h.control.operations.productAction(h.admin.tenantId, openAdmin()), {
       code: 'forbidden',
     });
-    await h.control.operations.productAction(h.user.tenantId, openAdmin);
+    await h.control.operations.productAction(h.user.tenantId, openAdmin());
     assert.equal(adminWindows(h, h.user.tenantId).length, 1);
   } finally {
     await h.close();
@@ -178,14 +179,12 @@ test('an acknowledged task notice is not replayed to later snapshots', async (t)
   const h = await stack();
   t.after(() => h.close());
   const tenant = h.user.tenantId;
-  h.control.tenants
-    .get(tenant)
-    .backgroundTasks.set('download-1', {
-      id: 'download-1',
-      kind: 'download',
-      state: 'complete',
-      name: 'a.pdf',
-    });
+  h.control.tenants.get(tenant).backgroundTasks.set('download-1', {
+    id: 'download-1',
+    kind: 'download',
+    state: 'complete',
+    name: 'a.pdf',
+  });
   assert.equal(h.control.viewers.productState(tenant).backgroundTasks?.length, 1);
   assert.deepEqual(await h.call(tenant, 'task.acknowledge', { id: 'download-1' }), { acknowledged: true });
   assert.deepEqual(await h.call(tenant, 'task.acknowledge', { id: 'download-1' }), { acknowledged: true });

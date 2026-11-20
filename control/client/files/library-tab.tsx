@@ -25,7 +25,6 @@ import {
   DialogTitle,
   IconButton,
   InputAdornment,
-  LinearProgress,
   ListItemIcon,
   ListItemText,
   Menu,
@@ -106,7 +105,6 @@ export function LibraryTab({
   const setQuery = (query: string) => onQuery(query.slice(0, 256));
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<RemoteKitError | undefined>();
-  const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string[]>();
   const [menu, setMenu] = useState<{ anchor: HTMLElement; id: string }>();
   const [uploadMenu, setUploadMenu] = useState<HTMLElement>();
@@ -153,7 +151,7 @@ export function LibraryTab({
     set: (mode: 'cards' | 'list') => onLayout(mode === 'cards' ? 'grid' : 'list'),
   };
   const partitionOf = (id: string | null) => partitions.find((item) => item.id === id)?.name ?? '';
-  const disabled = !online || busy || !snapshot;
+  const disabled = !online || !snapshot;
   const selecting = selected !== undefined;
   const chosen = new Set(selected);
   const menuEntry = catalog.find((entry) => entry.id === menu?.id);
@@ -183,13 +181,10 @@ export function LibraryTab({
 
   async function run(action: () => Promise<unknown>) {
     setError(undefined);
-    setBusy(true);
     try {
       await action();
     } catch (failure) {
       setError(failureError(failure));
-    } finally {
-      setBusy(false);
     }
   }
   const selectFilter = (next: FilesView) => {
@@ -538,7 +533,6 @@ export function LibraryTab({
               pb: 3,
             }}
           >
-            {busy && <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />}
             {(error ?? loadError) && (
               <FailureNote
                 error={error ?? loadError}
@@ -552,9 +546,7 @@ export function LibraryTab({
             )}
             {!snapshot && online && (
               <Box sx={{ py: 6, textAlign: 'center' }}>
-                <Button disabled={busy} onClick={() => void run(refresh)}>
-                  加载我的文件
-                </Button>
+                <Button onClick={() => void run(refresh)}>加载我的文件</Button>
               </Box>
             )}
             {snapshot && filter !== 'settings' && (
@@ -731,8 +723,9 @@ export function LibraryTab({
             const ids = move;
             setMove(undefined);
             void run(async () => {
-              await mutate('library.move', { operationId: operationId(), ids, partitionId });
+              const result = mutate('library.move', { operationId: operationId(), ids, partitionId });
               setSelected(undefined);
+              await result;
             });
           }}
         />
@@ -743,7 +736,7 @@ export function LibraryTab({
           fullWidth
           maxWidth="xs"
           aria-labelledby="delete-library-file"
-          onClose={busy ? undefined : () => setDeletion(undefined)}
+          onClose={() => setDeletion(undefined)}
         >
           <DialogTitle id="delete-library-file">
             {deletion.ids.length > 1 ? `删除 ${deletion.ids.length} 个文件？` : '删除文件？'}
@@ -765,7 +758,7 @@ export function LibraryTab({
             )}
           </DialogContent>
           <DialogActions>
-            <Button autoFocus disabled={busy} onClick={() => setDeletion(undefined)}>
+            <Button autoFocus onClick={() => setDeletion(undefined)}>
               取消
             </Button>
             <Button
@@ -774,9 +767,13 @@ export function LibraryTab({
               disabled={disabled}
               onClick={() =>
                 void run(async () => {
-                  await mutate('library.delete', { operationId: deletion.operationId, ids: deletion.ids });
+                  const result = mutate('library.delete', {
+                    operationId: deletion.operationId,
+                    ids: deletion.ids,
+                  });
                   setDeletion(undefined);
                   setSelected(undefined);
+                  await result;
                 })
               }
             >

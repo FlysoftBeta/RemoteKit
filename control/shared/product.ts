@@ -390,21 +390,36 @@ export interface ProductState {
   integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean };
 }
 export type ProductAction =
-  | { type: 'window.open'; appId: string; url?: string; placement: WindowPlacement; source?: 'launcher' }
+  | {
+      type: 'window.open';
+      windowId: string;
+      tabId?: string;
+      spaceId?: string;
+      appId: string;
+      url?: string;
+      placement: WindowPlacement;
+      source?: 'launcher';
+    }
   | { type: 'window.focus'; windowId: string; source?: 'launcher' }
-  | { type: 'window.place'; windowId: string; placement: Exclude<WindowPlacement, { mode: 'replace' }> }
+  | {
+      type: 'window.place';
+      windowId: string;
+      spaceId?: string;
+      placement: Exclude<WindowPlacement, { mode: 'replace' }>;
+    }
   | { type: 'window.close'; windowId: string }
   | { type: 'window.state'; windowId: string; state: Record<string, unknown> }
   | { type: 'space.activate'; spaceId: string; source?: 'launcher' }
   | { type: 'space.close'; spaceId: string }
   | { type: 'space.layout'; spaceId: string; weights: number[] }
-  | ({ type: 'app.install' } & AppDefinition)
+  | ({ type: 'app.install'; appId: string } & AppDefinition)
   | ({ type: 'app.update'; appId: string } & Partial<AppDefinition>)
   | { type: 'app.uninstall'; appId: string }
-  | { type: 'favorite.add'; url: string; title: string }
+  | { type: 'favorite.add'; favoriteId: string; url: string; title: string }
   | { type: 'favorite.remove'; id: string }
   | {
       type: 'tab.create';
+      tabId: string;
       windowId: string;
       url?: string;
       query?: string;
@@ -436,6 +451,37 @@ export type ProductAction =
   | { type: 'site.permissions.reset'; origin: string }
   | { type: 'page.exitFullscreen'; target: string }
   | { type: 'site.set'; origin: string; tabId?: string; tabletUa: boolean };
+export type CreatedIdField = 'windowId' | 'tabId' | 'spaceId' | 'appId' | 'favoriteId';
+/** IDs required by the objects an action creates, including replacement window groups. */
+export function creationIdFields(action: {
+  type: string;
+  appId?: string;
+  placement?: WindowPlacement;
+}): CreatedIdField[] {
+  switch (action.type) {
+    case 'window.open':
+      return [
+        'windowId',
+        ...(action.appId === 'browser' ||
+        (typeof action.appId === 'string' && action.appId.startsWith('web:'))
+          ? ['tabId' as const]
+          : []),
+        ...(action.placement?.mode === 'space' || action.placement?.mode === 'replace'
+          ? ['spaceId' as const]
+          : []),
+      ];
+    case 'window.place':
+      return action.placement?.mode === 'space' ? ['spaceId'] : [];
+    case 'tab.create':
+      return ['tabId'];
+    case 'app.install':
+      return ['appId'];
+    case 'favorite.add':
+      return ['favoriteId'];
+    default:
+      return [];
+  }
+}
 export interface ViewerViewport {
   devicePixelRatio: number;
   refreshHz?: number;

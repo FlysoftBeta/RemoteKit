@@ -182,12 +182,11 @@ export function SortableFileItems<T extends SortableItem>({
   const list = useRef<HTMLUListElement>(null);
   const drag = useRef<BasketDrag | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [saving, setSaving] = useState<{ ids: string[]; revision: number }>();
   const [scrollEdge, setScrollEdge] = useState(0.16);
   const stale = !!activeId && (!drag.current || disabled || !basketDragCurrent(drag.current, ids, revision));
   const byId = new Map(items.map((item) => [item.id, item]));
   const active = !stale && activeId ? byId.get(activeId) : undefined;
-  const order = saving?.revision === revision && saving.ids.every((id) => byId.has(id)) ? saving.ids : ids;
+  const order = ids;
   const pointer = useSensor(PointerSensor, { activationConstraint: { distance: 6 } });
   const mouse = useSensor(MouseSensor, { activationConstraint: { distance: 6 } });
   const touch = useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } });
@@ -288,8 +287,7 @@ export function SortableFileItems<T extends SortableItem>({
             : basketDrop(drag.current, over ? String(over.id) : undefined, ids, revision);
           endDrag();
           if (!result) return;
-          setSaving(result);
-          void onChange(result.ids, result.revision).finally(() => setSaving(undefined));
+          void onChange(result.ids, result.revision);
         }}
       >
         <SortableContext
@@ -333,7 +331,7 @@ export function SortableFileItems<T extends SortableItem>({
                     index={index}
                     mode={mode}
                     width={96}
-                    disabled={disabled || !!saving || ids.length < 2}
+                    disabled={disabled || ids.length < 2}
                     isCurrent={!!active}
                     anyDrag={!!activeId}
                     renderItem={(flags) => renderItem(item, flags)}

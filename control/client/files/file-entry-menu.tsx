@@ -56,21 +56,17 @@ export function FileEntryMenu({
   const [copied, setCopied] = useState(false);
   const [move, setMove] = useState<LibraryEntry>();
   const [deletion, setDeletion] = useState<{ entry: LibraryEntry; operationId: string }>();
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<RemoteKitError | undefined>();
   const basket = basketEntries(snapshot);
   const inBasket = basket.some((item) => item.id === entry?.id);
-  const disabled = !online || busy || !snapshot;
+  const disabled = !online || !snapshot;
   const unavailable = entry?.kind === 'file' && !entry.available;
   async function run(action: () => Promise<unknown>) {
-    setBusy(true);
     setError(undefined);
     try {
       await action();
     } catch (failure) {
       setError(failureError(failure));
-    } finally {
-      setBusy(false);
     }
   }
   const choose = (action: (entry: LibraryEntry) => void) => {
@@ -252,7 +248,7 @@ export function FileEntryMenu({
           open
           fullWidth
           maxWidth="xs"
-          onClose={busy ? undefined : () => setDeletion(undefined)}
+          onClose={() => setDeletion(undefined)}
           aria-labelledby="file-entry-delete-title"
         >
           <DialogTitle id="file-entry-delete-title">删除文件？</DialogTitle>
@@ -264,20 +260,19 @@ export function FileEntryMenu({
             {error && <FailureNote error={error} context={{ operation: '完成文件操作', scope: 'surface' }} />}
           </DialogContent>
           <DialogActions>
-            <Button disabled={busy} onClick={() => setDeletion(undefined)}>
-              取消
-            </Button>
+            <Button onClick={() => setDeletion(undefined)}>取消</Button>
             <Button
               color="error"
               variant="contained"
               disabled={disabled}
               onClick={() =>
                 void run(async () => {
-                  await mutate('library.delete', {
+                  const result = mutate('library.delete', {
                     operationId: deletion.operationId,
                     ids: [deletion.entry.id],
                   });
                   setDeletion(undefined);
+                  await result;
                   onDeleted?.();
                 })
               }

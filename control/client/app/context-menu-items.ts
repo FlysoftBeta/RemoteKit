@@ -1,3 +1,4 @@
+import { buildAction } from '../control/action-builder';
 import { SEARCH_ENGINES, type ProductAction, type ProductTab, type SearchEngine } from '../../shared/product';
 import type { ContextCommand, ContextMenu } from '../rtc/protocol';
 
@@ -16,7 +17,7 @@ export function contextMenuItems(
   const groups: ContextMenuItem[][] = [];
   const open = (label: string, url: string): ContextMenuItem => ({
     label,
-    action: { type: 'tab.create', windowId: tab.windowId, url },
+    action: buildAction({ type: 'tab.create', windowId: tab.windowId, url }),
   });
   if (menu.link)
     groups.push([
@@ -50,7 +51,7 @@ export function contextMenuItems(
       { label: '复制', command: 'copy' },
       {
         label: `使用${name}搜索"${label}"`,
-        action: { type: 'tab.create', windowId: tab.windowId, query: menu.selection },
+        action: buildAction({ type: 'tab.create', windowId: tab.windowId, query: menu.selection }),
       },
     ]);
   }

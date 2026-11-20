@@ -104,7 +104,7 @@ export interface LibraryMethods {
     result: LibrarySnapshot;
   };
   'library.partition': {
-    params: { operationId: string; id?: string; name: string };
+    params: { operationId: string; id: string; name: string; create: boolean };
     result: LibrarySnapshot;
   };
   'library.partitionDelete': { params: { operationId: string; id: string }; result: LibrarySnapshot };

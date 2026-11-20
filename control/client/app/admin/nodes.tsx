@@ -179,7 +179,7 @@ function NodeCard({
 }
 
 export function AdminNodesSection({ online, call }: { online: boolean; call: AdminCall }) {
-  const { data, setData, error } = useAdminResource(online, () => call('admin.nodes', {}));
+  const { data, mutate, error } = useAdminResource(online, 'admin.nodes', () => call('admin.nodes', {}));
   const [selected, setSelected] = useState<ConfiguredAdminNode | null>(null);
   const ready = data?.filter((node) => node.state === 'ready').length ?? 0;
   const total = data?.filter((node) => node.state !== 'unknown').length ?? 0;
@@ -209,12 +209,20 @@ export function AdminNodesSection({ online, call }: { online: boolean; call: Adm
         title={selected?.state === 'removed' ? '重新添加节点' : '移除节点'}
         confirmLabel={selected?.state === 'removed' ? '重新添加' : '移除'}
         onClose={() => setSelected(null)}
-        onConfirm={async () => {
+        onConfirm={() => {
           const node = selected!;
-          setData(
-            await call(node.state === 'removed' ? 'admin.readdNode' : 'admin.removeNode', {
-              nodeId: node.nodeId,
-            }),
+          void mutate(
+            (nodes) =>
+              nodes.map((item) =>
+                item.state !== 'unknown' && item.nodeId === node.nodeId
+                  ? { ...item, state: node.state === 'removed' ? 'offline' : 'removed' }
+                  : item,
+              ),
+            () =>
+              call(node.state === 'removed' ? 'admin.readdNode' : 'admin.removeNode', {
+                nodeId: node.nodeId,
+              }),
+            { retry: true },
           );
         }}
       >

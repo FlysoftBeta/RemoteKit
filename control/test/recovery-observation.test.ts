@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import { observedProductAction } from './server-fixture';
 import { applyDesiredViews } from './coordination-fixture';
 import { registerUser } from './server-fixture';
@@ -55,12 +56,12 @@ async function fixture() {
     await observedProductAction(
       control,
       tenant,
-      {
+      buildAction({
         type: 'window.open',
         appId: 'browser',
         placement: { mode: 'space' },
         url: 'https://saved.test/history',
-      },
+      }),
       'lease',
     )
   ).state.workspace.tabs[0];

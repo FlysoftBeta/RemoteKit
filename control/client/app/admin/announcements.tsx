@@ -18,7 +18,12 @@ type Editing =
   { kind: 'new' } | { kind: 'edit'; item: AdminAnnouncement } | { kind: 'delete'; item: AdminAnnouncement };
 
 export function AdminAnnouncementsSection({ online, call }: { online: boolean; call: AdminCall }) {
-  const { data, setData, error } = useAdminResource(online, () => call('admin.announcements', {}), 15000);
+  const { data, mutate, error } = useAdminResource<(AdminAnnouncement & { awaitingCounts?: boolean })[]>(
+    online,
+    'admin.announcements',
+    () => call('admin.announcements', {}),
+    15000,
+  );
   const [editing, setEditing] = useState<Editing>();
   return (
     <Box className="admin-section">
@@ -29,7 +34,7 @@ export function AdminAnnouncementsSection({ online, call }: { online: boolean; c
           <Button
             variant="contained"
             startIcon={<Add />}
-            disabled={!online}
+            disabled={!online || !data}
             onClick={() => setEditing({ kind: 'new' })}
           >
             发布公告
@@ -61,7 +66,11 @@ export function AdminAnnouncementsSection({ online, call }: { online: boolean; c
           <Typography variant="caption" color="text.secondary" component="p">
             {formatDateTime(item.publishedAt)} 发布
             {item.updatedAt !== item.publishedAt && ` · ${formatDateTime(item.updatedAt)} 修改`} ·{' '}
-            {item.reads}/{item.recipients} 人已读
+            {!item.awaitingCounts && (
+              <>
+                {item.reads}/{item.recipients} 人已读
+              </>
+            )}
           </Typography>
           <Typography variant="body2" className="admin-announcement-body">
             {item.body}
@@ -73,17 +82,44 @@ export function AdminAnnouncementsSection({ online, call }: { online: boolean; c
           key={editing.kind === 'edit' ? editing.item.id : 'new'}
           item={editing.kind === 'edit' ? editing.item : undefined}
           onClose={() => setEditing(undefined)}
-          onSave={async (draft) =>
-            setData(
-              editing.kind === 'edit'
-                ? await call('admin.updateAnnouncement', draft)
-                : await call('admin.publishAnnouncement', {
-                    id: draft.id,
-                    title: draft.title,
-                    body: draft.body,
-                  }),
-            )
-          }
+          onSave={(draft) => {
+            const now = Date.now();
+            void mutate(
+              (items) =>
+                editing.kind === 'edit'
+                  ? items.map((item) =>
+                      item.id === draft.id
+                        ? {
+                            ...item,
+                            title: draft.title.trim(),
+                            body: draft.body.trim(),
+                            updatedAt: now,
+                            ...(draft.republish ? { publishedAt: now, reads: 0 } : {}),
+                          }
+                        : item,
+                    )
+                  : items.some((item) => item.id === draft.id)
+                    ? items
+                    : [
+                        {
+                          id: draft.id,
+                          title: draft.title.trim(),
+                          body: draft.body.trim(),
+                          publishedAt: now,
+                          updatedAt: now,
+                          reads: 0,
+                          recipients: 0,
+                          awaitingCounts: true,
+                        },
+                        ...items,
+                      ],
+              () =>
+                editing.kind === 'edit'
+                  ? call('admin.updateAnnouncement', draft)
+                  : call('admin.publishAnnouncement', { id: draft.id, title: draft.title, body: draft.body }),
+              { retry: true, identity: editing.kind === 'new' ? draft.id : undefined },
+            );
+          }}
         />
       )}
       <ConfirmDialog
@@ -92,9 +128,14 @@ export function AdminAnnouncementsSection({ online, call }: { online: boolean; c
         confirmLabel="删除"
         danger
         onClose={() => setEditing(undefined)}
-        onConfirm={async () => {
-          if (editing?.kind === 'delete')
-            setData(await call('admin.deleteAnnouncement', { id: editing.item.id }));
+        onConfirm={() => {
+          if (editing?.kind !== 'delete') return;
+          const id = editing.item.id;
+          void mutate(
+            (items) => items.filter((item) => item.id !== id),
+            () => call('admin.deleteAnnouncement', { id }),
+            { retry: true },
+          );
         }}
       >
         <Typography variant="body2">
@@ -112,7 +153,7 @@ function AnnouncementEditor({
 }: {
   item?: AdminAnnouncement;
   onClose(): void;
-  onSave(draft: { id: string; title: string; body: string; republish: boolean }): Promise<void>;
+  onSave(draft: { id: string; title: string; body: string; republish: boolean }): void;
 }) {
   const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const [id] = useState(() => item?.id ?? randomUuid());
@@ -126,7 +167,6 @@ function AnnouncementEditor({
       confirmLabel={item ? '保存' : '发布'}
       disabled={!title.trim() || !body.trim()}
       onClose={onClose}
-      retryIdentity={item ? undefined : id}
       onConfirm={() => onSave({ id, title, body, republish })}
     >
       <TextField

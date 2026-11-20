@@ -1,3 +1,4 @@
+import { buildAction } from '../control/action-builder';
 import { Suspense, lazy, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import { BlankScreen, LockScreen } from '../auth/lock-screen';
@@ -115,15 +116,15 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
           };
           input.click();
           void stage
-            .action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } })
+            .action(buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }))
             .catch((error) => setDragFailure(failureError(error)));
         } else if (kind === 'files')
           void stage
-            .action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } })
+            .action(buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }))
             .catch((error) => setDragFailure(failureError(error)));
         else if (kind === 'site-settings')
           void stage
-            .action({ type: 'window.open', appId: 'settings', placement: { mode: 'space' } })
+            .action(buildAction({ type: 'window.open', appId: 'settings', placement: { mode: 'space' } }))
             .catch((error) => setDragFailure(failureError(error)));
         else if (kind === 'tabs') {
           const workspace = media.operations.getSnapshot().state?.workspace;
@@ -137,11 +138,13 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
               .catch((error) => setDragFailure(failureError(error)));
         } else if (kind === 'provider-login') {
           void stage
-            .action({
-              type: 'window.open',
-              appId: context.credential === 'xinjiaoyu' ? 'questions' : 'study',
-              placement: { mode: 'space' },
-            })
+            .action(
+              buildAction({
+                type: 'window.open',
+                appId: context.credential === 'xinjiaoyu' ? 'questions' : 'study',
+                placement: { mode: 'space' },
+              }),
+            )
             .catch((error) => setDragFailure(failureError(error)));
         } else if (kind === 'windows') overlays.openLauncher();
       }),

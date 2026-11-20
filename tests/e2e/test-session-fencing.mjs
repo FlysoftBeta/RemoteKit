@@ -1,3 +1,4 @@
+import { buildAction } from './kit/product-actions.mts';
 import assert from 'node:assert/strict';
 import { existsSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -41,7 +42,7 @@ try {
     currentPassword: stack.password,
     settings: { lockOnHidden: false, lockOnIdle: false },
   });
-  await viewer.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+  await viewer.action(buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }));
   await until(async () => (await viewer.state()).browser.state === 'available', 'Session running');
   await viewer.page.close();
   await until(async () => !(await stack.call('inspect')).runtimes[0]?.viewer, 'Viewer detached');

@@ -10,6 +10,7 @@ import React, {
   useSyncExternalStore,
 } from 'react';
 import { RemoteKitError } from '../../shared/errors';
+import { isBeingCreated } from '../control/product-operations';
 import type { ProductState, ProductWindow } from '../../shared/product';
 import { BUILTIN_APP_TITLES, SEARCH_ENGINES, isBuiltinApp, isLocalApp } from '../../shared/product';
 import { SurfaceState, failureError } from '../failures';
@@ -80,11 +81,12 @@ export function WindowFrame({
     },
     [dispatchAction, win.id],
   );
-  const operationFailure = useSyncExternalStore(
+  const operations = useSyncExternalStore(
     transport.operations.subscribe,
     transport.operations.getSnapshot,
     transport.operations.getSnapshot,
-  ).error;
+  );
+  const operationFailure = operations.error;
   const receiptFailure =
     operationFailure && failureContext(operationFailure)?.ownerKey === win.id ? operationFailure : undefined;
   const failure = windowFailure ?? receiptFailure ?? surfaceFailure?.error;
@@ -109,8 +111,10 @@ export function WindowFrame({
   const title = isBuiltinApp(win.appId)
     ? BUILTIN_APP_TITLES[win.appId]
     : (app?.name ?? BUILTIN_APP_TITLES.browser);
-  const creatingTab = win.id.startsWith('pending-') || !!win.activeTabId?.startsWith('pending-');
-  const navigationReady = shellReady && !creatingTab;
+  const creatingTab =
+    isBeingCreated(operations.authoritative, operations.pending, win.id) ||
+    isBeingCreated(operations.authoritative, operations.pending, win.activeTabId);
+  const navigationReady = shellReady;
   const content = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const node = content.current;

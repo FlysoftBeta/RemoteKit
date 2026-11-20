@@ -33,7 +33,7 @@ function workspace(): ProductWorkspace {
 const order = (w: ProductWorkspace, windowId: string) =>
   w.tabs.filter((tab) => tab.windowId === windowId).map((tab) => tab.id);
 const move = (w: ProductWorkspace, tabId: string, windowId: string, index?: number) =>
-  applyCommand(w, { type: 'tab.move', tabId, windowId, index }, { ids: [], viewId: '1', now: 1 }).workspace;
+  applyCommand(w, { type: 'tab.move', tabId, windowId, index }, { viewId: '1', now: 1 }).workspace;
 
 test('placeTab inserts at a position among the target window tabs', () => {
   const cases: [string, string, number | undefined, string[], string[]][] = [

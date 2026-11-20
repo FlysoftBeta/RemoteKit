@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { ProductOperation, OperationReceipt } from '../shared/product';
@@ -110,7 +111,9 @@ test('retryable receipts resubmit the same operation identity and status final f
   });
   t.after(() => store.reset());
   store.acceptSnapshot(productSnapshot());
-  const result = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+  const result = store.action(
+    buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
+  );
   for (let index = 0; index < 12; index++) {
     await Promise.resolve();
     t.mock.timers.tick(0);
@@ -140,7 +143,7 @@ test('retryable receipts resubmit the same operation identity and status final f
   t.after(() => stopped.reset());
   stopped.acceptSnapshot(productSnapshot());
   await assert.rejects(
-    stopped.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
+    stopped.action(buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } })),
     { code: 'forbidden' },
   );
   t.mock.timers.tick(60_000);
@@ -161,7 +164,9 @@ for (const status of ['accepted', 'applying', 'committed', 'unknown', 'failed'] 
     });
     t.after(() => store.reset());
     store.acceptSnapshot(productSnapshot());
-    const result = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+    const result = store.action(
+      buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
+    );
     const rejection = status === 'failed' ? assert.rejects(result, { code: 'rejected' }) : undefined;
     const operation = sent[0];
     assert.equal('phase' in operation, false);
@@ -200,7 +205,9 @@ test('operation polling follows receipts and authoritative revision retires a co
   });
   t.after(() => store.reset());
   store.acceptSnapshot(productSnapshot());
-  const response = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+  const response = store.action(
+    buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
+  );
   const receipt = {
     operationId: operation.operationId,
     operationGeneration: operation.operationGeneration,
@@ -336,7 +343,7 @@ test('authorization loss clears optimistic work and rejects its old correlation'
   });
   store.acceptSnapshot(productSnapshot());
   const response = assert.rejects(
-    store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
+    store.action(buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } })),
     { code: 'outcome_unknown' },
   );
   store.reset(2);
@@ -362,7 +369,9 @@ test('an old scope status request cannot block polling in a new scope', async (t
   t.after(() => store.reset());
   const submit = async () => {
     store.acceptSnapshot(productSnapshot());
-    const result = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+    const result = store.action(
+      buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
+    );
     const operation = sent[sent.length - 1];
     store.acceptReceipt({
       operationId: operation.operationId,
@@ -525,7 +534,9 @@ test('product transport rejection retains its code without querying an unadmitte
   });
   t.after(() => store.reset());
   store.acceptSnapshot(productSnapshot());
-  const response = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+  const response = store.action(
+    buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
+  );
   store.acceptReceipt({
     operationId: operation.operationId,
     operationGeneration: operation.operationGeneration,
@@ -561,7 +572,8 @@ test('a later retryable receipt resubmits the admitted operation with its origin
   t.after(() => store.reset());
   store.acceptSnapshot(productSnapshot());
   assert.equal(
-    (await store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } })).status,
+    (await store.action(buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } })))
+      .status,
     'accepted',
   );
   store.acceptReceipt({

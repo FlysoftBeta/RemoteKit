@@ -152,7 +152,9 @@ function SessionImportPanel({
 }
 
 export function AdminOverviewSection({ online, call }: { online: boolean; call: AdminCall }) {
-  const { data, error } = useAdminResource<AdminOverview>(online, () => call('admin.overview', {}));
+  const { data, error } = useAdminResource<AdminOverview>(online, 'admin.overview', () =>
+    call('admin.overview', {}),
+  );
   return (
     <Box className="admin-section">
       <SectionHeader title="概览" detail="集群、用户与存储的当前状态" />

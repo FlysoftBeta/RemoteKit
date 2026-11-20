@@ -19,7 +19,7 @@ import {
 } from './shared';
 
 export function AdminStorageSection({ online, call }: { online: boolean; call: AdminCall }) {
-  const { data, error } = useAdminResource(online, () => call('admin.storage', {}), 15000);
+  const { data, error } = useAdminResource(online, 'admin.storage', () => call('admin.storage', {}), 15000);
   return (
     <Box className="admin-section">
       <SectionHeader

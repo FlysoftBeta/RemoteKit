@@ -34,7 +34,8 @@ import {
 } from '@mui/material';
 import { useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
-import type { LibraryPartition, LibrarySource } from '../../shared/file-library';
+import { randomUuid } from '../../shared/random-uuid';
+import type { LibraryMethods, LibraryPartition, LibrarySource } from '../../shared/file-library';
 import { OverflowText } from '../app/overflow-text';
 import { scaledAnchor } from '../app/ui-scale';
 import { operationId } from '../control/product-operations';
@@ -61,15 +62,14 @@ export function FilesOrganization({
 }) {
   const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const { snapshot, online, mutate, apps } = useLibrary();
-  const [edit, setEdit] = useState<{ id?: string; name: string; operationId: string }>();
+  const [edit, setEdit] = useState<LibraryMethods['library.partition']['params']>();
   const [remove, setRemove] = useState<
     ({ partition: string } | { source: LibrarySource }) & { operationId: string }
   >();
   const [anchor, setAnchor] = useState<HTMLElement>();
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<RemoteKitError | undefined>();
   if (!snapshot) return null;
-  const disabled = !online || busy;
+  const disabled = !online;
   const activeSource =
     view === 'clipboard'
       ? { app: 'clipboard', channel: '' }
@@ -81,18 +81,20 @@ export function FilesOrganization({
   const sourceLabel = (source: LibrarySource) =>
     [sourceAppName(source.app, apps), sourceChannelName(source)].filter(Boolean).join(' › ');
   async function run(action: () => Promise<unknown>) {
-    setBusy(true);
     setError(undefined);
     try {
       await action();
     } catch (failure) {
       setError(failureError(failure));
-    } finally {
-      setBusy(false);
     }
   }
   const editPartition = (partition?: LibraryPartition) =>
-    setEdit({ id: partition?.id, name: partition?.name ?? '', operationId: operationId() });
+    setEdit({
+      id: partition?.id ?? randomUuid(),
+      name: partition?.name ?? '',
+      operationId: operationId(),
+      create: !partition,
+    });
   const toggleSource = (source: LibrarySource) =>
     void run(() =>
       mutate('library.source', { operationId: operationId(), source, excluded: !excluded(source) }),
@@ -381,19 +383,20 @@ export function FilesOrganization({
       )}
       {error && <FailureNote error={error} context={{ operation: '保存分区', scope: 'surface' }} />}
       {edit && (
-        <Dialog open fullWidth maxWidth="xs" onClose={busy ? undefined : () => setEdit(undefined)}>
+        <Dialog open fullWidth maxWidth="xs" onClose={() => setEdit(undefined)}>
           <Box
             component="form"
             onSubmit={(event) => {
               event.preventDefault();
               if (disabled || !edit.name.trim()) return;
               void run(async () => {
-                await mutate('library.partition', { ...edit, name: edit.name.trim() });
+                const result = mutate('library.partition', { ...edit, name: edit.name.trim() });
                 setEdit(undefined);
+                await result;
               });
             }}
           >
-            <DialogTitle>{edit.id ? '重命名分区' : '新建分区'}</DialogTitle>
+            <DialogTitle>{edit.create ? '新建分区' : '重命名分区'}</DialogTitle>
             <DialogContent>
               <TextField
                 inputRef={autoFocusRef}
@@ -409,9 +412,7 @@ export function FilesOrganization({
               {error && <FailureNote error={error} context={{ operation: '保存分区', scope: 'surface' }} />}
             </DialogContent>
             <DialogActions>
-              <Button disabled={busy} onClick={() => setEdit(undefined)}>
-                取消
-              </Button>
+              <Button onClick={() => setEdit(undefined)}>取消</Button>
               <Button type="submit" disabled={disabled || !edit.name.trim()}>
                 保存
               </Button>
@@ -420,7 +421,7 @@ export function FilesOrganization({
         </Dialog>
       )}
       {remove && counts && (
-        <Dialog open fullWidth maxWidth="xs" onClose={busy ? undefined : () => setRemove(undefined)}>
+        <Dialog open fullWidth maxWidth="xs" onClose={() => setRemove(undefined)}>
           <DialogTitle>{'partition' in remove ? '删除分区？' : '清除来源中的文件？'}</DialogTitle>
           <DialogContent>
             <Typography>
@@ -437,25 +438,24 @@ export function FilesOrganization({
             {error && <FailureNote error={error} context={{ operation: '保存分区', scope: 'surface' }} />}
           </DialogContent>
           <DialogActions>
-            <Button disabled={busy} onClick={() => setRemove(undefined)}>
-              取消
-            </Button>
+            <Button onClick={() => setRemove(undefined)}>取消</Button>
             <Button
               color="error"
               disabled={disabled}
               onClick={() =>
                 void run(async () => {
-                  if ('partition' in remove)
+                  const removed = remove;
+                  setRemove(undefined);
+                  if ('partition' in removed)
                     await mutate('library.partitionDelete', {
-                      operationId: remove.operationId,
-                      id: remove.partition,
+                      operationId: removed.operationId,
+                      id: removed.partition,
                     });
                   else
                     await mutate('library.sourcePurge', {
-                      operationId: remove.operationId,
-                      source: remove.source,
+                      operationId: removed.operationId,
+                      source: removed.source,
                     });
-                  setRemove(undefined);
                 })
               }
             >

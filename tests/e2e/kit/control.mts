@@ -92,7 +92,11 @@ process.on('message', (message: any) => {
       const record = store.security.security(viewer.user.id);
       const template = Array.from({ length: 128 }, (_, i) => (i === 0 ? 1 : 0));
       record.face = {
-        sealed: store.security.faceVault.seal(viewer.user.id, template, model),
+        sealed: store.security.faceVault.seal(
+          viewer.user.id,
+          { version: 2, templates: [{ source: 'enrolled', vector: template, addedAt: Date.now() }] },
+          model,
+        ),
         modelVersion: model,
       };
       record.settings.faceEnabled = true;

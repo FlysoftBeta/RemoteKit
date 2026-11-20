@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
 import { requestViewer } from './server-fixture';
@@ -173,7 +174,11 @@ test('locks existing peer, rejects product actions and uploads, and resumes with
   const op = {
     operationId: randomUUID(),
     operationGeneration: f.store.operations.operationGeneration(f.tenant),
-    action: { type: 'window.open' as const, appId: 'browser', placement: { mode: 'space' as const } },
+    action: buildAction({
+      type: 'window.open' as const,
+      appId: 'browser',
+      placement: { mode: 'space' as const },
+    }),
   };
   await assert.rejects(f.request('operation.submit', op), { code: 'locked' });
   assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);

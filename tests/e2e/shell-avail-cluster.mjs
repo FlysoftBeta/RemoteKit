@@ -1,3 +1,4 @@
+import { buildAction } from './kit/product-actions.mts';
 import { randomUUID } from 'node:crypto';
 import { createViewerContext, instrumentViewer, launchBrowser } from './kit/viewer.mjs';
 
@@ -104,7 +105,7 @@ try {
   });
   const initial = await connect('initial', true);
   await initial.service();
-  await initial.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+  await initial.action(buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }));
   await initial.page.waitForFunction(() => clusterQA.state?.browser.state === 'available');
   const remote = (await initial.state()).workspace.windows.find((win) => win.appId === 'browser');
   await initial.action({
@@ -181,10 +182,10 @@ try {
   await viewer.page.getByRole('button', { name: '开始', exact: true }).click();
   await shot(viewer, '04-start-without-A');
   await viewer.page.keyboard.press('Escape');
-  await viewer.action({ type: 'window.open', appId: 'settings', placement: { mode: 'space' } });
+  await viewer.action(buildAction({ type: 'window.open', appId: 'settings', placement: { mode: 'space' } }));
   await viewer.page.locator('.settings-app').waitFor();
   await shot(viewer, '05-settings-without-A');
-  await viewer.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
+  await viewer.action(buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }));
   await viewer.page.getByText('暂不可用', { exact: true }).first().waitFor();
   const catalog = await viewer.call('library.get');
   assert.equal(catalog.entries.find((entry) => entry.id === shared.entry.id).available, true);
@@ -204,7 +205,7 @@ try {
   });
   await viewer.page.locator('[role="document"][aria-busy="false"] svg').waitFor({ timeout: 120000 });
   await shot(viewer, '07-file-read-on-B');
-  await viewer.action({ type: 'window.open', appId: 'study', placement: { mode: 'space' } });
+  await viewer.action(buildAction({ type: 'window.open', appId: 'study', placement: { mode: 'space' } }));
   await viewer.page.locator('.study-app').waitFor();
   const study = await viewer.call('study.settings', { retentionDays: 30 });
   assert.equal(study.retentionDays, 30);

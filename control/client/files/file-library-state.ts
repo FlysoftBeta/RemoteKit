@@ -47,6 +47,7 @@ export function useFileLibrary(
       copySnippet: store.copySnippet,
       download: store.download,
       mutate: store.mutate,
+      createPartition: store.createPartition,
       select: store.select,
       cancelSelection: store.cancelSelection,
       checkout: (id: string) => state.checkouts[id],

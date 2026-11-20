@@ -1,3 +1,4 @@
+import { buildAction } from '../client/control/action-builder';
 import { applyDesiredViews } from './coordination-fixture';
 import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
@@ -103,7 +104,7 @@ async function fixture() {
   );
   const created = await control.operations.productAction(
     tenant,
-    { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
+    buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' }),
     'lease',
   );
   const tab = created.state.workspace.tabs[0];

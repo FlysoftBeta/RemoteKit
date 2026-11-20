@@ -1,3 +1,4 @@
+import { buildAction } from '../control/action-builder';
 import { ExpandMore } from '@mui/icons-material';
 import {
   Accordion,
@@ -167,7 +168,7 @@ export function InstallDialog({
             if (!value) return;
             setBusy(true);
             const { iconDataUrl, ...definition } = value;
-            void action({ type: 'app.install', ...definition })
+            void action(buildAction({ type: 'app.install', ...definition }))
               .then(onClose)
               .catch((error) => setError(failureError(error)))
               .finally(() => setBusy(false));

@@ -15,6 +15,7 @@ import type {
   SitePreferences,
 } from '../../shared/product';
 import type { RecordedAction } from '../../shared/recorded-action';
+import { creationIdFields } from '../../shared/product';
 import type { AuthSettings } from '../../shared/security';
 import type { ControlEvent, ImportChunk, ImportSite } from '../../shared/session-import';
 import type { AccountSession } from '../learning/providers/changyan/auth';
@@ -278,31 +279,40 @@ const reply = union(
   object({ kind: literal('permission'), decision: literal('allow', 'allow_once', 'block', 'dismiss') }),
   object({ kind: literal('protocol_handler'), accept: b(), remember: b() }),
 );
-export const action = union(
-  object({ type: literal('window.open'), appId: s(), placement }, { url: s(), ...source }),
+const actionShape = union(
+  object(
+    { type: literal('window.open'), windowId: s(), appId: s(), placement },
+    { tabId: s(), spaceId: s(), url: s(), ...source },
+  ),
   object({ type: literal('window.focus'), windowId: s() }, source),
-  object({
-    type: literal('window.place'),
-    windowId: s(),
-    placement: union(
-      object({ mode: literal('space') }),
-      object({ mode: literal('split'), besideWindowId: s(), side: literal('left', 'right') }),
-    ),
-  }),
+  object(
+    {
+      type: literal('window.place'),
+      windowId: s(),
+      placement: union(
+        object({ mode: literal('space') }),
+        object({ mode: literal('split'), besideWindowId: s(), side: literal('left', 'right') }),
+      ),
+    },
+    { spaceId: s() },
+  ),
   object({ type: literal('window.close'), windowId: s() }),
   object({ type: literal('window.state'), windowId: s(), state: windowState }),
   object({ type: literal('space.activate'), spaceId: s() }, source),
   object({ type: literal('space.close'), spaceId: s() }),
   object({ type: literal('space.layout'), spaceId: s(), weights: array(n()) }),
   object(
-    { type: literal('app.install'), name: s(), startUrl: s() },
+    { type: literal('app.install'), appId: s(), name: s(), startUrl: s() },
     { scope: s(), display: literal('standalone', 'browser'), themeColor: s(), iconToken: s() },
   ),
   object({ type: literal('app.update'), appId: s() }, appFields),
   object({ type: literal('app.uninstall'), appId: s() }),
-  object({ type: literal('favorite.add'), url: s(), title: s() }),
+  object({ type: literal('favorite.add'), favoriteId: s(), url: s(), title: s() }),
   object({ type: literal('favorite.remove'), id: s() }),
-  object({ type: literal('tab.create'), windowId: s() }, { url: s(), query: s(), title: s(), ...source }),
+  object(
+    { type: literal('tab.create'), tabId: s(), windowId: s() },
+    { url: s(), query: s(), title: s(), ...source },
+  ),
   object(
     { type: literal('tab.activate', 'tab.close'), tabId: s() },
     { requestId: s(), confirm: b(), cancel: b(), ...source },
@@ -335,6 +345,13 @@ export const action = union(
   object({ type: literal('page.exitFullscreen'), target: s() }),
   object({ type: literal('site.set'), origin: s(), tabletUa: b() }, { tabId: s() }),
 ) satisfies Codec<RecordedAction>;
+export const action: Codec<RecordedAction> = {
+  read(value, path) {
+    const result = actionShape.read(value, path);
+    for (const field of creationIdFields(result)) s().read(Reflect.get(result, field), `${path}.${field}`);
+    return result;
+  },
+};
 export const librarySource = object({ app: s(), channel: s() }) satisfies Codec<LibrarySource>;
 export const partition = object({ id: s(), name: s() }) satisfies Codec<LibraryPartition>;
 export const snippetOrigin = union(

@@ -9,14 +9,23 @@ import {
   Paper,
   Typography,
 } from '@mui/material';
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  createContext,
+  useContext,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from 'react';
 import type { AdminSocketMethods } from '../../../shared/admin';
 import { RemoteKitError } from '../../../shared/errors';
 import type { ErrorSearchMethods } from '../../control/socket-methods';
-import { failureError, FailureNote } from '../../failures';
-import { recover } from '../../failures/recovery';
+import { FailureNote } from '../../failures';
 import { RetryUnit } from '../../../shared/retry-unit';
 import { diagnostics } from '../../media/diagnostics';
+import { AdminResourceStore } from './resource-store';
 export type { ErrorSearchResult } from '../../control/socket-methods';
 
 type AdminMethods = AdminSocketMethods & ErrorSearchMethods;
@@ -63,11 +72,28 @@ export function randomPassword() {
   return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join('');
 }
 
-/** Loads one admin resource while its section is visible and refreshes it periodically. */
-export function useAdminResource<T>(online: boolean, load: () => Promise<T>, intervalMs = 5000) {
-  const [data, setData] = useState<T | null>(null),
-    [error, setError] = useState<RemoteKitError | undefined>();
-  const loader = useRef(load);
+const AdminResources = createContext<Map<string, AdminResourceStore<unknown>> | null>(null);
+export function AdminResourceProvider({ children }: { children: ReactNode }) {
+  const [resources] = useState(() => new Map<string, AdminResourceStore<unknown>>());
+  useEffect(() => {
+    resources.forEach((store) => store.activate());
+    return () => resources.forEach((store) => store.dispose());
+  }, [resources]);
+  return <AdminResources.Provider value={resources}>{children}</AdminResources.Provider>;
+}
+
+/** Sections share each resource's snapshot and pending changes for the lifetime of the console. */
+export function useAdminResource<T>(online: boolean, key: string, load: () => Promise<T>, intervalMs = 5000) {
+  const resources = useContext(AdminResources);
+  const [store] = useState(() => {
+    const existing = resources?.get(key) as AdminResourceStore<T> | undefined;
+    if (existing) return existing;
+    const created = new AdminResourceStore(load);
+    resources?.set(key, created as AdminResourceStore<unknown>);
+    return created;
+  });
+  store.setLoader(load);
+  const { data, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const retry = useRef(
     new RetryUnit({
       failed: (error) => diagnostics.record('admin_poll_failed', error),
@@ -76,23 +102,23 @@ export function useAdminResource<T>(online: boolean, load: () => Promise<T>, int
   );
   const input = useRef(0);
   const pending = useRef(false);
-  loader.current = load;
-  const refresh = useCallback(async (manual = true) => {
-    if (pending.current) return;
-    if (manual) input.current++;
-    if (!retry.current.ready(String(input.current))) return;
-    pending.current = true;
-    try {
-      setData(await loader.current());
-      retry.current.succeed();
-      setError(undefined);
-    } catch (e) {
-      retry.current.fail(e);
-      setError(failureError(e));
-    } finally {
-      pending.current = false;
-    }
-  }, []);
+  const refresh = useCallback(
+    async (manual = true) => {
+      if (pending.current) return;
+      if (manual) input.current++;
+      if (!retry.current.ready(String(input.current))) return;
+      pending.current = true;
+      try {
+        await store.refresh();
+        retry.current.succeed();
+      } catch (e) {
+        retry.current.fail(e);
+      } finally {
+        pending.current = false;
+      }
+    },
+    [store],
+  );
   useEffect(() => {
     if (!online) return;
     let active = true;
@@ -106,7 +132,7 @@ export function useAdminResource<T>(online: boolean, load: () => Promise<T>, int
       clearInterval(timer);
     };
   }, [online, refresh, intervalMs]);
-  return { data, setData, error, refresh };
+  return { data, error, refresh, mutate: store.mutate };
 }
 
 export function SectionHeader({
@@ -190,7 +216,6 @@ export function ConfirmDialog({
   danger,
   disabled,
   onConfirm,
-  retryIdentity,
   onClose,
 }: {
   open: boolean;
@@ -199,49 +224,25 @@ export function ConfirmDialog({
   confirmLabel?: string;
   danger?: boolean;
   disabled?: boolean;
-  onConfirm: () => Promise<void>;
-  retryIdentity?: string;
+  onConfirm: () => void;
   onClose: () => void;
 }) {
-  const abort = useRef(new AbortController());
-  useEffect(() => () => abort.current.abort(), []);
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState<RemoteKitError | undefined>();
-  useEffect(() => {
-    if (open) setError(undefined);
-  }, [open]);
   return (
-    <Dialog open={open} onClose={() => !busy && onClose()} fullWidth maxWidth="xs">
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="xs">
       <DialogTitle>{title}</DialogTitle>
-      <DialogContent
-        onChangeCapture={() => setError(undefined)}
-        sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}
-      >
-        {error && <FailureNote error={error} context={{ operation: '完成管理操作', scope: 'surface' }} />}
-        {children}
-      </DialogContent>
+      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{children}</DialogContent>
       <DialogActions>
-        <Button disabled={busy} onClick={onClose}>
-          取消
-        </Button>
+        <Button onClick={onClose}>取消</Button>
         <Button
           variant="contained"
           color={danger ? 'error' : 'primary'}
-          disabled={busy || disabled || !!error}
-          onClick={async () => {
-            setBusy(true);
-            setError(undefined);
-            try {
-              await recover(onConfirm, abort.current.signal, setError, { identity: retryIdentity });
-              onClose();
-            } catch (e) {
-              setError(failureError(e));
-            } finally {
-              setBusy(false);
-            }
+          disabled={disabled}
+          onClick={() => {
+            onConfirm();
+            onClose();
           }}
         >
-          {busy ? '请稍候…' : confirmLabel}
+          {confirmLabel}
         </Button>
       </DialogActions>
     </Dialog>

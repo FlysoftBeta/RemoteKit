@@ -9,7 +9,18 @@ import { diagnostics } from '../media/diagnostics';
 import { canonicalJson } from '../util/canonical-json';
 import { RequestTracker } from '../util/request-tracker';
 import { Store } from '../util/store';
-import { operationId, projectOperations, snapshotNewer, type PendingOperation } from './product-operations';
+import {
+  createdIds,
+  targetIds,
+  operationId,
+  projectOperations,
+  snapshotNewer,
+  type PendingOperation,
+} from './product-operations';
+
+interface Acknowledgment {
+  receipt?: OperationReceipt;
+}
 
 export type OperationPhase = 'unsent' | 'sent' | 'accepted' | 'applying' | 'committed' | 'failed' | 'unknown';
 export interface OperationIntent extends Omit<PendingOperation, 'action'> {
@@ -40,21 +51,21 @@ export class OperationsStore extends Store<OperationsSnapshot> {
   private readonly commands = new Map<string, ProductAction>();
   private readonly submissionUnits = new Map<string, RetryUnit>();
   private readonly queryUnits = new Map<string, RetryUnit>();
+  private readonly dependencyUnits = new Map<string, RetryUnit>();
+  private readonly acknowledgments = new Map<string, Acknowledgment>();
   private unit(units: Map<string, RetryUnit>, id: string) {
     let unit = units.get(id);
     if (!unit) {
+      const kind =
+        units === this.submissionUnits ? 'submission' : units === this.queryUnits ? 'query' : 'dependency';
       unit = new RetryUnit({
         failed: (error) =>
-          diagnostics.record(`operation_${units === this.submissionUnits ? 'submission' : 'query'}_failed`, {
+          diagnostics.record(`operation_${kind}_failed`, {
             id,
             code: error.code,
             errorId: error.errorId,
           }),
-        recovered: () =>
-          diagnostics.record(
-            `operation_${units === this.submissionUnits ? 'submission' : 'query'}_recovered`,
-            { id },
-          ),
+        recovered: () => diagnostics.record(`operation_${kind}_recovered`, { id }),
       });
       units.set(id, unit);
     }
@@ -80,10 +91,17 @@ export class OperationsStore extends Store<OperationsSnapshot> {
         );
         if (
           receipt &&
+          (['accepted', 'applying', 'committed'].includes(receipt.status) ||
+            (receipt.status === 'unknown' && receipt.resolved))
+        )
+          this.acknowledge(receipt);
+        if (
+          receipt &&
           !this.requests.resolve(entry.operationId, receipt) &&
           this.retryReceipt(entry, receipt)
         )
           return { ...entry, receipt: undefined, phase: 'unsent' as const };
+        if (receipt?.status === 'failed' && !this.executing.has(entry.operationId)) this.acknowledge(receipt);
         return receipt ? { ...entry, receipt, phase: receipt.status } : entry;
       })
       .filter((entry) => this.retain(entry, state));
@@ -124,13 +142,11 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     }
     admission.succeed();
     const source = current.authoritative!;
-    const targets = Object.entries(command)
-      .filter(([key]) => key === 'id' || key.endsWith('Id'))
-      .map(([, value]) => value);
-    if ('placement' in command && command.placement.mode === 'split')
-      targets.push(command.placement.besideWindowId);
-    if (targets.some((value) => typeof value === 'string' && /^(web:)?pending-/.test(value)))
-      throw new RemoteKitError('conflict', '操作正在等待确认');
+    const targets = new Set(targetIds(command));
+    const dependencies = current.pending
+      .filter((entry) => createdIds(entry.action).some((id) => targets.has(id) || targets.has(`web:${id}`)))
+      .map((entry) => this.acknowledgments.get(entry.operationId)!)
+      .filter((entry) => !!entry);
     const operation: OperationIntent = {
       operationId: operationId(),
       operationGeneration: source.operationGeneration!,
@@ -138,19 +154,54 @@ export class OperationsStore extends Store<OperationsSnapshot> {
       phase: 'unsent',
     };
     this.commands.set(operation.operationId, command);
+    this.acknowledgments.set(operation.operationId, {});
     this.update([...current.pending, operation]);
-    return this.execute(operation, command);
+    return this.execute(operation, command, 0, dependencies);
   };
+
+  private async waitForCreators(operation: OperationIntent, dependencies: Acknowledgment[], scope: number) {
+    if (!dependencies.length) return;
+    const unit = this.unit(this.dependencyUnits, operation.operationId);
+    for (;;) {
+      const failure = dependencies.find(
+        (entry) =>
+          entry.receipt?.status === 'failed' ||
+          (entry.receipt?.status === 'unknown' && entry.receipt.resolved),
+      )?.receipt;
+      if (failure) {
+        const error =
+          parseWireError(failure.error) ??
+          new RemoteKitError('outcome_unknown', 'Creating operation outcome is unknown');
+        const command = this.commands.get(operation.operationId);
+        this.receipt({ ...operation, status: 'failed', error: wireError(error) });
+        throw operationFailure(error, operation.action.type, command);
+      }
+      if (
+        dependencies.every(
+          (entry) => entry.receipt && ['accepted', 'applying', 'committed'].includes(entry.receipt.status),
+        )
+      ) {
+        unit.succeed();
+        return;
+      }
+      const { delay } = unit.fail(
+        new RemoteKitError('unavailable', 'Waiting for creating operation receipt', { retryAfterMs: 100 }),
+      );
+      await this.wait(delay!, scope);
+    }
+  }
 
   private async execute(
     operation: OperationIntent,
     command: ProductAction,
     initialDelay = 0,
+    dependencies: Acknowledgment[] = [],
   ): Promise<OperationReceipt> {
     const scope = this.scope;
     this.executing.add(operation.operationId);
     try {
       if (initialDelay) await this.wait(initialDelay, scope);
+      if (dependencies.length) await this.waitForCreators(operation, dependencies, scope);
       for (;;) {
         let receipt: OperationReceipt;
         try {
@@ -219,6 +270,10 @@ export class OperationsStore extends Store<OperationsSnapshot> {
         }
         return receipt;
       }
+    } catch (cause) {
+      if (scope === this.scope)
+        this.acknowledge({ ...operation, status: 'failed', error: wireError(toRemoteKitError(cause)) });
+      throw cause;
     } finally {
       this.executing.delete(operation.operationId);
       this.cleanCommands();
@@ -261,11 +316,14 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     this.commands.clear();
     this.submissionUnits.clear();
     this.queryUnits.clear();
+    this.dependencyUnits.clear();
+    this.acknowledgments.clear();
     this.executing.clear();
     this.publish({ authoritative: null, state: null, pending: [] });
   }
 
   private receipt(receipt: OperationReceipt) {
+    this.acknowledge(receipt);
     const current = this.getSnapshot();
     const command = this.commands.get(receipt.operationId);
     if (receipt.status === 'committed' || receipt.status === 'failed' || receipt.resolved) {
@@ -294,6 +352,11 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     this.publish({ ...this.getSnapshot(), error });
   }
 
+  private acknowledge(receipt: OperationReceipt) {
+    const entry = this.acknowledgments.get(receipt.operationId);
+    if (entry) entry.receipt = receipt;
+  }
+
   private update(
     pending: OperationIntent[],
     authoritative = this.getSnapshot().authoritative,
@@ -313,6 +376,8 @@ export class OperationsStore extends Store<OperationsSnapshot> {
       if (!pending.has(id) && !this.executing.has(id)) {
         this.commands.delete(id);
       }
+    for (const id of this.acknowledgments.keys())
+      if (!pending.has(id) && !this.executing.has(id)) this.acknowledgments.delete(id);
   }
 
   private async query({

@@ -1,3 +1,4 @@
+import { buildAction } from './kit/product-actions.mts';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -92,7 +93,7 @@ try {
       });
     }
     const reference = library.entries.find((entry) => entry.name === `${device}-reference-0.txt`);
-    await viewer.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
+    await viewer.action(buildAction({ type: 'window.open', appId: 'files', placement: { mode: 'space' } }));
     const filesWindow = (await viewer.state()).workspace.windows.find((win) => win.appId === 'files');
     await viewer.action({
       type: 'window.state',
@@ -129,7 +130,7 @@ try {
     const count = (await uploaded()).length;
     await page.screenshot({ path: join(out, 'upload-return.png') });
 
-    await viewer.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
+    await viewer.action(buildAction({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }));
     const browserWindow = (await viewer.state()).workspace.windows.find((win) => win.appId === 'browser');
     await viewer.action({ type: 'tab.navigate', tabId: browserWindow.activeTabId, url: fixtureOrigin });
     await viewer.media();

@@ -170,6 +170,12 @@ export class LibraryRepository {
       return snapshot;
     });
   }
+  claimPartitionId(tenant: string, partitionId: string) {
+    const result = this.db
+      .prepare('INSERT INTO library_partition_ids VALUES (?,?) ON CONFLICT DO NOTHING')
+      .run(tenant, partitionId);
+    if (Number(result.changes) === 0) throw new RemoteKitError('conflict', '分区标识已使用');
+  }
   pendingEntries(tenant: string) {
     const ids = new Set<string>();
     const pending = this.db
@@ -301,6 +307,7 @@ export class LibraryRepository {
       'library_state',
       'library_entries',
       'library_partitions',
+      'library_partition_ids',
       'library_basket',
       'library_excluded_sources',
     ])
