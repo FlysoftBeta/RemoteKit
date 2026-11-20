@@ -3,6 +3,7 @@ import type { ProductState } from '../../shared/product';
 import type { Action } from './product-dialogs';
 import type { SpaceSnapshots } from './space-snapshots';
 import { SpaceMenu } from './space-menu';
+import { SpaceHandle } from './space-handle';
 import { GroupList } from './group-list';
 export function LauncherSpaces({
   state,
@@ -35,6 +36,9 @@ export function LauncherSpaces({
       online={online}
       newTarget={newTarget}
       targetNew={targetNew}
+      handle={(space) => (
+        <SpaceHandle space={space} state={state} online={online} action={action} report={report} />
+      )}
       cardProps={(space) => ({
         onClick: (event) => {
           if (event.detail !== 0 && gesture.current.consumed) return;

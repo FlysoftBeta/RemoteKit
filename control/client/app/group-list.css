@@ -35,6 +35,20 @@
 .launcher-space-card.MuiButtonBase-root {
   position: relative;
 }
+.launcher-space-slot {
+  position: relative;
+  flex: none;
+  width: 100%;
+}
+.launcher-space-handle {
+  position: absolute;
+  top: 5px;
+  left: 4px;
+  z-index: var(--z-content);
+}
+.launcher-space-card.with-handle .launcher-space-title {
+  padding-left: 28px;
+}
 .launcher-space-badge {
   position: absolute;
   top: 38px;
@@ -94,7 +108,7 @@
   overflow-y: hidden;
   gap: 8px;
 }
-:root.layout-compact .launcher-space-card.MuiButtonBase-root {
+:root.layout-compact .launcher-space-slot {
   width: 144px;
 }
 :root.layout-compact .launcher-space-new.MuiButtonBase-root {

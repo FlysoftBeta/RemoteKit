@@ -23,6 +23,7 @@ export function GroupList({
   newTarget,
   targetNew,
   cardProps,
+  handle,
   children,
 }: {
   state: ProductState;
@@ -31,6 +32,8 @@ export function GroupList({
   newTarget: boolean;
   targetNew?(): void;
   cardProps?(space: ProductSpace): CardInteractions;
+  // Rendered beside the card, not inside it: the card is itself a button.
+  handle?(space: ProductSpace): React.ReactNode;
   children?: React.ReactNode;
 }) {
   const workspace = state.workspace;
@@ -52,6 +55,7 @@ export function GroupList({
           online={online}
           newTarget={newTarget}
           interactions={cardProps?.(space)}
+          handle={handle?.(space)}
         />
       ))}
       {children}
@@ -92,6 +96,7 @@ function GroupCard({
   online,
   newTarget,
   interactions,
+  handle,
 }: {
   space: ProductSpace;
   workspace: ProductState['workspace'];
@@ -99,20 +104,37 @@ function GroupCard({
   online: boolean;
   newTarget: boolean;
   interactions?: CardInteractions;
+  handle?: React.ReactNode;
 }) {
   const drop = useDropTarget('group', space.id);
   const dragging = useWindowDragging();
   return (
-    <ButtonBase
-      {...interactions}
-      ref={drop.ref}
-      data-window-drop-hover={drop.hovered ? 'true' : undefined}
-      className={`launcher-space-card${!newTarget && space.id === workspace.activeSpaceId ? ' target-space' : ''}${dragging && space.windowIds.length >= 3 ? ' drop-disabled' : ''}`}
-      data-space-card={space.id}
-      aria-label={
-        space.id === workspace.activeSpaceId
-          ? '当前窗口组'
-          : (space.name ??
+    <div className="launcher-space-slot">
+      <ButtonBase
+        {...interactions}
+        ref={drop.ref}
+        data-window-drop-hover={drop.hovered ? 'true' : undefined}
+        className={`launcher-space-card${handle ? ' with-handle' : ''}${!newTarget && space.id === workspace.activeSpaceId ? ' target-space' : ''}${dragging && space.windowIds.length >= 3 ? ' drop-disabled' : ''}`}
+        data-space-card={space.id}
+        aria-label={
+          space.id === workspace.activeSpaceId
+            ? '当前窗口组'
+            : (space.name ??
+              space.windowIds
+                .map((id) =>
+                  appName(
+                    workspace,
+                    workspace.windows.find((win) => win.id === id)!,
+                  ),
+                )
+                .join(' · '))
+        }
+        aria-current={space.id === workspace.activeSpaceId ? 'true' : undefined}
+        disabled={!online}
+      >
+        {space.id === workspace.activeSpaceId && <span className="launcher-space-badge">当前</span>}
+        <span className="launcher-space-title">
+          {space.name ??
             space.windowIds
               .map((id) =>
                 appName(
@@ -120,42 +142,29 @@ function GroupCard({
                   workspace.windows.find((win) => win.id === id)!,
                 ),
               )
-              .join(' · '))
-      }
-      aria-current={space.id === workspace.activeSpaceId ? 'true' : undefined}
-      disabled={!online}
-    >
-      {space.id === workspace.activeSpaceId && <span className="launcher-space-badge">当前</span>}
-      <span className="launcher-space-title">
-        {space.name ??
-          space.windowIds
-            .map((id) =>
-              appName(
-                workspace,
-                workspace.windows.find((win) => win.id === id)!,
-              ),
-            )
-            .join(' · ')}
-      </span>
-      <span className="launcher-space-preview">
-        {space.windowIds.map((id, index) => {
-          const win = workspace.windows.find((win) => win.id === id)!;
-          const app = workspace.apps.find((app) => `web:${app.id}` === win.appId);
-          const image = snapshots.get(id);
-          return (
-            <span key={id} className="launcher-window-preview" style={{ flexGrow: space.weights[index] }}>
-              {image ? (
-                <SnapshotImage source={image} />
-              ) : (
-                <AppIcon appId={win.appId} iconUrl={app?.iconUrl} />
-              )}
-              <Typography component="span" noWrap>
-                {appName(workspace, win)}
-              </Typography>
-            </span>
-          );
-        })}
-      </span>
-    </ButtonBase>
+              .join(' · ')}
+        </span>
+        <span className="launcher-space-preview">
+          {space.windowIds.map((id, index) => {
+            const win = workspace.windows.find((win) => win.id === id)!;
+            const app = workspace.apps.find((app) => `web:${app.id}` === win.appId);
+            const image = snapshots.get(id);
+            return (
+              <span key={id} className="launcher-window-preview" style={{ flexGrow: space.weights[index] }}>
+                {image ? (
+                  <SnapshotImage source={image} />
+                ) : (
+                  <AppIcon appId={win.appId} iconUrl={app?.iconUrl} />
+                )}
+                <Typography component="span" noWrap>
+                  {appName(workspace, win)}
+                </Typography>
+              </span>
+            );
+          })}
+        </span>
+      </ButtonBase>
+      {handle && <span className="launcher-space-handle">{handle}</span>}
+    </div>
   );
 }
