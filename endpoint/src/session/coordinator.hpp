@@ -29,6 +29,7 @@ class SessionCoordinator {
     std::function<Result<void>(const std::string&, uint64_t)> acknowledge;
     std::function<void(uint64_t)> management_lost;
     std::function<bool(const Json&, uint64_t)> send;
+    std::function<void(const Json&, int64_t)> received, converging;
   };
   SessionCoordinator(Json target,
                      std::string incarnation,
@@ -75,6 +76,7 @@ class SessionCoordinator {
   std::condition_variable wake_;
   Scope scope_;
   Json desired_;
+  uint64_t desired_version_ = 0;
   Json latest_ = Json::object();
   std::deque<std::function<void()>> jobs_;
   bool stopping_ = false, force_observation_ = true, signaled_ = false;

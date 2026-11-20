@@ -42,7 +42,9 @@ class RenderSlots {
              bool force,
              std::string&,
              bool* sent = nullptr,
-             bool keepalive = false);
+             bool keepalive = false,
+             remotekit_sdk_render_identity* identity = nullptr);
+  bool Rendering(remotekit_sdk_render_identity identity) const;
   void Pressure(bool encoder_backlog);
   bool HasCapacity() const;
   void WithdrawAdmission();
@@ -62,6 +64,7 @@ class RenderSlots {
   std::optional<uint64_t> ClipboardSequence() const;
   bool Close(std::string&);
   int64_t MonotonicMicros() const;
+  std::optional<int64_t> ProducerQpc(int64_t micros) const;
   std::optional<double> capture_to_ready_ms() const;
   double clock_uncertainty_us() const;
   uint64_t delivered_frames() const { return delivered_.load(); }

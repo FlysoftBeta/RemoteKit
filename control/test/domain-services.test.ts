@@ -118,11 +118,11 @@ test('a blocked tenant does not stop later reconciliation ticks for another tena
     blockedTenant = first.tenantId;
     blocked = true;
     const firstTick = services.reconciler.tick();
-    await services.tenants.serial(second.tenantId, async () => {});
+    await services.reconciler.requestProduct(second.tenantId);
     await new Promise<void>((resolve) => setImmediate(resolve));
     const before = snapshots.get(second.tenantId)!;
     const secondTick = services.reconciler.tick();
-    await services.tenants.serial(second.tenantId, async () => {});
+    await services.reconciler.requestProduct(second.tenantId);
     assert.ok(snapshots.get(second.tenantId)! > before);
     release();
     await Promise.all([firstTick, secondTick]);

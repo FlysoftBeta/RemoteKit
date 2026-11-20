@@ -28,6 +28,8 @@ EncoderRegistry::EncoderRegistry(ControllerContext context,
                         uint32_t timestamp, uint64_t epoch, size_t encoded_bytes, bool keyframe,
                         const remotekit_rtc_frame& source) mutable {
                const auto stamp = self->authorization.Frame();
+               if (!self->output.CanPublish(media::RenderSlots::Metadata(source)))
+                 return;
                if (!self->authorization.Current(stamp) || epoch != self->presentation.Epoch())
                  return;
                if (first_encoded) {
@@ -42,6 +44,10 @@ EncoderRegistry::EncoderRegistry(ControllerContext context,
                                {"encodedBytes", encoded_bytes},
                                {"keyframe", keyframe}};
                const auto metadata = media::RenderSlots::Metadata(source);
+               if (self->output.Matches(metadata)) {
+                 self->output.Published(metadata);
+                 self->presentation.timeline.Published(metadata, epoch, timestamp);
+               }
                message["viewports"] = Json::array();
                for (uint32_t i = 0; i < metadata.view_count; ++i) {
                  const auto& view = metadata.views[i];
@@ -74,6 +80,9 @@ EncoderRegistry::EncoderRegistry(ControllerContext context,
              return [self = this, encoder_peer](const remotekit_rtc_frame& source, bool keyframe,
                                                 const std::function<bool()>& send) {
                const auto stamp = self->authorization.Frame();
+               if (self->output.Suspended() ||
+                   !self->output.CanPublish(media::RenderSlots::Metadata(source)))
+                 return false;
                if (!self->authorization.Current(stamp) ||
                    source.layout_epoch != self->presentation.Epoch())
                  return false;

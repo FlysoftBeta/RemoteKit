@@ -5,6 +5,7 @@
 #include <ws2tcpip.h>
 #include "session/views.hpp"
 #include "session/view_configuration.hpp"
+#include "session/layout_conflict.hpp"
 #include <charconv>
 #include <cmath>
 #include <regex>
@@ -25,15 +26,31 @@ namespace remotekit {
 using ConnectionPhase = ConnectionTiming::ConnectionPhase;
 using Event = RtcEvent;
 
+void ViewController::DesiredReceived(const Json& document, int64_t received) {
+  presentation.timeline.Desired(id, document, received);
+}
+void ViewController::ConvergeStarted(const Json& document, int64_t qpc) {
+  if (!presentation.timeline.Key(std::stoull(document.at("revision").get<std::string>())).empty())
+    presentation.timeline.Mark("convergeStartMs", qpc);
+}
 Result<void> ViewController::StageDesired(const Json& document) {
-  RK_RETURN_IF_ERROR(view_store.SaveDesired(document.at("views"),
-                                            document.at("placementEpoch").get<uint64_t>(),
-                                            document.at("revision").get<std::string>()));
+  presentation.timeline.Desired(id, document);
+  presentation.timeline.Mark("convergeStartMs");
+  output.SetLayoutTransaction(
+      presentation.timeline.Key(std::stoull(document.at("revision").get<std::string>())));
+  RK_ASSIGN_OR_RETURN(topology, ViewStore::Topology(document.at("views")));
+  const auto placement = document.at("placementEpoch").get<uint64_t>();
+  if (topology != saved_topology || placement != saved_placement) {
+    RK_RETURN_IF_ERROR(
+        view_store.SaveDesired(topology, placement, document.at("revision").get<std::string>()));
+    RK_ASSIGN_OR_RETURN(retired, view_store.Retired());
+    for (const auto& view : retired)
+      observed_closed.insert(view.get<std::string>());
+    saved_topology = std::move(topology);
+    saved_placement = placement;
+  }
   downloads.SetInput(document.at("connectionEpoch").get<std::string>() + ":" +
                      document.at("revision").get<std::string>());
-  RK_ASSIGN_OR_RETURN(retired, view_store.Retired());
-  for (const auto& view : retired)
-    observed_closed.insert(view.get<std::string>());
   std::map<std::string, Json> staged;
   desired_order.clear();
   for (const auto& value : document.at("views")) {
@@ -51,12 +68,31 @@ Result<void> ViewController::StageDesired(const Json& document) {
   return {};
 }
 Result<void> ViewController::ConvergeDesired() {
+  struct Replanning {
+    bool& active;
+    ~Replanning() { active = false; }
+  } reset{replanning_layout};
+  replanning_layout = true;
+  for (unsigned attempt = 0;; ++attempt) {
+    auto result = ConvergeOnce();
+    if (result || !LayoutConflict(result.error()))
+      return result;
+    if (attempt + 1 == kImmediateLayoutAttempts) {
+      output_retry_.Fail(result.error());
+      return result;
+    }
+  }
+}
+Result<void> ViewController::ConvergeOnce() {
   RK_ASSIGN_OR_RETURN(snapshot, Snapshot());
   if (!snapshot.value("running", false))
     return browser.Unavailable("Browser is not running");
   std::set<std::string> existing;
+  closing_views.clear();
   for (const auto& view : snapshot.at("views")) {
     const auto name = view.at("viewId").get<std::string>();
+    if (view.value("close_state", std::string()) == "closing")
+      closing_views.insert(name);
     if (!desired.contains(name)) {
       RK_ASSIGN_OR_RETURN(closed, ManageViewClose({{"method", "view.close"},
                                                    {"viewId", name},
@@ -184,7 +220,7 @@ Result<ViewController::Geometry> ViewController::DesiredGeometry() {
   std::vector<protocol::PackItem> items;
   float scale = .5f;
   for (auto& [view, config] : desired) {
-    if (!config.at("visible").get<bool>())
+    if (!config.at("visible").get<bool>() || closing_views.contains(view))
       continue;
     const auto device = config.at("device");
     int w = config.at("width").get<int>();
@@ -194,7 +230,7 @@ Result<ViewController::Geometry> ViewController::DesiredGeometry() {
     items.push_back({std::stoull(view), w, h, 1.0});
     scale = std::max(scale, device.at("deviceScaleFactor").get<float>());
   }
-  const auto plan = protocol::PlanAtlas(items, items.empty() ? 1.f : scale,
+  const auto plan = protocol::PlanAtlas(items, items.empty() ? atlas_scale : scale,
                                         RuntimeOptions::kAtlasAllocationAlignment);
   if (!plan)
     return Error{ErrorCode::kLimitExceeded,
@@ -211,6 +247,8 @@ Result<void> ViewController::GeometryConfig(const Geometry& value) {
   Json configs = Json::array();
   bool visible_output = false;
   for (const auto& [view, config] : desired) {
+    if (closing_views.contains(view))
+      continue;
     const auto device = config.at("device");
     const bool visible = !navigation.Recovering(view) && config.at("visible").get<bool>();
     visible_output |= visible;
@@ -267,7 +305,8 @@ Result<void> ViewController::ReconcileOutput() {
   auto result = reconcile();
   reconciliation_pending = !result;
   if (!result) {
-    output_retry_.Fail(result.error());
+    if (!replanning_layout || !LayoutConflict(result.error()))
+      output_retry_.Fail(result.error());
     output.Suspend();
   } else {
     output_retry_.Success();
@@ -866,8 +905,15 @@ Result<void> ViewController::Initialize() {
   RK_ASSIGN_OR_RETURN(saved, view_store.Load());
   RK_ASSIGN_OR_RETURN(retired, view_store.Retired());
   std::map<std::string, Json> loaded;
-  for (const auto& config : saved)
-    loaded.emplace(config.at("viewId").get<std::string>(), config);
+  for (auto config : saved) {
+    config["width"] = 1;
+    config["height"] = 1;
+    config["visible"] = false;
+    config["device"] = {{"mode", "desktop"}, {"deviceScaleFactor", 1}};
+    config["occludedBottom"] = 0;
+    config["occlusionRevision"] = "0";
+    loaded.emplace(config.at("viewId").get<std::string>(), std::move(config));
+  }
   RK_RETURN_IF_ERROR(downloads.Initialize());
   desired = std::move(loaded);
   for (const auto& config : saved) {

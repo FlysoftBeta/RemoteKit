@@ -169,6 +169,9 @@ void Atlas::CompleteWork() {
   owner_.device_.context->PSSetSamplers(0, 1, &sampler);
   SharedAtlasFrame frame{};
   frame.generation = owner_.generation_;
+  frame.layout_revision = owner_.plane_pool_.layout_revision_;
+  frame.plane_rebuild_us = owner_.plane_pool_.plane_rebuild_us_;
+  frame.compositor_frame_us = owner_.plane_pool_.compositor_frame_us_;
   if (work->updated || work->revision != published_revision_ || !frame_id_)
     ++frame_id_;
   frame.frame_id = frame_id_;
@@ -242,6 +245,9 @@ void Atlas::PublishLayout() {
     return;
   auto frame = latest_frame_;
   frame.generation = owner_.generation_;
+  frame.layout_revision = owner_.plane_pool_.layout_revision_;
+  frame.plane_rebuild_us = owner_.plane_pool_.plane_rebuild_us_;
+  frame.compositor_frame_us = owner_.plane_pool_.compositor_frame_us_;
   frame.width_pixels = owner_.width_;
   frame.height_pixels = owner_.height_;
   frame.status = owner_.status_;

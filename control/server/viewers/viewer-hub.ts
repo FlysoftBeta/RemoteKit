@@ -4,7 +4,7 @@ import { RemoteKitError, wireError } from '../../shared/errors';
 import { canonicalJson } from '../config';
 import { log } from '../log';
 
-import type { ProductState } from '../../shared/product';
+import type { ProductState, ViewerViewport } from '../../shared/product';
 import { isLocalTab } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 import { type ViewerSecurityState } from '../auth/viewer-security';
@@ -181,82 +181,93 @@ export class ViewerHub {
       await this.detachViewer(tenant, viewer.id);
     }
   }
-  viewport(tenant: string, body: any, lease: string, epoch?: number) {
+  async viewport(tenant: string, body: any, lease: string, epoch?: number, timeline?: ViewportTimeline) {
     const runtime = this.context.tenants.get(tenant);
-    return this.context.tenants.serial(tenant, async () => {
-      this.assertProductViewer(tenant, lease, epoch);
-      const state = this.context.store.workspaces.workspace(tenant);
+    if (timeline) timeline.started = performance.now();
+    this.assertProductViewer(tenant, lease, epoch);
+    const state = this.context.store.workspaces.workspace(tenant);
+    if (
+      typeof body.devicePixelRatio !== 'number' ||
+      !Number.isFinite(body.devicePixelRatio) ||
+      body.devicePixelRatio < 0.5 ||
+      body.devicePixelRatio > 8 ||
+      !Array.isArray(body.windows) ||
+      body.windows.length > WORKSPACE_LIMITS.windows ||
+      (body.refreshHz !== undefined &&
+        (!Number.isFinite(body.refreshHz) || body.refreshHz < 1 || body.refreshHz > 500))
+    )
+      throw new RemoteKitError('invalid_request', '无效的显示区域');
+    const ids = new Set<string>();
+    for (const w of body.windows) {
       if (
-        typeof body.devicePixelRatio !== 'number' ||
-        !Number.isFinite(body.devicePixelRatio) ||
-        body.devicePixelRatio < 0.5 ||
-        body.devicePixelRatio > 8 ||
-        !Array.isArray(body.windows) ||
-        body.windows.length > WORKSPACE_LIMITS.windows ||
-        (body.refreshHz !== undefined &&
-          (!Number.isFinite(body.refreshHz) || body.refreshHz < 1 || body.refreshHz > 500))
+        !w ||
+        ids.has(w.windowId) ||
+        !state.windows.some((item) => item.id === w.windowId) ||
+        typeof w.visible !== 'boolean' ||
+        !Number.isInteger(w.width) ||
+        !Number.isInteger(w.height) ||
+        !Number.isInteger(w.occludedBottom) ||
+        w.occludedBottom < 0 ||
+        w.occludedBottom > w.height ||
+        typeof w.occlusionRevision !== 'string' ||
+        !/^[1-9]\d{0,19}$/.test(w.occlusionRevision) ||
+        BigInt(w.occlusionRevision) > 0xffffffffffffffffn ||
+        w.width < 1 ||
+        w.height < 1 ||
+        w.width > 8192 ||
+        w.height > 8192
       )
-        throw new RemoteKitError('invalid_request', '无效的显示区域');
-      const ids = new Set<string>();
-      for (const w of body.windows) {
-        if (
-          !w ||
-          ids.has(w.windowId) ||
-          !state.windows.some((item) => item.id === w.windowId) ||
-          typeof w.visible !== 'boolean' ||
-          !Number.isInteger(w.width) ||
-          !Number.isInteger(w.height) ||
-          !Number.isInteger(w.occludedBottom) ||
-          w.occludedBottom < 0 ||
-          w.occludedBottom > w.height ||
-          typeof w.occlusionRevision !== 'string' ||
-          !/^[1-9]\d{0,19}$/.test(w.occlusionRevision) ||
-          BigInt(w.occlusionRevision) > 0xffffffffffffffffn ||
-          w.width < 1 ||
-          w.height < 1 ||
-          w.width > 8192 ||
-          w.height > 8192
-        )
-          throw new RemoteKitError('invalid_request', '无效的窗口显示区域');
-        ids.add(w.windowId);
-      }
-      const previous = runtime.viewer!.viewport;
-      if (
-        previous &&
-        body.windows.some((w: any) => {
-          const old = previous.windows.find((item) => item.windowId === w.windowId);
-          return old && BigInt(w.occlusionRevision) < BigInt(old.occlusionRevision);
-        })
-      )
-        return this.productState(tenant);
-      // Preflight cannot mutate live observations or replace a valid viewport.
-      const feasibility = new QualityState().snapshot(state, body);
-      if (feasibility.resourceLimitation)
-        throw new RemoteKitError('limit_exceeded', feasibility.resourceLimitation, { capacity: 'windows' });
-      const viewport = {
-        devicePixelRatio: body.devicePixelRatio,
-        refreshHz: body.refreshHz,
-        windows: body.windows.map((w: any) => ({
-          windowId: w.windowId,
-          width: w.width,
-          height: w.height,
-          occludedBottom: w.visible ? w.occludedBottom : 0,
-          occlusionRevision: w.occlusionRevision,
-          visible: w.visible,
-        })),
-      };
-      if (canonicalJson(runtime.viewer!.viewport) === canonicalJson(viewport))
-        return this.productState(tenant);
-      runtime.viewer!.viewport = viewport;
-      runtime.lastViewport = viewport;
-      try {
-        await this.services.reconciler.reconcileProduct(tenant);
-      } catch (err) {
-        log.warn('viewer.reconcile_failed', { tenant, err });
-      }
-      this.push(tenant);
+        throw new RemoteKitError('invalid_request', '无效的窗口显示区域');
+      ids.add(w.windowId);
+    }
+    const previous = runtime.viewer!.viewport;
+    if (
+      previous &&
+      body.windows.some((w: any) => {
+        const old = previous.windows.find((item) => item.windowId === w.windowId);
+        return old && BigInt(w.occlusionRevision) < BigInt(old.occlusionRevision);
+      })
+    )
       return this.productState(tenant);
-    });
+    // Preflight cannot mutate live observations or replace a valid viewport.
+    const feasibility = new QualityState().snapshot(state, body);
+    if (feasibility.resourceLimitation)
+      throw new RemoteKitError('limit_exceeded', feasibility.resourceLimitation, { capacity: 'windows' });
+    const viewport = {
+      devicePixelRatio: body.devicePixelRatio,
+      refreshHz: body.refreshHz,
+      windows: body.windows.map((w: any) => ({
+        windowId: w.windowId,
+        width: w.width,
+        height: w.height,
+        occludedBottom: w.visible ? w.occludedBottom : 0,
+        occlusionRevision: w.occlusionRevision,
+        visible: w.visible,
+      })),
+    };
+    if (canonicalJson(runtime.viewer!.viewport) === canonicalJson(viewport)) return this.productState(tenant);
+    const geometryKey = (value: ViewerViewport | undefined) =>
+      value &&
+      canonicalJson({
+        ...value,
+        windows: value.windows.map(({ occlusionRevision, ...window }) => window),
+      });
+    const geometryChanged = geometryKey(previous) !== geometryKey(viewport);
+    runtime.viewer!.viewport = viewport;
+    runtime.lastViewport = viewport;
+    this.services.reconciler.publishDesired(tenant);
+    this.push(tenant);
+    const desired = await this.context.endpoint.published(tenant);
+    if (timeline && geometryChanged) {
+      timeline.published = performance.now();
+      timeline.revision = desired.revision;
+      timeline.windows = viewport.windows.map((window: { windowId: string; occlusionRevision: string }) => ({
+        windowId: window.windowId,
+        revision: window.occlusionRevision,
+      }));
+    }
+    this.assertProductViewer(tenant, lease, epoch);
+    return this.productState(tenant);
   }
   feedback(authority: ViewerAuthority, params: unknown) {
     const { tenantId: tenant, leaseId, epoch } = authority;
@@ -292,4 +303,12 @@ export interface ViewerAuthority {
   leaseId: string;
   epoch: number;
   connectionId?: string;
+}
+
+export interface ViewportTimeline {
+  received: number;
+  started?: number;
+  published?: number;
+  revision?: string;
+  windows?: { windowId: string; revision: string }[];
 }

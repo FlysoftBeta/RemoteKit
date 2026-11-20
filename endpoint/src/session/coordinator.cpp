@@ -1,3 +1,4 @@
+#include "media/gpu_device.hpp"
 #include "session/coordinator.hpp"
 #include "management/payload_limits.hpp"
 #include "util/log.hpp"
@@ -40,6 +41,7 @@ bool SessionCoordinator::LatestRevision(const Json& desired) const {
   return desired_.is_object() && desired_["revision"] == desired["revision"];
 }
 Result<Json> SessionCoordinator::Publish(const Json& desired, uint64_t generation) {
+  const auto received = media::QpcNow();
   RK_RETURN_IF_ERROR(coordination::ValidateDesired(desired));
   {
     std::lock_guard lock(mutex_);
@@ -63,9 +65,14 @@ Result<Json> SessionCoordinator::Publish(const Json& desired, uint64_t generatio
       if (desired["profileKey"] != desired_["profileKey"])
         return Error{ErrorCode::kConflict, "Session profile key conflicts"};
     }
-    desired_ = desired;
-    desired_.erase("id");
+    auto next = desired;
+    next.erase("id");
+    if (desired_ != next)
+      ++desired_version_;
+    desired_ = std::move(next);
   }
+  if (hooks_.received)
+    hooks_.received(desired, received);
   if (!desired["authorization"]["unlocked"].get<bool>() || desired["lock"]["state"] != "unlocked") {
     auto revoked = hooks_.authorization(desired, generation);
     if (!revoked && revoked.error().code != ErrorCode::kNotFound)
@@ -209,6 +216,8 @@ Result<void> SessionCoordinator::Converge(const Json& desired, const Scope& scop
   if (!Current(scope.generation) || !LatestRevision(desired) ||
       desired["connectionEpoch"] != scope.connection)
     return {};
+  if (hooks_.converging)
+    hooks_.converging(desired, media::QpcNow());
   RK_RETURN_IF_ERROR(hooks_.authorization(desired, scope.generation));
   const auto revision = desired["revision"].get<std::string>();
   if (desired["run"] == "stopped") {
@@ -388,6 +397,7 @@ void SessionCoordinator::FlushSignals(const std::string& input) {
 void SessionCoordinator::Run() {
   constexpr auto kMaintenanceInterval = std::chrono::milliseconds(100);
   auto next_maintenance = std::chrono::steady_clock::now();
+  uint64_t handled_desired_version = 0;
   for (;;) {
     Scope scope;
     Json desired;
@@ -396,12 +406,14 @@ void SessionCoordinator::Run() {
     {
       std::unique_lock lock(mutex_);
       wake_.wait_until(lock, next_maintenance, [&] {
-        return stopping_ || !jobs_.empty() || force_observation_ || signaled_;
+        return stopping_ || !jobs_.empty() || force_observation_ || signaled_ ||
+               desired_version_ != handled_desired_version;
       });
       if (stopping_ && jobs_.empty())
         return;
       const bool signals_only = std::exchange(signaled_, false) && jobs_.empty() &&
                                 !force_observation_ &&
+                                desired_version_ == handled_desired_version &&
                                 std::chrono::steady_clock::now() < next_maintenance;
       if (signals_only) {
         const auto input = desired_.dump() + ":" + std::to_string(scope_.generation);
@@ -411,6 +423,7 @@ void SessionCoordinator::Run() {
       }
       scope = scope_;
       desired = desired_;
+      handled_desired_version = desired_version_;
       jobs.swap(jobs_);
       force = std::exchange(force_observation_, false);
     }

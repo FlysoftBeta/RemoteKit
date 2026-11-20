@@ -98,11 +98,11 @@ test('claimed cancellation outcomes keep reconciling without resubmitting the na
   assert.equal(await store.cancelSelection('chooser'), 'unknown');
   assert.equal(store.getSnapshot().cancellations.chooser, 'unknown');
   assert.equal(store.getSnapshot().checkouts.chooser.state, 'unknown');
-  store.configure(true, true, 'viewer', []);
   state = 'selected';
-  t.mock.timers.tick(15_000);
+  store.configure(true, true, 'viewer', []);
   await flush();
-  assert.equal(store.getSnapshot().checkouts.chooser.state, 'selected');
+  assert.equal(store.getSnapshot().checkouts.chooser, undefined);
+  assert.equal(store.getSnapshot().cancellations.chooser, undefined);
   assert.equal(commits, 1);
   assert.ok(finishes >= 3);
 });

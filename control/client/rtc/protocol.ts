@@ -197,6 +197,7 @@ export type Outgoing = Authorized &
       }
     | { type: 'clock.ping'; version: 1; requestId: string }
     | { type: 'media.refresh' }
+    | { type: 'media.refresh'; reason: 'metadata'; rtpTimestamp: number; layoutEpoch: string }
     | { type: 'media.presentation'; version: 1; backend: 'video'; restart?: true }
     | MediaFeedback
     | KeyboardLayoutMessage

@@ -1,5 +1,6 @@
 #include "util/log.hpp"
 #include "rtc/channel.hpp"
+#include "protocol/rtc_events.h"
 #include "auth/face.hpp"
 #include "util/wire_error.hpp"
 #include "diagnostics/timing.hpp"
@@ -36,6 +37,10 @@ void ChannelController::HandlePeerEvent(const RtcEvent& event) {
     auto routed = data_router.Receive(event);
     if (!routed)
       LogError(LogLevel::kWarn, "dc.receive_failed", routed.error());
+    signal_();
+    return;
+  }
+  if (event.type == protocol::kRtcDataWritable) {
     signal_();
     return;
   }
@@ -101,6 +106,7 @@ void ChannelController::FlushSignals() {
         });
   }
   FlushControl();
+  FlushFrameMetadata();
   FlushServices();
 }
 
@@ -116,9 +122,10 @@ int ChannelController::SendData(uint64_t handle, uint64_t stamp, const std::stri
   if (wire.size() > 1)
     wire += ',';
   wire += "\"authEpoch\":" + std::to_string(token.epoch) + "}";
-  return authorization.Current(token)
-             ? sdk.remotekit_rtc_send_data(handle, wire.data(), wire.size(), 0)
-             : 1;
+  const auto status = authorization.Current(token)
+                          ? sdk.remotekit_rtc_send_data(handle, wire.data(), wire.size(), 0)
+                          : 1;
+  return status;
 }
 
 void ChannelController::Send(const Json& message, uint64_t expected_stamp) {
@@ -128,11 +135,18 @@ void ChannelController::Send(const Json& message, uint64_t expected_stamp) {
       !peer_controller.DataOpen() || stamp != authorization.Frame())
     return;
   FlushControl();
+  if (message.value("type", std::string()) == "frame") {
+    if (message.value("layoutEpoch", std::string()) != std::to_string(presentation.Epoch()))
+      return;
+    frame_metadata.Bind(handle, stamp, presentation.Epoch());
+    frame_metadata.Remember(message);
+    FlushFrameMetadata();
+    return;
+  }
   control_outbox.Transient(
       {handle, stamp}, message.dump(),
       [&](const std::string& encoded) { return SendData(handle, stamp, encoded); },
-      message.value("type", std::string()) == "frame" ||
-          message.value("type", std::string()) == "stats");
+      message.value("type", std::string()) == "stats");
 }
 
 void ChannelController::FlushControl() {
@@ -141,10 +155,45 @@ void ChannelController::FlushControl() {
   if (!stamp || !handle || !peer_controller.DataOpen() || stamp != authorization.Frame())
     return;
   control_outbox.Flush({handle, stamp}, [&](const std::string& encoded) {
-    return SendData(handle, stamp, encoded);
+    const auto status = SendData(handle, stamp, encoded);
+    if (!status && encoded.find("\"type\":\"presentation.prepare\"") != std::string::npos &&
+        encoded.find("\"outputGeneration\":\"0\"") == std::string::npos)
+      presentation.timeline.Mark("prepareSentMs");
+    return status;
   });
 }
 
+void ChannelController::FlushFrameMetadata() {
+  const auto stamp = authorization.Stamp();
+  const auto handle = peer_controller.Handle();
+  frame_metadata.Bind(handle, stamp, presentation.Epoch());
+  if (!stamp || !handle || !peer_controller.DataOpen() || stamp != authorization.Frame())
+    return;
+  frame_metadata.Flush([&](const Json& message) {
+    bool sent = false;
+    control_outbox.Transient({handle, stamp}, message.dump(), [&](const std::string& encoded) {
+      const auto status = SendData(handle, stamp, encoded);
+      sent = status == 0;
+      return status;
+    });
+    return sent;
+  });
+}
+void ChannelController::Refresh(const RtcEvent& event) {
+  if (event.message.value("reason", std::string()) == "metadata") {
+    uint64_t epoch = 0;
+    const auto rtp = event.message.find("rtpTimestamp");
+    if (event.bytes.size() <= 256 && DataRouter::Number(event.message, "layoutEpoch", epoch) &&
+        epoch == presentation.Epoch() && rtp != event.message.end() && rtp->is_number_unsigned() &&
+        rtp->get<uint64_t>() <= UINT32_MAX) {
+      frame_metadata.Bind(event.peer, event.authorization, epoch);
+      frame_metadata.Request(rtp->get<uint32_t>());
+      FlushFrameMetadata();
+    }
+    return;
+  }
+  pipeline.RequestRefresh(event);
+}
 void ChannelController::FlushServices() {
   const auto stamp = authorization.Stamp();
   const auto handle = peer_controller.Handle();
@@ -226,7 +275,7 @@ DataRouter::Hooks ChannelController::MakeRouterHooks() {
           [this](const RtcEvent& event) {
             presentation.ReceiveFeedback(event.peer, event.message, QpcNow(), event.bytes.size());
           },
-      .refresh = [this](const RtcEvent& event) { pipeline.RequestRefresh(event); },
+      .refresh = [this](const RtcEvent& event) { Refresh(event); },
       .data_state =
           [this](const RtcEvent& event) {
             if (event.value != 1) {

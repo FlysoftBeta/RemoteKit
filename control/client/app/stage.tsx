@@ -86,7 +86,7 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
         window.matchMedia('(pointer: coarse)').matches,
         now,
       );
-      keyboard.settle(now);
+      const settled = keyboard.settle(now);
       const editing = media.editing.mobileEditing;
       const focusedView = focused
         ? active.closest<HTMLElement>('.remote-viewport')?.dataset.viewId
@@ -114,6 +114,7 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
         document.visibilityState !== 'hidden',
       );
       position();
+      if (settled) media.viewport.flush();
     };
     transitionFrame = requestAnimationFrame(() => {
       transitionFrame = requestAnimationFrame(() => {
@@ -128,6 +129,8 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
     visual?.addEventListener('scroll', position);
     window.addEventListener('resize', measure);
     document.addEventListener('visibilitychange', measure);
+    document.addEventListener('pointerup', media.viewport.flush);
+    document.addEventListener('pointercancel', media.viewport.flush);
     measure();
     return () => {
       observer.disconnect();
@@ -138,6 +141,8 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
       visual?.removeEventListener('scroll', position);
       window.removeEventListener('resize', measure);
       document.removeEventListener('visibilitychange', measure);
+      document.removeEventListener('pointerup', media.viewport.flush);
+      document.removeEventListener('pointercancel', media.viewport.flush);
     };
   }, [showShell, media, scale, deadZone, fullscreen]);
   const call: WorkspaceCall = useCallback((method, params) => media.control.request(method, params), [media]);
@@ -320,6 +325,7 @@ export function Stage({
                   online={shellReady}
                   action={action}
                   report={report}
+                  preview={media.viewport.preview}
                 />
               )}
               <WindowFrame

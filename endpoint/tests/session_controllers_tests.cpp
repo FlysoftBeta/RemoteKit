@@ -1,6 +1,7 @@
 #include "runtime_config_fixture.hpp"
 #include "rtc/data_router.hpp"
 #include "rtc/outbox.hpp"
+#include "rtc/frame_metadata.hpp"
 #include "rtc/authorization.hpp"
 #include "rtc/peer.hpp"
 #include "rtc/service_peer.hpp"
@@ -419,11 +420,14 @@ void SessionManagementRequests() {
   CHECK(session.Initialize());
   SessionDb persisted(session_directory);
   CHECK(persisted.Open());
-  const Json valid_views = Json::array({TestView()});
+  const Json valid_views = ViewStore::Topology(Json::array({TestView()})).value();
   CHECK(persisted.Views().Save(valid_views));
   CHECK(session.Views().Initialize());
   for (const auto& invalid : {Json::array({nullptr}), Json::array({{{"viewId", "01"}}}),
-                              Json::array({{{"viewId", "1"}, {"device", nullptr}}})}) {
+                              Json::array({{{"viewId", "1"},
+                                            {"presence", "ensure"},
+                                            {"url", "about:blank"},
+                                            {"unknown", true}}})}) {
     CHECK(!persisted.Views().Save(invalid));
     CHECK(persisted.Views().Load().value() == valid_views);
     CHECK(session.Views().Contains("1"));
@@ -823,35 +827,34 @@ void OrderedTouchInput() {
   std::vector<Json> replies, dispatched;
   std::atomic<unsigned> input_calls{0};
   InputController controller(
-      "1", {.control = [] { return 3; },
-            .input_stamp = [] { return 2; },
-            .epoch = [] { return 5; },
-            .admitted = [](const auto&) { return true; },
-            .admission = [] { return AuthorizationController::AdmissionToken{1, 2, 1}; },
-            .revalidate = [](const auto&) { return true; },
-            .allows = [](const auto&, uint64_t) { return true; },
-            .rpc = [&](Json request, uint64_t, uint32_t, bool,
-                       const std::function<bool()>&) -> Result<Json> {
-              CHECK(request.at("method") == "input");
-              ++input_calls;
-              dispatched.push_back(request);
-              if (input_calls == 1)
-                return Json{{"ok", false},
-                            {"error",
-                             {{"code", "busy"},
-                              {"message", "Input queue full"},
-                              {"retryAfterMs", 16}}},
-                            {"inputAdmitted", false}};
-              return Json{{"ok", true}, {"inputAdmitted", true}};
-            },
-            .send =
-                [&](const Json& reply, uint64_t) {
-                  std::lock_guard lock(mutex);
-                  replies.push_back(reply);
-                  wake.notify_all();
-                },
-            .failed = [] { CHECK(false); },
-            .trace = [] { return std::shared_ptr<media::ServerTrace>(); }});
+      "1",
+      {.control = [] { return 3; },
+       .input_stamp = [] { return 2; },
+       .epoch = [] { return 5; },
+       .admitted = [](const auto&) { return true; },
+       .admission = [] { return AuthorizationController::AdmissionToken{1, 2, 1}; },
+       .revalidate = [](const auto&) { return true; },
+       .allows = [](const auto&, uint64_t) { return true; },
+       .rpc = [&](Json request, uint64_t, uint32_t, bool,
+                  const std::function<bool()>&) -> Result<Json> {
+         CHECK(request.at("method") == "input");
+         ++input_calls;
+         dispatched.push_back(request);
+         if (input_calls == 1)
+           return Json{
+               {"ok", false},
+               {"error", {{"code", "busy"}, {"message", "Input queue full"}, {"retryAfterMs", 16}}},
+               {"inputAdmitted", false}};
+         return Json{{"ok", true}, {"inputAdmitted", true}};
+       },
+       .send =
+           [&](const Json& reply, uint64_t) {
+             std::lock_guard lock(mutex);
+             replies.push_back(reply);
+             wake.notify_all();
+           },
+       .failed = [] { CHECK(false); },
+       .trace = [] { return std::shared_ptr<media::ServerTrace>(); }});
   controller.Start(1);
   uint64_t serial = 0;
   const auto touch = [&](const char* sequence, const char* action, const char* epoch = "5") {
@@ -1296,7 +1299,37 @@ void SignInValidation() {
   CHECK(!ValidSignInEvent(event));
 }
 
+void FrameMetadataRecovery() {
+  FrameMetadata metadata;
+  metadata.Bind(7, 9, 3);
+  metadata.Remember({{"rtpTimestamp", 12u}, {"layoutEpoch", "3"}});
+  unsigned attempts = 0;
+  metadata.Flush([&](const Json&) {
+    ++attempts;
+    return false;
+  });
+  CHECK(attempts == 1);
+  metadata.Flush([&](const Json& message) {
+    ++attempts;
+    return message.at("rtpTimestamp") == 12;
+  });
+  CHECK(attempts == 2);
+  metadata.Request(12);
+  metadata.Flush([&](const Json&) {
+    ++attempts;
+    return true;
+  });
+  CHECK(attempts == 3);
+  metadata.Request(12);
+  metadata.Bind(7, 9, 4);
+  metadata.Flush([&](const Json&) {
+    ++attempts;
+    return true;
+  });
+  CHECK(attempts == 3);
+}
 int main(int argc, char** argv) {
+  FrameMetadataRecovery();
   if (argc == 2 && std::string_view(argv[1]) == "--signin") {
     SignInValidation();
     return 0;

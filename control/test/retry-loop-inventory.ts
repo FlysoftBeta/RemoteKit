@@ -1,3 +1,11 @@
+export const eventRetryLoops = {
+  'presentation.frame_metadata': {
+    owner: 'client/presentation/presentation-session.ts',
+    events: ['video', 'writable'],
+    errors: ['busy', 'rate_limited', 'unavailable', 'outcome_unknown', 'internal'],
+  },
+} as const;
+
 export const auditLoops = {
   'browser-rtc-retirement': ['server/viewers/rtc-signaling.ts'],
   'generic-background-job': ['server/background.ts', 'shared/retry-unit.ts'],
@@ -15,6 +23,7 @@ export const auditLoops = {
   'missing-object-replicas': ['server/cluster/objects.ts'],
   'document-conversion-per-source-build': ['server/cluster/objects.ts'],
   'product-reconciliation-per-tenant': ['server/workspace/reconciler.ts'],
+  'observed-product-reconciliation': ['server/workspace/reconciler.ts'],
   'reconnect-process-change-reconciliation': ['server/workspace/reconciler.ts'],
   'pending-site-ua-reload': ['server/workspace/reconciler.ts', 'server/workspace/navigation.ts'],
   'pressure-relief-across-offline-tenants': ['server/workspace/lifecycle.ts'],
@@ -88,7 +97,7 @@ export const auditLoops = {
   'product-receipt-queries': ['client/control/operations-store.ts'],
   'latest-viewport-publication': ['client/control/viewport-requests.ts'],
   'browser-service-rtc-establishment': ['client/rtc/rtc-session.ts'],
-  'presentation-negotiation-and-missing-frame-metadata': ['client/presentation/presentation-session.ts'],
+  'presentation-negotiation': ['client/presentation/presentation-session.ts'],
   'document-conversion-open-and-page-resource-mounting': [
     'client/documents/channel-source.ts',
     'client/documents/document-viewer.tsx',
@@ -99,6 +108,7 @@ export const auditLoops = {
   'upload-process-commit-photo-task': ['client/files/photo-job-store.ts'],
   'library-refresh-and-mutations': ['client/files/library-store.ts'],
   'file-selection-checkout': ['client/files/library-store.ts'],
+  'observed-file-selection-checkout': ['client/files/library-store.ts'],
   'automatic-presence-verification-challenge': ['client/auth/auth-camera-session.ts'],
   'diagnostic-start-sample-finalization': ['client/media/diagnostic-collection.ts'],
   'admin-import-state-polling': [

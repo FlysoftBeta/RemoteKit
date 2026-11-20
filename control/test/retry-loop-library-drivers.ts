@@ -3,7 +3,7 @@ import { FileChannel } from '../client/files/file-channel';
 import { wireError } from '../shared/errors';
 import { operation, type OwnerFactory } from './retry-loop-boundary';
 
-export function driveLibrary(path: 'refresh' | 'mutation' | 'checkout'): OwnerFactory {
+export function driveLibrary(path: 'refresh' | 'mutation' | 'checkout' | 'observed'): OwnerFactory {
   return (boundary, t) => {
     const snapshot = { revision: 1, entries: [], basket: [], partitions: [], sources: [] };
     const request = (method: string, params: unknown) => {
@@ -16,7 +16,7 @@ export function driveLibrary(path: 'refresh' | 'mutation' | 'checkout'): OwnerFa
       if (targeted)
         return boundary.call(
           { method, params },
-          path === 'checkout' ? { state: 'selected', snapshot } : snapshot,
+          path === 'checkout' || path === 'observed' ? { state: 'selected', snapshot } : snapshot,
         );
       if (method === 'library.prepare')
         return Promise.resolve({ selectionId: 'selection-' + boundary.version });
@@ -34,6 +34,7 @@ export function driveLibrary(path: 'refresh' | 'mutation' | 'checkout'): OwnerFa
       rpc as unknown as ConstructorParameters<typeof LibraryStore>[1],
     );
     const callbacks: (() => void)[] = [];
+    let observedRevision = 1;
     const interval = setInterval;
     t.mock.method(globalThis, 'setInterval', (callback: () => void, ms: number) => {
       callbacks.push(callback);
@@ -46,7 +47,7 @@ export function driveLibrary(path: 'refresh' | 'mutation' | 'checkout'): OwnerFa
         result.run(() =>
           owner.mutate('library.delete', { operationId: 'delete-' + boundary.version, ids: ['entry'] }),
         );
-      if (path === 'checkout') result.run(() => owner.select('chooser', ['entry']));
+      if (path === 'checkout' || path === 'observed') result.run(() => owner.select('chooser', ['entry']));
     };
     return {
       start: () => {
@@ -55,6 +56,7 @@ export function driveLibrary(path: 'refresh' | 'mutation' | 'checkout'): OwnerFa
       },
       drive: () => {
         if (path === 'checkout') callbacks.forEach((callback) => callback());
+        if (path === 'observed') owner.receive({ ...snapshot, revision: ++observedRevision } as never);
       },
       changeInput: () => {
         boundary.version++;
@@ -62,7 +64,7 @@ export function driveLibrary(path: 'refresh' | 'mutation' | 'checkout'): OwnerFa
         run();
       },
       error: () =>
-        path === 'checkout'
+        path === 'checkout' || path === 'observed'
           ? owner.getSnapshot().checkouts.chooser?.error
           : (owner.getSnapshot().error ?? result.error()),
       dispose: () => owner.dispose(),

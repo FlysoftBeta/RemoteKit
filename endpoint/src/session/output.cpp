@@ -6,6 +6,7 @@
 #include "rtc/authorization.hpp"
 #include "rtc/peer.hpp"
 #include "util/result_macros.hpp"
+#include "protocol/atlas_dimensions.hpp"
 namespace remotekit {
 using ConnectionPhase = ConnectionTiming::ConnectionPhase;
 using Event = RtcEvent;
@@ -37,6 +38,7 @@ Result<void> OutputController::OpenOutput() {
                           adapter.context.Get(), diagnostic);
   if (!opened)
     return opened.error();
+  RequestFrame();
   capture_clock_uncertainty_ms = pool.clock_uncertainty_us() / 1000;
   timing.MarkConnection(ConnectionPhase::output_open_end);
   return PollClipboard(true);
@@ -77,21 +79,62 @@ Json OutputGeometry(Json configuration) {
 }
 }  // namespace
 
+void OutputController::BlockFrames() {
+  auto lock = presentation.LockLayout();
+  auto value = std::make_shared<media::LayoutRequirement>();
+  value->revision = UINT32_MAX;
+  requirement.store(std::move(value));
+}
+void OutputController::RequireFrame(const Json& next) {
+  auto value = std::make_shared<media::LayoutRequirement>();
+  value->revision = layout_revision;
+  for (const auto& view : next.at("viewConfigs"))
+    if (view.at("visible").get<bool>())
+      value->viewports.emplace(std::stoull(view.at("view").get<std::string>()),
+                               std::stoull(view.at("occlusionRevision").get<std::string>()));
+  auto lock = presentation.LockLayout();
+  presentation.timeline.Arm(layout_transaction, *value);
+  requirement.store(std::move(value));
+  RequestFrame();
+}
+void OutputController::RequestFrame() {
+  ++layout_serial;
+  pipeline.Wake();
+}
 Result<void> OutputController::Configure(int width,
                                          int height,
                                          float scale,
                                          Json views,
                                          bool visible) {
-  const Json next = {{"method", "output.configure"},
-                     {"width", width},
-                     {"height", height},
-                     {"device_scale", scale},
-                     {"allocation_alignment", RuntimeOptions::kAtlasAllocationAlignment},
-                     {"viewConfigs", std::move(views)}};
+  return ConfigureForGeneration(width, height, scale, std::move(views), visible, pool.Generation());
+}
+Result<void> OutputController::ConfigureForGeneration(int width,
+                                                      int height,
+                                                      float scale,
+                                                      Json views,
+                                                      bool visible,
+                                                      uint64_t generation) {
+  Json next = {{"method", "output.configure"},
+               {"width", width},
+               {"height", height},
+               {"device_scale", scale},
+               {"allocation_alignment", RuntimeOptions::kAtlasAllocationAlignment},
+               {"viewConfigs", std::move(views)}};
+  const auto native = protocol::AtlasAllocationDimensions(
+      width, height, scale, RuntimeOptions::kAtlasAllocationAlignment);
+  if (!native)
+    return Error{ErrorCode::kLimitExceeded, "invalid output extent"};
+  const bool retain_extent = extent_initialized &&
+                             configuration_incarnation == browser.Incarnation() &&
+                             configuration.value("device_scale", 0.f) == scale &&
+                             configuration.contains("outputWidthPixels");
+  next["outputWidthPixels"] =
+      retain_extent ? configuration.at("outputWidthPixels") : Json(native->width);
+  next["outputHeightPixels"] =
+      retain_extent ? configuration.at("outputHeightPixels") : Json(native->height);
   if (configuration_incarnation == browser.Incarnation() && configuration == next &&
-      (!visible || (pool.Generation() && !output_suspended)))
+      (!visible || (generation && !output_suspended)))
     return {};
-  const auto generation = pool.Generation();
   if (generation && configuration_incarnation == browser.Incarnation() &&
       OutputGeometry(configuration) == OutputGeometry(next)) {
     const auto& previous = configuration["viewConfigs"];
@@ -101,24 +144,57 @@ Result<void> OutputController::Configure(int width,
       if (view == previous[index])
         continue;
       auto updated = browser.Rpc().Request({{"method", "view.configure"},
+                                            {"layoutTransaction", layout_transaction},
                                             {"session", view["session"]},
                                             {"view", view["view"]},
                                             {"occludedBottom", view["occludedBottom"]},
                                             {"occlusionRevision", view["occlusionRevision"]},
                                             {"outputGeneration", std::to_string(generation)}});
-      if (!updated)
+      if (!updated) {
+        if (updated.error().message == "page_viewport_generation_mismatch")
+          configuration_incarnation.clear();
         return updated.error();
-      if (!updated.value().value("accepted", false))
-        return Error{ErrorCode::kOutcomeUnknown, "page viewport update was not accepted"};
+      }
+      presentation.timeline.Rpc(layout_transaction, updated.value());
+      if (!updated.value().value("accepted", false) && !updated.value().value("superseded", false))
+        return Error{ErrorCode::kConflict, "page viewport update was not accepted"};
     }
+    RequireFrame(next);
     configuration = next;
+    output_suspended = !visible;
+    return {};
+  }
+  const bool reuse = generation && configuration_incarnation == browser.Incarnation() &&
+                     configuration.at("outputWidthPixels") == next.at("outputWidthPixels") &&
+                     configuration.at("outputHeightPixels") == next.at("outputHeightPixels");
+  if (reuse) {
+    BlockFrames();
+    presentation.InvalidateLayout("reconfigure");
+    auto command = next;
+    command["layoutTransaction"] = layout_transaction;
+    auto result = browser.Rpc().Request(std::move(command));
+    if (!result)
+      return result.error();
+    presentation.timeline.Rpc(layout_transaction, result.value());
+    layout_revision = result.value().at("layoutRevision").get<uint32_t>();
+    RequireFrame(next);
+    configuration = next;
+    has_visible_output = visible;
+    output_suspended = !visible;
+    pipeline.Wake();
     return {};
   }
   RK_ASSIGN_OR_RETURN(active, PauseOutput(true));
   configuration_incarnation.clear();
-  auto result = browser.Rpc().Request(next);
+  auto command = next;
+  command["layoutTransaction"] = layout_transaction;
+  auto result = browser.Rpc().Request(std::move(command));
   if (!result)
     return result.error();
+  presentation.timeline.Rpc(layout_transaction, result.value());
+  layout_revision = result.value().at("layoutRevision").get<uint32_t>();
+  RequireFrame(next);
+  extent_initialized |= visible;
   has_visible_output = visible;
   RK_RETURN_IF_ERROR(ResumeOutput(active));
   configuration = next;

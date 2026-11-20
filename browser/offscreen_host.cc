@@ -1,4 +1,5 @@
 #include "remotekit/browser/offscreen_host.h"
+#include "browser/diagnostic_log.h"
 
 #include <algorithm>
 #include <cmath>
@@ -264,6 +265,39 @@ void OffscreenHost::SetPlaneSize(const gfx::Size& size) {
   SetViewport(viewport_);
 }
 
+void OffscreenHost::BeginLayoutTimeline(const std::string& key, uint64_t view) {
+  if (key.empty()) {
+    layout_transaction_.clear();
+    return;
+  }
+  if (key == layout_transaction_)
+    return;
+  layout_transaction_ = key;
+  layout_view_id_ = view;
+  layout_started_ = base::TimeTicks::Now();
+  layout_compositor_logged_ = false;
+  LayoutStage("configure_start");
+}
+int64_t OffscreenHost::LayoutElapsedUs() const {
+  return layout_started_.is_null() ? -1
+                                   : (base::TimeTicks::Now() - layout_started_).InMicroseconds();
+}
+void OffscreenHost::LayoutStage(const char* stage) {
+  if (layout_transaction_.empty())
+    return;
+  if (std::string_view(stage) == "first_matching_compositor_frame") {
+    if (layout_compositor_logged_)
+      return;
+    layout_compositor_logged_ = true;
+  }
+  LogEvent("info", "layout.timeline",
+           base::DictValue()
+               .Set("layoutTransaction", layout_transaction_)
+               .Set("viewId", base::NumberToString(layout_view_id_))
+               .Set("stage", stage)
+               .Set("relativeMs", LayoutElapsedUs() / 1000.0)
+               .Set("occlusionRevision", base::NumberToString(occlusion_revision_)));
+}
 bool OffscreenHost::PageFrameReady() const {
   if (!contents_ || !contents_->GetRenderWidgetHostView())
     return false;

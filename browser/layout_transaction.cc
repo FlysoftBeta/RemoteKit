@@ -30,7 +30,9 @@ Result<LayoutPlan> LayoutTransaction::Prepare(ViewRegistry::Specifications specs
     const auto found = views_.records.find(id);
     if (found != views_.records.end()) {
       const auto& record = found->second;
-      if (!record.requests->IsOpen() && spec != record.spec)
+      auto hidden = record.spec;
+      hidden.visible = false;
+      if (!record.requests->IsOpen() && spec != record.spec && spec != hidden)
         return {{}, {ErrorCode::kConflict, "View is closing"}};
       if (spec.visible && (spec != record.spec || plan.scale != output_scale ||
                            plan.width != logical_width || plan.height != logical_height)) {
@@ -54,13 +56,18 @@ Result<LayoutPlan> LayoutTransaction::Prepare(ViewRegistry::Specifications specs
     return {{}, {ErrorCode::kLimitExceeded, "Atlas resource budget exceeded"}};
   plan.specs = std::move(specs);
   plan.atlas = std::move(atlas.value);
-  plan.output_width = dimensions->width;
-  plan.output_height = dimensions->height;
+  const bool same_canvas = plan.width == logical_width && plan.height == logical_height &&
+                           plan.scale == output_scale && output_width && output_height;
+  plan.output_width = same_canvas ? output_width : dimensions->width;
+  plan.output_height = same_canvas ? output_height : dimensions->height;
   return {std::move(plan), {}};
 }
 void LayoutTransaction::Commit(LayoutPlan plan) {
   const bool changed = logical_width != plan.width || logical_height != plan.height ||
-                       output_scale != plan.scale || views_.Specs() != plan.specs;
+                       output_scale != plan.scale || views_.Specs() != plan.specs ||
+                       output_width != plan.output_width || output_height != plan.output_height;
+  if (changed)
+    ++revision;
   views_.SetSpecs(std::move(plan.specs));
   logical_width = plan.width;
   logical_height = plan.height;

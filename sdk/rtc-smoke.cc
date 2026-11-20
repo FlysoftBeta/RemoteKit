@@ -14,6 +14,8 @@
 #include <sstream>
 #include <thread>
 
+static_assert(REMOTEKIT_RTC_DATA_WRITABLE == 13);
+
 namespace {
 struct LogRecords {
   std::atomic<bool> pacing{false};
@@ -243,11 +245,12 @@ int main(int argc, char** argv) {
   bool sent = false, received = false, h264 = false, answer_sends_video = false;
   bool tested_recvonly_offer = false;
   bool stats_requested = false, stats_received = false;
+  bool writable = false;
   bool remote_a = false, remote_b = false;
   std::deque<Event> ice;
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
   while (std::chrono::steady_clock::now() < deadline &&
-         (!received || !answer_sends_video || !stats_received)) {
+         (!received || !answer_sends_video || !stats_received || !writable)) {
     Event e{};
     {
       std::unique_lock lock(events.mutex);
@@ -345,6 +348,10 @@ int main(int argc, char** argv) {
       if (remotekit_rtc_send_data(a, input, sizeof(input), 1) != REMOTEKIT_SDK_OK)
         return 9;
       sent = true;
+    } else if (e.type == REMOTEKIT_RTC_DATA_WRITABLE && e.peer == a) {
+      if (!e.text.empty() || !e.mid.empty() || e.value != 0)
+        return 29;
+      writable = true;
     } else if (e.type == REMOTEKIT_RTC_DATA && e.peer == b) {
       const unsigned char expected[] = {0, 1, 255, 13, 0, 42};
       received = e.value == 1 && e.text.size() == sizeof(expected) &&
@@ -373,9 +380,11 @@ int main(int argc, char** argv) {
         ++it;
     }
   }
-  if (!received || !h264 || !answer_sends_video || !stats_received) {
-    std::fprintf(stderr, "timeout or invalid SDP received=%d h264=%d sendonly-answer=%d stats=%d\n",
-                 received, h264, answer_sends_video, stats_received);
+  if (!received || !h264 || !answer_sends_video || !stats_received || !writable) {
+    std::fprintf(
+        stderr,
+        "timeout or invalid SDP received=%d h264=%d sendonly-answer=%d stats=%d writable=%d\n",
+        received, h264, answer_sends_video, stats_received, writable);
     return 11;
   }
   // A running stats callback holds the close barrier. This works whether

@@ -5,6 +5,7 @@
 #include "objects/service.hpp"
 #include "rtc/dc_services.hpp"
 #include <filesystem>
+#include <array>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -37,6 +38,7 @@ class FileLibrary {
   };
   struct Derivative {
     std::uint32_t width, height;
+    ServiceJson metadata = ServiceJson::object();
   };
   enum class DerivativeFormat { jpeg, png, webp };
   using Render = std::function<Result<Derivative>(const std::filesystem::path&)>;
@@ -73,11 +75,20 @@ class FileLibrary {
                                  const Check&,
                                  DerivativeFormat = DerivativeFormat::jpeg,
                                  const std::string& derived_from = {},
-                                 const std::string& derivative = {});
+                                 const std::string& kind = "thumbnail",
+                                 ServiceJson* metadata = nullptr);
   Result<Asset> CachedDerivative(const std::string& source,
                                  DerivativeFormat,
                                  const Render&,
-                                 const Check&);
+                                 const Check&,
+                                 const std::string& kind = "selection-transcode",
+                                 const std::string& variant = {},
+                                 ServiceJson* metadata = nullptr);
+  Result<ServiceJson> Preview(const std::string& source, unsigned max_side, const Check&);
+  Result<ServiceJson> Process(const std::string& source,
+                              const std::string& mode,
+                              std::optional<unsigned> quarter_turns,
+                              const Check&);
   Result<void> Sweep();
   ServiceJson CleanupFailures() const;
   ServiceJson StopBlockers(const std::function<bool(uint64_t)>& current) const;
@@ -111,7 +122,7 @@ class FileLibrary {
   const std::string tenant_;
   std::shared_ptr<objects::SessionObjects> access_;
   mutable std::mutex mutex_;
-  std::mutex derivatives_mutex_;
+  std::array<std::mutex, 32> derivatives_mutexes_;
   mutable std::map<std::string, Entry> entries_;
   std::map<std::string, Draft> drafts_;
   std::map<std::string, uint64_t> retiring_drafts_;
@@ -136,6 +147,6 @@ class FileLibrary {
                         Asset,
                         const Check&,
                         const std::string& derived_from = {},
-                        const std::string& derivative = {});
+                        const std::string& kind = "thumbnail");
 };
 }  // namespace remotekit

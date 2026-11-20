@@ -169,6 +169,7 @@ test('WS navigation submitted while Browser starts prepares its view before nati
       }),
       'lease',
     );
+    await f.control.reconciler.requestProduct(f.tenant);
     const tab = f.store.workspaces.workspace(f.tenant).tabs[0];
     f.control.tenants.get(f.tenant).browserIncarnation = undefined;
     const observe = f.endpoint.observe.bind(f.endpoint);

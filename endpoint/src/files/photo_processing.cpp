@@ -1,28 +1,28 @@
 #include "files/photo_processing.hpp"
-#include "files/photo_scan.hpp"
-#include "files/photo_geometry.hpp"
 #include <webp/decode.h>
 #include <webp/encode.h>
+#include "files/photo_geometry.hpp"
+#include "files/photo_scan.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
 #include <wincodec.h>
+#include <windows.h>
 #include <wrl/client.h>
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <numeric>
-#include <cstring>
-#include <chrono>
 #include <semaphore>
-#include "util/result_macros.hpp"
 #include <utility>
+#include "util/result_macros.hpp"
 
 namespace remotekit {
 namespace {
@@ -285,7 +285,7 @@ Result<cv::Mat> DecodeMemory(IWICImagingFactory& factory,
   const UINT max_dimension = analysis ? kAnalysisSide : thumbnail ? 16384 : kMaxDimension;
   const auto max_pixels = thumbnail ? 32 * 1024 * 1024 : kMaxPixels;
   if (width > max_dimension || height > max_dimension ||
-      static_cast<std::uint64_t>(width) * height > max_pixels)
+      static_cast<std::uint64_t>(width) * height > static_cast<std::uint64_t>(max_pixels))
     return Error{ErrorCode::kLimitExceeded, too_large};
   const UINT min_dimension = thumbnail ? 1 : analysis ? 16 : 32;
   if (width < min_dimension || height < min_dimension)
@@ -479,17 +479,6 @@ Result<void> EncodeWebp(const std::filesystem::path& path,
   if (!encoded || !output.file)
     return Error{ErrorCode::kUnavailable, "photo-output-failed"};
   return {};
-}
-
-cv::Mat LimitSide(const cv::Mat& image, int side) {
-  const int longest = std::max(image.cols, image.rows);
-  if (longest <= side)
-    return image;
-  cv::Mat result;
-  cv::resize(image, result,
-             {std::max(4, image.cols * side / longest), std::max(4, image.rows * side / longest)},
-             0, 0, cv::INTER_AREA);
-  return result;
 }
 
 Result<void> WriteThumbnail(IWICImagingFactory& factory,
@@ -768,13 +757,19 @@ Result<PhotoProcessResult> ProcessPhoto(const std::filesystem::path& input,
     RK_RETURN_IF_ERROR(imaging.Open());
     RK_ASSIGN_OR_RETURN(image, Decode(*imaging.factory.Get(), input, cancelled));
     unsigned turns = 0;
-    bool text_orientation = false;
+    std::string orientation_state = quarter_turns ? "confident" : "none";
     if (quarter_turns) {
       turns = *quarter_turns;
     } else {
       RK_ASSIGN_OR_RETURN(automatic, photo::AutomaticQuarterTurns(image, cancelled));
-      turns = automatic.value_or(0);
-      text_orientation = automatic.has_value();
+      turns = automatic.turns;
+      orientation_state = automatic.state;
+      if (mode == PhotoMode::kScan && orientation_state == "none") {
+        RK_ASSIGN_OR_RETURN(axis_turns, photo::GeometryAxisQuarterTurns(image, cancelled));
+        turns = axis_turns;
+        if (turns)
+          orientation_state = "uncertain";
+      }
     }
     RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
     if (turns)
@@ -782,24 +777,23 @@ Result<PhotoProcessResult> ProcessPhoto(const std::filesystem::path& input,
                  turns == 1   ? cv::ROTATE_90_CLOCKWISE
                  : turns == 2 ? cv::ROTATE_180
                               : cv::ROTATE_90_COUNTERCLOCKWISE);
-    std::string geometry = "unchanged";
+    PhotoGeometryResult geometry;
     if (mode == PhotoMode::kScan) {
       RK_ASSIGN_OR_RETURN(page, photo::AnalyzeGeometry(image, cancelled));
       RK_ASSIGN_OR_RETURN(rectified,
                           photo::ApplyGeometry(image, page, page.paper_color, cancelled));
       image = std::move(rectified);
-      geometry = page.kind;
+      geometry = {page.kind, !page.crops.empty()};
       RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-      image = LimitSide(image, 2480);
       RK_ASSIGN_OR_RETURN(paper, photo::AnalyzePaper(image, cancelled));
       RK_RETURN_IF_ERROR(photo::EnhanceScan(image, paper, cancelled));
     }
     RK_RETURN_IF_ERROR(EncodeWebp(output, image, cancelled));
     return PhotoProcessResult{static_cast<std::uint32_t>(image.cols),
-                              static_cast<std::uint32_t>(image.rows), geometry, turns,
-                              quarter_turns      ? "manual"
-                              : text_orientation ? "text"
-                                                 : "none"};
+                              static_cast<std::uint32_t>(image.rows),
+                              geometry,
+                              turns,
+                              {turns, orientation_state}};
   } catch (const cv::Exception&) {
     return Error{ErrorCode::kUnavailable, "photo-processing-failed"};
   } catch (const std::bad_alloc&) {
@@ -828,7 +822,10 @@ Result<PhotoProcessResult> TranscodePhoto(const std::filesystem::path& input,
   }
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   return PhotoProcessResult{static_cast<std::uint32_t>(image.cols),
-                            static_cast<std::uint32_t>(image.rows), "unchanged"};
+                            static_cast<std::uint32_t>(image.rows),
+                            {"unchanged", false},
+                            0,
+                            {}};
 }
 
 Result<PhotoProcessResult> CreatePhotoThumbnail(const std::filesystem::path& input,
@@ -844,7 +841,7 @@ Result<PhotoProcessResult> CreatePhotoThumbnail(const std::filesystem::path& inp
   RK_RETURN_IF_ERROR(WriteThumbnail(*imaging.factory.Get(), output, image, cancelled));
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   return PhotoProcessResult{
-      static_cast<std::uint32_t>(image.cols), static_cast<std::uint32_t>(image.rows), {}};
+      static_cast<std::uint32_t>(image.cols), static_cast<std::uint32_t>(image.rows), {}, 0, {}};
 }
 
 }  // namespace remotekit

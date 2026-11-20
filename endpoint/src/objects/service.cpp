@@ -1,3 +1,4 @@
+#include "protocol/file_requests.h"
 #include "objects/service.hpp"
 #include "documents/object_documents.hpp"
 #include "util/result_macros.hpp"
@@ -325,14 +326,21 @@ void SessionObjects::Grant(const std::string& id) {
   std::lock_guard lock(mutex_);
   grants_.insert(id);
 }
+bool SessionObjects::HasGrant(const std::string& id) {
+  std::lock_guard lock(mutex_);
+  return grants_.contains(id);
+}
 Result<ObjectInfo> SessionObjects::Write(const std::filesystem::path& path,
                                          const ObjectStore::Check& check,
-                                         const std::string& derived_from) {
+                                         const std::string& derived_from,
+                                         const std::string& kind) {
   Json claim{{"tenantId", tenant_}};
   if (!derived_from.empty()) {
+    if (!protocol::ValidObjectDerivativeKind(kind))
+      return Error{ErrorCode::kInvalidRequest, "invalid_object_derivative_kind"};
     RK_RETURN_IF_ERROR(Ensure(derived_from));
     claim["derivedFrom"] = derived_from;
-    claim["kind"] = "thumbnail";
+    claim["kind"] = kind;
   }
   RK_ASSIGN_OR_RETURN(info, service_.Write(path, check, claim));
   Grant(info.id);

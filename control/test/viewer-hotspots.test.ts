@@ -38,7 +38,7 @@ test('duplicate authoritative content keeps store identity and advances its orde
 });
 
 test('viewport acknowledgements suppress duplicates; failure and reset permit resending', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000000 });
   let calls = 0;
   let fail = false;
   const viewport = new ViewportRequests(async () => {
@@ -72,7 +72,7 @@ test('viewport acknowledgements suppress duplicates; failure and reset permit re
 });
 
 test('a changed viewport is sent while an older request is pending and stale replies cannot replace its acknowledgement', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000000 });
   const pending: (() => void)[] = [];
   const viewport = new ViewportRequests(() => new Promise<void>((resolve) => pending.push(resolve)));
   viewport.observe(productSnapshot(), true);

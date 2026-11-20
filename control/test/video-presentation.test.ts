@@ -9,6 +9,8 @@ import {
 import { CaptureLatency } from '../client/media/capture-latency';
 import type { Layout, Surface } from '../client/presentation/types';
 import { decodeIncoming } from '../client/rtc/protocol';
+import { RemoteKitError } from '../shared/errors';
+import { eventRetryLoops } from './retry-loop-inventory';
 const first: Surface = {
   id: '1',
   session: 's',
@@ -175,6 +177,7 @@ function environment(t: TestContext) {
     canvases,
     ready,
     sent,
+    channel,
     message,
     mode,
     prepare,
@@ -318,6 +321,13 @@ test('late frame metadata restores layout readiness without inventing current RT
   s.raf();
   s.raf();
   s.videos[1].frame(42);
+  assert.deepEqual(s.sent[s.sent.length - 1], {
+    type: 'media.refresh',
+    reason: 'metadata',
+    rtpTimestamp: 42,
+    layoutEpoch: '20',
+    authEpoch: 1,
+  });
   assert.equal(s.presentation.canInput('1'), null);
   s.message({ type: 'frame', rtpTimestamp: 42, layoutEpoch: '20' });
   assert.ok(s.presentation.canInput('1'));
@@ -350,19 +360,109 @@ test('hidden documents suspend ACK and need two fresh turns after becoming visib
   s.raf();
   assert.equal(s.sent.filter((m) => m.type === 'presentation.ready').length, 1);
 });
-test('static content keeps requesting fresh metadata while mounted without replacing the peer', (t) => {
+test('metadata recovery uses video and writable events without timer retries or IDR requests', (t) => {
   const s = environment(t);
   const peer = s.rtc.peer;
   s.mode();
   s.prepare();
   s.raf();
   s.raf();
-  for (let i = 0; i < 5; i++) t.mock.timers.tick(1100);
+  s.sent.length = 0;
+  const send = s.channel.send;
+  let fail = true;
+  t.mock.method(s.channel, 'send', (data: string) => {
+    if (fail) throw new Error('injected send failure');
+    send(data);
+  });
+  s.videos[1].frame(10);
+  assert.ok(s.presentation.failure);
+  t.mock.timers.tick(10000);
+  assert.deepEqual(s.sent, []);
+  fail = false;
+  s.presentation.onChannel({ type: 'writable' });
+  assert.deepEqual(s.sent, [
+    {
+      type: 'media.refresh',
+      reason: 'metadata',
+      rtpTimestamp: 10,
+      layoutEpoch: '20',
+      authEpoch: 1,
+    },
+  ]);
+  s.videos[2].frame(10);
+  s.presentation.onChannel({ type: 'writable' });
+  t.mock.timers.tick(10000);
+  assert.equal(s.sent.length, 1);
+  assert.equal(s.presentation.failure, undefined);
   assert.equal(s.presentation.getSnapshot().backend.phase, 'video');
   assert.equal(s.rtc.peer, peer);
   s.message({ type: 'frame', rtpTimestamp: 10, layoutEpoch: '20' });
   s.videos[1].frame(10);
   assert.ok(s.presentation.canInput('1'));
+});
+
+test('metadata without decoded pixels retains the normal refresh request', (t) => {
+  const s = environment(t);
+  s.mode();
+  s.prepare();
+  s.raf();
+  s.raf();
+  s.sent.length = 0;
+  t.mock.method(performance, 'now', () => 10000);
+  s.message({ type: 'frame', rtpTimestamp: 7, layoutEpoch: '20' });
+  assert.deepEqual(s.sent, [{ type: 'media.refresh' }]);
+  s.videos[1].frame(7);
+  assert.ok(s.presentation.canInput('1'));
+});
+
+for (const code of eventRetryLoops['presentation.frame_metadata'].errors) {
+  test(`presentation.frame_metadata retries ${code} on capacity without a deadline`, (t) => {
+    const s = environment(t);
+    s.mode();
+    s.prepare();
+    s.raf();
+    s.raf();
+    s.sent.length = 0;
+    const send = s.channel.send;
+    const failing = t.mock.method(s.channel, 'send', () => {
+      throw new RemoteKitError(code, 'injected metadata send failure');
+    });
+    s.videos[1].frame(0xffffffff);
+    assert.equal(s.presentation.failure?.code, code);
+    assert.equal(failing.mock.callCount(), 1);
+    t.mock.timers.tick(10000);
+    assert.equal(failing.mock.callCount(), 1);
+    failing.mock.restore();
+    s.presentation.onChannel({ type: 'writable' });
+    assert.deepEqual(s.sent, [
+      {
+        type: 'media.refresh',
+        reason: 'metadata',
+        rtpTimestamp: 0xffffffff,
+        layoutEpoch: '20',
+        authEpoch: 1,
+      },
+    ]);
+    assert.equal(s.presentation.failure, undefined);
+    assert.equal(s.channel.send, send);
+  });
+}
+
+test('a replacement layout cancels pending metadata recovery from the old barrier', (t) => {
+  const s = environment(t);
+  s.mode();
+  s.prepare();
+  s.raf();
+  s.raf();
+  const failing = t.mock.method(s.channel, 'send', () => {
+    throw new Error('injected metadata send failure');
+  });
+  s.videos[1].frame(42);
+  failing.mock.restore();
+  s.sent.length = 0;
+  s.message({ ...layout, epoch: '21' });
+  s.presentation.onChannel({ type: 'writable' });
+  assert.deepEqual(s.sent, []);
 });
 test('missing RTP metadata produces a stable error and stale callbacks cannot restore authority', (t) => {
   const s = environment(t);

@@ -18,6 +18,13 @@
 #include <iostream>
 #include <limits>
 #include <span>
+#include <cstring>
+#ifdef RK_FILE_PHOTO
+#include <webp/decode.h>
+#include <webp/encode.h>
+#include <wincodec.h>
+#include <wrl/client.h>
+#endif
 #include "util/result_macros.hpp"
 #include "util/file_io.hpp"
 
@@ -92,6 +99,217 @@ bool Remove(const fs::path& path) {
   fs::remove(path, error);
   return !error;
 }
+
+#ifdef RK_FILE_PHOTO
+using Microsoft::WRL::ComPtr;
+Result<void> PreviewImaging(HRESULT result) {
+  if (FAILED(result))
+    return WithOsError(ErrorCode::kRejected, "invalid_photo_preview", OsError::Kind::kHresult,
+                       result);
+  return {};
+}
+unsigned PreviewExif(std::span<const uint8_t> tiff) {
+  if (tiff.size() >= 6 && std::memcmp(tiff.data(), "Exif\0\0", 6) == 0)
+    tiff = tiff.subspan(6);
+  if (tiff.size() < 8)
+    return 1;
+  const bool little = tiff[0] == 'I' && tiff[1] == 'I';
+  if (!little && !(tiff[0] == 'M' && tiff[1] == 'M'))
+    return 1;
+  const auto number = [&](size_t offset, size_t count) {
+    uint32_t value = 0;
+    for (size_t i = 0; i < count; ++i)
+      value = value * 256 + tiff[offset + (little ? count - i - 1 : i)];
+    return value;
+  };
+  if (number(2, 2) != 42)
+    return 1;
+  const auto offset = number(4, 4);
+  if (offset > tiff.size() - 2)
+    return 1;
+  const auto count = number(offset, 2);
+  if (count > (tiff.size() - offset - 2) / 12)
+    return 1;
+  for (size_t i = 0; i < count; ++i) {
+    const auto entry = offset + 2 + i * 12;
+    if (number(entry, 2) == 274 && number(entry + 2, 2) == 3 && number(entry + 4, 4) == 1) {
+      const auto orientation = number(entry + 8, 2);
+      return orientation >= 1 && orientation <= 8 ? orientation : 1;
+    }
+  }
+  return 1;
+}
+class PreviewImage {
+ public:
+  ~PreviewImage() {
+    frame_.Reset();
+    decoder_.Reset();
+    factory_.Reset();
+    if (initialized_)
+      CoUninitialize();
+  }
+  Result<void> Open(const fs::path& path) {
+    RK_ASSIGN_OR_RETURN(size, FileSize(path));
+    if (!size || size > 64 * kMiB)
+      return Error{ErrorCode::kLimitExceeded, "photo_preview_input_too_large"};
+    bytes_.resize(static_cast<size_t>(size));
+    std::ifstream input(path, std::ios::binary);
+    input.read(reinterpret_cast<char*>(bytes_.data()), bytes_.size());
+    if (!input)
+      return Error{ErrorCode::kUnavailable, "photo_preview_read_failed"};
+    const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (initialized != RPC_E_CHANGED_MODE)
+      RK_RETURN_IF_ERROR(PreviewImaging(initialized));
+    initialized_ = SUCCEEDED(initialized);
+    RK_RETURN_IF_ERROR(PreviewImaging(CoCreateInstance(
+        CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory_))));
+    webp_ = bytes_.size() >= 12 && std::memcmp(bytes_.data(), "RIFF", 4) == 0 &&
+            std::memcmp(bytes_.data() + 8, "WEBP", 4) == 0;
+    if (webp_) {
+      WebPBitstreamFeatures features{};
+      if (WebPGetFeatures(bytes_.data(), bytes_.size(), &features) != VP8_STATUS_OK ||
+          features.has_animation)
+        return Error{ErrorCode::kRejected, "invalid_photo_preview"};
+      width_ = features.width;
+      height_ = features.height;
+      type = "image/webp";
+      for (size_t offset = 12; offset <= bytes_.size() && bytes_.size() - offset >= 8;) {
+        const uint64_t length = uint64_t(bytes_[offset + 4]) | (uint64_t(bytes_[offset + 5]) << 8) |
+                                (uint64_t(bytes_[offset + 6]) << 16) |
+                                (uint64_t(bytes_[offset + 7]) << 24);
+        if (length > bytes_.size() - offset - 8)
+          return Error{ErrorCode::kRejected, "invalid_photo_preview"};
+        if (std::memcmp(bytes_.data() + offset, "EXIF", 4) == 0)
+          orientation_ = PreviewExif(std::span(bytes_).subspan(offset + 8, length));
+        offset += 8 + length + (length & 1);
+      }
+    } else {
+      RK_RETURN_IF_ERROR(PreviewImaging(factory_->CreateDecoderFromFilename(
+          path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder_)));
+      GUID format{};
+      RK_RETURN_IF_ERROR(PreviewImaging(decoder_->GetContainerFormat(&format)));
+      if (format != GUID_ContainerFormatJpeg && format != GUID_ContainerFormatPng)
+        return Error{ErrorCode::kRejected, "invalid_photo_preview"};
+      type = format == GUID_ContainerFormatJpeg ? "image/jpeg" : "image/png";
+      RK_RETURN_IF_ERROR(PreviewImaging(decoder_->GetFrame(0, &frame_)));
+      RK_RETURN_IF_ERROR(PreviewImaging(frame_->GetSize(&width_, &height_)));
+      ComPtr<IWICMetadataQueryReader> metadata;
+      if (SUCCEEDED(frame_->GetMetadataQueryReader(&metadata))) {
+        PROPVARIANT value{};
+        if (SUCCEEDED(metadata->GetMetadataByName(L"/app1/ifd/{ushort=274}", &value)) &&
+            value.vt == VT_UI2 && value.uiVal >= 1 && value.uiVal <= 8)
+          orientation_ = value.uiVal;
+        PropVariantClear(&value);
+      }
+      if (type == "image/png") {
+        for (size_t offset = 8; offset <= bytes_.size() && bytes_.size() - offset >= 12;) {
+          uint64_t length = 0;
+          for (size_t i = 0; i < 4; ++i)
+            length = length * 256 + bytes_[offset + i];
+          if (length > bytes_.size() - offset - 12)
+            return Error{ErrorCode::kRejected, "invalid_photo_preview"};
+          if (std::memcmp(bytes_.data() + offset + 4, "eXIf", 4) == 0)
+            orientation_ = PreviewExif(std::span(bytes_).subspan(offset + 8, length));
+          offset += length + 12;
+        }
+      }
+    }
+    if (!width_ || !height_ || width_ > 16384 || height_ > 16384 ||
+        uint64_t(width_) * height_ > 32 * 1024 * 1024)
+      return Error{ErrorCode::kLimitExceeded, "photo_preview_input_too_large"};
+    width = orientation_ >= 5 ? height_ : width_;
+    height = orientation_ >= 5 ? width_ : height_;
+    return {};
+  }
+  Result<FileLibrary::Derivative> Write(const fs::path& output,
+                                        unsigned max_side,
+                                        const FileLibrary::Check& check) {
+    RK_RETURN_IF_ERROR(check());
+    const UINT longest = std::max(width_, height_);
+    const UINT target_width = std::max(1u, width_ * max_side / longest);
+    const UINT target_height = std::max(1u, height_ * max_side / longest);
+    std::vector<uint8_t> pixels(size_t(target_width) * target_height * 4);
+    if (webp_) {
+      WebPDecoderConfig config{};
+      if (!WebPInitDecoderConfig(&config))
+        return Error{ErrorCode::kUnavailable, "photo_preview_decoder_failed"};
+      config.options.use_scaling = 1;
+      config.options.scaled_width = target_width;
+      config.options.scaled_height = target_height;
+      config.output.colorspace = MODE_BGRA;
+      config.output.is_external_memory = 1;
+      config.output.u.RGBA.rgba = pixels.data();
+      config.output.u.RGBA.stride = target_width * 4;
+      config.output.u.RGBA.size = pixels.size();
+      const auto status = WebPDecode(bytes_.data(), bytes_.size(), &config);
+      WebPFreeDecBuffer(&config.output);
+      if (status != VP8_STATUS_OK)
+        return Error{ErrorCode::kRejected, "invalid_photo_preview"};
+    } else {
+      ComPtr<IWICBitmapScaler> scaler;
+      ComPtr<IWICFormatConverter> converter;
+      RK_RETURN_IF_ERROR(PreviewImaging(factory_->CreateBitmapScaler(&scaler)));
+      RK_RETURN_IF_ERROR(PreviewImaging(scaler->Initialize(
+          frame_.Get(), target_width, target_height, WICBitmapInterpolationModeFant)));
+      RK_RETURN_IF_ERROR(PreviewImaging(factory_->CreateFormatConverter(&converter)));
+      RK_RETURN_IF_ERROR(PreviewImaging(
+          converter->Initialize(scaler.Get(), GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone,
+                                nullptr, 0, WICBitmapPaletteTypeCustom)));
+      RK_RETURN_IF_ERROR(PreviewImaging(converter->CopyPixels(
+          nullptr, target_width * 4, static_cast<UINT>(pixels.size()), pixels.data())));
+    }
+    RK_RETURN_IF_ERROR(check());
+    const UINT oriented_width = orientation_ >= 5 ? target_height : target_width;
+    const UINT oriented_height = orientation_ >= 5 ? target_width : target_height;
+    std::vector<uint8_t> oriented(pixels.size());
+    constexpr WICBitmapTransformOptions transforms[] = {
+        WICBitmapTransformRotate0,
+        WICBitmapTransformRotate0,
+        WICBitmapTransformFlipHorizontal,
+        WICBitmapTransformRotate180,
+        WICBitmapTransformFlipVertical,
+        static_cast<WICBitmapTransformOptions>(WICBitmapTransformRotate90 |
+                                               WICBitmapTransformFlipHorizontal),
+        WICBitmapTransformRotate90,
+        static_cast<WICBitmapTransformOptions>(WICBitmapTransformRotate270 |
+                                               WICBitmapTransformFlipHorizontal),
+        WICBitmapTransformRotate270};
+    ComPtr<IWICBitmap> bitmap;
+    ComPtr<IWICBitmapFlipRotator> rotator;
+    RK_RETURN_IF_ERROR(PreviewImaging(factory_->CreateBitmapFromMemory(
+        target_width, target_height, GUID_WICPixelFormat32bppBGRA, target_width * 4,
+        static_cast<UINT>(pixels.size()), pixels.data(), &bitmap)));
+    RK_RETURN_IF_ERROR(PreviewImaging(factory_->CreateBitmapFlipRotator(&rotator)));
+    RK_RETURN_IF_ERROR(PreviewImaging(rotator->Initialize(bitmap.Get(), transforms[orientation_])));
+    RK_RETURN_IF_ERROR(PreviewImaging(rotator->CopyPixels(
+        nullptr, oriented_width * 4, static_cast<UINT>(oriented.size()), oriented.data())));
+    uint8_t* encoded = nullptr;
+    const auto size = WebPEncodeBGRA(oriented.data(), oriented_width, oriented_height,
+                                     oriented_width * 4, 80, &encoded);
+    std::unique_ptr<uint8_t, decltype(&WebPFree)> encoded_owner(encoded, WebPFree);
+    if (!size)
+      return Error{ErrorCode::kUnavailable, "photo_preview_encode_failed"};
+    RK_RETURN_IF_ERROR(check());
+    std::ofstream stream(output, std::ios::binary);
+    stream.write(reinterpret_cast<const char*>(encoded), size);
+    stream.close();
+    if (!stream)
+      return Error{ErrorCode::kUnavailable, "photo_output_failed"};
+    return FileLibrary::Derivative{oriented_width, oriented_height};
+  }
+  UINT width{}, height{};
+  std::string type;
+
+ private:
+  bool initialized_ = false, webp_ = false;
+  UINT width_{}, height_{};
+  unsigned orientation_ = 1;
+  std::vector<uint8_t> bytes_;
+  ComPtr<IWICImagingFactory> factory_;
+  ComPtr<IWICBitmapDecoder> decoder_;
+  ComPtr<IWICBitmapFrameDecode> frame_;
+};
+#endif
 }  // namespace
 
 ServiceJson FileLibrary::Asset::Json() const {
@@ -377,14 +595,14 @@ Result<FileLibrary::Asset> FileLibrary::Publish(const fs::path& source,
                                                 Asset asset,
                                                 const Check& check,
                                                 const std::string& derived_from,
-                                                const std::string& derivative) {
+                                                const std::string& kind) {
   RK_RETURN_IF_ERROR(Verify(source, asset.size));
-  RK_ASSIGN_OR_RETURN(info, access_->Write(source, check, derived_from));
+  RK_ASSIGN_OR_RETURN(info, access_->Write(source, check, derived_from, kind));
   asset.id = info.id;
   std::lock_guard lock(mutex_);
   RK_RETURN_IF_ERROR(check());
   Entry entry{asset};
-  RK_RETURN_IF_ERROR(store_.Seal(asset.id, asset.Json(), {}, Json(), derivative));
+  RK_RETURN_IF_ERROR(store_.Seal(asset.id, asset.Json(), {}, Json()));
   entries_.insert_or_assign(asset.id, std::move(entry));
   return asset;
 }
@@ -647,15 +865,32 @@ Result<fs::path> FileLibrary::Path(const std::string& id) const {
 Result<std::pair<FileLibrary::Asset, std::vector<std::uint8_t>>> FileLibrary::Read(
     const std::string& id,
     std::uint64_t offset) const {
-  RK_ASSIGN_OR_RETURN(asset, Describe(id));
-  RK_ASSIGN_OR_RETURN(bytes, objects_.Store().ReadRange(objects_.ObjectKeys(), id, offset, kChunk));
-  return std::pair{asset, std::move(bytes)};
+  std::optional<Asset> asset;
+  if (access_->HasGrant(id)) {
+    std::lock_guard lock(mutex_);
+    if (const auto found = entries_.find(id); found != entries_.end())
+      asset = found->second.asset;
+  }
+  if (!asset) {
+    RK_ASSIGN_OR_RETURN(described, Describe(id));
+    asset = described;
+  }
+  auto bytes = objects_.Store().ReadRange(objects_.ObjectKeys(), id, offset, kChunk);
+  if (!bytes && bytes.error().code == ErrorCode::kNotFound) {
+    RK_ASSIGN_OR_RETURN(described, Describe(id));
+    asset = described;
+    bytes = objects_.Store().ReadRange(objects_.ObjectKeys(), id, offset, kChunk);
+  }
+  if (!bytes)
+    return bytes.error();
+  return std::pair{*asset, std::move(bytes).value()};
 }
 Result<FileLibrary::Asset> FileLibrary::CreateDerivative(const Render& render,
                                                          const Check& check,
                                                          DerivativeFormat format,
                                                          const std::string& derived_from,
-                                                         const std::string& derivative) {
+                                                         const std::string& kind,
+                                                         ServiceJson* metadata) {
   const bool jpeg = format == DerivativeFormat::jpeg;
   const auto budget = jpeg ? kJpegDerivativeBytes : kPngDerivativeBytes;
   const char* extension = jpeg ? ".jpg" : format == DerivativeFormat::png ? ".png" : ".webp";
@@ -681,28 +916,118 @@ Result<FileLibrary::Asset> FileLibrary::CreateDerivative(const Render& render,
       return Error{ErrorCode::kLimitExceeded, "photo_output_too_large", ErrorReason::kFileTooLarge};
     RK_RETURN_IF_ERROR(FlushFile(path));
     auto result = Publish(path, {{}, type, size, dimensions.width, dimensions.height}, check,
-                          derived_from, derivative);
-    Remove(path);
+                          derived_from, kind);
+    if (result && metadata)
+      *metadata = dimensions.metadata;
     return result;
   }
 }
 Result<FileLibrary::Asset> FileLibrary::CachedDerivative(const std::string& source,
                                                          DerivativeFormat format,
                                                          const Render& render,
-                                                         const Check& check) {
-  std::lock_guard lock(derivatives_mutex_);
+                                                         const Check& check,
+                                                         const std::string& kind,
+                                                         const std::string& variant,
+                                                         ServiceJson* metadata) {
+  const std::string encoding = format == DerivativeFormat::jpeg  ? "jpeg"
+                               : format == DerivativeFormat::png ? "png"
+                                                                 : "webp";
+  const DerivativeKey key{source, kind, variant.empty() ? encoding : variant + ":" + encoding};
+  const auto lock_key = source + ":" + kind + ":" + key.parameters;
+  std::lock_guard lock(
+      derivatives_mutexes_[std::hash<std::string>{}(lock_key) % derivatives_mutexes_.size()]);
   RK_RETURN_IF_ERROR(check());
-  RK_ASSIGN_OR_RETURN(original, Describe(source));
-  const auto key = original.id + (format == DerivativeFormat::jpeg  ? "-jpeg"
-                                  : format == DerivativeFormat::png ? "-png"
-                                                                    : "-webp");
-  RK_ASSIGN_OR_RETURN(records, store_.Load(LibraryTable::kDerivatives));
-  if (const auto found = records.find(key); found != records.end()) {
-    RK_RETURN_IF_ERROR(library_records::Validate(LibraryTable::kDerivatives, key, found->second));
-    return Describe(found->second.at("assetId").get<std::string>());
+  RK_RETURN_IF_ERROR(Describe(source));
+  RK_ASSIGN_OR_RETURN(cached, store_.FindDerivative(key));
+  if (cached) {
+    auto asset = Describe(cached->asset_id);
+    if (asset) {
+      RK_RETURN_IF_ERROR(check());
+      if (metadata)
+        *metadata = cached->metadata;
+      return asset;
+    }
+    if (asset.error().code != ErrorCode::kNotFound)
+      return asset.error();
+    // A missing derivative is repairable only while the original is still readable.
+    RK_RETURN_IF_ERROR(Path(source));
+    RK_RETURN_IF_ERROR(check());
+    RK_RETURN_IF_ERROR(store_.EraseDerivative(key, check));
   }
-  RK_ASSIGN_OR_RETURN(asset, CreateDerivative(render, check, format, source, key));
+  ServiceJson rendered_metadata;
+  RK_ASSIGN_OR_RETURN(asset,
+                      CreateDerivative(render, check, format, source, kind, &rendered_metadata));
+  RK_RETURN_IF_ERROR(store_.SaveDerivative(key, {asset.id, rendered_metadata}, check));
+  if (metadata)
+    *metadata = std::move(rendered_metadata);
   return asset;
+}
+Result<ServiceJson> FileLibrary::Preview(const std::string& source,
+                                         unsigned max_side,
+                                         const Check& check) {
+  if (max_side != 1280 && max_side != 2560)
+    return Error{ErrorCode::kRejected, "invalid_photo_preview_max_side"};
+#ifdef RK_FILE_PHOTO
+  RK_RETURN_IF_ERROR(check());
+  RK_ASSIGN_OR_RETURN(path, Path(source));
+  PreviewImage image;
+  RK_RETURN_IF_ERROR(image.Open(path));
+  if (std::max(image.width, image.height) <= max_side) {
+    RK_RETURN_IF_ERROR(check());
+    return ServiceJson{{"assetId", source},
+                       {"width", image.width},
+                       {"height", image.height},
+                       {"type", image.type}};
+  }
+  RK_ASSIGN_OR_RETURN(
+      asset, CachedDerivative(
+                 source, DerivativeFormat::webp,
+                 [&](const fs::path& output) { return image.Write(output, max_side, check); },
+                 check, "preview", std::to_string(max_side) + "-q80-v1"));
+  RK_RETURN_IF_ERROR(check());
+  return ServiceJson{{"assetId", asset.id},
+                     {"width", asset.width},
+                     {"height", asset.height},
+                     {"type", "image/webp"}};
+#else
+  return Error{ErrorCode::kUnavailable, "photo_processing_unavailable"};
+#endif
+}
+Result<ServiceJson> FileLibrary::Process(const std::string& source,
+                                         const std::string& mode,
+                                         std::optional<unsigned> turns,
+                                         const Check& check) {
+  if (mode != "photo" && mode != "scan")
+    return Error{ErrorCode::kInvalidRequest, "invalid_photo_mode"};
+  if (turns && *turns > 3)
+    return Error{ErrorCode::kInvalidRequest, "invalid_photo_quarter_turns"};
+#ifdef RK_FILE_PHOTO
+  const auto variant = mode + "-" + (turns ? std::to_string(*turns) : "auto") + "-v" +
+                       std::to_string(derivative_records::kPhotoAlgorithmVersion);
+  ServiceJson metadata;
+  RK_ASSIGN_OR_RETURN(asset, CachedDerivative(
+                                 source, DerivativeFormat::webp,
+                                 [&](const fs::path& output) -> Result<Derivative> {
+                                   RK_ASSIGN_OR_RETURN(path, Path(source));
+                                   RK_ASSIGN_OR_RETURN(
+                                       processed, ProcessPhoto(path, output,
+                                                               mode == "scan" ? PhotoMode::kScan
+                                                                              : PhotoMode::kPhoto,
+                                                               turns, [&] { return !check(); }));
+                                   return Derivative{processed.width,
+                                                     processed.height,
+                                                     {{"geometry", processed.geometry},
+                                                      {"quarterTurns", processed.quarter_turns},
+                                                      {"orientation", processed.orientation}}};
+                                 },
+                                 check, "photo", variant, &metadata));
+  RK_RETURN_IF_ERROR(check());
+  auto result = asset.Json();
+  result.update(metadata);
+  return result;
+#else
+  return Error{ErrorCode::kUnavailable, "photo_processing_unavailable"};
+#endif
 }
 ServiceJson FileLibrary::CleanupFailures() const {
   std::lock_guard lock(mutex_);

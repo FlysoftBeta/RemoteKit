@@ -14,12 +14,13 @@ export function useFileLibrary(
   identity: string | undefined,
   requestIds: string[],
   updates: Events<LibrarySnapshot>,
-  product?: Pick<ProductState, 'workspace'> | null,
+  product?: Pick<ProductState, 'workspace' | 'fileRequests'> | null,
 ) {
   const [store] = useState(() => new LibraryStore(request, rpc));
+  const requestVersion = canonicalJson(product?.fileRequests ?? requestIds);
   useEffect(() => {
-    store.configure(online, enabled, identity, requestIds);
-  }, [store, online, enabled, identity, requestIds]);
+    store.configure(online, enabled, identity, requestIds, requestVersion);
+  }, [store, online, enabled, identity, requestVersion]);
   useEffect(() => () => store.dispose(), [store]);
   useEffect(() => updates.subscribe(store.receive), [store, updates]);
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);

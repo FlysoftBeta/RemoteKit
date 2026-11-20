@@ -22,6 +22,10 @@ class LayoutTransaction {
   float PageScale(const ViewSpec& spec) const {
     return spec.page_dsf > 0 ? spec.page_dsf : output_scale;
   }
+  float AtlasScale() const {
+    return std::min(float(output_width) / logical_width, float(output_height) / logical_height);
+  }
+  uint32_t revision = 0;
   float output_scale = 1;
   uint32_t allocation_alignment = 1;
   int logical_width = 0, logical_height = 0;

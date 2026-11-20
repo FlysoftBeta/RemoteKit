@@ -1,5 +1,6 @@
 #pragma once
 #include "rtc/dc_services.hpp"
+#include "rtc/frame_metadata.hpp"
 #include "rtc/data_router.hpp"
 #include "rtc/authorization.hpp"
 #include "rtc/outbox.hpp"
@@ -65,6 +66,8 @@ class ChannelController : private ControllerContext {
   int SendData(uint64_t handle, uint64_t stamp, const std::string& encoded);
   void Send(const Json& message, uint64_t expected_stamp = 0);
   void FlushControl();
+  void FlushFrameMetadata();
+  void Refresh(const RtcEvent& event);
   void FlushServices();
   Result<Json> Offer(const Json& request, uint64_t generation);
   Result<void> ReplayOffer(const Json& request, uint64_t generation);
@@ -88,6 +91,7 @@ class ChannelController : private ControllerContext {
   std::mutex event_mutex;
   std::deque<RtcEvent> events;
   DataRouter data_router;
+  FrameMetadata frame_metadata;
   uint64_t request_generation_ = 0;
   std::string peer_lease_;
   std::function<void()> signal_;

@@ -62,8 +62,9 @@ const request = {
   limits: { maxFiles: 10, maxFileBytes: 100, maxBatchBytes: 100 },
 } as unknown as FileRequest;
 
-for (const outcome of ['handed-off', 'failed'] as const) {
-  test(`sending the basket hides it at once; ${outcome === 'failed' ? 'a failed send shows it again' : 'it stays hidden while the page confirms'}`, async () => {
+for (const outcome of ['handed-off', 'failed', 'cancelled', 'cancel-failed', 'cancel-unknown'] as const) {
+  test(`basket hides immediately on send or cancel and restores errors: ${outcome}`, async () => {
+    const cancel = outcome.startsWith('cancel');
     let finish!: (state: SelectionState) => void;
     let fail!: (error: Error) => void;
     const selects: string[][] = [];
@@ -99,7 +100,11 @@ for (const outcome of ['handed-off', 'failed'] as const) {
           fail = reject;
         });
       },
-      cancelSelection: async () => 'cancelled',
+      cancelSelection: () =>
+        new Promise<SelectionState>((resolve, reject) => {
+          finish = resolve;
+          fail = reject;
+        }),
       apps: [],
     };
     const root = createRoot(document.getElementById('app')!);
@@ -115,20 +120,23 @@ for (const outcome of ['handed-off', 'failed'] as const) {
       });
       const panel = () => document.querySelector('[role="dialog"][aria-label="文件篮"]');
       assert.ok(panel());
-      const send = document.querySelector<HTMLButtonElement>('button[aria-label="发送"]')!;
+      const send = document.querySelector<HTMLButtonElement>(
+        `button[aria-label="${cancel ? '取消文件选择' : '发送'}"]`,
+      )!;
       assert.equal(send.disabled, false);
       await act(async () => {
         send.click();
       });
-      assert.deepEqual(selects, [[entry.id]]);
+      assert.deepEqual(selects, cancel ? [] : [[entry.id]]);
       assert.equal(panel(), null);
       await act(async () => {
-        if (outcome === 'failed') fail(new RemoteKitError('rejected', '文件无法交给页面'));
-        else finish('validating');
+        if (outcome === 'failed' || outcome === 'cancel-failed')
+          fail(new RemoteKitError('rejected', '文件选择操作被拒绝'));
+        else finish(outcome === 'cancel-unknown' ? 'unknown' : cancel ? 'cancelled' : 'validating');
       });
-      if (outcome === 'failed') {
+      if (outcome === 'failed' || outcome === 'cancel-failed' || outcome === 'cancel-unknown') {
         assert.ok(panel());
-        assert.match(document.body.textContent!, /未能发送文件/);
+        assert.match(document.body.textContent!, /未能|未知|无法确认/);
       } else assert.equal(panel(), null);
     } finally {
       await act(async () => root.unmount());

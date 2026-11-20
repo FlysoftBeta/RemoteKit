@@ -13,7 +13,24 @@ struct Paper {
   float black_point = 45;
 };
 
-Result<std::optional<unsigned>> AutomaticQuarterTurns(const cv::Mat&, const PhotoCancelled&);
+struct OrientationCrop {
+  cv::Rect bounds;
+  std::array<double, 4> probabilities{};
+};
+
+struct OrientationDecision {
+  unsigned turns = 0;
+  std::string state = "none";
+  bool vertical = false;
+  double dominance = 0;
+  std::array<double, 2> scores{};
+  std::array<double, 2> membership{};
+  std::array<double, 4> probabilities{};
+  std::vector<OrientationCrop> crops;
+};
+
+OrientationDecision FuseOrientation(bool vertical, const std::vector<OrientationCrop>&);
+Result<OrientationDecision> AutomaticQuarterTurns(const cv::Mat&, const PhotoCancelled&);
 Result<Paper> AnalyzePaper(const cv::Mat&, const PhotoCancelled&);
 Result<void> EnhanceScan(cv::Mat&, const Paper&, const PhotoCancelled&);
 }  // namespace remotekit::photo

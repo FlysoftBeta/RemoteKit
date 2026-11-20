@@ -30,6 +30,7 @@ class PresentationRefresh {
     scope_ = scope;
     pending_ = scope_.has_value();
     next_attempt_ms_ = 0;
+    next_force_ms_ = 0;
   }
 
   void Update(bool requested, double now_ms) {
@@ -45,11 +46,17 @@ class PresentationRefresh {
         if (state == State::succeeded) {
           pending_ = false;
           ++successes_;
+        } else if (state == State::failed) {
+          next_attempt_ms_ = next_force_ms_ = 0;
+        } else {
+          next_attempt_ms_ = next_force_ms_ = now_ms + kRetryMs;
         }
       }
     }
     // An in-flight request absorbs duplicates. A consumer that requests a
     // refresh after publication still needs its own frame.
+    if (requested && !pending_ && !attempt_)
+      next_attempt_ms_ = next_force_ms_ = 0;
     pending_ |= requested;
   }
 
@@ -60,6 +67,10 @@ class PresentationRefresh {
     ++forced_begins_;
   }
 
+  void SourceRejected() {
+    if (pending_ && !attempt_)
+      next_force_ms_ = next_attempt_ms_ = 0;
+  }
   bool Pending() const { return pending_; }
   Stats Snapshot() const { return {pending_, attempts_, forced_begins_, successes_}; }
 

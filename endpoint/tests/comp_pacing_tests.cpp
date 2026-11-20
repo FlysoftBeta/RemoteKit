@@ -1,4 +1,5 @@
 #include "media/comp_pacing.hpp"
+#include "media/layout_requirement.hpp"
 #include "media/idle_keepalive.hpp"
 #include "media/comp_recovery.hpp"
 #include "browser/osr/cache_policy.h"
@@ -13,6 +14,37 @@ void Require(bool value, const char* message) {
   }
 }
 int main() {
+  remotekit::media::LayoutRequirement required{4, {{1, 9}}};
+  remotekit::SharedAtlasFrame pixels{};
+  pixels.generation = 12;
+  pixels.layout_revision = 3;
+  pixels.view_count = 1;
+  pixels.views[0].webview_id = 1;
+  pixels.views[0].occlusion_revision = 9;
+  Require(!required.Matches(pixels, 12), "queued old layout pixels remain isolated");
+  pixels.layout_revision = 4;
+  Require(required.Matches(pixels, 12), "matching layout and viewport provide pixel proof");
+  pixels.generation = 11;
+  Require(!required.Matches(pixels, 12),
+          "old output generations cannot complete a new source demand");
+  pixels.generation = 12;
+  pixels.views[0].occlusion_revision = 8;
+  Require(!required.Matches(pixels, 12), "old keyboard pixels cannot complete the revision demand");
+  Require(required.Matches(pixels, 12, false),
+          "in-flight old keyboard pixels keep their truthful metadata and codec dependencies");
+  pixels.views[0].occlusion_revision = 10;
+  Require(required.Matches(pixels, 12), "new viewport revision supersedes the requested revision");
+  pixels.views[0].reserved = remotekit::kSharedAtlasViewStale;
+  Require(!required.Matches(pixels, 12), "stale planes never prove completion");
+  remotekit::CompBeginSchedule geometry;
+  geometry.Attempted(0, 1000000, true);
+  geometry.Wake();
+  Require(geometry.Due(1), "geometry demand bypasses the old 1 FPS deadline");
+  geometry.Attempted(1, 1000000, false);
+  Require(geometry.Due(2), "saturation preserves geometry priority until admission succeeds");
+  geometry.Attempted(2, 1000000, true);
+  geometry.Reevaluate(250000, 500000);
+  Require(geometry.deadline() == 750000, "cadence ramp contracts the old deadline");
   remotekit::IdleKeepalive keepalive(1000);
   Require(!keepalive.Due(10000, 0, false), "keepalive waits for first encode");
   Require(!keepalive.Due(3499, 1000, false), "keepalive waits 2.5 seconds");

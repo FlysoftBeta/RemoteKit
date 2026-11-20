@@ -44,6 +44,7 @@ class MediaPipeline : private ControllerContext, private media::CompHost {
 
  private:
   friend class NativeRetryOwnerProbe;
+  friend class NativeErrorStateProbe;
   void PollClipboard();
   mutable std::mutex clipboard_retry_mutex_;
   RetryUnit clipboard_retry_{"clipboard.sync"};
@@ -62,6 +63,8 @@ class MediaPipeline : private ControllerContext, private media::CompHost {
   media::CompEngine engine;
   bool has_current_view = false;
   Layout ObserveLayout(const SharedAtlasFrame&) override;
+  uint64_t PendingLayout() override;
+  bool MatchesLayout(const SharedAtlasFrame&) override;
   std::optional<PresentationBarrier::Key> RefreshKey(uint64_t peer) override;
   void Invalidate(const char* reason) override;
   void Reached(Milestone) override;

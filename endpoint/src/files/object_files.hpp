@@ -51,11 +51,6 @@ class ObjectFiles {
   DcFileServices services;
 #ifdef RK_FILE_PHOTO
   PhotoBurstSessions<PhotoBurstAnalyzer> photo_bursts;
-  struct PhotoThumbnail {
-    std::string asset_id;
-    int64_t refresh_after;
-  };
-  std::map<std::string, PhotoThumbnail> photo_thumbnails;
 #endif
 };
 }  // namespace remotekit

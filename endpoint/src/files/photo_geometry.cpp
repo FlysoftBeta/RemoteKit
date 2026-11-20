@@ -84,7 +84,7 @@ double Angle(const Points& points) {
   return std::atan(-line[0] / line[1]) * kDegrees;
 }
 
-enum class Kind { kText, kRule, kDotted, kStroke, kBoundary, kBinding, kMargin };
+enum class Kind { kText, kRule, kDotted, kStroke, kBoundary, kBinding, kMargin, kOcclusion };
 struct Span {
   Points points;
   Kind kind = Kind::kText;
@@ -92,6 +92,9 @@ struct Span {
   double weight = 1;
   cv::Vec3d line;
   double angle = 0;
+  double glyph_height = 0;
+  int glyph_count = 0;
+  Points printed_points;
   Span(Points samples,
        Kind type,
        double text_height,
@@ -115,13 +118,14 @@ struct Segment {
 };
 struct Evidence {
   std::vector<Span> spans;
-  cv::Mat ink, clean;
+  cv::Mat ink, clean, protected_ink;
   std::vector<cv::Rect> boxes;
 };
 struct Region {
   std::vector<int> members;
   std::optional<cv::Vec3d> left, right;
   double score = 0;
+  std::vector<cv::Vec3d> boundaries;
 };
 
 Points ColumnCentres(const cv::Mat& mask,
@@ -172,6 +176,62 @@ double Evaluate(const std::vector<double>& coefficients, double x) {
   return value;
 }
 
+void FindPrintedBaselines(Evidence& evidence, cv::Size size) {
+  double font_height = 0;
+  int best_population = 0;
+  for (const auto& candidate : evidence.spans) {
+    if (candidate.kind != Kind::kText || candidate.weight < .5 || candidate.glyph_height < 3)
+      continue;
+    int population = 0;
+    for (const auto& span : evidence.spans)
+      if (span.weight >= .5 && span.glyph_height >= .8 * candidate.glyph_height &&
+          span.glyph_height <= 1.25 * candidate.glyph_height)
+        population += span.glyph_count;
+    if (population > best_population) {
+      best_population = population;
+      font_height = candidate.glyph_height;
+    }
+  }
+  if (font_height == 0)
+    return;
+  for (auto& span : evidence.spans) {
+    if (span.kind != Kind::kText || span.weight < .5 || span.glyph_height < .65 * font_height ||
+        span.glyph_height > 1.4 * font_height)
+      continue;
+    Points glyphs;
+    for (const auto& box : evidence.boxes) {
+      const cv::Point2d center(box.x + box.width * .5, box.y + box.height * .5);
+      if (box.height >= .65 * font_height && box.height <= 1.4 * font_height &&
+          box.width >= .2 * box.height && box.width <= 1.7 * box.height &&
+          center.x >= span.points.front().x - 4 && center.x <= span.points.back().x + 4 &&
+          std::abs(span.line.dot(Homogeneous(center))) < span.height * .7)
+        glyphs.emplace_back(center.x, box.y + box.height);
+    }
+    if (glyphs.size() < 6)
+      continue;
+    Points best;
+    for (size_t i = 0; i < glyphs.size(); ++i) {
+      for (size_t j = i + 1; j < glyphs.size(); ++j) {
+        const auto delta = glyphs[j] - glyphs[i];
+        if (std::abs(delta.x) < .06 * size.width || std::abs(delta.y) > .4 * std::abs(delta.x))
+          continue;
+        const auto line = Line({glyphs[i], glyphs[j]});
+        Points selected;
+        for (auto point : glyphs)
+          if (std::abs(line.dot(Homogeneous(point))) <= std::max(1.5, .18 * font_height))
+            selected.push_back(point);
+        if (selected.size() > best.size())
+          best = std::move(selected);
+      }
+    }
+    if (best.size() >= 6 && best.size() >= .55 * glyphs.size() &&
+        Range(best, 0) >= std::max(60.0, .1 * size.width)) {
+      std::sort(best.begin(), best.end(), [](auto a, auto b) { return a.x < b.x; });
+      span.printed_points = std::move(best);
+    }
+  }
+}
+
 Evidence ExtractEvidence(const cv::Mat& image) {
   Evidence evidence;
   cv::Mat gray, hsv, low, labels, stats, centres;
@@ -179,6 +239,7 @@ Evidence ExtractEvidence(const cv::Mat& image) {
   cv::cvtColor(image, hsv, cv::COLOR_BGR2HSV);
   cv::adaptiveThreshold(gray, evidence.ink, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C,
                         cv::THRESH_BINARY_INV, 31, 9);
+  evidence.protected_ink = evidence.ink.clone();
   cv::GaussianBlur(gray, low, {}, 7);
   for (int y = 0; y < image.rows; ++y) {
     auto* ink = evidence.ink.ptr<uint8_t>(y);
@@ -297,16 +358,21 @@ Evidence ExtractEvidence(const cv::Mat& image) {
         continue;
     }
     int glyphs = 0;
+    std::vector<double> glyph_heights;
     for (const auto& box : evidence.boxes) {
       const cv::Point2d centre(box.x + box.width * .5, box.y + box.height * .5);
       const double aspect = double(box.width) / box.height;
       if (centre.x >= points.front().x - 4 && centre.x <= points.back().x + 4 &&
           std::abs(line.dot(Homogeneous(centre))) < height * .7 && aspect > .15 && aspect < 1.7 &&
-          box.height > height * .25)
+          box.height > height * .25) {
         ++glyphs;
+        glyph_heights.push_back(box.height);
+      }
     }
     const double weight = glyphs >= std::max(5.0, Range(points, 0) / 32) ? 1 : .2;
     evidence.spans.push_back({std::move(points), Kind::kText, height, weight, line});
+    evidence.spans.back().glyph_height = Quantile(glyph_heights);
+    evidence.spans.back().glyph_count = glyphs;
   }
   cv::Mat faint, blurred;
   cv::adaptiveThreshold(gray, faint, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY_INV, 31,
@@ -352,6 +418,7 @@ Evidence ExtractEvidence(const cv::Mat& image) {
     rules.push_back({std::move(points), Kind::kDotted, 1, 1.5});
   }
   evidence.spans.insert(evidence.spans.end(), rules.begin(), rules.end());
+  FindPrintedBaselines(evidence, image.size());
   return evidence;
 }
 
@@ -438,6 +505,14 @@ std::vector<Segment> ExtractSegments(const cv::Mat& image,
   lab = AnalysisLab(background);
   std::vector<cv::Vec4f> raw;
   cv::createLineSegmentDetector(cv::LSD_REFINE_STD, .7)->detect(gray, raw);
+  cv::Mat smooth_gray, edges;
+  cv::cvtColor(background, smooth_gray, cv::COLOR_BGR2GRAY);
+  cv::Canny(smooth_gray, edges, 8, 20);
+  std::vector<cv::Vec4i> transitions;
+  cv::HoughLinesP(edges, transitions, 1, CV_PI / 720, 40, .15 * std::min(image.cols, image.rows),
+                  25);
+  for (const auto& transition : transitions)
+    raw.emplace_back(transition[0], transition[1], transition[2], transition[3]);
   std::vector<Segment> segments;
   for (const auto& r : raw) {
     Segment segment{{{r[0], r[1]}, {r[2], r[3]}}};
@@ -537,6 +612,8 @@ Points RegionPoints(const Region& region, const std::vector<Span>& spans, bool r
   for (int i : region.members)
     if (!reliable || spans[i].weight >= .5)
       points.insert(points.end(), spans[i].points.begin(), spans[i].points.end());
+  if (reliable && points.empty())
+    return RegionPoints(region, spans);
   return points;
 }
 double RegionScore(const Region& region, const std::vector<Span>& spans) {
@@ -552,11 +629,13 @@ double RegionScore(const Region& region, const std::vector<Span>& spans) {
 }
 std::vector<Region> SegmentRegions(const cv::Mat& image,
                                    const Evidence& evidence,
-                                   const std::vector<Segment>& segments) {
+                                   const std::vector<Segment>& segments,
+                                   const cv::Mat& background) {
   std::vector<std::pair<double, cv::Vec3d>> barriers;
   for (const auto& segment : segments) {
     const auto delta = segment.points.back() - segment.points.front();
-    if (std::abs(delta.y) < 1.3 * std::abs(delta.x) || segment.Length() < .27 * image.rows)
+    if ((segment.kind != Kind::kBoundary && segment.kind != Kind::kBinding) ||
+        std::abs(delta.y) < 1.3 * std::abs(delta.x) || segment.Length() < .27 * image.rows)
       continue;
     const auto [continuity, gap] = TrackSupport(segment, evidence.ink);
     if (segment.kind == Kind::kBinding && (continuity < .8 || gap > .04 * image.rows))
@@ -587,13 +666,61 @@ std::vector<Region> SegmentRegions(const cv::Mat& image,
         continue;
       region.members.push_back(j);
     }
-    if (region.members.size() >= 3) {
+    if (!region.members.empty()) {
       region.score = RegionScore(region, evidence.spans);
       regions.push_back(std::move(region));
     }
   }
-  std::sort(regions.begin(), regions.end(), [](auto& a, auto& b) { return a.score > b.score; });
-  return regions;
+  cv::Mat hsv, paper;
+  cv::cvtColor(background, hsv, cv::COLOR_BGR2HSV);
+  cv::inRange(hsv, cv::Scalar(0, 0, 75), cv::Scalar(180, 100, 255), paper);
+  std::vector<cv::Vec3d> boundaries;
+  for (const auto& segment : segments) {
+    if (segment.kind != Kind::kBoundary ||
+        segment.Length() < .25 * std::min(image.rows, image.cols))
+      continue;
+    const auto direction = (segment.points.back() - segment.points.front()) / segment.Length();
+    const auto middle = Mean(segment.points);
+    const double extent = 2 * std::max(image.rows, image.cols);
+    cv::line(paper, middle - direction * extent, middle + direction * extent, cv::Scalar(0), 5);
+    boundaries.push_back(Line(segment.points));
+  }
+  cv::Mat labels;
+  const int count = cv::connectedComponents(paper, labels);
+  std::vector<Region> associated;
+  for (const auto& region : regions) {
+    std::vector<Region> sheets(count);
+    for (int i : region.members) {
+      std::vector<int> votes(count);
+      for (auto p : evidence.spans[i].points)
+        ++votes[labels.at<int>(std::clamp(cvRound(p.y), 0, image.rows - 1),
+                               std::clamp(cvRound(p.x), 0, image.cols - 1))];
+      const auto best = std::max_element(votes.begin() + 1, votes.end());
+      if (best != votes.end() && *best >= .65 * evidence.spans[i].points.size())
+        sheets[best - votes.begin()].members.push_back(i);
+    }
+    for (auto& sheet : sheets) {
+      if (sheet.members.empty())
+        continue;
+      sheet.left = region.left;
+      sheet.right = region.right;
+      const auto core = RegionPoints(sheet, evidence.spans);
+      const auto center = Mean(core);
+      for (auto line : boundaries) {
+        if (line.dot(Homogeneous(center)) < 0)
+          line *= -1;
+        const auto inside = std::count_if(core.begin(), core.end(),
+                                          [&](auto p) { return line.dot(Homogeneous(p)) >= -3; });
+        if (inside >= .95 * core.size())
+          sheet.boundaries.push_back(line);
+      }
+      sheet.score = RegionScore(sheet, evidence.spans);
+      associated.push_back(std::move(sheet));
+    }
+  }
+  std::sort(associated.begin(), associated.end(),
+            [](const auto& a, const auto& b) { return a.score > b.score; });
+  return associated;
 }
 
 struct VpFit {
@@ -668,7 +795,7 @@ std::optional<VpFit> FitVp(const std::vector<cv::Vec3d>& lines,
       best = value;
     }
   }
-  VpFit fit{best};
+  VpFit fit{best, {}};
   for (size_t i = 0; i < lines.size(); ++i)
     fit.errors.push_back(VpError(lines[i], middles[i], best));
   return fit;
@@ -678,14 +805,11 @@ std::vector<Segment> MarginTracks(const Region& region,
                                   const std::vector<Span>& spans,
                                   cv::Size size) {
   std::vector<Segment> result;
-  int rules = 0;
-  for (int i : region.members)
-    rules += spans[i].kind == Kind::kRule;
   for (bool end : {false, true}) {
     Points points;
     for (int i : region.members)
-      if (spans[i].weight >= .5 && spans[i].kind != Kind::kDotted)
-        points.push_back(end ? spans[i].points.back() : spans[i].points.front());
+      if (!spans[i].printed_points.empty())
+        points.push_back(end ? spans[i].printed_points.back() : spans[i].printed_points.front());
     std::vector<bool> remaining(points.size(), true);
     for (int repeat = 0; repeat < 2 && points.size() >= 4; ++repeat) {
       std::vector<int> best;
@@ -706,7 +830,7 @@ std::vector<Segment> MarginTracks(const Region& region,
       Points selected;
       for (int i : best)
         selected.push_back(points[i]);
-      if (best.size() < 4 || Range(selected, 1) < (rules >= 4 ? .22 : .3) * size.height)
+      if (best.size() < 4 || Range(selected, 1) < .3 * size.height)
         break;
       const auto line = Line(selected);
       const double low = PointQuantile(selected, 1, 0), high = PointQuantile(selected, 1, 1);
@@ -738,6 +862,18 @@ Points Frame(cv::Size size, int samples = 1) {
   return points;
 }
 
+bool BelongsToRegion(const Segment& segment, const Region& region) {
+  const auto middle = Mean(segment.points);
+  if (region.left &&
+      middle.x < (-(*region.left)[2] - (*region.left)[1] * middle.y) / (*region.left)[0] - 5)
+    return false;
+  if (region.right &&
+      middle.x > (-(*region.right)[2] - (*region.right)[1] * middle.y) / (*region.right)[0] + 5)
+    return false;
+  return std::all_of(region.boundaries.begin(), region.boundaries.end(),
+                     [&](auto line) { return line.dot(Homogeneous(middle)) >= -5; });
+}
+
 std::optional<cv::Matx33d> FitRegion(const cv::Mat& image,
                                      const Evidence& evidence,
                                      const Region& region,
@@ -745,67 +881,74 @@ std::optional<cv::Matx33d> FitRegion(const cv::Mat& image,
   const auto& spans = evidence.spans;
   const double length = std::max(image.cols, image.rows);
   const auto normalizer = Normalizer(image.size());
-  int printed = 0, rules = 0;
+  int printed = 0;
   std::vector<cv::Vec3d> lines;
   Points middles;
   std::vector<double> weights;
   for (int i : region.members) {
     const auto& span = spans[i];
-    printed += span.kind == Kind::kText && span.weight >= .5;
-    rules += span.kind == Kind::kRule;
-    const auto points = Transform(span.points, normalizer);
+    if (span.printed_points.empty())
+      continue;
+    ++printed;
+    const auto points = Transform(span.printed_points, normalizer);
     lines.push_back(Line(points));
     middles.push_back(Mean(points));
-    weights.push_back(std::min(span.Width() / length, .5) * span.weight);
+    weights.push_back(std::min(Range(span.printed_points, 0) / length, .5));
   }
-  if (printed < 5 && !(printed >= 2 && rules >= 4))
+  const int printed_candidates = printed;
+  if (printed < 3)
+    return {};
+  const auto reliable = RegionPoints(region, spans, true);
+  const double y_low = PointQuantile(reliable, 1, .1), y_high = PointQuantile(reliable, 1, .9);
+  std::vector<Segment> physical_edges;
+  for (const auto& segment : segments) {
+    if (!BelongsToRegion(segment, region))
+      continue;
+    const auto delta = segment.points.back() - segment.points.front();
+    const auto middle = Mean(segment.points);
+    if (segment.kind != Kind::kBoundary || segment.contrast < 20 || segment.support < .65 ||
+        std::abs(delta.y) > .3 * std::abs(delta.x) || segment.Length() < .16 * image.cols ||
+        (middle.y > y_low && middle.y < y_high))
+      continue;
+    const auto edge_line = Line(segment.points);
+    if (std::any_of(physical_edges.begin(), physical_edges.end(), [&](const auto& other) {
+          const auto other_line = Line(other.points);
+          return std::abs(edge_line.dot(Homogeneous(Mean(other.points)))) < 8 &&
+                 std::abs(edge_line[0] * other_line[0] + edge_line[1] * other_line[1]) > .995;
+        }))
+      continue;
+    physical_edges.push_back(segment);
+    const auto points = Transform(segment.points, normalizer);
+    lines.push_back(Line(points));
+    middles.push_back(Mean(points));
+    weights.push_back(std::min(segment.Length() / length, .5) * 1.5);
+  }
+  if (printed < 5 && physical_edges.empty())
     return {};
   auto horizontal = FitVp(lines, middles, weights, .9, 1, .22 * image.rows / length);
   if (!horizontal)
     return {};
-  int count = 0;
+  int printed_inliers = 0, edge_inliers = 0;
   double selected_weight = 0;
-  for (size_t i = 0; i < weights.size(); ++i)
-    if (horizontal->errors[i] < .9) {
-      ++count;
-      selected_weight += weights[i];
-    }
-  if (count < 5 || selected_weight < .6 * std::accumulate(weights.begin(), weights.end(), 0.0))
-    return {};
-  const auto reliable = RegionPoints(region, spans, true);
-  const double y_low = PointQuantile(reliable, 1, .1), y_high = PointQuantile(reliable, 1, .9);
-  for (const auto& segment : segments) {
-    const auto delta = segment.points.back() - segment.points.front();
-    const auto middle = Mean(segment.points);
-    if (segment.kind != Kind::kBoundary || segment.contrast < 20 ||
-        std::abs(delta.y) > .3 * std::abs(delta.x) || segment.Length() < .08 * image.cols ||
-        (middle.y > y_low && middle.y < y_high))
+  for (size_t i = 0; i < weights.size(); ++i) {
+    if (horizontal->errors[i] >= .9)
       continue;
-    const auto points = Transform(segment.points, normalizer);
-    const auto line = Line(points);
-    if (VpError(line, Mean(points), horizontal->point) <= .7) {
-      lines.push_back(line);
-      middles.push_back(Mean(points));
-      weights.push_back(std::min(segment.Length() / length, .3) * .6);
-    }
+    printed_inliers += i < size_t(printed_candidates);
+    edge_inliers += i >= size_t(printed_candidates);
+    selected_weight += weights[i];
   }
-  if (lines.size() > region.members.size()) {
-    auto refined = FitVp(lines, middles, weights, .9, 1, .22 * image.rows / length);
-    if (refined)
-      horizontal = std::move(refined);
-  }
+  if (!((printed_inliers >= 5) || (printed_inliers >= 3 && edge_inliers >= 1)) ||
+      selected_weight < .6 * std::accumulate(weights.begin(), weights.end(), 0.0))
+    return {};
   auto verticals = MarginTracks(region, spans, image.size());
   for (const auto& segment : segments) {
+    if (!BelongsToRegion(segment, region) || segment.kind != Kind::kBoundary)
+      continue;
     const auto delta = segment.points.back() - segment.points.front();
     if (std::abs(delta.y) < 1.3 * std::abs(delta.x) || segment.Length() < .12 * image.rows)
       continue;
-    const auto [continuity, gap] = TrackSupport(segment, evidence.ink);
-    if (segment.kind == Kind::kBinding && (continuity < .6 || gap > .04 * image.rows))
-      continue;
     auto copy = segment;
-    copy.weight = segment.kind == Kind::kBoundary  ? 1.5
-                  : segment.kind == Kind::kBinding ? .45
-                                                   : .65;
+    copy.weight = 1.5;
     verticals.push_back(std::move(copy));
   }
   std::sort(verticals.begin(), verticals.end(), [](const auto& a, const auto& b) {
@@ -870,11 +1013,12 @@ std::optional<cv::Matx33d> FitRegion(const cv::Mat& image,
   for (int axis = 0; axis < 2; ++axis) {
     std::vector<double> coordinates;
     for (int i : region.members)
-      coordinates.push_back(Coordinate(Mean(spans[i].points), axis));
+      if (!spans[i].printed_points.empty())
+        coordinates.push_back(Coordinate(Mean(spans[i].printed_points), axis));
     const double split = Quantile(coordinates);
     for (bool side : {false, true}) {
       std::vector<double> errors;
-      for (size_t i = 0; i < region.members.size(); ++i)
+      for (size_t i = 0; i < coordinates.size(); ++i)
         if ((coordinates[i] >= split) == side && horizontal->errors[i] < .9)
           errors.push_back(horizontal->errors[i]);
       if (errors.size() >= 3 && Quantile(errors) > .7)
@@ -1164,6 +1308,16 @@ std::vector<Points> ProtectedComponents(const cv::Mat& image,
         (box.width > 10 * box.height && box.height < 5))
       continue;
     const cv::Point2d centre(box.x + box.width * .5, box.y + box.height * .5);
+    if (std::any_of(main_page.boundaries.begin(), main_page.boundaries.end(), [&](auto line) {
+          const std::array<cv::Point2d, 4> corners{
+              {{double(box.x), double(box.y)},
+               {double(box.x + box.width), double(box.y)},
+               {double(box.x + box.width), double(box.y + box.height)},
+               {double(box.x), double(box.y + box.height)}}};
+          return std::all_of(corners.begin(), corners.end(),
+                             [&](auto p) { return line.dot(Homogeneous(p)) < -3; });
+        }))
+      continue;
     bool associated = false, main_associated = false, wrong_direction = false;
     for (int j = 0; j < static_cast<int>(evidence.spans.size()); ++j) {
       const auto& span = evidence.spans[j];
@@ -1217,6 +1371,234 @@ Points ClipPolygon(const Points& polygon, cv::Vec3d line) {
   return result;
 }
 
+struct OcclusionText {
+  double angle;
+  double font;
+  double first_print;
+  double foreign_bottom;
+  double foreign_flat_bottom;
+  double foreign_slope;
+  double foreign_x;
+  Points printed;
+  std::vector<int> foreign;
+};
+
+std::optional<OcclusionText> FindOcclusionText(const Evidence& evidence, const Region& region) {
+  std::vector<double> angles, heights;
+  Points printed;
+  for (int i : region.members) {
+    const auto& span = evidence.spans[i];
+    if (span.printed_points.empty())
+      continue;
+    angles.push_back(Angle(span.printed_points));
+    heights.push_back(span.glyph_height);
+    printed.insert(printed.end(), span.printed_points.begin(), span.printed_points.end());
+  }
+  if (angles.size() < 3)
+    return {};
+  const double main_angle = Quantile(angles), font = Quantile(heights);
+  const double first_print = PointQuantile(printed, 1, 0);
+  std::vector<int> foreign;
+  for (int i : region.members) {
+    const auto& span = evidence.spans[i];
+    if (span.kind != Kind::kText || Mean(span.points).y >= first_print - 2 * font)
+      continue;
+    int similar_rows = 0;
+    if (span.glyph_height > 1.5 * font) {
+      for (int j : region.members) {
+        const auto& other = evidence.spans[j];
+        if (i != j && other.kind == Kind::kText && other.glyph_height >= .8 * span.glyph_height &&
+            other.glyph_height <= 1.25 * span.glyph_height &&
+            std::abs(other.angle - span.angle) < 4 &&
+            std::abs(Mean(other.points).y - Mean(span.points).y) < 6 * font)
+          ++similar_rows;
+      }
+    }
+    if (std::abs(span.angle - main_angle) >= 7 || similar_rows >= 2)
+      foreign.push_back(i);
+  }
+  std::vector<double> foreign_angles;
+  for (int i : foreign)
+    foreign_angles.push_back(evidence.spans[i].angle);
+  for (size_t n = 0; n < foreign.size(); ++n) {
+    const auto& seed = evidence.spans[foreign[n]];
+    for (int i : region.members) {
+      const auto& span = evidence.spans[i];
+      if (span.kind != Kind::kText || Mean(span.points).y >= first_print - 2 * font ||
+          std::find(foreign.begin(), foreign.end(), i) != foreign.end())
+        continue;
+      const double gap = std::max(seed.points.front().x, span.points.front().x) -
+                         std::min(seed.points.back().x, span.points.back().x);
+      if (gap < 3 * font && std::abs(Mean(seed.points).y - Mean(span.points).y) < 3.5 * font)
+        foreign.push_back(i);
+    }
+  }
+  if (foreign.size() < 2)
+    return {};
+  const double foreign_slope = std::tan(Quantile(foreign_angles) / kDegrees);
+  std::vector<double> foreign_xs;
+  for (int i : foreign)
+    foreign_xs.push_back(Mean(evidence.spans[i].points).x);
+  const double foreign_x = Quantile(foreign_xs);
+  double foreign_bottom = 0, foreign_flat_bottom = 0;
+  for (int i : foreign) {
+    for (auto point : evidence.spans[i].points) {
+      foreign_bottom = std::max(foreign_bottom, point.y - foreign_slope * (point.x - foreign_x) +
+                                                    evidence.spans[i].height * .5);
+      foreign_flat_bottom = std::max(foreign_flat_bottom, point.y + evidence.spans[i].height * .5);
+    }
+  }
+  return OcclusionText{main_angle,          font,          first_print, foreign_bottom,
+                       foreign_flat_bottom, foreign_slope, foreign_x,   std::move(printed),
+                       std::move(foreign)};
+}
+
+double ForeignTextBottom(const OcclusionText& text, double x) {
+  return std::max(text.foreign_flat_bottom,
+                  text.foreign_bottom + text.foreign_slope * (x - text.foreign_x));
+}
+
+struct OcclusionCandidate {
+  cv::Vec3d line;
+  double strength;
+  double support;
+  double center;
+};
+
+std::vector<OcclusionCandidate> OcclusionCandidates(const cv::Mat& image,
+                                                    const Evidence& evidence,
+                                                    const OcclusionText& text) {
+  cv::Mat gray, smooth;
+  cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+  gray.convertTo(gray, CV_32F);
+  cv::GaussianBlur(gray, smooth, {}, 1);
+  std::vector<OcclusionCandidate> candidates;
+  const double middle_x = image.cols * .5;
+  double first_foreign = image.rows;
+  for (int i : text.foreign)
+    first_foreign = std::min(first_foreign, PointQuantile(evidence.spans[i].points, 1, 0));
+  const int first_y = std::max(12, cvRound(first_foreign));
+  const int last_y = std::min(cvRound(text.first_print - text.font), cvRound(.3 * image.rows));
+  for (int angle = -24; angle <= 24; ++angle) {
+    const double slope = std::tan(angle / kDegrees);
+    for (int center = first_y; center <= last_y; center += 2) {
+      cv::Vec3d line(-slope, 1, slope * middle_x - center);
+      line /= std::hypot(line[0], line[1]);
+      int outside_lines = 0;
+      for (int i : text.foreign)
+        outside_lines += line.dot(Homogeneous(Mean(evidence.spans[i].points))) < 0;
+      if (outside_lines < 2 ||
+          std::any_of(
+              text.printed.begin(), text.printed.end(),
+              [&](auto point) { return line.dot(Homogeneous(point)) < text.font; }))
+        continue;
+      double sum = 0;
+      int positive = 0, negative = 0, valid = 0, samples = 0;
+      for (int x = 10; x < image.cols - 10; x += 4) {
+        const int y = cvRound(center + slope * (x - middle_x));
+        if (y < 10 || y >= image.rows - 10)
+          continue;
+        ++samples;
+        const std::array<float, 4> values{{smooth.at<float>(y - 9, x), smooth.at<float>(y - 3, x),
+                                           smooth.at<float>(y + 3, x), smooth.at<float>(y + 9, x)}};
+        const auto [low, high] = std::minmax_element(values.begin(), values.end());
+        if (*low < 110 || *high - *low > 20)
+          continue;
+        // Remove gradual lighting changes; retain a narrow, coherent paper step.
+        const double edge = values[2] - values[1] - .5 * (values[3] - values[0]);
+        sum += std::clamp(edge, -3.0, 3.0);
+        positive += edge > .5;
+        negative += edge < -.5;
+        ++valid;
+      }
+      if (valid < .55 * samples || valid < 50)
+        continue;
+      const double strength = std::abs(sum) / valid;
+      const double support = double(sum > 0 ? positive : negative) / valid;
+      if (strength >= .6 && support >= .55)
+        candidates.push_back({line, strength, support, double(center)});
+    }
+  }
+  std::sort(candidates.begin(), candidates.end(),
+            [](const auto& a, const auto& b) { return a.center > b.center; });
+  return candidates;
+}
+
+std::optional<Segment> FindOccludingEdge(const cv::Mat& image,
+                                         const Evidence& evidence,
+                                         Region& region) {
+  const auto text = FindOcclusionText(evidence, region);
+  if (!text)
+    return {};
+  const auto candidates = OcclusionCandidates(image, evidence, *text);
+  if (candidates.empty())
+    return {};
+  cv::Mat labels, stats, centers;
+  const int count =
+      cv::connectedComponentsWithStats(evidence.protected_ink, labels, stats, centers);
+  struct ProtectedInk {
+    Points box;
+    bool main_text;
+  };
+  std::vector<ProtectedInk> protected_ink;
+  for (int i = 1; i < count; ++i) {
+    const auto* box = stats.ptr<int>(i);
+    if (box[4] < 4 || box[2] >= .9 * image.cols || box[3] >= .9 * image.rows)
+      continue;
+    const cv::Point2d center(box[0] + box[2] * .5, box[1] + box[3] * .5);
+    bool main_text = false;
+    for (int j : region.members) {
+      const auto& span = evidence.spans[j];
+      if (center.x >= span.points.front().x - text->font &&
+          center.x <= span.points.back().x + text->font &&
+          std::abs(span.line.dot(Homogeneous(center))) < span.height * .8 &&
+          (!span.printed_points.empty() ||
+           (Mean(span.points).y > ForeignTextBottom(*text, Mean(span.points).x) + 2 * text->font &&
+            std::abs(span.angle - text->angle) < 5)))
+        main_text = true;
+    }
+    protected_ink.push_back({{{double(box[0]), double(box[1])},
+                              {double(box[0] + box[2]), double(box[1])},
+                              {double(box[0] + box[2]), double(box[1] + box[3])},
+                              {double(box[0]), double(box[1] + box[3])}},
+                             main_text});
+  }
+  for (auto candidate : candidates) {
+    double outside = 0;
+    for (const auto& ink : protected_ink) {
+      const auto center = Mean(ink.box);
+      if (!ink.main_text && center.y < ForeignTextBottom(*text, center.x) + text->font &&
+          std::all_of(
+              ink.box.begin(), ink.box.end(),
+              [&](auto point) { return candidate.line.dot(Homogeneous(point)) < -text->font; }))
+        continue;
+      for (auto point : ink.box)
+        outside = std::max(outside, -candidate.line.dot(Homogeneous(point)));
+    }
+    if (outside > .01 * std::max(image.cols, image.rows))
+      continue;
+    candidate.line[2] += outside + 1.5;
+    const auto line = candidate.line;
+    int removed_lines = 0;
+    for (int i : text->foreign)
+      removed_lines += line.dot(Homogeneous(Mean(evidence.spans[i].points))) < 0;
+    if (removed_lines < 2)
+      continue;
+    region.boundaries.push_back(line);
+    std::erase_if(region.members, [&](int i) {
+      return line.dot(Homogeneous(Mean(evidence.spans[i].points))) < 0 &&
+             evidence.spans[i].printed_points.empty();
+    });
+    return Segment{{{0, -line[2] / line[1]},
+                    {double(image.cols - 1), (-line[2] - line[0] * (image.cols - 1)) / line[1]}},
+                   Kind::kOcclusion,
+                   1,
+                   candidate.strength,
+                   candidate.support};
+  }
+  return {};
+}
+
 void ChooseEdges(const cv::Mat& image,
                  const Evidence& evidence,
                  const Region& region,
@@ -1235,7 +1617,7 @@ void ChooseEdges(const cv::Mat& image,
   };
   std::array<std::vector<Proposal>, 4> proposals;
   for (const auto& segment : segments) {
-    if (segment.kind != Kind::kBoundary)
+    if (segment.kind != Kind::kBoundary && segment.kind != Kind::kOcclusion)
       continue;
     Points positions;
     for (int i = 0; i < 8; ++i)
@@ -1243,10 +1625,7 @@ void ChooseEdges(const cv::Mat& image,
                           (segment.points.back() - segment.points.front()) * (i / 7.0));
     auto mapped = MapPoints(positions, geometry);
     const auto delta = mapped.back() - mapped.front();
-    const bool horizontal = std::abs(delta.y) <= std::abs(delta.x) * std::tan(8 / kDegrees);
-    const bool vertical = std::abs(delta.x) <= std::abs(delta.y) * std::tan(8 / kDegrees);
-    if (!horizontal && !vertical)
-      continue;
+    const bool horizontal = std::abs(delta.y) <= std::abs(delta.x);
     const int axis = horizontal ? 1 : 0;
     const double coordinate = PointQuantile(mapped, axis);
     const bool low = coordinate < Coordinate(reference, axis);
@@ -1269,8 +1648,11 @@ void ChooseEdges(const cv::Mat& image,
         std::vector<double> coordinates;
         for (const auto& p : *i)
           coordinates.push_back(p.coordinate);
-        if (std::abs(proposal.coordinate - Quantile(coordinates)) <
-            (axis ? .035 : .015) * std::max(image.cols, image.rows)) {
+        const auto first_line = Line(i->front().visible);
+        const auto next_line = Line(proposal.visible);
+        if (std::abs(first_line[0] * next_line[0] + first_line[1] * next_line[1]) > .995 &&
+            std::abs(proposal.coordinate - Quantile(coordinates)) <
+                (axis ? .035 : .015) * std::max(image.cols, image.rows)) {
           found = i;
           break;
         }
@@ -1299,7 +1681,16 @@ void ChooseEdges(const cv::Mat& image,
       std::vector<double> residuals;
       for (auto p : visible)
         residuals.push_back(line.dot(Homogeneous(p)));
-      line[2] -= std::max(0.0, Quantile(residuals, .95)) + .003 * (axis ? image.rows : image.cols);
+      const bool occlusion = std::any_of(group.begin(), group.end(), [](const auto& proposal) {
+        return proposal.segment->kind == Kind::kOcclusion;
+      });
+      if (occlusion) {
+        // The occlusion boundary already includes a margin for every ink component.
+        line[2] += std::max(0.0, -*std::min_element(residuals.begin(), residuals.end())) + .5;
+      } else {
+        line[2] -=
+            std::max(0.0, Quantile(residuals, .95)) + .003 * (axis ? image.rows : image.cols);
+      }
       if (side == 0 && region.left) {
         Points seam;
         for (int i = 0; i < 20; ++i) {
@@ -1310,15 +1701,18 @@ void ChooseEdges(const cv::Mat& image,
                                      PointQuantile(visible, 0)) < .05 * image.cols)
           continue;
       }
-      // A left occluder without a page-separating track is not a page edge.
-      if (side == 0 && !region.left)
+      if (side == 0 && !region.left && region.boundaries.empty())
         continue;
-      bool violation = false;
+      double outside = 0;
       for (const auto& box : protected_boxes)
         for (auto p : box)
-          violation |= line.dot(Homogeneous(p)) < -1.5;
-      if (violation)
+          outside = std::max(outside, -line.dot(Homogeneous(p)));
+      if (outside > .01 * std::max(image.cols, image.rows))
         continue;
+      // Move a nearly touching boundary outward to retain the complete stroke.
+      // A component that crosses farther into the background vetoes this edge.
+      if (outside > 0)
+        line[2] += outside + 1.5;
       const auto retained = ClipPolygon(frame, line);
       if (retained.size() < 3)
         continue;
@@ -1334,32 +1728,6 @@ void ChooseEdges(const cv::Mat& image,
     if (best)
       geometry.crops.push_back(*best);
   }
-}
-
-bool HorizontalWriting(const cv::Mat& clean) {
-  std::array<int, 2> scores{};
-  for (int axis = 0; axis < 2; ++axis) {
-    cv::Mat oriented, joined, labels, stats, centres;
-    if (axis)
-      cv::transpose(clean, oriented);
-    else
-      oriented = clean;
-    cv::morphologyEx(oriented, joined, cv::MORPH_CLOSE, cv::Mat::ones(3, 23, CV_8U));
-    const int count = cv::connectedComponentsWithStats(joined, labels, stats, centres);
-    std::vector<bool> valid(count);
-    for (int i = 1; i < count; ++i) {
-      const auto* s = stats.ptr<int>(i);
-      valid[i] = s[2] >= std::max(60.0, .06 * std::max(clean.cols, clean.rows)) &&
-                 s[2] >= 3.5 * s[3] && s[3] >= 4 && s[3] < .075 * std::max(clean.cols, clean.rows);
-    }
-    for (int y = 0; y < oriented.rows; ++y) {
-      const auto* row = oriented.ptr<uint8_t>(y);
-      const auto* ids = labels.ptr<int>(y);
-      for (int x = 0; x < oriented.cols; ++x)
-        scores[axis] += row[x] && valid[ids[x]];
-    }
-  }
-  return !(scores[1] > std::max(1, scores[0]) * 1.8 && scores[1] > .35 * cv::countNonZero(clean));
 }
 
 bool PaperRegion(const cv::Mat& background, const Region& region, const Evidence& evidence) {
@@ -1415,6 +1783,40 @@ std::optional<double> TextSkew(const Evidence& evidence, const Region& region) {
 }
 }  // namespace
 
+Result<unsigned> GeometryAxisQuarterTurns(const cv::Mat& source, const PhotoCancelled& cancelled) {
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  cv::Mat image;
+  const double scale = std::min(1.0, 640.0 / std::max(source.cols, source.rows));
+  cv::resize(source, image, {}, scale, scale, cv::INTER_AREA);
+  const auto evidence = ExtractEvidence(image);
+  std::array<double, 2> scores{};
+  for (int axis = 0; axis < 2; ++axis) {
+    RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+    cv::Mat oriented, joined, labels, stats, centers;
+    if (axis)
+      cv::transpose(evidence.clean, oriented);
+    else
+      oriented = evidence.clean;
+    cv::morphologyEx(oriented, joined, cv::MORPH_CLOSE, cv::Mat::ones(3, 23, CV_8U));
+    const int count = cv::connectedComponentsWithStats(joined, labels, stats, centers);
+    std::vector<bool> lines(count);
+    for (int i = 1; i < count; ++i) {
+      const auto* box = stats.ptr<int>(i);
+      lines[i] = box[2] >= 40 && box[2] >= 3.5 * box[3] && box[3] >= 3 && box[3] <= 48;
+    }
+    for (int y = 0; y < oriented.rows; ++y) {
+      const auto* pixels = oriented.ptr<uint8_t>(y);
+      const auto* ids = labels.ptr<int>(y);
+      for (int x = 0; x < oriented.cols; ++x)
+        scores[axis] += pixels[x] && lines[ids[x]];
+    }
+  }
+  return scores[1] > 1.8 * std::max(1.0, scores[0]) &&
+                 scores[1] > .35 * cv::countNonZero(evidence.clean)
+             ? 1u
+             : 0u;
+}
+
 Result<PageGeometry> AnalyzeGeometry(const cv::Mat& source, const PhotoCancelled& cancelled) {
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   PageGeometry geometry;
@@ -1426,20 +1828,15 @@ Result<PageGeometry> AnalyzeGeometry(const cv::Mat& source, const PhotoCancelled
     return geometry;
   const auto evidence = ExtractEvidence(image);
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-  if (!HorizontalWriting(evidence.clean))
-    return geometry;
-  int printed = 0;
-  for (const auto& span : evidence.spans)
-    printed += span.kind == Kind::kText && span.weight >= .5;
-  if (printed < 2)
-    return geometry;
   cv::Mat background;
-  const auto segments = ExtractSegments(image, evidence.ink, background);
+  auto segments = ExtractSegments(image, evidence.ink, background);
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-  const auto regions = SegmentRegions(image, evidence, segments);
+  const auto regions = SegmentRegions(image, evidence, segments, background);
   if (regions.empty() || !PaperRegion(background, regions.front(), evidence))
     return geometry;
-  const auto& main_page = regions.front();
+  auto main_page = regions.front();
+  if (auto occlusion = FindOccludingEdge(image, evidence, main_page))
+    segments.push_back(std::move(*occlusion));
   std::array<std::vector<double>, 3> colors;
   for (auto point : RegionPoints(main_page, evidence.spans, true)) {
     const auto color = SampleColor(background, point);
@@ -1456,7 +1853,7 @@ Result<PageGeometry> AnalyzeGeometry(const cv::Mat& source, const PhotoCancelled
   if (text_x.size() >= 16) {
     const double split = Quantile(text_x);
     for (bool left : {true, false}) {
-      Region field{{}, main_page.left, main_page.right};
+      Region field{{}, main_page.left, main_page.right, 0, main_page.boundaries};
       for (int i : main_page.members)
         if ((Mean(evidence.spans[i].points).x < split) == left)
           field.members.push_back(i);
@@ -1468,7 +1865,7 @@ Result<PageGeometry> AnalyzeGeometry(const cv::Mat& source, const PhotoCancelled
           y.push_back(Mean(evidence.spans[i].points).y);
         const double y_split = Quantile(y);
         for (bool upper : {true, false}) {
-          Region half{{}, main_page.left, main_page.right};
+          Region half{{}, main_page.left, main_page.right, 0, main_page.boundaries};
           for (int i : field.members)
             if ((Mean(evidence.spans[i].points).y < y_split) == upper)
               half.members.push_back(i);
@@ -1514,32 +1911,27 @@ Result<PageGeometry> AnalyzeGeometry(const cv::Mat& source, const PhotoCancelled
       geometry.kind = "perspective";
   } else if (!fitted) {
     const auto angle = TextSkew(evidence, main_page);
-    if (!angle)
-      return geometry;
-    const auto rotation = cv::getRotationMatrix2D({image.cols * .5f, image.rows * .5f}, *angle, 1);
-    geometry.matrix = {rotation.ptr<double>(0)[0],
-                       rotation.ptr<double>(0)[1],
-                       rotation.ptr<double>(0)[2],
-                       rotation.ptr<double>(1)[0],
-                       rotation.ptr<double>(1)[1],
-                       rotation.ptr<double>(1)[2],
-                       0,
-                       0,
-                       1};
-    geometry.kind = "deskew";
+    if (angle) {
+      const auto rotation =
+          cv::getRotationMatrix2D({image.cols * .5f, image.rows * .5f}, *angle, 1);
+      geometry.matrix = {rotation.ptr<double>(0)[0],
+                         rotation.ptr<double>(0)[1],
+                         rotation.ptr<double>(0)[2],
+                         rotation.ptr<double>(1)[0],
+                         rotation.ptr<double>(1)[1],
+                         rotation.ptr<double>(1)[2],
+                         0,
+                         0,
+                         1};
+      geometry.kind = "deskew";
+    }
   }
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   ChooseEdges(image, evidence, main_page, segments, geometry);
   return geometry;
 }
 
-Result<cv::Mat> ApplyGeometry(const cv::Mat& source,
-                              const PageGeometry& geometry,
-                              const cv::Scalar& fill,
-                              const PhotoCancelled& cancelled) {
-  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-  if (geometry.kind == "unchanged" && geometry.crops.empty())
-    return source;
+Result<cv::Rect2d> GeometryBounds(const PageGeometry& geometry) {
   auto retained = MapPoints(Frame(geometry.analysis_size, 257), geometry);
   for (auto line : geometry.crops)
     retained = ClipPolygon(retained, line);
@@ -1549,16 +1941,28 @@ Result<cv::Mat> ApplyGeometry(const cv::Mat& source,
   const double low_y = std::floor(PointQuantile(retained, 1, 0) / geometry.scale) - 3;
   const double width = std::ceil(PointQuantile(retained, 0, 1) / geometry.scale) + 4 - low_x;
   const double height = std::ceil(PointQuantile(retained, 1, 1) / geometry.scale) + 4 - low_y;
-  double zoom = std::min(
-      {1.0, std::sqrt(8.0 * 1024 * 1024 / (width * height)), 8192.0 / std::max(width, height)});
-  cv::Size size;
-  do {
-    size = {int(std::ceil(width * zoom)), int(std::ceil(height * zoom))};
-    if (int64_t(size.width) * size.height <= 8 * 1024 * 1024 &&
-        std::max(size.width, size.height) <= 8192)
-      break;
-    zoom *= .9999;
-  } while (true);
+  return cv::Rect2d{low_x, low_y, width, height};
+}
+
+Result<cv::Mat> ApplyGeometry(const cv::Mat& source,
+                              const PageGeometry& geometry,
+                              const cv::Scalar& fill,
+                              const PhotoCancelled& cancelled) {
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  if (geometry.kind == "unchanged" && geometry.crops.empty()) {
+    if (std::max(source.cols, source.rows) <= 2480)
+      return source;
+    cv::Mat result;
+    const double scale = 2480.0 / std::max(source.cols, source.rows);
+    cv::resize(source, result, {cvRound(source.cols * scale), cvRound(source.rows * scale)}, 0, 0,
+               cv::INTER_AREA);
+    return result;
+  }
+  RK_ASSIGN_OR_RETURN(bounds, GeometryBounds(geometry));
+  const double low_x = bounds.x, low_y = bounds.y;
+  const double zoom = std::min(1.0, 2480.0 / std::max(bounds.width, bounds.height));
+  const cv::Size size{std::min(2480, int(std::ceil(bounds.width * zoom))),
+                      std::min(2480, int(std::ceil(bounds.height * zoom)))};
   const auto inverse = (Normalizer(geometry.analysis_size) * geometry.matrix).inv();
   const double length = std::max(geometry.analysis_size.width, geometry.analysis_size.height);
   // A 16-pixel grid keeps map storage below 1 MiB at the maximum canvas size.
@@ -1578,7 +1982,7 @@ Result<cv::Mat> ApplyGeometry(const cv::Mat& source,
     }
   }
   cv::Mat result(size, source.type());
-  // Remap strips bound temporary maps independently of the full-resolution frame.
+  // Strip maps are allocated at the final output size, independently of the source frame.
   for (int top = 0; top < size.height; top += 128) {
     RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
     const int rows = std::min(128, size.height - top);

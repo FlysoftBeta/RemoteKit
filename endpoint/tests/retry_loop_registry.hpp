@@ -57,3 +57,17 @@ constexpr Loop kLoops[] = {
     {"document.convert", "documents/object_documents.cpp"},
     {"document.persistence", "documents/object_documents.cpp"},
 };
+
+struct EventRetryLoop {
+  const char* name;
+  const char* source;
+  const char* tests;
+  const char* entry;
+};
+constexpr EventRetryLoop kEventRetryLoops[] = {
+    {"layout.begin", "media/comp_engine.cpp", "comp_pacing_tests.cpp", "geometry demand"},
+    {"presentation.refresh", "media/presentation_refresh.hpp", "presentation_barrier_tests.cpp",
+     "TestPresentationRefresh"},
+    {"frame.metadata", "rtc/frame_metadata.hpp", "session_controllers_tests.cpp",
+     "FrameMetadataRecovery"},
+};

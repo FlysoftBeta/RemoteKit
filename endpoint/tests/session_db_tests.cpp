@@ -11,6 +11,8 @@
 #include <windows.h>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 using namespace remotekit;
 namespace {
 void Check(bool value, const char* message) {
@@ -114,7 +116,7 @@ void Formats() {
       {config_formats::Owner,
        {{"version", 1}, {"snapshotId", "{01234567-0123-4567-89ab-0123456789ab}"}},
        "snapshotId"},
-      {session_documents::View, TestView(), "url"},
+      {session_documents::View, session_documents::ViewTopology(TestView()), "url"},
       {session_documents::Downloads, Download(), "records"},
       {session_documents::WireError, {{"code", "internal"}, {"message", "failed"}}, "message"},
   };
@@ -159,7 +161,7 @@ void MigrationRunner(const fs::path& path) {
   sqlite::Database db;
   Take(db.Open(path / "session.db"));
   const std::array<SessionMigration, 1> steps{
-      {{5, "future-test", [](sqlite::Database& store) -> Result<void> {
+      {{kSessionDbVersion + 1, "future-test", [](sqlite::Database& store) -> Result<void> {
           RK_RETURN_IF_ERROR(store.Execute("CREATE TABLE future_step(value TEXT)"));
           return CorruptState("injected migration failure");
         }}}};
@@ -167,16 +169,16 @@ void MigrationRunner(const fs::path& path) {
   {
     auto query = Take(db.Prepare("PRAGMA user_version"));
     Take(query.Step());
-    Check(query.Int64(0) == 4, "migration rollback preserves schema version");
+    Check(query.Int64(0) == kSessionDbVersion, "migration rollback preserves schema version");
   }
   Check(std::distance(fs::directory_iterator(path / "backups"), fs::directory_iterator()) == 1,
         "verified pre-migration backup retained");
   const std::array<SessionMigration, 1> success{
-      {{5, "future-test", [](sqlite::Database& store) -> Result<void> {
+      {{kSessionDbVersion + 1, "future-test", [](sqlite::Database& store) -> Result<void> {
           return store.Execute("CREATE TABLE future_step(value TEXT)");
         }}}};
   Take(MigrateSessionDb(db, path, "dev", success));
-  Take(CheckSessionDb(db, 5));
+  Take(CheckSessionDb(db, kSessionDbVersion + 1));
   Take(db.Close());
 }
 // A store written by the previous build (user_version 3, no download retry column) upgrades
@@ -211,6 +213,11 @@ void UpgradeFromVersion3(const fs::path& path) {
     Take(
         db.Execute("UPDATE library_selections SET state='submitted', "
                    "document=json_set(document,'$.state','submitted')"));
+    Take(db.Execute("DROP TABLE file_derivatives"));
+    Take(
+        db.Execute("CREATE TABLE library_derivatives(asset_id TEXT NOT NULL,format TEXT NOT NULL,"
+                   "derived_id TEXT NOT NULL,PRIMARY KEY(asset_id,format))"));
+    Take(db.Execute("ALTER TABLE views ADD COLUMN position INTEGER NOT NULL DEFAULT 0"));
     Take(db.Execute("PRAGMA user_version=3"));
     Take(db.Close());
   }
@@ -229,7 +236,7 @@ void UpgradeFromVersion3(const fs::path& path) {
   Take(upgraded.Close());
   sqlite::Database db;
   Take(db.Open(path / "session.db"));
-  Take(CheckSessionDb(db, 4));
+  Take(CheckSessionDb(db));
   {
     auto column =
         Take(db.Prepare("SELECT 1 FROM pragma_table_info('download_imports') WHERE name='retry'"));
@@ -243,12 +250,393 @@ void UpgradeFromVersion3(const fs::path& path) {
   }
   Take(db.Close());
 }
+int64_t Scalar(sqlite::Database& db, const char* sql) {
+  auto query = Take(db.Prepare(sql));
+  Check(Take(query.Step()), "scalar query returns a row");
+  return query.Int64(0);
+}
+std::string ObjectId(unsigned value) {
+  std::ostringstream text;
+  text << std::hex << std::setw(64) << std::setfill('0') << value;
+  return text.str();
+}
+void CreateVersion4(sqlite::Database& db) {
+  Take(db.Execute("DROP TABLE file_derivatives"));
+  Take(
+      db.Execute("CREATE TABLE library_derivatives(asset_id TEXT NOT NULL,format TEXT NOT NULL,"
+                 "derived_id TEXT NOT NULL,PRIMARY KEY(asset_id,format))"));
+  Take(db.Execute("ALTER TABLE views ADD COLUMN position INTEGER NOT NULL DEFAULT 0"));
+  Take(db.Execute("PRAGMA user_version=4"));
+}
+void InsertVersion4(sqlite::Database& db,
+                    const std::string& source,
+                    const std::string& format,
+                    const std::string& asset) {
+  auto insert = Take(db.Prepare("INSERT INTO library_derivatives VALUES(?,?,?)"));
+  Take(insert.Bind(1, source));
+  Take(insert.Bind(2, format));
+  Take(insert.Bind(3, asset));
+  Check(!Take(insert.Step()), "insert v4 derivative");
+}
+void UpgradeDerivatives(const fs::path& path) {
+  {
+    SessionDb initial(path);
+    Take(initial.Open());
+    Take(initial.Close());
+  }
+  sqlite::Database db;
+  Take(db.Open(path / "session.db"));
+  CreateVersion4(db);
+  InsertVersion4(db, ObjectId(1), "jpeg", ObjectId(2));
+  InsertVersion4(db, ObjectId(1), "png", ObjectId(3));
+  InsertVersion4(db, ObjectId(1), "webp", ObjectId(4));
+  InsertVersion4(db, ObjectId(1), "unknown", ObjectId(5));
+  InsertVersion4(db, "invalid", "jpeg", ObjectId(6));
+  InsertVersion4(db, ObjectId(7), "png", "invalid");
+  InsertVersion4(db, ObjectId(8) + std::string("\0extra", 6), "jpeg", ObjectId(9));
+  Take(db.Execute("PRAGMA foreign_keys=ON"));
+  Take(
+      db.Execute("CREATE TABLE migration_guard(source_id TEXT,format TEXT,"
+                 "FOREIGN KEY(source_id,format) REFERENCES library_derivatives(asset_id,format))"));
+  {
+    auto guard = Take(db.Prepare("INSERT INTO migration_guard VALUES(?,'jpeg')"));
+    Take(guard.Bind(1, ObjectId(1)));
+    Take(guard.Step());
+  }
+  Check(!MigrateSessionDb(db, path, "dev"), "failure dropping v4 table aborts the migration");
+  Check(Scalar(db, "PRAGMA user_version") == 4 &&
+            Scalar(db, "SELECT count(*) FROM library_derivatives") == 7 &&
+            Scalar(db, "SELECT count(*) FROM sqlite_master WHERE name='file_derivatives'") == 0,
+        "migration failure rolls back copied rows, schema and version");
+  Check(std::distance(fs::directory_iterator(path / "backups"), fs::directory_iterator()) == 1,
+        "failed v4 migration retains its verified backup");
+  Take(db.Execute("DROP TABLE migration_guard"));
+  Take(MigrateSessionDb(db, path, "dev"));
+  Check(
+      Scalar(db, "PRAGMA user_version") == kSessionDbVersion &&
+          Scalar(db, "SELECT count(*) FROM sqlite_master WHERE name='library_derivatives'") == 0 &&
+          Scalar(db, "SELECT count(*) FROM file_derivatives") == 2,
+      "v4 JPEG/PNG rows migrate and unrepresentable rows are discarded");
+  {
+    auto query = Take(
+        db.Prepare("SELECT kind,parameters,metadata FROM file_derivatives ORDER BY parameters"));
+    Check(Take(query.Step()) && query.Text(0) == "selection-transcode" && query.Text(1) == "jpeg" &&
+              query.Text(2) == "{}",
+          "JPEG key gains its purpose and empty metadata");
+    Check(Take(query.Step()) && query.Text(1) == "png" && !Take(query.Step()),
+          "PNG key migrates once");
+  }
+  Take(db.Close());
+  SessionDb reopened(path);
+  Take(reopened.Open());
+  const auto jpeg =
+      Take(reopened.Library().FindDerivative({ObjectId(1), "selection-transcode", "jpeg"}));
+  Check(jpeg && jpeg->asset_id == ObjectId(2) && jpeg->metadata == Json::object(),
+        "migrated cache is readable through the current owner");
+}
+void UpgradeDerivativeBounds(const fs::path& path) {
+  {
+    SessionDb initial(path);
+    Take(initial.Open());
+    Take(initial.Close());
+  }
+  sqlite::Database db;
+  Take(db.Open(path / "session.db"));
+  CreateVersion4(db);
+  {
+    sqlite::Transaction transaction(db);
+    Take(transaction.Begin());
+    for (unsigned i = 1; i <= 1025; ++i)
+      InsertVersion4(db, ObjectId(i), "jpeg", ObjectId(2048));
+    Take(transaction.Commit());
+  }
+  Take(MigrateSessionDb(db, path, "dev"));
+  Check(Scalar(db, "SELECT count(*) FROM file_derivatives") == 1024 &&
+            Scalar(db, "SELECT min(sequence) FROM file_derivatives") == 2,
+        "migration applies the current cache bound deterministically");
+}
+Json ProcessingMetadata() {
+  return {{"geometry", {{"kind", "unchanged"}, {"cropped", false}}},
+          {"quarterTurns", 0},
+          {"orientation", {{"turns", 0}, {"state", "confident"}}}};
+}
+void DerivativeDecoding(const fs::path& path) {
+  SessionDb db(path);
+  Take(db.Open());
+  auto library = db.Library();
+  const DerivativeKey photo{ObjectId(1), "photo", "photo-0-v1:webp"};
+  const DerivativeRecord record{ObjectId(2), ProcessingMetadata()};
+  const std::vector<DerivativeKey> keys{
+      {ObjectId(1), "preview", "1280-q80-v1:webp"}, {ObjectId(1), "preview", "2560-q80-v1:webp"},
+      {ObjectId(1), "thumbnail", "320-v1:jpeg"},    {ObjectId(1), "selection-transcode", "jpeg"},
+      {ObjectId(1), "selection-transcode", "png"},  photo,
+      {ObjectId(1), "photo", "scan-auto-v1:webp"}};
+  for (const auto& key : keys) {
+    const DerivativeRecord expected{ObjectId(2),
+                                    key.kind == "photo" ? record.metadata : Json::object()};
+    Take(library.SaveDerivative(key, expected));
+    const auto found = Take(library.FindDerivative(key));
+    Check(found && found->asset_id == expected.asset_id && found->metadata == expected.metadata,
+          "typed derivative key and metadata round trip");
+  }
+  for (const auto& invalid :
+       std::vector<DerivativeKey>{{"invalid", "photo", "photo-0-v1:webp"},
+                                  {ObjectId(1), "document", "jpeg"},
+                                  {ObjectId(1), "preview", "320-q80-v1:webp"},
+                                  {ObjectId(1), "preview", "1280-q80-v1:jpeg"},
+                                  {ObjectId(1), "photo", "photo-4-v1:webp"},
+                                  {ObjectId(1), "photo", "photo-0-v2:webp"},
+                                  {ObjectId(1), "thumbnail", "jpeg"},
+                                  {ObjectId(1), "selection-transcode", "webp"}}) {
+    Check(!library.FindDerivative(invalid) && !library.SaveDerivative(invalid, record),
+          "unknown derivative recipe is rejected");
+  }
+  auto unknown = record.metadata;
+  unknown["unknown"] = true;
+  auto wrong = record.metadata;
+  wrong["quarterTurns"] = 0.0;
+  auto missing = record.metadata;
+  missing.erase("orientation");
+  auto inconsistent = record.metadata;
+  inconsistent["orientation"]["turns"] = 1;
+  auto invalid_kind = record.metadata;
+  invalid_kind["geometry"]["kind"] = "unknown";
+  sqlite::Database inject;
+  Take(inject.Open(path / "session.db"));
+  auto duplicate = record.metadata.dump();
+  const auto turn_field = duplicate.find("\"quarterTurns\":0");
+  duplicate.replace(turn_field, std::string("\"quarterTurns\":0").size(),
+                    "\"quarterTurns\":0,\"quarterTurns\":0");
+  const std::vector<std::string> invalid_metadata{"{",
+                                                  "[]",
+                                                  "{}",
+                                                  duplicate,
+                                                  unknown.dump(),
+                                                  wrong.dump(),
+                                                  missing.dump(),
+                                                  inconsistent.dump(),
+                                                  invalid_kind.dump(),
+                                                  std::string(4097, ' ')};
+  for (const auto& metadata : invalid_metadata) {
+    {
+      auto damage =
+          Take(inject.Prepare("UPDATE file_derivatives SET metadata=? "
+                              "WHERE kind='photo' AND parameters='photo-0-v1:webp'"));
+      Take(damage.Bind(1, metadata));
+      Take(damage.Step());
+    }
+    const auto found = library.FindDerivative(photo);
+    Check(!found && found.error().reason == ErrorReason::kCorruptRecord,
+          "persisted metadata corruption is not interpreted as a cache miss");
+    Check(!CheckSessionDb(inject), "startup validation rejects corrupt derivative metadata");
+    Take(library.SaveDerivative(photo, record));
+    // Duplicate keys exist only in the serialized representation.
+    if (metadata != duplicate)
+      Check(!library.SaveDerivative(photo, {ObjectId(2), Json::parse(metadata, nullptr, false)}),
+            "writer rejects the same invalid metadata");
+  }
+  Take(inject.Execute("UPDATE file_derivatives SET parameters='invalid' WHERE kind='thumbnail'"));
+  Check(!CheckSessionDb(inject), "startup validates stored parameter keys");
+  Take(inject.Execute(
+      "UPDATE file_derivatives SET parameters='320-v1:jpeg' WHERE kind='thumbnail'"));
+  Take(inject.Execute("PRAGMA ignore_check_constraints=ON"));
+  Take(inject.Execute("UPDATE file_derivatives SET sequence=-1 WHERE kind='photo'"));
+  Check(!library.FindDerivative(photo) && !CheckSessionDb(inject), "negative sequence is corrupt");
+  Take(inject.Execute("UPDATE file_derivatives SET sequence=1 WHERE kind='photo'"));
+  Take(inject.Execute("PRAGMA ignore_check_constraints=OFF"));
+  Take(CheckSessionDb(inject));
+  Take(inject.Close());
+  Take(db.Close());
+  const auto checkpoint = path / "checkpoint";
+  fs::create_directories(checkpoint);
+  fs::copy_file(path / "session.db", checkpoint / "session.db");
+  SessionDb read_only(checkpoint);
+  Take(read_only.OpenReadOnly(true));
+  Check(Take(read_only.Library().FindDerivative(photo))->metadata == record.metadata,
+        "copying session.db alone retains the cache and its strict decoder");
+}
+void DerivativeFailures(const fs::path& path, const std::string& kind, unsigned limit) {
+  SessionDb db(path);
+  Take(db.Open());
+  auto library = db.Library();
+  const auto key = [&](unsigned id) {
+    return DerivativeKey{ObjectId(id), kind, kind == "thumbnail" ? "320-v1:jpeg" : "jpeg"};
+  };
+  const DerivativeRecord record{ObjectId(4096)};
+  for (unsigned i = 1; i <= limit; ++i)
+    Take(library.SaveDerivative(key(i), record));
+  sqlite::Database inject;
+  Take(inject.Open(path / "session.db"));
+  Take(
+      inject.Execute("CREATE TRIGGER fail_cache_insert BEFORE INSERT ON file_derivatives "
+                     "BEGIN SELECT RAISE(ABORT,'injected insert'); END"));
+  Check(!library.SaveDerivative(key(limit + 1), record), "cache insert failure");
+  Take(inject.Execute("DROP TRIGGER fail_cache_insert"));
+  Take(
+      inject.Execute("CREATE TRIGGER fail_cache_evict BEFORE DELETE ON file_derivatives "
+                     "BEGIN SELECT RAISE(ABORT,'injected eviction'); END"));
+  Check(!library.SaveDerivative(key(limit + 1), record), "cache eviction failure");
+  Check(Scalar(inject, "SELECT count(*) FROM file_derivatives") == limit &&
+            Take(library.FindDerivative(key(1))) && !Take(library.FindDerivative(key(limit + 1))),
+        "failed eviction rolls back the inserted row and retains the oldest mapping");
+  Check(!library.EraseDerivative(key(1)), "mapping erase failure is returned");
+  Check(bool(Take(library.FindDerivative(key(1)))), "failed erase retains the mapping");
+  Take(inject.Execute("DROP TRIGGER fail_cache_evict"));
+  unsigned checks = 0;
+  const auto cancelled = [&]() -> Result<void> {
+    if (++checks == 2)
+      return Error{ErrorCode::kCanceled, "injected admission retirement"};
+    return {};
+  };
+  Check(!library.SaveDerivative(key(limit + 1), record, cancelled), "cancel before cache commit");
+  Check(Scalar(inject, "SELECT count(*) FROM file_derivatives") == limit &&
+            Take(library.FindDerivative(key(1))) && !Take(library.FindDerivative(key(limit + 1))),
+        "cancel rolls back both insertion and eviction");
+  checks = 0;
+  Check(!library.EraseDerivative(key(1), cancelled) && Take(library.FindDerivative(key(1))),
+        "cancel rolls back mapping deletion");
+  Take(library.SaveDerivative(key(limit + 1), record));
+  Check(Scalar(inject, "SELECT count(*) FROM file_derivatives") == limit &&
+            !Take(library.FindDerivative(key(1))) && Take(library.FindDerivative(key(limit + 1))),
+        "successful insertion evicts the oldest mapping within its bound");
+  Take(inject.Close());
+  Take(db.Close());
+  Check(!library.SaveDerivative(key(1), record) && !library.EraseDerivative(key(limit + 1)),
+        "cache writes cannot reopen a closed checkpoint store");
+}
+void UpgradeGeometry(const fs::path& path) {
+  {
+    SessionDb initial(path);
+    Take(initial.Open());
+    Take(initial.Close());
+  }
+  sqlite::Database db;
+  Take(db.Open(path / "session.db"));
+  auto legacy = TestView();
+  legacy["visible"] = true;
+  legacy["occludedBottom"] = 200;
+  legacy["occlusionRevision"] = "99";
+  legacy["adopt"] = {{"browserIncarnation", "browser"}, {"provisionalId", "provisional"}};
+  legacy["width"] = nullptr;
+  legacy["device"] = "discarded geometry";
+  auto second = TestView("2");
+  second["signIn"] = "changyan";
+  Take(db.Execute("ALTER TABLE views ADD COLUMN position INTEGER NOT NULL DEFAULT 0"));
+  for (const auto& config : {legacy, second}) {
+    auto insert = Take(db.Prepare("INSERT INTO views VALUES(?,?,0)"));
+    Take(insert.Bind(1, config.at("viewId").get<std::string>()));
+    Take(insert.Bind(2, config.dump()));
+    Take(insert.Step());
+  }
+  Take(db.Execute("PRAGMA user_version=5"));
+  Take(
+      db.Execute("CREATE TRIGGER fail_geometry_migration BEFORE UPDATE ON views "
+                 "WHEN OLD.view_id='2' BEGIN "
+                 "SELECT RAISE(ABORT,'injected migration failure'); END"));
+  Check(!MigrateSessionDb(db, path, "dev"), "geometry migration reports write failure");
+  Check(Scalar(db, "PRAGMA user_version") == 5 &&
+            Scalar(db,
+                   "SELECT json_extract(config,'$.occludedBottom') FROM views WHERE view_id='1'") ==
+                200,
+        "failed migration retains both old geometry and schema version");
+  Take(db.Execute("DROP TRIGGER fail_geometry_migration"));
+  Take(db.Execute("UPDATE views SET config=json_set(config,'$.unknown',true)"));
+  Check(!MigrateSessionDb(db, path, "dev") && Scalar(db, "PRAGMA user_version") == 5,
+        "migration rejects unknown durable fields and rolls back");
+  Take(db.Execute("UPDATE views SET config=json_remove(config,'$.unknown')"));
+  Take(MigrateSessionDb(db, path, "dev"));
+  {
+    auto query = Take(db.Prepare("SELECT config FROM views WHERE view_id='1'"));
+    Check(
+        Take(query.Step()) && Json::parse(query.Text(0)) == session_documents::ViewTopology(legacy),
+        "v5 migration discards geometry and retains adoption topology");
+  }
+  Check(Scalar(db, "SELECT count(*) FROM pragma_table_info('views') WHERE name='position'") == 0,
+        "v6 drops durable presentation order");
+  {
+    auto query = Take(db.Prepare("SELECT config FROM views WHERE view_id='2'"));
+    Check(
+        Take(query.Step()) && Json::parse(query.Text(0)) == session_documents::ViewTopology(second),
+        "v5 migration retains sign-in topology");
+  }
+  Take(db.Execute("UPDATE views SET config=json_set(config,'$.visible',false)"));
+  Check(!CheckSessionDb(db), "current schema strictly rejects persisted geometry");
+  Take(db.Close());
+  SessionDb invalid(path);
+  Check(!invalid.Open(), "startup rejects a current record containing transient geometry");
+}
+void PresentationOrderIsVolatile(const fs::path& path) {
+  SessionDb store(path);
+  Take(store.Open());
+  const auto first = TestView("1");
+  const auto second = TestView("2");
+  Take(store.Views().SaveDesired(Json::array({second, first}), 1, "1"));
+  sqlite::Database inject;
+  Take(inject.Open(path / "session.db"));
+  Take(inject.Execute("BEGIN IMMEDIATE"));
+  Take(store.Views().SaveDesired(Json::array({first, second}), 1, "2"));
+  Check(Scalar(inject, "SELECT desired_revision FROM coordination_state") == 1,
+        "presentation order changes bypass the persistence transaction");
+  Take(inject.Execute("ROLLBACK"));
+}
+void GeometryIsVolatile(const fs::path& path) {
+  SessionDb store(path);
+  Take(store.Open());
+  auto config = TestView();
+  config["occludedBottom"] = 120;
+  config["occlusionRevision"] = "7";
+  Take(store.Views().SaveDesired(Json::array({config}), 1, "1"));
+  const auto topology = session_documents::ViewTopology(config);
+  sqlite::Database observer;
+  Take(observer.Open(path / "session.db"));
+  Take(observer.Execute("BEGIN IMMEDIATE"));
+  config["occludedBottom"] = 0;
+  config["occlusionRevision"] = "8";
+  config["width"] = 800;
+  config["height"] = 600;
+  config["visible"] = true;
+  config["device"]["deviceScaleFactor"] = 2;
+  Take(store.Views().SaveDesired(Json::array({config}), 1, "2"));
+  {
+    auto query = Take(observer.Prepare("SELECT config FROM views"));
+    Check(Take(query.Step()), "persisted view exists");
+    const auto saved = Json::parse(query.Text(0));
+    Check(saved == topology, "geometry observations never reach the durable view configuration");
+  }
+  Check(Scalar(observer, "SELECT desired_revision FROM coordination_state") == 1,
+        "geometry does not update the durable revision");
+  Take(observer.Execute("ROLLBACK"));
+  const auto restored = Take(store.Views().Load());
+  Check(restored == Json::array({topology}), "crash recovery has no geometry");
+  Take(
+      observer.Execute("CREATE TRIGGER fail_views BEFORE DELETE ON views BEGIN "
+                       "SELECT RAISE(ABORT,'injected topology failure'); END"));
+  config["width"] = 900;
+  Take(store.Views().SaveDesired(Json::array({config}), 1, "3"));
+  auto changed = config;
+  changed["url"] = "https://example.test/new";
+  Check(!store.Views().SaveDesired(Json::array({changed}), 1, "4"),
+        "topology failure is returned while geometry bypasses writes");
+  Check(Take(store.Views().Load()) == restored &&
+            Scalar(observer, "SELECT desired_revision FROM coordination_state") == 1,
+        "failed topology commit preserves the full durable desired record");
+  Check(!store.Views().SaveDesired(Json::array(), 1, "5"), "view removal requires a commit");
+  Take(observer.Execute("DROP TRIGGER fail_views"));
+  Take(store.Views().SaveDesired(Json::array({changed}), 1, "6"));
+  Check(Take(store.Views().Load())[0].at("url") == changed.at("url"),
+        "topology commits after the fault clears");
+  Take(store.Close());
+  SessionDb reopened(path);
+  Take(reopened.Open());
+  Check(Take(reopened.Views().Load()) == Json::array({session_documents::ViewTopology(changed)}),
+        "restart retains topology without any geometry");
+}
 void Transactions(const fs::path& path) {
   SessionDb store(path);
   Take(store.Open());
   auto views = store.Views();
   auto recovery = store.Recovery();
-  const auto config = TestView("1", "old");
+  const auto config = session_documents::ViewTopology(TestView("1", "old"));
   Take(views.Save(Json::array({config})));
   auto invalid_recovery = Recovery();
   invalid_recovery["chunks"][0]["data"] = "%%%";
@@ -440,6 +828,14 @@ int wmain(int argc, wchar_t** argv) {
     Formats();
     MigrationRunner(root / "runner");
     UpgradeFromVersion3(root / "upgrade-v3");
+    UpgradeDerivatives(root / "upgrade-derivatives");
+    UpgradeDerivativeBounds(root / "upgrade-bounds");
+    DerivativeDecoding(root / "derivative-decoding");
+    DerivativeFailures(root / "thumbnail-failures", "thumbnail", 256);
+    DerivativeFailures(root / "cache-failures", "selection-transcode", 1024);
+    UpgradeGeometry(root / "upgrade-geometry");
+    GeometryIsVolatile(root / "geometry");
+    PresentationOrderIsVolatile(root / "order");
     Transactions(root / "transactions");
     EventTransactions(root / "events");
     Reads(root / "reads");

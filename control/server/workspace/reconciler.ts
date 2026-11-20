@@ -9,10 +9,83 @@ import { pageUsageIdentity } from './workspace';
 import type { ProductTab } from '../../shared/product';
 import { isLocalTab } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
+import { canonical, type SessionObserved } from '../endpoint/coordination';
+import { KeyedSerialQueue } from '../util/serial-queue';
 
 export class Reconciler {
   private closed = false;
   private readonly pending = new Set<Promise<void>>();
+  private readonly requested = new Map<string, { dirty: boolean; work: Promise<void> }>();
+  private readonly observations = new WeakMap<object, string>();
+  private readonly products = new KeyedSerialQueue();
+
+  observe(message: SessionObserved) {
+    const runtime = this.context.tenants.get(message.tenantId);
+    const key = canonical({
+      sessionId: message.sessionId,
+      placementEpoch: message.placementEpoch,
+      connectionEpoch: message.connectionEpoch,
+      endpointIncarnation: message.endpointIncarnation,
+      observedRevision: message.observedRevision,
+      converged: message.converged,
+      browser: message.browser,
+      browserIncarnation: message.browserIncarnation,
+      browserRestart: message.browserRestart,
+      applied: message.applied,
+      authorization: message.authorization,
+      lock: message.lock,
+      views: message.views.map(({ compositor, renderer_pids, ...view }) => view),
+      pendingPopups: message.pendingPopups,
+      recovery: message.recovery,
+      blockers: message.blockers,
+      rtc: { active: message.rtc.active, connectionId: message.rtc.connectionId },
+      mediaPolicy: message.stats.mediaPolicy,
+      allocationPressure: message.stats.allocationPressure,
+      lastError: message.lastError,
+    });
+    if (this.observations.get(runtime) === key) return;
+    this.observations.set(runtime, key);
+    if (!runtime.viewer && !runtime.started && !runtime.pendingRtcCheck) return;
+    return this.requestProduct(message.tenantId);
+  }
+
+  publishDesired(tenant: string) {
+    this.context.endpoint.invalidate(tenant);
+    void this.requestProduct(tenant);
+  }
+
+  requestProduct(tenant: string): Promise<void> {
+    if (this.closed || this.context.closed) return Promise.resolve();
+    const existing = this.requested.get(tenant);
+    if (existing) {
+      existing.dirty = true;
+      return existing.work;
+    }
+    const request = { dirty: true, work: Promise.resolve() };
+    const tracking = this.context.tenants.get(tenant).reconciliation;
+    request.work = Promise.resolve().then(async () => {
+      try {
+        while (request.dirty && !this.closed && !this.context.closed) {
+          try {
+            await this.context.tenants.serial(tenant, async () => {
+              request.dirty = false;
+              if (this.context.tenants.get(tenant).pendingRtcCheck)
+                await this.services.rtc.checkReconnectedRtc(tenant);
+              if (!this.closed && !this.context.closed) await this.reconcileProduct(tenant);
+            });
+          } catch (err) {
+            this.context.tenants.get(tenant).lastError = toRemoteKitError(err);
+          }
+        }
+      } finally {
+        this.requested.delete(tenant);
+        if (tracking.inflight === request.work) delete tracking.inflight;
+      }
+    });
+    this.requested.set(tenant, request);
+    tracking.inflight = request.work;
+    return request.work;
+  }
   async close() {
     this.closed = true;
     await this.reclaim.close();
@@ -22,6 +95,7 @@ export class Reconciler {
         .values()
         .flatMap((runtime) => (runtime.reconciliation.inflight ? [runtime.reconciliation.inflight] : [])),
     );
+    await this.products.drain();
   }
   get backgroundFailure() {
     return this.reclaim.retry.error;
@@ -67,20 +141,7 @@ export class Reconciler {
       .all() as { tenant: string }[];
     for (const { tenant } of active) this.context.tenants.get(tenant).started = true;
     const work = this.context.tenants.activeTenants().map((tenant) => {
-      const tracking = this.context.tenants.get(tenant).reconciliation;
-      const running = tracking.inflight;
-      if (running) return running;
-      const task = (async () => {
-        if (this.context.tenants.get(tenant).pendingRtcCheck)
-          await this.services.rtc.checkReconnectedRtc(tenant);
-        await this.context.tenants.serial(tenant, () => this.reconcileProduct(tenant));
-      })()
-        .catch((err) => {
-          this.context.tenants.get(tenant).lastError = toRemoteKitError(err);
-        })
-        .finally(() => delete tracking.inflight);
-      tracking.inflight = task;
-      return task;
+      return this.requestProduct(tenant);
     });
     await Promise.all([...work, relief, reclaim]);
   }
@@ -151,7 +212,10 @@ export class Reconciler {
     }
     this.services.viewers.push(tenant);
   }
-  async reconcileProduct(tenant: string) {
+  reconcileProduct(tenant: string): Promise<void> {
+    return this.products.run(tenant, () => this.reconcileLatest(tenant));
+  }
+  private async reconcileLatest(tenant: string) {
     if (this.closed || this.context.closed) return;
     const runtime = this.context.tenants.get(tenant);
     this.services.pageRequests.observePendingClose(this.context.store.workspaces.workspace(tenant));
@@ -183,7 +247,8 @@ export class Reconciler {
     }
     if (!(runtime.viewer !== undefined) && !runtime.started) return;
     const tracking = runtime.reconciliation;
-    const desiredKey = this.productInput(tenant);
+    const observation = this.observations.get(runtime);
+    const desiredKey = this.productInput(tenant, observation);
     if (!tracking.retry.ready(desiredKey)) return;
     try {
       if (!(runtime.viewer !== undefined)) {
@@ -366,12 +431,19 @@ export class Reconciler {
         throw new RemoteKitError('unavailable', 'Browser已离线，页面保留并等待恢复');
       const viewer = runtime.viewer,
         viewport = viewer?.viewport ?? runtime.lastViewport;
+      const visibilityChanged = () =>
+        (runtime.viewer?.viewport ?? runtime.lastViewport) !== viewport ||
+        this.context.store.workspaces.workspace(tenant).revision !== state.revision;
       this.services.lifecycle.observeWanted(state);
       const wanted = (tab: ProductTab) => this.services.lifecycle.wantedVisible(state, tab);
       const ordered = [...state.tabs]
         .filter((t) => !isLocalTab(t))
         .sort((a, b) => Number(wanted(a)) - Number(wanted(b)));
       for (const t of resourceLimitation ? [] : ordered) {
+        if (visibilityChanged()) {
+          this.publishDesired(tenant);
+          return;
+        }
         if (!(runtime.viewer !== undefined)) {
           await this.observeOffline(tenant);
           return;
@@ -393,6 +465,10 @@ export class Reconciler {
           current,
           lifecycleBlocked,
         );
+        if (visibilityChanged()) {
+          this.publishDesired(tenant);
+          return;
+        }
         if (lifecycleBlocked) {
           await this.services.lifecycle.advanceLifecycleRecovery(
             state,
@@ -433,7 +509,7 @@ export class Reconciler {
       this.services.pageRequests.clear(tenant);
       const failure = toRemoteKitError(error);
       if (error instanceof EndpointSnapshotError) runtime.browserRestart = error.browserRestart;
-      tracking.retry.ready(this.productInput(tenant));
+      tracking.retry.ready(this.productInput(tenant, observation));
       tracking.retry.fail(failure);
       runtime.lastErrorKey = 'endpoint';
       runtime.lastError = failure;
@@ -441,13 +517,14 @@ export class Reconciler {
       throw error;
     }
   }
-  private productInput(tenant: string) {
+  private productInput(tenant: string, observation: string | undefined) {
     const runtime = this.context.tenants.get(tenant);
     return JSON.stringify([
       this.context.store.workspaces.workspace(tenant).revision,
       runtime.viewer?.id,
       runtime.viewer?.viewport,
       runtime.browserIncarnation,
+      observation,
     ]);
   }
   async observeOffline(tenant: string) {

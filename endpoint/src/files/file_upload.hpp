@@ -62,6 +62,7 @@ class FileUploadStore {
 
  private:
   friend class NativeRetryOwnerProbe;
+  friend class FileUploadStoreTest;
   Result<Batch> Begin(const Binding&, const std::vector<Spec>&);
   Result<Batch> Seal(const std::string& id, const Binding&);
   Result<void> Erase(std::map<std::string, Batch>::iterator);
@@ -71,6 +72,10 @@ class FileUploadStore {
   std::map<std::string, RetryUnit> cleanup_retries_;
   std::set<std::string> confirmed_exits_;
   std::function<Result<void>(const std::filesystem::path&)> remove_tree_;
+  std::function<void(const std::filesystem::path&, const std::filesystem::path&, std::error_code&)>
+      link_file_ = [](const auto& source, const auto& target, auto& error) {
+        std::filesystem::create_hard_link(source, target, error);
+      };
   std::uint64_t reserved_bytes_{};
   std::uint64_t reserved_files_{};
 };

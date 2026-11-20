@@ -282,11 +282,34 @@ Result<FileUploadStore::Batch> FileUploadStore::Stage(const Binding& binding,
       const auto& path = batch.files[i].path;
       RK_RETURN_IF_ERROR(RemoveFile(path));
       std::error_code error;
-      std::filesystem::create_hard_link(source.path, path, error);
-      if (error)
-        return WithOsError(ErrorCode::kUnavailable,
-                           "cannot link selection payload: " + error.message(),
-                           OsError::Kind::kWin32, error.value());
+      link_file_(source.path, path, error);
+      if (error) {
+        struct Copy {
+          const std::function<Result<void>()>& check;
+          uint64_t budget;
+          std::optional<Error> failure;
+        } copy{check, source.spec.size, {}};
+        const auto progress = [](LARGE_INTEGER total, LARGE_INTEGER transferred, LARGE_INTEGER,
+                                 LARGE_INTEGER, DWORD, DWORD, HANDLE, HANDLE,
+                                 LPVOID context) -> DWORD {
+          auto& copy = *static_cast<Copy*>(context);
+          const auto current = copy.check();
+          if (!current)
+            copy.failure = current.error();
+          else if (static_cast<uint64_t>(total.QuadPart) > copy.budget ||
+                   static_cast<uint64_t>(transferred.QuadPart) > copy.budget)
+            copy.failure = Error{ErrorCode::kLimitExceeded, "selection_copy_budget_exceeded",
+                                 ErrorReason::kFileTooLarge};
+          return copy.failure ? PROGRESS_CANCEL : PROGRESS_CONTINUE;
+        };
+        if (!CopyFileExW(source.path.c_str(), path.c_str(), progress, &copy, nullptr,
+                         COPY_FILE_FAIL_IF_EXISTS)) {
+          if (copy.failure)
+            return *copy.failure;
+          return WithOsError(ErrorCode::kUnavailable, "cannot copy selection payload",
+                             OsError::Kind::kWin32, GetLastError());
+        }
+      }
     }
     RK_RETURN_IF_ERROR(check());
     RK_ASSIGN_OR_RETURN(sealed, Seal(id, binding));

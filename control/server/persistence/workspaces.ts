@@ -146,6 +146,22 @@ export class WorkspacesRepository {
     )
       throw new RemoteKitError('internal', '工作区窗口/标签归属不一致');
     const previous = this.workspace(state.tenantId);
+    // Focus can advance while an asynchronous product reconciliation owns this snapshot.
+    if (state.revision < previous.revision) {
+      if (state.spaces.some((space) => space.id === previous.activeSpaceId))
+        state.activeSpaceId = previous.activeSpaceId;
+      for (const space of state.spaces) {
+        const latest = previous.spaces.find((item) => item.id === space.id);
+        if (latest?.focusedWindowId && space.windowIds.includes(latest.focusedWindowId)) {
+          space.focusedWindowId = latest.focusedWindowId;
+          space.lastActiveAt = latest.lastActiveAt;
+        }
+      }
+      for (const window of state.windows) {
+        const latest = previous.windows.find((item) => item.id === window.id);
+        if (latest) window.lastActiveAt = latest.lastActiveAt;
+      }
+    }
     if (
       isDeepStrictEqual(
         {

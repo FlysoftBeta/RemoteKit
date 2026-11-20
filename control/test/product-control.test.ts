@@ -16,6 +16,8 @@ import { ControlDatabase } from '../server/persistence/database';
 import { RemoteKitError } from '../shared/errors';
 import type { ProductAction } from '../shared/product';
 import { accountsFor, registerUser, requestViewer, TestClock, testGateway } from './server-fixture';
+import { settle as settleAsync } from './retry-loop-boundary';
+import { log } from '../server/log';
 
 class ProductEndpoint implements EndpointLink {
   readonly state = { state: 'ready' as const, incarnation: 'test', connectionEpoch: 'test' };
@@ -570,6 +572,7 @@ test('automatic reclaim uses eligible background time and canDiscard; activating
         },
       ],
     });
+    await control.reconciler.requestProduct(user.tenantId);
     assert.equal(view.pending, true);
     assert.equal(
       endpoint.calls.filter((c) => c.method === 'view.lifecycle' && c.args.action === 'restore').length,
@@ -874,7 +877,8 @@ test('UA table precedes Browser/view creation; failed application persists desir
       { type: 'site.set', origin: 'https://example.test', tabletUa: true, tabId: b.id },
       'lease',
     );
-    await assert.rejects(control.reconciler.reconcileProduct(user.tenantId), { code: 'unavailable' });
+    await control.reconciler.requestProduct(user.tenantId);
+    assert.equal(control.tenants.get(user.tenantId).lastError?.code, 'unavailable');
     assert.equal(pending.application?.status, 'pending');
     assert.equal(store.workspaces.workspace(user.tenantId).sites['https://example.test'].tabletUa, true);
     assert.equal(endpoint.calls.filter((c) => c.method === 'view.command').length, 0);
@@ -1792,7 +1796,13 @@ function connect(url: string, cookie: string, origin = 'http://product.test') {
   };
 }
 
-test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Viewer and hide on disconnect', async () => {
+test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Viewer and hide on disconnect', async (t) => {
+  const timelines: Record<string, unknown>[] = [];
+  const info = log.info;
+  t.mock.method(log, 'info', (event: string, fields?: Record<string, unknown>) => {
+    if (event === 'viewport.timeline') timelines.push(fields!);
+    else info(event, fields);
+  });
   const store = new ControlDatabase(':memory:', { buildId: 'test' }),
     endpoint = new ProductEndpoint(),
     control = createApplication(store, testGateway(endpoint)),
@@ -1917,7 +1927,7 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
       tenantId: stateA.workspace.tenantId,
     });
     assert.equal(scope.error.code, 'invalid_request');
-    await a.request('4', 'viewport', {
+    const viewport = {
       devicePixelRatio: 1,
       windows: [
         {
@@ -1929,7 +1939,21 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
           occlusionRevision: '1',
         },
       ],
+    };
+    await a.request('4', 'viewport', viewport);
+    assert.equal(timelines.length, 1);
+    const timeline = timelines[0];
+    assert.equal(timeline.received, 0);
+    assert.ok(Number(timeline.started) >= 0);
+    assert.ok(Number(timeline.published) >= Number(timeline.started));
+    assert.ok(Number(timeline.replied) >= Number(timeline.published));
+    assert.match(String(timeline.revision), /^[1-9]\d*$/);
+    assert.deepEqual(timeline.windows, [{ windowId: win.id, revision: '1' }]);
+    await a.request('same-geometry', 'viewport', {
+      ...viewport,
+      windows: viewport.windows.map((window) => ({ ...window, occlusionRevision: '2' })),
     });
+    assert.equal(timelines.length, 1);
     assert.equal(endpoint.views.get(stateA.workspace.tenantId)!.get(tab.webviewId).visible, true);
     const replacement = connect(socketUrl, cookieA);
     peers.push(replacement);
@@ -2219,6 +2243,7 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
       ],
     });
     assert.equal(control.viewers.productState(user.tenantId).quality.resourceLimitation, null);
+    await control.reconciler.requestProduct(user.tenantId);
     assert.equal(control.viewers.productState(user.tenantId).endpointError, null);
     await observedProductAction(control, user.tenantId, { type: 'window.close', windowId: w.id }, 'lease');
     assert.equal(control.viewers.productState(user.tenantId).workspace.windows.length, 0);
@@ -2518,6 +2543,150 @@ test('viewport revisions reject stale occlusion without changing stable geometry
     );
   } finally {
     await control.viewers.detachViewer(user.tenantId, 'lease');
+    await control.close();
+    store.db.close();
+  }
+});
+
+test('viewport and window switches publish while a product reconcile owns the tenant queue', async (t) => {
+  const { store, endpoint, control, user } = await fixture();
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  try {
+    await control.viewers.attachViewer(
+      user.tenantId,
+      'lease',
+      () => {},
+      { identity: 'user', valid: () => true },
+      true,
+    );
+    for (let i = 0; i < 2; i++)
+      await observedProductAction(
+        control,
+        user.tenantId,
+        buildAction({
+          type: 'window.open',
+          appId: 'browser',
+          placement: { mode: 'space' },
+          url: 'about:blank',
+        }),
+        'lease',
+      );
+    await control.reconciler.requestProduct(user.tenantId);
+    const stale = store.workspaces.workspace(user.tenantId);
+    const first = stale.windows[0];
+    const second = stale.windows[1];
+    let entered = false;
+    let completed = false;
+    const reconcile = control.reconciler.reconcileProduct.bind(control.reconciler);
+    t.mock.method(control.reconciler, 'reconcileProduct', async (tenant: string) => {
+      if (!entered) {
+        entered = true;
+        await hold;
+        store.workspaces.saveWorkspace(stale);
+        completed = true;
+      } else await reconcile(tenant);
+    });
+    const work = control.reconciler.requestProduct(user.tenantId);
+    await settleAsync();
+    assert.equal(entered, true);
+    let replied = false;
+    const viewport = {
+      devicePixelRatio: 1,
+      windows: stale.windows.map((window) => ({
+        windowId: window.id,
+        width: 800,
+        height: 600,
+        visible: true,
+        occludedBottom: 0,
+        occlusionRevision: '20',
+      })),
+    };
+    const request = requestViewer(control, user.tenantId, 'lease', 'viewport', viewport).then(() => {
+      replied = true;
+    });
+    await settleAsync();
+    assert.equal(replied, true);
+    assert.equal(completed, false);
+    assert.equal(endpoint.views.get(user.tenantId)!.get(stale.tabs[0].webviewId).width, 800);
+    await request;
+    const focus = await submitViewerAction(control, user.tenantId, 'lease', {
+      type: 'window.focus',
+      windowId: first.id,
+    });
+    assert.equal(focus.status, 'committed');
+    await control.endpoint.published(user.tenantId);
+    let desired = endpoint.calls.filter((call) => call.method === 'session.desired').slice(-1)[0].args;
+    assert.equal(desired.views.find((view: any) => view.viewId === stale.tabs[0].webviewId).visible, true);
+    assert.equal(desired.views.find((view: any) => view.viewId === stale.tabs[1].webviewId).visible, false);
+    const target = stale.spaces.find((space) => space.windowIds.includes(second.id))!;
+    const activate = await submitViewerAction(control, user.tenantId, 'lease', {
+      type: 'space.activate',
+      spaceId: target.id,
+    });
+    assert.equal(activate.status, 'committed');
+    await control.endpoint.published(user.tenantId);
+    desired = endpoint.calls.filter((call) => call.method === 'session.desired').slice(-1)[0].args;
+    assert.equal(desired.views.find((view: any) => view.viewId === stale.tabs[1].webviewId).visible, true);
+    assert.equal(completed, false);
+    release();
+    await work;
+    assert.equal(store.workspaces.workspace(user.tenantId).activeSpaceId, target.id);
+  } finally {
+    release();
+    await control.close();
+    store.db.close();
+  }
+});
+
+test('session observations update loading and native file requests without a tick', async () => {
+  const { store, endpoint, control, user } = await fixture();
+  try {
+    await control.viewers.attachViewer(
+      user.tenantId,
+      'lease',
+      () => {},
+      { identity: 'user', valid: () => true },
+      true,
+    );
+    await observedProductAction(
+      control,
+      user.tenantId,
+      buildAction({
+        type: 'window.open',
+        appId: 'browser',
+        placement: { mode: 'space' },
+        url: 'https://example.test/',
+      }),
+      'lease',
+    );
+    const state = store.workspaces.workspace(user.tenantId);
+    const native = endpoint.views.get(user.tenantId)!.get(state.tabs[0].webviewId);
+    native.loading = true;
+    native.pageRequests = {
+      pending: [
+        { kind: 'file_chooser', request: 'native', state: 'pending', mode: 'open', accept_types: [] },
+      ],
+      events: [],
+    };
+    const push = async () => {
+      control.endpoint.nodes.emit('session.observed', {
+        nodeId: 'fixture',
+        message: control.endpoint.observation(user.tenantId)!,
+      });
+      await control.tenants.get(user.tenantId).reconciliation.inflight;
+    };
+    await push();
+    assert.equal(control.viewers.productState(user.tenantId).workspace.tabs[0].loading, true);
+    assert.equal(control.viewers.productState(user.tenantId).fileRequests.length, 1);
+    native.loading = false;
+    native.pageRequests.pending = [];
+    await push();
+    assert.equal(control.viewers.productState(user.tenantId).workspace.tabs[0].loading, false);
+    assert.equal(control.viewers.productState(user.tenantId).fileRequests.length, 0);
+  } finally {
     await control.close();
     store.db.close();
   }

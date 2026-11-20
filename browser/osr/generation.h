@@ -21,7 +21,9 @@ class Generation : public std::enable_shared_from_this<Generation> {
   Generation(uint32_t width, uint32_t height, uint64_t generation);
   ~Generation();
   void Start() { scheduler_.Start(); }
-  void SetViews(std::vector<View> views) { plane_pool_.SetViews(std::move(views)); }
+  void SetViews(std::vector<View> views, uint32_t layout_revision) {
+    plane_pool_.SetViews(std::move(views), layout_revision);
+  }
   bool Configure(const std::shared_ptr<Plane>& plane) { return plane_pool_.Configure(plane); }
   void Configured(std::shared_ptr<Plane> plane, bool ok) {
     plane_pool_.Configured(std::move(plane), ok);

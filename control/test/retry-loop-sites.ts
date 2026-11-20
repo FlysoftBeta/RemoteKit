@@ -75,9 +75,8 @@ export const creationBindings: Record<string, string | string[]> = {
     'rtc-stats-feedback-control-endpoint-clock-probes',
     'media-feedback-recovery',
   ],
-  'client/presentation/presentation-session.ts#RetryUnit:1':
-    'presentation-negotiation-and-missing-frame-metadata',
-  'client/presentation/presentation-session.ts#RetryUnit:2': 'presentation-metadata-recovery',
+  'client/presentation/presentation-session.ts#RetryUnit:1': 'presentation-negotiation',
+  'client/presentation/presentation-session.ts#RetryUnit:2': 'presentation-pixel-recovery',
   'client/rtc/rtc-session.ts#RetryUnit:1': 'browser-service-rtc-establishment',
   'client/rtc/rtc-session.ts#RetryUnit:2': 'rtc-offer-status-reconciliation',
   'server/application.ts#BackgroundJob:1': [

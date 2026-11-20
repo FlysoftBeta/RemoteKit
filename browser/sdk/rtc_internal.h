@@ -187,6 +187,7 @@ class Peer : public webrtc::PeerConnectionObserver,
   void OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState s) override;
   void OnDataChannel(scoped_refptr<webrtc::DataChannelInterface> channel) override;
   void OnStateChange() override;
+  void OnBufferedAmountChange(uint64_t sent_data_size) override;
   void OnMessage(const webrtc::DataBuffer& message) override;
   const uint64_t id;
   remotekit_rtc_options options;

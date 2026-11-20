@@ -19,12 +19,32 @@ using PhotoCancelled = std::function<bool()>;
 enum class PhotoMode { kPhoto, kScan };
 enum class PhotoTranscode { kJpeg, kPng };
 
+struct PhotoGeometryResult {
+  std::string kind = "unchanged";
+  bool cropped = false;
+};
+
+struct PhotoOrientationResult {
+  unsigned turns = 0;
+  std::string state = "none";
+};
+
+template <class Json>
+void to_json(Json& json, const PhotoGeometryResult& geometry) {
+  json = {{"kind", geometry.kind}, {"cropped", geometry.cropped}};
+}
+
+template <class Json>
+void to_json(Json& json, const PhotoOrientationResult& orientation) {
+  json = {{"turns", orientation.turns}, {"state", orientation.state}};
+}
+
 struct PhotoProcessResult {
   std::uint32_t width;
   std::uint32_t height;
-  std::string geometry;
+  PhotoGeometryResult geometry;
   unsigned quarter_turns = 0;
-  std::string orientation = "none";
+  PhotoOrientationResult orientation;
 };
 
 struct PhotoBurstCandidate {

@@ -7,6 +7,7 @@
 #include "util/file_io.hpp"
 #include "util/result_macros.hpp"
 #include <charconv>
+#include <algorithm>
 #include <limits>
 namespace remotekit {
 namespace {
@@ -34,6 +35,23 @@ Result<void> View(const Json& view) {
     return CorruptRecord(std::string("views.config: ") + error.what());
   }
 }
+}  // namespace
+Result<Json> ViewStore::Topology(const Json& views) {
+  try {
+    persisted::Array(views, 4096);
+    Json stable = Json::array();
+    for (const auto& view : views)
+      stable.push_back(session_documents::ViewTopology(view));
+    std::sort(stable.begin(), stable.end(), [](const Json& left, const Json& right) {
+      return left.at("viewId").get_ref<const std::string&>() <
+             right.at("viewId").get_ref<const std::string&>();
+    });
+    return stable;
+  } catch (const std::exception& error) {
+    return CorruptRecord(std::string("views.config: ") + error.what());
+  }
+}
+namespace {
 const char* TableName(LibraryTable table) {
   switch (table) {
     case LibraryTable::kAssets:
@@ -42,8 +60,6 @@ const char* TableName(LibraryTable table) {
       return "library_drafts";
     case LibraryTable::kSelections:
       return "library_selections";
-    case LibraryTable::kDerivatives:
-      return "library_derivatives";
   }
   std::terminate();
 }
@@ -95,8 +111,8 @@ Result<void> SessionDb::Delete(const char* sql, const std::string& id) {
 }
 Result<Json> ViewStore::Load() {
   std::lock_guard lock(db_.mutex_);
-  RK_ASSIGN_OR_RETURN(
-      statement, db_.db_.Prepare("SELECT config,view_id FROM views ORDER BY position,view_id"));
+  RK_ASSIGN_OR_RETURN(statement,
+                      db_.db_.Prepare("SELECT config,view_id FROM views ORDER BY view_id"));
   Json views = Json::array();
   for (;;) {
     RK_ASSIGN_OR_RETURN(row, statement.Step());
@@ -113,17 +129,13 @@ Result<Json> ViewStore::Load() {
   return views;
 }
 Result<void> ViewStore::Save(const Json& views) {
-  if (!views.is_array())
-    return CorruptState("invalid views.config collection");
+  RK_ASSIGN_OR_RETURN(stable, Topology(views));
   return db_.Write([&]() -> Result<void> {
     RK_RETURN_IF_ERROR(db_.db_.Execute("DELETE FROM views"));
-    int64_t position = 0;
-    for (const auto& view : views) {
-      RK_RETURN_IF_ERROR(View(view));
-      RK_ASSIGN_OR_RETURN(statement, db_.db_.Prepare("INSERT INTO views VALUES(?,?,?)"));
+    for (const auto& view : stable) {
+      RK_ASSIGN_OR_RETURN(statement, db_.db_.Prepare("INSERT INTO views VALUES(?,?)"));
       RK_RETURN_IF_ERROR(statement.Bind(1, view.at("viewId").get<std::string>()));
       RK_RETURN_IF_ERROR(statement.Bind(2, view.dump()));
-      RK_RETURN_IF_ERROR(statement.Bind(3, position++));
       RK_RETURN_IF_ERROR(Done(statement));
     }
     return {};
@@ -132,9 +144,18 @@ Result<void> ViewStore::Save(const Json& views) {
 Result<void> ViewStore::SaveDesired(const Json& views,
                                     uint64_t epoch,
                                     const std::string& revision) {
+  std::lock_guard lock(db_.mutex_);
+  RK_ASSIGN_OR_RETURN(stable, Topology(views));
+  RK_ASSIGN_OR_RETURN(previous, Load());
+  RK_ASSIGN_OR_RETURN(
+      placement,
+      db_.db_.Prepare("SELECT placement_epoch FROM coordination_state WHERE singleton=1"));
+  RK_ASSIGN_OR_RETURN(found, placement.Step());
+  if (found && placement.Int64(0) == static_cast<int64_t>(epoch) && previous == stable)
+    return {};
   return db_.Write([&]() -> Result<void> {
     RK_RETURN_IF_ERROR(db_.Events().BeginPlacement(epoch));
-    RK_RETURN_IF_ERROR(Save(views));
+    RK_RETURN_IF_ERROR(Save(stable));
     RK_RETURN_IF_ERROR(db_.db_.Execute(
         "DELETE FROM retired_views WHERE view_id NOT IN (SELECT view_id FROM views); DELETE FROM "
         "view_runtime WHERE view_id NOT IN (SELECT view_id FROM views)"));
@@ -436,10 +457,6 @@ Result<std::map<std::string, Json>> LibraryStore::Load(LibraryTable table) {
             !value["state"].is_string() || value["state"] != statement.Text(1))
           return CorruptState("invalid library selection");
         break;
-      case LibraryTable::kDerivatives:
-        id += "-" + statement.Text(1);
-        value = {{"assetId", statement.Text(2)}};
-        break;
     }
     RK_RETURN_IF_ERROR(library_records::Validate(table, id, value));
     result.emplace(std::move(id), std::move(value));
@@ -452,45 +469,34 @@ Result<void> SessionDb::PutLibrary(LibraryTable table, const std::string& id, co
                           ? "INSERT OR REPLACE INTO library_assets VALUES(?,?,?,?,?)"
                       : table == LibraryTable::kDrafts
                           ? "INSERT OR REPLACE INTO library_drafts VALUES(?,?,?,?,?,?,?)"
-                      : table == LibraryTable::kSelections
-                          ? "INSERT OR REPLACE INTO library_selections VALUES(?,?,?)"
-                          : "INSERT OR REPLACE INTO library_derivatives VALUES(?,?,?)";
+                          : "INSERT OR REPLACE INTO library_selections VALUES(?,?,?)";
   RK_ASSIGN_OR_RETURN(statement, db_.Prepare(query));
-  if (table == LibraryTable::kDerivatives) {
-    const auto dash = id.find('-');
-    if (dash == std::string::npos)
-      return CorruptState("invalid derivative key");
-    RK_RETURN_IF_ERROR(statement.Bind(1, id.substr(0, dash)));
-    RK_RETURN_IF_ERROR(statement.Bind(2, id.substr(dash + 1)));
-    RK_RETURN_IF_ERROR(statement.Bind(3, value.at("assetId").get<std::string>()));
-  } else {
-    RK_RETURN_IF_ERROR(statement.Bind(1, id));
-    if (table == LibraryTable::kAssets) {
-      RK_RETURN_IF_ERROR(statement.Bind(2, value.at("size").get<int64_t>()));
-      if (value.contains("type")) {
-        RK_RETURN_IF_ERROR(statement.Bind(3, value.at("type").get<std::string>()));
-      } else {
-        RK_RETURN_IF_ERROR(statement.BindNull(3));
-      }
-      for (const auto [column, name] : {std::pair{4, "width"}, {5, "height"}}) {
-        if (value.contains(name)) {
-          RK_RETURN_IF_ERROR(statement.Bind(column, value.at(name).get<int64_t>()));
-        } else {
-          RK_RETURN_IF_ERROR(statement.BindNull(column));
-        }
-      }
-    } else if (table == LibraryTable::kDrafts) {
-      int column = 2;
-      for (const auto* name : {"operation", "name", "type"}) {
-        RK_RETURN_IF_ERROR(statement.Bind(column++, value.at(name).get<std::string>()));
-      }
-      RK_RETURN_IF_ERROR(statement.Bind(5, value.at("size").get<int64_t>()));
-      RK_RETURN_IF_ERROR(statement.Bind(6, value.at("expires").get<int64_t>()));
-      RK_RETURN_IF_ERROR(statement.Bind(7, value.at("sealed").get<std::string>()));
+  RK_RETURN_IF_ERROR(statement.Bind(1, id));
+  if (table == LibraryTable::kAssets) {
+    RK_RETURN_IF_ERROR(statement.Bind(2, value.at("size").get<int64_t>()));
+    if (value.contains("type")) {
+      RK_RETURN_IF_ERROR(statement.Bind(3, value.at("type").get<std::string>()));
     } else {
-      RK_RETURN_IF_ERROR(statement.Bind(2, value.at("state").get<std::string>()));
-      RK_RETURN_IF_ERROR(statement.Bind(3, value.dump()));
+      RK_RETURN_IF_ERROR(statement.BindNull(3));
     }
+    for (const auto [column, name] : {std::pair{4, "width"}, {5, "height"}}) {
+      if (value.contains(name)) {
+        RK_RETURN_IF_ERROR(statement.Bind(column, value.at(name).get<int64_t>()));
+      } else {
+        RK_RETURN_IF_ERROR(statement.BindNull(column));
+      }
+    }
+  } else if (table == LibraryTable::kDrafts) {
+    int column = 2;
+    for (const auto* name : {"operation", "name", "type"}) {
+      RK_RETURN_IF_ERROR(statement.Bind(column++, value.at(name).get<std::string>()));
+    }
+    RK_RETURN_IF_ERROR(statement.Bind(5, value.at("size").get<int64_t>()));
+    RK_RETURN_IF_ERROR(statement.Bind(6, value.at("expires").get<int64_t>()));
+    RK_RETURN_IF_ERROR(statement.Bind(7, value.at("sealed").get<std::string>()));
+  } else {
+    RK_RETURN_IF_ERROR(statement.Bind(2, value.at("state").get<std::string>()));
+    RK_RETURN_IF_ERROR(statement.Bind(3, value.dump()));
   }
   return Done(statement);
 }
@@ -501,8 +507,6 @@ Result<void> LibraryStore::Erase(LibraryTable table, const std::string& id) {
   const char* key = table == LibraryTable::kAssets   ? "asset_id"
                     : table == LibraryTable::kDrafts ? "upload_id"
                                                      : "selection_id";
-  if (table == LibraryTable::kDerivatives)
-    return Error{ErrorCode::kInternal, "invalid library erase"};
   auto sql = std::string("DELETE FROM ") + TableName(table) + " WHERE " + key + "=?";
   return db_.Write([&] { return db_.Delete(sql.c_str(), id); });
 }
@@ -520,18 +524,88 @@ Result<void> LibraryStore::Selections(const std::map<std::string, Json>& documen
 Result<void> LibraryStore::Seal(const std::string& asset,
                                 const Json& metadata,
                                 const std::string& upload,
-                                const Json& draft,
-                                const std::string& derivative) {
+                                const Json& draft) {
   return db_.Write([&]() -> Result<void> {
     RK_RETURN_IF_ERROR(db_.PutLibrary(LibraryTable::kAssets, asset, metadata));
     if (!upload.empty()) {
       RK_RETURN_IF_ERROR(db_.PutLibrary(LibraryTable::kDrafts, upload, draft));
     }
-    if (!derivative.empty()) {
-      RK_RETURN_IF_ERROR(
-          db_.PutLibrary(LibraryTable::kDerivatives, derivative, {{"assetId", asset}}));
-    }
+
     return {};
   });
 }
+Result<std::optional<DerivativeRecord>> LibraryStore::FindDerivative(const DerivativeKey& key) {
+  try {
+    derivative_records::Key(key);
+    std::lock_guard lock(db_.mutex_);
+    RK_ASSIGN_OR_RETURN(query,
+                        db_.db_.Prepare("SELECT asset_id,metadata,sequence FROM file_derivatives "
+                                        "WHERE source_id=? AND kind=? AND parameters=?"));
+    RK_RETURN_IF_ERROR(query.Bind(1, key.source));
+    RK_RETURN_IF_ERROR(query.Bind(2, key.kind));
+    RK_RETURN_IF_ERROR(query.Bind(3, key.parameters));
+    RK_ASSIGN_OR_RETURN(row, query.Step());
+    if (!row)
+      return std::optional<DerivativeRecord>{};
+    if (query.IsNull(2) || query.Int64(2) < 0)
+      return CorruptRecord("invalid derivative sequence");
+    DerivativeRecord record{query.Text(0), derivative_records::DecodeMetadata(query.Text(1))};
+    derivative_records::Record(key, record);
+    return std::optional<DerivativeRecord>{std::move(record)};
+  } catch (const std::exception& error) {
+    return CorruptRecord(std::string("invalid derivative record: ") + error.what());
+  }
+}
+Result<void> LibraryStore::EraseDerivative(const DerivativeKey& key,
+                                           const std::function<Result<void>()>& check) {
+  try {
+    derivative_records::Key(key);
+  } catch (const std::exception& error) {
+    return CorruptRecord(error.what());
+  }
+  return db_.Write([&]() -> Result<void> {
+    if (check)
+      RK_RETURN_IF_ERROR(check());
+    RK_ASSIGN_OR_RETURN(
+        remove, db_.db_.Prepare(
+                    "DELETE FROM file_derivatives WHERE source_id=? AND kind=? AND parameters=?"));
+    RK_RETURN_IF_ERROR(remove.Bind(1, key.source));
+    RK_RETURN_IF_ERROR(remove.Bind(2, key.kind));
+    RK_RETURN_IF_ERROR(remove.Bind(3, key.parameters));
+    RK_RETURN_IF_ERROR(Done(remove));
+    if (check)
+      RK_RETURN_IF_ERROR(check());
+    return {};
+  });
+}
+Result<void> LibraryStore::SaveDerivative(const DerivativeKey& key,
+                                          const DerivativeRecord& record,
+                                          const std::function<Result<void>()>& check) {
+  try {
+    derivative_records::Record(key, record);
+  } catch (const std::exception& error) {
+    return CorruptRecord(error.what());
+  }
+  return db_.Write([&]() -> Result<void> {
+    if (check)
+      RK_RETURN_IF_ERROR(check());
+    RK_ASSIGN_OR_RETURN(
+        save, db_.db_.Prepare(
+                  "INSERT INTO file_derivatives VALUES(?,?,?,?,?,"
+                  "(SELECT COALESCE(MAX(sequence),0)+1 FROM file_derivatives)) "
+                  "ON CONFLICT(source_id,kind,parameters) DO UPDATE SET asset_id=excluded.asset_id,"
+                  "metadata=excluded.metadata,sequence=excluded.sequence"));
+    RK_RETURN_IF_ERROR(save.Bind(1, key.source));
+    RK_RETURN_IF_ERROR(save.Bind(2, key.kind));
+    RK_RETURN_IF_ERROR(save.Bind(3, key.parameters));
+    RK_RETURN_IF_ERROR(save.Bind(4, record.asset_id));
+    RK_RETURN_IF_ERROR(save.Bind(5, record.metadata.dump()));
+    RK_RETURN_IF_ERROR(Done(save));
+    RK_RETURN_IF_ERROR(derivative_records::Trim(db_.db_));
+    if (check)
+      RK_RETURN_IF_ERROR(check());
+    return {};
+  });
+}
+
 }  // namespace remotekit

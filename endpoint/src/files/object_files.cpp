@@ -1,10 +1,7 @@
 #include "files/object_files.hpp"
-#include "media/gpu_device.hpp"
 #include "protocol/file_requests.h"
 #include "util/result_macros.hpp"
 namespace remotekit {
-using media::QpcFrequency;
-using media::QpcNow;
 Result<void> ObjectFiles::Start() {
   RK_RETURN_IF_ERROR(store.Open());
   RK_RETURN_IF_ERROR(file_library.Initialize());
@@ -76,50 +73,25 @@ Result<Json> ObjectFiles::Photo(const FileJob& job, const std::string& method, c
   if (method == "photo.thumbnail") {
     const auto asset_id = Required(params, "assetId");
     RK_ASSIGN_OR_RETURN(source, file_library.Path(asset_id));
-    const auto now = QpcNow();
-    const auto cached = photo_thumbnails.find(asset_id);
-    if (cached != photo_thumbnails.end()) {
-      std::optional<remotekit::FileLibrary::Asset> thumbnail;
-      if (now < cached->second.refresh_after) {
-        {
-          auto described = file_library.Describe(cached->second.asset_id);
-          if (described)
-            thumbnail = described.value();
-          else if (described.error().code != ErrorCode::kNotFound)
-            return described.error();
-        }
-      }
-      if (thumbnail) {
-        RK_RETURN_IF_ERROR(check());
-        return thumbnail->Json();
-      }
-      photo_thumbnails.erase(cached);
-    }
-    RK_ASSIGN_OR_RETURN(
-        thumbnail,
-        file_library.CreateDerivative(
-            [&](const fs::path& output) -> Result<remotekit::FileLibrary::Derivative> {
-              RK_ASSIGN_OR_RETURN(dimensions,
-                                  remotekit::CreatePhotoThumbnail(source, output, cancelled));
-              return remotekit::FileLibrary::Derivative{dimensions.width, dimensions.height};
-            },
-            [&] { return Require(job); }, FileLibrary::DerivativeFormat::jpeg, asset_id));
+    RK_ASSIGN_OR_RETURN(thumbnail,
+                        file_library.CachedDerivative(
+                            asset_id, FileLibrary::DerivativeFormat::jpeg,
+                            [&](const fs::path& output) -> Result<FileLibrary::Derivative> {
+                              RK_ASSIGN_OR_RETURN(dimensions,
+                                                  CreatePhotoThumbnail(source, output, cancelled));
+                              return FileLibrary::Derivative{dimensions.width, dimensions.height};
+                            },
+                            check, "thumbnail", "320-v1"));
     RK_RETURN_IF_ERROR(check());
-    constexpr size_t kThumbnailCacheEntries = 256;
-    if (photo_thumbnails.size() >= kThumbnailCacheEntries) {
-      const auto oldest =
-          std::min_element(photo_thumbnails.begin(), photo_thumbnails.end(),
-                           [](const auto& left, const auto& right) {
-                             return left.second.refresh_after < right.second.refresh_after;
-                           });
-      photo_thumbnails.erase(oldest);
-    }
-    photo_thumbnails.emplace(asset_id,
-                             PhotoThumbnail{thumbnail.id, QpcNow() + QpcFrequency() * 3600});
     return thumbnail.Json();
   }
+  if (method == "photo.preview") {
+    if (!protocol::ValidPhotoPreviewParams(params))
+      return Error{ErrorCode::kRejected, "invalid_photo_preview"};
+    return file_library.Preview(Required(params, "assetId"), params.at("maxSide").get<unsigned>(),
+                                check);
+  }
   if (method == "photo.process") {
-    RK_ASSIGN_OR_RETURN(source, file_library.Path(Required(params, "assetId")));
     const auto mode = Required(params, "mode");
     if (mode != "photo" && mode != "scan")
       return Error{ErrorCode::kInvalidRequest, "invalid_photo_mode"};
@@ -129,24 +101,7 @@ Result<Json> ObjectFiles::Photo(const FileJob& job, const std::string& method, c
         return Error{ErrorCode::kInvalidRequest, "invalid_photo_quarter_turns"};
       turns = found->get<unsigned>();
     }
-    PhotoProcessResult processed;
-    RK_ASSIGN_OR_RETURN(
-        derivative, file_library.CreateDerivative(
-                        [&](const fs::path& output) -> Result<FileLibrary::Derivative> {
-                          RK_ASSIGN_OR_RETURN(
-                              dimensions,
-                              ProcessPhoto(source, output,
-                                           mode == "scan" ? PhotoMode::kScan : PhotoMode::kPhoto,
-                                           turns, cancelled));
-                          processed = std::move(dimensions);
-                          return FileLibrary::Derivative{processed.width, processed.height};
-                        },
-                        check, FileLibrary::DerivativeFormat::webp, Required(params, "assetId")));
-    auto asset = derivative.Json();
-    asset["geometry"] = processed.geometry;
-    asset["quarterTurns"] = processed.quarter_turns;
-    asset["orientation"] = processed.orientation;
-    return asset;
+    return file_library.Process(Required(params, "assetId"), mode, turns, check);
   }
 #endif
   return Error{ErrorCode::kUnavailable, "photo_processing_unavailable"};

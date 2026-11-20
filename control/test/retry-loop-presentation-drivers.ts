@@ -2,7 +2,7 @@ import { JSDOM } from 'jsdom';
 import { PresentationSession } from '../client/presentation/presentation-session';
 import type { OwnerFactory } from './retry-loop-boundary';
 
-export function drivePresentation(path: 'negotiation' | 'metadata'): OwnerFactory {
+export function drivePresentation(path: 'negotiation' | 'pixels'): OwnerFactory {
   return (boundary, t) => {
     t.mock.method(performance, 'now', () => Date.now());
     const dom = new JSDOM('', { pretendToBeVisual: true });
@@ -27,7 +27,7 @@ export function drivePresentation(path: 'negotiation' | 'metadata'): OwnerFactor
         sendChannel: (_channel: unknown, message: { type: string }) => {
           if (
             (path === 'negotiation' && message.type === 'media.presentation') ||
-            (path === 'metadata' && message.type === 'media.refresh')
+            (path === 'pixels' && message.type === 'media.refresh')
           )
             boundary.callSync(message, undefined);
           if (message.type === 'media.presentation')
@@ -41,11 +41,11 @@ export function drivePresentation(path: 'negotiation' | 'metadata'): OwnerFactor
     const refresh = () => dom.window.document.dispatchEvent(new dom.window.Event('visibilitychange'));
     const begin = () => {
       owner.onChannel({ type: 'open' } as never);
-      if (path === 'metadata') refresh();
+      if (path === 'pixels') refresh();
     };
     return {
       start: begin,
-      drive: path === 'metadata' ? refresh : () => {},
+      drive: path === 'pixels' ? refresh : () => {},
       changeInput: () => {
         ports.rtc.attempt++;
         ports.authorization.peerAuthEpoch++;

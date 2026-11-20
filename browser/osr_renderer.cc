@@ -13,8 +13,8 @@ OsrRenderer::~OsrRenderer() {
 bool OsrRenderer::IsGpuFaultSealed() {
   return osr::gpu_fault_sealed;
 }
-void OsrRenderer::SetViews(std::vector<View> views) {
-  state_->SetViews(std::move(views));
+void OsrRenderer::SetViews(std::vector<View> views, uint32_t layout_revision) {
+  state_->SetViews(std::move(views), layout_revision);
 }
 void OsrRenderer::PublishClipboardSequence(uint64_t sequence) {
   state_->PublishClipboardSequence(sequence);

@@ -50,9 +50,22 @@ MediaPipeline::MediaPipeline(ControllerContext context,
              context.trace,
              {context.options.idle_idr_ms, context.options.max_encode_width,
               context.options.max_encode_height}) {}
+uint64_t MediaPipeline::PendingLayout() {
+  return output.PendingLayout();
+}
+bool MediaPipeline::MatchesLayout(const SharedAtlasFrame& frame) {
+  return output.Matches(frame);
+}
 media::CompHost::Layout MediaPipeline::ObserveLayout(const SharedAtlasFrame& metadata) {
+  auto lock = presentation.LockLayout();
+  if (!output.Matches(metadata))
+    return {0, false};
   auto next = presentation.Layout(metadata);
   const auto epoch = presentation.ObserveLayout(metadata);
+  if (presentation.timeline.Active())
+    presentation.timeline.Source(
+        metadata, epoch, output.Slots().ProducerQpc(metadata.plane_rebuild_us),
+        output.Slots().ProducerQpc(metadata.compositor_frame_us), output.ClockUncertaintyMs());
   next["epoch"] = std::to_string(epoch);
   if (next != presentation.Snapshot()) {
     has_current_view = std::ranges::any_of(

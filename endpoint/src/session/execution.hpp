@@ -72,6 +72,11 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   const fs::path directory_;
   std::atomic<std::shared_ptr<Session>> runtime_;
   std::atomic<std::shared_ptr<const Json>> desired_;
+  struct LayoutArrival {
+    std::string revision;
+    int64_t received = 0, converge_started = 0;
+  };
+  std::atomic<std::shared_ptr<const LayoutArrival>> layout_arrival_;
   PlacementClipboard clipboard_;
   std::atomic<uint64_t> generation_{0};
   std::atomic<bool> running_{false};

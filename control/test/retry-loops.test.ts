@@ -454,7 +454,7 @@ export const retryLoops: Record<string, Binding> = {
     event: 'viewer.face_poll',
     create: driveViewerServer('face'),
   },
-  'presentation-negotiation-and-missing-frame-metadata': {
+  'presentation-negotiation': {
     owner: 'client/presentation/presentation-session.ts',
     boundary: 'EndpointChannel.sendChannel(media.presentation) and native mode reply',
     event: 'presentation',
@@ -464,11 +464,11 @@ export const retryLoops: Record<string, Binding> = {
       return identity;
     },
   },
-  'presentation-metadata-recovery': {
+  'presentation-pixel-recovery': {
     owner: 'client/presentation/presentation-session.ts',
     boundary: 'EndpointChannel.sendChannel(media.refresh) from visibility recovery',
-    event: 'presentation_metadata',
-    create: drivePresentation('metadata'),
+    event: 'presentation_pixels',
+    create: drivePresentation('pixels'),
   },
   'tab-window-space-app-close-batch': {
     owner: 'server/workspace/page-requests.ts',
@@ -482,7 +482,6 @@ export const retryLoops: Record<string, Binding> = {
     boundary: 'viewport RPC after owner reset',
     event: 'viewport',
     create: driveViewportOwner(true),
-    startup: 100,
   },
   'durable-download-dispatch': {
     owner: 'server/workspace/session-events.ts',
@@ -953,6 +952,19 @@ export const retryLoops: Record<string, Binding> = {
     event: 'reconciler.product',
     create: driveReconciler('product'),
   },
+  'observed-product-reconciliation': {
+    owner: 'server/workspace/reconciler.ts',
+    boundary: 'EndpointGateway.published after a session observation',
+    event: 'reconciler.product',
+    create: driveReconciler('observed'),
+  },
+  'observed-file-selection-checkout': {
+    owner: 'client/files/library-store.ts',
+    boundary: 'library.finish after a relevant push',
+    event: 'library.checkout',
+    create: driveLibrary('observed'),
+    callScoped: true,
+  },
   'reconnect-process-change-reconciliation': {
     owner: 'server/workspace/reconciler.ts',
     boundary: 'EndpointGateway.published after endpointReady',
@@ -1129,7 +1141,6 @@ export const retryLoops: Record<string, Binding> = {
     boundary: 'viewport RPC',
     event: 'viewport',
     create: driveViewport,
-    startup: 100,
   },
   'upload-then-library-import-per-queued-file': {
     owner: 'client/files/import-queue.ts',

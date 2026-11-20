@@ -1,7 +1,7 @@
 import { buildAction } from '../control/action-builder';
 import './window-divider.css';
 import { useDropRegistration } from './window-drag';
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import type { ProductSpace } from '../../shared/product';
 import type { Action } from './product-dialogs';
 import { uiScale } from './ui-scale';
@@ -21,15 +21,23 @@ export function WindowDivider({
   online,
   action,
   report,
+  preview,
 }: {
   space: ProductSpace;
   index: number;
   online: boolean;
   action: Action;
   report(error: unknown): void;
+  preview(active: boolean): void;
 }) {
   const drop = useDropRegistration('divider', undefined);
   const drag = useRef<{ x: number; width: number; ratio: number; weights: number[] } | undefined>(undefined);
+  useEffect(
+    () => () => {
+      if (drag.current) preview(false);
+    },
+    [preview],
+  );
   const ratio = space.weights[index] / (space.weights[index] + space.weights[index + 1]);
   const change = (next: number) =>
     void action({
@@ -58,6 +66,7 @@ export function WindowDivider({
       onPointerDown={(event) => {
         if (!online) return;
         const node = event.currentTarget;
+        preview(true);
         drag.current = {
           x: event.clientX,
           width:
@@ -95,10 +104,13 @@ export function WindowDivider({
           ).catch(report);
         else change(next);
         event.currentTarget.releasePointerCapture(event.pointerId);
+        preview(false);
       }}
       onLostPointerCapture={(event) => {
+        if (!drag.current) return;
         drag.current = undefined;
         restore(event.currentTarget);
+        preview(false);
       }}
     >
       <span className="window-divider-target" ref={drop.ref} />

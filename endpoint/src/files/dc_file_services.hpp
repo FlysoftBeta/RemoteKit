@@ -8,6 +8,8 @@
 #include "rtc/dc_services.hpp"
 #include "files/file_upload.hpp"
 #include "files/photo_processing.hpp"
+#include "objects/work_queue.hpp"
+#include "protocol/file_requests.h"
 #include <chrono>
 #include <condition_variable>
 #include <cctype>
@@ -25,7 +27,7 @@ inline bool LibraryFileMethod(const ServiceJson& method) {
   return method == "asset.begin" || method == "asset.chunk" || method == "asset.seal" ||
          method == "asset.cancel" || method == "asset.read" || method == "asset.describe" ||
          method == "document.open" || method == "document.resource" || method == "photo.process" ||
-         method == "photo.thumbnail" || PhotoBurstMethod(method);
+         method == "photo.thumbnail" || method == "photo.preview" || PhotoBurstMethod(method);
 }
 inline std::string EncodeFileChunk(const std::vector<std::uint8_t>& bytes) {
   constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -110,6 +112,9 @@ class PhotoBurstSessions {
   static constexpr size_t kMaxSampleBytes = 44 * 1024;
 
   void Sweep(const std::function<bool(uint64_t)>& current, Clock::time_point now = Clock::now()) {
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock())
+      return;
     const auto expired = [&](const auto& item) {
       return now >= item.second.deadline || !current(item.second.grant);
     };
@@ -121,6 +126,7 @@ class PhotoBurstSessions {
                               const std::string& method,
                               const ServiceJson& params,
                               const PhotoCancelled& cancelled) {
+    std::lock_guard lock(mutex_);
     if (cancelled())
       return Error{ErrorCode::kOutcomeUnknown, "file_transfer_interrupted"};
     const auto now = Clock::now();
@@ -218,6 +224,7 @@ class PhotoBurstSessions {
     std::optional<Error> error;
   };
   uint64_t sequence_{};
+  std::mutex mutex_;
   std::map<std::string, Burst> active_;
   std::map<std::string, Terminal> terminal_;
 
@@ -277,8 +284,8 @@ class PhotoBurstSessions {
   }
 };
 
-// One Session-lifetime disk worker. No caller waits for it while holding a
-// Session/Browser lock. Admission, receipts and replay history are bounded.
+// Short I/O stays on the Session worker. Process-wide pools bound CPU work,
+// reserve burst analysis capacity and allow independent range reads.
 class DcFileServices {
   friend class NativeRetryOwnerProbe;
   const Json log_fields_;
@@ -300,6 +307,7 @@ class DcFileServices {
     ServiceJson reply;
     bool chunk = false;
     uint64_t grant{};
+    int pool = -1;
     RetryUnit retry{"files.admission"};
   };
   RetryUnit maintenance_retry_{"files.maintenance"};
@@ -328,6 +336,23 @@ class DcFileServices {
   std::mutex flush_mutex_;
   std::condition_variable wake_;
   std::thread worker_;
+  std::condition_variable drained_;
+  std::array<size_t, 3> active_{};
+  static int Pool(const ServiceJson& method) {
+    if (method == "photo.process" || method == "photo.thumbnail" || method == "photo.preview")
+      return 0;
+    if (PhotoBurstMethod(method))
+      return 1;
+    if (method == "asset.read")
+      return 2;
+    return -1;
+  }
+  static objects::WorkQueue& ProcessingPool(int pool) {
+    static objects::WorkQueue photos{2};
+    static objects::WorkQueue bursts{1};
+    static objects::WorkQueue reads{4};
+    return pool == 0 ? photos : pool == 1 ? bursts : reads;
+  }
   bool stop_ = false, sweep_requested_ = false;
   uint64_t peer_ = 0, epoch_ = 0, control_ = 0;
   std::string connection_;
@@ -353,7 +378,7 @@ class DcFileServices {
     }
   }
   bool CurrentLocked(const Job& job) const {
-    if (!peer_ || job.peer != peer_ || job.epoch != epoch_ || job.control != control_)
+    if (stop_ || !peer_ || job.peer != peer_ || job.epoch != epoch_ || job.control != control_)
       return false;
     const auto& id = job.message["params"]["requestId"].get_ref<const std::string&>();
     const auto found = authorized_.find(id);
@@ -364,6 +389,73 @@ class DcFileServices {
         {"type", "files.result"}, {"version", 1}, {"requestId", request["requestId"]}, {"ok", ok}};
     result[ok ? "result" : "error"] = value;
     return result;
+  }
+
+  void RunJob(const Job& job, const Execute& execute, int pool = -1) {
+    ServiceJson reply;
+    try {
+      Result<ServiceJson> executed = Error{ErrorCode::kConflict, "file_transfer_interrupted"};
+      if (Current(job))
+        executed = execute(job);
+      reply = executed ? Reply(job.message, true, executed.value())
+                       : Reply(job.message, false,
+                               WireError(executed.error(), "dc.request_failed",
+                                         RequestLogFields(job.message, log_fields_)));
+    } catch (const InvalidRequest& error) {
+      reply = Reply(job.message, false,
+                    WireError({ErrorCode::kInvalidRequest, error.what()}, "dc.request_failed",
+                              RequestLogFields(job.message, log_fields_)));
+    } catch (const ServiceJson::exception& error) {
+      LogError(LogLevel::kWarn, "files.invalid_request",
+               Error{ErrorCode::kInvalidRequest, error.what()});
+      reply = Reply(job.message, false,
+                    WireError({ErrorCode::kInternal, "Invalid file worker state"},
+                              "dc.request_failed", RequestLogFields(job.message, log_fields_)));
+    } catch (const std::filesystem::filesystem_error& error) {
+      reply = Reply(job.message, false,
+                    WireError(WithOsError(ErrorCode::kUnavailable, error.what(),
+                                          OsError::Kind::kWin32, error.code().value()),
+                              "dc.request_failed", RequestLogFields(job.message, log_fields_)));
+    } catch (const std::exception& error) {
+      LogError(LogLevel::kWarn, "files.worker_failed", Error{ErrorCode::kInternal, error.what()});
+      reply = Reply(job.message, false,
+                    WireError({ErrorCode::kInternal, "internal"}, "dc.request_failed",
+                              RequestLogFields(job.message, log_fields_)));
+    } catch (...) {
+      LogError(LogLevel::kWarn, "files.worker_failed",
+               Error{ErrorCode::kInternal, "unknown exception"});
+      reply = Reply(job.message, false,
+                    WireError({ErrorCode::kInternal, "internal"}, "dc.request_failed",
+                              RequestLogFields(job.message, log_fields_)));
+    }
+    std::lock_guard lock(mutex_);
+    if (pool >= 0) {
+      --active_[pool];
+      drained_.notify_all();
+    }
+    if (!CurrentLocked(job))
+      return;
+    if (!PhotoBurstMethod(job.message["method"]) && !reply.value("ok", false) &&
+        reply["error"].value("code", "") == "not_found")
+      reply["error"]["detail"] = protocol::FileNotFoundDetail(reply["error"].value("message", ""));
+    const auto key = job.message["requestId"].get<std::string>();
+    auto found = receipts_.find(key);
+    if (found == receipts_.end())
+      return;
+    found->second.reply = reply;
+    if (!reply.value("ok", false)) {
+      const auto error = ParseWireError(reply.at("error"));
+      found->second.retry.Fail(error);
+    } else {
+      found->second.retry.Success();
+    }
+    std::erase(history_, key);
+    history_.push_back(key);
+    QueueReply(reply, job.grant);
+    while (history_.size() > 128) {
+      receipts_.erase(history_.front());
+      history_.pop_front();
+    }
   }
 
  public:
@@ -400,67 +492,35 @@ class DcFileServices {
               Maintain(sweep, maintenance_epoch);
               if (!job.peer)
                 continue;
-              ServiceJson reply;
-              try {
-                Result<ServiceJson> executed =
-                    Error{ErrorCode::kConflict, "file_transfer_interrupted"};
-                if (Current(job))
-                  executed = execute(job);
-                reply = executed ? Reply(job.message, true, executed.value())
-                                 : Reply(job.message, false,
-                                         WireError(executed.error(), "dc.request_failed",
-                                                   RequestLogFields(job.message, log_fields_)));
-              } catch (const InvalidRequest& error) {
-                reply =
-                    Reply(job.message, false,
-                          WireError({ErrorCode::kInvalidRequest, error.what()}, "dc.request_failed",
-                                    RequestLogFields(job.message, log_fields_)));
-              } catch (const ServiceJson::exception& error) {
-                LogError(LogLevel::kWarn, "files.invalid_request",
-                         Error{ErrorCode::kInvalidRequest, error.what()});
-                reply = Reply(
-                    job.message, false,
-                    WireError({ErrorCode::kInternal, "Invalid file worker state"},
-                              "dc.request_failed", RequestLogFields(job.message, log_fields_)));
-              } catch (const std::filesystem::filesystem_error& error) {
-                reply = Reply(
-                    job.message, false,
-                    WireError(WithOsError(ErrorCode::kUnavailable, error.what(),
-                                          OsError::Kind::kWin32, error.code().value()),
-                              "dc.request_failed", RequestLogFields(job.message, log_fields_)));
-              } catch (const std::exception& error) {
-                LogError(LogLevel::kWarn, "files.worker_failed",
-                         Error{ErrorCode::kInternal, error.what()});
-                reply = Reply(job.message, false,
-                              WireError({ErrorCode::kInternal, "internal"}, "dc.request_failed",
-                                        RequestLogFields(job.message, log_fields_)));
-              } catch (...) {
-                LogError(LogLevel::kWarn, "files.worker_failed",
-                         Error{ErrorCode::kInternal, "unknown exception"});
-                reply = Reply(job.message, false,
-                              WireError({ErrorCode::kInternal, "internal"}, "dc.request_failed",
-                                        RequestLogFields(job.message, log_fields_)));
-              }
-              std::lock_guard lock(mutex_);
-              if (!CurrentLocked(job))
+              const int pool = Pool(job.message["method"]);
+              if (pool < 0) {
+                RunJob(job, execute);
                 continue;
-              const auto key = job.message["requestId"].get<std::string>();
-              auto found = receipts_.find(key);
-              if (found == receipts_.end())
-                continue;
-              found->second.reply = reply;
-              if (!reply.value("ok", false)) {
-                const auto error = ParseWireError(reply.at("error"));
-                found->second.retry.Fail(error);
-              } else {
-                found->second.retry.Success();
               }
-              std::erase(history_, key);
-              history_.push_back(key);
-              QueueReply(reply, job.grant);
-              while (history_.size() > 128) {
-                receipts_.erase(history_.front());
-                history_.pop_front();
+              bool submitted;
+              {
+                std::lock_guard lock(mutex_);
+                if (!CurrentLocked(job))
+                  continue;
+                ++active_[pool];
+                submitted = ProcessingPool(pool).Submit(
+                    [this, job, execute, pool] { RunJob(job, execute, pool); }, this,
+                    [this, job, pool] {
+                      RunJob(
+                          job,
+                          [](const Job&) -> Result<ServiceJson> {
+                            return Error{ErrorCode::kCanceled, "file_processing_cancelled"};
+                          },
+                          pool);
+                    });
+              }
+              if (!submitted) {
+                RunJob(
+                    job,
+                    [](const Job&) -> Result<ServiceJson> {
+                      return Error{ErrorCode::kBusy, "file_processing_busy"};
+                    },
+                    pool);
               }
             }
           },
@@ -488,6 +548,18 @@ class DcFileServices {
     wake_.notify_all();
     if (worker_.joinable())
       worker_.join();
+    std::array<size_t, 3> active;
+    {
+      std::lock_guard lock(mutex_);
+      active = active_;
+    }
+    for (int pool = 0; pool < 3; ++pool)
+      if (active[pool])
+        ProcessingPool(pool).Cancel(this);
+    std::unique_lock lock(mutex_);
+    drained_.wait(lock, [&] {
+      return std::all_of(active_.begin(), active_.end(), [](size_t count) { return count == 0; });
+    });
   }
   void Bind(uint64_t peer, std::string connection = {}) {
     std::lock_guard lock(mutex_);
@@ -590,15 +662,21 @@ class DcFileServices {
       }
       return;
     }
+    const int pool = Pool(message["method"]);
+    const auto pending = std::count_if(receipts_.begin(), receipts_.end(), [&](const auto& item) {
+      if (!item.second.reply.is_null())
+        return false;
+      return item.second.pool == pool;
+    });
     const bool chunk = message["method"] == "asset.chunk";
-    if (jobs_.size() >= 8 || outbox_.size() >= 24 ||
+    if (pending >= 8 || outbox_.size() >= 24 ||
         (chunk && std::count_if(receipts_.begin(), receipts_.end(), [](const auto& item) {
                     return item.second.chunk && item.second.reply.is_null();
                   }) >= 4)) {
       failure(ErrorCode::kBusy, "file_transfer_busy");
       return;
     }
-    receipts_.emplace(key, Receipt{fingerprint, nullptr, chunk, found->second.serial});
+    receipts_.emplace(key, Receipt{fingerprint, nullptr, chunk, found->second.serial, pool});
     receipts_.at(key).retry.Input(key);
     jobs_.push_back({peer, epoch_, control_, message, found->second.binding, found->second.serial});
     wake_.notify_one();

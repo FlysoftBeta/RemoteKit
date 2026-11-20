@@ -18,7 +18,9 @@ struct PageGeometry {
   std::string kind = "unchanged";
 };
 
+Result<unsigned> GeometryAxisQuarterTurns(const cv::Mat&, const PhotoCancelled&);
 Result<PageGeometry> AnalyzeGeometry(const cv::Mat&, const PhotoCancelled&);
+Result<cv::Rect2d> GeometryBounds(const PageGeometry&);
 Result<cv::Mat> ApplyGeometry(const cv::Mat&,
                               const PageGeometry&,
                               const cv::Scalar& paper_color,

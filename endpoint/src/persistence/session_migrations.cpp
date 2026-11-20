@@ -1,5 +1,7 @@
 #include "persistence/session_migrations.hpp"
 #include "persistence/strict_json.hpp"
+#include "persistence/session_documents.hpp"
+#include "persistence/derivative_records.hpp"
 #include "util/result_macros.hpp"
 #include <algorithm>
 #include <array>
@@ -7,7 +9,13 @@
 
 namespace remotekit {
 namespace {
-constexpr int64_t kVersion = 4;
+constexpr auto kDerivativeSchema = R"sql(
+CREATE TABLE file_derivatives(
+ source_id TEXT NOT NULL, kind TEXT NOT NULL, parameters TEXT NOT NULL,
+ asset_id TEXT NOT NULL, metadata TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>=0),
+ PRIMARY KEY(source_id,kind,parameters)
+) STRICT;
+)sql";
 // v4: download imports keep their retry-unit state, and a selection persisted as "submitted"
 // (dispatch possibly delivered) becomes "unknown", which reconciliation resolves.
 Result<void> UpgradeToVersion4(sqlite::Database& db) {
@@ -16,12 +24,52 @@ Result<void> UpgradeToVersion4(sqlite::Database& db) {
       "UPDATE library_selections SET state='unknown', "
       "document=json_set(document,'$.state','unknown') WHERE state='submitted'");
 }
+Result<void> UpgradeToVersion5(sqlite::Database& db) {
+  RK_RETURN_IF_ERROR(db.Execute(kDerivativeSchema));
+  // JPEG/PNG keys identify selection transcoding. WebP keys lack purpose,
+  // parameters, algorithm version and processing metadata, so cannot be preserved.
+  // Invalid IDs and unknown formats cannot form a valid derivative key either.
+  RK_RETURN_IF_ERROR(
+      db.Execute("INSERT INTO file_derivatives "
+                 "SELECT asset_id,'selection-transcode',format,derived_id,'{}',"
+                 "ROW_NUMBER() OVER(ORDER BY asset_id,format) FROM library_derivatives "
+                 "WHERE typeof(asset_id)='text' AND length(CAST(asset_id AS BLOB))=64 "
+                 "AND asset_id NOT GLOB '*[^0-9a-f]*' AND typeof(derived_id)='text' "
+                 "AND length(CAST(derived_id AS BLOB))=64 AND derived_id NOT GLOB '*[^0-9a-f]*' "
+                 "AND format IN ('jpeg','png') ORDER BY asset_id,format"));
+  RK_RETURN_IF_ERROR(derivative_records::Trim(db));
+  return db.Execute("DROP TABLE library_derivatives");
+}
+Result<void> UpgradeToVersion6(sqlite::Database& db) {
+  RK_ASSIGN_OR_RETURN(query, db.Prepare("SELECT view_id,config FROM views"));
+  std::vector<std::pair<std::string, Json>> views;
+  for (;;) {
+    RK_ASSIGN_OR_RETURN(row, query.Step());
+    if (!row)
+      break;
+    auto config = session_documents::ViewTopology(Json::parse(query.Text(1)));
+    if (config.at("viewId") != query.Text(0))
+      return CorruptRecord("mismatched views.view_id");
+    views.emplace_back(query.Text(0), std::move(config));
+  }
+  for (const auto& [id, config] : views) {
+    RK_ASSIGN_OR_RETURN(update, db.Prepare("UPDATE views SET config=? WHERE view_id=?"));
+    RK_RETURN_IF_ERROR(update.Bind(1, config.dump()));
+    RK_RETURN_IF_ERROR(update.Bind(2, id));
+    RK_ASSIGN_OR_RETURN(row, update.Step());
+    if (row)
+      return CorruptState("unexpected view migration row");
+  }
+  return db.Execute("ALTER TABLE views DROP COLUMN position");
+}
 // The baseline creates the latest schema directly; these steps upgrade existing stores.
-constexpr std::array<SessionMigration, 1> kMigrations{{
+constexpr std::array<SessionMigration, 3> kMigrations{{
     {4, "retry_state_and_uncertain_selections", UpgradeToVersion4},
+    {5, "unified_file_derivatives", UpgradeToVersion5},
+    {6, "transient_view_geometry", UpgradeToVersion6},
 }};
 constexpr auto kBaseline = R"sql(
-CREATE TABLE views(view_id TEXT PRIMARY KEY, config TEXT NOT NULL,position INTEGER NOT NULL);
+CREATE TABLE views(view_id TEXT PRIMARY KEY, config TEXT NOT NULL);
 CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,type TEXT NOT NULL,body TEXT NOT NULL);
 CREATE TABLE event_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),stream_id TEXT NOT NULL,acked_through INTEGER NOT NULL);
 INSERT INTO event_state VALUES(1,lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-4'||substr(lower(hex(randomblob(2))),2)||'-8'||substr(lower(hex(randomblob(2))),2)||'-'||lower(hex(randomblob(6))),0);
@@ -36,8 +84,7 @@ CREATE TABLE library_assets(asset_id TEXT PRIMARY KEY, size INTEGER NOT NULL, ty
 CREATE TABLE library_drafts(upload_id TEXT PRIMARY KEY, operation TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
  size INTEGER NOT NULL, expires INTEGER NOT NULL, sealed TEXT NOT NULL);
 CREATE TABLE library_selections(selection_id TEXT PRIMARY KEY, state TEXT NOT NULL, document TEXT NOT NULL);
-CREATE TABLE library_derivatives(asset_id TEXT NOT NULL, format TEXT NOT NULL, derived_id TEXT NOT NULL, PRIMARY KEY(asset_id, format));
-PRAGMA user_version=4;
+PRAGMA user_version=6;
 )sql";
 Result<int64_t> Version(sqlite::Database& db) {
   RK_ASSIGN_OR_RETURN(query, db.Prepare("PRAGMA user_version"));
@@ -45,6 +92,22 @@ Result<int64_t> Version(sqlite::Database& db) {
   if (!row)
     return CorruptState("missing session store version");
   return query.Int64(0);
+}
+Result<void> CheckViews(sqlite::Database& db) {
+  try {
+    RK_ASSIGN_OR_RETURN(query, db.Prepare("SELECT view_id,config FROM views"));
+    for (;;) {
+      RK_ASSIGN_OR_RETURN(row, query.Step());
+      if (!row)
+        return {};
+      const auto config = Json::parse(query.Text(1));
+      session_documents::View(config);
+      if (config.at("viewId") != query.Text(0))
+        return CorruptRecord("mismatched views.view_id");
+    }
+  } catch (const std::exception& error) {
+    return CorruptRecord(std::string("views.config: ") + error.what());
+  }
 }
 Result<void> Backup(sqlite::Database& db,
                     const fs::path& directory,
@@ -98,7 +161,9 @@ Result<void> CheckSessionDb(sqlite::Database& db, int64_t expected_version) {
   RK_ASSIGN_OR_RETURN(invalid, foreign.Step());
   if (invalid)
     return CorruptState("session foreign key check failed");
-  return {};
+  if (expected_version >= 6)
+    RK_RETURN_IF_ERROR(CheckViews(db));
+  return derivative_records::CheckStore(db);
 }
 Result<void> MigrateSessionDb(sqlite::Database& db,
                               const fs::path& directory,
@@ -117,11 +182,12 @@ Result<void> MigrateSessionDb(sqlite::Database& db,
         sqlite::Transaction transaction(db);
         RK_RETURN_IF_ERROR(transaction.Begin());
         RK_RETURN_IF_ERROR(db.Execute(kBaseline));
+        RK_RETURN_IF_ERROR(db.Execute(kDerivativeSchema));
         RK_RETURN_IF_ERROR(transaction.Commit());
       }
     }
     RK_ASSIGN_OR_RETURN(version, Version(db));
-    const auto target = steps.empty() ? kVersion : steps.back().version;
+    const auto target = steps.empty() ? kSessionDbVersion : steps.back().version;
     const bool pending = std::any_of(steps.begin(), steps.end(),
                                      [&](const auto& step) { return step.version > version; });
     if (pending)
@@ -140,8 +206,8 @@ Result<void> MigrateSessionDb(sqlite::Database& db,
     }
     if (version != target)
       return CorruptState("invalid session schema version");
-    RK_RETURN_IF_ERROR(transaction.Commit());
-    return CheckSessionDb(db, target);
+    RK_RETURN_IF_ERROR(CheckSessionDb(db, target));
+    return transaction.Commit();
   } catch (const std::exception& error) {
     return CorruptState(error.what());
   }

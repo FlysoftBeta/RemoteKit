@@ -17,6 +17,8 @@ void PresentationController::QueueLayout(const Json& mode) {
                {"outputGeneration", std::to_string(key.generation)},
                {"layoutEpoch", std::to_string(key.epoch)}};
   }
+  if (layout_prepare && layout_prepare->generation)
+    timeline.Mark("prepareQueuedMs");
   hooks_.outbox().Replace(hooks_.scope(),
                           selected_mode.is_null() ? std::string() : selected_mode.dump(),
                           layout.empty() ? std::string() : layout.dump(),
@@ -52,6 +54,8 @@ bool PresentationController::PresentationMessage(const Event& event) {
     if (DataRouter::Number(message, "barrierId", key.barrier) &&
         DataRouter::Number(message, "outputGeneration", key.generation) &&
         DataRouter::Number(message, "layoutEpoch", key.epoch) && barrier_.Ready(event.peer, key)) {
+      if (key.generation)
+        timeline.Mark("readyReceivedMs");
       layout_prepare.reset();
       hooks_.refresh();
     }

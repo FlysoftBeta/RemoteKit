@@ -52,6 +52,8 @@ class ViewController : private ControllerContext {
     return reconciliation_pending && QpcNow() >= next_reconciliation;
   }
   bool ReconciliationPending() const { return reconciliation_pending; }
+  void DesiredReceived(const Json& document, int64_t received);
+  void ConvergeStarted(const Json& document, int64_t qpc);
   Result<void> StageDesired(const Json& document);
   Result<void> ConvergeDesired();
   Result<void> RecordClosed(const std::string& view, const std::string& reason);
@@ -101,7 +103,12 @@ class ViewController : private ControllerContext {
   ViewStore view_store;
   RecoveryStore recovery_store;
   bool download_reconciliation_failed = false;
+  bool replanning_layout = false;
+  std::set<std::string> closing_views;
+  Result<void> ConvergeOnce();
   std::map<std::string, Json> desired;
+  Json saved_topology;
+  uint64_t saved_placement = 0;
   std::vector<std::string> desired_order;
   std::set<std::string> restoring_views;
   std::map<std::string, std::string> resume_urls;

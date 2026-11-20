@@ -292,6 +292,76 @@ class NativeErrorStateProbe {
       dispatch = {};
     }
   }
+  static void GeometryRecovery(const fs::path& root) {
+    Link link;
+    auto sdk = MakeSdk();
+    const auto options = Take(RuntimeOptions::FromConfig(TestConfig(), root, "dev", "test"));
+    objects::ObjectService objects(options.data, link, {}, "test", "dev");
+    media::FrameAdmission admission;
+    const std::string id(32, 'a');
+    const auto directory = options.data / "sessions" / id;
+    auto config = TestView();
+    config["visible"] = true;
+    config["occludedBottom"] = 200;
+    config["occlusionRevision"] = "7";
+    {
+      SessionDb seed(directory);
+      Take(seed.Open());
+      Take(seed.Views().SaveDesired(Json::array({config}), 1, "1"));
+      Take(seed.Close());
+    }
+    Session session(sdk, options, "tenant", id, 1, {}, link, objects, admission);
+    Take(session.Initialize());
+    const auto restored = session.views.Desired("1");
+    Check(restored.at("visible") == false && restored.at("width") == 1 &&
+              restored.at("height") == 1 && restored.at("occludedBottom") == 0 &&
+              restored.at("occlusionRevision") == "0" &&
+              restored.at("device").at("deviceScaleFactor") == 1,
+          "restored topology starts hidden without recovered Viewer geometry");
+    Check(!session.output.Visible(), "restored views cannot present before Viewer geometry");
+    sqlite::Database inject;
+    Take(inject.Open(directory / "session.db"));
+    Take(
+        inject.Execute("CREATE TRIGGER fail_geometry_commit BEFORE DELETE ON views BEGIN "
+                       "SELECT RAISE(ABORT,'injected durable write'); END"));
+    Json document{{"views", Json::array({config})},
+                  {"placementEpoch", 1},
+                  {"revision", "2"},
+                  {"connectionEpoch", "1"},
+                  {"lock", {{"state", "unlocked"}}}};
+    Take(session.views.StageDesired(document));
+    Check(session.views.Desired("1") == config,
+          "Viewer geometry applies directly while durable writes fail");
+    std::promise<void> writing, release;
+    auto released = release.get_future();
+    auto durable = std::async(std::launch::async, [&] {
+      return session.store.Write([&]() -> Result<void> {
+        writing.set_value();
+        released.wait();
+        return {};
+      });
+    });
+    writing.get_future().wait();
+    config["width"] = 800;
+    config["device"]["deviceScaleFactor"] = 2;
+    document["views"] = Json::array({config});
+    document["revision"] = "3";
+    auto geometry =
+        std::async(std::launch::async, [&] { return session.views.StageDesired(document); });
+    const bool independent =
+        geometry.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    release.set_value();
+    Take(durable.get());
+    Take(geometry.get());
+    Check(independent && session.views.Desired("1") == config,
+          "geometry application never waits for the persistence transaction mutex");
+    document["views"][0]["url"] = "https://example.test/new";
+    document["revision"] = "4";
+    Check(!session.views.StageDesired(document) && session.views.Desired("1") == config,
+          "failed topology commit cannot publish partially staged desired state");
+    Take(inject.Execute("DROP TRIGGER fail_geometry_commit"));
+    Take(session.Stop());
+  }
   static void ViewsAndOutput(const fs::path& root) {
     Link link;
     auto sdk = MakeSdk();
@@ -395,6 +465,68 @@ class NativeErrorStateProbe {
     Check(Take(session.views.ManageSessionIdentity(Json::object())).at("userAgent") == "test-agent",
           "Browser identity uses its strict request contract");
 
+    unsigned output_closes = 0, output_configures = 0, output_revision = 0;
+    dispatch = [&](const Json& request) -> Result<Json> {
+      if (request.at("method") == "snapshot")
+        return Json{{"sessions", Json::array({{{"views", Json::array()}}})}};
+      if (request.at("method") == "output.close")
+        ++output_closes;
+      if (request.at("method") == "output.configure") {
+        ++output_configures;
+        ++output_revision;
+      }
+      return Json{{"layoutRevision", output_revision}, {"accepted", true}};
+    };
+    const auto configs = [](int width, int height, bool second = false) {
+      return Json::array({{{"session", "1"},
+                           {"view", second ? "2" : "1"},
+                           {"width", width},
+                           {"height", height},
+                           {"visible", true},
+                           {"device", "desktop"},
+                           {"device_scale_factor", 1.f},
+                           {"occludedBottom", 0},
+                           {"occlusionRevision", "0"}}});
+    };
+    Take(session.output.Configure(648, 488, 1, configs(640, 480), true));
+    output_closes = output_configures = 0;
+    SharedAtlasFrame old_pixels{};
+    old_pixels.layout_revision = session.output.layout_revision;
+    old_pixels.view_count = 1;
+    old_pixels.views[0].webview_id = 1;
+    auto layout_lock = session.presentation.LockLayout();
+    std::promise<void> observed;
+    auto delayed = std::async(std::launch::async, [&] {
+      observed.set_value();
+      return session.pipeline.ObserveLayout(old_pixels).epoch;
+    });
+    observed.get_future().wait();
+    Take(session.output.ConfigureForGeneration(808, 608, 1, configs(800, 600), true, 7));
+    const auto resized_epoch = session.presentation.Epoch();
+    layout_lock.unlock();
+    Check(delayed.get() == 0 && session.presentation.Epoch() == resized_epoch,
+          "a polled old frame cannot replace the geometry transaction after its boundary");
+    Check(output_closes == 0 && output_configures == 1,
+          "fixed-extent resize keeps the live output resources");
+    Check(session.output.configuration.at("outputWidthPixels") == 648 &&
+              session.output.configuration.at("outputHeightPixels") == 488,
+          "logical atlas resizing preserves the aligned physical extent");
+    Take(session.output.ConfigureForGeneration(808, 608, 1, configs(800, 600, true), true, 7));
+    Check(output_closes == 0 && output_configures == 2,
+          "visible-member replacement keeps the live output resources");
+    const auto epoch = session.presentation.Epoch();
+    auto keyboard = configs(800, 600, true);
+    keyboard[0]["occludedBottom"] = 200;
+    keyboard[0]["occlusionRevision"] = "1";
+    Take(session.output.ConfigureForGeneration(808, 608, 1, keyboard, true, 7));
+    Check(session.presentation.Epoch() == epoch && output_closes == 0 && output_configures == 2,
+          "keyboard observation preserves the presentation epoch and output");
+    Take(session.output.ConfigureForGeneration(808, 608, 2, configs(800, 600, true), true, 7));
+    Check(output_closes == 1 && output_configures == 3,
+          "DPR extent change crosses the full output reconfiguration boundary");
+    Take(session.output.ConfigureForGeneration(16, 16, 2, Json::array(), false, 7));
+    Check(output_closes == 1 && output_configures == 4,
+          "an empty visible set preserves the configured extent and output");
     unsigned configure = 0;
     dispatch = [&](const Json& request) -> Result<Json> {
       if (request.at("method") == "output.configure") {
@@ -648,6 +780,7 @@ int main(int argc, char** argv) {
     NativeErrorStateProbe::StopRecovery(root / "recovery");
     NativeErrorStateProbe::ServicePeerLookup(root / "service-peers");
     NativeErrorStateProbe::ViewsAndOutput(root / "views");
+    NativeErrorStateProbe::GeometryRecovery(root / "geometry");
     NativeErrorStateProbe::ShutdownOwnership(root / "shutdown");
     NativeErrorStateProbe::ReaderPublication(root / "reader");
     NativeErrorStateProbe::DocumentRetry(root / "documents");

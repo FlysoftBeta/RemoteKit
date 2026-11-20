@@ -90,8 +90,7 @@ export function FileBasketDialog({
   } = useLibrary();
   const transaction = request && checkout(request.id);
   const [chosen, setChosen] = useState<string | null>(null);
-  // Set when the user sends; the commit and its confirmation continue without the panel.
-  const [sent, setSent] = useState(false);
+  const [dismissedRequest, setDismissedRequest] = useState<string>();
   const taskAbort = useRef(new AbortController());
   useEffect(() => () => taskAbort.current.abort(), []);
   const [error, setError] = useState<RemoteKitError | undefined>();
@@ -220,9 +219,13 @@ export function FileBasketDialog({
       onClose?.();
       return;
     }
+    if (disabled) return;
+    setDismissedRequest(request.id);
     void run(async () => {
       if (final) return;
-      await cancelSelection(request.id);
+      const state = await cancelSelection(request.id);
+      if (state === 'unknown' || state === 'pending')
+        throw new RemoteKitError('outcome_unknown', '文件选择关闭结果未知，正在确认');
     });
   };
   const saveBasket = async (ids: string[], revision = snapshot?.revision) => {
@@ -240,7 +243,8 @@ export function FileBasketDialog({
   };
   const submit = () => {
     if (!request || (!transaction && blocked)) return;
-    setSent(true);
+    if (disabled) return;
+    setDismissedRequest(request.id);
     void run(async () => {
       await select(
         request.id,
@@ -333,8 +337,8 @@ export function FileBasketDialog({
             ? '页面接收结果未知，正在确认'
             : '等待页面确认文件'
         : '';
-  // The panel reappears only when the send failed or its outcome needs the user.
-  if (sent && !error && !transaction?.error && !outcome.uncertain) return null;
+  if (request && dismissedRequest === request.id && !error && !transaction?.error && !outcome.uncertain)
+    return null;
   return (
     <>
       <FloatingPanel

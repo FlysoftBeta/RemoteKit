@@ -38,6 +38,7 @@ interface Checkout {
   state: SelectionState;
   commit?: 'retry' | 'query';
   active: boolean;
+  recheck?: boolean;
   nextCheck: number;
   retry: RetryUnit;
   error?: RemoteKitError;
@@ -72,6 +73,7 @@ export class LibraryStore extends Store<LibraryState> {
   private enabled = false;
   private online = false;
   private requestIds: string[] = [];
+  private requestVersion = '';
   private timer?: ReturnType<typeof setInterval>;
   constructor(
     private readonly request: LibraryRequest,
@@ -98,7 +100,15 @@ export class LibraryStore extends Store<LibraryState> {
     }
     return queue;
   };
-  configure(online: boolean, enabled: boolean, identity: string | undefined, requestIds: string[]) {
+  configure(
+    online: boolean,
+    enabled: boolean,
+    identity: string | undefined,
+    requestIds: string[],
+    requestVersion = JSON.stringify(requestIds),
+  ) {
+    const requestsChanged = this.requestVersion !== requestVersion;
+    this.requestVersion = requestVersion;
     this.requestIds = [...requestIds];
     let outcomesChanged = false;
     for (const id of this.cancellations.keys()) {
@@ -129,6 +139,7 @@ export class LibraryStore extends Store<LibraryState> {
     this.photos.configure(online && enabled && !!identity, identity);
     if (!scopeChanged && !connectionChanged) {
       if (outcomesChanged) this.emit();
+      if (online && enabled && requestsChanged) this.reconcile(true);
       return;
     }
     clearInterval(this.timer);
@@ -141,6 +152,7 @@ export class LibraryStore extends Store<LibraryState> {
         diagnostics.record('library-refresh', error),
       );
       this.timer = setInterval(this.reconcile, 1500);
+      this.reconcile(true);
     }
   }
   dispose = () => {
@@ -195,7 +207,9 @@ export class LibraryStore extends Store<LibraryState> {
     }
   }
   receive = (next: LibrarySnapshot) => {
-    if (this.online) this.accept(next, this.epoch);
+    if (!this.online || (this.librarySnapshot && next.revision <= this.librarySnapshot.revision)) return;
+    this.accept(next, this.epoch);
+    this.reconcile(true);
   };
   mutate = <K extends LibraryMutationMethod>(
     method: K,
@@ -416,6 +430,10 @@ export class LibraryStore extends Store<LibraryState> {
             ? Date.now() + 1500
             : Infinity;
       if (this.current(epoch)) this.emit();
+      if (this.current(epoch) && transaction.recheck) {
+        transaction.recheck = false;
+        this.reconcile(true);
+      } else if (this.current(epoch)) this.reconcile();
     }
   }
 
@@ -458,9 +476,10 @@ export class LibraryStore extends Store<LibraryState> {
     await this.refresh();
     return result.state;
   };
-  private reconcile = () => {
+  private reconcile = (observed = false) => {
     let changed = false;
     for (const [id, checkout] of this.checkouts) {
+      if (observed && checkout.active) checkout.recheck = true;
       const live = this.requestIds.includes(id);
       const terminal = checkout.state === 'selected' || checkout.state === 'cancelled';
       if (!live && !checkout.active && (terminal || !checkout.selectionId)) {
@@ -472,12 +491,11 @@ export class LibraryStore extends Store<LibraryState> {
         checkout.selectionId &&
         (checkout.commit !== 'retry' || !live) &&
         !checkout.active &&
-        Date.now() >= checkout.nextCheck
+        (observed || Date.now() >= checkout.nextCheck)
       ) {
         void this.confirm(id, checkout, false).catch((error) =>
           diagnostics.record('library-reconcile', error),
         );
-        break;
       }
     }
     if (changed) this.emit();

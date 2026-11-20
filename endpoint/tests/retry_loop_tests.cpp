@@ -1,4 +1,5 @@
 #include "retry_owner_drivers.hpp"
+#include "session/layout_conflict.hpp"
 #include "retry_loop_registry.hpp"
 #include "retry_loop_instances.hpp"
 #include "retry_input_driver.hpp"
@@ -86,6 +87,13 @@ std::map<std::string, unsigned> Instances(const std::string& text, const std::st
 void RegistryGuard(const fs::path& repository) {
   VerifyOwnerCoverage();
   std::set<std::string> registered;
+  for (const auto& loop : kEventRetryLoops) {
+    Check(registered.insert(loop.name).second, "duplicate event retry registry entry");
+    Check(fs::exists(repository / "endpoint/src" / loop.source), "event retry owner missing");
+    Check(Read(repository / "endpoint/tests" / loop.tests).find(loop.entry) != std::string::npos,
+          "event retry behavior coverage missing");
+  }
+  registered.clear();
   for (const auto& loop : kLoops)
     Check(registered.insert(loop.name).second, "duplicate registry entry");
   Check(DeclaredUnits("RetryUnit added{\"unregistered.loop\"};").contains("unregistered.loop"),
@@ -392,6 +400,39 @@ void Matrix(const Entry& entry, const fs::path& root) {
     }
   }
 }
+void LayoutConflictReplanning(const fs::path& root) {
+  NativeRetryClock clock;
+  SessionFixture fixture(root, "output.reconcile");
+  unsigned snapshots = 0, configures = 0, failures = 1;
+  browser_dispatch = [&](Json request) -> Result<Json> {
+    const auto method = request.at("method");
+    if (method == "snapshot") {
+      ++snapshots;
+      return Json{{"sessions", Json::array({{{"views", Json::array()}}})}};
+    }
+    if (method == "output.configure") {
+      ++configures;
+      if (configures <= failures)
+        return Error{ErrorCode::kConflict, "view_transaction_identity_mismatch"};
+      return Json{{"layoutRevision", configures}};
+    }
+    return Json::object();
+  };
+  Take(fixture.owner.Views().ConvergeDesired());
+  Check(configures == 2 && snapshots >= 2,
+        "known layout conflicts immediately re-read the authoritative snapshot and replan");
+  NativeRetryOwnerProbe::Change(fixture.owner, "output.reconcile");
+  failures = UINT_MAX;
+  const auto before = configures;
+  const auto failed = fixture.owner.Views().ConvergeDesired();
+  Check(!failed && configures == before + kImmediateLayoutAttempts,
+        "immediate layout attempts have a fixed bound");
+  Check(fixture.Status().Status() == RetryUnit::State::kWaiting,
+        "exhausted immediate attempts enter the registered output retry unit");
+  const auto blocked = fixture.owner.Views().ConvergeDesired();
+  Check(!blocked && configures == before + kImmediateLayoutAttempts,
+        "the shared retry deadline gates another burst");
+}
 void PreviousDocumentJob() {
   const Json previous{{"version", 1},
                       {"buildId", "build"},
@@ -450,6 +491,8 @@ int main(int argc, char** argv) try {
       fs::absolute(argv[1]) / ("retry-owners-" + std::to_string(GetCurrentProcessId()));
   fs::create_directories(root);
   PreviousDocumentJob();
+  if (selected.empty() || selected == "output.reconcile")
+    LayoutConflictReplanning(root / "layout-conflicts");
   if (selected.empty() || selected == "browser.health")
     BrowserHealthReplies(root / "health-replies");
   for (const auto code : {ErrorCode::kBusy, ErrorCode::kRateLimited, ErrorCode::kUnavailable,

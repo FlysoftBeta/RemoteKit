@@ -947,6 +947,8 @@ class SessionFixture {
       if (loop == "output.reconcile" && method != "output.configure")
         return Json::object();
       Json success = Json::object();
+      if (method == "output.configure")
+        success["layoutRevision"] = 1;
       if (method == "navigation.import.begin")
         success = {{"transfer", "transfer"}};
       if (method == "navigation.transfer.status")

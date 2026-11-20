@@ -385,7 +385,8 @@ bool RenderSlots::Begin(uint32_t interval,
                         bool force,
                         std::string& error,
                         bool* sent,
-                        bool keepalive) {
+                        bool keepalive,
+                        remotekit_sdk_render_identity* identity) {
   PublishGuard publish{*this};
   if (sent)
     *sent = false;
@@ -441,6 +442,8 @@ bool RenderSlots::Begin(uint32_t interval,
     ++counters_.begins;
     if (sent)
       *sent = true;
+    if (identity)
+      *identity = {id->generation, id->value, id->slot, 0};
     RK_SERVER_TRACE(s.trace, "render_begin", (TraceIds{0, 0, id->generation, 0, 0}),
                     rk_record.slot = id->slot;
                     rk_record.fence = id->value;
@@ -449,6 +452,13 @@ bool RenderSlots::Begin(uint32_t interval,
                     rk_record.leased = static_cast<int>(s.pacing.occupied()););
   }
   return true;
+}
+bool RenderSlots::Rendering(remotekit_sdk_render_identity identity) const {
+  if (!state_ || identity.slot >= kRenderSlotCount)
+    return false;
+  const auto& slot = state_->pacing.slots()[identity.slot];
+  return slot.phase == CompPacing::Phase::rendering && slot.id.generation == identity.generation &&
+         slot.id.value == identity.value;
 }
 bool RenderSlots::HasCapacity() const {
   return state_ && state_->pacing.occupied() < state_->pacing.depth();
@@ -575,6 +585,13 @@ RenderSlots::Result RenderSlots::Poll(remotekit_rtc_frame& frame,
       return Result::ready;
     }
   return Result::idle;
+}
+std::optional<int64_t> RenderSlots::ProducerQpc(int64_t micros) const {
+  if (micros < 0 || !clock_.consistent_across_processes || !clock_.high_resolution ||
+      clock_.qpc_frequency != QpcFrequency())
+    return {};
+  const auto midpoint = clock_.qpc_before + (clock_.qpc_after - clock_.qpc_before) / 2;
+  return midpoint + int64_t(double(micros - clock_.monotonic_us) * QpcFrequency() / 1000000.0);
 }
 std::optional<uint64_t> RenderSlots::ClipboardSequence() const {
   const auto state = clipboard_state_.load();

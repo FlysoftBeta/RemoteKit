@@ -268,6 +268,7 @@ Result<ObjectInfo> ObjectStore::WriteChunk(const Keys& keys,
   if (known && known->id == id)
     return *known;
   auto lock = Lock(id);
+  std::unique_lock range_lock(range_locks_[std::hash<std::string>{}(id) % range_locks_.size()]);
   auto local = Inspect(id);
   if (local)
     return local;
@@ -342,6 +343,7 @@ Result<ObjectInfo> ObjectStore::Write(const Keys& keys, std::istream& input, con
     return Io();
   const auto id = cluster::Hex(digest.Finish());
   auto lock = Lock(id);
+  std::unique_lock range_lock(range_locks_[std::hash<std::string>{}(id) % range_locks_.size()]);
   RK_ASSIGN_OR_RETURN(path, StoredPath(id));
   auto partial = path;
   partial += ".partial";
@@ -418,7 +420,7 @@ Result<Bytes> ObjectStore::ReadRange(const Keys& keys,
   if (length > kSegmentSize)
     return Error{ErrorCode::kLimitExceeded, "object range too large"};
   RK_ASSIGN_OR_RETURN(path, StoredPath(id));
-  auto lock = Lock(id);
+  std::shared_lock lock(range_locks_[std::hash<std::string>{}(id) % range_locks_.size()]);
   std::ifstream input(path, std::ios::binary);
   if (!input) {
     unsigned long code = 0;
@@ -469,6 +471,7 @@ Result<ObjectInfo> ObjectStore::Import(const std::string& id,
                                        const std::string& sha256) {
   RK_ASSIGN_OR_RETURN(path, StoredPath(id));
   auto lock = Lock(id);
+  std::unique_lock range_lock(range_locks_[std::hash<std::string>{}(id) % range_locks_.size()]);
   auto partial = path;
   partial += ".partial";
   std::error_code error;
@@ -494,6 +497,7 @@ Result<ObjectInfo> ObjectStore::Import(const std::string& id,
 Result<void> ObjectStore::Delete(const std::string& id) {
   RK_ASSIGN_OR_RETURN(path, StoredPath(id));
   auto lock = Lock(id);
+  std::unique_lock range_lock(range_locks_[std::hash<std::string>{}(id) % range_locks_.size()]);
   std::error_code error;
   fs::remove(path, error);
   if (error)

@@ -89,12 +89,15 @@ struct SharedAtlasFrame {
   // OSR producer timestamp in Chromium TimeTicks microseconds. This is not a
   // physical presentation time or proof of GPU completion.
   std::int64_t capture_time_us;
+  // Layout-only producer phase timestamps in Chromium TimeTicks microseconds; -1 is absent.
+  std::int64_t plane_rebuild_us;
+  std::int64_t compositor_frame_us;
   std::uint32_t slot;
   std::uint32_t width_pixels;
   std::uint32_t height_pixels;
   SharedAtlasStatus status;
   std::uint32_t view_count;
-  std::uint32_t reserved;
+  std::uint32_t layout_revision;
   SharedAtlasView views[kSharedAtlasMaxViews];
 };
 
@@ -116,7 +119,7 @@ struct alignas(64) SharedRenderMapping {
   SharedRenderSlot slots[kSharedAtlasSlotCount];
 };
 inline constexpr std::uint32_t kSharedRenderMagic = 0x524B5253;  // RKRS
-inline constexpr std::uint32_t kSharedRenderVersion = 8;
+inline constexpr std::uint32_t kSharedRenderVersion = 9;
 inline constexpr std::uint32_t kRenderSlotCount = kSharedAtlasSlotCount;
 static_assert(std::is_trivially_copyable_v<SharedRenderMapping>);
 static_assert(offsetof(SharedRenderSlot, publication_sequence) % 8 == 0);
@@ -128,13 +131,13 @@ static_assert(offsetof(SharedAtlasView, selection_menu) == 136);
 static_assert(sizeof(SharedAtlasContextMenu) == 16);
 static_assert(offsetof(SharedAtlasView, context_menu) == 224);
 static_assert(sizeof(SharedAtlasView) == 256);
-static_assert(sizeof(SharedAtlasFrame) == 16440);
-static_assert(sizeof(SharedRenderSlot) == 16448);
+static_assert(sizeof(SharedAtlasFrame) == 16456);
+static_assert(sizeof(SharedRenderSlot) == 16512);
 static_assert(offsetof(SharedRenderMapping, clipboard_sequence) == 24);
 static_assert(offsetof(SharedRenderMapping, clipboard_sequence) % 8 == 0);
 static_assert(offsetof(SharedRenderMapping, latest_layout) == 32);
 static_assert(offsetof(SharedRenderMapping, slots) == 16512);
-static_assert(sizeof(SharedRenderMapping) == 82304);
+static_assert(sizeof(SharedRenderMapping) == 82560);
 // Only consumed_fences[slot] >= value releases that slot. UINT64_MAX means
 // device loss, never completion. No other slot's fence value releases it.
 }  // namespace remotekit

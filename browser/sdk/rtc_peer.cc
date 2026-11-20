@@ -1,6 +1,8 @@
 #include "remotekit/browser/sdk/rtc_internal.h"
+#include "remotekit/protocol/rtc_events.h"
 #include "browser/sdk/sdk_logging.h"
 using namespace remotekit::rtc;
+static_assert(remotekit::protocol::kRtcDataWritable == REMOTEKIT_RTC_DATA_WRITABLE);
 namespace remotekit::rtc {
 // Preserve explicit Chromium trials. Our screenshare default changes only the
 // ALR pacing factor; queue time, probing budgets and resource algorithms remain
@@ -167,6 +169,9 @@ void Peer::OnDataChannel(scoped_refptr<webrtc::DataChannelInterface> channel) {
   AttachData(std::move(channel));
 }
 
+void Peer::OnBufferedAmountChange(uint64_t) {
+  Event(remotekit::protocol::kRtcDataWritable, nullptr, 0, nullptr, 0);
+}
 void Peer::OnStateChange() {
   Event(REMOTEKIT_RTC_DATA_STATE, nullptr, 0, nullptr, data->state());
 }

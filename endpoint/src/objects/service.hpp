@@ -101,9 +101,11 @@ class SessionObjects {
   Result<ObjectInfo> Ensure(const std::string& id);
   Result<Json> Prepare(const std::vector<std::string>& ids);
   void Grant(const std::string& id);
+  bool HasGrant(const std::string& id);
   Result<ObjectInfo> Write(const std::filesystem::path& path,
                            const ObjectStore::Check& check,
-                           const std::string& derived_from = {});
+                           const std::string& derived_from = {},
+                           const std::string& kind = "thumbnail");
 
  private:
   ObjectService& service_;

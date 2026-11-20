@@ -46,6 +46,12 @@ std::optional<CompFailure> CompEngine::StartGeneration() {
 }
 void CompEngine::StopGeneration() {
   presentation_refresh.SetScope(std::nullopt);
+  if (layout_attempt)
+    layout_attempt->CancelWaiting();
+  layout_attempt.reset();
+  layout_serial = 0;
+  layout_begin.reset();
+  refresh_begin.reset();
   if (tail_attempt)
     tail_attempt->CancelWaiting();
   tail_attempt.reset();
@@ -61,6 +67,12 @@ void CompEngine::ResetStream() {
     tail_attempt->CancelWaiting();
   tail_attempt.reset();
   presentation_refresh.SetScope(std::nullopt);
+  if (layout_attempt)
+    layout_attempt->CancelWaiting();
+  layout_attempt.reset();
+  layout_serial = 0;
+  layout_begin.reset();
+  refresh_begin.reset();
   has_current_view = false;
   next_tail_attempt_ms = 0;
   begin_schedule.Reset();
@@ -144,6 +156,8 @@ std::optional<CompFailure> CompEngine::UpdateCadence(const CompStream& stream) {
   sampling_fps = cadence.Update(comp_bitrate.load(), comp_fps.load(), policy_max_fps.load(),
                                 std::min(official_max_fps, codec_max_fps), slots.HasCapacity(),
                                 static_cast<int64_t>(1000000.0 * QpcNow() / QpcFrequency()));
+  if (sampling_fps)
+    begin_schedule.Reevaluate(QpcNow(), std::max<int64_t>(1, QpcFrequency() / sampling_fps));
   {
     std::lock_guard lock(comp_diagnostics_mutex);
     comp_diagnostics.targetFps =
@@ -163,6 +177,46 @@ std::optional<CompFailure> CompEngine::Step(const CompStream& stream, CompHost& 
   auto result =
       !stream.output_open ? RenderSlots::Result::idle : slots.Poll(frame, metadata, error);
   ObserveWake();
+  const auto rejected = [&](auto& pending) {
+    if (!pending || slots.Rendering(*pending))
+      return false;
+    const auto identity = *pending;
+    pending.reset();
+    return result != RenderSlots::Result::ready || metadata.generation != identity.generation ||
+           metadata.slot != identity.slot || metadata.ready_fence_value != identity.value;
+  };
+  rejected(layout_begin);
+  if (rejected(refresh_begin))
+    presentation_refresh.SourceRejected();
+  const double layout_now_ms = 1000.0 * QpcNow() / QpcFrequency();
+  const auto demand = host.PendingLayout();
+  if (demand != layout_serial) {
+    if (layout_attempt)
+      layout_attempt->CancelWaiting();
+    layout_attempt.reset();
+    layout_serial = demand;
+    layout_begin.reset();
+    refresh_begin.reset();
+    next_layout_attempt_ms = 0;
+  }
+  if (layout_attempt && layout_now_ms >= layout_source_deadline_ms &&
+      layout_attempt->CancelWaiting())
+    next_layout_attempt_ms = layout_now_ms + 1000;
+  if (layout_attempt && layout_attempt->state() != TailIdrAttempt::State::source_wait &&
+      layout_attempt->state() != TailIdrAttempt::State::encoding)
+    layout_attempt.reset();
+  if (result == RenderSlots::Result::ready) {
+    if (!host.MatchesLayout(metadata)) {
+      frame.release(frame.release_context, frame.frame_id);
+      frame = {};
+      result = RenderSlots::Result::idle;
+    }
+  }
+  const bool force_layout = demand && !layout_begin && !layout_attempt &&
+                            layout_now_ms >= next_layout_attempt_ms &&
+                            result != RenderSlots::Result::ready;
+  if (force_layout)
+    begin_schedule.Wake();
   if (first_source && result == RenderSlots::Result::ready) {
     host.Reached(CompHost::Milestone::source_frame);
     first_source = false;
@@ -191,13 +245,13 @@ std::optional<CompFailure> CompEngine::Step(const CompStream& stream, CompHost& 
       tail_attempt.reset();
   }
   const bool tail_ready = idle.TailDue(now_ms) && !tail_attempt && now_ms >= next_tail_attempt_ms &&
-                          !presentation_refresh.Pending();
+                          !presentation_refresh.Pending() && !demand;
   const bool force_tail = tail_ready && tail_begins < 3;
-  const bool force_refresh =
-      result != RenderSlots::Result::ready && presentation_refresh.CanForce(now_ms);
+  const bool force_refresh = result != RenderSlots::Result::ready && !refresh_begin &&
+                             presentation_refresh.CanForce(now_ms);
   const bool force_keepalive =
       slots.Stats().idle && !force_tail && !force_refresh && !recovery.active() &&
-      !presentation_refresh.Pending() &&
+      !presentation_refresh.Pending() && !demand &&
       keepalive.Due(now, encoders.LastEncodedQpc(), tail_attempt || idle.TailDue(now_ms));
   const bool begin_allowed = host.CanBegin() && stream.output_open && (stream.peer != 0) &&
                              host.Current(stream.scope) && comp_bitrate.load() && sampling_fps;
@@ -210,17 +264,24 @@ std::optional<CompFailure> CompEngine::Step(const CompStream& stream, CompHost& 
                                    : FrameAdmission::Priority::normal);
   }
   if (begin_allowed && slots.CanAttemptAdmission() &&
-      (begin_schedule.Due(now) || slots.AdmissionPending() || force_keepalive)) {
+      (begin_schedule.Due(now) || slots.AdmissionPending() || force_keepalive || force_refresh)) {
     const auto interval = static_cast<uint32_t>((1000000ull + sampling_fps - 1) / sampling_fps);
     if (begin_schedule.Due(now) && !force_keepalive)
       slots.Pressure(encoders.Pending() > 1);
     bool sent = false;
-    if (!slots.Begin(interval, force_tail || force_refresh || recovery.active() || force_keepalive,
-                     error, &sent, force_keepalive)) {
+    remotekit_sdk_render_identity identity{};
+    if (!slots.Begin(
+            interval,
+            force_layout || force_tail || force_refresh || recovery.active() || force_keepalive,
+            error, &sent, force_keepalive, &identity)) {
       if (frame.release)
         frame.release(frame.release_context, frame.frame_id);
       return Failure(error, "render-begin-failed");
     }
+    if (sent && force_layout)
+      layout_begin = identity;
+    if (sent && force_refresh)
+      refresh_begin = identity;
     if (sent && force_keepalive)
       keepalive.Sent(now);
     if (sent && force_tail)
@@ -276,6 +337,7 @@ std::optional<CompFailure> CompEngine::Step(const CompStream& stream, CompHost& 
       d.sourceHeight = metadata.height_pixels;
     }
     if (adaptation_status != 0 || adapted.drop || !comp_bitrate.load() || !sampling_fps) {
+      presentation_refresh.SourceRejected();
       frame.release(frame.release_context, frame.frame_id);
     } else {
       // Retain hard H264 texture/frame limits, without trading product quality
@@ -322,6 +384,10 @@ std::optional<CompFailure> CompEngine::Step(const CompStream& stream, CompHost& 
       // No old texture is relabeled using the latest-layout publication.
       const auto layout = host.ObserveLayout(metadata);
       const auto epoch = layout.epoch;
+      if (!epoch) {
+        frame.release(frame.release_context, frame.frame_id);
+        return {};
+      }
       has_current_view = layout.has_current_view;
       frame.layout_epoch = epoch;
       UpdateRefresh(stream, host, now_ms);
@@ -332,8 +398,15 @@ std::optional<CompFailure> CompEngine::Step(const CompStream& stream, CompHost& 
         next_tail_attempt_ms = now_ms + tail_retry_ms;
         attempt = tail_attempt;
       }
+      const bool layout_refresh = !attempt && demand && !layout_attempt;
+      if (layout_refresh) {
+        layout_attempt = std::make_shared<TailIdrAttempt>();
+        layout_source_deadline_ms = now_ms + std::max(1000.0, 2000.0 / sampling_fps);
+        attempt = layout_attempt;
+      }
       if (attempt) {
-        auto wrapped = remotekit::TailRefreshLease::Wrap(frame, std::move(attempt));
+        auto wrapped =
+            remotekit::TailRefreshLease::Wrap(frame, std::move(attempt), !layout_refresh);
         frame.release(frame.release_context, frame.frame_id);
         frame = wrapped;
       }

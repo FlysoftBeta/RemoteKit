@@ -7,8 +7,9 @@ import { emptyWorkspace } from '../server/persistence/workspaces';
 import type { DomainContext, DomainServices } from '../server/application';
 import type { ProductTab } from '../shared/product';
 import { operation, type OwnerFactory } from './retry-loop-boundary';
+import { observedSession } from './coordination-fixture';
 
-export function driveReconciler(path: 'product' | 'reconnect' | 'ua' | 'reclaim'): OwnerFactory {
+export function driveReconciler(path: 'product' | 'observed' | 'reconnect' | 'ua' | 'reclaim'): OwnerFactory {
   return (boundary, t) => {
     let clockOffset = 0;
     const clock = { wallMs: () => Date.now(), monotonicMs: () => Date.now() + clockOffset };
@@ -120,26 +121,40 @@ export function driveReconciler(path: 'product' | 'reconnect' | 'ua' | 'reclaim'
     }
     const owner = new Reconciler(context, services);
     const result = operation();
+    const observation = observedSession(
+      { tenantId: 'tenant', sessionId: 'a'.repeat(32), placementEpoch: 1 },
+      'connection',
+      'endpoint',
+    );
     const run = () =>
       result.run(() =>
         path === 'reconnect'
           ? owner.endpointReady({ processChanged: false, nodeId: 'node' })
-          : path === 'reclaim'
-            ? owner.tick()
-            : owner.reconcileProduct('tenant'),
+          : path === 'observed'
+            ? (owner.observe(observation) ?? Promise.resolve())
+            : path === 'reclaim'
+              ? owner.tick()
+              : owner.reconcileProduct('tenant'),
       );
     return {
       start: run,
-      drive: path === 'reconnect' ? () => result.run(() => owner.reconcileProduct('tenant')) : run,
+      drive:
+        path === 'observed'
+          ? () => owner.requestProduct('tenant')
+          : path === 'reconnect'
+            ? () => result.run(() => owner.reconcileProduct('tenant'))
+            : run,
       changeInput: () => {
         boundary.version++;
+        observation.observedRevision = String(boundary.version);
         Object.defineProperty(store, 'buildId', { value: 'changed', configurable: true });
         const next = store.workspaces.workspace('tenant');
         next.revision++;
         // A dropped reload is not retried; the next site UA change asks for a new one.
         if (path === 'ua') next.tabs[0].pendingUaReloadOrigin = 'https://example.test';
         store.workspaces.writeWorkspace(next);
-        run();
+        if (path === 'observed') void owner.observe(observation);
+        else run();
       },
       error: () =>
         path === 'reclaim'
@@ -147,6 +162,7 @@ export function driveReconciler(path: 'product' | 'reconnect' | 'ua' | 'reclaim'
           : (runtime.lastError ??
             (path === 'ua' ? store.operations.recentOperations('tenant')[0]?.error : undefined)),
       dispose: async () => {
+        await owner.close();
         await tenants.close();
         store.db.close();
       },

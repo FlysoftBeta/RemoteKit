@@ -7,6 +7,7 @@
 #include "protocol/file_requests.h"
 #ifdef RK_FILE_PHOTO
 #include <webp/encode.h>
+#include <webp/decode.h>
 #endif
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <sstream>
@@ -57,6 +59,7 @@ class Control final : public remotekit::ManagementLink {
   std::string address;
   std::vector<remotekit::Json> committed;
   unsigned located = 0;
+  std::map<std::string, remotekit::Error> locate_failures;
   remotekit::Json locate_sources;
   std::vector<size_t> locate_batches;
   std::mutex mutex;
@@ -106,6 +109,10 @@ class Control final : public remotekit::ManagementLink {
     if (fields["tenantId"] == "other-tenant")
       return remotekit::Error{remotekit::ErrorCode::kForbidden, "no tenant claim"};
     remotekit::Json sources = remotekit::Json::object();
+    for (const auto& id : fields["ids"])
+      if (const auto failure = locate_failures.find(id.get<std::string>());
+          failure != locate_failures.end())
+        return failure->second;
     for (const auto& id : fields["ids"])
       sources[id.get<std::string>()] =
           !locate_sources.is_null() ? locate_sources
@@ -410,6 +417,160 @@ void HashOnlySelection(const fs::path& root) {
 }
 #endif
 
+void CacheHealing(const fs::path& root) {
+  Control control;
+  remotekit::objects::ObjectService objects(root / "node", control, {}, "cache", "dev");
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  fs::create_directories(root);
+  const auto source_path = root / "source";
+  std::ofstream(source_path, std::ios::binary) << "original-source";
+  const auto source = Take(objects.Write(source_path, {}, {{"tenantId", "tenant"}}));
+  LibraryFixture library(root / "session", objects, "tenant");
+  Take(library.Initialize());
+  const auto live = []() -> remotekit::Result<void> { return {}; };
+  unsigned renders = 0;
+  const auto render = [&](const fs::path& path) -> remotekit::Result<FileLibrary::Derivative> {
+    ++renders;
+    std::ofstream(path, std::ios::binary) << "cached-derivative";
+    return FileLibrary::Derivative{320, 240};
+  };
+  const auto cached =
+      Take(library.CachedDerivative(source.id, FileLibrary::DerivativeFormat::jpeg, render, live));
+  Take(objects.Store().Delete(cached.id));
+  control.locate_failures.emplace(
+      cached.id, remotekit::Error{remotekit::ErrorCode::kNotFound, "missing derivative"});
+  CHECK(Take(library.CachedDerivative(source.id, FileLibrary::DerivativeFormat::jpeg, render, live))
+            .id == cached.id);
+  CHECK(renders == 2);
+  Take(objects.Store().Delete(cached.id));
+  control.locate_failures.at(cached.id) =
+      remotekit::Error{remotekit::ErrorCode::kForbidden, "revoked derivative"};
+  CHECK(library.CachedDerivative(source.id, FileLibrary::DerivativeFormat::jpeg, render, live)
+            .error()
+            .code == remotekit::ErrorCode::kForbidden);
+  CHECK(renders == 2);
+  control.locate_failures.at(cached.id) =
+      remotekit::Error{remotekit::ErrorCode::kNotFound, "missing derivative"};
+  const auto failed_render = [&](const fs::path&) -> remotekit::Result<FileLibrary::Derivative> {
+    return remotekit::Error{remotekit::ErrorCode::kCanceled, "cancelled render"};
+  };
+  CHECK(!library.CachedDerivative(source.id, FileLibrary::DerivativeFormat::jpeg, failed_render,
+                                  live));
+  CHECK(Take(library.CachedDerivative(source.id, FileLibrary::DerivativeFormat::jpeg, render, live))
+            .id == cached.id);
+  CHECK(renders == 3);
+  {
+    const auto stored = Take(objects.Store().StoredPath(cached.id));
+    std::ofstream(stored, std::ios::binary | std::ios::trunc) << "corrupt";
+  }
+  const auto corrupt =
+      library.CachedDerivative(source.id, FileLibrary::DerivativeFormat::jpeg, render, live);
+  CHECK(!corrupt && corrupt.error().reason == remotekit::ErrorReason::kCorruptRecord);
+  CHECK(renders == 3);
+}
+#ifdef RK_FILE_PHOTO
+void PhotoDerivatives(const fs::path& root) {
+  Control control;
+  remotekit::objects::ObjectService objects(root / "node", control, {}, "photos", "dev");
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  fs::create_directories(root);
+  const auto write_webp = [&](const char* name, int width, int height) {
+    std::vector<uint8_t> pixels(size_t(width) * height * 4, 255);
+    for (int y = 0; y < height; ++y)
+      for (int x = 0; x < width; ++x)
+        pixels[(size_t(y) * width + x) * 4] = static_cast<uint8_t>(x * 255 / width);
+    uint8_t* encoded = nullptr;
+    const auto size = WebPEncodeLosslessRGBA(pixels.data(), width, height, width * 4, &encoded);
+    CHECK(size);
+    const auto path = root / name;
+    std::ofstream stream(path, std::ios::binary);
+    stream.write(reinterpret_cast<const char*>(encoded), size);
+    stream.close();
+    WebPFree(encoded);
+    return Take(objects.Write(path, {}, {{"tenantId", "tenant"}}));
+  };
+  const auto large = write_webp("large.webp", 3200, 1600);
+  const auto small = write_webp("small.webp", 128, 64);
+  const auto live = []() -> remotekit::Result<void> { return {}; };
+  remotekit::Json processed, preview;
+  {
+    LibraryFixture library(root / "session", objects, "tenant");
+    Take(library.Initialize());
+    CHECK(library.Preview(large.id, 1279, live).error().code == remotekit::ErrorCode::kRejected);
+    preview = Take(library.Preview(large.id, 1280, live));
+    CHECK(preview.size() == 4 && preview["type"] == "image/webp" && preview["width"] == 1280 &&
+          preview["height"] == 640);
+    CHECK(control.committed.back()["kind"] == "preview" &&
+          control.committed.back()["derivedFrom"] == large.id);
+    const auto count = control.committed.size();
+    CHECK(Take(library.Preview(large.id, 1280, live)) == preview);
+    CHECK(control.committed.size() == count);
+    const auto higher = Take(library.Preview(large.id, 2560, live));
+    CHECK(higher["width"] == 2560 && higher["height"] == 1280 &&
+          higher["assetId"] != preview["assetId"]);
+    const auto bytes = Take(library.Read(preview["assetId"], 0)).second;
+    WebPBitstreamFeatures features{};
+    CHECK(WebPGetFeatures(bytes.data(), bytes.size(), &features) == VP8_STATUS_OK);
+    CHECK(features.width == 1280 && features.height == 640 && features.format == 1);
+    CHECK(Take(library.Preview(small.id, 1280, live))["assetId"] == small.id);
+    const auto jpeg = root / "small.jpg";
+    Take(remotekit::TranscodePhoto(root / "small.webp", jpeg, remotekit::PhotoTranscode::kJpeg));
+    const auto jpeg_object = Take(objects.Write(jpeg, {}, {{"tenantId", "tenant"}}));
+    const auto original = Take(library.Preview(jpeg_object.id, 1280, live));
+    CHECK(original["assetId"] == jpeg_object.id && original["width"] == 128 &&
+          original["height"] == 64 && original["type"] == "image/jpeg");
+    for (const auto format : {remotekit::PhotoTranscode::kJpeg, remotekit::PhotoTranscode::kPng}) {
+      const auto path =
+          root / (format == remotekit::PhotoTranscode::kJpeg ? "large.jpg" : "large.png");
+      Take(remotekit::TranscodePhoto(root / "large.webp", path, format));
+      const auto object = Take(objects.Write(path, {}, {{"tenantId", "tenant"}}));
+      const auto resized = Take(library.Preview(object.id, 1280, live));
+      CHECK(resized["width"] == 1280 && resized["height"] == 640 &&
+            resized["type"] == "image/webp");
+    }
+    const auto before_process = control.committed.size();
+    std::array<std::future<remotekit::Json>, 4> requests;
+    for (auto& request : requests)
+      request = std::async(std::launch::async,
+                           [&] { return Take(library.Process(small.id, "photo", 0, live)); });
+    processed = requests.front().get();
+    for (size_t i = 1; i < requests.size(); ++i)
+      CHECK(requests[i].get() == processed);
+    CHECK(control.committed.size() == before_process + 1);
+    CHECK(control.committed.back()["kind"] == "photo");
+    const auto rotated = Take(library.Process(small.id, "photo", 1, live));
+    CHECK(rotated["width"] == 64 && rotated["height"] == 128 && rotated["quarterTurns"] == 1);
+    const auto before_scan = control.committed.size();
+    Take(library.Process(small.id, "scan", 0, live));
+    CHECK(control.committed.size() == before_scan + 1);
+    const auto cancelled = []() -> remotekit::Result<void> {
+      return remotekit::Error{remotekit::ErrorCode::kCanceled, "retired grant"};
+    };
+    CHECK(!library.Process(small.id, "photo", 0, cancelled));
+    CHECK(!library.Preview(large.id, 1280, cancelled));
+  }
+  {
+    LibraryFixture library(root / "session", objects, "tenant");
+    Take(library.Initialize());
+    const auto count = control.committed.size();
+    CHECK(Take(library.Process(small.id, "photo", 0, live)) == processed);
+    CHECK(Take(library.Preview(large.id, 1280, live)) == preview);
+    CHECK(control.committed.size() == count);
+    std::array<std::future<std::pair<FileLibrary::Asset, std::vector<uint8_t>>>, 4> reads;
+    for (size_t i = 0; i < reads.size(); ++i)
+      reads[i] = std::async(std::launch::async, [&, i] { return Take(library.Read(large.id, i)); });
+    std::ifstream source_bytes(root / "large.webp", std::ios::binary);
+    const std::vector<uint8_t> all{std::istreambuf_iterator<char>(source_bytes), {}};
+    for (size_t i = 0; i < reads.size(); ++i) {
+      const auto range = reads[i].get();
+      CHECK(std::equal(range.second.begin(), range.second.end(), all.begin() + i));
+    }
+  }
+}
+#endif
+
 int main(int argc, char** argv) {
   using remotekit::PhotoTranscode;
   using remotekit::SelectionWebpTranscode;
@@ -442,7 +603,9 @@ int main(int argc, char** argv) {
   DocumentOpenContract();
 #ifdef RK_FILE_PHOTO
   HashOnlySelection(root / "hash-only");
+  PhotoDerivatives(root / "photo-derivatives");
 #endif
+  CacheHealing(root / "cache-healing");
   Documents(root / "documents");
   Control control;
   const auto source_key = TestPrivateKey(7), target_key = TestPrivateKey(8);
@@ -522,11 +685,12 @@ int main(int argc, char** argv) {
       std::ofstream(path, std::ios::binary) << "webp-derivative-cache";
       return FileLibrary::Derivative{320, 240};
     };
-    const auto cached =
-        Take(library.CachedDerivative(hash, FileLibrary::DerivativeFormat::webp, render, live));
+    const auto cached = Take(library.CachedDerivative(hash, FileLibrary::DerivativeFormat::webp,
+                                                      render, live, "preview", "1280-q80-v1"));
     cached_id = cached.id;
     CHECK(cached.type == "image/webp" && cached.width == 320 && cached.height == 240);
-    CHECK(Take(library.CachedDerivative(hash, FileLibrary::DerivativeFormat::webp, render, live))
+    CHECK(Take(library.CachedDerivative(hash, FileLibrary::DerivativeFormat::webp, render, live,
+                                        "preview", "1280-q80-v1"))
               .id == cached.id);
     CHECK(renders == 1);
     for (const auto format :
@@ -631,7 +795,7 @@ int main(int argc, char** argv) {
                      CHECK(false);
                      return FileLibrary::Derivative{};
                    },
-                   live))
+                   live, "preview", "1280-q80-v1"))
               .id == cached_id);
     for (const auto& [format, id] : transcode_cache) {
       CHECK(Take(library.CachedDerivative(

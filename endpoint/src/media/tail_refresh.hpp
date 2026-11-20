@@ -10,8 +10,9 @@ namespace remotekit {
 class TailRefreshLease {
  public:
   static remotekit_rtc_frame Wrap(const remotekit_rtc_frame& source,
-                                  std::shared_ptr<TailIdrAttempt> attempt) {
-    auto* lease = new TailRefreshLease(source, std::move(attempt));
+                                  std::shared_ptr<TailIdrAttempt> attempt,
+                                  bool require_keyframe = true) {
+    auto* lease = new TailRefreshLease(source, std::move(attempt), require_keyframe);
     source.retain(source.release_context, source.frame_id);
     auto tagged = source;
     tagged.release_context = lease;
@@ -28,14 +29,20 @@ class TailRefreshLease {
     auto* lease = From(frame);
     return !lease || lease->attempt_->BeginEncoding();
   }
-  static void Finish(const remotekit_rtc_frame& frame, bool keyframe_delivered) {
+  static bool RequiresKeyframe(const remotekit_rtc_frame& frame) {
+    const auto* lease = From(frame);
+    return lease && lease->require_keyframe_;
+  }
+  static void Finish(const remotekit_rtc_frame& frame, bool delivered, bool keyframe = true) {
     if (auto* lease = From(frame))
-      lease->attempt_->Finish(keyframe_delivered);
+      lease->attempt_->Finish(delivered && (!lease->require_keyframe_ || keyframe));
   }
 
  private:
-  TailRefreshLease(const remotekit_rtc_frame& source, std::shared_ptr<TailIdrAttempt> attempt)
-      : source_(source), attempt_(std::move(attempt)) {}
+  TailRefreshLease(const remotekit_rtc_frame& source,
+                   std::shared_ptr<TailIdrAttempt> attempt,
+                   bool require_keyframe)
+      : source_(source), attempt_(std::move(attempt)), require_keyframe_(require_keyframe) {}
   static void Retain(void* context, uint64_t) {
     auto* lease = static_cast<TailRefreshLease*>(context);
     lease->refs_.fetch_add(1);
@@ -51,6 +58,7 @@ class TailRefreshLease {
   }
   remotekit_rtc_frame source_;
   std::shared_ptr<TailIdrAttempt> attempt_;
+  bool require_keyframe_;
   std::atomic<uint32_t> refs_{1};
 };
 }  // namespace remotekit

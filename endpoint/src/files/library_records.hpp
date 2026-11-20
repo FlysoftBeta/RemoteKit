@@ -141,12 +141,7 @@ inline Result<void> Validate(LibraryTable table, const std::string& id, const Js
         return CorruptRecord("invalid_asset_draft");
       value.at("expires").get<int64_t>();
     } else {
-      Keys(value, {"assetId"});
-      Text(value.at("assetId"), 64, 64);
-      if (id.size() < 68 || !HexId(id.substr(0, 64), 64) || id[64] != '-' ||
-          (id.substr(65) != "jpeg" && id.substr(65) != "png" && id.substr(65) != "webp") ||
-          !HexId(value.at("assetId").get<std::string>(), 64))
-        return CorruptRecord("invalid_derivative_record");
+      return CorruptRecord("invalid library table");
     }
     return {};
   } catch (const std::exception& error) {

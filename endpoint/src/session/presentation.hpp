@@ -1,5 +1,6 @@
 #pragma once
 #include "util/common.hpp"
+#include "session/layout_timeline.hpp"
 #include "rtc/event.hpp"
 #include "rtc/outbox.hpp"
 #include "media/presentation_barrier.hpp"
@@ -23,6 +24,10 @@ class PresentationController {
     std::function<MediaSampling()> sampling;
   };
   explicit PresentationController(Hooks hooks) : hooks_(std::move(hooks)) {}
+  LayoutTimeline timeline;
+  std::unique_lock<std::recursive_mutex> LockLayout() {
+    return std::unique_lock<std::recursive_mutex>(mutex_);
+  }
   void Bind(uint64_t peer);
   void QueueLayout(const Json& mode = Json());
   bool PresentationMessage(const Event& event);

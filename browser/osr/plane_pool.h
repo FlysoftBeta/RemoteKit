@@ -26,7 +26,7 @@ struct Plane {
   uint64_t generation = 0, binding_epoch = 0;
   uintptr_t host_identity = 0;
   bool enabled = false, configuring = false, configured = false, retired = false;
-  bool retirement_probe_registered = false;
+  bool retirement_probe_registered = false, layout_frame_pending = true;
   base::TimeTicks configure_deadline, next_configure_attempt;
   std::array<std::shared_ptr<Target>, kPlaneTargets> targets;
   std::shared_ptr<Target> latest;
@@ -40,7 +40,7 @@ struct PlaneRead {
 struct PlanePool {
   explicit PlanePool(Generation& owner) : owner_(owner) {}
   using View = OsrRenderer::View;
-  void SetViews(std::vector<View> views);
+  void SetViews(std::vector<View> views, uint32_t layout_revision);
   bool Configure(const std::shared_ptr<Plane>& plane);
   void Configured(std::shared_ptr<Plane> plane, bool ok);
   void PlaneResult(std::shared_ptr<Work> work,
@@ -54,6 +54,8 @@ struct PlanePool {
   std::map<uint64_t, std::shared_ptr<Plane>> planes_;
   std::vector<uint64_t> order_;
   uint64_t revision_ = 1;
+  uint32_t layout_revision_ = 0;
+  int64_t plane_rebuild_us_ = -1, compositor_frame_us_ = -1;
 
  private:
   Generation& owner_;

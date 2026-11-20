@@ -110,6 +110,7 @@ Result<ConfigureViewRequest> DecodeConfigureView(const base::DictValue& wire,
   request.occluded_bottom = decoder.Optional<int>("occludedBottom");
   request.occlusion_revision = decoder.Optional<uint64_t>("occlusionRevision");
   request.output_generation = decoder.Optional<uint64_t>("outputGeneration");
+  request.layoutTransaction = decoder.Optional<std::string>("layoutTransaction");
   request.visible = decoder.Optional<bool>("visible");
   request.width = decoder.Optional<int>("width");
   request.height = decoder.Optional<int>("height");
@@ -450,14 +451,19 @@ ControlResult ControlDispatcher::HandleConfigureView(const ConfigureViewRequest&
     if (!request.occluded_bottom || !request.occlusion_revision || !request.output_generation ||
         *request.occluded_bottom < 0)
       return error(ErrorCode::kInvalidRequest, "invalid_page_viewport");
-    if ((!runtime_.output || *request.output_generation != runtime_.output_generation) ||
-        *request.occlusion_revision < record->viewport.revision) {
+    if (!runtime_.output || *request.output_generation != runtime_.output_generation)
+      return error(ErrorCode::kConflict, "page_viewport_generation_mismatch");
+    if (*request.occlusion_revision < record->viewport.revision) {
       reply.Set("ok", true);
-      reply.Set("ignored", true);
+      reply.Set("superseded", true);
+      reply.Set("occlusionRevision", base::NumberToString(record->viewport.revision));
       return reply;
     }
     if (spec != record->spec)
       return error(ErrorCode::kConflict, "page_viewport_requires_stable_plane");
+    if (request.layoutTransaction)
+      if (auto* host = record->webview->offscreen_host())
+        host->BeginLayoutTimeline(*request.layoutTransaction, view);
     record->viewport = {*request.occluded_bottom, *request.occlusion_revision};
     if (auto* host = record->webview->offscreen_host())
       host->SetOcclusionRevision(record->viewport.revision);
@@ -467,6 +473,9 @@ ControlResult ControlDispatcher::HandleConfigureView(const ConfigureViewRequest&
                                      spec.visible ? record->viewport.occluded_bottom : 0),
         runtime_.layout_transaction.PageScale(spec));
     runtime_.UpdateOutput();
+    if (request.layoutTransaction)
+      if (auto* host = record->webview->offscreen_host())
+        host->LayoutStage("geometry_applied");
     reply.Set("ok", true);
     reply.Set("accepted", true);
     reply.Set("completed", true);

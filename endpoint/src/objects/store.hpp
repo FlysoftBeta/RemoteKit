@@ -5,6 +5,7 @@
 #include <functional>
 #include <istream>
 #include <mutex>
+#include <shared_mutex>
 #include <ostream>
 
 namespace remotekit::objects {
@@ -53,5 +54,6 @@ class ObjectStore {
   std::unique_lock<std::recursive_mutex> Lock(const std::string& id) const;
   std::filesystem::path root_;
   mutable std::array<std::recursive_mutex, 64> locks_;
+  mutable std::array<std::shared_mutex, 64> range_locks_;
 };
 }  // namespace remotekit::objects

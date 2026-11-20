@@ -2,6 +2,7 @@
 #include "browser/control_requests.h"
 #include "browser/control_response.h"
 #include "browser/browser_runtime.h"
+#include "browser/offscreen_host.h"
 #include <cmath>
 #include <set>
 #include "browser/audio_target.h"
@@ -59,6 +60,9 @@ Result<OutputConfigureRequest> DecodeOutputConfigure(const base::DictValue& wire
   }
   request.device_scale = decoder.Optional<double>("device_scale");
   request.allocation_alignment = decoder.Optional<int>("allocation_alignment");
+  request.layoutTransaction = decoder.Optional<std::string>("layoutTransaction");
+  request.outputWidthPixels = decoder.Optional<int>("outputWidthPixels");
+  request.outputHeightPixels = decoder.Optional<int>("outputHeightPixels");
   request.enabled = decoder.Optional<bool>("enabled");
   request.width = decoder.Optional<int>("width");
   request.height = decoder.Optional<int>("height");
@@ -124,15 +128,12 @@ ControlResult ControlDispatcher::HandleOutputConfigure(const OutputConfigureRequ
     return error(ErrorCode::kLimitExceeded, "Atlas dimensions exceed supported bounds");
   if (next_width < 16 || next_height < 16)
     return error(ErrorCode::kInvalidRequest, "invalid_atlas_dimensions");
-  if (runtime_.output && (next_width != runtime_.layout_transaction.logical_width ||
-                          next_height != runtime_.layout_transaction.logical_height))
-    return error(ErrorCode::kConflict, "close_output_before_size_change");
   // Source geometry and output extent are one transaction. In particular,
   // neither the old nor new layout must fit a max(old,new) intermediate atlas.
   auto next_specs = runtime_.views.Specs();
   if (Ptr(request.viewConfigs)) {
-    if (runtime_.output)
-      return error(ErrorCode::kConflict, "close_output_before_view_transaction");
+    for (auto& [view, spec] : next_specs)
+      spec.visible = false;
     for (const auto& config : *request.viewConfigs) {
       if (!runtime_.views.Find(config.session, config.view))
         return error(ErrorCode::kConflict, "view_transaction_identity_mismatch");
@@ -149,16 +150,12 @@ ControlResult ControlDispatcher::HandleOutputConfigure(const OutputConfigureRequ
   if (Ptr(request.device_scale)) {
     if (!scale || !std::isfinite(*scale) || *scale < 0.5 || *scale > 4)
       return error(ErrorCode::kInvalidRequest, "invalid_device_scale");
-    if (runtime_.output)
-      return error(ErrorCode::kConflict, "close_output_before_scale_change");
     next_scale = static_cast<float>(*scale);
   }
   if (const auto* value = Ptr(request.allocation_alignment)) {
     if ((*value != 1 && *value != 16))
       return error(ErrorCode::kInvalidRequest, "invalid_allocation_alignment");
     next_alignment = *value;
-    if (runtime_.output && next_alignment != runtime_.layout_transaction.allocation_alignment)
-      return error(ErrorCode::kConflict, "close_output_before_alignment_change");
   }
   if (const auto* value = Ptr(request.enabled)) {
     next_enabled = *value;
@@ -167,6 +164,21 @@ ControlResult ControlDispatcher::HandleOutputConfigure(const OutputConfigureRequ
                                                          next_height, next_scale, next_alignment);
   if (!next_layout)
     return ControlResult::Failure(id, *next_layout.status.error, next_layout.status.message);
+  if (request.outputWidthPixels || request.outputHeightPixels) {
+    if (!request.outputWidthPixels || !request.outputHeightPixels ||
+        *request.outputWidthPixels < 16 || *request.outputHeightPixels < 16 ||
+        *request.outputWidthPixels > 8192 || *request.outputHeightPixels > 8192 ||
+        *request.outputWidthPixels % next_alignment ||
+        *request.outputHeightPixels % next_alignment ||
+        uint64_t(*request.outputWidthPixels) * *request.outputHeightPixels > 16777216)
+      return error(ErrorCode::kInvalidRequest, "invalid_output_extent");
+    next_layout.value.output_width = *request.outputWidthPixels;
+    next_layout.value.output_height = *request.outputHeightPixels;
+  }
+  if (runtime_.output &&
+      (next_layout.value.output_width != runtime_.layout_transaction.output_width ||
+       next_layout.value.output_height != runtime_.layout_transaction.output_height))
+    return error(ErrorCode::kConflict, "close_output_before_extent_change");
   if (request.viewConfigs) {
     for (const auto& config : *request.viewConfigs) {
       auto* record = runtime_.views.Find(config.session, config.view);
@@ -174,10 +186,19 @@ ControlResult ControlDispatcher::HandleOutputConfigure(const OutputConfigureRequ
         record->viewport = config.viewport;
     }
   }
+  if (request.layoutTransaction)
+    for (auto& [view, record] : runtime_.views.records)
+      if (auto* host = record.webview->offscreen_host())
+        host->BeginLayoutTimeline(*request.layoutTransaction, view);
   runtime_.layout_transaction.Commit(std::move(next_layout.value));
   runtime_.output_enabled = next_enabled;
   runtime_.UpdateOutput();
+  if (request.layoutTransaction)
+    for (auto& [view, record] : runtime_.views.records)
+      if (auto* host = record.webview->offscreen_host())
+        host->LayoutStage("geometry_applied");
   reply.Set("ok", true);
+  reply.Set("layoutRevision", static_cast<int>(runtime_.layout_transaction.revision));
   reply.Set("allocation_alignment",
             static_cast<int>(runtime_.layout_transaction.allocation_alignment));
   reply.Set("width_pixels", static_cast<int>(runtime_.layout_transaction.output_width));

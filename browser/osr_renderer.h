@@ -36,7 +36,7 @@ class OsrRenderer final {
   OsrRenderer(const OsrRenderer&) = delete;
   OsrRenderer& operator=(const OsrRenderer&) = delete;
   static bool IsGpuFaultSealed();
-  void SetViews(std::vector<View> views);
+  void SetViews(std::vector<View> views, uint32_t layout_revision);
   void PublishClipboardSequence(uint64_t sequence);
   void StopView(uint64_t webview_id);
   base::DictValue DescribeForConsumer(uint32_t pid);

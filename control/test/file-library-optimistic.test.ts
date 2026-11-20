@@ -6,6 +6,40 @@ import { RemoteKitError } from '../shared/errors';
 import type { LibrarySnapshot } from '../shared/file-library';
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+for (const event of ['page-request', 'library'] as const) {
+  test(`checkout confirmation follows a ${event} push immediately and coalesces updates during confirmation`, async (t) => {
+    const server = snapshot();
+    let finishCount = 0;
+    const pending = deferred<{ state: 'validating'; snapshot: LibrarySnapshot }>();
+    const store = new LibraryStore(
+      (async (method: string) => {
+        if (method === 'library.prepare') return { selectionId: 'selection' };
+        if (method === 'library.finish') {
+          finishCount++;
+          if (finishCount === 1) return pending.promise;
+          return { state: 'selected', snapshot: server };
+        }
+        return server;
+      }) as LibraryRequest,
+      { commitSelection: async () => ({ state: 'validating' }) } as unknown as FilePort,
+    );
+    t.after(store.dispose);
+    store.configure(true, true, 'viewer', ['chooser'], 'pending');
+    await flush();
+    const selecting = store.select('chooser', ['a']);
+    await flush();
+    if (event === 'page-request') store.configure(true, true, 'viewer', [], 'closed');
+    else store.receive({ ...server, revision: 2 });
+    assert.equal(finishCount, 1);
+    pending.resolve({ state: 'validating', snapshot: server });
+    await selecting;
+    await flush();
+    assert.equal(finishCount, 2);
+    if (event === 'page-request') assert.equal(store.getSnapshot().checkouts.chooser, undefined);
+    else assert.equal(store.getSnapshot().checkouts.chooser.state, 'selected');
+  });
+}
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: Error) => void;

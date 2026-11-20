@@ -60,7 +60,7 @@ export class OperationPipeline {
     epoch = this.context.tenants.get(tenant).viewer?.security?.epoch,
   ): Promise<OperationReceipt> {
     const runtime = this.context.tenants.get(tenant);
-    return this.context.tenants.serial(tenant, async () => {
+    const execute = async (): Promise<OperationReceipt> => {
       this.services.viewers.assertProductViewer(tenant, lease, epoch);
       if (
         !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -191,16 +191,18 @@ export class OperationPipeline {
         this.services.viewers.push(tenant);
       }
       return receipt;
-    });
+    };
+    return isVisibilityAction(operation.action) ? execute() : this.context.tenants.serial(tenant, execute);
   }
   async productAction(tenant: string, body: ProductAction, lease?: string): Promise<ProductActionResult> {
     const epoch = this.context.tenants.get(tenant).viewer?.security?.epoch;
-    return this.context.tenants.serial(tenant, async () => {
+    const execute = async () => {
       if (lease) this.services.viewers.assertProductViewer(tenant, lease, epoch);
       return this.applyProductAction(tenant, body).catch((error) => {
         throw toRemoteKitError(error);
       });
-    });
+    };
+    return isVisibilityAction(body) ? execute() : this.context.tenants.serial(tenant, execute);
   }
 
   async applyProductAction(
@@ -248,6 +250,7 @@ export class OperationPipeline {
       }
     });
     this.services.viewers.push(tenant);
+    if (isVisibilityAction(body)) this.services.reconciler.publishDesired(tenant);
     for (const effect of plan.effects) {
       // Replies release pending Browser requests even when layout convergence
       // reports a conflict while the page is closing. Their captured native
@@ -310,6 +313,10 @@ export class OperationPipeline {
     this.services.viewers.push(tenant);
     return { state: this.services.viewers.productState(tenant), ...(application ? { application } : {}) };
   }
+}
+
+function isVisibilityAction(action: ProductAction) {
+  return action?.type === 'window.focus' || action?.type === 'space.activate';
 }
 
 export interface ExecutionContext {

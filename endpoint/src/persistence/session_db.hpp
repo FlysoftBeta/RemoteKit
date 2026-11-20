@@ -1,5 +1,6 @@
 #pragma once
 #include "persistence/sqlite.hpp"
+#include "persistence/derivative_records.hpp"
 #include "persistence/strict_json.hpp"
 #include "util/common.hpp"
 #include <functional>
@@ -28,6 +29,7 @@ class EventStore {
 class ViewStore {
  public:
   explicit ViewStore(SessionDb& db) : db_(db) {}
+  static Result<Json> Topology(const Json& views);
   Result<Json> Load();
   Result<void> Save(const Json& views);
   Result<void> SaveDesired(const Json& views, uint64_t epoch, const std::string& revision);
@@ -67,7 +69,7 @@ class DownloadStore {
  private:
   SessionDb& db_;
 };
-enum class LibraryTable { kAssets, kDrafts, kSelections, kDerivatives };
+enum class LibraryTable { kAssets, kDrafts, kSelections };
 class LibraryStore {
  public:
   explicit LibraryStore(SessionDb& db) : db_(db) {}
@@ -79,8 +81,13 @@ class LibraryStore {
   Result<void> Seal(const std::string& asset,
                     const Json& metadata,
                     const std::string& upload,
-                    const Json& draft,
-                    const std::string& derivative = {});
+                    const Json& draft);
+  Result<std::optional<DerivativeRecord>> FindDerivative(const DerivativeKey&);
+  Result<void> EraseDerivative(const DerivativeKey&,
+                               const std::function<Result<void>()>& check = {});
+  Result<void> SaveDerivative(const DerivativeKey&,
+                              const DerivativeRecord&,
+                              const std::function<Result<void>()>& check = {});
 
  private:
   SessionDb& db_;
@@ -99,6 +106,7 @@ class SessionDb {
   LibraryStore Library() { return LibraryStore(*this); }
 
  private:
+  friend class NativeErrorStateProbe;
   friend class ViewStore;
   friend class EventStore;
   friend class RecoveryStore;

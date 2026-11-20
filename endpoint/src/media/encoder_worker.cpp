@@ -346,7 +346,7 @@ void EncoderWorker::Complete(AccessUnit& unit) {
     if (sdk_.encoder_drop)
       sdk_.encoder_drop(encoder_, job.frame.rtp_timestamp);
   }
-  remotekit::TailRefreshLease::Finish(job.frame, status == 0 && unit.keyframe);
+  remotekit::TailRefreshLease::Finish(job.frame, status == 0, unit.keyframe);
   RK_SERVER_TRACE(
       trace_, "encoded_return", TraceIds::Frame(job.frame, true), rk_record.cookie = job.cookie;
       rk_record.encoder = encoder_; rk_record.peer = trace_peer_; rk_record.status = status;

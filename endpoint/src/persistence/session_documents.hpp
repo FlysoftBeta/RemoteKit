@@ -31,22 +31,10 @@ inline void WireError(const Json& value) {
 }
 inline void View(const Json& value) {
   using namespace persisted;
-  Keys(value,
-       {"viewId", "presence", "url", "width", "height", "visible", "device", "occludedBottom",
-        "occlusionRevision"},
-       {"signIn", "adopt"});
+  Keys(value, {"viewId", "presence", "url"}, {"signIn", "adopt"});
   Counter(value.at("viewId"), true);
   Enum(value.at("presence"), {"ensure", "ifPresent"});
   Text(value.at("url"), 0, 32768);
-  Unsigned(value.at("width"), 1, 8192);
-  const auto height = Unsigned(value.at("height"), 1, 8192);
-  Boolean(value.at("visible"));
-  Unsigned(value.at("occludedBottom"), 0, height);
-  Counter(value.at("occlusionRevision"));
-  const auto& device = value.at("device");
-  Keys(device, {"mode", "deviceScaleFactor"});
-  Enum(device.at("mode"), {"desktop"});
-  Number(device.at("deviceScaleFactor"), 0.01, 16);
   if (value.contains("signIn"))
     Enum(value.at("signIn"), {"changyan", "xinjiaoyu"});
   if (value.contains("adopt")) {
@@ -55,6 +43,13 @@ inline void View(const Json& value) {
     Text(value.at("adopt").at("browserIncarnation"), 1, 128);
     Text(value.at("adopt").at("provisionalId"), 1, 128);
   }
+}
+inline Json ViewTopology(Json value) {
+  for (const auto* key :
+       {"width", "height", "visible", "device", "occludedBottom", "occlusionRevision"})
+    value.erase(key);
+  View(value);
+  return value;
 }
 inline void EventBody(const std::string& type, const Json& body) {
   using namespace persisted;

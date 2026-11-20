@@ -53,6 +53,9 @@ class OffscreenHost final : public aura::WindowTreeHost,
   const gfx::Size& plane_size() const { return plane_size_; }
   gfx::Size plane_target_size() const;
   bool PageFrameReady() const;
+  void BeginLayoutTimeline(const std::string& key, uint64_t view);
+  void LayoutStage(const char* stage);
+  int64_t LayoutElapsedUs() const;
   void SetScreenConfiguration(const gfx::Size& viewport, float scale);
   static void UpdateIdentity(content::WebContents* contents, bool tablet);
   static void SetKeyboardLayoutMap(base::flat_map<std::string, std::string> layout);
@@ -101,6 +104,10 @@ class OffscreenHost final : public aura::WindowTreeHost,
   gfx::Size viewport_;
   gfx::Size plane_size_;
   uint64_t occlusion_revision_ = 0;
+  std::string layout_transaction_;
+  uint64_t layout_view_id_ = 0;
+  base::TimeTicks layout_started_;
+  bool layout_compositor_logged_ = false;
   raw_ptr<content::WebContents> contents_ = nullptr;
   float output_scale_ = 1.f;
   float screen_scale_ = 1.f;

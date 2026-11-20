@@ -20,12 +20,14 @@ enum remotekit_rtc_event_type {
   REMOTEKIT_RTC_REFRESH_REQUEST = 9,
   REMOTEKIT_RTC_STATS = 10,
   REMOTEKIT_RTC_AUTH_DATA = 11,
-  REMOTEKIT_RTC_AUTH_DATA_STATE = 12
+  REMOTEKIT_RTC_AUTH_DATA_STATE = 12,
+  REMOTEKIT_RTC_DATA_WRITABLE = 13
 };
 /* Event bytes are borrowed until return. SDP is UTF-8; ICE text is the
  * candidate with mid in auxiliary and mline in value. DATA and AUTH_DATA are
  * binary when value=1. STATE is PeerConnectionState (0=new..5=closed).
  * DATA_STATE and AUTH_DATA_STATE are DataChannelState (0=connecting..3=closed).
+ * DATA_WRITABLE has no payload: retry queued control data after buffer drainage.
  * ICE_COMPLETE carries the complete local SDP with gathered candidates;
  * value=1 for offer and 0 for answer. Use this event for non-trickle signaling.
  * REFRESH_REQUEST has no payload: enqueue one latest-cache refresh/IDR. It is

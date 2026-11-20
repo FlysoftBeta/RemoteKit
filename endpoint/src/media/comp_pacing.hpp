@@ -16,6 +16,9 @@ class CompBeginSchedule {
   }
   bool Due(int64_t now) const { return now >= deadline_; }
   int64_t deadline() const { return deadline_; }
+  void Reevaluate(int64_t now, int64_t interval) {
+    deadline_ = std::min(deadline_, now + interval);
+  }
 
   void Attempted(int64_t now, int64_t interval, bool sent) {
     if (wake_pending_ && !sent)

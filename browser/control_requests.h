@@ -42,6 +42,8 @@ struct OutputConfigureRequest : RequestEnvelope {
   std::optional<std::vector<ViewConfiguration>> viewConfigs;
   std::optional<double> device_scale;
   std::optional<int> allocation_alignment;
+  std::optional<int> outputWidthPixels, outputHeightPixels;
+  std::optional<std::string> layoutTransaction;
   std::optional<bool> enabled;
   std::optional<int> width;
   std::optional<int> height;
@@ -95,6 +97,7 @@ struct RecreateViewRequest : RequestEnvelope {
   std::optional<NavigationOperations::Identity> operation;
 };
 struct ConfigureViewRequest : RequestEnvelope {
+  std::optional<std::string> layoutTransaction;
   std::optional<int> occluded_bottom;
   std::optional<uint64_t> occlusion_revision;
   std::optional<uint64_t> output_generation;

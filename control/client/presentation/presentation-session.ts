@@ -121,10 +121,12 @@ export class PresentationSession {
   }
 
   private readonly recovery = new RetryUnit({ name: 'presentation' });
-  private readonly metadataRetry = new RetryUnit({ name: 'presentation_metadata' });
+  private readonly pixelRetry = new RetryUnit({ name: 'presentation_pixels' });
+  private readonly requestedMetadata = new Set<string>();
+  private metadataFailure?: RemoteKitError;
   private currentFailure?: RemoteKitError;
   get failure() {
-    return this.presentationError ?? this.metadataRetry.error;
+    return this.presentationError ?? this.metadataFailure ?? this.pixelRetry.error;
   }
   get presentationError() {
     if (!this.presentationErrorCode) {
@@ -169,8 +171,6 @@ export class PresentationSession {
 
   private presentationVisibility?: () => void;
 
-  private videoMetadataRefreshTimer?: ReturnType<typeof setTimeout>;
-
   private readonly videoSupported = VideoPlane.supported();
 
   private renderers = new Set<PlaneRenderer>();
@@ -180,6 +180,37 @@ export class PresentationSession {
   mediaRefreshRequests = 0;
 
   private mediaRefreshAt = -Infinity;
+
+  private requestFrameMetadata(rtpTimestamp: number, layoutEpoch: string) {
+    const channel = this.ports.endpoint.channel;
+    const authEpoch = this.ports.authorization.peerAuthEpoch;
+    if (
+      !this.ports.rtc.peer ||
+      channel?.readyState !== 'open' ||
+      this.ports.authorization.productLocked ||
+      !authEpoch ||
+      this.presentationBackend !== 'video'
+    )
+      return;
+    const key = JSON.stringify([this.ports.rtc.attempt, authEpoch, layoutEpoch, rtpTimestamp]);
+    if (this.requestedMetadata.has(key)) return;
+    try {
+      this.ports.endpoint.sendChannel(channel, {
+        type: 'media.refresh',
+        reason: 'metadata',
+        rtpTimestamp,
+        layoutEpoch,
+        authEpoch,
+      });
+      this.mediaRefreshRequests++;
+      this.metadataFailure = undefined;
+      this.requestedMetadata.add(key);
+      if (this.requestedMetadata.size > 256)
+        this.requestedMetadata.delete(this.requestedMetadata.values().next().value!);
+    } catch (error) {
+      this.metadataFailure = toRemoteKitError(error);
+    }
+  }
 
   private requestPresentationRefresh() {
     const channel = this.ports.endpoint.channel;
@@ -196,7 +227,7 @@ export class PresentationSession {
     )
       return;
     if (
-      !this.metadataRetry.ready(
+      !this.pixelRetry.ready(
         JSON.stringify([this.ports.rtc.attempt, this.ports.authorization.peerAuthEpoch, this.layout?.epoch]),
       )
     )
@@ -205,9 +236,9 @@ export class PresentationSession {
     try {
       this.ports.endpoint.sendChannel(channel, { type: 'media.refresh' });
       this.mediaRefreshRequests++;
-      this.metadataRetry.succeed();
+      this.pixelRetry.succeed();
     } catch (error) {
-      this.metadataRetry.fail(error);
+      this.pixelRetry.fail(error);
       this.mediaRefreshAt = -Infinity;
     }
   }
@@ -371,7 +402,7 @@ export class PresentationSession {
         return;
       this.presentationBarrierAcknowledged = true;
       this.ports.endpoint.sendChannel(channel, { type: 'presentation.ready', ...key });
-      this.scheduleVideoMetadataRefresh();
+      this.refreshWaitingVideoPlanes();
     });
   }
 
@@ -399,7 +430,7 @@ export class PresentationSession {
           const pending = this.pendingPresentationAction;
           if (pending) this.afterPresentationHidden(pending.channel, pending.action);
           this.requestPresentationRefresh();
-          this.scheduleVideoMetadataRefresh();
+          this.refreshWaitingVideoPlanes();
         }
       };
       document.addEventListener('visibilitychange', this.presentationVisibility);
@@ -441,8 +472,6 @@ export class PresentationSession {
     this.presentationBarrier = undefined;
     this.presentationBarrierAcknowledged = false;
     for (const renderer of this.videoPlanes.keys()) this.detachVideoPlane(renderer);
-    clearTimeout(this.videoMetadataRefreshTimer);
-    this.videoMetadataRefreshTimer = undefined;
     this.viewPresentations.clear();
     this.notify();
     const error = this.presentationError;
@@ -492,8 +521,8 @@ export class PresentationSession {
   }
 
   private hideVideoPlanes() {
-    clearTimeout(this.videoMetadataRefreshTimer);
-    this.videoMetadataRefreshTimer = undefined;
+    this.metadataFailure = undefined;
+    this.requestedMetadata.clear();
     for (const renderer of this.videoPlanes.keys()) this.hideVideoPlane(renderer);
   }
 
@@ -529,7 +558,7 @@ export class PresentationSession {
         this.hideVideoPlane(renderer);
         this.positionVideoPlane(renderer);
         this.requestPresentationRefresh();
-        this.scheduleVideoMetadataRefresh();
+        this.refreshWaitingVideoPlanes();
       },
       frame: (metadata) => {
         if (current() && this.presentationBackend === 'video' && !this.ports.authorization.productLocked) {
@@ -546,7 +575,7 @@ export class PresentationSession {
     this.videoPlanes.set(renderer, plane);
     this.positionVideoPlane(renderer);
     this.requestPresentationRefresh();
-    this.scheduleVideoMetadataRefresh();
+    this.refreshWaitingVideoPlanes();
   }
 
   private positionVideoPlane(renderer: PlaneRenderer) {
@@ -554,39 +583,30 @@ export class PresentationSession {
     return !!(plane && this.layout && this.rendererCurrent(renderer) && plane.position(this.layout));
   }
 
-  private scheduleVideoMetadataRefresh() {
-    // Narrow layouts retain mounted viewports for hidden Windows. Their old
-    // receivers stay hidden, but cannot consume retries or fail current planes.
-    const waitingPlanes = () =>
-      [...this.videoPlanes].filter(([renderer, plane]) => {
-        const bounds = renderer.canvas.getBoundingClientRect();
-        const eligible =
-          document.visibilityState === 'visible' &&
-          this.presentationBarrierAcknowledged &&
-          !!this.presentationBarrier &&
-          barrierMatchesLayout(this.presentationBarrier, this.layout) &&
-          this.rendererCurrent(renderer) &&
-          !renderer.view.stale &&
-          bounds.width > 0 &&
-          bounds.height > 0;
-        return eligible && !plane.ready;
-      });
-    if (this.presentationBackend !== 'video' || this.videoMetadataRefreshTimer || !waitingPlanes().length)
-      return;
-    const attempt = this.ports.rtc.attempt;
-    this.videoMetadataRefreshTimer = setTimeout(
-      () => {
-        this.videoMetadataRefreshTimer = undefined;
-        if (attempt !== this.ports.rtc.attempt || this.presentationBackend !== 'video') return;
-        const waiting = waitingPlanes();
-        if (!waiting.length) return;
-        // A static source may lose its first frame or metadata. Keep requesting
-        // at the shared refresh rate until the current viewport is authorized.
-        this.requestPresentationRefresh();
-        this.scheduleVideoMetadataRefresh();
-      },
-      Math.max(100, 1010 - (performance.now() - this.mediaRefreshAt)),
-    );
+  private refreshWaitingVideoPlanes() {
+    if (this.presentationBackend !== 'video') return;
+    let pixelsMissing = false;
+    let metadataMissing = false;
+    for (const [renderer, plane] of this.videoPlanes) {
+      const bounds = renderer.canvas.getBoundingClientRect();
+      if (
+        document.visibilityState !== 'visible' ||
+        !this.presentationBarrierAcknowledged ||
+        !this.presentationBarrier ||
+        !barrierMatchesLayout(this.presentationBarrier, this.layout) ||
+        !this.rendererCurrent(renderer) ||
+        renderer.view.stale ||
+        bounds.width <= 0 ||
+        bounds.height <= 0
+      )
+        continue;
+      const observation = plane.pendingObservation;
+      if (observation && this.videoObservationCurrent(renderer, plane, observation)) {
+        metadataMissing = true;
+        this.requestFrameMetadata(observation.rtp, observation.barrier.layoutEpoch);
+      } else if (!plane.ready) pixelsMissing = true;
+    }
+    if (pixelsMissing && !metadataMissing) this.requestPresentationRefresh();
   }
 
   private videoObservationCurrent(renderer: PlaneRenderer, plane: VideoPlane, observation: VideoObservation) {
@@ -622,6 +642,7 @@ export class PresentationSession {
         continue;
       }
       plane.pendingObservation = undefined;
+      this.metadataFailure = undefined;
       // Endpoint's ACK barrier guarantees stable geometry for every published
       // frame in this interval. This recovers layout authorization, not the
       // autonomous element's current RTP or a new compositor observation.
@@ -692,7 +713,7 @@ export class PresentationSession {
           wall: Date.now(),
         };
       }
-      this.scheduleVideoMetadataRefresh();
+      this.refreshWaitingVideoPlanes();
       return;
     }
     // Exact current-RTP reports require THIS element's real callback.
@@ -908,7 +929,7 @@ export class PresentationSession {
       }
       this.frameGate.record(message.rtpTimestamp, message.layoutEpoch);
       this.matchPendingVideoObservations();
-      if (message.layoutEpoch === this.layout?.epoch) this.scheduleVideoMetadataRefresh();
+      if (message.layoutEpoch === this.layout?.epoch) this.refreshWaitingVideoPlanes();
       this.presentation.cost('frameMessageTotal', start, performance.now() - start);
     }
   }
@@ -922,9 +943,9 @@ export class PresentationSession {
   reset() {
     this.currentFailure = undefined;
     this.recovery.succeed();
-    this.metadataRetry.succeed();
-    clearTimeout(this.videoMetadataRefreshTimer);
-    this.videoMetadataRefreshTimer = undefined;
+    this.pixelRetry.succeed();
+    this.metadataFailure = undefined;
+    this.requestedMetadata.clear();
     clearTimeout(this.presentationNegotiationTimer);
     this.presentationNegotiationTimer = undefined;
     this.cancelPresentationAck();
@@ -1040,7 +1061,9 @@ export class PresentationSession {
     }
   };
   onChannel = (event: import('../rtc/endpoint-channel').ChannelEvent) => {
+    if (event.type === 'bound') this.requestedMetadata.clear();
     if (event.type === 'open') this.negotiatePresentation(this.ports.endpoint.channel!);
+    if (event.type === 'open' || event.type === 'writable') this.refreshWaitingVideoPlanes();
   };
   onAuthorization = () => {
     if (!this.ports.authorization.productLocked && this.ports.endpoint.channel?.readyState === 'open')

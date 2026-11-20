@@ -45,7 +45,7 @@ void TestPresentationRefresh() {
   frame.release(frame.release_context, frame.frame_id);
   refresh.Update(false, 1);
   CHECK(leases == 0 && lost->state() == Attempt::State::failed && refresh.Pending());
-  CHECK(!refresh.CanForce(999) && !refresh.TryStart(999, 500));
+  CHECK(refresh.CanForce(1));
   CHECK(refresh.CanForce(1000));
   refresh.Forced(1000);
   auto gated = refresh.TryStart(1000, 500);
@@ -68,10 +68,11 @@ void TestPresentationRefresh() {
   refresh.Update(false, 4499);
   CHECK(!refresh.CanForce(4499) && late->state() == Attempt::State::source_wait);
   refresh.Update(false, 4500);
-  CHECK(refresh.CanForce(4500) && !remotekit::TailRefreshLease::BeginEncoding(frame));
+  CHECK(!refresh.CanForce(4500) && !remotekit::TailRefreshLease::BeginEncoding(frame));
+  CHECK(refresh.CanForce(5500));
   frame.release(frame.release_context, frame.frame_id);
 
-  auto old = refresh.TryStart(4500, 500);
+  auto old = refresh.TryStart(5500, 500);
   CHECK(old && old->BeginEncoding());
   const auto next = gate.Video(1, true);
   CHECK(next && *next != *key && !gate.RefreshKey(1, 7));
@@ -96,7 +97,7 @@ void TestPresentationRefresh() {
   CHECK(completed && completed->BeginEncoding());
   completed->Finish(true);
   refresh.Update(true, 10001);
-  CHECK(refresh.Pending() && !refresh.CanForce(10999) && refresh.CanForce(11000));
+  CHECK(refresh.Pending() && refresh.CanForce(10001));
   auto stale_auth = refresh.TryStart(11000, 500);
   CHECK(stale_auth);
   refresh.SetScope(Refresh::Scope{1, 5, *next});
@@ -110,6 +111,13 @@ void TestPresentationRefresh() {
   CHECK(gate.Ready(1, *changed));
   CHECK(gate.RefreshKey(1, 8) == changed);
   CHECK(leases == 0);
+  auto viewport = std::make_shared<Attempt>();
+  auto viewport_frame = remotekit::TailRefreshLease::Wrap(source, viewport, false);
+  CHECK(!remotekit::TailRefreshLease::RequiresKeyframe(viewport_frame));
+  CHECK(remotekit::TailRefreshLease::BeginEncoding(viewport_frame));
+  remotekit::TailRefreshLease::Finish(viewport_frame, true, false);
+  viewport_frame.release(viewport_frame.release_context, viewport_frame.frame_id);
+  CHECK(viewport->state() == Attempt::State::succeeded && leases == 0);
 }
 
 int main() {

@@ -38,6 +38,8 @@ class CompHost {
   // Revalidate revocation and shutdown after GPU observation.
   virtual bool Current(uint64_t scope) = 0;
   virtual bool CanBegin() = 0;
+  virtual uint64_t PendingLayout() { return 0; }
+  virtual bool MatchesLayout(const SharedAtlasFrame&) { return true; }
 
  protected:
   ~CompHost() = default;
@@ -94,7 +96,10 @@ class CompEngine {
   IdleKeepalive keepalive;
   PresentationRefresh presentation_refresh;
   std::shared_ptr<TailIdrAttempt> tail_attempt;
-  uint64_t observed_wakes = 0;
+  uint64_t observed_wakes = 0, layout_serial = 0;
+  double layout_source_deadline_ms = 0, next_layout_attempt_ms = 0;
+  std::optional<remotekit_sdk_render_identity> layout_begin, refresh_begin;
+  std::shared_ptr<TailIdrAttempt> layout_attempt;
   uint32_t official_max_fps = 240, codec_max_fps = 240;
   bool has_current_view = false, first_source = true, first_submit = true;
   double next_tail_attempt_ms = 0;

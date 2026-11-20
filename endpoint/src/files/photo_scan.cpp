@@ -122,6 +122,11 @@ double LineMembership(const cv::Mat& mask, const std::vector<cv::Point2d>& point
 struct TextGate {
   bool text = false;
   bool vertical = false;
+  double dominance = 0;
+  std::array<double, 2> scores{};
+  std::array<double, 2> membership{};
+  std::vector<cv::Point2d> points;
+  cv::Mat mask;
 };
 
 TextGate GateText(const cv::Mat& image) {
@@ -166,7 +171,12 @@ TextGate GateText(const cv::Mat& image) {
                            std::max(1.0, std::min(horizontal_score, vertical_score));
   return {(axis ? vertical.lines : horizontal.lines) >= 4 && dominance >= 1.18 &&
               (axis ? vertical_members : horizontal_members) >= 0.35,
-          axis};
+          axis,
+          dominance,
+          {horizontal_score, vertical_score},
+          {horizontal_members, vertical_members},
+          std::move(points),
+          std::move(mask)};
 }
 
 struct OrientationModel {
@@ -262,8 +272,41 @@ cv::Mat AnalysisLab(const cv::Mat& image) {
   return result;
 }
 
-Result<std::optional<unsigned>> AutomaticQuarterTurns(const cv::Mat& image,
-                                                      const PhotoCancelled& cancelled) {
+OrientationDecision FuseOrientation(bool vertical, const std::vector<OrientationCrop>& crops) {
+  OrientationDecision result;
+  result.vertical = vertical;
+  result.crops = crops;
+  if (crops.empty())
+    return result;
+  std::array<double, 4> logs{};
+  for (const auto& crop : crops)
+    for (int i = 0; i < 4; ++i)
+      logs[i] += std::log(std::max(1e-7, crop.probabilities[i])) / crops.size();
+  const double peak = *std::max_element(logs.begin(), logs.end());
+  double total = 0;
+  for (int i = 0; i < 4; ++i) {
+    result.probabilities[i] = std::exp(logs[i] - peak);
+    total += result.probabilities[i];
+  }
+  for (auto& probability : result.probabilities)
+    probability /= total;
+  const unsigned first = vertical ? 1 : 0;
+  const unsigned second = first + 2;
+  const unsigned best =
+      result.probabilities[first] >= result.probabilities[second] ? first : second;
+  double runner_up = 0;
+  for (unsigned i = 0; i < 4; ++i)
+    if (i != best)
+      runner_up = std::max(runner_up, result.probabilities[i]);
+  const double gap = result.probabilities[best] - runner_up;
+  result.turns = (4u - best) % 4u;
+  result.state = crops.size() >= 3 && result.probabilities[best] >= .78 && gap >= .60 ? "confident"
+                                                                                      : "uncertain";
+  return result;
+}
+
+Result<OrientationDecision> AutomaticQuarterTurns(const cv::Mat& image,
+                                                  const PhotoCancelled& cancelled) {
   static OrientationModel model;
   {
     std::lock_guard lock(model.mutex);
@@ -272,26 +315,86 @@ Result<std::optional<unsigned>> AutomaticQuarterTurns(const cv::Mat& image,
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   const auto analysis = LimitSide(image, 1024);
   const auto gate = GateText(analysis);
+  OrientationDecision result;
+  result.vertical = gate.vertical;
+  result.dominance = gate.dominance;
+  result.scores = gate.scores;
+  result.membership = gate.membership;
   if (!gate.text)
-    return std::optional<unsigned>{};
-  const auto input = OrientationInput(analysis);
-  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+    return result;
+
+  // Line clusters nominate blocks; component density ranks them. Suppressing
+  // overlapping blocks keeps handwriting in one area from dominating the vote.
+  cv::Mat joined, labels, stats, centers;
+  cv::morphologyEx(gate.mask, joined, cv::MORPH_CLOSE,
+                   cv::Mat::ones(gate.vertical ? 35 : 3, gate.vertical ? 3 : 35, CV_8U));
+  const int count = cv::connectedComponentsWithStats(joined, labels, stats, centers);
+  const int side = cvRound(.5 * std::min(analysis.cols, analysis.rows));
+  struct Candidate {
+    cv::Rect bounds;
+    int members;
+  };
+  std::vector<Candidate> candidates;
+  for (int i = 1; i < count; ++i) {
+    const auto* box = stats.ptr<int>(i);
+    if (box[cv::CC_STAT_AREA] < 80)
+      continue;
+    const auto* center = centers.ptr<double>(i);
+    const cv::Rect bounds{std::clamp(cvRound(center[0]) - side / 2, 0, analysis.cols - side),
+                          std::clamp(cvRound(center[1]) - side / 2, 0, analysis.rows - side), side,
+                          side};
+    int members = 0;
+    for (auto point : gate.points)
+      members += bounds.contains(cv::Point(cvRound(point.x), cvRound(point.y)));
+    if (members >= 12)
+      candidates.push_back({bounds, members});
+  }
+  std::vector<OrientationCrop> crops;
   std::lock_guard lock(model.mutex);
   try {
-    model.net.setInput(input);
-    const auto output = model.net.forward();
-    if (output.total() != 4 || output.type() != CV_32F)
-      return Error{ErrorCode::kUnavailable, "photo-orientation-model-unavailable"};
-    const auto* probabilities = output.ptr<float>();
-    const auto best = std::max_element(probabilities, probabilities + 4);
-    const unsigned orientation = static_cast<unsigned>(best - probabilities);
-    RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-    if (!std::isfinite(*best) || *best < 0.78f || (orientation % 2 != 0) != gate.vertical)
-      return std::optional<unsigned>{};
-    return std::optional<unsigned>{(4u - orientation) % 4u};
+    while (crops.size() < 3) {
+      const Candidate* selected = nullptr;
+      double best_score = 0;
+      for (const auto& candidate : candidates) {
+        double overlap = 0;
+        for (const auto& crop : crops)
+          overlap = std::max(
+              overlap, double((crop.bounds & candidate.bounds).area()) / candidate.bounds.area());
+        const double score = candidate.members * (1 - overlap) * (1 - overlap);
+        if (overlap <= .65 && score > best_score) {
+          selected = &candidate;
+          best_score = score;
+        }
+      }
+      if (!selected)
+        break;
+      const auto& candidate = *selected;
+      RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+      model.net.setInput(OrientationInput(analysis(candidate.bounds)));
+      const auto output = model.net.forward();
+      if (output.total() != 4 || output.type() != CV_32F)
+        return Error{ErrorCode::kUnavailable, "photo-orientation-model-unavailable"};
+      OrientationCrop crop{candidate.bounds};
+      for (int i = 0; i < 4; ++i) {
+        crop.probabilities[i] = output.ptr<float>()[i];
+        if (!std::isfinite(crop.probabilities[i]) || crop.probabilities[i] < 0)
+          return Error{ErrorCode::kUnavailable, "photo-orientation-model-unavailable"};
+      }
+      crops.push_back(crop);
+    }
   } catch (const cv::Exception&) {
     return Error{ErrorCode::kUnavailable, "photo-orientation-model-unavailable"};
   }
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  auto fused = FuseOrientation(gate.vertical, crops);
+  if (crops.empty()) {
+    fused.turns = gate.vertical ? 1 : 0;
+    fused.state = "uncertain";
+  }
+  fused.dominance = gate.dominance;
+  fused.scores = gate.scores;
+  fused.membership = gate.membership;
+  return fused;
 }
 
 Result<Paper> AnalyzePaper(const cv::Mat& image, const PhotoCancelled& cancelled) {
@@ -299,7 +402,7 @@ Result<Paper> AnalyzePaper(const cv::Mat& image, const PhotoCancelled& cancelled
   const auto analysis = LimitSide(image, 768);
   cv::Mat background, lab;
   cv::morphologyEx(analysis, background, cv::MORPH_CLOSE,
-                   cv::getStructuringElement(cv::MORPH_ELLIPSE, {31, 31}));
+                   cv::getStructuringElement(cv::MORPH_RECT, {31, 31}));
   cv::GaussianBlur(background, background, {}, 5);
   lab = AnalysisLab(background);
   std::vector<cv::Mat> channels;
@@ -354,15 +457,7 @@ Result<Paper> AnalyzePaper(const cv::Mat& image, const PhotoCancelled& cancelled
   cv::morphologyEx(mask, mask, cv::MORPH_CLOSE,
                    cv::getStructuringElement(cv::MORPH_RECT, {11, 11}));
   cv::morphologyEx(mask, mask, cv::MORPH_OPEN, cv::getStructuringElement(cv::MORPH_RECT, {5, 5}));
-  cv::Mat labels, stats, centers;
-  const int count = cv::connectedComponentsWithStats(mask, labels, stats, centers, 8);
-  int largest = 0;
-  for (int index = 1; index < count; ++index)
-    if (!largest ||
-        stats.ptr<int>(index)[cv::CC_STAT_AREA] > stats.ptr<int>(largest)[cv::CC_STAT_AREA])
-      largest = index;
-  if (largest)
-    mask = labels == largest;
+  cv::Mat labels;
   // Smooth neutral shadows remain part of the sheet. A sharp luminance
   // transition blocks growth into a table or binding even when it is neutral.
   cv::Mat light, mean, squared, variance, gradient_x, gradient_y, gradient;
@@ -409,10 +504,46 @@ Result<Paper> AnalyzePaper(const cv::Mat& image, const PhotoCancelled& cancelled
   }
   mask.convertTo(paper.mask, CV_32F, 1.0 / 255);
   cv::GaussianBlur(paper.mask, paper.mask, {}, 2);
-  background.convertTo(background, CV_32FC3);
+  // Fit illumination only to paper samples. Dilating the ink exclusion also
+  // keeps antialiased stroke edges and colored ink out of the light field.
+  cv::Mat gray, local, excluded;
+  cv::cvtColor(analysis, gray, cv::COLOR_BGR2GRAY);
+  cv::GaussianBlur(gray, local, {}, 3);
+  excluded = local - gray > 3;
+  const auto source_lab = AnalysisLab(analysis);
+  for (int row = 0; row < lab.rows; ++row) {
+    const auto* colors = source_lab.ptr<cv::Vec3b>(row);
+    auto* ink = excluded.ptr<std::uint8_t>(row);
+    for (int col = 0; col < lab.cols; ++col)
+      if (std::hypot(colors[col][1] - dominant[1], colors[col][2] - dominant[2]) > 12)
+        ink[col] = 255;
+  }
+  cv::dilate(excluded, excluded, cv::getStructuringElement(cv::MORPH_RECT, {3, 3}));
+  cv::Mat samples, mass, weighted;
+  cv::bitwise_and(mask, ~excluded, samples);
+  samples.convertTo(mass, CV_32F, 1.0 / 255);
+  analysis.convertTo(weighted, CV_32FC3);
+  std::vector<cv::Mat> planes;
+  cv::split(weighted, planes);
+  cv::boxFilter(mass, mass, -1, {65, 65});
+  cv::GaussianBlur(mass, mass, {}, 8);
+  for (int channel = 0; channel < 3; ++channel) {
+    cv::Mat weights;
+    samples.convertTo(weights, CV_32F, 1.0 / 255);
+    cv::multiply(planes[channel], weights, planes[channel]);
+    cv::boxFilter(planes[channel], planes[channel], -1, {65, 65});
+    cv::GaussianBlur(planes[channel], planes[channel], {}, 8);
+    for (int row = 0; row < mass.rows; ++row) {
+      auto* values = planes[channel].ptr<float>(row);
+      const auto* counts = mass.ptr<float>(row);
+      for (int col = 0; col < mass.cols; ++col)
+        values[col] = counts[col] > .01f ? values[col] / counts[col] : paper.color[channel];
+    }
+  }
+  cv::merge(planes, background);
   cv::max(background, 64, background);
-  cv::divide(248.0, background, paper.gain);
-  cv::min(paper.gain, 2.2, paper.gain);
+  cv::divide(255.0, background, paper.gain);
+  cv::min(paper.gain, 3.2, paper.gain);
   cv::Mat normalized, luminance, low;
   analysis.convertTo(normalized, CV_32FC3);
   cv::multiply(normalized, paper.gain, normalized);
@@ -434,62 +565,158 @@ Result<Paper> AnalyzePaper(const cv::Mat& image, const PhotoCancelled& cancelled
   return paper;
 }
 
-Result<void> EnhanceScan(cv::Mat& image, const Paper& paper, const PhotoCancelled& cancelled) {
-  cv::Mat gain, mask;
-  cv::resize(paper.gain, gain, image.size(), 0, 0, cv::INTER_LINEAR);
-  cv::resize(paper.mask, mask, image.size(), 0, 0, cv::INTER_LINEAR);
-  std::array<float, 256> tone{};
-  for (int value = 0; value < 256; ++value) {
-    float target =
-        255 *
-        std::pow(std::max(0.0f, (value - paper.black_point) / (255 - paper.black_point)), 1.12f);
-    const float u = std::clamp((target - 237) / 16, 0.0f, 1.0f);
-    tone[value] = target + (255 - target) * u * u * (3 - 2 * u) * 0.88f;
-  }
-  cv::Mat toned(image.size(), CV_32FC3);
-  for (int row = 0; row < image.rows; ++row) {
-    if (row % 32 == 0)
-      RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-    const auto* source = image.ptr<cv::Vec3b>(row);
-    const auto* gains = gain.ptr<cv::Vec3f>(row);
-    const auto* weights = mask.ptr<float>(row);
-    auto* output = toned.ptr<cv::Vec3f>(row);
-    for (int col = 0; col < image.cols; ++col) {
-      const float weight = weights[col];
-      cv::Vec3f pixel;
-      for (int channel = 0; channel < 3; ++channel)
-        pixel[channel] =
-            std::min(255.0f, source[col][channel] * (1 + (gains[col][channel] - 1) * weight));
-      const float luminance = pixel[0] * 0.114f + pixel[1] * 0.587f + pixel[2] * 0.299f;
-      const float multiplier =
-          tone[std::clamp(static_cast<int>(luminance), 0, 255)] / std::max(luminance, 1.0f);
-      for (int channel = 0; channel < 3; ++channel)
-        output[col][channel] = std::clamp(
-            pixel[channel] + (pixel[channel] * multiplier - pixel[channel]) * weight, 0.0f, 255.0f);
+namespace {
+cv::Mat PaperNoise(const cv::Mat& gray, const cv::Mat& local, const cv::Mat& mask) {
+  cv::Mat median_filtered;
+  cv::medianBlur(gray, median_filtered, 3);
+  // MAD is measured before normalization, so weak strokes are compared with
+  // sensor noise rather than with the varying paper brightness.
+  constexpr int tile = 64;
+  cv::Mat noise((gray.rows + tile - 1) / tile, (gray.cols + tile - 1) / tile, CV_32F);
+  for (int y = 0; y < noise.rows; ++y) {
+    for (int x = 0; x < noise.cols; ++x) {
+      std::array<unsigned, 511> residuals{};
+      std::array<unsigned, 256> fine_residuals{};
+      unsigned count = 0;
+      for (int row = y * tile; row < std::min((y + 1) * tile, gray.rows); ++row) {
+        const auto* values = gray.ptr<std::uint8_t>(row);
+        const auto* means = local.ptr<float>(row);
+        const auto* filtered = median_filtered.ptr<std::uint8_t>(row);
+        const auto* selected = mask.ptr<float>(row);
+        for (int col = x * tile; col < std::min((x + 1) * tile, gray.cols); ++col) {
+          if (selected[col] < .9f)
+            continue;
+          ++residuals[std::clamp(cvRound(values[col] - means[col]) + 255, 0, 510)];
+          ++fine_residuals[std::abs(values[col] - filtered[col])];
+          ++count;
+        }
+      }
+      unsigned sum = 0;
+      int median = 0;
+      while (median < 510 && sum + residuals[median] < (count + 1) / 2)
+        sum += residuals[median++];
+      sum = residuals[median];
+      int mad = 0;
+      while (mad < 510 && sum < (count + 1) / 2) {
+        ++mad;
+        if (median >= mad)
+          sum += residuals[median - mad];
+        if (median + mad < 511)
+          sum += residuals[median + mad];
+      }
+      sum = 0;
+      int fine_mad = 0;
+      while (fine_mad < 255 && sum + fine_residuals[fine_mad] < (count + 1) / 2)
+        sum += fine_residuals[fine_mad++];
+      // Dense ink can occupy half a tile. Its broad residual must not raise
+      // the noise threshold enough to erase a grid or overlapping handwriting.
+      noise.at<float>(y, x) = std::max(.8f, std::min(1.4826f * mad, 2 * 1.4826f * fine_mad + 1.5f));
     }
   }
-  cv::Mat luminance, blurred;
-  cv::cvtColor(toned, luminance, cv::COLOR_BGR2GRAY);
+  cv::resize(noise, noise, gray.size(), 0, 0, cv::INTER_LINEAR);
+  return noise;
+}
+
+cv::Mat ProtectedStrokes(const cv::Mat& gray, const cv::Mat& local, const cv::Mat& noise) {
+  cv::Mat envelope;
+  cv::morphologyEx(gray, envelope, cv::MORPH_CLOSE,
+                   cv::getStructuringElement(cv::MORPH_RECT, {21, 21}));
+  cv::Mat strokes(gray.size(), CV_8U);
+  for (int row = 0; row < gray.rows; ++row) {
+    const auto* values = gray.ptr<std::uint8_t>(row);
+    const auto* means = local.ptr<float>(row);
+    const auto* surface = envelope.ptr<std::uint8_t>(row);
+    const auto* sigma = noise.ptr<float>(row);
+    auto* selected = strokes.ptr<std::uint8_t>(row);
+    for (int col = 0; col < gray.cols; ++col) {
+      const float contrast = std::min(means[col], static_cast<float>(surface[col])) - values[col];
+      selected[col] = contrast > std::max(3.0f, 2.5f * sigma[col]) ? 255 : 0;
+    }
+  }
+  cv::Mat labels, stats, centers;
+  const int count = cv::connectedComponentsWithStats(strokes, labels, stats, centers, 8);
+  std::vector<bool> retained(count);
+  std::vector<double> signal(count);
+  for (int row = 0; row < gray.rows; ++row) {
+    const auto* ids = labels.ptr<int>(row);
+    const auto* values = gray.ptr<std::uint8_t>(row);
+    const auto* means = local.ptr<float>(row);
+    const auto* sigma = noise.ptr<float>(row);
+    for (int col = 0; col < gray.cols; ++col)
+      if (ids[col])
+        signal[ids[col]] += (means[col] - values[col]) / sigma[col];
+  }
+  for (int index = 1; index < count; ++index) {
+    const auto* component = stats.ptr<int>(index);
+    const int length = std::max(component[cv::CC_STAT_WIDTH], component[cv::CC_STAT_HEIGHT]);
+    const int width = std::min(component[cv::CC_STAT_WIDTH], component[cv::CC_STAT_HEIGHT]);
+    const double contrast = signal[index] / component[cv::CC_STAT_AREA];
+    retained[index] = component[cv::CC_STAT_AREA] >= 12 && length >= 7 &&
+                      (contrast >= 4 || (length >= 18 && length > width * 4));
+  }
+  for (int row = 0; row < gray.rows; ++row) {
+    const auto* ids = labels.ptr<int>(row);
+    auto* selected = strokes.ptr<std::uint8_t>(row);
+    for (int col = 0; col < gray.cols; ++col)
+      selected[col] = retained[ids[col]] ? 255 : 0;
+  }
+  cv::dilate(strokes, strokes, cv::getStructuringElement(cv::MORPH_RECT, {3, 3}));
+  cv::GaussianBlur(strokes, strokes, {}, .6);
+  return strokes;
+}
+}  // namespace
+
+Result<void> EnhanceScan(cv::Mat& image, const Paper& paper, const PhotoCancelled& cancelled) {
   RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-  cv::GaussianBlur(luminance, blurred, {}, 0.65 * std::max(image.cols, image.rows) / 2480.0);
+  cv::Mat gain, mask, gray, local;
+  cv::resize(paper.gain, gain, image.size(), 0, 0, cv::INTER_LINEAR);
+  cv::resize(paper.mask, mask, image.size(), 0, 0, cv::INTER_LINEAR);
+  cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+  cv::boxFilter(gray, local, CV_32F, {9, 9});
+  const auto noise = PaperNoise(gray, local, mask);
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  const auto protection = ProtectedStrokes(gray, local, noise);
+  const float black = std::min(160.0f, paper.black_point + 14);
+  std::array<float, 256> ink_tone{};
+  for (int value = 0; value < 256; ++value)
+    ink_tone[value] = 255 * std::pow(std::max(0.0f, (value - black) / (255 - black)), 1.12f);
+
   for (int row = 0; row < image.rows; ++row) {
     if (row % 32 == 0)
       RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
-    auto* output = image.ptr<cv::Vec3b>(row);
-    const auto* pixels = toned.ptr<cv::Vec3f>(row);
-    const auto* values = luminance.ptr<float>(row);
-    const auto* smooth = blurred.ptr<float>(row);
+    auto* pixels = image.ptr<cv::Vec3b>(row);
+    const auto* gains = gain.ptr<cv::Vec3f>(row);
     const auto* weights = mask.ptr<float>(row);
+    const auto* sigma = noise.ptr<float>(row);
+    const auto* protected_ink = protection.ptr<std::uint8_t>(row);
     for (int col = 0; col < image.cols; ++col) {
-      if (weights[col] == 0)
+      const float weight = weights[col];
+      if (weight == 0)
         continue;
-      const float scale =
-          (values[col] + 0.32f * (values[col] - smooth[col])) / std::max(values[col], 1.0f);
+      cv::Vec3f pixel;
+      for (int channel = 0; channel < 3; ++channel)
+        pixel[channel] = std::min(255.0f, pixels[col][channel] * gains[col][channel]);
+      const float luminance = pixel[0] * .114f + pixel[1] * .587f + pixel[2] * .299f;
+      const float chroma =
+          std::max({pixel[0], pixel[1], pixel[2]}) - std::min({pixel[0], pixel[1], pixel[2]});
+      const float deficit = 255 - luminance;
+      const float threshold = std::max(14.0f, 4 * sigma[col] * gains[col][1]);
+      const float u = std::clamp((deficit - threshold * .5f) / (threshold * 1.5f), 0.0f, 1.0f);
+      const float color_ink = std::clamp((chroma - 8) / 12, 0.0f, 1.0f);
+      const float ink_weight = std::max(color_ink, protected_ink[col] / 255.0f);
+      const float ink_multiplier =
+          ink_tone[std::clamp(static_cast<int>(luminance), 0, 255)] / std::max(luminance, 1.0f);
+      const float multiplier = 1 + (ink_multiplier - 1) * (1 - .7f * color_ink);
       for (int channel = 0; channel < 3; ++channel) {
-        const float sharpened = std::clamp(pixels[col][channel] * scale, 0.0f, 255.0f);
-        output[col][channel] = cv::saturate_cast<std::uint8_t>(
-            pixels[col][channel] + (sharpened - pixels[col][channel]) * weights[col]);
+        const float clean = 255 - std::min(255 - pixel[channel], 3.0f) * u * u * (3 - 2 * u);
+        const float target = pixel[channel] * multiplier;
+        // Feathered stroke support preserves continuous ink tones; unsupported
+        // neutral texture stays within three levels of white.
+        pixel[channel] = clean + (target - clean) * ink_weight;
       }
+      for (int channel = 0; channel < 3; ++channel)
+        pixels[col][channel] = cv::saturate_cast<std::uint8_t>(
+            pixels[col][channel] + (pixel[channel] - pixels[col][channel]) * weight);
     }
   }
   return {};

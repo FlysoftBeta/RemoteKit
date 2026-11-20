@@ -161,6 +161,7 @@ void BrowserRuntime::UpdateOutput() {
   if (!output)
     return;
   output->PublishClipboardSequence(clipboard->sequence());
+  const auto atlas_scale = layout_transaction.AtlasScale();
   std::vector<OsrRenderer::View> render_views;
   for (auto& [i, record] : views.records) {
     if (!record.spec.visible)
@@ -177,13 +178,13 @@ void BrowserRuntime::UpdateOutput() {
     view.metadata.instance_generation = token.value.instance;
     view.metadata.document_generation = token.value.document;
     view.metadata.focus_generation = token.value.focus;
-    view.metadata.x_pixels = std::lround(p.x * layout_transaction.output_scale);
-    view.metadata.y_pixels = std::lround(p.y * layout_transaction.output_scale);
+    view.metadata.x_pixels = std::lround(p.x * atlas_scale);
+    view.metadata.y_pixels = std::lround(p.y * atlas_scale);
     view.metadata.width_pixels =
-        std::lround((p.x + p.width) * layout_transaction.output_scale) - view.metadata.x_pixels;
+        std::lround((p.x + p.width) * atlas_scale) - view.metadata.x_pixels;
     view.metadata.height_pixels =
-        std::lround((p.y + p.height) * layout_transaction.output_scale) - view.metadata.y_pixels;
-    view.metadata.atlas_pixels_per_dip = layout_transaction.output_scale;
+        std::lround((p.y + p.height) * atlas_scale) - view.metadata.y_pixels;
+    view.metadata.atlas_pixels_per_dip = atlas_scale;
     view.metadata.page_device_scale_factor = layout_transaction.PageScale(record.spec);
     view.metadata.text_input = adapter.TextInputState();
     view.metadata.selection_menu =
@@ -195,7 +196,7 @@ void BrowserRuntime::UpdateOutput() {
                           !paused_output.contains(adapter.view_id());
     render_views.push_back(std::move(view));
   }
-  output->SetViews(std::move(render_views));
+  output->SetViews(std::move(render_views), layout_transaction.revision);
 }
 mojo::ScopedMessagePipeHandle BrowserRuntime::TakeControlAttachment(const base::DictValue& request,
                                                                     const base::DictValue& reply) {

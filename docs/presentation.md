@@ -53,6 +53,7 @@ Client:   每个 video 观察到自己的真实 RTP 并匹配当前 epoch → �
 - 呈现协议先协商：`media.presentation{version:1, backend:"video"}` → `presentation.mode`。未完成协商和当前布局确认之前不发布视频码流。
 - 屏障 Key = (barrierId, outputGeneration, layoutEpoch)，全部是十进制字符串。旧 peer 或旧 Key 的 ready 不能放行。重复的同 Key prepare 是幂等的，不会重启已经开始的两次 rAF 等待。
 - 页面在后台时 ACK 暂停推进，不存在用超时绕过屏障的路径。
+- 只缺帧元数据（已收到像素与 RTP，没有匹配的 `frame`）时，Viewer 发 `media.refresh{reason:"metadata", rtpTimestamp, layoutEpoch, authEpoch}`，Endpoint 从缓存（256 条）重发原 `frame`，不重新编码 IDR；发送失败等 DataChannel 可写事件（`REMOTEKIT_RTC_DATA_WRITABLE`）再发，没有定时重试。只缺像素时走原来的呈现刷新。
 - Endpoint 在实际调用 `remotekit_rtc_encoded` 发送时持有呈现锁，把屏障和布局更新串行化，覆盖已经进入编码器的旧结果。只在硬件接受纹理时检查门禁会与之后的布局变化或锁定竞争。旧 epoch 的结果被丢弃，并正常结束编码/纹理/尾帧租约。
 - `generation:"0", views:[]` 表示输出暂不可用（暂停、故障、重建），立即撤销客户端的旧 ready；它不是"文档已销毁"的证据（见[移动编辑](mobile-editing.md)）。
 - 布局换代的字段比较必须是完整规范化的布局身份。曾经候选布局漏了 `clientGestures` 字段，与实际布局永远不相等，2.4 秒内发出约 1000 次 prepare，客户端的两次 rAF 一直被重启，ACK 永远完不成。
@@ -63,7 +64,15 @@ atlas 计划和规范化布局身份只由稳定窗口尺寸、DPR、采样规�
 
 仅遮挡变化时 Endpoint 保持输出与编码管线，Browser 原地 resize WebContents；不更新 generation/layoutEpoch、不重发 layout、不触发 prepare/ready，也不为遮挡请求关键帧。`view.viewport` 只更新页面高度和输入边界，不改变呈现 ready。逐帧 `viewports` 将页面高度/revision 绑定真实 RTP，用于判断哪一帧已反映新高度。
 
-窗口 resize、旋转、DPR/UI scale、可见成员或 atlas/编码规划变化仍按完整布局身份建立新代次和屏障；同时携带当前遮挡，让新代次首帧使用正确的页面高度。焦点、文档与授权边界保留各自的输入/呈现门禁。普通尺寸变化使用过渡快照，键盘遮挡直接使用稳定视频。
+窗口 resize、旋转、DPR/UI scale、可见成员或 atlas 规划变化仍按完整布局身份建立新代次和屏障；同时携带当前遮挡，让新代次首帧使用正确的页面高度。
+
+**布局与输出 extent 分开**：编码 extent 在首个可见 atlas 时确定，只有 DPR 变化才重算。extent 不变的布局变化（resize、分栏、切换窗口、可见成员变化）不关闭输出、不重配编码器、不重建共享输出纹理：Browser 收到原地布局事务，只为尺寸变化的 view 换 plane，旧 plane 按 GPU Fence 退休；Endpoint 建立新的 layoutEpoch 与屏障。extent 真变化才完整重配。几何事务的首帧是显式呈现需求：新几何已应用、还没有匹配像素时按身份投递优先 Begin，直到成功，不受低 FPS 节拍留下的旧截止时间约束（见[节拍 · 呈现刷新](pacing.md#呈现刷新首帧与布局补帧)）。纯遮挡更新同样带 revision 级刷新需求。
+
+**几何是瞬态的**：窗口尺寸、DPR、可见性、展示顺序与遮挡都不写入 `session.db`，直接应用、不经持久化事务；只有 view 集合与需要崩溃恢复的拓扑才提交。Endpoint 重启后 view 先用隐藏的 1×1 占位，等 Viewer 重报几何。
+
+**冲突立即重规划**：`view_transaction_identity_mismatch`、view 正在关闭、页面 viewport 未被接受这类能确定原因的冲突，按最新快照立即重规划，最多 3 次，之后才进入共享重试单元的退避；真正的 unavailable/outcome_unknown 才指数退避。
+
+每个布局事务在 Endpoint 日志写一条 `layout.timeline`（desired 收到、converge、Browser RPC 发出/回执与锁等待、plane 重建、首个匹配 CompositorFrame、prepare、ready、首个匹配帧发送，相对毫秒），Browser 日志带同一关联键；Control 对 viewport 请求写 `viewport.timeline`。都只在几何变化时记录。焦点、文档与授权边界保留各自的输入/呈现门禁。普通尺寸变化使用过渡快照，键盘遮挡直接使用稳定视频。
 
 ## 帧与 RTP 匹配
 

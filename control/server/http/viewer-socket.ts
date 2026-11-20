@@ -13,7 +13,7 @@ import { DiagnosticSessions, diagnosticMessageLimit } from '../diagnostics/sessi
 import { viewerErrorReports } from '../diagnostics/viewer-errors';
 import { learningMethods } from '../learning/service';
 import { log, reportError } from '../log';
-import type { ViewerAuthority } from '../viewers/viewer-hub';
+import type { ViewerAuthority, ViewportTimeline } from '../viewers/viewer-hub';
 
 type DiagnosticAuthority = {
   sessions?: DiagnosticSessions;
@@ -28,6 +28,7 @@ type RequestContext = {
   services: DomainServices;
   authority: ViewerAuthority;
   diagnostics?: DiagnosticAuthority;
+  viewportTimeline?: ViewportTimeline;
 };
 type Handler = (ctx: RequestContext, params: any) => unknown;
 const product =
@@ -124,8 +125,14 @@ const handlers: Record<string, Handler> = {
   'app.inspect': product(({ services, authority }, params) =>
     services.workspace.inspect(authority.tenantId, params.tabId),
   ),
-  viewport: product(({ services, authority }, params) =>
-    services.viewers.viewport(authority.tenantId, params, authority.leaseId, authority.epoch),
+  viewport: product(({ services, authority, viewportTimeline }, params) =>
+    services.viewers.viewport(
+      authority.tenantId,
+      params,
+      authority.leaseId,
+      authority.epoch,
+      viewportTimeline,
+    ),
   ),
   feedback: product(({ services, authority }, params) => services.viewers.feedback(authority, params)),
 };
@@ -342,6 +349,7 @@ export async function dispatchViewerRequest(
   diagnostics?: DiagnosticAuthority,
   host?: string,
   logs?: RequestContext['logs'],
+  viewportTimeline?: ViewportTimeline,
 ): Promise<any> {
   services.viewers.assertViewer(authority.tenantId, authority.leaseId);
   if (!params || typeof params !== 'object' || Array.isArray(params))
@@ -351,7 +359,7 @@ export async function dispatchViewerRequest(
   const handler = Object.prototype.hasOwnProperty.call(handlers, method) ? handlers[method] : undefined;
   if (!handler) throw new RemoteKitError('invalid_request', '未知 WebSocket 方法');
   try {
-    return await handler({ services, authority, diagnostics, host, logs }, params);
+    return await handler({ services, authority, diagnostics, host, logs, viewportTimeline }, params);
   } catch (error) {
     throw toRemoteKitError(error);
   }
@@ -484,6 +492,7 @@ export function attachViewerSocket(
             );
         });
         ws.on('message', (data, binary) => {
+          const received = performance.now();
           if (isClosing()) return;
           let request: any;
           const raw = data.toString();
@@ -540,6 +549,8 @@ export function attachViewerSocket(
             return;
           }
           pending.add(request.id);
+          const viewportTimeline: ViewportTimeline | undefined =
+            request.method === 'viewport' ? { received } : undefined;
           const immediate = request.method.startsWith('auth.') || request.method === 'clock.ping';
           void track(
             (immediate ? Promise.resolve() : ready)
@@ -576,6 +587,7 @@ export function attachViewerSocket(
                   },
                   req.headers.host,
                   { directory: options.logDir, nodes: options.nodes ?? { all: () => [] } },
+                  viewportTimeline,
                 );
                 if (ws.readyState !== WebSocket.OPEN) return;
                 if (
@@ -585,6 +597,19 @@ export function attachViewerSocket(
                 )
                   throw new RemoteKitError('outcome_unknown', '授权已改变，操作结果请核对当前状态');
                 send(ws, { type: 'result', id: request.id, result });
+                if (viewportTimeline?.published !== undefined) {
+                  const relative = (time: number) => Math.round((time - received) * 1000) / 1000;
+                  log.info('viewport.timeline', {
+                    tenant: peer.tenant,
+                    requestId: request.id,
+                    revision: viewportTimeline.revision,
+                    windows: viewportTimeline.windows,
+                    received: 0,
+                    started: relative(viewportTimeline.started!),
+                    published: relative(viewportTimeline.published),
+                    replied: relative(performance.now()),
+                  });
+                }
               })
               .catch((error) => {
                 const failure = reportError(toRemoteKitError(error), 'viewer.request_failed', {

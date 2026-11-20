@@ -16,14 +16,14 @@ void Check(bool value, const char* message) {
 }
 void ContextMenuTests() {
   using namespace remotekit;
-  static_assert(kSharedRenderVersion == 8);
+  static_assert(kSharedRenderVersion == 9);
   static_assert(sizeof(SharedAtlasView) == 256);
   static_assert(offsetof(SharedAtlasView, context_menu) == 224);
-  static_assert(sizeof(SharedAtlasFrame) == 16440);
+  static_assert(sizeof(SharedAtlasFrame) == 16456);
   static_assert(offsetof(SharedRenderMapping, slots) == 16512);
   static_assert(offsetof(SharedRenderMapping, clipboard_sequence) == 24);
   static_assert(offsetof(SharedRenderMapping, latest_layout) == 32);
-  static_assert(sizeof(SharedRenderMapping) == 82304);
+  static_assert(sizeof(SharedRenderMapping) == 82560);
   DirectServices services;
   services.Bind(3);
   SharedAtlasFrame frame{};

@@ -1,4 +1,4 @@
-﻿#include "files/file_upload.hpp"
+#include "files/file_upload.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -6,6 +6,22 @@
 #include <iostream>
 #include <stdexcept>
 
+namespace remotekit {
+class FileUploadStoreTest {
+ public:
+  static void FailHardLinks(FileUploadStore& store) {
+    store.link_file_ = [](const auto&, const auto&, std::error_code& error) {
+      error = std::make_error_code(std::errc::cross_device_link);
+    };
+  }
+  static void GrowBeforeCopy(FileUploadStore& store) {
+    store.link_file_ = [](const auto& source, const auto&, std::error_code& error) {
+      std::ofstream(source, std::ios::binary | std::ios::app) << "extra";
+      error = std::make_error_code(std::errc::cross_device_link);
+    };
+  }
+};
+}  // namespace remotekit
 namespace fs = std::filesystem;
 using remotekit::FileUploadStore;
 #define CHECK(value)                             \
@@ -87,6 +103,27 @@ int main() {
     CHECK(Fails([&] { return restarted.Stage(binding, {sources[0], sources[0]}, live); }));
     Take(store.ConfirmBrowserStopped("browser"));
     CHECK(!fs::exists(submitted.files.front().path));
+    CHECK(store.reserved_bytes() == 0 && store.reserved_files() == 0);
+    remotekit::FileUploadStoreTest::GrowBeforeCopy(store);
+    const auto over_budget = store.Stage(binding, sources, live);
+    CHECK(!over_budget && over_budget.error().code == remotekit::ErrorCode::kLimitExceeded);
+    CHECK(store.reserved_bytes() == 0 && store.reserved_files() == 0);
+    std::ofstream(source, std::ios::binary | std::ios::trunc) << "abc";
+  }
+  {
+    FileUploadStore store(root / "copy", {8, 8, 8, 2, 2});
+    Take(store.Initialize());
+    remotekit::FileUploadStoreTest::FailHardLinks(store);
+    const auto batch = Take(store.Stage(binding, sources, live));
+    CHECK(!fs::equivalent(source, batch.files.front().path));
+    std::ifstream input(batch.files.front().path, std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(input), {}) == "abc");
+    input.close();
+    CHECK(store.reserved_bytes() == 3 && store.reserved_files() == 1);
+    Take(store.MarkSubmitted(batch.id));
+    CHECK(!Take(store.Cancel(batch.id)));
+    Take(store.ConfirmBrowserStopped("browser"));
+    CHECK(!fs::exists(batch.files.front().path));
     CHECK(store.reserved_bytes() == 0 && store.reserved_files() == 0);
   }
   {

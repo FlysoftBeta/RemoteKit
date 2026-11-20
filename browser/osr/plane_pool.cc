@@ -30,7 +30,7 @@ base::DictValue Failure(const std::string& error) {
 }
 }  // namespace
 
-void PlanePool::SetViews(std::vector<View> views) {
+void PlanePool::SetViews(std::vector<View> views, uint32_t layout_revision) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(owner_.sequence_);
   if (owner_.retirement_.stopping_ || owner_.failed_)
     return;
@@ -38,6 +38,17 @@ void PlanePool::SetViews(std::vector<View> views) {
     owner_.Fatal("too many OSR planes");
     return;
   }
+  bool layout_changed = layout_revision_ != layout_revision;
+  for (const auto& view : views) {
+    const auto found = planes_.find(view.metadata.webview_id);
+    layout_changed |= found == planes_.end() ||
+                      (view.offscreen_host && found->second->metadata.occlusion_revision !=
+                                                  view.offscreen_host->occlusion_revision());
+  }
+  if (layout_changed) {
+    plane_rebuild_us_ = compositor_frame_us_ = -1;
+  }
+  layout_revision_ = layout_revision;
   std::map<uint64_t, std::shared_ptr<Plane>> next;
   std::vector<uint64_t> order;
   bool changed = views.size() != planes_.size();
@@ -93,6 +104,8 @@ void PlanePool::SetViews(std::vector<View> views) {
           },
           std::weak_ptr<Generation>(owner_.shared_from_this()), plane->host));
     }
+    if (layout_changed)
+      plane->layout_frame_pending = true;
     plane->metadata = v;
     plane->enabled = view.render_enabled;
     next.emplace(v.webview_id, std::move(plane));
@@ -196,6 +209,8 @@ bool PlanePool::Configure(const std::shared_ptr<Plane>& plane) {
         },
         plane, owner_.device_.device));
   }
+  plane_rebuild_us_ = base::TimeTicks::Now().since_origin().InMicroseconds();
+  plane->host->LayoutStage("plane_texture_rebuild");
   plane->configuring = true;
   plane->host->compositor()->ConfigureRemoteKitOutput(
       std::move(config), base::BindOnce(&Generation::Configured, owner_.shared_from_this(), plane));
@@ -236,6 +251,11 @@ void PlanePool::PlaneResult(std::shared_ptr<Work> work,
         target->occlusion_revision = read.metadata.occlusion_revision;
         if (read.plane->metadata.occlusion_revision == read.metadata.occlusion_revision &&
             read.plane->host && read.plane->host->PageFrameReady()) {
+          if (read.plane->layout_frame_pending) {
+            read.plane->layout_frame_pending = false;
+            compositor_frame_us_ = base::TimeTicks::Now().since_origin().InMicroseconds();
+            read.plane->host->LayoutStage("first_matching_compositor_frame");
+          }
           read.plane->latest = target;
           read.target = target;
           work->updated = true;

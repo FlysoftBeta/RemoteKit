@@ -63,6 +63,26 @@ SessionCoordinator::Hooks SessionExecution::Hooks() {
       .send = [self](
                   const Json& value,
                   uint64_t generation) { return self->management_.SendEvent(value, generation); },
+      .received =
+          [self](const Json& value, int64_t received) {
+            self->layout_arrival_.store(std::make_shared<const LayoutArrival>(
+                LayoutArrival{value.at("revision").get<std::string>(), received, 0}));
+            if (auto session = self->runtime_.load())
+              session->Views().DesiredReceived(value, received);
+          },
+      .converging =
+          [self](const Json& value, int64_t qpc) {
+            auto arrival = self->layout_arrival_.load();
+            if (!arrival || arrival->revision != value.at("revision").get<std::string>() ||
+                arrival->converge_started)
+              return;
+            auto next = std::make_shared<LayoutArrival>(*arrival);
+            next->converge_started = qpc;
+            if (!self->layout_arrival_.compare_exchange_strong(arrival, next))
+              return;
+            if (auto session = self->runtime_.load())
+              session->Views().ConvergeStarted(value, qpc);
+          },
   };
 }
 void SessionExecution::Activate(std::string connection, uint64_t generation) {
@@ -147,6 +167,11 @@ Result<void> SessionExecution::Prepare(const Json& document) try {
       RK_RETURN_IF_ERROR(session->AcknowledgeEvents(stream, known->second));
   }
   starting_ = !session->Running();
+  if (const auto arrival = layout_arrival_.load();
+      arrival && arrival->revision == document.at("revision").get<std::string>()) {
+    session->Views().DesiredReceived(document, arrival->received);
+    session->Views().ConvergeStarted(document, arrival->converge_started);
+  }
   RK_RETURN_IF_ERROR(session->StageDesired(document, clipboard_));
   staged_revision_ = document.at("revision").get<std::string>();
   return {};

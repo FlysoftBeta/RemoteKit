@@ -55,6 +55,18 @@ Result<Json> BrowserRpc::Exchange(Json command,
     RK_SERVER_TRACE(trace, stage, media::TraceIds{}, rk_record.browser_sequence = sequence;
                     rk_record.status = status; rk_record.producer_pid = producer_pid_.load(););
   };
+  const bool layout_rpc = command.contains("layoutTransaction");
+  const auto layout_now = [] {
+    LARGE_INTEGER value{};
+    QueryPerformanceCounter(&value);
+    return value.QuadPart;
+  };
+  const auto layout_frequency = [] {
+    LARGE_INTEGER value{};
+    QueryPerformanceFrequency(&value);
+    return value.QuadPart;
+  };
+  const auto layout_wait = layout_rpc ? layout_now() : 0;
   record("input_rpc_lock_wait");
   std::unique_lock lock(mutex_, std::defer_lock);
   if (opportunistic) {
@@ -62,6 +74,7 @@ Result<Json> BrowserRpc::Exchange(Json command,
       return Error{ErrorCode::kBusy, "browser RPC lock busy"};
   } else
     lock.lock();
+  const auto layout_acquired = layout_rpc ? layout_now() : 0;
   record("input_rpc_lock_acquired");
   if (admitted && !admitted())
     return Error{ErrorCode::kConflict, "Authorization changed before Browser dispatch"};
@@ -81,6 +94,7 @@ Result<Json> BrowserRpc::Exchange(Json command,
   const bool clipboard = command.value("method", std::string()).starts_with("clipboard.");
   std::vector<char> response(clipboard ? 32 * 1024 * 1024 : 1024 * 1024);
   size_t count = 0;
+  const auto layout_dispatch = layout_rpc ? layout_now() : 0;
   record("input_rpc_sdk_call");
   const int status =
       sdk_.remotekit_sdk_control_request(Control(), encoded.data(), encoded.size(), response.data(),
@@ -109,6 +123,18 @@ Result<Json> BrowserRpc::Exchange(Json command,
   if (!reply.is_object() || !reply.contains("ok") || !reply["ok"].is_boolean())
     return failed(Error{ErrorCode::kOutcomeUnknown, "invalid browser response"});
   needs_health_check_ = false;
+  if (layout_rpc)
+    reply["layoutTiming"] = {
+        {"lockWaitStartQpc", layout_wait},
+        {"lockAcquiredQpc", layout_acquired},
+        {"dispatchQpc", layout_dispatch},
+        {"receiptQpc", layout_now()},
+        {"lockWaitMs", 1000.0 * (layout_acquired - layout_wait) / layout_frequency()}};
+  if (layout_rpc) {
+    reply["layoutTiming"]["method"] = command.at("method");
+    if (command.contains("view"))
+      reply["layoutTiming"]["viewId"] = command.at("view");
+  }
   return reply;
 }
 Result<Json> BrowserRpc::Request(Json command,

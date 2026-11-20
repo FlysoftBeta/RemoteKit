@@ -44,7 +44,8 @@ int EncoderSet::Encode(void* context, uint64_t encoder, const remotekit_rtc_fram
     return REMOTEKIT_SDK_BUSY;
   auto found = self->encoders.find(encoder);
   if (found != self->encoders.end() &&
-      found->second->Enqueue(*frame, key != 0 || remotekit::TailRefreshLease::From(*frame)))
+      found->second->Enqueue(*frame,
+                             key != 0 || remotekit::TailRefreshLease::RequiresKeyframe(*frame)))
     return 0;
   remotekit::TailRefreshLease::Finish(*frame, false);
   return REMOTEKIT_SDK_BUSY;

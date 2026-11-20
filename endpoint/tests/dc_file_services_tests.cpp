@@ -292,7 +292,124 @@ void TransientReceiptAdmission() {
   CHECK(reply.at("ok") == true && calls == 2);
   services.Stop();
 }
+void ProcessingDoesNotBlockFiles() {
+  DcFileServices first, second;
+  std::atomic<unsigned> running = 0, reads = 0, bursts = 0, chunks = 0;
+  std::atomic<bool> release = false;
+  const auto execute = [&](const DcFileServices::Job& job) -> Result<ServiceJson> {
+    const auto method = job.message.at("method").get<std::string>();
+    if (method == "photo.process") {
+      ++running;
+      while (!release && (first.Current(job) || second.Current(job)))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } else if (method == "asset.read") {
+      ++reads;
+      while (reads < 4)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } else if (method == "photo.burst.sample") {
+      ++bursts;
+    } else if (method == "asset.chunk") {
+      ++chunks;
+    }
+    return ServiceJson{{"accepted", true}};
+  };
+  first.Start(execute, []() -> Result<void> { return {}; });
+  second.Start(execute, []() -> Result<void> { return {}; });
+  first.Bind(7, "one");
+  second.Bind(8, "two");
+  Take(first.Authorize("one", 1, {}, true));
+  Take(second.Authorize("two", 1, {}, true));
+  const auto request = [](const std::string& id, const char* method) {
+    auto value = Request(id.c_str(), method);
+    value["params"]["requestId"] = "library";
+    return value;
+  };
+  first.Admit(7, request("cpu-one", "photo.process"));
+  second.Admit(8, request("cpu-two", "photo.process"));
+  Until([&] { return running == 2; });
+  first.Admit(7, request("cpu-queued", "photo.process"));
+  first.Admit(7, request("burst-priority", "photo.burst.sample"));
+  first.Admit(7, request("chunk", "asset.chunk"));
+  for (unsigned i = 0; i < 4; ++i) {
+    auto range = request("read-" + std::to_string(i), "asset.read");
+    range["params"]["offset"] = i * 16384;
+    first.Admit(7, range);
+  }
+  Until([&] { return reads == 4 && bursts == 1 && chunks == 1; });
+  CHECK(running == 2);
+  DcFileServices queued;
+  queued.Start(execute, []() -> Result<void> { return {}; });
+  queued.Bind(9, "queued");
+  Take(queued.Authorize("queued", 1, {}, true));
+  queued.Admit(9, request("queued-other-session", "photo.process"));
+  queued.Admit(9, request("queued-marker", "asset.chunk"));
+  Until([&] { return chunks == 2; });
+  queued.Stop();
+  CHECK(running == 2);
+  // Retire a queued processing job and an executing job. Stop must drain both.
+  first.Bind(0);
+  first.Stop();
+  CHECK(running == 2);
+  first.Flush(7, [](const std::string&) {
+    CHECK(false);
+    return 0;
+  });
+  release = true;
+  second.Stop();
+}
+void PreviewContract() {
+  const ServiceJson params{
+      {"requestId", "library"}, {"assetId", std::string(64, 'a')}, {"maxSide", 1280}};
+  CHECK(protocol::ValidPhotoPreviewParams(params));
+  auto changed = params;
+  changed["maxSide"] = 2560;
+  CHECK(protocol::ValidPhotoPreviewParams(changed));
+  for (const auto value :
+       {ServiceJson(320), ServiceJson(1280.0), ServiceJson(-1), ServiceJson("1280")}) {
+    changed["maxSide"] = value;
+    CHECK(!protocol::ValidPhotoPreviewParams(changed));
+  }
+  changed = params;
+  changed["extra"] = true;
+  CHECK(!protocol::ValidPhotoPreviewParams(changed));
+  changed = params;
+  changed["requestId"] = "chooser";
+  CHECK(!protocol::ValidPhotoPreviewParams(changed));
+}
+void FileMissingDetails() {
+  DcFileServices services;
+  services.Start(
+      [](const DcFileServices::Job& job) -> Result<ServiceJson> {
+        return Error{ErrorCode::kNotFound,
+                     job.message.at("params").at("message").get<std::string>()};
+      },
+      []() -> Result<void> { return {}; });
+  services.Bind(7, "details");
+  Take(services.Authorize("details", 1, {}, true));
+  for (const auto& [message, detail] :
+       {std::pair{"object open failed: Windows 2", "asset_unreadable"},
+        std::pair{"unknown_file_selection", "selection_unknown"},
+        std::pair{"entry_missing", "entry_missing"}}) {
+    auto request = Request(message, "asset.read");
+    request["params"] = {{"requestId", "library"}, {"message", message}};
+    services.Admit(7, request);
+    ServiceJson reply;
+    Until([&] {
+      services.Flush(7, [&](const auto& wire) {
+        reply = ServiceJson::parse(wire);
+        return 0;
+      });
+      return !reply.is_null();
+    });
+    CHECK(reply.at("error").at("code") == "not_found");
+    CHECK(reply.at("error").at("detail") == detail);
+  }
+  services.Stop();
+}
 int main() {
+  ProcessingDoesNotBlockFiles();
+  FileMissingDetails();
+  PreviewContract();
   MaintenanceFailureIsolation();
   TransientReceiptAdmission();
   CheckValidationErrorReply();

@@ -150,6 +150,7 @@ export function createApplication(
   const sessionObserved = ({ message }: { message: import('./endpoint/coordination').SessionObserved }) => {
     const viewer = context.tenants.get(message.tenantId).viewer;
     if (viewer) services.security.observe(message.tenantId, viewer.security, message);
+    void services.reconciler.observe(message);
   };
   endpoint.nodes.on('session.fault', sessionFault);
   endpoint.nodes.on('session.observed', sessionObserved);

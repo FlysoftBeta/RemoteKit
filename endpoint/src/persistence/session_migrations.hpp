@@ -4,6 +4,7 @@
 #include <string>
 
 namespace remotekit {
+inline constexpr int64_t kSessionDbVersion = 6;
 struct SessionMigration {
   int64_t version;
   const char* name;
@@ -13,5 +14,5 @@ Result<void> MigrateSessionDb(sqlite::Database& db,
                               const std::filesystem::path& directory,
                               const std::string& build,
                               std::span<const SessionMigration> steps = {});
-Result<void> CheckSessionDb(sqlite::Database& db, int64_t expected_version = 4);
+Result<void> CheckSessionDb(sqlite::Database& db, int64_t expected_version = kSessionDbVersion);
 }  // namespace remotekit
