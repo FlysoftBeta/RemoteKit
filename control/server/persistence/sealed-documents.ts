@@ -2,8 +2,17 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:cr
 import type { LearningProvider } from '../../shared/learning';
 import type { Sessions } from '../learning/accounts';
 import type { AtRestKey } from '../auth/crypto';
-import { RemoteKitError } from '../../shared/errors';
-import { array, number, corruptRecord, decodeJson, encodeJson, type Codec } from './codec';
+import {
+  array,
+  number,
+  integer,
+  literal,
+  object,
+  corruptRecord,
+  decodeJson,
+  encodeJson,
+  type Codec,
+} from './codec';
 import { changyanSession, xinjiaoyuSession } from './documents';
 
 export const learningKeyInfo = 'remotekit learning account key 1';
@@ -53,16 +62,16 @@ export function openLearningDocument<T>(
   }
 }
 
-export function validFaceTemplate(value: unknown): value is number[] {
+function validFaceTemplate(value: unknown): value is number[] {
   return (
     Array.isArray(value) &&
     value.length === 128 &&
-    value.every((n) => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) <= 1) &&
-    Math.abs(value.reduce((sum, n) => sum + n * n, 0) - 1) <= 0.01
+    value.every((n) => typeof n === 'number' && Number.isFinite(n)) &&
+    Math.abs(Math.sqrt(value.reduce((sum, n) => sum + n * n, 0)) - 1) < 1e-3
   );
 }
 
-const faceTemplate: Codec<number[]> = {
+export const faceTemplate: Codec<number[]> = {
   read(value, path) {
     const template = array(number()).read(value, path);
     if (!validFaceTemplate(template))
@@ -71,20 +80,44 @@ const faceTemplate: Codec<number[]> = {
   },
 };
 
-export function sealFaceTemplate(key: AtRestKey, user: string, template: number[], modelVersion: string) {
-  if (!validFaceTemplate(template))
-    throw new RemoteKitError('invalid_request', '人脸模板格式无效', { detail: 'Invalid face template' });
+export interface FaceGallery {
+  version: 2;
+  templates: { source: 'enrolled' | 'learned'; vector: number[]; addedAt: number }[];
+}
+
+const galleryShape = object({
+  version: literal(2),
+  templates: array(
+    object({
+      source: literal('enrolled', 'learned'),
+      vector: faceTemplate,
+      addedAt: integer(),
+    }),
+    { min: 1, max: 9 },
+  ),
+});
+const faceGallery: Codec<FaceGallery> = {
+  read(value, path) {
+    const gallery = galleryShape.read(value, path);
+    const enrolled = gallery.templates.filter((entry) => entry.source === 'enrolled').length;
+    if (enrolled < 1 || enrolled > 5 || gallery.templates.length - enrolled > 4)
+      throw new Error(`${path} expected 1..5 enrolled and 0..4 learned templates`);
+    return gallery;
+  },
+};
+
+export function sealFaceGallery(key: AtRestKey, user: string, gallery: FaceGallery, modelVersion: string) {
   return key.seal(
     JSON.stringify([user, modelVersion]),
-    Buffer.from(encodeJson(template, faceTemplate, `user_security.face_ciphertext ${user}`)),
+    Buffer.from(encodeJson(gallery, faceGallery, `user_security.face_ciphertext ${user}`)),
   );
 }
 
-export function openFaceTemplate(key: AtRestKey, user: string, sealed: string, modelVersion: string) {
+export function openFaceGallery(key: AtRestKey, user: string, sealed: string, modelVersion: string) {
   try {
     return decodeJson(
       key.open(JSON.stringify([user, modelVersion]), sealed).toString(),
-      faceTemplate,
+      faceGallery,
       `user_security.face_ciphertext ${user}`,
     );
   } catch (error) {

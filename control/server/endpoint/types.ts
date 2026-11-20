@@ -1,4 +1,5 @@
 import type { FileRequest } from '../../shared/product';
+import type { FaceHint, FaceStatus } from '../../shared/security';
 import type {
   AppliedMediaPolicy,
   OperationReceipt,
@@ -89,8 +90,11 @@ export interface FaceBinding {
 }
 export interface FaceStatusReply {
   challengeId: string;
-  status: string;
-  template?: number[];
+  status: FaceStatus;
+  templates?: number[][];
+  learn?: number[];
+  progress?: number;
+  hint?: FaceHint;
   error?: NativeError;
   outcome?: 'no_matching_face' | 'camera_unavailable';
 }

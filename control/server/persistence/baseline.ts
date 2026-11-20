@@ -146,6 +146,6 @@ CREATE UNIQUE INDEX single_admin ON users(is_admin) WHERE is_admin=1;
 CREATE INDEX usage_events_context ON usage_events(tenant,window_id,context,at,id);
 CREATE INDEX usage_events_tenant ON usage_events(tenant,at,id);
 CREATE INDEX viewer_presence_tenant ON viewer_presence(tenant,connected_at);
-INSERT INTO schema_version VALUES (26);
+INSERT INTO schema_version VALUES (27);
 INSERT INTO server_settings VALUES (1,'{"version":1,"logRetentionDays":30}');
 `;

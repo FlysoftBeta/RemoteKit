@@ -26,18 +26,19 @@ struct Frame {
   std::vector<uint8_t> data;
 };
 
-bool ValidChallenge(FaceChallenge& challenge) {
+bool ValidChallenge(const FaceChallenge& challenge) {
   if (!challenge.epoch || challenge.challenge_id.empty() || challenge.challenge_id.size() > 128 ||
       !challenge.timeout_ms)
     return false;
   switch (challenge.purpose) {
     case FacePurpose::enroll:
-      return challenge.timeout_ms <= 60'000 && !challenge.face_template;
+      return challenge.timeout_ms <= 60'000 && challenge.templates.empty();
     case FacePurpose::verify:
     case FacePurpose::presence: {
       const auto max = challenge.purpose == FacePurpose::verify ? 30'000u : 120'000u;
-      return challenge.timeout_ms <= max && challenge.face_template &&
-             Normalize(*challenge.face_template);
+      return challenge.timeout_ms <= max && !challenge.templates.empty() &&
+             challenge.templates.size() <= 9 &&
+             std::all_of(challenge.templates.begin(), challenge.templates.end(), ValidTemplate);
     }
   }
   return false;
@@ -54,41 +55,46 @@ struct Faces::Impl {
   void Finish(FaceResult final) {
     result = std::move(final);
     latest.reset();
-    challenge.face_template.reset();
-    samples = {};
-    last_presence_hash.reset();
+    challenge.templates.clear();
+    policy = {};
+  }
+
+  void Finish(FaceState state,
+              FaceOutcome outcome = FaceOutcome::none,
+              std::optional<remotekit::Error> error = {}) {
+    FaceResult final;
+    final.state = state;
+    final.outcome = outcome;
+    final.error = std::move(error);
+    Finish(std::move(final));
   }
 
   void Expire(Clock::time_point now) {
     if (!active || result.state != FaceState::pending)
       return;
+    if (policy.CompletionTime() && *policy.CompletionTime() <= deadline) {
+      policy.Advance(now);
+      if (policy.Result().state == FaceState::enrolled) {
+        Finish(policy.Result());
+        return;
+      }
+    }
     if (challenge.purpose == FacePurpose::presence && now - last_match >= 5s)
-      Finish({FaceState::absent,
-              {},
-              now - last_submit >= 5s ? FaceOutcome::camera_unavailable
-                                      : FaceOutcome::no_matching_face});
+      Finish(FaceState::absent, now - last_submit >= 5s ? FaceOutcome::camera_unavailable
+                                                        : FaceOutcome::no_matching_face);
     else if (now >= deadline)
-      Finish({FaceState::expired, {}, {}});
+      Finish(FaceState::expired);
   }
 
-  void Observe(Clock::time_point received,
-               const std::optional<FaceTemplate>& value,
-               uint64_t frame_hash) {
-    const bool enroll = challenge.purpose == FacePurpose::enroll;
-    const bool matches =
-        value && (enroll || Similarity(*value, *challenge.face_template) >= kMatchThreshold);
-    if (challenge.purpose == FacePurpose::presence) {
-      if (matches && last_presence_hash != frame_hash) {
-        last_presence_hash = frame_hash;
-        last_match = received;
-      }
-      return;
-    }
-    if (auto accepted = samples.Observe(received, value, frame_hash, challenge.face_template)) {
-      Finish({enroll ? FaceState::enrolled : FaceState::matched,
-              enroll ? std::optional(*accepted) : std::nullopt,
-              {}});
-    }
+  void Observe(Clock::time_point received, const FaceInference& inference, uint64_t frame_hash) {
+    const auto observation = policy.Observe(received, inference, frame_hash);
+    if (observation.gate != FaceGate::none)
+      ++gate_failures[static_cast<size_t>(observation.gate)];
+    if (observation.presence_match)
+      last_match = received;
+    result = policy.Result();
+    if (result.state != FaceState::pending)
+      Finish(result);
   }
 
   void Run(std::stop_token stop) {
@@ -99,9 +105,10 @@ struct Faces::Impl {
         changed.wait(lock, stop, [this] { return active && result.state == FaceState::pending; });
         continue;
       }
-      const auto expiry = challenge.purpose == FacePurpose::presence
-                              ? std::min(deadline, last_match + 5s)
-                              : deadline;
+      auto expiry = challenge.purpose == FacePurpose::presence ? std::min(deadline, last_match + 5s)
+                                                               : deadline;
+      if (const auto completion = policy.CompletionTime())
+        expiry = std::min(expiry, *completion);
       const auto waiting_generation = generation;
       changed.wait_until(lock, stop, expiry, [this, waiting_generation] {
         return latest.has_value() || generation != waiting_generation ||
@@ -115,9 +122,8 @@ struct Faces::Impl {
       Frame frame = std::move(*latest);
       latest.reset();
       lock.unlock();
-      std::optional<FaceTemplate> value;
+      FaceInference inference;
       std::optional<remotekit::Error> failure;
-      FaceGate gate = FaceGate::none;
 #if defined(RK_FACE_OPENCV)
       if (Clock::now() - frame.received <= 1s) {
         auto engine = GetEngine(models);
@@ -126,9 +132,7 @@ struct Faces::Impl {
         else {
           auto inferred = engine.value()->InferRGB24(frame.width, frame.height, frame.data.data());
           if (inferred) {
-            gate = inferred.value().gate;
-            if (gate == FaceGate::none)
-              value = std::move(inferred.value().feature);
+            inference = std::move(inferred).value();
           } else {
             failure = inferred.error();
           }
@@ -138,18 +142,16 @@ struct Faces::Impl {
       failure = remotekit::Error{remotekit::ErrorCode::kUnavailable,
                                  "Face inference capability unavailable"};
 #endif
-      const auto frame_hash = value ? Fingerprint(frame.data) : 0;
+      const auto frame_hash = Fingerprint(frame.data);
       lock.lock();
       const auto now = Clock::now();
       Expire(now);
       if (!active || frame.generation != generation || result.state != FaceState::pending)
         continue;
-      if (gate != FaceGate::none)
-        ++gate_failures[static_cast<size_t>(gate)];
       if (failure) {
-        Finish({FaceState::failed, {}, FaceOutcome::none, *failure});
+        Finish(FaceState::failed, FaceOutcome::none, *failure);
       } else if (now - frame.received <= 1s) {
-        Observe(frame.received, value, frame_hash);
+        Observe(frame.received, inference, frame_hash);
       }
     }
   }
@@ -158,7 +160,7 @@ struct Faces::Impl {
     ++generation;
     active = false;
     challenge = {};
-    Finish({});
+    Finish(FaceResult{});
   }
 
   const std::filesystem::path models;
@@ -170,9 +172,8 @@ struct Faces::Impl {
   FaceResult result;
   std::optional<Frame> latest;
   Clock::time_point deadline, last_match, last_submit;
-  FaceWindow samples;
+  FacePolicy policy;
   std::array<uint64_t, kFaceGateCount> gate_failures{};
-  std::optional<uint64_t> last_presence_hash;
   Worker worker;
 };
 
@@ -235,6 +236,8 @@ bool Faces::Begin(FaceChallenge challenge) {
     return false;
   impl_->Reset();
   impl_->challenge = std::move(challenge);
+  impl_->policy = FacePolicy(impl_->challenge.purpose, impl_->challenge.templates);
+  impl_->result = impl_->policy.Result();
   impl_->active = true;
   const auto now = Clock::now();
   impl_->last_match = now;
@@ -243,10 +246,8 @@ bool Faces::Begin(FaceChallenge challenge) {
   impl_->worker.Start(
       impl_->mutex, [impl = impl_.get()](std::stop_token stop) { impl->Run(stop); },
       [impl = impl_.get()] {
-        impl->Finish({FaceState::failed,
-                      {},
-                      FaceOutcome::none,
-                      remotekit::Error{remotekit::ErrorCode::kInternal, "Face worker failed"}});
+        impl->Finish(FaceState::failed, FaceOutcome::none,
+                     remotekit::Error{remotekit::ErrorCode::kInternal, "Face worker failed"});
       });
   impl_->changed.notify_one();
   return true;

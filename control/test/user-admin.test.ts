@@ -193,7 +193,17 @@ test('clearing second factors removes PIN and face and disables face verificatio
       settings: { ...record.settings, faceEnabled: true },
       pin: { salt: 'salt', hash: 'hash' },
       face: {
-        sealed: h.store.security.faceVault.seal(id, [1, ...Array(127).fill(0)], 'model'),
+        sealed: h.store.security.faceVault.seal(
+          id,
+          {
+            version: 2,
+            templates: [
+              { source: 'enrolled', vector: [1, ...Array(127).fill(0)], addedAt: 1 },
+              { source: 'learned', vector: [0, 1, ...Array(126).fill(0)], addedAt: 2 },
+            ],
+          },
+          'model',
+        ),
         modelVersion: 'model',
       },
     });
@@ -224,7 +234,17 @@ test('self password reset preserves this login and clearing factors publishes au
     settings: { ...security.settings, faceEnabled: true, lockOnDeparture: true },
     pin: { salt: 'salt', hash: 'hash' },
     face: {
-      sealed: h.store.security.faceVault.seal(user.id, [1, ...Array(127).fill(0)], 'model'),
+      sealed: h.store.security.faceVault.seal(
+        user.id,
+        {
+          version: 2,
+          templates: [
+            { source: 'enrolled', vector: [1, ...Array(127).fill(0)], addedAt: 1 },
+            { source: 'learned', vector: [0, 1, ...Array(126).fill(0)], addedAt: 2 },
+          ],
+        },
+        'model',
+      ),
       modelVersion: 'model',
     },
   });

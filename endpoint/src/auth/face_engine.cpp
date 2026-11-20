@@ -44,36 +44,67 @@ uint64_t Fingerprint(std::span<const uint8_t> data) {
   return hash;
 }
 
+float BestSimilarity(std::span<const FaceTemplate> gallery, const FaceTemplate& value) {
+  float score = -1;
+  for (const auto& reference : gallery)
+    score = std::max(score, Similarity(reference, value));
+  return score;
+}
+
+bool ValidTemplate(const FaceTemplate& value) {
+  double squared_norm = 0;
+  for (float component : value) {
+    if (!std::isfinite(component))
+      return false;
+    squared_norm += double(component) * component;
+  }
+  return std::abs(std::sqrt(squared_norm) - 1) < 1e-3;
+}
+
 FaceSelection SelectFace(std::span<const FaceDetection> detections, int width, int height) {
   FaceSelection result;
+  float second_area = 0;
   for (const auto& candidate : detections) {
-    if (candidate[14] >= 0.90f && candidate[2] >= 64 && candidate[3] >= 64) {
+    if (candidate[14] < kDetectScore || candidate[2] < kMinFace || candidate[3] < kMinFace)
+      continue;
+    for (float component : candidate) {
+      if (!std::isfinite(component)) {
+        result.gate = FaceGate::nonfinite;
+        return result;
+      }
+    }
+    ++result.qualified;
+    const float area = candidate[2] * candidate[3];
+    if (area > result.face[2] * result.face[3]) {
+      second_area = result.face[2] * result.face[3];
       result.face = candidate;
-      ++result.qualified;
+    } else {
+      second_area = std::max(second_area, area);
     }
   }
-  if (result.qualified != 1) {
-    result.gate = result.qualified ? FaceGate::multiple_faces : FaceGate::no_qualified_face;
+  if (!result.qualified) {
+    result.gate = FaceGate::no_qualified_face;
     return result;
   }
-  for (float component : result.face) {
-    if (!std::isfinite(component)) {
-      result.gate = FaceGate::nonfinite;
+  if (second_area > result.face[2] * result.face[3] * 0.5f) {
+    result.gate = FaceGate::multiple_faces;
+    return result;
+  }
+  auto& face = result.face;
+  for (int i = 4; i < 14; i += 2) {
+    if (face[i] < 2 || face[i] > width - 3 || face[i + 1] < 2 || face[i + 1] > height - 3) {
+      result.gate = FaceGate::boundary;
       return result;
     }
   }
-  auto& face = result.face;
-  const float right = face[0] + face[2];
-  const float bottom = face[1] + face[3];
-  if (face[0] < -0.02f * width || face[1] < -0.02f * height || right > width + 0.02f * width ||
-      bottom > height + 0.02f * height) {
-    result.gate = FaceGate::boundary;
-    return result;
-  }
+  const float right = std::min(float(width), face[0] + face[2]);
+  const float bottom = std::min(float(height), face[1] + face[3]);
   face[0] = std::max(0.0f, face[0]);
   face[1] = std::max(0.0f, face[1]);
-  face[2] = std::min(float(width), right) - face[0];
-  face[3] = std::min(float(height), bottom) - face[1];
+  face[2] = right - face[0];
+  face[3] = bottom - face[1];
+  if (face[2] <= 0 || face[3] <= 0)
+    result.gate = FaceGate::boundary;
   return result;
 }
 
@@ -124,17 +155,25 @@ struct Engine::Impl {
     cv::Mat bgr;
     cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
     detector_->setInputSize(bgr.size());
-    cv::Mat detections;
-    detector_->detect(bgr, detections);
-    std::vector<FaceDetection> candidates(detections.rows);
-    for (int i = 0; i < detections.rows; ++i)
-      std::copy_n(detections.ptr<float>(i), 15, candidates[i].begin());
-    const auto selected = SelectFace(candidates, width, height);
+    auto candidates = Detect(bgr);
+    auto selected = SelectFace(candidates, width, height);
     FaceInference result;
-    result.detections = detections.rows;
+    cv::Mat gray;
+    cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+    cv::Scalar mean, deviation;
+    cv::meanStdDev(gray, mean, deviation);
+    if (selected.gate == FaceGate::no_qualified_face &&
+        (mean[0] < 65 || mean[0] > 190 || deviation[0] > 70 ||
+         cv::countNonZero(gray < 8) + cv::countNonZero(gray > 247) > gray.total() * 0.15)) {
+      candidates = Detect(CorrectLuminance(bgr));
+      selected = SelectFace(candidates, width, height);
+      result.detection_retried = true;
+    }
+    result.face = selected.face;
+    result.detections = int(candidates.size());
     result.qualified = selected.qualified;
     result.gate = selected.gate;
-    if (selected.qualified == 1)
+    if (selected.qualified)
       result.detection_score = selected.face[14];
     if (result.gate != FaceGate::none)
       return result;
@@ -143,15 +182,11 @@ struct Engine::Impl {
     RK_ASSIGN_OR_RETURN(real2, RealProbability(v2_, bgr, face, 2.7f));
     result.live_v1se = real1;
     result.live_v2 = real2;
-    if (real1 < 0.70f)
-      result.gate = FaceGate::live_v1se;
-    else if (real2 < 0.70f)
-      result.gate = FaceGate::live_v2;
-    else if ((real1 + real2) * 0.5f < 0.90f)
-      result.gate = FaceGate::live_mean;
+    result.gate = PerFrameLiveGate(real1, real2);
     cv::Mat aligned, features;
     cv::Mat detection(1, 15, CV_32F, const_cast<float*>(face));
     recognizer_->alignCrop(bgr, detection, aligned);
+    result.quality = MeasureQuality(bgr, aligned, selected.face);
     recognizer_->feature(aligned, features);
     FaceTemplate value;
     if (features.total() != value.size() || features.type() != CV_32F || !features.isContinuous())
@@ -165,6 +200,76 @@ struct Engine::Impl {
   }
 
  private:
+  std::vector<FaceDetection> Detect(const cv::Mat& image) {
+    cv::Mat detections;
+    detector_->detect(image, detections);
+    std::vector<FaceDetection> candidates(detections.rows);
+    for (int i = 0; i < detections.rows; ++i)
+      std::copy_n(detections.ptr<float>(i), 15, candidates[i].begin());
+    return candidates;
+  }
+
+  static cv::Mat CorrectLuminance(const cv::Mat& image) {
+    cv::Mat lab;
+    cv::cvtColor(image, lab, cv::COLOR_BGR2Lab);
+    std::vector<cv::Mat> channels;
+    cv::split(lab, channels);
+    const double mean = std::clamp(cv::mean(channels[0])[0], 1.0, 254.0);
+    const double gamma = std::clamp(std::log(120.0 / 255) / std::log(mean / 255), 0.45, 2.0);
+    cv::Mat table(1, 256, CV_8U);
+    for (int i = 0; i < 256; ++i)
+      table.at<uint8_t>(i) = cv::saturate_cast<uint8_t>(255 * std::pow(i / 255.0, gamma));
+    cv::LUT(channels[0], table, channels[0]);
+    cv::createCLAHE(1.5, {4, 4})->apply(channels[0], channels[0]);
+    cv::merge(channels, lab);
+    cv::Mat result;
+    cv::cvtColor(lab, result, cv::COLOR_Lab2BGR);
+    return result;
+  }
+
+  static FaceQuality MeasureQuality(const cv::Mat& frame,
+                                    const cv::Mat& aligned,
+                                    const FaceDetection& face) {
+    FaceQuality quality;
+    const cv::Point2f eye1(face[4], face[5]), eye2(face[6], face[7]);
+    const cv::Point2f eyes = (eye1 + eye2) * 0.5f;
+    const cv::Point2f mouth =
+        (cv::Point2f(face[10], face[11]) + cv::Point2f(face[12], face[13])) * 0.5f;
+    const cv::Point2f nose(face[8], face[9]);
+    quality.inter_ocular = float(cv::norm(eye2 - eye1));
+    const cv::Point2f horizontal = (eye2 - eye1) / std::max(quality.inter_ocular, 1.0f);
+    cv::Point2f vertical(-horizontal.y, horizontal.x);
+    if ((mouth - eyes).dot(vertical) < 0)
+      vertical *= -1;
+    quality.yaw = (nose - eyes).dot(horizontal) / std::max(quality.inter_ocular, 1.0f);
+    quality.pitch = (nose - eyes).dot(vertical) / std::max((mouth - eyes).dot(vertical), 1.0f);
+    cv::Mat gray, laplacian;
+    cv::cvtColor(aligned, gray, cv::COLOR_BGR2GRAY);
+    cv::Laplacian(gray, laplacian, CV_32F);
+    cv::Scalar mean, deviation;
+    cv::meanStdDev(laplacian, mean, deviation);
+    quality.sharpness = float(deviation[0] * deviation[0]);
+    const auto interior = gray(cv::Rect(20, 20, 72, 72));
+    cv::meanStdDev(interior, mean, deviation);
+    quality.mean_luma = float(mean[0]);
+    quality.contrast = float(deviation[0]);
+    quality.dark_fraction = float(cv::countNonZero(interior < 8)) / float(interior.total());
+    quality.bright_fraction = float(cv::countNonZero(interior > 247)) / float(interior.total());
+    cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+    const cv::Rect bounds(0, 0, frame.cols, frame.rows);
+    const cv::Rect box = cv::Rect(int(face[0]), int(face[1]), int(face[2]), int(face[3])) & bounds;
+    const cv::Rect surrounding =
+        cv::Rect(int(face[0] - face[2] * 0.5f), int(face[1] - face[3] * 0.5f), int(face[2] * 2),
+                 int(face[3] * 2)) &
+        bounds;
+    const double area = surrounding.area() - box.area();
+    quality.background_luma =
+        area > 0 ? float((cv::sum(gray(surrounding))[0] - cv::sum(gray(box))[0]) / area)
+                 : quality.mean_luma;
+    quality.backlight = quality.background_luma - quality.mean_luma;
+    return quality;
+  }
+
   static Result<float> RealProbability(cv::dnn::Net& net,
                                        const cv::Mat& frame,
                                        const float* face,

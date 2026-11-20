@@ -5,13 +5,14 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  LinearProgress,
   Stack,
   TextField,
   Typography,
 } from '@mui/material';
 import React, { useEffect, useRef, useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
-import type { AuthSettings, AuthState } from '../../shared/security';
+import type { AuthSettings, AuthState, FaceHint } from '../../shared/security';
 import { SettingRow, SettingSection, SettingSwitch } from '../app/setting-layout';
 import { useAutoFocus } from '../editing/local-autofocus';
 import { failureError, FailureNote } from '../failures';
@@ -22,6 +23,16 @@ import type { useAutoLock } from './auth-idle';
 import './security-settings.css';
 
 type Change = 'password' | 'pin' | 'removePin' | 'enroll' | 'removeFace' | 'policy';
+const enrollmentHints: Record<FaceHint, string> = {
+  no_face: '请把脸放进画面',
+  multiple_faces: '画面里只保留你一个人',
+  too_far: '靠近一些',
+  too_dark: '光线太暗',
+  too_bright: '光线太亮',
+  backlit: '避免背光，面向光源',
+  blurry: '保持稳定',
+  turn_head: '缓慢转动头部，上下左右看看',
+};
 const titles: Record<Change, string> = {
   password: '更改账户密码',
   pin: '设置 PIN',
@@ -341,15 +352,25 @@ export function SecuritySettings({
                       摄像头画面通过当前连接发送给验证服务。请正对摄像头完成录入。
                     </Typography>
                     {camera.explicit === 'enroll' && <CameraPreview stream={camera.stream} />}
-                    {enrollmentStatus && (
+                    {enrollmentStatus === 'pending' && (
+                      <Stack spacing={1}>
+                        <LinearProgress
+                          variant="determinate"
+                          value={(auth.face.progress ?? 0) * 100}
+                          sx={{ height: 4, borderRadius: 2, width: '100%' }}
+                        />
+                        <Typography variant="body2" color="text.secondary" role="status">
+                          {auth.face.hint ? enrollmentHints[auth.face.hint] : '保持面对摄像头'}
+                        </Typography>
+                      </Stack>
+                    )}
+                    {enrollmentStatus && enrollmentStatus !== 'pending' && (
                       <Typography role="status">
-                        {enrollmentStatus === 'pending'
-                          ? '正在录入，请正对摄像头。'
-                          : enrollmentStatus === 'expired'
-                            ? '录入已超时，原有设置仍有效。'
-                            : enrollmentStatus === 'failed' || enrollmentStatus === 'absent'
-                              ? '未能完成录入，原有设置仍有效。'
-                              : '录入已完成。'}
+                        {enrollmentStatus === 'expired'
+                          ? '录入已超时，原有设置仍有效。'
+                          : enrollmentStatus === 'failed' || enrollmentStatus === 'absent'
+                            ? '未能完成录入，原有设置仍有效。'
+                            : '录入已完成。'}
                       </Typography>
                     )}
                   </>

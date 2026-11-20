@@ -6,7 +6,8 @@ import { RemoteKitError, type ErrorCode } from '../../shared/errors';
 import { RetryUnit } from '../../shared/retry-unit';
 import { log } from '../log';
 import { baseline } from './baseline';
-import { corruptState } from './codec';
+import { corruptState, decodeJson } from './codec';
+import { faceTemplate, sealFaceGallery } from './sealed-documents';
 import type { AtRestKey } from '../auth/crypto';
 
 export interface MigrationContext {
@@ -73,9 +74,44 @@ export const migrations: Migration[] = [
       db.exec('CREATE TABLE session_node_bindings (tenant TEXT PRIMARY KEY, node_id TEXT NOT NULL)');
     },
   },
+  {
+    version: 27,
+    name: 'face template galleries',
+    up(db, { atRestKey }) {
+      const addedAt = Date.now();
+      const save = db.prepare('UPDATE user_security SET face_ciphertext=? WHERE user_id=?');
+      for (const row of db
+        .prepare(
+          'SELECT user_id,face_ciphertext,face_model FROM user_security WHERE face_ciphertext IS NOT NULL',
+        )
+        .all() as {
+        user_id: string;
+        face_ciphertext: string;
+        face_model: string;
+      }[]) {
+        const vector = decodeJson(
+          atRestKey.open(JSON.stringify([row.user_id, row.face_model]), row.face_ciphertext).toString(),
+          faceTemplate,
+          `user_security.face_ciphertext ${row.user_id}`,
+        );
+        save.run(
+          sealFaceGallery(
+            atRestKey,
+            row.user_id,
+            {
+              version: 2,
+              templates: [{ source: 'enrolled', vector, addedAt }],
+            },
+            row.face_model,
+          ),
+          row.user_id,
+        );
+      }
+    },
+  },
 ];
 
-export const currentVersion = 26;
+export const currentVersion = 27;
 export interface MigrationOptions extends MigrationContext {
   backupDirectory: string;
   buildId: string;

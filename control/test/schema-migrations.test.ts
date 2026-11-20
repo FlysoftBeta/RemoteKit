@@ -20,6 +20,7 @@ import { migrations, migrate } from '../server/persistence/migrations';
 import { RemoteKitError } from '../shared/errors';
 import { checkIntegrity } from '../server/persistence/integrity';
 import { registerUser } from './server-fixture';
+import { FaceVault, defaultAuthSettings } from '../server/auth/crypto';
 const fixture = readFileSync(new URL('./fixtures/control-v23.sql', import.meta.url), 'utf8');
 const schema = (db: Sqlite.Database) =>
   db
@@ -28,13 +29,103 @@ const schema = (db: Sqlite.Database) =>
     )
     .all();
 
+test('v23 face vectors migrate once with the existing key and AAD to strict v2 galleries', () => {
+  const db = new Sqlite(':memory:');
+  const key = new AtRestKey(null);
+  const vault = new FaceVault(key);
+  const vector = [1, ...Array(127).fill(0)];
+  const sealed = key.seal(JSON.stringify(['user', 'model']), Buffer.from(JSON.stringify(vector)));
+  db.exec(fixture);
+  db.prepare('INSERT INTO users(id,username,tenant,salt,password_hash) VALUES (?,?,?,?,?)').run(
+    'user',
+    'user',
+    'tenant',
+    'salt',
+    'hash',
+  );
+  db.prepare('INSERT INTO user_security VALUES (?,?,NULL,NULL,?,?)').run(
+    'user',
+    JSON.stringify(defaultAuthSettings()),
+    sealed,
+    'model',
+  );
+  const before = Date.now();
+  try {
+    assert.throws(() => vault.open('user', sealed, 'model'), { reason: 'corrupt_record' });
+    migrate(db, { backupDirectory: '', buildId: 'test', atRestKey: key });
+    const row = db.prepare('SELECT face_ciphertext FROM user_security').get() as { face_ciphertext: string };
+    const gallery = vault.open('user', row.face_ciphertext, 'model');
+    assert.deepEqual(gallery, {
+      version: 2,
+      templates: [{ source: 'enrolled', vector, addedAt: gallery.templates[0].addedAt }],
+    });
+    assert(gallery.templates[0].addedAt >= before && gallery.templates[0].addedAt <= Date.now());
+    assert.throws(() => vault.open('other', row.face_ciphertext, 'model'), { reason: 'corrupt_record' });
+    migrate(db, { backupDirectory: '', buildId: 'test', atRestKey: key });
+    assert.deepEqual(db.prepare('SELECT face_ciphertext FROM user_security').get(), row);
+    for (const malformed of [
+      vector,
+      { ...gallery, version: 1 },
+      { ...gallery, extra: true },
+      { ...gallery, templates: [] },
+      { ...gallery, templates: [{ source: 'learned', vector, addedAt: 1 }] },
+      { ...gallery, templates: [{ source: 'enrolled', vector, addedAt: 1.5 }] },
+      { ...gallery, templates: [{ source: 'enrolled', vector, addedAt: 1, extra: true }] },
+      { ...gallery, templates: [{ source: 'enrolled', vector: vector.map((n) => n * 1.002), addedAt: 1 }] },
+      { ...gallery, templates: Array(6).fill(gallery.templates[0]) },
+      {
+        ...gallery,
+        templates: [gallery.templates[0], ...Array(5).fill({ source: 'learned', vector, addedAt: 1 })],
+      },
+    ]) {
+      const invalid = key.seal(JSON.stringify(['user', 'model']), Buffer.from(JSON.stringify(malformed)));
+      assert.throws(() => vault.open('user', invalid, 'model'), { reason: 'corrupt_record' });
+      assert.throws(() => vault.seal('user', malformed as never, 'model'), { reason: 'corrupt_record' });
+    }
+  } finally {
+    db.close();
+  }
+});
+
+test('invalid v1 faces roll back the entire numbered migration', () => {
+  const db = new Sqlite(':memory:');
+  db.exec(fixture);
+  db.prepare('INSERT INTO users(id,username,tenant,salt,password_hash) VALUES (?,?,?,?,?)').run(
+    'user',
+    'user',
+    'tenant',
+    'salt',
+    'hash',
+  );
+  db.prepare('INSERT INTO user_security VALUES (?,?,NULL,NULL,?,?)').run(
+    'user',
+    JSON.stringify(defaultAuthSettings()),
+    'broken',
+    'model',
+  );
+  try {
+    assert.throws(
+      () => migrate(db, { backupDirectory: '', buildId: 'test', atRestKey: new AtRestKey(null) }),
+      /migration failed/i,
+    );
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 23 });
+    assert.deepEqual(db.prepare('SELECT face_ciphertext FROM user_security').get(), {
+      face_ciphertext: 'broken',
+    });
+  } finally {
+    db.close();
+  }
+});
+
 test('v25 migrates bindings as an empty table and rejects malformed schema versions', () => {
   const db = new Sqlite(':memory:');
   const options = { backupDirectory: '', buildId: 'test', atRestKey: new AtRestKey(null) };
   try {
-    db.exec('CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (25)');
+    db.exec(
+      'CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (25); CREATE TABLE user_security (user_id TEXT, face_ciphertext TEXT, face_model TEXT)',
+    );
     migrate(db, options);
-    assert.deepEqual(db.prepare('SELECT version FROM schema_version').all(), [{ version: 26 }]);
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').all(), [{ version: 27 }]);
     assert.deepEqual(db.prepare('SELECT * FROM session_node_bindings').all(), []);
     db.prepare('UPDATE schema_version SET version=?').run('26bad');
     assert.throws(() => migrate(db, options), { reason: 'corrupt_state' });
@@ -57,7 +148,7 @@ test('release v23 migrates durable retry state and keeps a verified backup', () 
       assert(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='retry_units'").get());
       assert.equal(schema(store.db).length, before.length + 3);
       assert(Number(store.db.pragma('schema_version', { simple: true })) > Number(version));
-      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 26n }]);
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 27n }]);
       assert.equal(existsSync(join(directory, 'backups')), true);
     } finally {
       store.db.close();
@@ -82,7 +173,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
   }
   writeFileSync(join(backupDirectory, 'keep.txt'), 'keep');
   migrations.push({
-    version: 27,
+    version: 28,
     name: 'future-test',
     up(database) {
       database.exec('CREATE TABLE future_step(id TEXT)');
@@ -99,7 +190,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
     const copy = new Sqlite(
       join(
         backupDirectory,
-        readdirSync(backupDirectory).find((name) => /^control-v23-to-v27-test-.*T.*Z\.db$/.test(name))!,
+        readdirSync(backupDirectory).find((name) => /^control-v23-to-v28-test-.*T.*Z\.db$/.test(name))!,
       ),
       { readonly: true },
     );

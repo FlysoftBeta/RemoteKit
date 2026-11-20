@@ -14,9 +14,13 @@ import type { EndpointLink } from '../server/endpoint/link';
 import { ControlDatabase } from '../server/persistence/database';
 import type { FaceStatus } from '../shared/security';
 import { RemoteKitError } from '../shared/errors';
+import { configureLog } from '../server/log';
+import { readFaceStatus } from '../server/endpoint/face-status';
+import { faceHints } from '../shared/security';
 
 const password = 'password123';
 const template = Array.from({ length: 128 }, (_, i) => (i === 0 ? 1 : 0));
+const templates = [template, [0, 1, ...Array(126).fill(0)], [0, 0, 1, ...Array(125).fill(0)]];
 const defer = () => {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
@@ -58,6 +62,8 @@ class AuthEndpoint implements EndpointLink {
   calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   connectionId?: string;
   faceStatus: FaceStatus = 'pending';
+  faceFields: Record<string, unknown> = {};
+  facePurpose?: string;
   faceOutcome?: 'no_matching_face' | 'camera_unavailable';
   statusGate?: ReturnType<typeof defer>;
   authGate?: ReturnType<typeof defer>;
@@ -112,6 +118,7 @@ class AuthEndpoint implements EndpointLink {
       case 'service.face.capabilities':
         return { available: true, modelVersion: 'test-sface' };
       case 'service.face.begin':
+        this.facePurpose = String(params.purpose);
         return { accepted: true };
       case 'service.face.status':
         if (this.statusGate) await this.statusGate.promise;
@@ -119,7 +126,9 @@ class AuthEndpoint implements EndpointLink {
           challengeId: params.challengeId,
           status: this.faceStatus,
           outcome: this.faceOutcome,
-          ...(this.faceStatus === 'enrolled' ? { template } : {}),
+          ...(this.faceStatus === 'enrolled' ? { templates } : {}),
+          ...(this.facePurpose === 'enroll' && this.faceStatus === 'pending' ? { progress: 0.25 } : {}),
+          ...this.faceFields,
         };
       default:
         return { accepted: true };
@@ -271,10 +280,10 @@ test('face template is encrypted and late matches or enrollment results cannot c
   assert.equal(readFileSync(path + '.key').length, 32);
   const reopened = new ControlDatabase(path, { buildId: 'test' });
   try {
-    assert.deepEqual(
-      reopened.security.faceVault.open(f.user.id, stored.sealed, stored.modelVersion),
-      template,
-    );
+    assert.deepEqual(reopened.security.faceVault.open(f.user.id, stored.sealed, stored.modelVersion), {
+      version: 2,
+      templates: templates.map((vector) => ({ source: 'enrolled', vector, addedAt: f.clock.wallMs() })),
+    });
   } finally {
     reopened.db.close();
   }
@@ -282,7 +291,7 @@ test('face template is encrypted and late matches or enrollment results cannot c
   const verify = await f.request('auth.face.begin', { purpose: 'verify' });
   assert.equal(JSON.stringify(verify).includes(JSON.stringify(template)), false);
   const begin = f.endpoint.calls.filter((c) => c.method === 'service.face.begin').slice(-1)[0];
-  assert.deepEqual(begin?.params.template, template);
+  assert.deepEqual(begin?.params.templates, templates);
   assert.equal(begin?.params.epoch, verify.serviceEpoch);
   f.endpoint.faceStatus = 'matched';
   f.endpoint.statusGate = defer();
@@ -309,4 +318,226 @@ test('face template is encrypted and late matches or enrollment results cannot c
   f.endpoint.faceStatus = 'matched';
   await f.control.viewers.pollFaceAuth();
   assert.equal((await f.request('auth.get')).locked, false);
+});
+
+async function enrolledFixture(t: TestContext) {
+  const f = await fixture(t);
+  await f.serviceOffer();
+  await f.request('auth.face.begin', { purpose: 'enroll', currentPassword: password });
+  assert.equal(
+    'templates' in
+      f.endpoint.calls.filter((call) => call.method === 'service.face.begin').slice(-1)[0]!.params,
+    false,
+  );
+  f.endpoint.faceStatus = 'enrolled';
+  await f.control.viewers.pollFaceAuth();
+  const gallery = () => {
+    const face = f.store.security.security(f.user.id).face!;
+    return f.store.security.faceVault.open(f.user.id, face.sealed, face.modelVersion);
+  };
+  const verify = async () => {
+    f.endpoint.faceStatus = 'pending';
+    f.endpoint.faceFields = {};
+    await f.request('auth.lock');
+    await f.control.servicePeers.authorize(f.tenant);
+    await f.request('auth.face.begin', { purpose: 'verify' });
+  };
+  return { ...f, gallery, verify };
+}
+
+const learnedVector = [0, 0, 0, 1, ...Array(124).fill(0)];
+
+test('enrollment progress and hints reach AuthState while vectors stay private', async (t) => {
+  const f = await fixture(t);
+  await f.serviceOffer();
+  const started = await f.request('auth.face.begin', { purpose: 'enroll', currentPassword: password });
+  assert.equal(started.face.progress, 0);
+  for (const hint of faceHints) {
+    f.endpoint.faceFields = { progress: 0.75, hint };
+    await f.control.viewers.pollFaceAuth();
+    const state = await f.request('auth.get');
+    assert.equal(state.face.progress, 0.75);
+    assert.equal(state.face.hint, hint);
+    assert.equal('templates' in state.face || 'learn' in state.face, false);
+  }
+  f.endpoint.faceFields = {};
+  await f.control.viewers.pollFaceAuth();
+  assert.equal((await f.request('auth.get')).face.hint, undefined);
+  f.endpoint.faceFields = { progress: 2, templates };
+  await f.control.viewers.pollFaceAuth();
+  const failed = await f.request('auth.get');
+  assert.equal(failed.face.status, 'failed');
+  assert.equal(failed.face.progress, undefined);
+  assert.equal(failed.face.hint, undefined);
+  assert.equal(f.store.security.security(f.user.id).face, undefined);
+});
+
+test('matched verification learns once, replaces oldest learned entry, and re-enrollment replaces the gallery', async (t) => {
+  const f = await enrolledFixture(t);
+  const record = f.store.security.security(f.user.id);
+  const gallery = f.gallery();
+  gallery.templates.push(
+    ...[40, 10, 30, 20].map((addedAt) => ({ source: 'learned' as const, vector: template, addedAt })),
+  );
+  record.face!.sealed = f.store.security.faceVault.seal(f.user.id, gallery, 'test-sface');
+  f.store.security.saveSecurity(f.user.id, record);
+  await f.verify();
+  const begin = f.endpoint.calls.filter((call) => call.method === 'service.face.begin').slice(-1)[0]!;
+  assert.deepEqual(
+    begin.params.templates,
+    gallery.templates.map((entry) => entry.vector),
+  );
+  assert.equal('template' in begin.params, false);
+  f.endpoint.faceStatus = 'matched';
+  f.endpoint.faceFields = { learn: learnedVector };
+  await f.control.viewers.pollFaceAuth();
+  assert.equal((await f.request('auth.get')).locked, false);
+  assert.deepEqual(
+    f
+      .gallery()
+      .templates.filter((entry) => entry.source === 'learned')
+      .map((entry) => entry.addedAt),
+    [40, 30, 20, f.clock.wallMs()],
+  );
+  assert.deepEqual(f.gallery().templates.slice(-1)[0]!.vector, learnedVector);
+  await f.request('auth.verify', { method: 'password', secret: password });
+  await f.control.viewers.pollFaceAuth();
+  assert.equal(f.gallery().templates.length, 7);
+  f.endpoint.faceFields = {};
+  await f.request('auth.face.begin', { purpose: 'enroll', currentPassword: password });
+  f.endpoint.faceStatus = 'enrolled';
+  await f.control.viewers.pollFaceAuth();
+  assert.equal(f.gallery().templates.length, 3);
+  assert(f.gallery().templates.every((entry) => entry.source === 'enrolled'));
+  await f.request('auth.face.remove', { currentPassword: password });
+  assert.equal(f.store.security.security(f.user.id).face, undefined);
+});
+
+for (const method of ['pin', 'password'] as const) {
+  test(`${method} unlock learns only from the most recent, fresh verify poll`, async (t) => {
+    const f = await enrolledFixture(t);
+    if (method === 'pin') await f.request('auth.settings', { currentPassword: password, pin: '123456' });
+    const unlock = () => f.request('auth.verify', { method, secret: method === 'pin' ? '123456' : password });
+    await f.verify();
+    f.endpoint.faceFields = { learn: learnedVector };
+    await f.control.viewers.pollFaceAuth();
+    const state = await f.request('auth.get');
+    assert.equal(
+      'learn' in state.face || 'templates' in state.face || 'progress' in state.face || 'hint' in state.face,
+      false,
+    );
+    f.clock.advance(2000);
+    await unlock();
+    assert.equal(f.gallery().templates.length, 4);
+    for (const invalidation of [
+      'age',
+      'new-poll',
+      'new-challenge',
+      'cancel',
+      'expired',
+      'poll-error',
+      'presence',
+    ]) {
+      f.clock.advance(61000);
+      await f.verify();
+      f.endpoint.faceFields = { learn: learnedVector };
+      await f.control.viewers.pollFaceAuth();
+      if (invalidation === 'age') f.clock.advance(2001);
+      if (invalidation === 'expired') f.clock.advance(30001);
+      if (invalidation === 'new-poll') {
+        f.endpoint.faceFields = {};
+        await f.control.viewers.pollFaceAuth();
+      }
+      if (['new-challenge', 'cancel', 'presence'].includes(invalidation)) {
+        const challengeId = (await f.request('auth.get')).face.challengeId;
+        await f.request('auth.face.cancel', { challengeId });
+        if (invalidation !== 'cancel')
+          await f.request('auth.face.begin', {
+            purpose: invalidation === 'presence' ? 'presence' : 'verify',
+          });
+      }
+      if (invalidation === 'poll-error') {
+        const original = f.endpoint.request.bind(f.endpoint);
+        const mock = t.mock.method(
+          f.endpoint,
+          'request',
+          async (name: string, tenant: string, params?: Record<string, unknown>) => {
+            if (name === 'service.face.status') throw new RemoteKitError('unavailable', 'poll failed');
+            return original(name, tenant, params);
+          },
+        );
+        await f.control.viewers.pollFaceAuth();
+        mock.mock.restore();
+      }
+      if (invalidation === 'presence') await f.control.viewers.pollFaceAuth();
+      await unlock();
+      assert.equal(f.gallery().templates.length, 4, invalidation);
+    }
+  });
+}
+
+test('learning save failures are logged with an error id and never fail either unlock path', async (t) => {
+  const f = await enrolledFixture(t);
+  const records: any[] = [];
+  configureLog({ write: (line) => records.push(JSON.parse(line)) });
+  for (const matched of [false, true]) {
+    await f.verify();
+    f.endpoint.faceFields = { learn: learnedVector };
+    f.endpoint.faceStatus = matched ? 'matched' : 'pending';
+    if (!matched) await f.control.viewers.pollFaceAuth();
+    const mock = t.mock.method(f.store.security, 'saveSecurity', () => {
+      throw new Error('disk failed');
+    });
+    if (matched) await f.control.viewers.pollFaceAuth();
+    else await f.request('auth.verify', { method: 'password', secret: password });
+    mock.mock.restore();
+    assert.equal((await f.request('auth.get')).locked, false);
+    assert.equal(f.gallery().templates.length, 3);
+  }
+  assert.equal(
+    records.filter(
+      (record) => record.ev === 'security.save_face_learning_failed' && /^c-/.test(record.errorId),
+    ).length,
+    2,
+  );
+});
+
+test('malformed faceStatus shapes fail before learning or enrollment can commit', async (t) => {
+  const f = await enrolledFixture(t);
+  for (const fields of [
+    { template },
+    { templates },
+    { learn: Array(128).fill(0) },
+    { learn: template.map((n) => n * 1.002) },
+    { learn: [NaN, ...Array(127).fill(0)] },
+    { learn: template, progress: 0.5 },
+    { learn: template, hint: 'no_face' },
+    { learn: template, unknown: true },
+    { challengeId: 'other', learn: template },
+  ]) {
+    f.clock.advance(61000);
+    await f.verify();
+    f.endpoint.faceStatus = 'matched';
+    f.endpoint.faceFields = fields;
+    await f.control.viewers.pollFaceAuth();
+    const state = await f.request('auth.get');
+    assert.equal(state.locked, true);
+    assert.equal(state.face.status, 'failed');
+    assert.equal(f.gallery().templates.length, 3);
+  }
+  for (const fields of [
+    { status: 'pending' },
+    { status: 'pending', progress: -0.1 },
+    { status: 'pending', progress: NaN },
+    { status: 'pending', progress: 0.5, hint: 'unknown' },
+    { status: 'enrolled', templates: templates.slice(0, 2) },
+    { status: 'enrolled', templates: [...templates, ...templates] },
+    { status: 'enrolled', templates, learn: template },
+    { status: 'enrolled', templates, progress: 1 },
+    { status: 'enrolled', templates: [template, template, Array(128).fill(0)] },
+  ])
+    assert.throws(() => readFaceStatus({ challengeId: 'id', ...fields }, 'enroll', 'id'));
+  assert.throws(() =>
+    readFaceStatus({ challengeId: 'id', status: 'matched', learn: template }, 'presence', 'id'),
+  );
 });

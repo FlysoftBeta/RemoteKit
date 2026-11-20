@@ -7,6 +7,7 @@ import type { AuthSettings } from '../../shared/security';
 import { AtRestKey, FaceVault, defaultAuthSettings, type SecretHash } from '../auth/crypto';
 import type { ControlDatabase } from '../persistence/database';
 import { emptyWorkspace } from '../persistence/workspaces';
+import type { FaceGallery } from '../persistence/sealed-documents';
 
 // Every Control version stored passwords and PINs as hex scrypt(N=16384, r=8, p=1, 64 bytes)
 // with a hex salt, so a hash in any other shape came from an unknown method and is dropped.
@@ -28,7 +29,7 @@ export interface RecoveredUser {
   disabledAt: number | null;
   settings: AuthSettings;
   pin?: SecretHash;
-  face?: { template: number[]; modelVersion: string };
+  face?: { gallery: FaceGallery; modelVersion: string };
 }
 
 export interface RecoveryPlan {
@@ -196,7 +197,7 @@ export function planRecovery(source: string, options: RecoveryOptions): Recovery
     if (sealed && modelVersion) {
       try {
         if (!vault) throw new Error('没有旧 key');
-        user.face = { template: vault.open(user.id, sealed, modelVersion), modelVersion };
+        user.face = { gallery: vault.open(user.id, sealed, modelVersion), modelVersion };
       } catch (error) {
         skipped.push(`${user.username}: 人脸无法解密（${(error as Error).message}），放弃人脸`);
       }
@@ -254,7 +255,7 @@ export function applyRecovery(store: ControlDatabase, plan: RecoveryPlan) {
         settings: user.settings,
         pin: user.pin,
         face: user.face && {
-          sealed: store.security.faceVault.seal(user.id, user.face.template, user.face.modelVersion),
+          sealed: store.security.faceVault.seal(user.id, user.face.gallery, user.face.modelVersion),
           modelVersion: user.face.modelVersion,
         },
       });

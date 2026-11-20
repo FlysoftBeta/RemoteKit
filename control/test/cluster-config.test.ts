@@ -240,12 +240,15 @@ test('face templates, placements and profile keys survive a Control restart', as
   const directory = await mkdtemp(join(tmpdir(), 'rk-placement-'));
   const path = join(directory, 'control.db');
   let store = new ControlDatabase(path, { buildId: 'test' });
-  const template = Array(128).fill(1 / Math.sqrt(128));
-  const face = store.security.faceVault.seal('user', template, 'model');
+  const gallery = {
+    version: 2 as const,
+    templates: [{ source: 'enrolled' as const, vector: Array(128).fill(1 / Math.sqrt(128)), addedAt: 1 }],
+  };
+  const face = store.security.faceVault.seal('user', gallery, 'model');
   store.db.close();
   try {
     store = new ControlDatabase(path, { buildId: 'test' });
-    assert.deepEqual(store.security.faceVault.open('user', face, 'model'), template);
+    assert.deepEqual(store.security.faceVault.open('user', face, 'model'), gallery);
     const nodes = new NodeRegistry({
       nodes: { alpha: testNode('alpha') },
       privateKey: Buffer.alloc(32).toString('base64'),
@@ -261,7 +264,7 @@ test('face templates, placements and profile keys survive a Control restart', as
     placement = new Placement(store, nodes);
     assert.deepEqual(placement.peek('tenant'), assigned);
     assert.equal(placement.keys(placement.resolve('tenant')).profileKey, profileKey);
-    assert.deepEqual(store.security.faceVault.open('user', face, 'model'), template);
+    assert.deepEqual(store.security.faceVault.open('user', face, 'model'), gallery);
     nodes.stop();
   } finally {
     store.db.close();

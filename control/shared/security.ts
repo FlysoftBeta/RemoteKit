@@ -13,6 +13,17 @@ export interface AuthSettings {
 
 export type FacePurpose = 'enroll' | 'verify' | 'presence';
 export type FaceStatus = 'pending' | 'matched' | 'enrolled' | 'absent' | 'failed' | 'expired';
+export const faceHints = [
+  'no_face',
+  'multiple_faces',
+  'too_far',
+  'too_dark',
+  'too_bright',
+  'backlit',
+  'blurry',
+  'turn_head',
+] as const;
+export type FaceHint = (typeof faceHints)[number];
 
 export interface AuthState {
   user: ProductUser;
@@ -31,6 +42,8 @@ export interface AuthState {
     challengeId?: string;
     purpose?: FacePurpose;
     status?: FaceStatus;
+    progress?: number;
+    hint?: FaceHint;
   };
   endpointGeneration: number;
 }

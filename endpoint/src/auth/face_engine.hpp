@@ -7,12 +7,25 @@
 
 namespace rk::auth {
 
-inline constexpr float kMatchThreshold = 0.45f;
+inline constexpr float kMatchThreshold = 0.41f;
+inline constexpr float kLearnFloor = 0.335f;
+inline constexpr float kNovelty = 0.60f;
+inline constexpr float kDiversity = 0.995f;
+inline constexpr float kDetectScore = 0.90f;
+inline constexpr float kMinFace = 40;
 using FaceDetection = std::array<float, 15>;
 
 bool Normalize(FaceTemplate& value);
 float Similarity(const FaceTemplate& lhs, const FaceTemplate& rhs);
+float BestSimilarity(std::span<const FaceTemplate> gallery, const FaceTemplate& value);
+bool ValidTemplate(const FaceTemplate& value);
 uint64_t Fingerprint(std::span<const uint8_t> data);
+
+inline FaceGate PerFrameLiveGate(float first, float second) {
+  if (first < 0.50f)
+    return FaceGate::live_v1se;
+  return second < 0.50f ? FaceGate::live_v2 : FaceGate::none;
+}
 
 struct FaceSelection {
   FaceGate gate = FaceGate::none;
@@ -21,7 +34,23 @@ struct FaceSelection {
 };
 FaceSelection SelectFace(std::span<const FaceDetection> detections, int width, int height);
 
+struct FaceQuality {
+  float inter_ocular = 0;
+  float yaw = 0;
+  float pitch = 0;
+  float sharpness = 0;
+  float mean_luma = 0;
+  float dark_fraction = 0;
+  float bright_fraction = 0;
+  float contrast = 0;
+  float background_luma = 0;
+  float backlight = 0;
+};
+
 struct FaceInference {
+  FaceDetection face{};
+  FaceQuality quality;
+  bool detection_retried = false;
   FaceGate gate = FaceGate::none;
   int detections = 0;
   int qualified = 0;

@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace rk::auth {
 
@@ -25,11 +26,22 @@ enum class FaceGate {
   live_v2,
   live_mean,
   embedding,
+  too_far,
+  too_dark,
+  too_bright,
+  backlit,
+  blurry,
+  inconsistent,
+  not_diverse,
+  identity,
+  live_set_v1se,
+  live_set_v2,
   count
 };
 inline constexpr size_t kFaceGateCount = static_cast<size_t>(FaceGate::count);
 
 using FaceTemplate = std::array<float, 128>;
+using FaceGallery = std::vector<FaceTemplate>;
 
 enum class FacePurpose { enroll, verify, presence };
 enum class FaceState { pending, matched, enrolled, absent, failed, expired };
@@ -45,16 +57,19 @@ struct FaceChallenge {
   std::string challenge_id;
   FacePurpose purpose = FacePurpose::verify;
   uint32_t timeout_ms = 0;
-  std::optional<FaceTemplate> face_template;
+  FaceGallery templates;
 };
 
 enum class FaceOutcome { none, no_matching_face, camera_unavailable };
 
 struct FaceResult {
   FaceState state = FaceState::pending;
-  std::optional<FaceTemplate> face_template;
+  FaceGallery templates;
   FaceOutcome outcome = FaceOutcome::none;
   std::optional<remotekit::Error> error;
+  std::optional<FaceTemplate> learn;
+  std::optional<float> progress;
+  std::optional<std::string> hint;
 };
 
 class Faces {

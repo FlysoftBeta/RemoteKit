@@ -1,4 +1,4 @@
-import { openFaceTemplate, sealFaceTemplate } from '../persistence/sealed-documents';
+import { openFaceGallery, sealFaceGallery, type FaceGallery } from '../persistence/sealed-documents';
 import {
   createCipheriv,
   createDecipheriv,
@@ -121,10 +121,10 @@ export class AtRestKey {
 
 export class FaceVault {
   constructor(private readonly key: AtRestKey) {}
-  seal(user: string, template: number[], modelVersion: string) {
-    return sealFaceTemplate(this.key, user, template, modelVersion);
+  seal(user: string, gallery: FaceGallery, modelVersion: string) {
+    return sealFaceGallery(this.key, user, gallery, modelVersion);
   }
-  open(user: string, sealed: string, modelVersion: string): number[] {
-    return openFaceTemplate(this.key, user, sealed, modelVersion);
+  open(user: string, sealed: string, modelVersion: string): FaceGallery {
+    return openFaceGallery(this.key, user, sealed, modelVersion);
   }
 }

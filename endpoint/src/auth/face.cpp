@@ -1,4 +1,5 @@
 #include "auth/face.hpp"
+#include "auth/face_wire.hpp"
 #include "util/wire_error.hpp"
 #include "media/gpu_device.hpp"
 #include "util/thread.hpp"
@@ -86,6 +87,9 @@ Result<Json> FaceController::FaceCommand(const std::string& method,
                                          const Json& request,
                                          uint64_t generation,
                                          const std::function<bool()>& management_current) {
+  const auto fields = rk::auth::ValidateFaceFields(method, request);
+  if (!fields)
+    return fields.error();
   auto transition = authorization.LockTransition();
   {
     auto require_auth_peer_result_2 = authorization.RequireAuthPeer(request);
@@ -111,35 +115,7 @@ Result<Json> FaceController::FaceCommand(const std::string& method,
     const auto result = faces.Status(epoch, challenge);
     if (!result)
       return Error{ErrorCode::kConflict, "stale_face_challenge"};
-    using State = rk::auth::FaceState;
-    const char* state = nullptr;
-    switch (result->state) {
-      case State::pending:
-        state = "pending";
-        break;
-      case State::matched:
-        state = "matched";
-        break;
-      case State::enrolled:
-        state = "enrolled";
-        break;
-      case State::absent:
-        state = "absent";
-        break;
-      case State::failed:
-        state = "failed";
-        break;
-      case State::expired:
-        state = "expired";
-        break;
-    }
-    Json reply = {{"challengeId", challenge}, {"status", state}};
-    if (result->state == State::enrolled && result->face_template)
-      reply["template"] = *result->face_template;
-    if (result->outcome == rk::auth::FaceOutcome::camera_unavailable)
-      reply["outcome"] = "camera_unavailable";
-    else if (result->outcome == rk::auth::FaceOutcome::no_matching_face)
-      reply["outcome"] = "no_matching_face";
+    Json reply = rk::auth::FaceStatusJson(*result, challenge);
     if (result->error)
       reply["error"] = WireError(*result->error, "dc.request_failed",
                                  {{"method", method}, {"tenantId", tenant}, {"sessionId", id}});
@@ -172,28 +148,10 @@ Result<Json> FaceController::FaceCommand(const std::string& method,
       timeout.get<uint64_t>() > maximum)
     return Error{ErrorCode::kInvalidRequest, "invalid_face_timeout"};
   rk::auth::FaceChallenge face_challenge{epoch, challenge, kind, timeout.get<uint32_t>(), {}};
-  const auto model = request.find("template");
-  if (kind == Purpose::enroll) {
-    if (model != request.end())
-      return Error{ErrorCode::kInvalidRequest, "unexpected_face_template"};
-  } else {
-    rk::auth::FaceTemplate value{};
-    if (model == request.end() || !model->is_array() || model->size() != value.size())
-      return Error{ErrorCode::kInvalidRequest, "invalid_face_template"};
-    double norm = 0;
-    for (size_t i = 0; i < value.size(); ++i) {
-      if (!(*model)[i].is_number())
-        return Error{ErrorCode::kInvalidRequest, "invalid_face_template"};
-      const double sample = (*model)[i].get<double>();
-      if (!std::isfinite(sample) || std::abs(sample) > 1.01)
-        return Error{ErrorCode::kInvalidRequest, "invalid_face_template"};
-      value[i] = static_cast<float>(sample);
-      norm += sample * sample;
-    }
-    if (std::abs(norm - 1) > 0.01)
-      return Error{ErrorCode::kInvalidRequest, "invalid_face_template"};
-    face_challenge.face_template = value;
-  }
+  auto gallery = rk::auth::ReadFaceGallery(request, kind);
+  if (!gallery)
+    return gallery.error();
+  face_challenge.templates = std::move(gallery).value();
   // Do not let a final chunk from the old challenge enter the new worker.
   raw_camera.Cancel();
   if (!faces.Begin(std::move(face_challenge)))

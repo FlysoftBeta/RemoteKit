@@ -7,16 +7,19 @@
 #include <wrl/client.h>
 #include <io.h>
 #include <fcntl.h>
+#include <webp/decode.h>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
@@ -91,7 +94,7 @@ struct Imaging {
     Check(converter->CopyPixels(nullptr, w * 3, w * h * 3, image.data));
     return image;
   }
-  cv::Mat JPEG60(const cv::Mat& image) {
+  cv::Mat JPEG50(const cv::Mat& image) {
     ComPtr<IStream> stream;
     Check(CreateStreamOnHGlobal(nullptr, TRUE, &stream));
     ComPtr<IWICBitmapEncoder> encoder;
@@ -104,7 +107,7 @@ struct Imaging {
     prop.pstrName = const_cast<wchar_t*>(L"ImageQuality");
     VARIANT quality{};
     quality.vt = VT_R4;
-    quality.fltVal = .6f;
+    quality.fltVal = .5f;
     Check(properties->Write(1, &prop, &quality));
     Check(frame->Initialize(properties.Get()));
     Check(frame->SetSize(image.cols, image.rows));
@@ -126,210 +129,347 @@ struct Imaging {
     return Decode(bytes);
   }
 };
-// Private file path: seek past metadata payloads without reading them into memory.
-std::vector<BYTE> ReadPrivateJPEG(const fs::path& path) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f)
-    throw std::runtime_error("input missing");
-  auto byte = [&]() {
-    int c = f.get();
-    if (c < 0)
-      throw std::runtime_error("JPEG truncated");
-    return BYTE(c);
-  };
-  if (byte() != 255 || byte() != 216)
-    throw std::runtime_error("JPEG required");
-  std::vector<BYTE> out{255, 216};
-  for (;;) {
-    if (byte() != 255)
-      throw std::runtime_error("JPEG marker");
-    BYTE tag = byte();
-    while (tag == 255)
-      tag = byte();
-    if (tag == 217) {
-      out.insert(out.end(), {255, tag});
-      return out;
-    }
-    if (tag == 1 || (tag >= 208 && tag <= 215)) {
-      out.insert(out.end(), {255, tag});
-      continue;
-    }
-    BYTE hi = byte(), lo = byte();
-    int length = int(hi) * 256 + lo;
-    if (length < 2)
-      throw std::runtime_error("JPEG length");
-    if ((tag >= 224 && tag <= 239) || tag == 254) {
-      f.seekg(length - 2, std::ios::cur);
-      if (!f)
-        throw std::runtime_error("JPEG seek");
+
+// Only structural chunk headers and pixel chunks are read. Metadata payloads are sought past.
+cv::Mat ReadPrivateWebP(const fs::path& path) {
+  std::ifstream stream(path, std::ios::binary);
+  std::array<uint8_t, 12> riff{};
+  if (!stream.read(reinterpret_cast<char*>(riff.data()), riff.size()) ||
+      std::memcmp(riff.data(), "RIFF", 4) || std::memcmp(riff.data() + 8, "WEBP", 4))
+    throw std::runtime_error("WebP input");
+  std::vector<uint8_t> pixels;
+  std::array<uint8_t, 8> header{};
+  while (stream.read(reinterpret_cast<char*>(header.data()), header.size())) {
+    uint32_t length = uint32_t(header[4]) | uint32_t(header[5]) << 8 | uint32_t(header[6]) << 16 |
+                      uint32_t(header[7]) << 24;
+    if (length > 256 * 1024 * 1024)
+      throw std::runtime_error("WebP chunk");
+    const bool image = !std::memcmp(header.data(), "VP8 ", 4) ||
+                       !std::memcmp(header.data(), "VP8L", 4) ||
+                       !std::memcmp(header.data(), "ALPH", 4);
+    if (image) {
+      pixels.insert(pixels.end(), header.begin(), header.end());
+      const size_t start = pixels.size();
+      pixels.resize(start + length + (length & 1));
+      if (!stream.read(reinterpret_cast<char*>(pixels.data() + start), length + (length & 1)))
+        throw std::runtime_error("WebP pixels");
     } else {
-      out.insert(out.end(), {255, tag, hi, lo});
-      size_t offset = out.size();
-      out.resize(offset + length - 2);
-      if (!f.read(reinterpret_cast<char*>(out.data() + offset), length - 2))
-        throw std::runtime_error("JPEG segment");
-    }
-    if (tag == 218) {  // Entropy-coded scan: handle stuffed bytes and subsequent scans.
-      for (;;) {
-        BYTE c = byte();
-        if (c != 255) {
-          out.push_back(c);
-          continue;
-        }
-        BYTE next = byte();
-        if (next == 0 || (next >= 208 && next <= 215)) {
-          out.insert(out.end(), {255, next});
-          continue;
-        }
-        f.seekg(-2, std::ios::cur);
-        break;
-      }
+      stream.seekg(length + (length & 1), std::ios::cur);
     }
   }
+  // A simple RIFF containing only the image chunks prevents decoder metadata access.
+  std::vector<uint8_t> bytes{'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'};
+  const uint32_t size = uint32_t(pixels.size() + 4);
+  for (int i = 0; i < 4; ++i)
+    bytes[4 + i] = uint8_t(size >> (i * 8));
+  bytes.insert(bytes.end(), pixels.begin(), pixels.end());
+  int width = 0, height = 0;
+  uint8_t* decoded = WebPDecodeBGR(bytes.data(), bytes.size(), &width, &height);
+  if (!decoded)
+    throw std::runtime_error("WebP decode");
+  cv::Mat result = cv::Mat(height, width, CV_8UC3, decoded).clone();
+  WebPFree(decoded);
+  return result;
 }
+
 using rk::auth::Engine;
 using rk::auth::FaceGate;
 using rk::auth::FaceInference;
+using rk::auth::FacePolicy;
 using rk::auth::FaceTemplate;
-using rk::auth::FaceWindow;
 using rk::auth::Similarity;
+using Gallery = std::vector<FaceTemplate>;
+using Clock = std::chrono::steady_clock;
+using namespace std::chrono_literals;
 
-struct Result {
+struct Sample {
   FaceInference inference;
-  uint64_t hash = 0;
+  uint64_t hash;
 };
-
-Result Infer(Engine& engine, const cv::Mat& bgr) {
+Sample Infer(Engine& engine, const cv::Mat& bgr) {
   cv::Mat rgb;
   cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
-  auto inferred = engine.InferRGB24(rgb.cols, rgb.rows, rgb.data);
-  if (!inferred)
-    throw std::runtime_error("inference failure");
-  return {std::move(inferred).value(), rk::auth::Fingerprint({rgb.data, rgb.total() * 3})};
+  auto result = engine.InferRGB24(rgb.cols, rgb.rows, rgb.data);
+  if (!result)
+    throw std::runtime_error("inference");
+  return {std::move(result).value(), rk::auth::Fingerprint({rgb.data, rgb.total() * 3})};
 }
 
 cv::Mat Camera(const cv::Mat& image, int width) {
-  int height = width * 3 / 4;
-  double scale = std::max(double(width) / image.cols, double(height) / image.rows);
-  cv::Mat resized;
-  cv::resize(image, resized,
-             {int(std::ceil(image.cols * scale)), int(std::ceil(image.rows * scale))}, 0, 0,
-             cv::INTER_LINEAR);
-  return resized(cv::Rect((resized.cols - width) / 2, (resized.rows - height) / 2, width, height))
-      .clone();
-}
-std::ofstream CSV(const fs::path& path, const char* header) {
-  std::ofstream f(path);
-  if (!f)
-    throw std::runtime_error("output unavailable");
-  f << std::setprecision(9) << header << '\n';
-  return f;
-}
-void Private(Engine& engine, Imaging& imaging, const fs::path& input, const fs::path& out) {
-  std::vector<fs::path> photos;
-  for (const auto& entry : fs::directory_iterator(input)) {
-    if (entry.is_regular_file() &&
-        (entry.path().extension() == ".jpg" || entry.path().extension() == ".jpeg"))
-      photos.push_back(entry.path());
-  }
-  std::sort(photos.begin(), photos.end());
-  auto frames =
-      CSV(out / "frames.csv", "photo,width,height,variant,detections,qualified,gate,live1,live2");
-  auto sequences = CSV(out / "sequences.csv", "width,enrollments,verification_sequences,matched");
-  const std::array<int, 3> widths{640, 480, 320};
-  std::vector<std::array<std::array<Result, 5>, 3>> variants(photos.size());
-  for (size_t p = 0; p < photos.size(); ++p) {
-    const auto image = imaging.Decode(ReadPrivateJPEG(photos[p]));
-    for (size_t s = 0; s < widths.size(); ++s) {
-      const int width = widths[s];
-      const auto camera = Camera(image, width);
-      for (int v = 0; v < 5; ++v) {
-        cv::Mat frame;
-        if (v == 0)
-          frame = camera;
-        else if (v == 1)
-          cv::GaussianBlur(camera, frame, {0, 0}, 1.0);
-        else if (v == 2 || v == 3)
-          camera.convertTo(frame, -1, v == 2 ? 0.7 : 1.3);
-        else
-          frame = imaging.JPEG60(camera);
-        auto result = Infer(engine, frame);
-        const auto& r = result.inference;
-        frames << p + 1 << ',' << width << ',' << width * 3 / 4 << ',' << v << ',' << r.detections
-               << ',' << r.qualified << ',' << int(r.gate) << ',' << r.live_v1se << ',' << r.live_v2
-               << '\n';
-        variants[p][s][v] = std::move(result);
-      }
-    }
-  }
-  using namespace std::chrono_literals;
-  const auto epoch = FaceWindow::Clock::time_point{};
-  for (size_t s = 0; s < widths.size(); ++s) {
-    int enrollments = 0, total = 0, matched = 0;
-    for (size_t a = 0; a < photos.size(); ++a) {
-      for (size_t b = a + 1; b < photos.size(); ++b) {
-        for (size_t c = b + 1; c < photos.size(); ++c) {
-          FaceWindow enrollment;
-          std::optional<FaceTemplate> reference;
-          int time = 0;
-          for (size_t p : {a, b, c}) {
-            const auto& r = variants[p][s][0];
-            reference = enrollment.Observe(
-                epoch + time * 200ms,
-                r.inference.gate == FaceGate::none ? r.inference.feature : std::nullopt, r.hash,
-                std::nullopt);
-            ++time;
-          }
-          if (!reference)
-            continue;
-          ++enrollments;
-          for (size_t p = 0; p < photos.size(); ++p) {
-            if (p == a || p == b || p == c)
-              continue;
-            ++total;
-            FaceWindow verification;
-            for (int v = 0; v < 5; ++v) {
-              const auto& r = variants[p][s][v];
-              if (verification.Observe(
-                      epoch + v * 200ms,
-                      r.inference.gate == FaceGate::none ? r.inference.feature : std::nullopt,
-                      r.hash, reference)) {
-                ++matched;
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
-    sequences << widths[s] << ',' << enrollments << ',' << total << ',' << matched << '\n';
-  }
+  int crop_width = image.cols, crop_height = image.rows;
+  if (crop_width * 3 > crop_height * 4)
+    crop_width = crop_height * 4 / 3;
+  else
+    crop_height = crop_width * 3 / 4;
+  cv::Mat result;
+  cv::resize(image(cv::Rect((image.cols - crop_width) / 2, (image.rows - crop_height) / 2,
+                            crop_width, crop_height)),
+             result, {width, width * 3 / 4}, 0, 0, cv::INTER_AREA);
+  return result;
 }
 
-void LFW(Engine& engine, Imaging& imaging, const fs::path& out, const fs::path& pairfile) {
+cv::Mat Noise(const cv::Mat& image, double sigma, cv::RNG& rng) {
+  cv::Mat noise(image.size(), CV_16SC3), converted, result;
+  rng.fill(noise, cv::RNG::NORMAL, 0, sigma);
+  image.convertTo(converted, CV_16SC3);
+  cv::add(converted, noise, converted);
+  converted.convertTo(result, CV_8UC3);
+  return result;
+}
+
+cv::Mat Variant(const cv::Mat& image,
+                int variant,
+                const rk::auth::FaceDetection& face,
+                Imaging& imaging) {
+  cv::Mat result;
+  if (variant == 0)
+    return image.clone();
+  if (variant <= 5) {
+    const double iod = std::hypot(face[4] - face[6], face[5] - face[7]);
+    if (iod <= 0)
+      throw std::runtime_error("scale geometry unavailable");
+    const double scale =
+        std::min(1.0, std::array<double, 5>{60, 45, 35, 28, 22}[variant - 1] / iod);
+    cv::Mat small;
+    cv::resize(image, small, {}, scale, scale, cv::INTER_AREA);
+    cv::copyMakeBorder(
+        small, result, (image.rows - small.rows) / 2,
+        image.rows - small.rows - (image.rows - small.rows) / 2, (image.cols - small.cols) / 2,
+        image.cols - small.cols - (image.cols - small.cols) / 2, cv::BORDER_REPLICATE);
+    cv::GaussianBlur(result, result, {0, 0}, 18);
+    small.copyTo(result(cv::Rect((image.cols - small.cols) / 2, (image.rows - small.rows) / 2,
+                                 small.cols, small.rows)));
+  } else if (variant <= 9) {
+    const double gamma = std::array<double, 4>{0.5, 0.7, 1.4, 2.0}[variant - 6];
+    cv::Mat table(1, 256, CV_8U);
+    for (int i = 0; i < 256; ++i)
+      table.at<uint8_t>(i) = cv::saturate_cast<uint8_t>(255 * std::pow(i / 255.0, gamma));
+    cv::LUT(image, table, result);
+  } else if (variant <= 11) {
+    image.convertTo(result, -1, variant == 10 ? 0.5 : 1.6);
+  } else if (variant == 12) {
+    result = image.clone();
+    const double cx = face[0] + face[2] * 0.5;
+    const double cy = std::max(0.0, double(face[1] - face[3] * 0.4));
+    const double radius = std::max(image.cols * 0.25, double(face[2]));
+    for (int y = 0; y < result.rows; ++y) {
+      for (int x = 0; x < result.cols; ++x) {
+        auto& pixel = result.at<cv::Vec3b>(y, x);
+        const bool interior =
+            x >= face[0] && x < face[0] + face[2] && y >= face[1] && y < face[1] + face[3];
+        const double halo =
+            255 * std::exp(-((x - cx) * (x - cx) + (y - cy) * (y - cy)) / (2 * radius * radius));
+        for (int c = 0; c < 3; ++c)
+          pixel[c] = cv::saturate_cast<uint8_t>(interior ? pixel[c] * 0.6 : pixel[c] + halo);
+      }
+    }
+  } else if (variant <= 14) {
+    cv::GaussianBlur(image, result, {0, 0}, variant - 12.0);
+  } else if (variant == 15) {
+    result = imaging.JPEG50(image);
+  } else {
+    cv::RNG rng(8162);
+    result = Noise(image, 6, rng);
+  }
+  return result;
+}
+
+std::vector<Sample> Sequence(Engine& engine,
+                             const cv::Mat& frame,
+                             int count,
+                             uint64_t seed,
+                             int start = 0) {
+  std::vector<Sample> samples;
+  for (int i = start; i < start + count; ++i) {
+    cv::RNG rng(seed + uint64_t(i) * 7919);
+    auto transform = cv::getRotationMatrix2D({frame.cols * 0.5f, frame.rows * 0.5f},
+                                             rng.uniform(-2.0, 2.0), rng.uniform(0.97, 1.03));
+    transform.at<double>(0, 2) += rng.uniform(-0.03, 0.03) * frame.cols;
+    transform.at<double>(1, 2) += rng.uniform(-0.03, 0.03) * frame.rows;
+    cv::Mat jittered;
+    cv::warpAffine(frame, jittered, transform, frame.size(), cv::INTER_LINEAR,
+                   cv::BORDER_REPLICATE);
+    samples.push_back(Infer(engine, Noise(jittered, 2, rng)));
+  }
+  return samples;
+}
+
+float Best(const Gallery& gallery, const std::optional<FaceTemplate>& feature) {
+  return feature ? rk::auth::BestSimilarity(gallery, *feature) : -1;
+}
+
+struct Evaluation {
+  Gallery gallery;
+  bool matched = false;
+  size_t collected = 0;
+  int elapsed = -1;
+  std::array<int, rk::auth::kFaceGateCount> failures{};
+};
+
+Evaluation Evaluate(const std::vector<Sample>& samples, const Gallery& gallery, bool enroll) {
+  FacePolicy policy(enroll ? rk::auth::FacePurpose::enroll : rk::auth::FacePurpose::verify,
+                    gallery);
+  Evaluation result;
+  const size_t maximum = enroll ? 300 : 150;
+  for (size_t i = 0; i < std::min(samples.size(), maximum); ++i) {
+    const auto& sample = samples[i];
+    const auto observation =
+        policy.Observe(Clock::time_point{} + i * 200ms, sample.inference, sample.hash);
+    if (observation.gate != FaceGate::none)
+      ++result.failures[static_cast<size_t>(observation.gate)];
+    const auto& status = policy.Result();
+    result.collected = status.templates.size();
+    if ((status.state == rk::auth::FaceState::enrolled ||
+         status.state == rk::auth::FaceState::matched) &&
+        result.elapsed < 0) {
+      result.elapsed = int(i) * 200;
+      result.matched = !enroll;
+      result.gallery = status.templates;
+    }
+    if (result.elapsed >= 0 && i >= 14)
+      break;
+  }
+  return result;
+}
+
+std::ofstream CSV(const fs::path& path, const char* header) {
+  std::ofstream stream(path);
+  if (!stream)
+    throw std::runtime_error("output unavailable");
+  stream << std::setprecision(9) << header << '\n';
+  return stream;
+}
+
+struct PrivateGallery {
+  int id, photo, width, variant;
+  Gallery vectors;
+};
+
+int Axis(int variant) {
+  return variant == 0 ? 0 : variant <= 5 ? 1 : variant <= 12 ? 2 : 3;
+}
+
+std::vector<PrivateGallery> Private(Engine& engine,
+                                    Imaging& imaging,
+                                    const fs::path& input,
+                                    const fs::path& out) {
+  auto enrollments =
+      CSV(out / "enrollments.csv", "id,photo,width,variant,templates,elapsed_ms,collected");
+  auto enrollment_gates = CSV(out / "enrollment_gates.csv", "gallery,gate,count");
+  auto sequences =
+      CSV(out / "sequences.csv",
+          "gallery,photo,width,enroll_variant,variant,axis,matched,elapsed_ms,single_best");
+  auto gates = CSV(out / "gates.csv", "gallery,photo,width,enroll_variant,variant,gate,count");
+  auto frames = CSV(out / "frames.csv",
+                    "photo,width,variant,frame,gate,live1,live2,iod,yaw,pitch,sharpness,luma,dark,"
+                    "bright,contrast,backlight");
+  std::vector<PrivateGallery> galleries;
+  for (int width : {480, 640}) {
+    struct Photo {
+      std::array<cv::Mat, 17> frames;
+      std::array<Sample, 17> single;
+      std::array<std::vector<Sample>, 17> sequences;
+    };
+    std::array<Photo, 4> photos;
+    for (int p = 0; p < 4; ++p) {
+      const auto image = Camera(ReadPrivateWebP(input / (std::to_string(p + 1) + ".webp")), width);
+      const auto geometry = Infer(engine, image).inference.face;
+      for (int v = 0; v < 17; ++v) {
+        const auto frame = Variant(image, v, geometry, imaging);
+        photos[p].frames[v] = frame;
+        photos[p].single[v] = Infer(engine, frame);
+        photos[p].sequences[v] = Sequence(engine, frame, 15, 1000 + p * 100 + v);
+        for (size_t i = 0; i < photos[p].sequences[v].size(); ++i) {
+          const auto& r = photos[p].sequences[v][i].inference;
+          frames << p + 1 << ',' << width << ',' << v << ',' << i << ',' << int(r.gate) << ','
+                 << r.live_v1se << ',' << r.live_v2 << ',' << r.quality.inter_ocular << ','
+                 << r.quality.yaw << ',' << r.quality.pitch << ',' << r.quality.sharpness << ','
+                 << r.quality.mean_luma << ',' << r.quality.dark_fraction << ','
+                 << r.quality.bright_fraction << ',' << r.quality.contrast << ','
+                 << r.quality.backlight << '\n';
+        }
+      }
+      std::cerr << width << ' ' << p + 1 << '\n';
+    }
+    const auto evaluate = [&](int p, int v, const Gallery& gallery, bool enroll) {
+      auto& cached = photos[p].sequences[v];
+      auto result = Evaluate(cached, gallery, enroll);
+      const size_t maximum = enroll ? 300 : 150;
+      while (result.elapsed < 0 && cached.size() < maximum) {
+        auto more =
+            Sequence(engine, photos[p].frames[v], 5, 1000 + p * 100 + v, int(cached.size()));
+        cached.insert(cached.end(), more.begin(), more.end());
+        result = Evaluate(cached, gallery, enroll);
+      }
+      return result;
+    };
+    for (int p = 0; p < 4; ++p) {
+      for (int enrollment_variant : {0, 10, 12, 3, 14}) {
+        auto enrolled = evaluate(p, enrollment_variant, {}, true);
+        PrivateGallery gallery{int(galleries.size()), p + 1, width, enrollment_variant,
+                               std::move(enrolled.gallery)};
+        enrollments << gallery.id << ',' << p + 1 << ',' << width << ',' << enrollment_variant
+                    << ',' << gallery.vectors.size() << ',' << enrolled.elapsed << ','
+                    << enrolled.collected << '\n';
+        enrollments.flush();
+        for (size_t gate = 1; gate < enrolled.failures.size(); ++gate)
+          enrollment_gates << gallery.id << ',' << gate << ',' << enrolled.failures[gate] << '\n';
+        for (int probe = 0; probe < 4; ++probe) {
+          if (probe == p)
+            continue;
+          for (int v = 0; v < 17; ++v) {
+            Evaluation verified;
+            if (!gallery.vectors.empty())
+              verified = evaluate(probe, v, gallery.vectors, false);
+            sequences << gallery.id << ',' << probe + 1 << ',' << width << ',' << enrollment_variant
+                      << ',' << v << ',' << Axis(v) << ',' << verified.matched << ','
+                      << verified.elapsed << ','
+                      << Best(gallery.vectors, photos[probe].single[v].inference.feature) << '\n';
+            for (size_t gate = 1; gate < verified.failures.size(); ++gate)
+              gates << gallery.id << ',' << probe + 1 << ',' << width << ',' << enrollment_variant
+                    << ',' << v << ',' << gate << ',' << verified.failures[gate] << '\n';
+          }
+        }
+        galleries.push_back(std::move(gallery));
+      }
+    }
+  }
+  return galleries;
+}
+
+void LFW(Engine& engine,
+         Imaging& imaging,
+         const fs::path& out,
+         const fs::path& pairfile,
+         const std::vector<PrivateGallery>& galleries) {
   _setmode(_fileno(stdin), _O_BINARY);
   std::vector<FaceInference> faces;
-  auto images = CSV(out / "lfw_images.csv", "id,detections,qualified,gate,detected,accepted");
+  auto images = CSV(out / "lfw_images.csv", "id,gate,detected");
+  auto scores = CSV(out / "gallery_lfw.csv", "gallery,id,cosine");
   for (;;) {
-    uint32_t id = 0, n = 0;
+    uint32_t id = 0, length = 0;
     std::cin.read(reinterpret_cast<char*>(&id), 4);
     if (std::cin.eof())
       break;
-    if (!std::cin || !std::cin.read(reinterpret_cast<char*>(&n), 4) || n > 64 * 1024 * 1024)
+    if (!std::cin || !std::cin.read(reinterpret_cast<char*>(&length), 4) ||
+        length > 64 * 1024 * 1024)
       throw std::runtime_error("stream header");
-    std::vector<BYTE> bytes(n);
-    if (!std::cin.read(reinterpret_cast<char*>(bytes.data()), n))
+    std::vector<BYTE> bytes(length);
+    if (!std::cin.read(reinterpret_cast<char*>(bytes.data()), length))
       throw std::runtime_error("stream body");
     if (id >= faces.size())
       faces.resize(id + 1);
     faces[id] = Infer(engine, imaging.Decode(bytes)).inference;
     const auto& r = faces[id];
-    images << id << ',' << r.detections << ',' << r.qualified << ',' << int(r.gate) << ','
-           << r.feature.has_value() << ',' << (r.gate == FaceGate::none) << '\n';
-    if (id % 500 == 0)
+    images << id << ',' << int(r.gate) << ',' << r.feature.has_value() << '\n';
+    for (const auto& gallery : galleries) {
+      if (!gallery.vectors.empty())
+        scores << gallery.id << ',' << id << ',' << Best(gallery.vectors, r.feature) << '\n';
+    }
+    if (id % 1000 == 0)
       std::cerr << id << '\n';
   }
-  auto pairs = CSV(out / "lfw_pairs.csv", "same,id1,id2,both_detected,cosine,both_accepted");
+  auto pairs = CSV(out / "lfw_pairs.csv", "same,id1,id2,both_detected,cosine");
   std::ifstream input(pairfile);
   int same = 0, a = 0, b = 0;
   while (input >> same >> a >> b) {
@@ -337,30 +477,32 @@ void LFW(Engine& engine, Imaging& imaging, const fs::path& out, const fs::path& 
     const auto& y = faces.at(b);
     const bool detected = x.feature && y.feature;
     pairs << same << ',' << a << ',' << b << ',' << detected << ','
-          << (detected ? Similarity(*x.feature, *y.feature) : -1) << ','
-          << (x.gate == FaceGate::none && y.gate == FaceGate::none) << '\n';
+          << (detected ? Similarity(*x.feature, *y.feature) : -1) << '\n';
   }
 }
 
 int wmain(int argc, wchar_t** argv) {
   try {
-    if (argc != 5)
+    if (argc != 5 && argc != 6)
       return 2;
     Imaging imaging;
-    auto engine = rk::auth::GetEngine(argv[2]);
+    auto engine = rk::auth::GetEngine(argv[1]);
     if (!engine)
       throw std::runtime_error("models unavailable");
     const fs::path out = argv[4];
     fs::create_directories(out);
-    if (std::wstring(argv[1]) == L"--photos")
-      Private(*engine.value(), imaging, argv[3], out);
-    else if (std::wstring(argv[1]) == L"--lfw")
-      LFW(*engine.value(), imaging, out, argv[3]);
-    else
-      return 2;
+    auto constants =
+        CSV(out / "constants.csv", "match,learn_floor,novelty,diversity,detect,min_face");
+    constants << rk::auth::kMatchThreshold << ',' << rk::auth::kLearnFloor << ','
+              << rk::auth::kNovelty << ',' << rk::auth::kDiversity << ',' << rk::auth::kDetectScore
+              << ',' << rk::auth::kMinFace << '\n';
+    const auto galleries = Private(*engine.value(), imaging, argv[2], out);
+    if (argc == 6 && std::wstring_view(argv[5]) == L"--private-only")
+      return 0;
+    LFW(*engine.value(), imaging, out, argv[3], galleries);
     return 0;
-  } catch (const std::exception&) {
-    std::cerr << "evaluation_error\n";
+  } catch (const std::exception& e) {
+    std::cerr << "evaluation_error: " << e.what() << '\n';
     return 1;
   }
 }

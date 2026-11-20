@@ -426,7 +426,7 @@ export class ServicePeers {
   }
   beginFace(
     tenant: string,
-    params: FaceBinding & { purpose: string; timeoutMs: number; template?: number[] },
+    params: FaceBinding & { purpose: string; timeoutMs: number; templates?: number[][] },
   ) {
     return this.face(tenant, 'service.face.begin', params);
   }

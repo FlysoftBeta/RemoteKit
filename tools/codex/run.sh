@@ -1,7 +1,7 @@
 #!/bin/sh
 # Run one Codex task non-interactively from the repository root.
 #
-#   tools/codex/run.sh <task-dir> <name> [low|medium|high] [--resume <prior-name>]
+#   tools/codex/run.sh <task-dir> <name> [low|medium|high] [--resume <prior-name>] [--fast]
 #
 # Reads <task-dir>/<name>.body.md, prepends preamble.md and appends rules.md
 # (skip rules.md by creating <task-dir>/<name>.norules), and writes
@@ -13,6 +13,8 @@
 # same <task-dir> instead of starting a new one: the body is sent as the next
 # message, without preamble.md (the conversation already has it); rules.md is
 # still appended unless <name>.norules exists.
+#
+# --fast runs on Codex's fast service tier.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -20,9 +22,24 @@ dir="$1"
 name="$2"
 effort="${3:-high}"
 prior=""
-if [ "${4:-}" = "--resume" ]; then
-  prior="${5:?--resume needs the name of an earlier run}"
-fi
+tier=default
+shift $(($# < 3 ? $# : 3))
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --resume)
+      prior="${2:?--resume needs the name of an earlier run}"
+      shift 2
+      ;;
+    --fast)
+      tier=fast
+      shift
+      ;;
+    *)
+      echo "unknown option $1" >&2
+      exit 2
+      ;;
+  esac
+done
 
 session_of() {
   grep -a -m1 '^session id:' "$1" 2>/dev/null | awk '{print $3}' | tr -d '\r'
@@ -42,11 +59,11 @@ if [ -n "$prior" ]; then
     exit 2
   fi
   codex exec resume -m gpt-6.1-sol -c model_reasoning_effort="$effort" -c project_doc_max_bytes=0 \
-    --dangerously-bypass-approvals-and-sandbox \
+    -c service_tier="$tier" --dangerously-bypass-approvals-and-sandbox \
     -o "$dir/$name.result.md" "$id" - < "$dir/$name.prompt.md" > "$dir/$name.log" 2>&1
 else
   codex exec -m gpt-6.1-sol -c model_reasoning_effort="$effort" -c project_doc_max_bytes=0 \
-    --dangerously-bypass-approvals-and-sandbox --color never \
+    -c service_tier="$tier" --dangerously-bypass-approvals-and-sandbox --color never \
     -o "$dir/$name.result.md" - < "$dir/$name.prompt.md" > "$dir/$name.log" 2>&1
 fi
 status=$?

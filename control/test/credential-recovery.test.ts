@@ -11,7 +11,15 @@ import { ControlDatabase } from '../server/persistence/database';
 import { applyRecovery, planRecovery } from '../server/recovery/credentials';
 import { accountsFor, registerUser } from './server-fixture';
 
-const template = Array.from({ length: 128 }, (_, index) => (index === 0 ? 1 : 0));
+const vector = Array.from({ length: 128 }, (_, index) => (index === 0 ? 1 : 0));
+const gallery = {
+  version: 2 as const,
+  templates: [
+    { source: 'enrolled' as const, vector, addedAt: 100 },
+    { source: 'enrolled' as const, vector: vector.map((n) => (n === 0 ? 0 : -n)), addedAt: 101 },
+    { source: 'learned' as const, vector, addedAt: 200 },
+  ],
+};
 
 async function withDirectory(run: (directory: string) => Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), 'rk-recovery-'));
@@ -53,7 +61,7 @@ test('current databases recover passwords, PINs, faces and tokens despite damage
     old.security.saveSecurity(admin.user.id, {
       settings: { ...old.security.security(admin.user.id).settings, faceEnabled: true, idleSeconds: 60 },
       pin,
-      face: { sealed: old.security.faceVault.seal(admin.user.id, template, 'm1'), modelVersion: 'm1' },
+      face: { sealed: old.security.faceVault.seal(admin.user.id, gallery, 'm1'), modelVersion: 'm1' },
     });
     old.security.saveSecurity(member.user.id, {
       settings: { ...old.security.security(member.user.id).settings, faceEnabled: true },
@@ -85,7 +93,10 @@ test('current databases recover passwords, PINs, faces and tokens despite damage
       const security = store.security.security(admin.user.id);
       assert.equal(security.settings.idleSeconds, 60);
       assert.equal(security.settings.faceEnabled, true);
-      assert.deepEqual(store.security.faceVault.open(admin.user.id, security.face!.sealed, 'm1'), template);
+      assert.deepEqual(store.security.faceVault.open(admin.user.id, security.face!.sealed, 'm1'), gallery);
+      assert.throws(() => old.security.faceVault.open(admin.user.id, security.face!.sealed, 'm1'), {
+        reason: 'corrupt_record',
+      });
       assert.equal(store.accounts.identity(member.token)?.user.username, 'member');
       assert.equal((await accountsFor(store).login('member', 'member-password1')).user.id, member.user.id);
       for (const user of plan.users) assert.equal(store.workspaces.workspace(user.tenant).windows.length, 0);
@@ -127,7 +138,7 @@ test('older layouts and a damaged credential table keep whatever rows still deco
     db.prepare('INSERT INTO user_security VALUES (?,?,NULL,NULL,?,?)').run(
       'u1',
       '{"faceEnabled":true,"idleSeconds":"bad"}',
-      vault.seal('u1', template, 'm0'),
+      vault.seal('u1', gallery, 'm0'),
       'm0',
     );
     db.close();
@@ -141,9 +152,20 @@ test('older layouts and a damaged credential table keep whatever rows still deco
       ],
     );
     assert.ok(plan.skipped.some((line) => line.startsWith('unset:')));
-    assert.deepEqual(plan.users[0].face, { template, modelVersion: 'm0' });
+    assert.deepEqual(plan.users[0].face, { gallery, modelVersion: 'm0' });
     assert.equal(plan.users[0].settings.idleSeconds, 300);
     assert.equal(planRecovery(source, { admin: 'THIRD', tokens: false, now: 0 }).users[1].isAdmin, true);
+
+    const legacy = new AtRestKey(source + '.face-key').seal(
+      JSON.stringify(['u1', 'm0']),
+      Buffer.from(JSON.stringify(vector)),
+    );
+    const sourceDb = new Database(source);
+    sourceDb.prepare('UPDATE user_security SET face_ciphertext=? WHERE user_id=?').run(legacy, 'u1');
+    sourceDb.close();
+    const legacyPlan = planRecovery(source, { tokens: false, now: 0 });
+    assert.equal(legacyPlan.users[0].face, undefined);
+    assert.equal(legacyPlan.users[0].settings.faceEnabled, false);
 
     damage(source, ['user_security']);
     plan = planRecovery(source, { tokens: false, now: Date.now() });

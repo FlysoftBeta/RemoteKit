@@ -7,11 +7,12 @@ import { randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type { AuthSettings, AuthState, FacePurpose, FaceStatus } from '../../shared/security';
 import type { SessionObserved } from '../endpoint/coordination';
+import { readFaceStatus } from '../endpoint/face-status';
+import type { FaceStatusReply } from '../endpoint/types';
 import type { EndpointGateway } from '../endpoint/gateway';
 import type { ControlDatabase } from '../persistence/database';
 import { systemClock, type Clock } from '../util/clock';
 import { hashSecret } from './crypto';
-import { validFaceTemplate } from '../persistence/sealed-documents';
 
 // Endpoint gate epochs are scoped to a peer and restart on its replacement.
 interface Peer {
@@ -30,6 +31,7 @@ interface Challenge {
   expires: number;
   modelVersion: string;
   started: boolean;
+  learning?: { vector: number[]; polledAt: number };
 }
 export type ViewerLock =
   | { state: 'locked'; epoch: number }
@@ -326,6 +328,7 @@ export class ViewerSecurity {
 
   private async unlock(tenant: string, viewer: ViewerSecurityState, epoch: number) {
     this.check(tenant, viewer, epoch, true);
+    this.learnFace(tenant, viewer);
     this.clearChallenge(tenant, viewer, true);
     transitionLock(viewer, 'unlocked');
     this.changed(tenant, viewer, true);
@@ -334,9 +337,56 @@ export class ViewerSecurity {
     );
   }
 
+  private learnFace(tenant: string, viewer: ViewerSecurityState) {
+    const challenge = viewer.challenge;
+    const snapshot = challenge?.learning;
+    if (!challenge || !snapshot) return;
+    delete challenge.learning;
+    const now = this.clock.monotonicMs();
+    if (
+      challenge.purpose !== 'verify' ||
+      !challenge.started ||
+      now >= challenge.expires ||
+      now - snapshot.polledAt > 2000 ||
+      viewer.servicePeer !== challenge.peer ||
+      challenge.peer.epoch !== challenge.epoch ||
+      challenge.peer.appliedEpoch !== challenge.epoch
+    )
+      return;
+    try {
+      const record = this.store.security.security(viewer.user.id);
+      if (!record.face || record.face.modelVersion !== challenge.modelVersion) return;
+      const gallery = this.store.security.faceVault.open(
+        viewer.user.id,
+        record.face.sealed,
+        challenge.modelVersion,
+      );
+      const learned = gallery.templates.filter((entry) => entry.source === 'learned');
+      if (learned.length === 4) {
+        const oldest = learned.reduce((a, b) => (a.addedAt <= b.addedAt ? a : b));
+        gallery.templates.splice(gallery.templates.indexOf(oldest), 1);
+      }
+      gallery.templates.push({ source: 'learned', vector: snapshot.vector, addedAt: this.clock.wallMs() });
+      record.face.sealed = this.store.security.faceVault.seal(
+        viewer.user.id,
+        gallery,
+        challenge.modelVersion,
+      );
+      this.store.security.saveSecurity(viewer.user.id, record);
+    } catch (cause) {
+      reportError(
+        new RemoteKitError('internal', '保存人脸学习结果失败', { cause }),
+        'security.save_face_learning_failed',
+        { tenant, operation: challenge.id },
+      );
+    }
+  }
+
   private clearChallenge(tenant: string, viewer: ViewerSecurityState, preserve = false, send = true) {
     const challenge = viewer.challenge;
     viewer.challenge = undefined;
+    delete viewer.face.progress;
+    delete viewer.face.hint;
     if (!preserve) {
       delete viewer.face.challengeId;
       delete viewer.face.purpose;
@@ -374,10 +424,13 @@ export class ViewerSecurity {
     if (purpose === 'presence' && !viewer.locked && !record.settings.lockOnDeparture)
       throw new RemoteKitError('conflict', '未启用离开锁定');
     if (viewer.challenge?.purpose === purpose) return;
-    let template: number[] | undefined;
+    let templates: number[][] | undefined;
     if (purpose !== 'enroll') {
       try {
-        template = this.store.security.faceVault.open(viewer.user.id, record.face!.sealed, modelVersion);
+        const gallery = this.store.security.faceVault.open(viewer.user.id, record.face!.sealed, modelVersion);
+        templates = ['enrolled', 'learned'].flatMap((source) =>
+          gallery.templates.filter((entry) => entry.source === source).map((entry) => entry.vector),
+        );
       } catch {
         throw new RemoteKitError('conflict', '已录入的人脸不可用，请用密码重新录入');
       }
@@ -399,7 +452,7 @@ export class ViewerSecurity {
         ...this.faceBinding(challenge),
         purpose,
         timeoutMs,
-        ...(template ? { template } : {}),
+        ...(templates ? { templates } : {}),
       });
       this.check(tenant, viewer, generation);
       if (
@@ -410,7 +463,13 @@ export class ViewerSecurity {
       )
         throw new RemoteKitError('outcome_unknown', '人脸请求结果未知');
       challenge.started = true;
-      viewer.face = { ...viewer.face, challengeId: challenge.id, purpose, status: 'pending' };
+      viewer.face = {
+        ...viewer.face,
+        challengeId: challenge.id,
+        purpose,
+        status: 'pending',
+        ...(purpose === 'enroll' ? { progress: 0 } : {}),
+      };
       this.changed(tenant, viewer, false);
     } catch (error) {
       if (viewer.challenge === challenge) {
@@ -421,6 +480,7 @@ export class ViewerSecurity {
             challengeId: challenge.id,
             purpose,
             status: 'pending',
+            ...(purpose === 'enroll' ? { progress: 0 } : {}),
             error: wireError(endpointError(error)),
           };
           this.changed(tenant, viewer, false);
@@ -460,6 +520,7 @@ export class ViewerSecurity {
         unit.succeed();
         delete viewer.face.error;
       } catch (cause) {
+        delete challenge.learning;
         const failure = unit.fail(endpointError(cause));
         if (this.closed || !this.valid(tenant, viewer)) return;
         viewer.face.error = wireError(failure.error);
@@ -476,28 +537,44 @@ export class ViewerSecurity {
         challenge.peer.appliedEpoch !== challenge.epoch
       )
         return;
-      let status: FaceStatus =
-        result?.challengeId === challenge.id &&
-        ['pending', 'matched', 'enrolled', 'absent', 'failed', 'expired'].includes(result.status)
-          ? (result.status as FaceStatus)
-          : 'failed';
+      let validated: FaceStatusReply | undefined;
+      let invalidReply: unknown;
+      try {
+        validated = readFaceStatus(result, challenge.purpose, challenge.id);
+      } catch (cause) {
+        invalidReply = cause;
+      }
+      let status: FaceStatus = validated?.status ?? 'failed';
       if (this.clock.monotonicMs() >= challenge.expires) status = 'expired';
+      delete challenge.learning;
       if (
-        (status === 'enrolled' && challenge.purpose !== 'enroll') ||
-        (status === 'matched' && challenge.purpose === 'enroll') ||
-        (status === 'absent' && challenge.purpose !== 'presence')
+        challenge.purpose === 'verify' &&
+        (status === 'pending' || status === 'matched') &&
+        validated?.learn
       )
-        status = 'failed';
+        challenge.learning = { vector: validated.learn, polledAt: this.clock.monotonicMs() };
+      if (challenge.purpose === 'enroll' && status === 'pending') {
+        viewer.face.progress = validated!.progress;
+        viewer.face.hint = validated!.hint;
+        this.changed(tenant, viewer, false);
+      }
       if (status === 'pending' || (challenge.purpose === 'presence' && status === 'matched')) return;
       if (challenge.purpose === 'enroll' && status === 'enrolled') {
-        if (viewer.locked || !validFaceTemplate(result?.template)) status = 'failed';
+        if (viewer.locked) status = 'failed';
         else {
           const record = this.store.security.security(viewer.user.id);
           try {
             record.face = {
               sealed: this.store.security.faceVault.seal(
                 viewer.user.id,
-                result!.template!,
+                {
+                  version: 2,
+                  templates: validated!.templates!.map((vector) => ({
+                    source: 'enrolled',
+                    vector,
+                    addedAt: this.clock.wallMs(),
+                  })),
+                },
                 challenge.modelVersion,
               ),
               modelVersion: challenge.modelVersion,
@@ -511,21 +588,23 @@ export class ViewerSecurity {
         }
       }
       viewer.face.status = status;
-      if (status === 'absent') viewer.face.outcome = result?.outcome;
+      if (status === 'absent') viewer.face.outcome = validated?.outcome;
       else delete viewer.face.outcome;
       if (status === 'failed')
         viewer.face.error = wireError(
           reportError(
-            result?.error ? endpointError(result.error) : new RemoteKitError('internal', '人脸验证失败'),
+            validated?.error
+              ? endpointError(validated.error)
+              : new RemoteKitError('internal', '人脸验证失败', { cause: invalidReply }),
             'security.face_failed',
             { tenant, operation: challenge.id },
           ),
         );
       else delete viewer.face.error;
-      this.clearChallenge(tenant, viewer, true);
-      this.changed(tenant, viewer, false);
       if (challenge.purpose === 'verify' && status === 'matched')
         await this.unlock(tenant, viewer, generation);
+      else this.clearChallenge(tenant, viewer, true);
+      this.changed(tenant, viewer, false);
       if (challenge.purpose === 'presence') {
         if (status === 'expired' && !viewer.locked)
           await this.startFace(tenant, viewer, 'presence', generation);
