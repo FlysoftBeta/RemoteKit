@@ -1,46 +1,39 @@
 import './lock-screen.css';
 import React, { useEffect, useState } from 'react';
+import type { AuthState } from '../../shared/security';
+import type { AuthCamera } from './auth-camera';
+import { FaceBadge, useFaceUnlock, type FaceUnlock } from './face-unlock';
 
-type Direction = 'Up' | 'Down' | 'Left' | 'Right';
-const sequence: Direction[] = ['Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right'];
+const tapGapMs = 500;
+const tapSlopPx = 40;
 
-export function lockDirection(x: number, y: number, width: number, height: number): Direction | undefined {
-  const dx = x / width - 0.5,
-    dy = y / height - 0.5;
-  if (Math.max(Math.abs(dx), Math.abs(dy)) <= 0.05) return;
-  if (Math.abs(dy) >= Math.abs(dx)) return dy < 0 ? 'Up' : 'Down';
-  return dx < 0 ? 'Left' : 'Right';
-}
-
-export class RevealSequence {
-  private prefix: Direction[] = [];
-  private at = -Infinity;
+// Three quick taps (or Enter presses) close together reveal the unlock form. The gesture grants
+// nothing; it only decides whether the form is shown.
+export class TripleTap {
+  private taps: { x: number; y: number; at: number }[] = [];
   reset() {
-    this.prefix = [];
-    this.at = -Infinity;
+    this.taps = [];
   }
-  push(direction: Direction, now: number) {
-    if (now - this.at >= 5000) this.reset();
-    this.prefix.push(direction);
-    while (this.prefix.some((item, index) => item !== sequence[index])) this.prefix.shift();
-    if (this.prefix.length === sequence.length) {
-      this.reset();
-      return true;
-    }
-    this.at = this.prefix.length ? now : -Infinity;
-    return false;
+  push(x: number, y: number, now: number) {
+    const last = this.taps[this.taps.length - 1];
+    const first = this.taps[0];
+    if (!last || now - last.at > tapGapMs || Math.hypot(x - first.x, y - first.y) > tapSlopPx) this.taps = [];
+    this.taps.push({ x, y, at: now });
+    if (this.taps.length < 3) return false;
+    this.reset();
+    return true;
   }
 }
 
-export function BlankScreen() {
-  return <div className="viewer-lock-blank" />;
+export function BlankScreen({ children }: { children?: React.ReactNode }) {
+  return <div className="viewer-lock-blank">{children}</div>;
 }
 
-export function RevealScreen({ children }: { children: (close: () => void) => React.ReactNode }) {
+function useReveal() {
   const [open, setOpen] = useState(false);
   useEffect(() => {
-    const reveal = new RevealSequence();
-    let tap: { id: number; direction: Direction; x: number; y: number; at: number } | undefined;
+    const reveal = new TripleTap();
+    let tap: { id: number; x: number; y: number; at: number } | undefined;
     const reset = () => {
       reveal.reset();
       tap = undefined;
@@ -49,54 +42,48 @@ export function RevealScreen({ children }: { children: (close: () => void) => Re
       reset();
       if (document.hidden) setOpen(false);
     };
-    const push = (direction: Direction) => {
-      if (reveal.push(direction, performance.now())) setOpen(true);
+    const push = (x: number, y: number) => {
+      if (reveal.push(x, y, performance.now())) setOpen(true);
     };
     const key = (event: KeyboardEvent) => {
       if (
         open ||
         document.hidden ||
-        event.repeat ||
         event.isComposing ||
         event.keyCode === 229 ||
         event.altKey ||
         event.ctrlKey ||
         event.metaKey ||
-        event.shiftKey ||
-        !['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)
+        event.shiftKey
       )
         return;
+      if (event.key !== 'Enter' || event.repeat) {
+        reset();
+        return;
+      }
       event.preventDefault();
-      push(event.key.slice(5) as Direction);
+      push(0, 0);
     };
-    const region = (event: PointerEvent) =>
-      lockDirection(event.clientX, event.clientY, innerWidth, innerHeight);
+    const onFace = (event: Event) => event.target instanceof Element && !!event.target.closest('.lock-face');
     const down = (event: PointerEvent) => {
       tap = undefined;
       if (open || document.hidden || !event.isPrimary || event.button !== 0) return;
-      const direction = region(event);
-      if (direction)
-        tap = { id: event.pointerId, direction, x: event.clientX, y: event.clientY, at: performance.now() };
+      if (onFace(event)) {
+        reset();
+        return;
+      }
+      tap = { id: event.pointerId, x: event.clientX, y: event.clientY, at: performance.now() };
     };
     const moved = (event: PointerEvent) => {
-      if (
-        tap?.id === event.pointerId &&
-        (Math.hypot(event.clientX - tap.x, event.clientY - tap.y) > 12 || region(event) !== tap.direction)
-      )
+      if (tap?.id === event.pointerId && Math.hypot(event.clientX - tap.x, event.clientY - tap.y) > 12)
         tap = undefined;
     };
     const up = (event: PointerEvent) => {
       moved(event);
       const held = tap;
       tap = undefined;
-      if (
-        held &&
-        held.id === event.pointerId &&
-        event.isPrimary &&
-        event.button === 0 &&
-        performance.now() - held.at <= 700
-      )
-        push(held.direction);
+      if (held && held.id === event.pointerId && event.isPrimary && performance.now() - held.at <= 400)
+        push(held.x, held.y);
     };
     const context = (event: MouseEvent) => {
       if (!open) event.preventDefault();
@@ -122,5 +109,33 @@ export function RevealScreen({ children }: { children: (close: () => void) => Re
       document.removeEventListener('visibilitychange', hidden);
     };
   }, [open]);
-  return open && !document.hidden ? <>{children(() => setOpen(false))}</> : <BlankScreen />;
+  return [open && !document.hidden, () => setOpen(false)] as const;
+}
+
+export function RevealScreen({ children }: { children: (close: () => void) => React.ReactNode }) {
+  const [open, close] = useReveal();
+  return open ? <>{children(close)}</> : <BlankScreen />;
+}
+
+export function LockScreen({
+  auth,
+  camera,
+  children,
+}: {
+  auth: AuthState | null;
+  camera: AuthCamera;
+  children: (close: () => void, face: FaceUnlock) => React.ReactNode;
+}) {
+  const face = useFaceUnlock(auth, camera);
+  const [open, close] = useReveal();
+  if (open)
+    return (
+      <>
+        {children(() => {
+          face.stop();
+          close();
+        }, face)}
+      </>
+    );
+  return <BlankScreen>{face.usable && <FaceBadge face={face} />}</BlankScreen>;
 }

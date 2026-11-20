@@ -1,57 +1,49 @@
 import Close from '@mui/icons-material/Close';
-import {
-  Box,
-  Button,
-  IconButton,
-  Stack,
-  TextField,
-  ToggleButton,
-  ToggleButtonGroup,
-  Typography,
-} from '@mui/material';
+import { Button, IconButton, TextField, Typography } from '@mui/material';
 import React, { useEffect, useRef, useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import type { AuthState } from '../../shared/security';
 import { useAutoFocus } from '../editing/local-autofocus';
 import { failureError, FailureNote } from '../failures';
 import { recover } from '../failures/recovery';
-import type { AuthCamera, AuthRequest } from './auth-camera';
+import type { AuthRequest } from './auth-camera';
+import { FaceBadge, type FaceUnlock } from './face-unlock';
 
 export function UnlockView({
   auth,
   request,
-  camera,
+  face,
   close,
   connectionError,
   revoked,
 }: {
   auth: AuthState | null;
   request: AuthRequest;
-  camera: AuthCamera;
+  face: FaceUnlock;
   close: () => void;
   connectionError?: RemoteKitError;
   revoked?: boolean;
 }) {
   const autoFocusRef = useAutoFocus<HTMLInputElement>();
-  const [method, setMethod] = useState<'password' | 'pin' | 'face'>('password');
+  const [chosen, setChosen] = useState<'password' | 'pin'>();
+  const method = chosen === 'password' || !auth?.methods.pin ? 'password' : 'pin';
   const [secret, setSecret] = useState('');
-  const [faceUnavailable] = useState(() => new RemoteKitError('rejected', '人脸验证服务不可用'));
   const [error, setError] = useState<RemoteKitError | undefined>();
   const [busy, setBusy] = useState(false);
-  const closePanel = () => {
-    if (camera.explicit === 'verify') camera.cancel();
-    close();
-  };
   useEffect(() => {
     const escape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closePanel();
+      if (event.key === 'Escape') close();
     };
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
-  }, [camera, close]);
+  }, [close]);
+  // Opening the form is a user gesture, so the camera may prompt for permission here.
+  const faceStarted = useRef(false);
   useEffect(() => {
-    if (method === 'face' && !auth?.methods.face) setMethod('password');
-  }, [method, auth?.methods.face]);
+    if (faceStarted.current || !face.usable) return;
+    faceStarted.current = true;
+    if (face.phase === 'idle') face.begin();
+  }, [face.usable, face.phase, face.begin]);
   const lifetime = useRef(new AbortController());
   useEffect(() => () => lifetime.current.abort(), []);
   const submit = async (event: React.FormEvent) => {
@@ -60,8 +52,7 @@ export function UnlockView({
     setBusy(true);
     setError(undefined);
     try {
-      if (method === 'face') await camera.start('verify');
-      else await recover(() => request('auth.verify', { method, secret }), lifetime.current.signal, setError);
+      await recover(() => request('auth.verify', { method, secret }), lifetime.current.signal, setError);
     } catch (failure) {
       setError(failureError(failure));
     } finally {
@@ -69,110 +60,61 @@ export function UnlockView({
       setBusy(false);
     }
   };
+  const switchMethod = () => {
+    setChosen(method === 'pin' ? 'password' : 'pin');
+    setSecret('');
+    setError(undefined);
+  };
   return (
-    <main className="auth-page">
-      <Box component="form" className="auth-form" onSubmit={submit}>
-        <Stack direction="row" justifyContent="space-between" alignItems="center">
-          <Typography component="h1" variant="h5">
-            解锁
-          </Typography>
-          <IconButton aria-label="关闭验证" onClick={closePanel}>
-            <Close />
-          </IconButton>
-        </Stack>
+    <main className="unlock-page">
+      <form className="unlock-card" onSubmit={submit}>
+        <IconButton className="unlock-close" aria-label="关闭验证" onClick={close}>
+          <Close />
+        </IconButton>
+        <Typography component="h1" variant="h5" className="unlock-title">
+          解锁
+        </Typography>
         {!auth ? (
-          <>
-            <FailureNote
-              error={connectionError ?? new RemoteKitError('unavailable', '')}
-              context={{
-                operation: '连接验证服务',
-                scope: 'full-screen',
-                connection: true,
-                issue: revoked ? 'lease' : undefined,
-                action: revoked ? { label: '重新加载', run: () => location.reload() } : undefined,
-              }}
-            />
-          </>
+          <FailureNote
+            error={connectionError ?? new RemoteKitError('unavailable', '')}
+            context={{
+              operation: '连接验证服务',
+              scope: 'full-screen',
+              connection: true,
+              issue: revoked ? 'lease' : undefined,
+              action: revoked ? { label: '重新加载', run: () => location.reload() } : undefined,
+            }}
+          />
         ) : (
           <>
-            <Typography color="text.secondary">{auth.user.username}</Typography>
-            {!auth.face.available && (
-              <Typography variant="caption" color="text.secondary">
-                {auth.face.reason ?? '人脸服务正在连接，请使用密码或 PIN。'}
-              </Typography>
-            )}
-            {(auth.methods.pin || auth.methods.face) && (
-              <ToggleButtonGroup
-                exclusive
-                size="small"
-                value={method}
-                aria-label="验证方式"
-                onChange={(_, value: typeof method | null) => {
-                  if (!value || value === method) return;
-                  if (camera.explicit === 'verify') camera.cancel();
-                  setMethod(value);
-                  setSecret('');
-                  setError(undefined);
-                }}
-              >
-                <ToggleButton value="password">密码</ToggleButton>
-                {auth.methods.pin && <ToggleButton value="pin">PIN</ToggleButton>}
-                {auth.methods.face && <ToggleButton value="face">人脸</ToggleButton>}
-              </ToggleButtonGroup>
-            )}
-            {method !== 'face' ? (
-              <TextField
-                key={method}
-                inputRef={autoFocusRef}
-                required
-                type="password"
-                value={secret}
-                label={method === 'pin' ? 'PIN' : '账户密码'}
-                autoComplete={method === 'pin' ? 'off' : 'current-password'}
-                slotProps={{
-                  htmlInput:
-                    method === 'pin' ? { inputMode: 'numeric', pattern: '[0-9]{6,12}', maxLength: 12 } : {},
-                }}
-                onChange={(event) => setSecret(event.target.value)}
-              />
+            <Typography className="unlock-user" color="text.secondary">
+              {auth.user.username}
+            </Typography>
+            {face.usable ? (
+              <FaceBadge face={face} prominent />
             ) : (
-              <Typography role="status" color="text.secondary">
-                {!auth.face.available
-                  ? '当前服务无法进行人脸验证。'
-                  : auth.face.purpose === 'verify' && auth.face.status === 'pending'
-                    ? '请正对摄像头。'
-                    : auth.face.purpose === 'verify' && auth.face.status === 'expired'
-                      ? '验证已超时，工作区仍锁定。'
-                      : auth.face.purpose === 'verify' && auth.face.status === 'failed'
-                        ? '未能完成人脸验证，工作区仍锁定。'
-                        : '开启摄像头后，按提示完成人脸验证。'}
-              </Typography>
+              face.enrolled && (
+                <Typography className="unlock-face-note" variant="caption" color="text.secondary">
+                  {auth.face.reason ?? '人脸服务正在连接，请先使用 PIN 或密码'}
+                </Typography>
+              )
             )}
-            {method === 'face' && !auth.face.available && (
-              <FailureNote
-                error={faceUnavailable}
-                context={{
-                  operation: '完成人脸验证',
-                  scope: 'full-screen',
-                  consequence: '工作区仍锁定，请使用密码或 PIN',
-                }}
-              />
-            )}
-            {method === 'face' && auth.face.error && (
-              <FailureNote
-                error={auth.face.error}
-                context={{
-                  operation: '完成人脸验证',
-                  scope: 'full-screen',
-                  action: {
-                    label: '开启摄像头',
-                    run: () => {
-                      void camera.start('verify').catch((error) => setError(failureError(error)));
-                    },
-                  },
-                }}
-              />
-            )}
+            <TextField
+              key={method}
+              className={`unlock-secret ${method}`}
+              inputRef={autoFocusRef}
+              required
+              fullWidth
+              type="password"
+              value={secret}
+              label={method === 'pin' ? 'PIN' : '账户密码'}
+              autoComplete={method === 'pin' ? 'off' : 'current-password'}
+              slotProps={{
+                htmlInput:
+                  method === 'pin' ? { inputMode: 'numeric', pattern: '[0-9]{6,12}', maxLength: 12 } : {},
+              }}
+              onChange={(event) => setSecret(event.target.value)}
+            />
             {error && (
               <FailureNote
                 error={error}
@@ -180,24 +122,25 @@ export function UnlockView({
                   operation: '解锁',
                   scope: 'full-screen',
                   input: true,
-                  issue: method === 'face' ? undefined : 'credentials',
+                  issue: 'credentials',
                   action: {
                     label: method === 'pin' ? '输入 PIN' : '输入密码',
-                    run: () => document.querySelector<HTMLInputElement>('.auth-form input')?.focus(),
+                    run: () => document.querySelector<HTMLInputElement>('.unlock-card input')?.focus(),
                   },
                 }}
               />
             )}
-            <Button
-              type="submit"
-              variant="contained"
-              disabled={busy || (method === 'face' && !auth.face.available)}
-            >
-              {busy ? '正在验证…' : method === 'face' ? '开启摄像头' : '解锁'}
+            <Button type="submit" variant="contained" size="large" fullWidth disabled={busy || !secret}>
+              {busy ? '正在验证…' : '解锁'}
             </Button>
+            {auth.methods.pin && (
+              <Button className="unlock-switch" variant="text" size="small" onClick={switchMethod}>
+                {method === 'pin' ? '改用账户密码' : '改用 PIN'}
+              </Button>
+            )}
           </>
         )}
-      </Box>
+      </form>
     </main>
   );
 }

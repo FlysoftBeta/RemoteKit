@@ -1,24 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lockDirection, RevealSequence } from '../client/auth/lock-screen';
+import { TripleTap } from '../client/auth/lock-screen';
 
-test('lock reveal accepts one mixed direction sequence and recovers its longest prefix', () => {
-  const reveal = new RevealSequence();
-  const directions = ['Up', 'Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right'] as const;
-  assert.deepEqual(
-    directions.map((direction, i) => reveal.push(direction, i * 400)),
-    [...Array(8).fill(false), true],
-  );
-  assert.equal(reveal.push('Right', 4000), false);
-  reveal.push('Up', 4100);
-  reveal.push('Up', 9200);
-  for (const direction of directions.slice(3)) assert.equal(reveal.push(direction, 9300), false);
+test('lock reveal needs three quick taps close together', () => {
+  const reveal = new TripleTap();
+  assert.equal(reveal.push(100, 100, 0), false);
+  assert.equal(reveal.push(110, 105, 300), false);
+  assert.equal(reveal.push(95, 98, 600), true);
+  assert.equal(reveal.push(100, 100, 700), false, 'a completed gesture starts over');
 });
 
-test('lock tap regions use normalized axes, a central dead zone, and vertical diagonal ties', () => {
-  assert.equal(lockDirection(500, 50, 1000, 100), undefined);
-  assert.equal(lockDirection(0, 50, 1000, 100), 'Left');
-  assert.equal(lockDirection(999, 50, 1000, 100), 'Right');
-  assert.equal(lockDirection(250, 25, 1000, 100), 'Up');
-  assert.equal(lockDirection(750, 75, 1000, 100), 'Down');
+test('slow or scattered taps restart the lock reveal', () => {
+  const reveal = new TripleTap();
+  reveal.push(100, 100, 0);
+  reveal.push(100, 100, 300);
+  assert.equal(reveal.push(100, 100, 900), false, 'gap too long');
+  reveal.push(100, 100, 1100);
+  assert.equal(reveal.push(400, 100, 1300), false, 'too far from the first tap');
+  reveal.push(400, 100, 1500);
+  assert.equal(reveal.push(400, 100, 1700), true);
 });

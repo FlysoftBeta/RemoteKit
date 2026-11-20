@@ -241,26 +241,17 @@ async function prepare(browser, phone, first = false) {
     await pause(500);
     if (phone) {
       const { width, height } = page.viewportSize();
-      for (const [x, y] of [
-        [0.5, 0.25],
-        [0.5, 0.25],
-        [0.5, 0.75],
-        [0.5, 0.75],
-        [0.25, 0.5],
-        [0.75, 0.5],
-        [0.25, 0.5],
-        [0.75, 0.5],
-      ]) {
+      for (let tap = 0; tap < 3; tap++) {
         await cdp.send('Input.dispatchTouchEvent', {
           type: 'touchStart',
-          touchPoints: [{ x: x * width, y: y * height, id: 1 }],
+          touchPoints: [{ x: width * 0.4, y: height * 0.4, id: 1 }],
         });
         await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
         await pause(120);
       }
     } else
-      for (const direction of ['Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right']) {
-        await page.keyboard.press('Arrow' + direction);
+      for (let press = 0; press < 3; press++) {
+        await page.keyboard.press('Enter');
         await pause(80);
       }
   };

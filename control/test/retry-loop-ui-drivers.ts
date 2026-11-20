@@ -332,7 +332,7 @@ export function driveUi(
           key: boundary.version,
           auth: auth as never,
           request: authRequest as never,
-          camera: {} as never,
+          face: { usable: false, enrolled: false, phase: 'idle', begin: noop, stop: noop } as never,
           close: noop,
         });
       if (path.startsWith('security'))

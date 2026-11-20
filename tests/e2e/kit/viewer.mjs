@@ -193,19 +193,14 @@ export async function launch({
       await waitUnlocked();
       await wait(() => state, 'unlocked product state');
     }
-    const sequence = ['Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right'];
     async function unlockByKeys() {
-      for (const direction of sequence) await page.keyboard.press('Arrow' + direction);
+      for (let press = 0; press < 3; press++) await page.keyboard.press('Enter');
       await authenticate();
     }
     async function unlockByTaps() {
       const { width, height } = page.viewportSize();
-      // lockDirection normalizes around (0.5, 0.5), chooses the dominant axis,
-      // and excludes the central 10% square. These are the four region centres.
-      const centres = { Up: [0.5, 0.25], Down: [0.5, 0.75], Left: [0.25, 0.5], Right: [0.75, 0.5] };
-      for (const direction of sequence) {
-        const [x, y] = centres[direction];
-        await pointer.move(x * width, y * height);
+      await pointer.move(width * 0.4, height * 0.4);
+      for (let tap = 0; tap < 3; tap++) {
         await pointer.down();
         await pointer.up();
       }

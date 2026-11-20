@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { RemoteKitError } from '../../shared/errors';
-import { BlankScreen, RevealScreen } from '../auth/lock-screen';
+import { BlankScreen, LockScreen } from '../auth/lock-screen';
 import { UnlockView } from '../auth/unlock-view';
 import { useWorkspaceClipboard } from '../clipboard/workspace-clipboard';
 import { deviceClipboard } from '../clipboard/device-clipboard';
@@ -191,18 +191,22 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
   return (
     <KeyboardPreferenceContext.Provider value={state?.workspace.settings.workspace.autoKeyboard ?? false}>
       {localLock || auth?.locked !== false ? (
-        <RevealScreen key={`${auth?.epoch ?? 'connecting'}:${localLock ?? ''}`}>
-          {(close) => (
+        <LockScreen
+          key={`${auth?.epoch ?? 'connecting'}:${localLock ?? ''}`}
+          auth={localLock ? null : auth}
+          camera={controls.camera}
+        >
+          {(close, face) => (
             <UnlockView
               auth={localLock ? null : auth}
               request={controls.authRequest}
-              camera={controls.camera}
+              face={face}
               close={close}
               connectionError={media.control.error}
               revoked={status === 'revoked'}
             />
           )}
-        </RevealScreen>
+        </LockScreen>
       ) : !state ? (
         <BlankScreen />
       ) : (

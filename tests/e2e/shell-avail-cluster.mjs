@@ -144,8 +144,7 @@ try {
   await viewer.call('auth.lock');
   await viewer.page.locator('.viewer-lock-blank').waitFor();
   await viewer.page.evaluate(() => new Promise(requestAnimationFrame));
-  for (const key of ['Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right'])
-    await viewer.page.keyboard.press('Arrow' + key);
+  for (let press = 0; press < 3; press++) await viewer.page.keyboard.press('Enter');
   await viewer.page.getByLabel(/账户密码/).fill(password);
   await viewer.page.getByRole('button', { name: '解锁', exact: true }).click();
   await viewer.ready();
@@ -154,10 +153,8 @@ try {
   await viewer.call('auth.lock');
   await viewer.page.locator('.viewer-lock-blank').waitFor();
   await viewer.page.evaluate(() => new Promise(requestAnimationFrame));
-  for (const key of ['Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right'])
-    await viewer.page.keyboard.press('Arrow' + key);
-  await viewer.page.getByRole('button', { name: '人脸', exact: true }).click();
-  await viewer.page.getByRole('button', { name: '开启摄像头', exact: true }).click();
+  // The blank lock screen's face badge starts verification without revealing the form.
+  await viewer.page.locator('.lock-face').click();
   await viewer.page.waitForFunction(() => clusterQA.authFrames >= 2 && clusterQA.authGrants >= 2);
   const face = await viewer.call('auth.get');
   assert(face.face.challengeId);

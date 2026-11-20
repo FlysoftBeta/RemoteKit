@@ -26,11 +26,10 @@ window.__remotekitTest = {
   failures: showFailureScene,
   state: () => JSON.parse(JSON.stringify(operations?.getSnapshot().authoritative ?? null)),
   async unlock() {
-    // RevealScreen owns the pattern and its completed-pattern action. Authentication
-    // still goes through UnlockView, using the scenario's seeded credentials.
-    for (const direction of ['Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right']) {
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: `Arrow${direction}`, cancelable: true }));
-    }
+    // LockScreen owns the reveal gesture. Authentication still goes through UnlockView,
+    // using the scenario's seeded credentials.
+    for (let press = 0; press < 3; press++)
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }));
     await new Promise<void>((done) => requestAnimationFrame(() => done()));
   },
 };

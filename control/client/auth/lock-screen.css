@@ -7,3 +7,208 @@
   user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
+
+/* Face badge: quiet on the blank screen, prominent above the PIN/password field. */
+.lock-face {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 16px;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+}
+.lock-face.scanning {
+  cursor: default;
+}
+.lock-face:focus-visible {
+  box-shadow: 0 0 0 2px var(--primary-border);
+}
+.lock-face-mark {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  transition:
+    background-color 0.2s,
+    color 0.2s,
+    transform 0.15s;
+}
+.lock-face:active .lock-face-mark {
+  transform: scale(0.94);
+}
+.lock-face-glyph {
+  display: block;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.lock-face-scan {
+  fill: currentColor;
+  stroke: none;
+  opacity: 0.55;
+  animation: lock-face-scan 1.6s ease-in-out infinite alternate;
+}
+.lock-face.scanning .lock-face-frame {
+  animation: lock-face-breathe 1.6s ease-in-out infinite alternate;
+}
+.lock-face-caption {
+  line-height: 1.3;
+  white-space: nowrap;
+  transition: color 0.2s;
+}
+
+.lock-face.quiet {
+  position: absolute;
+  left: 50%;
+  top: 72%;
+  transform: translateX(-50%);
+  color: var(--text-muted);
+  opacity: 0.55;
+  cursor: pointer;
+}
+.lock-face.quiet.scanning {
+  cursor: none;
+}
+.lock-face.quiet .lock-face-glyph {
+  width: 28px;
+  height: 28px;
+}
+.lock-face.quiet .lock-face-caption {
+  font-size: 12px;
+}
+
+.lock-face.prominent {
+  color: var(--text-secondary);
+}
+.lock-face.prominent .lock-face-mark {
+  width: 76px;
+  height: 76px;
+  background: var(--surface-neutral);
+  box-shadow: inset 0 0 0 1px var(--border-neutral);
+}
+.lock-face.prominent:hover .lock-face-mark {
+  background: var(--surface-handle-hover);
+}
+.lock-face.prominent.scanning .lock-face-mark {
+  color: var(--primary);
+  background: var(--primary-drop);
+  box-shadow: inset 0 0 0 1px var(--primary-border);
+}
+.lock-face.prominent.scanning .lock-face-mark::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+  border-radius: 50%;
+  border: 2px solid var(--primary-pulse);
+  animation: lock-face-ring 1.6s ease-out infinite;
+}
+.lock-face.prominent.failed .lock-face-mark {
+  color: var(--attention);
+}
+.lock-face.prominent .lock-face-glyph {
+  width: 40px;
+  height: 40px;
+}
+.lock-face.prominent .lock-face-caption {
+  font-size: 14px;
+}
+.lock-face.prominent.scanning .lock-face-caption {
+  color: var(--primary);
+}
+
+@keyframes lock-face-scan {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(30px);
+  }
+}
+@keyframes lock-face-breathe {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.45;
+  }
+}
+@keyframes lock-face-ring {
+  from {
+    transform: scale(0.92);
+    opacity: 1;
+  }
+  to {
+    transform: scale(1.18);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lock-face-scan,
+  .lock-face.scanning .lock-face-frame,
+  .lock-face.prominent.scanning .lock-face-mark::after {
+    animation: none;
+  }
+}
+
+/* Unlock form */
+.unlock-page {
+  height: 100%;
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: max(24px, env(safe-area-inset-top)) 16px 24px;
+  background: var(--surface-background);
+}
+.unlock-card {
+  position: relative;
+  margin: auto 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 360px;
+  max-width: 100%;
+  padding: 36px 28px 20px;
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: 0 12px 40px var(--shadow-notice);
+}
+.unlock-close.MuiIconButton-root {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+.unlock-title.MuiTypography-root {
+  font-weight: 600;
+}
+.unlock-user.MuiTypography-root {
+  margin-top: -12px;
+}
+.unlock-card > .failure-note {
+  align-self: stretch;
+}
+.unlock-face-note.MuiTypography-root {
+  text-align: center;
+}
+.unlock-secret.pin input {
+  text-align: center;
+  font-size: 22px;
+  letter-spacing: 0.4em;
+  /* Keep the dots centred despite the trailing letter spacing. */
+  text-indent: 0.4em;
+}
+.unlock-switch.MuiButton-root {
+  margin-top: -6px;
+}
