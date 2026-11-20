@@ -496,6 +496,7 @@ export interface SocketMethods
     result: { recorded: boolean };
   };
   'announcement.read': { params: { id: string }; result: { read: boolean } };
+  'task.acknowledge': { params: { id: string }; result: { acknowledged: boolean } };
   'usage.clear': { params: { scope: 'all' | 'pages' }; result: { cleared: boolean } };
   'page.preview': { params: { url: string; image: string }; result: { saved: boolean } };
   'launcher.get': { params: { query?: string }; result: { items: LauncherItem[] } };

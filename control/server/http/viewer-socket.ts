@@ -104,6 +104,14 @@ const handlers: Record<string, Handler> = {
   'announcement.read': product(({ services, authority }, params) =>
     services.announcements.markRead(authority.tenantId, params.id),
   ),
+  // A task notice is delivered once; later pages and unlocks do not replay it.
+  'task.acknowledge': product(({ services, authority }, params) => {
+    if (typeof params.id !== 'string' || !params.id)
+      throw new RemoteKitError('invalid_request', '任务标识无效');
+    if (services.tenants.get(authority.tenantId).backgroundTasks.delete(params.id))
+      services.viewers.push(authority.tenantId);
+    return { acknowledged: true };
+  }),
   'usage.clear': product(({ services, authority }, params) =>
     services.workspace.clearUsage(authority.tenantId, params.scope),
   ),

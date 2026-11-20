@@ -167,7 +167,9 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
     else notices.resolve('capacity:output');
   }, [viewportNotice, state?.endpointError]);
   const seenTasks = useRef(new Map<string, string>());
+  const taskViewer = showShell && status === 'online';
   useEffect(() => {
+    if (!taskViewer) return;
     for (const task of state?.backgroundTasks ?? []) {
       if (seenTasks.current.get(task.id) === task.state) continue;
       seenTasks.current.set(task.id, task.state);
@@ -181,8 +183,16 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
             })
           : { class: 'B', text: `${task.name} 已下载到我的文件` },
       );
+      void media.control
+        .request('task.acknowledge', { id: task.id })
+        .catch((error) =>
+          notices.post(
+            'task:acknowledge',
+            presentFailure(failureError(error), { operation: '确认下载提示', scope: 'global' }),
+          ),
+        );
     }
-  }, [state?.backgroundTasks]);
+  }, [media, taskViewer, state?.backgroundTasks]);
   const pending = state?.workspace.pendingClose;
   const foreground =
     state && !overlays.launcherOpen && !(pending && !pending.awaiting)

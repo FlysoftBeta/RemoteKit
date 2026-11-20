@@ -33,6 +33,7 @@ const operations: Record<string, string> = {
   'clipboard.set': '同步剪贴板',
   'clipboard.applied': '准备远端粘贴',
   'announcement.read': '保存公告已读状态',
+  'task.acknowledge': '确认下载提示',
   'library.get': '读取我的文件',
   'library.import': '导入文件',
   'library.replace': '保存照片',

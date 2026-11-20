@@ -173,3 +173,22 @@ test('announcements reach every user, track reads per publication and are admin-
     await h.close();
   }
 });
+
+test('an acknowledged task notice is not replayed to later snapshots', async (t) => {
+  const h = await stack();
+  t.after(() => h.close());
+  const tenant = h.user.tenantId;
+  h.control.tenants
+    .get(tenant)
+    .backgroundTasks.set('download-1', {
+      id: 'download-1',
+      kind: 'download',
+      state: 'complete',
+      name: 'a.pdf',
+    });
+  assert.equal(h.control.viewers.productState(tenant).backgroundTasks?.length, 1);
+  assert.deepEqual(await h.call(tenant, 'task.acknowledge', { id: 'download-1' }), { acknowledged: true });
+  assert.deepEqual(await h.call(tenant, 'task.acknowledge', { id: 'download-1' }), { acknowledged: true });
+  assert.equal(h.control.viewers.productState(tenant).backgroundTasks?.length, 0);
+  await assert.rejects(h.call(tenant, 'task.acknowledge', { id: 1 }), { code: 'invalid_request' });
+});
