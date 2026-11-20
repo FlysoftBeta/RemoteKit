@@ -1,5 +1,14 @@
 import Close from '@mui/icons-material/Close';
-import { Box, Button, IconButton, Stack, Tab, Tabs, TextField, Typography } from '@mui/material';
+import {
+  Box,
+  Button,
+  IconButton,
+  Stack,
+  TextField,
+  ToggleButton,
+  ToggleButtonGroup,
+  Typography,
+} from '@mui/material';
 import React, { useEffect, useRef, useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import type { AuthState } from '../../shared/security';
@@ -101,15 +110,19 @@ export function UnlockView({
               )
             )}
             {auth.methods.pin && (
-              <Tabs
-                variant="fullWidth"
+              <ToggleButtonGroup
+                exclusive
+                fullWidth
+                size="small"
                 value={method}
                 aria-label="验证方式"
-                onChange={(_, value: 'password' | 'pin') => switchMethod(value)}
+                onChange={(_, value: 'password' | 'pin' | null) => {
+                  if (value) switchMethod(value);
+                }}
               >
-                <Tab value="pin" label="PIN" />
-                <Tab value="password" label="密码" />
-              </Tabs>
+                <ToggleButton value="pin">PIN</ToggleButton>
+                <ToggleButton value="password">密码</ToggleButton>
+              </ToggleButtonGroup>
             )}
             <TextField
               key={method}

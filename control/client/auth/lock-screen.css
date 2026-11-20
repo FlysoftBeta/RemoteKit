@@ -168,6 +168,3 @@
   /* Keep the dots centred despite the trailing letter spacing. */
   text-indent: 0.4em;
 }
-.unlock-form .MuiTabs-root {
-  border-bottom: 1px solid var(--border);
-}

@@ -1,3 +1,4 @@
+import './lock-screen.css';
 import { useCallback, useEffect, useState } from 'react';
 import { parseWireError, RemoteKitError } from '../../shared/errors';
 import type { AuthState } from '../../shared/security';
