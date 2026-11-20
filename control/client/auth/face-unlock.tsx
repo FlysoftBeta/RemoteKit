@@ -90,9 +90,7 @@ export function FaceBadge({ face, prominent }: { face: FaceUnlock; prominent?: b
       ? '正在识别…'
       : face.phase === 'failed'
         ? `${face.reason}，点按重试`
-        : prominent
-          ? '点按使用人脸解锁'
-          : '点按开始识别';
+        : '点按使用人脸解锁';
   return (
     <button
       type="button"
@@ -106,9 +104,11 @@ export function FaceBadge({ face, prominent }: { face: FaceUnlock; prominent?: b
       <span className="lock-face-mark">
         <FaceGlyph phase={face.phase} />
       </span>
-      <span className="lock-face-caption" role="status">
-        {caption}
-      </span>
+      {prominent && (
+        <span className="lock-face-caption" role="status">
+          {caption}
+        </span>
+      )}
     </button>
   );
 }

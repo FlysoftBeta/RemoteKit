@@ -1,5 +1,5 @@
 import Close from '@mui/icons-material/Close';
-import { Button, IconButton, TextField, Typography } from '@mui/material';
+import { Box, Button, IconButton, Stack, Tab, Tabs, TextField, Typography } from '@mui/material';
 import React, { useEffect, useRef, useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import type { AuthState } from '../../shared/security';
@@ -60,20 +60,23 @@ export function UnlockView({
       setBusy(false);
     }
   };
-  const switchMethod = () => {
-    setChosen(method === 'pin' ? 'password' : 'pin');
+  const switchMethod = (next: 'password' | 'pin') => {
+    if (next === method) return;
+    setChosen(next);
     setSecret('');
     setError(undefined);
   };
   return (
-    <main className="unlock-page">
-      <form className="unlock-card" onSubmit={submit}>
-        <IconButton className="unlock-close" aria-label="关闭验证" onClick={close}>
-          <Close />
-        </IconButton>
-        <Typography component="h1" variant="h5" className="unlock-title">
-          解锁
-        </Typography>
+    <main className="auth-page">
+      <Box component="form" className="auth-form unlock-form" onSubmit={submit}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Typography component="h1" variant="h5">
+            解锁
+          </Typography>
+          <IconButton aria-label="关闭验证" onClick={close}>
+            <Close />
+          </IconButton>
+        </Stack>
         {!auth ? (
           <FailureNote
             error={connectionError ?? new RemoteKitError('unavailable', '')}
@@ -87,17 +90,26 @@ export function UnlockView({
           />
         ) : (
           <>
-            <Typography className="unlock-user" color="text.secondary">
-              {auth.user.username}
-            </Typography>
+            <Typography color="text.secondary">{auth.user.username}</Typography>
             {face.usable ? (
               <FaceBadge face={face} prominent />
             ) : (
               face.enrolled && (
-                <Typography className="unlock-face-note" variant="caption" color="text.secondary">
+                <Typography variant="caption" color="text.secondary">
                   {auth.face.reason ?? '人脸服务正在连接，请先使用 PIN 或密码'}
                 </Typography>
               )
+            )}
+            {auth.methods.pin && (
+              <Tabs
+                variant="fullWidth"
+                value={method}
+                aria-label="验证方式"
+                onChange={(_, value: 'password' | 'pin') => switchMethod(value)}
+              >
+                <Tab value="pin" label="PIN" />
+                <Tab value="password" label="密码" />
+              </Tabs>
             )}
             <TextField
               key={method}
@@ -125,22 +137,17 @@ export function UnlockView({
                   issue: 'credentials',
                   action: {
                     label: method === 'pin' ? '输入 PIN' : '输入密码',
-                    run: () => document.querySelector<HTMLInputElement>('.unlock-card input')?.focus(),
+                    run: () => document.querySelector<HTMLInputElement>('.unlock-form input')?.focus(),
                   },
                 }}
               />
             )}
-            <Button type="submit" variant="contained" size="large" fullWidth disabled={busy || !secret}>
+            <Button type="submit" variant="contained" disabled={busy || !secret}>
               {busy ? '正在验证…' : '解锁'}
             </Button>
-            {auth.methods.pin && (
-              <Button className="unlock-switch" variant="text" size="small" onClick={switchMethod}>
-                {method === 'pin' ? '改用账户密码' : '改用 PIN'}
-              </Button>
-            )}
           </>
         )}
-      </form>
+      </Box>
     </main>
   );
 }
