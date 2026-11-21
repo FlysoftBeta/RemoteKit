@@ -39,6 +39,7 @@
 #include "remotekit/browser/control_server.h"
 #include "remotekit/browser/osr_renderer.h"
 #include "remotekit/browser/page_requests.h"
+#include "browser/observed_state.h"
 #include "remotekit/browser/offscreen_host.h"
 #include "remotekit/browser/webview.h"
 #include "remotekit/browser/view_model.h"
@@ -79,11 +80,18 @@ BrowserRuntime::BrowserRuntime() {
                  [](BrowserRuntime* runtime, uint64_t sequence) {
                    if (runtime->output)
                      runtime->output->PublishClipboardSequence(sequence);
+                   ObservedState::Changed();
                  },
                  base::Unretained(this)));
   CHECK(!ui::TouchSelectionMenuRunner::GetInstance());
   selection_menu = std::make_unique<RemoteTouchSelectionMenuRunner>(views);
   context_menu = std::make_unique<RemoteContextMenu>(views);
+  ObservedState::SetNotifier(base::BindRepeating(
+      [](BrowserRuntime* runtime, uint64_t revision) {
+        if (runtime->output)
+          runtime->output->ObservedChanged(revision);
+      },
+      base::Unretained(this)));
   content::GpuDataManager::GetInstance()->AddObserver(this);
 }
 void BrowserRuntime::OnGpuInfoUpdate() {
@@ -103,6 +111,7 @@ void BrowserRuntime::OnGpuInfoUpdate() {
                     manager->GetFeatureStatus(gpu::GPU_FEATURE_TYPE_GPU_TILE_RASTERIZATION)));
 }
 BrowserRuntime::~BrowserRuntime() {
+  ObservedState::SetNotifier({});
   content::GpuDataManager::GetInstance()->RemoveObserver(this);
   // PostMainMessageLoopRun also runs after a partial PreMain startup failure.
   // Contexts must never be left to implicit member destruction order.

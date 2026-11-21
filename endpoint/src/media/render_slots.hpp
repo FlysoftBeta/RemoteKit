@@ -9,6 +9,7 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <functional>
 namespace remotekit::media {
 class RenderSlots {
  public:
@@ -31,6 +32,9 @@ class RenderSlots {
   enum class Result { idle, ready, error };
   void SetTrace(std::shared_ptr<ServerTrace> trace) { trace_ = std::move(trace); }
   void SetClock(const remotekit_rtc_clock_sample& sample) { clock_ = sample; }
+  // Called on an SDK worker thread when the Browser reports a page state change. Set before
+  // Open; it is read-only afterwards.
+  void SetObservedChanged(std::function<void()> notify) { observed_changed_ = std::move(notify); }
   remotekit::Result<void> Open(remotekit_sdk_render_setup,
                                uint32_t producer_pid,
                                Sdk&,
@@ -94,6 +98,7 @@ class RenderSlots {
   SharedAtlasFrame published_metadata_{};
   remotekit_rtc_clock_sample clock_{};
   std::shared_ptr<ServerTrace> trace_;
+  std::function<void()> observed_changed_;
   std::atomic<uint64_t> delivered_{0};
   // Media source identity remains unique across render generations.
   uint64_t next_cookie_ = 0;

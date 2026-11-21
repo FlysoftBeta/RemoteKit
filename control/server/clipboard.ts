@@ -5,8 +5,12 @@ import type { ClipboardChangedEvent } from './endpoint/types';
 import { warnClipboardOversize } from './persistence/clipboards';
 import type { ViewerAuthority } from './viewers/viewer-hub';
 import { counter } from './endpoint/coordination';
+import { KeyedSerialQueue } from './util/serial-queue';
 
 export class ClipboardService {
+  // Clipboard writes touch only the clipboard and snippet stores, so they do not wait behind the
+  // tenant's product reconciliation.
+  private readonly clipboardQueue = new KeyedSerialQueue();
   constructor(
     private readonly context: DomainContext,
     private readonly services: Pick<DomainServices, 'viewers' | 'library'>,
@@ -30,7 +34,7 @@ export class ClipboardService {
   }
 
   changed(event: ClipboardChangedEvent, commit: (disposition: string) => void) {
-    return this.context.tenants.serial(event.tenantId, async () => {
+    return this.clipboardQueue.run(event.tenantId, async () => {
       let clipboard: ReturnType<DomainContext['store']['clipboards']['latest']>;
       let library: ReturnType<DomainContext['store']['library']['snapshot']> | undefined;
       this.context.store.transaction(() => {
@@ -79,7 +83,7 @@ export class ClipboardService {
     });
   }
   set(authority: ViewerAuthority, params: { text: string }) {
-    return this.context.tenants.serial(authority.tenantId, async () => {
+    return this.clipboardQueue.run(authority.tenantId, async () => {
       this.services.viewers.assertProductViewer(authority.tenantId, authority.leaseId, authority.epoch);
       if (typeof params.text !== 'string') throw new RemoteKitError('invalid_request', '无效的剪贴板文本');
       const value = await this.accept(authority.tenantId, params.text, '', { kind: 'device' }, false);
@@ -117,7 +121,7 @@ export class ClipboardService {
   }
 
   copySnippet(authority: ViewerAuthority, entryId: string) {
-    return this.context.tenants.serial(authority.tenantId, async () => {
+    return this.clipboardQueue.run(authority.tenantId, async () => {
       this.services.viewers.assertProductViewer(authority.tenantId, authority.leaseId, authority.epoch);
       const entry = this.context.store.library
         .snapshot(authority.tenantId)

@@ -19,6 +19,9 @@ void OsrRenderer::SetViews(std::vector<View> views, uint32_t layout_revision) {
 void OsrRenderer::PublishClipboardSequence(uint64_t sequence) {
   state_->PublishClipboardSequence(sequence);
 }
+void OsrRenderer::ObservedChanged(uint64_t revision) {
+  state_->ObservedChanged(revision);
+}
 void OsrRenderer::StopView(uint64_t id) {
   state_->StopView(id);
 }

@@ -44,6 +44,17 @@ int main() {
   CHECK(!EncodeRenderWire(message));
   message.begin = {};
   message.begin.identity.generation = 7;
+  message.type = RenderWireType::kObservedChanged;
+  CHECK(!EncodeRenderWire(message));
+  message.begin.identity.value = 9;
+  RoundTrip(message);
+  message.begin.identity.slot = 1;
+  CHECK(!EncodeRenderWire(message));
+  message.begin.identity.slot = 0;
+  message.begin.identity.generation = 0;
+  CHECK(!EncodeRenderWire(message));
+  message.begin.identity.generation = 7;
+  message.begin.identity.value = 0;
   for (auto type : {RenderWireType::kStop, RenderWireType::kStopped}) {
     message.type = type;
     RoundTrip(message);

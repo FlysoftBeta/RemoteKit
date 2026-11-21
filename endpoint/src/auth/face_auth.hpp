@@ -83,6 +83,9 @@ class Faces {
   bool Cancel(uint64_t epoch, std::string_view challenge_id);
   void Cancel();
   std::array<uint64_t, kFaceGateCount> GateFailures();
+  // Called from the worker thread, with the state lock held, when the pending challenge's
+  // status, progress, hint or outcome changed. It must not block.
+  void SetChanged(std::function<void()> changed);
 
  private:
   friend struct FaceWorkerTestAccess;

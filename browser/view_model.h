@@ -153,8 +153,11 @@ struct ImeCommit {
 };
 struct SelectionCommand {
   std::uint64_t menu{};
-  enum class Command { cut, copy, paste, select_all, context_menu, dismiss };
+  enum class Command { cut, copy, paste, select_all, context_menu };
   Command command{};
+};
+struct SelectionDismiss {
+  std::uint64_t revision{};
 };
 struct SelectionExtent {
   enum class Which { start, end, insertion };
@@ -192,6 +195,7 @@ using InputPayload = std::variant<KeyInput,
                                   ImeCancel,
                                   ImeFinish,
                                   SelectionCommand,
+                                  SelectionDismiss,
                                   SelectionExtent,
                                   ContextCommand,
                                   EditingDismiss>;

@@ -54,6 +54,7 @@ for (const dependency of ['faceCapabilities', 'faceStatus'] as const) {
           expires: Infinity,
           modelVersion: 'test',
           started: true,
+          polledAt: 0,
         };
         poll = control.security.poll(user.tenantId, viewer);
       }

@@ -88,6 +88,8 @@ test('shutdown closes upgraded sockets, removes listeners, and drains RPC and de
     signalsCleared = false;
   const control = {
     events: new EventEmitter(),
+    endpoint: { nodes: new EventEmitter() },
+    store: { accounts: { userForTenant: () => undefined } },
     accounts: { identity: () => ({ tenantId: 'tenant' }) },
     viewers: {
       attachViewer: async () => ({ workspace: { revision: 1 } }),

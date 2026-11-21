@@ -6,6 +6,8 @@ import { RemoteKitError } from '../../shared/errors';
 import type { ProductState } from '../../shared/product';
 import type { OperationsSnapshot } from '../control/operations-store';
 import type { WorkspaceSnapshot } from '../control/workspace-session';
+import { keyboardAssignment, keyboardOwner } from '../editing/keyboard-ownership';
+import { keyboardTimeline } from '../editing/keyboard-timeline';
 import { KeyboardViewport } from '../editing/keyboard-viewport';
 import { ShellKeyboard } from '../editing/shell-keyboard';
 import { NoticeCenter, SurfaceState, failureError, notices, presentFailure } from '../failures';
@@ -60,13 +62,11 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
     let transitionFrame = 0;
     let settleTimer: ReturnType<typeof setTimeout> | undefined;
     const measure = () => {
-      const active = document.activeElement;
-      const focused =
-        active instanceof HTMLTextAreaElement &&
-        active.classList.contains('remote-input') &&
-        active.inputMode !== 'none';
+      const owner = keyboardOwner(document.activeElement);
+      const focused = owner.kind !== 'none';
       const keyboard = keyboardViewport.current;
       const now = performance.now();
+      const wasOpen = keyboard.open;
       keyboard.measure(
         {
           visual: visual
@@ -87,12 +87,17 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
         now,
       );
       const settled = keyboard.settle(now);
+      const opened = keyboard.open && !wasOpen;
+      if (opened) keyboardTimeline.mark('keyboard-detected', now);
       const editing = media.editing.mobileEditing;
-      const focusedView = focused
-        ? active.closest<HTMLElement>('.remote-viewport')?.dataset.viewId
-        : undefined;
-      const owner = focusedView ?? editing.views.find((view) => editing.forKeyboard(view))?.id ?? '';
-      media.viewport.setOcclusion(owner, transitioning ? 0 : keyboard.occludedBottom / scale);
+      // A shell field's keyboard only covers shell UI; remote windows keep stable geometry.
+      const assignment = keyboardAssignment(
+        owner,
+        keyboard.occludedBottom / scale,
+        editing.views.find((view) => editing.forKeyboard(view))?.id ?? '',
+      );
+      media.viewport.setOcclusion(assignment.viewId, transitioning ? 0 : assignment.remoteBottom);
+      node.style.setProperty('--shell-keyboard-inset', `${transitioning ? 0 : assignment.shellBottom}px`);
       clearTimeout(settleTimer);
       if (keyboard.deadline !== undefined)
         settleTimer = setTimeout(measure, Math.max(1, keyboard.deadline - now));
@@ -114,8 +119,14 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
         document.visibilityState !== 'hidden',
       );
       position();
-      if (settled) media.viewport.flush();
+      // The first occlusion value goes out at once; only restoring waits for the settle.
+      if (settled || (opened && !transitioning)) media.viewport.flush();
     };
+    const visualResized = () => {
+      keyboardTimeline.mark('visual-viewport');
+      measure();
+    };
+    const focusChanged = () => queueMicrotask(measure);
     transitionFrame = requestAnimationFrame(() => {
       transitionFrame = requestAnimationFrame(() => {
         transitioning = false;
@@ -125,8 +136,10 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
     const unsubscribeEditing = media.editing.subscribe(measure);
     const observer = new ResizeObserver(measure);
     observer.observe(node);
-    visual?.addEventListener('resize', measure);
+    visual?.addEventListener('resize', visualResized);
     visual?.addEventListener('scroll', position);
+    document.addEventListener('focusin', focusChanged);
+    document.addEventListener('focusout', focusChanged);
     window.addEventListener('resize', measure);
     document.addEventListener('visibilitychange', measure);
     document.addEventListener('pointerup', media.viewport.flush);
@@ -137,8 +150,10 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
       unsubscribeEditing();
       cancelAnimationFrame(transitionFrame);
       clearTimeout(settleTimer);
-      visual?.removeEventListener('resize', measure);
+      visual?.removeEventListener('resize', visualResized);
       visual?.removeEventListener('scroll', position);
+      document.removeEventListener('focusin', focusChanged);
+      document.removeEventListener('focusout', focusChanged);
       window.removeEventListener('resize', measure);
       document.removeEventListener('visibilitychange', measure);
       document.removeEventListener('pointerup', media.viewport.flush);
@@ -197,8 +212,10 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
       snapshots.capture(shell.current, previousSpace.current.windowIds);
     const space = workspace?.spaces.find((space) => space.id === workspace.activeSpaceId);
     previousSpace.current = { id: workspace?.activeSpaceId ?? null, windowIds: space?.windowIds ?? [] };
+    // After this commit the windows of this space are laid out; geometry reports follow it.
+    media.viewport.setRenderedSpace(workspace?.activeSpaceId ?? null);
     snapshots.retain(state?.workspace.windows.map((win) => win.id) ?? []);
-  }, [state?.workspace.activeSpaceId, state?.workspace.windows, snapshots]);
+  }, [state?.workspace.activeSpaceId, state?.workspace.windows, snapshots, media]);
   return { shell, snapshots, width, scale, deadZone, action, call };
 }
 export type WorkspaceStage = ReturnType<typeof useWorkspaceStage>;

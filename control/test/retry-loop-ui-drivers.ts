@@ -399,7 +399,10 @@ export function driveUi(
             alive: () => true,
             collapse: noop,
             dragHandle: noop,
-            run: (command) => boundary.call({ command, selection: boundary.version }, undefined),
+            run: async (command) => {
+              await boundary.call({ command, selection: boundary.version }, undefined);
+              return { kind: 'sent' };
+            },
           },
           close,
           dismiss: noop,
@@ -533,6 +536,7 @@ export function driveUi(
             windowId: 'window',
             onBack: noop,
             onClose: noop,
+            onCompat: noop,
           }),
         );
       if (path === 'media')

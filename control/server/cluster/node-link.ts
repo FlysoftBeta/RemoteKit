@@ -269,6 +269,12 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         .map((node) => node.metrics),
     );
   }
+  onFaceChanged(listener: (event: { tenantId: string; connectionId: string }) => void) {
+    this.on('service.face.changed', listener);
+    return () => {
+      this.off('service.face.changed', listener);
+    };
+  }
   onSignal(listener: (event: RtcSignal) => void) {
     this.on('rtc.signal', listener);
     return () => {
@@ -585,6 +591,12 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         typeof message.connectionId !== 'string' ||
         (message.event === 'rtc.signal' && (!message.signal || typeof message.signal !== 'object'))
       )
+        throw new Error('Invalid node event');
+      this.emit(message.event, message);
+      return;
+    }
+    if (message.event === 'service.face.changed') {
+      if (typeof message.tenantId !== 'string' || typeof message.connectionId !== 'string')
         throw new Error('Invalid node event');
       this.emit(message.event, message);
       return;

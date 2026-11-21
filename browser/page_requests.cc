@@ -2,6 +2,8 @@
 #include "browser/diagnostic_log.h"
 #include "third_party/blink/public/mojom/devtools/console_message.mojom.h"
 #include "browser/page_requests.h"
+#include "browser/observed_state.h"
+#include "browser/pdf_viewer.h"
 #include "browser/signin.h"
 #include "browser/browser_context.h"
 #include "browser/site_preferences.h"
@@ -194,6 +196,11 @@ PageRequests* PageRequests::ForContents(content::WebContents* contents) {
       return page;
   return nullptr;
 }
+namespace {
+void NotifyChanged() {
+  ObservedState::Changed();
+}
+}  // namespace
 void PageRequests::SitePreferencesChanged(content::BrowserContext* context) {
   std::vector<base::WeakPtr<PageRequests>> pages;
   for (auto* page : BoundPages())
@@ -346,6 +353,7 @@ void PageRequests::RequestClose() {
     return;
   close_state_ = CloseState::kClosing;
   close_reason_ = "requested";
+  NotifyChanged();
   if (!web_contents()) {
     close_state_ = CloseState::kClosed;
     return;
@@ -360,13 +368,16 @@ void PageRequests::BeforeUnloadFired(content::WebContents*,
                                      bool* proceed_to_fire_unload) {
   *proceed_to_fire_unload = proceed;
   close_state_ = AfterBeforeUnload(close_state_, proceed);
+  NotifyChanged();
 }
 void PageRequests::CloseContents(content::WebContents*) {
   if (close_state_ != CloseState::kClosing)
     close_reason_ = "window.close";
   close_state_ = CloseState::kClosed;
+  NotifyChanged();
 }
 void PageRequests::Event(base::DictValue event) {
+  NotifyChanged();
   if (events_.size() == kLimit)
     events_.pop_front();
   events_.push_back(std::move(event));
@@ -394,6 +405,7 @@ std::uint64_t PageRequests::Add(std::unique_ptr<Pending> request) {
   request->data.Set("request", base::NumberToString(id));
   request->data.Set("state", "pending");
   pending_.emplace(id, std::move(request));
+  NotifyChanged();
   return id;
 }
 void PageRequests::Cancel(std::uint64_t id, const std::string& reason) {
@@ -402,6 +414,7 @@ void PageRequests::Cancel(std::uint64_t id, const std::string& reason) {
     return;
   auto request = std::move(it->second);
   pending_.erase(it);
+  NotifyChanged();
   auto event = Kind("request_cancelled");
   event.Set("request", base::NumberToString(id));
   event.Set("reason", Clip(reason));
@@ -623,7 +636,12 @@ void PageRequests::RunFileChooser(content::RenderFrameHost* frame,
   auto accepts = ExportFileChooserAcceptHints(params.accept_types);
   request->data.Set("accept_types", std::move(accepts.types));
   request->data.Set("accept_types_omitted", accepts.omitted);
-  Add(std::move(request));
+  const auto id = Add(std::move(request));
+  if (id)
+    LogEvent("info", "page_request.file_chooser",
+             base::DictValue()
+                 .Set("request", base::NumberToString(id))
+                 .Set("wallMs", base::NumberToString(base::Time::Now().InMillisecondsSinceUnixEpoch())));
 }
 void PageRequests::EnumerateDirectory(content::WebContents*,
                                       scoped_refptr<content::FileSelectListener> listener,
@@ -680,7 +698,7 @@ bool PageRequests::IsWebContentsCreationOverridden(content::RenderFrameHost*,
                                                    const GURL&,
                                                    const std::string&,
                                                    const GURL& target_url) {
-  if (SignIn::ForContents(web_contents()))
+  if (SignIn::ForContents(web_contents()) || PdfDocument::ForContents(web_contents()))
     return true;
   if (popup_handler_)
     return false;
@@ -697,7 +715,7 @@ content::WebContents* PageRequests::AddNewContents(content::WebContents*,
                                                    const blink::mojom::WindowFeatures&,
                                                    bool user_gesture,
                                                    bool* was_blocked) {
-  if (SignIn::ForContents(web_contents())) {
+  if (SignIn::ForContents(web_contents()) || PdfDocument::ForContents(web_contents())) {
     if (was_blocked)
       *was_blocked = true;
     return nullptr;
@@ -723,7 +741,7 @@ content::WebContents* PageRequests::OpenURLFromTab(
     base::OnceCallback<void(content::NavigationHandle&)> callback) {
   content::WebContents* target = source;
   if (params.disposition != WindowOpenDisposition::CURRENT_TAB) {
-    if (SignIn::ForContents(source))
+    if (SignIn::ForContents(source) || PdfDocument::ForContents(source))
       return nullptr;
     switch (params.disposition) {
       case WindowOpenDisposition::NEW_FOREGROUND_TAB:
@@ -857,6 +875,7 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
       return Result(protocol::ErrorCode::kInvalidRequest, "invalid_permission_decision");
     auto completed = std::move(found->second);
     pending_.erase(found);
+    NotifyChanged();
     reply_results_.insert_or_assign(id, ReplyReceipt{completed->document, *decision, {}});
     while (reply_results_.size() > kLimit)
       reply_results_.erase(reply_results_.begin());
@@ -879,6 +898,7 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
       return Result(protocol::ErrorCode::kInvalidRequest, "invalid_credentials");
     auto completed = std::move(found->second);
     pending_.erase(found);
+    NotifyChanged();
     std::move(completed->auth).Run(true, *username, *password);
     return Result();
   }
@@ -920,6 +940,7 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
     }
     request->validating = true;
     request->data.Set("state", "validating");
+    NotifyChanged();
     base::ThreadPool::PostTaskAndReplyWithResult(
         FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
         base::BindOnce(&ValidateFiles, std::move(paths)),
@@ -948,6 +969,7 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
   }
   auto completed = std::move(found->second);
   pending_.erase(found);
+  NotifyChanged();
   auto event = Kind("request_replied");
   event.Set("request", base::NumberToString(id));
   event.Set("state", completed->type == Pending::Type::dialog ? "resolved" : "submitted");
@@ -975,6 +997,7 @@ void PageRequests::FilesValidated(std::uint64_t id,
   }
   auto request = std::move(found->second);
   pending_.erase(found);
+  NotifyChanged();
   std::vector<blink::mojom::FileChooserFileInfoPtr> files;
   for (auto& selected : paths) {
     auto native = blink::mojom::NativeFileInfo::New();
@@ -1054,7 +1077,26 @@ base::DictValue PageRequests::Command(const base::DictValue& command) {
   }
   return result;
 }
+void PageRequests::DidStartLoading() {
+  NotifyChanged();
+}
+void PageRequests::DidStopLoading() {
+  NotifyChanged();
+}
+void PageRequests::TitleWasSet(content::NavigationEntry*) {
+  NotifyChanged();
+}
+void PageRequests::OnAudioStateChanged(bool) {
+  NotifyChanged();
+}
+void PageRequests::PrimaryPageChanged(content::Page&) {
+  NotifyChanged();
+}
+void PageRequests::PrimaryMainFrameRenderProcessGone(base::TerminationStatus) {
+  NotifyChanged();
+}
 void PageRequests::DidStartNavigation(content::NavigationHandle* navigation) {
+  NotifyChanged();
   if (navigation->IsSameDocument())
     return;
   std::vector<std::uint64_t> ids;
@@ -1077,6 +1119,7 @@ void PageRequests::DidStartNavigation(content::NavigationHandle* navigation) {
   }
 }
 void PageRequests::DidFinishNavigation(content::NavigationHandle* navigation) {
+  NotifyChanged();
   if (!navigation->HasCommitted() || navigation->IsSameDocument())
     return;
   static_cast<ProfilePermissions*>(

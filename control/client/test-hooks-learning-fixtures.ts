@@ -164,7 +164,7 @@ export function learningProductFixture(appId = 'study', signed = true): ProductS
     },
     endpointGeneration: 1,
     endpointError: null,
-    viewer: { connected: true },
+    viewer: { connected: true, generation: 1 },
     announcements: [],
     pageDialogs: [],
     fileRequests: [],

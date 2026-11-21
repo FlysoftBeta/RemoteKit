@@ -99,10 +99,17 @@ Result<void> SessionDb::Write(const std::function<Result<void>()>& action) {
   writing_ = true;
   struct Finish {
     bool& writing;
-    ~Finish() { writing = false; }
-  } finish{writing_};
+    bool& appended;
+    ~Finish() {
+      writing = false;
+      appended = false;
+    }
+  } finish{writing_, event_appended_};
   RK_RETURN_IF_ERROR(action());
-  return transaction.Commit();
+  RK_RETURN_IF_ERROR(transaction.Commit());
+  if (event_appended_ && events_appended_)
+    events_appended_();
+  return {};
 }
 Result<void> SessionDb::Delete(const char* sql, const std::string& id) {
   RK_ASSIGN_OR_RETURN(statement, db_.Prepare(sql));
@@ -141,9 +148,7 @@ Result<void> ViewStore::Save(const Json& views) {
     return {};
   });
 }
-Result<void> ViewStore::SaveDesired(const Json& views,
-                                    uint64_t epoch,
-                                    const std::string& revision) {
+Result<void> ViewStore::SaveDesired(const Json& views, uint64_t epoch) {
   std::lock_guard lock(db_.mutex_);
   RK_ASSIGN_OR_RETURN(stable, Topology(views));
   RK_ASSIGN_OR_RETURN(previous, Load());
@@ -159,11 +164,7 @@ Result<void> ViewStore::SaveDesired(const Json& views,
     RK_RETURN_IF_ERROR(db_.db_.Execute(
         "DELETE FROM retired_views WHERE view_id NOT IN (SELECT view_id FROM views); DELETE FROM "
         "view_runtime WHERE view_id NOT IN (SELECT view_id FROM views)"));
-    RK_ASSIGN_OR_RETURN(
-        statement,
-        db_.db_.Prepare("UPDATE coordination_state SET desired_revision=? WHERE singleton=1"));
-    RK_RETURN_IF_ERROR(statement.Bind(1, revision));
-    return Done(statement);
+    return {};
   });
 }
 Result<Json> ViewStore::Retired() {

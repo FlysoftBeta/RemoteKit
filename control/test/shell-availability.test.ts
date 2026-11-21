@@ -20,6 +20,9 @@ class ServiceEndpoint {
   faceStatus = 'pending';
   facePurpose?: string;
   statusGate?: Promise<void>;
+  onFaceChanged() {
+    return () => {};
+  }
   onSignal(listener: Parameters<NonNullable<EndpointLink['onSignal']>>[0]) {
     this.signals.add(listener);
     return () => {

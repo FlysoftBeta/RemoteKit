@@ -153,6 +153,10 @@ void DownloadImportTests(const fs::path& root,
     CHECK(downloads.Pending() == 1 && fs::exists(target));
     Take(downloads.Observe("next-incarnation", Json::array({event}), "1", rpc));
     CHECK(imports == 2 && events().size() == 1);
+    // Layout revisions re-announce the same storage; that is not a capability change.
+    downloads.SetStorage("");
+    Take(downloads.Observe("next-incarnation", Json::array({event}), "1", rpc));
+    CHECK(imports == 2 && events().size() == 1);
     {
       DownloadImports reopened(store.Downloads());
       Take(reopened.Initialize());
@@ -162,7 +166,7 @@ void DownloadImportTests(const fs::path& root,
     }
     acknowledge();
     control.reject_commit = false;
-    downloads.SetInput("quota-released");
+    downloads.SetStorage("quota-released");
     Take(downloads.Observe("next-incarnation", Json::array({event}), "1", rpc));
     CHECK(imports == 3 && downloads.Pending() == 0 && !fs::exists(target));
     CHECK(events().at(0).at("type") == "download.imported");

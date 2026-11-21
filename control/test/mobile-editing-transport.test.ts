@@ -176,8 +176,8 @@ test('dismissal shares input ordering and can close menus during a media barrier
   assert.equal(ordered[1].revision, '8');
   assert.equal(BigInt(ordered[1].sequence), BigInt(ordered[0].sequence) + 1n);
   transport.presentation.canInput = () => false;
-  assert(transport.input.sendInput(surface, { type: 'selection_command', menu: '5', command: 'dismiss' }));
-  assert.equal(sent[sent.length - 1].event.command, 'dismiss');
+  assert(transport.input.sendInput(surface, { type: 'selection.dismiss', revision: '5' }));
+  assert.equal(sent[sent.length - 1].event.type, 'selection.dismiss');
   assert(transport.input.sendInput(surface, { type: 'context_command', menu: '6', command: 'dismiss' }));
   assert.equal(sent[sent.length - 1].event.menu, '6');
   receive({ ...transport.presentation.layout!, generation: '0', epoch: '3', views: [], reconfiguring: true });

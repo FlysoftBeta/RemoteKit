@@ -139,6 +139,8 @@ export const tab = object(
       { returnedAt: n() },
     ),
     signIn: literal('changyan', 'xinjiaoyu'),
+    owner: object({ kind: literal('files'), windowId: s(), filesTabId: s(), assetId: s() }),
+    documentError: wireError,
     usageDocument: s(),
     usageSource: literal('launcher'),
     kind: tabKind,

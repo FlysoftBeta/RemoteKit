@@ -184,6 +184,12 @@ Session::Session(media::Sdk& api,
   output.SetClipboardPoll([this](bool force) { return clipboard.Poll(force); });
   views.SetDownloadImport(
       [this](const Json& download) { return files.Library().ImportDownload(download); });
+  views.SetDocuments({[this](const std::string& view, const std::string& asset) {
+                        return files.Library().StageViewDocument(view, asset);
+                      },
+                      [this](const std::map<std::string, std::string>& wanted) {
+                        files.Library().RetainViewDocuments(wanted);
+                      }});
   output.Slots().SetTrace(trace);
   presentation.SetFirstPresented(
       [this](const std::string& view, int64_t at) { browser.Presented(view, at); });

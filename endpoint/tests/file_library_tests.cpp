@@ -808,6 +808,39 @@ int main(int argc, char** argv) {
     CHECK(Take(library.CancelPendingSelections(unsubmitted.binding, live)) == State::cancelled);
     CHECK(Take(library.CancelPendingSelections(unsubmitted.binding, live)) == State::cancelled);
     CHECK(!Take(library.Claim(unsubmitted.id, live)));
+    {
+      // The Browser exits while its callback is dispatching: nothing can answer any more.
+      auto exiting = selection;
+      exiting.id = "22222222222222222222222222222222";
+      exiting.request_id = "exiting-chooser-token";
+      exiting.binding = {"exiting-browser", "1", "1", "1", "1"};
+      exiting.state = State::pending;
+      Take(library.Prepare(exiting));
+      const auto blocking = [&](bool browser_alive) {
+        return library
+            .StopBlockers([](uint64_t) { return false; },
+                          [&](const std::string& incarnation) {
+                            return browser_alive && incarnation == "exiting-browser";
+                          })["pendingNativeSelections"]
+            .get<int64_t>();
+      };
+      const auto waiting = blocking(false);
+      CHECK(blocking(true) == waiting);
+      CHECK(Take(library.Claim(exiting.id, live)));
+      CHECK(library.FindSelection(exiting.id)->state == State::dispatching);
+      CHECK(blocking(true) == waiting && blocking(false) == waiting - 1);
+      Take(library.BrowserExited("other-browser"));
+      CHECK(library.FindSelection(exiting.id)->state == State::dispatching);
+      Take(library.BrowserExited("exiting-browser"));
+      CHECK(library.FindSelection(exiting.id)->state == State::unknown);
+      CHECK(Take(library.Database().Library().Load(remotekit::LibraryTable::kSelections))
+                .at(exiting.id)
+                .at("state") == "unknown");
+      CHECK(blocking(false) == waiting - 1);
+      CHECK(!Take(library.Claim(exiting.id, live)));
+      CHECK(Take(library.Finish(exiting.id, State::cancelled, State::pending)) == State::unknown);
+      CHECK(library.FindSelection("11111111111111111111111111111111")->state == State::pending);
+    }
   }
   {
     LibraryFixture library(session, objects, "tenant");

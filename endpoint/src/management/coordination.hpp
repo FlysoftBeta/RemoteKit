@@ -171,7 +171,7 @@ inline Result<void> ValidateDesired(const Json& value) {
     if (!Keys(view,
               {"viewId", "presence", "url", "width", "height", "visible", "device",
                "occludedBottom", "occlusionRevision"},
-              {"signIn", "adopt"}) ||
+              {"signIn", "adopt", "document"}) ||
         !Counter(view["viewId"], true) || !views.insert(view["viewId"].get<std::string>()).second ||
         (view["presence"] != "ensure" && view["presence"] != "ifPresent") ||
         !view["url"].is_string() || !view["visible"].is_boolean() ||

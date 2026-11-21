@@ -1,4 +1,5 @@
 #include "remotekit/browser/view_model.h"
+#include "browser/observed_state.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -101,9 +102,10 @@ Status ValidateInput(const InputPayload& p) {
                  v.which <= SelectionExtent::Which::insertion && Finite(v.x, v.y) &&
                  std::abs(v.x) <= 1e7 && std::abs(v.y) <= 1e7;
         else if constexpr (std::is_same_v<T, SelectionCommand>)
-          return (v.menu || v.command == SelectionCommand::Command::dismiss) &&
-                 v.command >= SelectionCommand::Command::cut &&
-                 v.command <= SelectionCommand::Command::dismiss;
+          return v.menu && v.command >= SelectionCommand::Command::cut &&
+                 v.command <= SelectionCommand::Command::context_menu;
+        else if constexpr (std::is_same_v<T, SelectionDismiss>)
+          return v.revision != 0;
         else if constexpr (std::is_same_v<T, ContextCommand>)
           return v.menu && v.command >= ContextCommand::Command::undo &&
                  v.command <= ContextCommand::Command::dismiss;
@@ -243,6 +245,7 @@ Status ViewModel::CommitDocument(SessionId s, WebViewId id) {
        !(v->pending->action == Lifecycle::restore && v->actual == Residency::frozen)))
     return Fail(ErrorCode::kConflict, "WebView does not have a live document");
   ++v->document;
+  browser::ObservedState::Changed();
   return {};
 }
 Status ViewModel::InvalidateInstance(SessionId s, WebViewId id) {
@@ -255,6 +258,7 @@ Status ViewModel::InvalidateInstance(SessionId s, WebViewId id) {
   ++v->lifecycle_generation;
   v->focused = false;
   v->pending.reset();
+  browser::ObservedState::Changed();
   return {};
 }
 Result<InputToken> ViewModel::Token(SessionId s, WebViewId id) const {
@@ -273,8 +277,8 @@ bool IsHoverInput(const InputPayload& payload) {
 bool IsDismissInput(const InputPayload& payload) {
   if (std::holds_alternative<EditingDismiss>(payload))
     return true;
-  if (const auto* command = std::get_if<SelectionCommand>(&payload))
-    return command->command == SelectionCommand::Command::dismiss;
+  if (std::holds_alternative<SelectionDismiss>(payload))
+    return true;
   if (const auto* command = std::get_if<ContextCommand>(&payload))
     return command->command == ContextCommand::Command::dismiss;
   return false;
@@ -363,6 +367,7 @@ Status ViewModel::CompleteLifecycle(SessionId s,
   }
   v->last_lifecycle = LifecycleResult{r.generation, r.action, succeeded, std::move(detail), error};
   v->pending.reset();
+  browser::ObservedState::Changed();
   return {};
 }
 

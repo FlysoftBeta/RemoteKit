@@ -29,6 +29,8 @@ constexpr bool ValidateRenderWire(const RenderWireMessage& message) {
       return ValidRenderGenerationControl(message);
     case RenderWireType::kWake:
       return ValidRenderWake(message);
+    case RenderWireType::kObservedChanged:
+      return ValidRenderObservedChanged(message);
   }
   return false;
 }

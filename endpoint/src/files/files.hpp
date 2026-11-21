@@ -41,6 +41,7 @@ class LibraryController : private ControllerContext {
   Json SelectionBrowserCommand(const FileBinding& binding, const char* method);
   Json SelectionStatusCommand(const LibrarySelection& selection);
   Result<std::string> RetireUnsubmittedSelection(const std::string& selection_id);
+  std::string Announced(const std::string& selection_id, const char* state);
   Result<std::string> ObserveSelection(const LibrarySelection& selection, const Json& status);
   Result<Json> DirectSelectionCommit(const FileJob& job, const std::string& selection_id);
   Result<Json> DirectSelectionCancel(const FileJob& job);
@@ -48,9 +49,15 @@ class LibraryController : private ControllerContext {
   Result<Json> FileBrowserCommand(const FileBinding& binding, const char* method);
   Result<Json> LibraryCommand(const std::string& method, const Json& request);
   Result<void> BrowserStopped(const std::string& incarnation);
+  // Document views read a private file staged from a library asset. Staging is idempotent per
+  // (view, asset, Browser incarnation); Retain is the release point for everything not wanted.
+  Result<StagedDocument> StageViewDocument(const std::string& view, const std::string& asset);
+  void RetainViewDocuments(const std::map<std::string, std::string>& wanted);
 
   Json StopBlockers(const std::function<bool(uint64_t)>& current) const {
-    return file_library.StopBlockers(current);
+    const auto exited = ConfirmedExit();
+    return file_library.StopBlockers(
+        current, [&](const std::string& incarnation) { return BrowserLive(incarnation, exited); });
   }
 
  private:
@@ -58,10 +65,26 @@ class LibraryController : private ControllerContext {
   AuthorizationController& authorization;
   ViewController& views;
   FileController& files;
+  // Whether `incarnation` is the running Browser: the process is alive and its exit is neither
+  // observed nor confirmed.
+  bool BrowserLive(const std::string& incarnation, const std::string& confirmed_exit) const {
+    return incarnation == browser.ProcessIncarnation() && incarnation != confirmed_exit &&
+           browser.Alive() && !browser.Exited();
+  }
+  std::string ConfirmedExit() const {
+    std::lock_guard lock(exit_mutex_);
+    return last_confirmed_browser_exit;
+  }
+  mutable std::mutex exit_mutex_;
   std::string last_confirmed_browser_exit;
   remotekit::FileUploadStore file_uploads;
   remotekit::FileLibrary file_library;
   std::mutex file_store_mutex;
+  struct ViewDocument {
+    std::string asset, batch, incarnation;
+    StagedDocument file;
+  };
+  std::map<std::string, ViewDocument> view_documents_;  // file_store_mutex
   Json cleanup_failures_ = Json::object();
   struct SelectionWatch {
     remotekit::FileLibrary::Selection selection;
@@ -105,8 +128,12 @@ class FileController : private ControllerContext {
         [this](uint64_t grant) { return file_services.CurrentLibraryGrant(grant); });
   }
   Result<void> BrowserStopped(const std::string& incarnation);
+  // Tells the Viewer a selection reached a final state, so it confirms at once.
+  void NotifySelection(const std::string& selection_id, const std::string& state);
+  void SetNotify(std::function<void()> notify) { notify_ = std::move(notify); }
 
  private:
+  std::function<void()> notify_;
   AuthorizationController& authorization;
   ViewController& views;
   PeerController& peer_controller;

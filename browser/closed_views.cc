@@ -1,4 +1,5 @@
 #include "browser/closed_views.h"
+#include "browser/observed_state.h"
 #include "base/strings/string_number_conversions.h"
 namespace remotekit::browser {
 Status ClosedViews::Acknowledge(SessionId session, const std::vector<WebViewId>& ids) {
@@ -20,5 +21,6 @@ void ClosedViews::Record(SessionId session, WebViewId view, const std::string& r
   value.Set("close_reason", reason);
   tombstones.insert_or_assign(view, std::move(value));
   retired.insert(view);
+  ObservedState::Changed();
 }
 }  // namespace remotekit::browser

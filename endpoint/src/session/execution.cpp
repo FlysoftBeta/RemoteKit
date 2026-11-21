@@ -31,6 +31,7 @@ SessionCoordinator::Hooks SessionExecution::Hooks() {
       .clipboard = [self](const Json& value) { return self->clipboard_.Deliver(value); },
       .start = [self] { return self->Start(); },
       .views = [self](const Json& value) { return self->Views(value); },
+      .geometry = [self](const Json& value) { return self->Geometry(value); },
       .stop = [self](const Json& commit, bool force) { return self->Stop(commit, !force); },
       .observe = [self] { return self->Observe(); },
       .maintain = [self]() -> Result<void> {
@@ -91,6 +92,7 @@ void SessionExecution::Activate(std::string connection, uint64_t generation) {
     connection_ = std::move(connection);
   }
   generation_ = generation;
+  events_wanted_ = true;
 }
 Result<void> SessionExecution::Authorize(const Json& document, uint64_t generation) {
   std::lock_guard lock(authorization_mutex_);
@@ -155,7 +157,9 @@ Result<void> SessionExecution::Prepare(const Json& document) try {
     session = std::make_shared<Session>(sdk_, options_, tenant_, id_, epoch_, key.value(),
                                         management_, objects_, frame_admission_, access);
     session->SetSignal(signal_);
+    session->SetObservedChanged(observed_changed_);
     RK_RETURN_IF_ERROR(session->Initialize());
+    events_wanted_ = true;
     session->BeginManagementRequest(generation_.load());
     phases["restoreTotal"] = PhaseMs(start);
     session->SetOpenTiming(std::move(phases));
@@ -196,6 +200,12 @@ Result<void> SessionExecution::Views(const Json&) {
   if (!session)
     return Error{ErrorCode::kUnavailable, "Session execution is not prepared"};
   return session->Views().ConvergeDesired();
+}
+Result<bool> SessionExecution::Geometry(const Json& document) {
+  const auto session = runtime_.load();
+  if (!session || session->PersistenceClosed())
+    return false;
+  return session->Views().ApplyGeometry(document);
 }
 Result<Json> SessionExecution::Stop(const Json& commit,
                                     bool check_blockers,
@@ -358,7 +368,6 @@ Result<void> SessionExecution::Acknowledge(const std::string& stream, uint64_t u
   if (auto session = runtime_.load(); session && !session->PersistenceClosed())
     RK_RETURN_IF_ERROR(session->AcknowledgeEvents(stream, up_to));
   acknowledged_[stream] = std::max(acknowledged_[stream], up_to);
-  last_events_sent_ = {};
   return {};
 }
 bool SessionExecution::VersionDue(int64_t now, int64_t interval) const {
@@ -394,6 +403,7 @@ Result<Json> SessionExecution::Observe() try {
   Json snapshot{
       {"views", Json::array()},
       {"pendingPopups", Json::array()},
+      {"documentErrors", Json::object()},
       {"recovery", {{"pending", false}, {"views", Json::object()}, {"exportPending", false}}},
       {"rtc", {{"active", false}, {"connectionId", nullptr}, {"avSync", nullptr}}},
       {"stats", Json::object()},
@@ -453,6 +463,7 @@ Result<Json> SessionExecution::Observe() try {
               {"lock", lock},
               {"views", snapshot.at("views")},
               {"pendingPopups", snapshot.at("pendingPopups")},
+              {"documentErrors", snapshot.at("documentErrors")},
               {"recovery", snapshot.at("recovery")},
               {"rtc", snapshot.at("rtc")},
               {"blockers", blockers},
@@ -467,6 +478,7 @@ void SessionExecution::FlushSignals() {
     return;
   if (auto session = runtime_.load())
     session->FlushSignals();
+  PublishEvents();
 }
 void SessionExecution::Maintain() {
   if (retired_)
@@ -476,13 +488,19 @@ void SessionExecution::Maintain() {
     session->MaintainRecovery();
     auto sampled = Sample([&] { return session->Snapshot(); });
   }
-  const auto generation = generation_.load();
-  if (!management_.Current(generation))
+  PublishEvents();
+}
+void SessionExecution::PublishEvents() {
+  if (retired_ || !management_.Current(generation_.load()))
     return;
-  const auto now = std::chrono::steady_clock::now();
-  if (now - last_events_sent_ < std::chrono::milliseconds(500))
+  // A stored event goes out at once; the interval only retransmits what Control has not
+  // acknowledged.
+  const bool wanted = events_wanted_.exchange(false);
+  if (!wanted && !(events_outstanding_ &&
+                   std::chrono::steady_clock::now() - last_events_sent_ >= kEventResendInterval))
     return;
-  auto delivered = DeliverEvents([this] { return SendEvents(); });
+  if (!DeliverEvents([this] { return SendEvents(); }))
+    events_wanted_ = true;
 }
 RetryUnit::Snapshot SessionExecution::SamplingRetryStatus() const {
   std::lock_guard lock(sampling_retry_mutex_);
@@ -547,6 +565,7 @@ Result<void> SessionExecution::SendEvents() {
   }
   if (state.value().at("streamId").is_null())
     return {};
+  events_outstanding_ = !events.value().empty();
   std::string connection;
   {
     std::lock_guard lock(scope_mutex_);
@@ -557,10 +576,18 @@ Result<void> SessionExecution::SendEvents() {
     sent_stream_ = stream;
     sent_through_ = 0;
   }
+  const bool resend =
+      connection != sent_connection_ || now - last_events_sent_ >= kEventResendInterval;
   auto budget = management_.EventBudget();
+  bool sent_any = false;
   for (auto event : events.value()) {
-    if (!budget.messages)
+    const auto seq = std::stoull(event.at("seq").get<std::string>());
+    if (seq <= sent_through_ && !resend)
+      continue;
+    if (!budget.messages) {
+      events_wanted_ = true;
       break;
+    }
     event.update({{"event", "session.event"},
                   {"connectionEpoch", connection},
                   {"tenantId", tenant_},
@@ -568,16 +595,22 @@ Result<void> SessionExecution::SendEvents() {
                   {"placementEpoch", epoch_},
                   {"streamId", stream}});
     const auto bytes = event.dump().size();
-    if (bytes > budget.bytes)
+    if (bytes > budget.bytes) {
+      events_wanted_ = true;
       break;
+    }
     if (!management_.SendEvent(event, generation)) {
       return Error{ErrorCode::kBusy, "event publication queue is full"};
     }
     --budget.messages;
     budget.bytes -= bytes;
-    sent_through_ = std::max(sent_through_, std::stoull(event.at("seq").get<std::string>()));
+    sent_through_ = std::max(sent_through_, seq);
+    sent_any = true;
   }
-  last_events_sent_ = now;
+  if (sent_any) {
+    last_events_sent_ = now;
+    sent_connection_ = connection;
+  }
   return {};
 }
 Result<void> SessionExecution::Admit(const Json& request, uint64_t generation) {

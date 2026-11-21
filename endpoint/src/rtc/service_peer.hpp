@@ -28,6 +28,7 @@ class ServicePeer {
   PeerController peer_;
   std::mutex mutex_;
   std::atomic<bool> stop_{false};
+  std::atomic<uint64_t> generation_{0};
   std::thread worker_;
 };
 }  // namespace remotekit

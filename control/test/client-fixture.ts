@@ -111,7 +111,7 @@ export function productSnapshot(): import('../shared/product').ProductState {
     },
     endpointGeneration: 1,
     endpointError: null,
-    viewer: { connected: true },
+    viewer: { connected: true, generation: 1 },
     integrations: { siteUa: false, lifecycle: false, popupAdoption: false },
   };
 }

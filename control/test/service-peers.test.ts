@@ -25,6 +25,7 @@ test('an offline service peer retains cleanup without blocking a surviving node'
     mutating: false,
   } as ViewerSecurityState;
   runtime.viewer = {
+    generation: 1,
     id: 'lease',
     security,
     authentication: { identity: 'user', valid: () => true },
@@ -37,6 +38,7 @@ test('an offline service peer retains cleanup without blocking a surviving node'
       nodeId,
       state: { state: 'ready', connectionEpoch: `${nodeId}-epoch`, incarnation: `${nodeId}-process` },
       metrics: { predicted: () => index },
+      onFaceChanged: () => () => {},
       onSignal(callback: typeof signal) {
         signal = callback;
         return () => {

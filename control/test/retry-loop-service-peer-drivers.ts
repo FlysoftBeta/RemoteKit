@@ -25,6 +25,7 @@ export function driveServicePeer(path: 'authorization' | 'retirement'): OwnerFac
     };
     runtime.viewer = {
       id: 'lease',
+      generation: 1,
       security,
       authentication: { identity: 'user', valid: () => true },
       revoke: () => {},
@@ -34,6 +35,7 @@ export function driveServicePeer(path: 'authorization' | 'retirement'): OwnerFac
       nodeId: 'node',
       state: { state: 'ready', connectionEpoch: 'epoch' },
       metrics: { predicted: () => 0 },
+      onFaceChanged: () => () => {},
       onSignal: (callback: typeof signal) => {
         signal = callback;
         return () => {

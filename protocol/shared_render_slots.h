@@ -28,11 +28,12 @@ struct SharedAtlasContextMenu {
 };
 struct SharedAtlasSelectionMenu {
   std::uint64_t menu_id;
+  // Browser-owned counter of the view's selection presentation (handles and
+  // menu together); 0 when there is none. A dismissal names the value it saw.
+  std::uint64_t revision;
   std::uint32_t flags;
-  std::uint32_t reserved;
   float anchor_x, anchor_y, anchor_width, anchor_height;
   float handle_height;
-  float reserved_float;
   struct Handle {
     float x, y, line_height;
     std::uint32_t visible;
@@ -119,7 +120,7 @@ struct alignas(64) SharedRenderMapping {
   SharedRenderSlot slots[kSharedAtlasSlotCount];
 };
 inline constexpr std::uint32_t kSharedRenderMagic = 0x524B5253;  // RKRS
-inline constexpr std::uint32_t kSharedRenderVersion = 9;
+inline constexpr std::uint32_t kSharedRenderVersion = 10;
 inline constexpr std::uint32_t kRenderSlotCount = kSharedAtlasSlotCount;
 static_assert(std::is_trivially_copyable_v<SharedRenderMapping>);
 static_assert(offsetof(SharedRenderSlot, publication_sequence) % 8 == 0);

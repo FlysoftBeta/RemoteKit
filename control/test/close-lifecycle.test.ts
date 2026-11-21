@@ -296,6 +296,7 @@ for (const phase of ['awaitingPrompt', 'awaitingCloseEvidence'] as const) {
     f.clock.advance(1);
     t.mock.method(f.control.endpoint, 'isReady', () => false);
     await f.control.reconciler.reconcileProduct(f.tenant);
+    await f.control.reconciler.settled(f.tenant);
     assert.equal(f.state().pendingClose, null);
     assert.equal(f.state().pendingWindowCloseId, null);
     assert.equal(f.status(receipt).status, 'unknown');

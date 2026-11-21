@@ -22,8 +22,8 @@ void CheckDismissal() {
   CHECK(!model.AcceptInput(session, {old, 2, KeyInput{}}));
   CHECK(!model.AcceptInput(session, {old, 2, EditingDismiss{0, 1}}));
   CHECK(model.FindWebView(session, view)->focused);
-  CHECK(model.AcceptInput(session, {model.Token(session, view).value, 2,
-                                    SelectionCommand{1, SelectionCommand::Command::dismiss}}));
+  CHECK(model.AcceptInput(session, {model.Token(session, view).value, 2, SelectionDismiss{7}}));
+  CHECK(!model.AcceptInput(session, {model.Token(session, view).value, 3, SelectionDismiss{0}}));
 }
 void CheckLifecycleAndInput() {
   ViewModel model;

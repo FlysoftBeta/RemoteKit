@@ -148,6 +148,34 @@ int main(int argc, char** argv) {
     invalid = desired;
     invalid["unrecognized"] = true;
     Check(!coordination::ValidateDesired(invalid), "unknown fields rejected");
+    {
+      const std::string asset(64, 'a');
+      auto document = desired;
+      document["views"][0]["url"] = "remotekit-pdf://viewer/";
+      document["views"][0]["document"] = {{"kind", "pdf"}, {"assetId", asset}};
+      Check(bool(coordination::ValidateDesired(document)), "document view accepted");
+      auto broken = document;
+      broken["views"][0]["url"] = "https://example.test/";
+      Check(!coordination::ValidateDesired(broken), "document needs the viewer URL");
+      broken = desired;
+      broken["views"][0]["url"] = "remotekit-pdf://viewer/";
+      Check(!coordination::ValidateDesired(broken), "viewer URL needs a document");
+      for (const auto& value :
+           {Json({{"kind", "pdf"}}), Json({{"kind", "docx"}, {"assetId", asset}}),
+            Json({{"kind", "pdf"}, {"assetId", "ABC"}}),
+            Json({{"kind", "pdf"}, {"assetId", asset}, {"extra", 1}}),
+            Json({{"kind", "pdf"}, {"assetId", 7}}), Json("pdf"), Json(nullptr)}) {
+        broken = document;
+        broken["views"][0]["document"] = value;
+        Check(!coordination::ValidateDesired(broken), "malformed document rejected");
+      }
+      broken = document;
+      broken["views"][0]["signIn"] = "changyan";
+      Check(!coordination::ValidateDesired(broken), "document view cannot sign in");
+      broken = document;
+      broken["views"][0]["adopt"] = {{"browserIncarnation", "b"}, {"provisionalId", "p"}};
+      Check(!coordination::ValidateDesired(broken), "document view cannot adopt");
+    }
     invalid = desired;
     invalid["sitePreferences"]["sites"]["https://EXAMPLE.test"] = {{"tabletUa", true}};
     Check(!coordination::ValidateDesired(invalid), "site entries are validated before publication");

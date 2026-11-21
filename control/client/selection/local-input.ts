@@ -1,6 +1,14 @@
 import type { SelectionAction } from '../rtc/protocol';
 import { deviceClipboard } from '../clipboard/device-clipboard';
-import { wordAt, type HandleKind, type Point, type SelectionClipboard, type SelectionTarget } from './target';
+import {
+  COMMAND_SENT,
+  wordAt,
+  type CommandOutcome,
+  type HandleKind,
+  type Point,
+  type SelectionClipboard,
+  type SelectionTarget,
+} from './target';
 
 export type TextInput = HTMLInputElement | HTMLTextAreaElement;
 
@@ -141,7 +149,12 @@ export class LocalInputTarget implements SelectionTarget {
     ];
   }
 
-  async run(command: SelectionAction) {
+  async run(command: SelectionAction): Promise<CommandOutcome> {
+    await this.execute(command);
+    return COMMAND_SENT;
+  }
+
+  private async execute(command: SelectionAction) {
     const start = this.input.selectionStart ?? 0;
     const end = this.input.selectionEnd ?? start;
     const original = this.input.value;

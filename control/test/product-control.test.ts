@@ -14,6 +14,7 @@ import type { EndpointLink } from '../server/endpoint/link';
 import { createHttp } from '../server/http/server';
 import { ControlDatabase } from '../server/persistence/database';
 import { RemoteKitError } from '../shared/errors';
+import { occlusionRevision } from '../shared/occlusion-revision';
 import type { ProductAction } from '../shared/product';
 import { accountsFor, registerUser, requestViewer, TestClock, testGateway } from './server-fixture';
 import { settle as settleAsync } from './retry-loop-boundary';
@@ -497,6 +498,7 @@ test('remote page fullscreen follows the live document, with a document-bound ex
       true,
     );
     await control.reconciler.reconcileProduct(tenantId);
+    await control.reconciler.settled(tenantId);
     assert.equal(page()?.target, second.target);
     await observedProductAction(
       control,
@@ -633,6 +635,8 @@ async function uncertainTab() {
     ],
   };
   await requestViewer(f.control, tenant, 'lease', 'viewport', viewport);
+  await new Promise((resolve) => setImmediate(resolve));
+  await f.control.reconciler.settled(tenant);
   const view = f.endpoint.views.get(tenant)!.get(tab.webviewId);
   Object.assign(view, {
     lifecycle_uncertain: true,
@@ -647,6 +651,11 @@ async function uncertainTab() {
 
 test('uncertain recovery uses matching unload and restore snapshot evidence after both replies are lost', async () => {
   const f = await uncertainTab();
+  // One projection and one maintenance pass, however many observations the Endpoint reports meanwhile.
+  const pass = async () => {
+    await f.control.reconciler.reconcileProduct(f.tenant);
+    await f.control.reconciler.settled(f.tenant);
+  };
   try {
     f.endpoint.guardedLifecycle = (view, args) => {
       assert.equal(view.visible, false);
@@ -663,7 +672,7 @@ test('uncertain recovery uses matching unload and restore snapshot evidence afte
       throw new RemoteKitError('outcome_unknown', 'lifecycle response lost');
     };
     f.endpoint.calls = [];
-    await f.control.reconciler.tick();
+    await pass();
     assert.equal(f.tabState().lifecycleRecovery?.phase, 'unload');
     assert.equal(f.view.visible, false);
     assert.deepEqual(f.lifecycleCalls(), [
@@ -676,10 +685,10 @@ test('uncertain recovery uses matching unload and restore snapshot evidence afte
       },
     ]);
     f.view.last_lifecycle.generation = '40';
-    await f.control.reconciler.tick();
+    await pass();
     assert.equal(f.lifecycleCalls().length, 1);
     f.view.last_lifecycle.generation = '42';
-    await f.control.reconciler.tick();
+    await pass();
     assert.equal(f.tabState().lifecycleRecovery?.phase, 'restore');
     assert.deepEqual(f.lifecycleCalls()[1], {
       viewId: f.tab.webviewId,
@@ -688,7 +697,7 @@ test('uncertain recovery uses matching unload and restore snapshot evidence afte
       browserIncarnation: 'browser-10',
       lifecycleGeneration: '42',
     });
-    await f.control.reconciler.tick();
+    await pass();
     assert.equal(f.tabState().url, 'https://saved.test/');
     assert.equal(f.lifecycleCalls().length, 2);
     Object.assign(f.view, {
@@ -697,7 +706,7 @@ test('uncertain recovery uses matching unload and restore snapshot evidence afte
       url: 'https://saved.test/',
       last_lifecycle: { generation: '43', action: 3, succeeded: true },
     });
-    await f.control.reconciler.tick();
+    await pass();
     assert.equal(f.view.visible, true);
     assert.equal(f.tabState().lifecycleRecovery, undefined);
     assert.equal(f.tabState().lifecycleRecoveryError, undefined);
@@ -847,6 +856,7 @@ test('UA table precedes Browser/view creation; failed application persists desir
       true,
     );
     await control.reconciler.reconcileProduct(user.tenantId);
+    await control.reconciler.settled(user.tenantId);
     const firstSites = endpoint.calls.findIndex((c) => c.method === 'policy.sites.applied'),
       ensure = endpoint.calls.findIndex((c) => c.method === 'browser.started');
     assert.ok(firstSites >= 0 && firstSites < ensure);
@@ -942,9 +952,11 @@ test('a navigation recovery rejected for POST history reopens on the next addres
       },
     });
     await f.control.reconciler.reconcileProduct(f.tenant);
+    await f.control.reconciler.settled(f.tenant);
     assert.equal(f.tabState().lifecycleRecoveryError?.code, 'rejected');
     const calls = f.endpoint.calls.length;
     await f.control.reconciler.reconcileProduct(f.tenant);
+    await f.control.reconciler.settled(f.tenant);
     assert.equal(f.tabState().lifecycleRecoveryError?.code, 'rejected');
     assert.equal(f.endpoint.calls.length, calls);
     await observedProductAction(
@@ -975,6 +987,7 @@ test('a site UA reload never wedges the tenant: legacy, stale, terminal and retr
   const reconcile = async () => {
     control.tenants.get(tenant).reconciliation.retry.succeed();
     await control.reconciler.reconcileProduct(tenant);
+    await control.reconciler.settled(tenant);
   };
   const pend = (identity?: {
     operationId: string;
@@ -1008,6 +1021,7 @@ test('a site UA reload never wedges the tenant: legacy, stale, terminal and retr
       }),
       'lease',
     );
+    await control.reconciler.settled(tenant);
 
     // Written by the release that sent reloads without a sequence: no receipt backs it.
     pend({
@@ -1052,7 +1066,8 @@ test('a site UA reload never wedges the tenant: legacy, stale, terminal and retr
     pend();
     endpoint.commandFailure = new RemoteKitError('unavailable', 'Browser is not running');
     endpoint.calls = [];
-    await assert.rejects(reconcile(), { code: 'unavailable' });
+    await reconcile();
+    assert.equal(control.tenants.get(tenant).lastError?.code, 'unavailable');
     const first = reloads()[0].args;
     assert.equal(pending().pendingUaReloadIdentity?.operationId, first.operationId);
     endpoint.commandFailure = undefined;
@@ -1169,6 +1184,7 @@ test('auto keyboard persists globally, has a committed receipt, and leaves site 
       ['reload'],
     );
     await control.reconciler.reconcileProduct(tenantId);
+    await control.reconciler.settled(tenantId);
     const reload = reloads[0].args;
     assert.equal(store.operations.operation(tenantId, reload.operationId)?.receipt.status, 'committed');
     assert.ok(
@@ -1569,6 +1585,7 @@ test('product media policy precedes ensure and feedback only updates diagnostic 
       true,
     );
     await control.reconciler.reconcileProduct(user.tenantId);
+    await control.reconciler.settled(user.tenantId);
     const firstPolicy = endpoint.calls.findIndex((c) => c.method === 'policy.media.applied'),
       firstEnsure = endpoint.calls.findIndex((c) => c.method === 'browser.started');
     assert.ok(firstPolicy >= 0 && firstPolicy < firstEnsure);
@@ -1762,6 +1779,7 @@ test('explicit no-peer media policy clears the previous applied diagnostic', asy
       true,
     );
     await control.reconciler.reconcileProduct(user.tenantId);
+    await control.reconciler.settled(user.tenantId);
     assert.deepEqual(control.viewers.productState(user.tenantId).quality.applied, applied);
     applied = null;
     await control.reconciler.tick();
@@ -1886,6 +1904,7 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     assert.equal(opened.result.status, 'committed');
     const tenantA = store.accounts.authenticated(cookieA.split('=')[1])!;
     await control.reconciler.reconcileProduct(tenantA);
+    await control.reconciler.settled(tenantA);
     const stateA = control.viewers.productState(tenantA),
       win = stateA.workspace.windows[0],
       tab = stateA.workspace.tabs[0];
@@ -1927,8 +1946,12 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
       tenantId: stateA.workspace.tenantId,
     });
     assert.equal(scope.error.code, 'invalid_request');
+    const generation = initialA.state.viewer.generation;
+    assert.equal(typeof generation, 'number');
+    const first = occlusionRevision(generation, 1);
     const viewport = {
       devicePixelRatio: 1,
+      activeSpaceId: stateA.workspace.activeSpaceId,
       windows: [
         {
           windowId: win.id,
@@ -1936,7 +1959,7 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
           height: 700,
           visible: true,
           occludedBottom: 0,
-          occlusionRevision: '1',
+          occlusionRevision: first,
         },
       ],
     };
@@ -1948,10 +1971,13 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     assert.ok(Number(timeline.published) >= Number(timeline.started));
     assert.ok(Number(timeline.replied) >= Number(timeline.published));
     assert.match(String(timeline.revision), /^[1-9]\d*$/);
-    assert.deepEqual(timeline.windows, [{ windowId: win.id, revision: '1' }]);
+    assert.deepEqual(timeline.windows, [{ windowId: win.id, revision: first }]);
     await a.request('same-geometry', 'viewport', {
       ...viewport,
-      windows: viewport.windows.map((window) => ({ ...window, occlusionRevision: '2' })),
+      windows: viewport.windows.map((window) => ({
+        ...window,
+        occlusionRevision: occlusionRevision(generation, 2),
+      })),
     });
     assert.equal(timelines.length, 1);
     assert.equal(endpoint.views.get(stateA.workspace.tenantId)!.get(tab.webviewId).visible, true);
@@ -2522,18 +2548,27 @@ test('viewport revisions reject stale occlusion without changing stable geometry
     const view = endpoint.views.get(user.tenantId)!.get(tab.webviewId);
     assert.equal(view.height, 900);
     assert.equal(view.occludedBottom, 380);
-    assert.equal(view.occlusionRevision, '11');
+    assert.equal(
+      view.occlusionRevision,
+      occlusionRevision(control.tenants.get(user.tenantId).viewer!.generation, 11),
+    );
     assert.equal(control.viewers.productState(user.tenantId).quality.effectiveDpr, closed.effectiveDpr);
     assert.equal(
       control.viewers.productState(user.tenantId).quality.resourceLimitation,
       closed.resourceLimitation,
     );
-    await requestViewer(control, user.tenantId, 'lease', 'viewport', {
-      ...viewport,
-      windows: [{ ...viewport.windows[0], occludedBottom: 0, occlusionRevision: '10' }],
-    });
+    await assert.rejects(
+      requestViewer(control, user.tenantId, 'lease', 'viewport', {
+        ...viewport,
+        windows: [{ ...viewport.windows[0], occludedBottom: 0, occlusionRevision: '10' }],
+      }),
+      { code: 'conflict' },
+    );
     assert.equal(view.occludedBottom, 380);
-    assert.equal(view.occlusionRevision, '11');
+    assert.equal(
+      view.occlusionRevision,
+      occlusionRevision(control.tenants.get(user.tenantId).viewer!.generation, 11),
+    );
     await assert.rejects(
       requestViewer(control, user.tenantId, 'lease', 'viewport', {
         ...viewport,
@@ -2593,17 +2628,21 @@ test('viewport and window switches publish while a product reconcile owns the te
     await settleAsync();
     assert.equal(entered, true);
     let replied = false;
-    const viewport = {
+    const spaceOf = (windowId: string) => stale.spaces.find((space) => space.windowIds.includes(windowId))!;
+    // The Viewer reports one space at a time: its visible windows are that space's.
+    const report = (windowId: string, revision: string) => ({
       devicePixelRatio: 1,
+      activeSpaceId: spaceOf(windowId).id,
       windows: stale.windows.map((window) => ({
         windowId: window.id,
         width: 800,
         height: 600,
-        visible: true,
+        visible: window.id === windowId,
         occludedBottom: 0,
-        occlusionRevision: '20',
+        occlusionRevision: revision,
       })),
-    };
+    });
+    const viewport = report(first.id, '20');
     const request = requestViewer(control, user.tenantId, 'lease', 'viewport', viewport).then(() => {
       replied = true;
     });
@@ -2629,6 +2668,11 @@ test('viewport and window switches publish while a product reconcile owns the te
     assert.equal(activate.status, 'committed');
     await control.endpoint.published(user.tenantId);
     desired = endpoint.calls.filter((call) => call.method === 'session.desired').slice(-1)[0].args;
+    assert.equal(desired.views.find((view: any) => view.viewId === stale.tabs[0].webviewId).visible, true);
+    await requestViewer(control, user.tenantId, 'lease', 'viewport', report(second.id, '21'));
+    await control.endpoint.published(user.tenantId);
+    desired = endpoint.calls.filter((call) => call.method === 'session.desired').slice(-1)[0].args;
+    assert.equal(desired.views.find((view: any) => view.viewId === stale.tabs[0].webviewId).visible, false);
     assert.equal(desired.views.find((view: any) => view.viewId === stale.tabs[1].webviewId).visible, true);
     assert.equal(completed, false);
     release();

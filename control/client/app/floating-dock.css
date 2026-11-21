@@ -1,7 +1,7 @@
 .floating-dock {
   --dock-top: 97px;
   position: absolute;
-  inset: 0;
+  inset: 0 0 var(--shell-keyboard-inset, 0px) 0;
   z-index: var(--z-dock);
   pointer-events: none;
 }

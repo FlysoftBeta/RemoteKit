@@ -4,6 +4,7 @@ import { JSDOM } from 'jsdom';
 import { RemoteSelectionTarget } from '../client/selection/remote-selection';
 import type { SelectionMessage } from '../client/rtc/protocol';
 import type { Surface } from '../client/presentation/types';
+import { RemoteKitError } from '../shared/errors';
 import { deviceClipboard } from '../client/clipboard/device-clipboard';
 
 const dom = new JSDOM('<canvas></canvas>');
@@ -27,6 +28,7 @@ const message: SelectionMessage = {
   type: 'input.selection',
   version: 1,
   revision: '1',
+  selectionRevision: '3',
   outputGeneration: '7',
   layoutEpoch: '9',
   view: surface,
@@ -38,7 +40,7 @@ const message: SelectionMessage = {
   },
 };
 
-test('remote handles and extents project through DPR, media scaling, letterbox and shell scaling', () => {
+test('remote handles and extents project through DPR, media scaling, letterbox and shell scaling', async () => {
   const sent: Record<string, unknown>[] = [];
   const input = {
     sendInput: (_surface: Surface, event: Record<string, unknown>) => {
@@ -64,12 +66,12 @@ test('remote handles and extents project through DPR, media scaling, letterbox a
   target.dragHandle('start', { x: 350, y: 320 });
   assert.deepEqual(sent.pop(), { type: 'selection.extent', which: 'start', x: 250, y: 120 });
   assert.deepEqual(target.commands(), ['copy', 'contextMenu']);
-  target.run('copy');
+  assert.deepEqual(await target.run('copy'), { kind: 'sent' });
   assert.deepEqual(sent.pop(), { type: 'selection_command', menu: '5', command: 'copy' });
   assert.deepEqual(target.handles(), {});
 });
 
-test('a caret-only remote target dismisses without a menu and hides clipped handles', () => {
+test('a caret-only remote target dismisses with its presentation revision and hides clipped handles', () => {
   const sent: Record<string, unknown>[] = [];
   const target = new RemoteSelectionTarget(
     {
@@ -91,7 +93,7 @@ test('a caret-only remote target dismisses without a menu and hides clipped hand
   );
   assert.equal(target.handles().insertion?.visible, false);
   target.collapse();
-  assert.deepEqual(sent, [{ type: 'selection_command', menu: '0', command: 'dismiss' }]);
+  assert.deepEqual(sent, [{ type: 'selection.dismiss', revision: '3' }]);
   assert.equal(target.alive(), false);
 });
 
@@ -119,10 +121,10 @@ test('remote paste refreshes before dispatch and abandons a retired menu', async
       finish = resolve;
     });
   try {
-    target.run('paste');
+    const first = target.run('paste');
     assert.equal(sent.length, 0);
     finish();
-    await Promise.resolve();
+    assert.deepEqual(await first, { kind: 'unknown' });
     assert.deepEqual(sent.pop(), { type: 'selection_command', menu: '5', command: 'paste' });
     target.update(
       { ...message, revision: '2' },
@@ -130,13 +132,95 @@ test('remote paste refreshes before dispatch and abandons a retired menu', async
       { width: 450, height: 300, canvas: { left: 20, top: 30, width: 400, height: 200 } },
       canvas,
     );
-    target.run('paste');
+    const second = target.run('paste');
     target.collapse();
     sent.length = 0;
     finish();
-    await Promise.resolve();
+    assert.equal((await second).kind, 'not-sent');
     assert.equal(sent.length, 0);
   } finally {
     deviceClipboard.preparePaste = originalPrepare;
   }
+});
+
+const geometry = { width: 450, height: 300, canvas: { left: 20, top: 30, width: 400, height: 200 } };
+const targetWith = (sendInput: () => boolean) =>
+  new RemoteSelectionTarget(
+    { input: { ensureInputFocus: () => true, sendInput } } as never,
+    message,
+    surface,
+    geometry,
+    canvas,
+  );
+
+test('a command that was not sent reports the error and keeps the menu usable', async () => {
+  const target = targetWith(() => false);
+  const outcome = await target.run('copy');
+  assert.equal(outcome.kind, 'not-sent');
+  assert.equal(outcome.kind === 'not-sent' && outcome.error.code, 'unavailable');
+  assert.equal(target.alive(), true);
+  assert.deepEqual(target.commands(), ['copy', 'contextMenu']);
+});
+
+test('a failed paste preparation is not sent', async () => {
+  const sent: Record<string, unknown>[] = [];
+  const target = targetWith(() => {
+    sent.push({});
+    return true;
+  });
+  const originalPrepare = deviceClipboard.preparePaste;
+  deviceClipboard.preparePaste = () => Promise.reject(new RemoteKitError('forbidden', '剪贴板不可用'));
+  try {
+    const outcome = await target.run('paste');
+    assert.equal(outcome.kind === 'not-sent' && outcome.error.code, 'forbidden');
+    assert.equal(sent.length, 0);
+    assert.equal(target.alive(), true);
+  } finally {
+    deviceClipboard.preparePaste = originalPrepare;
+  }
+});
+
+test('cut and paste have an unknown result: no resend until the selection updates', async () => {
+  let count = 0;
+  const target = targetWith(() => ++count > 0);
+  const originalPrepare = deviceClipboard.preparePaste;
+  deviceClipboard.preparePaste = async () => undefined;
+  try {
+    assert.deepEqual(await target.run('paste'), { kind: 'unknown' });
+    assert.deepEqual(await target.run('paste'), { kind: 'unknown' });
+    assert.deepEqual(await target.run('cut'), { kind: 'unknown' });
+    assert.equal(count, 1);
+    assert.equal(target.alive(), true);
+    target.update({ ...message, revision: '2' }, surface, geometry, canvas);
+    assert.deepEqual(await target.run('cut'), { kind: 'unknown' });
+    assert.equal(count, 2);
+  } finally {
+    deviceClipboard.preparePaste = originalPrepare;
+  }
+});
+
+test('a dismissal carries the revision the viewer saw, menu or not', () => {
+  const sent: Record<string, unknown>[] = [];
+  const target = targetWith(() => {
+    sent.push({});
+    return true;
+  });
+  const events: Record<string, unknown>[] = [];
+  const recording = new RemoteSelectionTarget(
+    {
+      input: {
+        sendInput: (_surface: Surface, event: Record<string, unknown>) => {
+          events.push(event);
+          return true;
+        },
+      },
+    } as never,
+    { ...message, selectionRevision: '41' },
+    surface,
+    geometry,
+    canvas,
+  );
+  recording.collapse();
+  assert.deepEqual(events, [{ type: 'selection.dismiss', revision: '41' }]);
+  assert.equal(target.alive(), true);
 });

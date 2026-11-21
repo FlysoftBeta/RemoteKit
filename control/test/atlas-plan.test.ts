@@ -36,6 +36,7 @@ test('axis constraints lower real DPR without shrinking DIP; minimum failure is 
   state.activeSpaceId = 'space';
   const viewport = {
     devicePixelRatio: 4,
+    activeSpaceId: 'space',
     windows: [
       { windowId: 'w', width: 8192, height: 400, visible: true, occludedBottom: 0, occlusionRevision: '1' },
     ],

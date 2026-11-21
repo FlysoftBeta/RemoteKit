@@ -39,6 +39,17 @@ class ViewController : private ControllerContext {
     before_views = std::move(callback);
   }
   void SetDownloadImport(DownloadImports::Import import) { downloads.SetImport(std::move(import)); }
+  // The staged file a document view is bound to. `Stage` is idempotent per (view, asset, Browser
+  // incarnation); `Retain` releases every staged document not named by the map view -> asset.
+  struct Documents {
+    std::function<Result<StagedDocument>(const std::string& view, const std::string& asset)> stage;
+    std::function<void(const std::map<std::string, std::string>& wanted)> retain;
+  };
+  void SetDocuments(Documents documents) { documents_ = std::move(documents); }
+  bool IsDocument(const std::string& view) const {
+    const auto found = desired.find(view);
+    return found != desired.end() && found->second.contains("document");
+  }
   size_t PendingDownloads() const {
     return std::max(downloads.Pending(), size_t(download_reconciliation_failed));
   }
@@ -56,6 +67,9 @@ class ViewController : private ControllerContext {
   void ConvergeStarted(const Json& document, int64_t qpc);
   Result<void> StageDesired(const Json& document);
   Result<void> ConvergeDesired();
+  // Applies the geometry and visibility of `document` to the staged views without
+  // reconciling topology. Returns false when the Browser state needs the full pass instead.
+  Result<bool> ApplyGeometry(const Json& document);
   Result<void> RecordClosed(const std::string& view, const std::string& reason);
   Result<void> AckClosed(const Json& views);
   Result<void> Start();
@@ -103,6 +117,13 @@ class ViewController : private ControllerContext {
   ViewStore view_store;
   RecoveryStore recovery_store;
   bool download_reconciliation_failed = false;
+  Documents documents_;
+  // Terminal staging failures per document view. Cleared when the view leaves `desired` or its
+  // document stages. A transient failure is returned to the coordinator's retry instead.
+  std::map<std::string, Error> document_errors_;
+  Json DocumentErrors() const;
+  Result<StagedDocument> StageDocument(const std::string& view, const Json& config);
+  void ReleaseDocuments();
   bool replanning_layout = false;
   std::set<std::string> closing_views;
   Result<void> ConvergeOnce();

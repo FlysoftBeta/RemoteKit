@@ -31,22 +31,19 @@ inline void WireError(const Json& value) {
 }
 inline void View(const Json& value) {
   using namespace persisted;
-  Keys(value, {"viewId", "presence", "url"}, {"signIn", "adopt"});
+  Keys(value, {"viewId", "presence", "url"}, {"signIn"});
   Counter(value.at("viewId"), true);
   Enum(value.at("presence"), {"ensure", "ifPresent"});
   Text(value.at("url"), 0, 32768);
   if (value.contains("signIn"))
     Enum(value.at("signIn"), {"changyan", "xinjiaoyu"});
-  if (value.contains("adopt")) {
-    Require(!value.contains("signIn"), "sign-in view cannot adopt");
-    Keys(value.at("adopt"), {"browserIncarnation", "provisionalId"});
-    Text(value.at("adopt").at("browserIncarnation"), 1, 128);
-    Text(value.at("adopt").at("provisionalId"), 1, 128);
-  }
 }
 inline Json ViewTopology(Json value) {
-  for (const auto* key :
-       {"width", "height", "visible", "device", "occludedBottom", "occlusionRevision"})
+  // A popup adoption is bound to the Browser instance that created the popup, and a view
+  // document to the staged file of the running Browser, so neither is part of the durable
+  // topology.
+  for (const auto* key : {"width", "height", "visible", "device", "occludedBottom",
+                          "occlusionRevision", "adopt", "document"})
     value.erase(key);
   View(value);
   return value;

@@ -67,6 +67,8 @@ export interface SelectionMessage {
   type: 'input.selection';
   version: 1;
   revision: string;
+  // Browser's counter for the view's current selection presentation (handles and menu); '0' when none.
+  selectionRevision: string;
   view: SelectionView | null;
   menu: SelectionMenu | null;
   outputGeneration: string;
@@ -141,6 +143,12 @@ export type FileResult = {
   result?: unknown;
   error?: WireError;
 };
+export type FileSelectionMessage = {
+  type: 'files.selection';
+  version: 1;
+  selectionId: string;
+  state: 'selected' | 'cancelled';
+};
 export interface ViewViewportMessage {
   type: 'view.viewport';
   viewId: string;
@@ -163,6 +171,7 @@ export type Incoming = Authorized &
     | FocusMessage
     | FrameMessage
     | FileResult
+    | FileSelectionMessage
     | { type: 'clock.pong'; version: 1; requestId: string; serverTimeMs: number; serverMonotonicMs: number }
     | { type: 'presentation.mode'; version: 1; backend: 'video' }
     | ({ type: 'presentation.prepare' } & PresentationBarrier)
@@ -323,6 +332,8 @@ function valid(v: Record<string, unknown>): boolean {
       return (
         v.version === 1 &&
         sequence(v.revision) &&
+        sequence(v.selectionRevision) &&
+        (v.selectionRevision === '0') === (v.view === null) &&
         sequence(v.outputGeneration) &&
         sequence(v.layoutEpoch) &&
         object(handles) &&
@@ -426,6 +437,8 @@ function valid(v: Record<string, unknown>): boolean {
       );
     case 'files.result':
       return v.version === 1 && string(v.requestId) && typeof v.ok === 'boolean' && resultError(v);
+    case 'files.selection':
+      return v.version === 1 && string(v.selectionId) && (v.state === 'selected' || v.state === 'cancelled');
     case 'clock.pong':
       return v.version === 1 && string(v.requestId) && numbers(v, ['serverTimeMs', 'serverMonotonicMs']);
     case 'presentation.mode':

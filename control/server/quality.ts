@@ -80,7 +80,7 @@ export class QualityState {
               !workspace.tabs.some((tab) => tab.id === window.activeTabId && isLocalTab(tab)),
           ) &&
           workspace.spaces.some(
-            (space) => space.id === workspace.activeSpaceId && space.windowIds.includes(w.windowId),
+            (space) => space.id === viewport.activeSpaceId && space.windowIds.includes(w.windowId),
           ),
       ) ?? [];
     let effectiveDpr = scale,

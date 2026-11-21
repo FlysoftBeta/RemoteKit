@@ -42,6 +42,13 @@ void RenderReader(std::shared_ptr<RenderConnection> channel) {
           event.value = message.begin.identity.value;
           event.slot = message.begin.identity.slot;
         }
+      } else if (message.type == remotekit::RenderWireType::kObservedChanged) {
+        std::lock_guard lock(channel->lock);
+        if (channel->generation_state.stopping())
+          continue;
+        event.type = REMOTEKIT_SDK_RENDER_OBSERVED_CHANGED;
+        event.generation = message.begin.identity.generation;
+        event.value = message.begin.identity.value;
       } else if (message.type == remotekit::RenderWireType::kStopped) {
         std::lock_guard lock(channel->lock);
         if (channel->generation_state.RecordStopped(message.begin.identity.generation)) {
@@ -67,7 +74,8 @@ void RenderReader(std::shared_ptr<RenderConnection> channel) {
     // Serialize Wake delivery with Stop, including a reentrant Stop from the
     // callback worker. Stop returning must not permit a later Wake callback.
     std::lock_guard callback_lock(channel->callback_lock);
-    if (event.type == REMOTEKIT_SDK_RENDER_WAKE) {
+    if (event.type == REMOTEKIT_SDK_RENDER_WAKE ||
+        event.type == REMOTEKIT_SDK_RENDER_OBSERVED_CHANGED) {
       std::lock_guard lock(channel->lock);
       if (channel->generation_state.stopping())
         continue;

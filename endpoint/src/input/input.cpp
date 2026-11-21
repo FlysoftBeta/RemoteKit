@@ -14,9 +14,9 @@ bool IsDismissal(const Json& command) {
     return true;
   const auto event = command.find("event");
   return command.value("type", Json()) == "input" && event != command.end() && event->is_object() &&
-         (event->value("type", Json()) == "selection_command" ||
-          event->value("type", Json()) == "context_command") &&
-         event->value("command", Json()) == "dismiss";
+         (event->value("type", Json()) == "selection.dismiss" ||
+          (event->value("type", Json()) == "context_command" &&
+           event->value("command", Json()) == "dismiss"));
 }
 }  // namespace
 void InputController::ReplyInput(Json reply, const Json& request, uint64_t stamp) {

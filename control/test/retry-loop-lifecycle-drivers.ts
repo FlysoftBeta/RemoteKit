@@ -142,7 +142,10 @@ export const driveNavigationAck: OwnerFactory = (boundary) => {
     ],
   };
   const run = () =>
-    owner.observe(workspace, tab, current, { browserIncarnation: 'browser-' + boundary.version });
+    owner.acknowledge(
+      'tenant',
+      owner.observe(workspace, tab, current, { browserIncarnation: 'browser-' + boundary.version }),
+    );
   return {
     start: run,
     drive: run,

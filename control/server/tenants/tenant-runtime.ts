@@ -10,6 +10,7 @@ import { BackgroundReclaimViews } from '../workspace/lifecycle';
 import type { InternalFileRequest } from '../workspace/page-requests';
 export interface ViewerLease {
   id: string;
+  generation: number;
   authentication: { identity: string; valid: () => boolean };
   revoke: (reason: 'another-viewer' | 'logout') => void;
   viewport?: ViewerViewport;

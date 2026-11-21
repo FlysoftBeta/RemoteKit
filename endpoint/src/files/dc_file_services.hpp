@@ -620,6 +620,13 @@ class DcFileServices {
     std::lock_guard lock(mutex_);
     return CurrentLocked(job);
   }
+  // A message that answers no request; a full outbox drops it, and its consumer's own query
+  // covers that.
+  void QueueNotice(const ServiceJson& notice) {
+    std::lock_guard lock(mutex_);
+    if (peer_)
+      QueueReply(notice, 0);
+  }
   bool CurrentLibraryGrant(uint64_t grant) const {
     std::lock_guard lock(mutex_);
     const auto found = authorized_.find("library");

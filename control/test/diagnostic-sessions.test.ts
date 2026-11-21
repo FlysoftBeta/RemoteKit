@@ -61,6 +61,7 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
     events: emitter,
     store: {
       accounts: {
+        userForTenant: () => undefined,
         identity: (token: string) =>
           token ? { tenantId: token === 'new-token' ? 'one' : token } : undefined,
       },
@@ -79,7 +80,7 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
       },
     },
     endpoint: {
-      nodes: { get: () => node },
+      nodes: Object.assign(new EventEmitter(), { get: () => node }),
       placement: { peek: () => ({ nodeId: 'node', sessionId: 'a'.repeat(32) }) },
       snapshot: async (tenant: string, options: unknown) => {
         assert.deepEqual(options, { outputDiagnostics: true });

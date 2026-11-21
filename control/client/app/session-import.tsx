@@ -1,4 +1,5 @@
 import { buildAction } from '../control/action-builder';
+import { sessionImportFeed } from '../control/session-import-feed';
 import Close from '@mui/icons-material/Close';
 import ContentCopy from '@mui/icons-material/ContentCopy';
 import DeleteOutline from '@mui/icons-material/DeleteOutline';
@@ -223,6 +224,9 @@ function ImportDialog({
       }
     } catch (e) {
       retry.current.fail(e);
+      retry.current.schedule(() => {
+        if (mounted.current) void refresh(false);
+      });
       if (mounted.current) setError(failureError(e));
     } finally {
       refreshing.current = false;
@@ -231,14 +235,19 @@ function ImportDialog({
   useEffect(() => {
     mounted.current = true;
     if (online) void refresh();
-    const timer = online
-      ? setInterval(() => {
-          void refresh(false);
-        }, 5000)
+    const unsubscribe = online
+      ? sessionImportFeed.subscribe((pushed) => {
+          if (!pushed) void refresh(false);
+          else if (mounted.current) {
+            retry.current.succeed();
+            setState(pushed);
+            setError(undefined);
+          }
+        })
       : undefined;
     return () => {
       mounted.current = false;
-      clearInterval(timer);
+      unsubscribe?.();
     };
   }, [call, online]);
   const run = async (work: () => Promise<void>) => {

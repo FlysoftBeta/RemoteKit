@@ -10,6 +10,11 @@
 #include <vector>
 
 namespace remotekit {
+// A private file the Browser reads on behalf of one document view.
+struct StagedDocument {
+  std::string path;
+  std::uint64_t size = 0;
+};
 // Endpoint-private Session storage. This C++ API never crosses the SDK DLL.
 class FileUploadStore {
  public:

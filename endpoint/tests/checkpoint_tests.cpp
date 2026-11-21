@@ -552,10 +552,11 @@ void Blockers(const fs::path& root) {
                                    {{asset.id, "asset", "text/plain"}}};
   Take(library.Prepare(selection));
   Take(library.Begin(7, "upload", {"name", "text/plain", 3}, [] { return Result<void>(); }));
-  const auto blockers = library.StopBlockers([](uint64_t grant) { return grant == 7; });
+  const auto live = [](const std::string&) { return true; };
+  const auto blockers = library.StopBlockers([](uint64_t grant) { return grant == 7; }, live);
   Check(blockers["pendingNativeSelections"] == 1 && blockers["inFlightUploads"] == 1,
         "library owns selection and upload counts");
-  Check(library.StopBlockers([](uint64_t) { return false; })["inFlightUploads"] == 0,
+  Check(library.StopBlockers([](uint64_t) { return false; }, live)["inFlightUploads"] == 0,
         "revoked upload is not in flight");
 }
 void Metrics(const fs::path& root) {

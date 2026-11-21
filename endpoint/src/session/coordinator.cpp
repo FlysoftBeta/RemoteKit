@@ -212,6 +212,28 @@ Result<Json> SessionCoordinator::SetFenceError(std::optional<Error> error) {
     return Json::object();
   });
 }
+namespace {
+Json GeometryIdentity(Json document) {
+  document.erase("revision");
+  document.erase("quality");
+  for (auto& view : document.at("views"))
+    for (const auto* field : {"width", "height", "visible", "occludedBottom", "occlusionRevision"})
+      view.erase(field);
+  return document;
+}
+}  // namespace
+bool SessionCoordinator::GeometryOnly(const Json& desired) const {
+  return hooks_.geometry && converged_identity_.is_object() && desired["run"] == "running" &&
+         desired["lock"]["state"] == "unlocked" && desired["authorization"]["unlocked"] == true &&
+         !prepared_revision_.empty() && !started_revision_.empty() && !views_revision_.empty() &&
+         GeometryIdentity(desired) == converged_identity_;
+}
+void SessionCoordinator::ResetConvergence() {
+  prepared_revision_.clear();
+  started_revision_.clear();
+  views_revision_.clear();
+  converged_identity_ = Json();
+}
 Result<void> SessionCoordinator::Converge(const Json& desired, const Scope& scope) {
   if (!Current(scope.generation) || !LatestRevision(desired) ||
       desired["connectionEpoch"] != scope.connection)
@@ -226,14 +248,24 @@ Result<void> SessionCoordinator::Converge(const Json& desired, const Scope& scop
       if (!stopped)
         return stopped.error();
       stopped_revision_ = revision;
-      prepared_revision_.clear();
-      started_revision_.clear();
-      views_revision_.clear();
+      ResetConvergence();
     }
     converged_ = true;
     return {};
   }
   stopped_revision_.clear();
+  if (views_revision_ != revision && GeometryOnly(desired)) {
+    // The document differs from the converged one only in geometry. Applying it needs no
+    // Session preparation, start or topology reconciliation, which dominate the full pass.
+    RK_ASSIGN_OR_RETURN(applied, hooks_.geometry(desired));
+    if (applied) {
+      prepared_revision_ = started_revision_ = views_revision_ = revision;
+      converged_ = true;
+      return {};
+    }
+  }
+  // The full pass may change what the identity describes before it completes.
+  converged_identity_ = Json();
   if (prepared_revision_ != revision) {
     RK_RETURN_IF_ERROR(hooks_.prepare(desired));
     prepared_revision_ = revision;
@@ -252,10 +284,12 @@ Result<void> SessionCoordinator::Converge(const Json& desired, const Scope& scop
     RK_RETURN_IF_ERROR(hooks_.views(desired));
     views_revision_ = revision;
   }
+  if (desired["run"] == "running")
+    converged_identity_ = GeometryIdentity(desired);
   converged_ = true;
   return {};
 }
-void SessionCoordinator::Observe(const Scope& scope, bool force) {
+void SessionCoordinator::Observe(const Scope& scope, bool force, bool immediate) {
   if (!Current(scope.generation))
     return;
   auto sampled = fence_error_                 ? Result<Json>(*fence_error_)
@@ -284,6 +318,7 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
         {"lock", {{"leaseId", nullptr}, {"epoch", 0}, {"state", "locked"}}},
         {"views", Json::array()},
         {"pendingPopups", Json::array()},
+        {"documentErrors", Json::object()},
         {"recovery", {{"pending", false}, {"views", Json::object()}, {"exportPending", false}}},
         {"rtc", {{"active", false}, {"connectionId", nullptr}, {"avSync", nullptr}}},
         {"blockers",
@@ -302,9 +337,7 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
   const auto browser = incarnation.is_string() ? incarnation.get<std::string>() : std::string();
   if (browser != browser_incarnation_) {
     if (!browser_incarnation_.empty()) {
-      prepared_revision_.clear();
-      started_revision_.clear();
-      views_revision_.clear();
+      ResetConvergence();
       converged_ = false;
     }
     browser_incarnation_ = browser;
@@ -321,9 +354,7 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
   }
   if (desired.is_object() && desired["run"] == "running" &&
       observation.value("browser", Json()) != "running" && !started_revision_.empty()) {
-    prepared_revision_.clear();
-    started_revision_.clear();
-    views_revision_.clear();
+    ResetConvergence();
     converged_ = false;
   }
   observation["observedRevision"] = desired.is_object() ? desired["revision"] : Json("0");
@@ -349,8 +380,21 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
   const auto encoded = observation.dump();
   const auto now = std::chrono::steady_clock::now();
   const bool changed = encoded != last_encoded_;
-  if ((!force && (!changed || now - last_sent_ < std::chrono::milliseconds(100))) || !scope.active)
+  if (!scope.active)
     return;
+  constexpr auto kMinimumInterval = std::chrono::milliseconds(100);
+  if (!force) {
+    if (!changed) {
+      observe_due_.reset();
+      return;
+    }
+    if (!immediate && now - last_sent_ < kMinimumInterval) {
+      // Leading + latest value: the change goes out when the interval ends, not at the next
+      // sample, and carries whatever is newest then.
+      observe_due_ = last_sent_ + kMinimumInterval;
+      return;
+    }
+  }
   observation["seq"] =
       std::to_string(observation_sequence_.fetch_add(1, std::memory_order_relaxed) + 1);
   if (!coordination::ObservationFits(observation)) {
@@ -366,6 +410,7 @@ void SessionCoordinator::Observe(const Scope& scope, bool force) {
   if (hooks_.send(observation, scope.generation)) {
     last_encoded_ = encoded;
     last_sent_ = now;
+    observe_due_.reset();
     std::lock_guard lock(mutex_);
     latest_ = std::move(observation);
   }
@@ -374,6 +419,15 @@ void SessionCoordinator::Signal() {
   {
     std::lock_guard lock(mutex_);
     signaled_ = true;
+  }
+  wake_.notify_one();
+}
+void SessionCoordinator::ObservedChanged() {
+  {
+    std::lock_guard lock(mutex_);
+    if (!observed_changed_)
+      observed_changed_at_ = std::chrono::system_clock::now();
+    observed_changed_ = true;
   }
   wake_.notify_one();
 }
@@ -398,21 +452,45 @@ void SessionCoordinator::Run() {
   constexpr auto kMaintenanceInterval = std::chrono::milliseconds(100);
   auto next_maintenance = std::chrono::steady_clock::now();
   uint64_t handled_desired_version = 0;
+  // A newer desired document is applied before maintenance and the observation publish, so
+  // neither delays it. Deferring is bounded so a stream of documents cannot starve them.
+  std::optional<std::chrono::steady_clock::time_point> deferred_since;
+  bool carried_force = false, carried_urgent = false, carried_applied = false;
   for (;;) {
     Scope scope;
     Json desired;
     std::deque<std::function<void()>> jobs;
-    bool force = false;
+    bool force = false, urgent = false;
+    std::chrono::system_clock::time_point wake_received_at{};
     {
       std::unique_lock lock(mutex_);
-      wake_.wait_until(lock, next_maintenance, [&] {
-        return stopping_ || !jobs_.empty() || force_observation_ || signaled_ ||
+      const auto wake_at =
+          observe_due_ ? std::min(next_maintenance, *observe_due_) : next_maintenance;
+      wake_.wait_until(lock, wake_at, [&] {
+        return stopping_ || !jobs_.empty() || force_observation_ || signaled_ || observed_changed_ ||
                desired_version_ != handled_desired_version;
       });
       if (stopping_ && jobs_.empty())
         return;
+      if (!signaled_ && jobs_.empty() && !force_observation_ && !observed_changed_ &&
+          desired_version_ == handled_desired_version && observe_due_ &&
+          std::chrono::steady_clock::now() >= *observe_due_ &&
+          std::chrono::steady_clock::now() < next_maintenance) {
+        // Only the minimum interval of a deferred change elapsed: publish it without a
+        // maintenance pass.
+        const auto due_scope = scope_;
+        lock.unlock();
+        try {
+          if (observation_retry_.Ready())
+            Observe(due_scope, false, true);
+        } catch (...) {
+          error_ = Error{ErrorCode::kInternal, "Session observation failed"};
+          observation_retry_.Fail(*error_);
+        }
+        continue;
+      }
       const bool signals_only = std::exchange(signaled_, false) && jobs_.empty() &&
-                                !force_observation_ &&
+                                !force_observation_ && !observed_changed_ &&
                                 desired_version_ == handled_desired_version &&
                                 std::chrono::steady_clock::now() < next_maintenance;
       if (signals_only) {
@@ -425,13 +503,42 @@ void SessionCoordinator::Run() {
       desired = desired_;
       handled_desired_version = desired_version_;
       jobs.swap(jobs_);
-      force = std::exchange(force_observation_, false);
+      force = std::exchange(force_observation_, false) || std::exchange(carried_force, false);
+      if (observed_changed_)
+        wake_received_at = observed_changed_at_;
+      urgent = std::exchange(observed_changed_, false) || std::exchange(carried_urgent, false);
     }
+    bool applied = std::exchange(carried_applied, false);
+    const auto defer = [&] {
+      // A page state change is observed now; only a document or maintenance may wait.
+      if (urgent)
+        return false;
+      {
+        std::lock_guard lock(mutex_);
+        if (stopping_ || desired_version_ == handled_desired_version)
+          return false;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (!deferred_since)
+        deferred_since = now;
+      if (now - *deferred_since >= kMaintenanceInterval)
+        return false;
+      carried_force |= force;
+      carried_urgent |= urgent;
+      carried_applied |= applied;
+      return true;
+    };
     next_maintenance = std::chrono::steady_clock::now() + kMaintenanceInterval;
     const auto input = desired.dump() + ":" + std::to_string(scope.generation);
     convergence_retry_.Input(input);
     maintenance_retry_.Input(input);
     observation_retry_.Input(input);
+    const auto progress = [&] {
+      return std::tie(converged_, prepared_revision_, started_revision_, views_revision_,
+                      stopped_revision_);
+    };
+    const auto before = std::make_tuple(converged_, prepared_revision_, started_revision_,
+                                        views_revision_, stopped_revision_);
     try {
       if (desired.is_object() && scope.active && !fence_error_ && convergence_retry_.Ready()) {
         auto converged = Converge(desired, scope);
@@ -448,8 +555,12 @@ void SessionCoordinator::Run() {
       error_ = Error{ErrorCode::kInternal, "Session convergence failed"};
       convergence_retry_.Fail(*error_);
     }
+    // What a document changed is published at once, not at the next sample.
+    applied |= progress() != before || !jobs.empty();
     for (auto& job : jobs)
       job();
+    if (defer())
+      continue;
     try {
       if (!fence_error_ && maintenance_retry_.Ready()) {
         auto result = hooks_.maintain();
@@ -464,9 +575,24 @@ void SessionCoordinator::Run() {
       error_ = Error{ErrorCode::kInternal, "Session maintenance failed"};
       maintenance_retry_.Fail(*error_);
     }
+    if (defer())
+      continue;
+    deferred_since.reset();
     try {
-      if (observation_retry_.Ready())
-        Observe(scope, force);
+      if (observation_retry_.Ready()) {
+        const auto sent_before = last_sent_;
+        Observe(scope, force, urgent || applied);
+        if (urgent && last_sent_ != sent_before) {
+          // Wall times let the Browser, Endpoint and Control logs of one change be lined up.
+          const auto ms = [](std::chrono::system_clock::time_point at) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(at.time_since_epoch())
+                .count();
+          };
+          LogEvent(LogLevel::kDebug, "session.observed_changed_published",
+                   {{"wakeReceivedMs", ms(wake_received_at)},
+                    {"publishedMs", ms(std::chrono::system_clock::now())}});
+        }
+      }
     } catch (...) {
       error_ = Error{ErrorCode::kInternal, "Session observation failed"};
       observation_retry_.Fail(*error_);

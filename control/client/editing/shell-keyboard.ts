@@ -1,4 +1,5 @@
 import type { FloatingActions } from '../app/floating-actions';
+import { isShellEditable } from './keyboard-ownership';
 
 export class ShellKeyboard {
   private owner?: HTMLElement;
@@ -17,10 +18,7 @@ export class ShellKeyboard {
   private observe = () => {
     if (this.disposed) return;
     const active = this.document.activeElement as HTMLElement | null;
-    const editable = active?.matches(
-      'textarea:not([readonly]):not([disabled]), input:not([readonly]):not([disabled]):is(:not([type]), [type=text], [type=search], [type=email], [type=password], [type=url], [type=tel], [type=number]), [contenteditable=true]',
-    );
-    const owner = editable && !active!.classList.contains('remote-input') ? active! : undefined;
+    const owner = isShellEditable(active) ? active : undefined;
     if (this.owner !== owner) {
       if (this.owner && this.hidden) this.owner.inputMode = this.inputMode;
       this.owner = owner;

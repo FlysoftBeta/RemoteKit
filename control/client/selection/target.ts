@@ -1,4 +1,5 @@
 /// <reference lib="es2022.intl" />
+import type { RemoteKitError } from '../../shared/errors';
 import type { SelectionAction } from '../rtc/protocol';
 
 export interface Point {
@@ -18,11 +19,17 @@ export interface SelectionHandles {
   insertion?: SelectionHandle;
 }
 
+// 'unknown': the command was delivered but its effect is only visible in the next
+// selection update; it must neither close the menu nor be sent again.
+export type CommandOutcome =
+  { kind: 'sent' } | { kind: 'not-sent'; error: RemoteKitError } | { kind: 'unknown' };
+export const COMMAND_SENT: CommandOutcome = { kind: 'sent' };
+
 export interface SelectionTarget {
   handles(): SelectionHandles;
   anchor(): { left: number; top: number; width: number; height: number };
   commands(): SelectionAction[];
-  run(command: SelectionAction): void | Promise<void>;
+  run(command: SelectionAction): CommandOutcome | Promise<CommandOutcome>;
   dragHandle(which: HandleKind, point: Point): void;
   collapse(): void;
   alive(): boolean;

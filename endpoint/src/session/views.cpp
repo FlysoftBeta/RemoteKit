@@ -41,22 +41,26 @@ Result<void> ViewController::StageDesired(const Json& document) {
   RK_ASSIGN_OR_RETURN(topology, ViewStore::Topology(document.at("views")));
   const auto placement = document.at("placementEpoch").get<uint64_t>();
   if (topology != saved_topology || placement != saved_placement) {
-    RK_RETURN_IF_ERROR(
-        view_store.SaveDesired(topology, placement, document.at("revision").get<std::string>()));
+    RK_RETURN_IF_ERROR(view_store.SaveDesired(topology, placement));
     RK_ASSIGN_OR_RETURN(retired, view_store.Retired());
     for (const auto& view : retired)
       observed_closed.insert(view.get<std::string>());
     saved_topology = std::move(topology);
     saved_placement = placement;
   }
-  downloads.SetInput(document.at("connectionEpoch").get<std::string>() + ":" +
-                     document.at("revision").get<std::string>());
+  downloads.SetStorage(document.at("connectionEpoch").get<std::string>());
   std::map<std::string, Json> staged;
   desired_order.clear();
   for (const auto& value : document.at("views")) {
     const auto view = value.at("viewId").get<std::string>();
     if (observed_closed.contains(view))
       continue;
+    // A document view keeps its document for its whole life: the Browser binds it at creation.
+    // Opening another document needs a new view.
+    const auto previous = desired.find(view);
+    if (previous != desired.end() && previous->second.contains("document") &&
+        previous->second.value("document", Json()) != value.value("document", Json()))
+      return Error{ErrorCode::kConflict, "view document is immutable"};
     auto config = value;
     if (document.at("lock").at("state") != "unlocked")
       config["visible"] = false;
@@ -64,6 +68,7 @@ Result<void> ViewController::StageDesired(const Json& document) {
     desired_order.push_back(view);
   }
   desired = std::move(staged);
+  std::erase_if(document_errors_, [&](const auto& item) { return !desired.contains(item.first); });
   reconciliation_pending = true;
   return {};
 }
@@ -82,6 +87,36 @@ Result<void> ViewController::ConvergeDesired() {
       return result;
     }
   }
+}
+Result<bool> ViewController::ApplyGeometry(const Json& document) {
+  if (reconciliation_pending || !browser.Alive() || browser.Stopping() || !browser.Initialized())
+    return false;
+  std::map<std::string, const Json*> geometry;
+  for (const auto& view : document.at("views"))
+    geometry.emplace(view.at("viewId").get<std::string>(), &view);
+  for (auto& [view, config] : desired) {
+    const auto found = geometry.find(view);
+    if (found == geometry.end())
+      return false;
+    for (const auto* field : {"width", "height", "visible", "occludedBottom", "occlusionRevision"})
+      config[field] = found->second->at(field);
+  }
+  presentation.timeline.Desired(id, document);
+  presentation.timeline.Mark("convergeStartMs");
+  output.SetLayoutTransaction(
+      presentation.timeline.Key(std::stoull(document.at("revision").get<std::string>())));
+  struct Replanning {
+    bool& active;
+    ~Replanning() { active = false; }
+  } reset{replanning_layout};
+  replanning_layout = true;
+  auto result = ReconcileOutput();
+  if (result)
+    return true;
+  // A layout conflict means the Browser view changed under us; the full pass refreshes it.
+  if (LayoutConflict(result.error()))
+    return false;
+  return result.error();
 }
 Result<void> ViewController::ConvergeOnce() {
   RK_ASSIGN_OR_RETURN(snapshot, Snapshot());
@@ -102,6 +137,8 @@ Result<void> ViewController::ConvergeOnce() {
       existing.insert(name);
     }
   }
+  ReleaseDocuments();
+  std::optional<Error> transient_document_error;
   for (const auto& view : desired_order) {
     if (!desired.contains(view) || existing.contains(view))
       continue;
@@ -117,18 +154,68 @@ Result<void> ViewController::ConvergeOnce() {
         continue;
       }
     }
+    if (config.contains("adopt") &&
+        config.at("adopt").at("browserIncarnation") != browser.Incarnation()) {
+      // The popup exists only in the Browser instance that created it. After that instance
+      // exits the adoption can never succeed: it settles as a conflict for this view alone.
+      LogError(LogLevel::kWarn, "view.adopt_retired",
+               Error{ErrorCode::kConflict, "popup Browser is retired"},
+               {{"sessionId", id}, {"view", view}});
+      desired.erase(view);
+      continue;
+    }
+    if (config.contains("document")) {
+      // A document that cannot be staged must not hold back the Session's other views. A final
+      // failure is reported on the view; a transient one is retried by the coordinator.
+      auto staged = StageDocument(view, config);
+      if (!staged) {
+        if (RetryDelay(staged.error(), 0)) {
+          document_errors_.erase(view);
+          if (!transient_document_error)
+            transient_document_error = staged.error();
+        } else {
+          document_errors_.insert_or_assign(view, staged.error());
+        }
+        continue;
+      }
+      document_errors_.erase(view);
+    }
     auto created = CreateView(config, restoring_views.contains(view));
     if (!created)
       return created.error();
     restoring_views.erase(view);
   }
-  return ReconcileOutput();
+  RK_RETURN_IF_ERROR(ReconcileOutput());
+  if (transient_document_error)
+    return *transient_document_error;
+  return {};
+}
+Result<StagedDocument> ViewController::StageDocument(const std::string& view, const Json& config) {
+  if (!documents_.stage)
+    return Error{ErrorCode::kInternal, "document staging is not configured"};
+  return documents_.stage(view, config.at("document").at("assetId").get<std::string>());
+}
+void ViewController::ReleaseDocuments() {
+  std::map<std::string, std::string> wanted;
+  for (const auto& [view, config] : desired)
+    if (config.contains("document"))
+      wanted.emplace(view, config.at("document").at("assetId").get<std::string>());
+  if (documents_.retain)
+    documents_.retain(wanted);
+}
+Json ViewController::DocumentErrors() const {
+  Json errors = Json::object();
+  for (const auto& [view, error] : document_errors_)
+    errors[view] = WireError(error);
+  return errors;
 }
 Result<void> ViewController::RecordClosed(const std::string& view, const std::string& reason) {
   if (!observed_closed.contains(view)) {
     RK_ASSIGN_OR_RETURN(event, view_store.Close(view, reason, browser.Incarnation()));
     desired.erase(view);
+    document_errors_.erase(view);
     observed_closed.insert(view);
+    ReleaseDocuments();
   }
   navigation.Forget(view);
   return {};
@@ -322,8 +409,16 @@ void ViewController::NavigationOperation(Json& target, const Json& source) {
 
 Result<Json> ViewController::CreateView(const Json& config, bool recovering) {
   auto view = ViewId(config);
-  RK_ASSIGN_OR_RETURN(has_recovery_file, recovery_store.Contains(view));
-  RK_ASSIGN_OR_RETURN(resume_url, view_store.ResumeUrl(view, config.at("url").get<std::string>()));
+  const bool document_view = config.contains("document");
+  // A document view always starts at the viewer: it has no history worth restoring.
+  bool has_recovery_file = false;
+  std::string resume_url = config.at("url").get<std::string>();
+  if (!document_view) {
+    RK_ASSIGN_OR_RETURN(recovery, recovery_store.Contains(view));
+    has_recovery_file = recovery;
+    RK_ASSIGN_OR_RETURN(resume, view_store.ResumeUrl(view, resume_url));
+    resume_url = std::move(resume);
+  }
   auto device = config.at("device");
   const auto mode = device.at("mode").get<std::string>();
   Json request = {
@@ -336,11 +431,14 @@ Result<Json> ViewController::CreateView(const Json& config, bool recovering) {
       {"device", mode},
       {"visible", false}};
   RK_RETURN_IF_ERROR(ValidateSignIn(config));
+  RK_RETURN_IF_ERROR(ValidateDocument(config));
   if (config.contains("signIn"))
     request["signIn"] = config["signIn"];
+  if (document_view) {
+    RK_ASSIGN_OR_RETURN(staged, StageDocument(view, config));
+    request["document"] = {{"path", staged.path}, {"size", std::to_string(staged.size)}};
+  }
   if (config.contains("adopt")) {
-    if (config["adopt"]["browserIncarnation"] != browser.Incarnation())
-      return Error{ErrorCode::kCanceled, "popup Browser is retired"};
     request["method"] = "view.adopt";
     request["provisionalId"] = config["adopt"]["provisionalId"];
   }
@@ -392,6 +490,7 @@ Result<Json> ViewController::InactiveSnapshot() {
       {"browserIncarnation", nullptr},
       {"rtc", RtcSnapshot()},
       {"stats", diagnostics.Stats()},
+      {"documentErrors", DocumentErrors()},
       {"recovery", navigation.RecoverySnapshot()}};
 }
 
@@ -469,8 +568,8 @@ Result<Json> ViewController::Snapshot(bool output_diagnostics) {
                                        {"pending", item["pageRequests"].at("pending")}};
         }
         RK_RETURN_IF_ERROR(navigation.CaptureNavigation(view));
-        if (desired.contains(view_id) && !navigation.Recovering(view_id) && view.contains("url") &&
-            view["url"].is_string()) {
+        if (desired.contains(view_id) && !IsDocument(view_id) && !navigation.Recovering(view_id) &&
+            view.contains("url") && view["url"].is_string()) {
           const auto url = view["url"].get<std::string>();
           if (!url.empty() && resume_urls[view_id] != url) {
             RK_RETURN_IF_ERROR(view_store.CommitNavigation(view_id, url));
@@ -519,6 +618,7 @@ Result<Json> ViewController::Snapshot(bool output_diagnostics) {
         {"browserIncarnation", browser.Incarnation()},
         {"rtc", RtcSnapshot()},
         {"stats", diagnostics.Stats()},
+        {"documentErrors", DocumentErrors()},
         {"recovery", navigation.RecoverySnapshot()},
         {"outputDiagnostics", std::move(output_status)}};
   }

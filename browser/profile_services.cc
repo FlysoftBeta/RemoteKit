@@ -1,4 +1,5 @@
 #include "browser/control_response.h"
+#include "browser/observed_state.h"
 #include "browser/profile_services.h"
 #include "browser/browser_context.h"
 #include "browser/page_requests.h"
@@ -653,7 +654,13 @@ void ProfileDownloads::Update(download::DownloadItem* item) {
     event.Set("origin", std::string(base::TruncateUTF8ToByteSize(origin.Serialize(), 2048)));
     events_.emplace(event_id, std::move(event));
     record.completion_recorded = true;
+    ObservedState::Changed();
   }
+  // The snapshot reports in-progress downloads, not their byte counts.
+  const auto* previous = record.snapshot.FindString("state");
+  const auto* current = data.FindString("state");
+  if (!previous || !current || *previous != *current)
+    ObservedState::Changed();
   record.snapshot = std::move(data);
 }
 void ProfileDownloads::OnDownloadUpdated(download::DownloadItem* item) {

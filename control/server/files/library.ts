@@ -180,7 +180,8 @@ function entries(snapshot: LibrarySnapshot, entryIds: string[]) {
 export class FileLibrary {
   private readonly queues = new KeyedSerialQueue();
   private readonly availability = new Map<string, string>();
-  private readonly availabilityTimers = new Map<string, NodeJS.Timeout>();
+  /** Tenants whose availability refresh is running; a change meanwhile marks it for one more pass. */
+  private readonly availabilityRuns = new Map<string, { dirty: boolean; ids: string[] }>();
   private readonly availabilityJobs = new Map<string, BackgroundJob>();
   private closed = false;
   private readonly selectionRetries = new Map<string, { tenant: string; unit: RetryUnit; input: number }>();
@@ -196,34 +197,40 @@ export class FileLibrary {
   objectsChanged(ids: string[]) {
     if (this.closed) return;
     for (const tenant of this.repository.referencingTenants(ids)) {
-      if (this.availabilityTimers.has(tenant)) continue;
-      const timer = setTimeout(() => {
-        this.availabilityTimers.delete(tenant);
-        let job = this.availabilityJobs.get(tenant);
-        if (!job) {
-          job = new BackgroundJob('library.availability', { tenant });
-          this.availabilityJobs.set(tenant, job);
-        }
-        const current = job;
-        const refresh = () =>
-          current
-            .run(async () => this.refreshAvailability(tenant), ids.join(','))
-            .then(() => {
-              if (!this.closed)
-                current.retry.schedule(() => {
-                  void refresh();
-                });
+      const running = this.availabilityRuns.get(tenant);
+      if (running) {
+        running.dirty = true;
+        running.ids = ids;
+        continue;
+      }
+      const run = { dirty: false, ids };
+      this.availabilityRuns.set(tenant, run);
+      let job = this.availabilityJobs.get(tenant);
+      if (!job) {
+        job = new BackgroundJob('library.availability', { tenant });
+        this.availabilityJobs.set(tenant, job);
+      }
+      const current = job;
+      const refresh = (): Promise<void> =>
+        current
+          .run(async () => this.refreshAvailability(tenant), run.ids.join(','))
+          .then(() => {
+            if (this.closed) return;
+            if (run.dirty) {
+              run.dirty = false;
+              return refresh();
+            }
+            this.availabilityRuns.delete(tenant);
+            current.retry.schedule(() => {
+              void refresh();
             });
-        void refresh();
-      }, 250);
-      timer.unref();
-      this.availabilityTimers.set(tenant, timer);
+          });
+      void refresh();
     }
   }
   async close() {
     this.closed = true;
-    for (const timer of this.availabilityTimers.values()) clearTimeout(timer);
-    this.availabilityTimers.clear();
+    this.availabilityRuns.clear();
     await Promise.all([...this.availabilityJobs.values()].map((job) => job.close()));
     this.availabilityJobs.clear();
     await this.queues.drain();

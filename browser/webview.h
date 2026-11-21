@@ -15,6 +15,7 @@
 #include "base/timer/timer.h"
 #include "base/values.h"
 #include "browser/navigation_operations.h"
+#include "browser/pdf_viewer.h"
 #include "content/browser/renderer_host/text_input_manager.h"  // nogncheck
 #include "content/public/browser/devtools_agent_host_observer.h"
 #include "content/public/browser/web_contents_observer.h"
@@ -66,13 +67,15 @@ class WebView final : public content::WebContentsObserver,
           SessionId,
           WebViewId,
           std::unique_ptr<content::WebContents> adopted = {},
-          std::string sign_in = {});
+          std::string sign_in = {},
+          std::optional<PdfBinding> document = std::nullopt);
   ~WebView() override;
   void SetSessionStorageShouldPersist(bool persist);
   WebView(const WebView&) = delete;
   WebView& operator=(const WebView&) = delete;
 
   SignIn* sign_in() const { return sign_in_.get(); }
+  PdfDocument* pdf() const { return pdf_.get(); }
   content::WebContents* contents() const;
   OffscreenHost* offscreen_host() const;
   SessionId session_id() const { return session_; }
@@ -154,6 +157,7 @@ class WebView final : public content::WebContentsObserver,
   WebViewId view_;
 
   std::unique_ptr<SignIn> sign_in_;
+  std::unique_ptr<PdfDocument> pdf_;
   std::unique_ptr<WebViewExecution> execution_;
   std::unique_ptr<DeviceConfiguration> device_;
   std::unique_ptr<NavigationCoordinator> navigation_;

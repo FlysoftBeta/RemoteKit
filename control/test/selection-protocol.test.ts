@@ -28,6 +28,7 @@ const message = (revision = '1'): SelectionMessage => ({
   type: 'input.selection',
   version: 1,
   revision,
+  selectionRevision: '7',
   outputGeneration: '1',
   layoutEpoch: '1',
   handles: { start: null, end: null, insertion: null },
@@ -47,7 +48,7 @@ const message = (revision = '1'): SelectionMessage => ({
 test('selection protocol accepts visible and cleared menus with exact decimal ids', () => {
   for (const value of [
     message(),
-    { ...message('2'), view: null, menu: null },
+    { ...message('2'), selectionRevision: '0', view: null, menu: null },
     { ...message('3'), menu: { ...message().menu!, commands: ['copy', 'selectAll'] } },
     {
       ...message('4'),
@@ -65,6 +66,11 @@ test('selection protocol rejects malformed identity, geometry, revisions and com
     { ...valid, version: 2 },
     { ...valid, revision: '01' },
     { ...valid, revision: 1 },
+    { ...valid, selectionRevision: undefined },
+    { ...valid, selectionRevision: '07' },
+    { ...valid, selectionRevision: 7 },
+    { ...valid, selectionRevision: '0' },
+    { ...valid, view: null, menu: null, handles: { start: null, end: null, insertion: null } },
     { ...valid, view: null },
     { ...valid, menu: null },
     { ...valid, view: { ...valid.view!, instance: 1 } },

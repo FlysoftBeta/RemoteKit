@@ -12,6 +12,7 @@ const workspace = () => ({
 });
 const viewport = {
   devicePixelRatio: 1,
+  activeSpaceId: 'space',
   windows: [
     { windowId: 'w', width: 800, height: 600, visible: true, occludedBottom: 0, occlusionRevision: '1' },
   ],
@@ -106,6 +107,7 @@ test('all preferences retain client DPR until the physical atlas allocation boun
   const state = workspace(),
     measured = {
       devicePixelRatio: 2,
+      activeSpaceId: 'space',
       windows: [
         {
           windowId: 'w',

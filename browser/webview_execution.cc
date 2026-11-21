@@ -42,6 +42,8 @@ bool WebViewExecution::IsInPrimaryPage(content::NavigationHandle* navigation) co
 void WebViewExecution::InstallContents() {
   if (owner_.sign_in_)
     owner_.sign_in_->Attach(contents_.get());
+  if (owner_.pdf_)
+    owner_.pdf_->Attach(contents_.get());
   DeviceConfiguration::InstallSiteIdentity(contents_.get());
   owner_.Observe(contents_.get());
   owner_.input_->focus_observer_.Attach(contents_.get());

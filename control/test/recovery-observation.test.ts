@@ -101,6 +101,7 @@ test('pending recovery preserves product URL/title/history while withholding nat
     });
     await publishAndObserve(control.endpoint, tenant);
     await control.reconciler.reconcileProduct(tenant);
+    await control.reconciler.settled(tenant);
     let current = store.workspaces.workspace(tenant).tabs[0];
     assert.equal(current.url, 'https://saved.test/history');
     assert.equal(current.title, 'Saved title');

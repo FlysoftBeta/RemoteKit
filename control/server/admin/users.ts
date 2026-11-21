@@ -269,6 +269,7 @@ export class UserAdmin {
         store.operations.deleteTenant(user.tenant);
         store.workspaces.deleteTenant(user.tenant);
         store.reclaim.deleteTenant(user.tenant);
+        store.viewerGenerations.deleteTenant(user.tenant);
         store.announcements.deleteUser(user.id);
         store.clipboards.clear(user.id);
         const importMail = this.services.sessionImporter.deleteUser(user.tenant);

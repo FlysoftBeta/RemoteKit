@@ -103,6 +103,11 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
     usedIds.add(id);
   }
   const tab = () => findTab(state, action.tabId);
+  const unownedTab = () => {
+    const t = tab();
+    if (t.owner) throw new RemoteKitError('forbidden', '此标签页由文件窗口管理', { detail: 'Owned tab' });
+    return t;
+  };
   if (
     !suppliedIds.has('tabId') &&
     typeof action.tabId === 'string' &&
@@ -373,13 +378,13 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       );
       break;
     case 'tab.activate': {
-      const t = tab();
+      const t = unownedTab();
       findWindow(state, t.windowId).activeTabId = t.id;
       focusWindow(state, t.windowId, now);
       break;
     }
     case 'tab.move': {
-      const t = tab();
+      const t = unownedTab();
       const target = window();
       const old = findWindow(state, t.windowId);
       assertWindowMutable(state, old.id);
@@ -398,7 +403,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       break;
     }
     case 'tab.navigate': {
-      const t = tab(),
+      const t = unownedTab(),
         address = navigationUrl(action.url),
         previousKind = t.kind ?? 'remote';
       if (replacesFailedInstance(state, action)) reopenFailedInstance(t, ctx.viewId);
@@ -421,7 +426,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       break;
     }
     case 'tab.command': {
-      const t = tab();
+      const t = unownedTab();
       if (!['back', 'forward', 'reload', 'stop'].includes(action.command))
         throw new RemoteKitError('invalid_request', '未知导航命令');
       if (isLocalTab(t)) break;
@@ -447,7 +452,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       break;
     }
     case 'tab.close': {
-      const t = tab();
+      const t = unownedTab();
       if (action.confirm === true || action.cancel === true) {
         const close = readClose(state.pendingClose, t.webviewId);
         if (

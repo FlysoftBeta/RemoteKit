@@ -102,7 +102,7 @@ export function driveReconciler(path: 'product' | 'observed' | 'reconnect' | 'ua
         maintainBackgroundTab: async () => {},
       },
       operations: { saveWorkspace: store.workspaces.saveWorkspace.bind(store.workspaces) },
-      navigation: { observeRetired: noop, observe: async () => {} },
+      navigation: { observeRetired: noop, observe: () => [], acknowledge: async () => {} },
       learning: { signIn: { reconcile: noop } },
       pageRequests: {
         clear: noop,
@@ -134,7 +134,7 @@ export function driveReconciler(path: 'product' | 'observed' | 'reconnect' | 'ua
             ? (owner.observe(observation) ?? Promise.resolve())
             : path === 'reclaim'
               ? owner.tick()
-              : owner.reconcileProduct('tenant'),
+              : owner.reconcileProduct('tenant').then(() => owner.settled('tenant')),
       );
     return {
       start: run,

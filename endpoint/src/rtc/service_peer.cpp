@@ -48,7 +48,15 @@ ServicePeer::ServicePeer(media::Sdk& sdk,
                                          generation);
                  },
              .log_fields = {{"tenantId", tenant_}, {"leaseId", lease_}}},
-            PeerController::Role::kService) {}
+            PeerController::Role::kService) {
+  // The challenge's status reaches Control as it changes; Control reads the result itself.
+  face_.SetChanged([this] {
+    management_.SendEvent({{"event", "service.face.changed"},
+                           {"tenantId", tenant_},
+                           {"connectionId", peer_.Connection()}},
+                          generation_.load());
+  });
+}
 
 ServicePeer::~ServicePeer() {
   stop_ = true;
@@ -65,6 +73,7 @@ Result<Json> ServicePeer::Command(const std::string& method,
     return Error{ErrorCode::kConflict, "Viewer service lease is retired"};
   if (!management_.Current(generation))
     return Error{ErrorCode::kUnavailable, "Management is disconnected"};
+  generation_ = generation;
   if (method == "service.offer") {
     const auto sdp = Required(request, "sdp");
     if (sdp.size() > limits::serviceOfferSdpBytes) {

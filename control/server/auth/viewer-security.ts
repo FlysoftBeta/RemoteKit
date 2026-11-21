@@ -31,6 +31,8 @@ interface Challenge {
   expires: number;
   modelVersion: string;
   started: boolean;
+  /** When the Endpoint's status was last read; the fallback poll waits for a quiet challenge. */
+  polledAt: number;
   learning?: { vector: number[]; polledAt: number };
 }
 export type ViewerLock =
@@ -58,6 +60,7 @@ export class ViewerSecurity {
   private closed = false;
   private readonly capabilityJobs = new Set<RetryUnit>();
   private readonly polls = new Map<ViewerSecurityState, Promise<void>>();
+  private readonly repoll = new Set<ViewerSecurityState>();
   async close() {
     this.closed = true;
     for (const unit of this.capabilityJobs) unit.close();
@@ -445,6 +448,7 @@ export class ViewerSecurity {
       expires: this.clock.monotonicMs() + timeoutMs,
       modelVersion,
       started: false,
+      polledAt: this.clock.monotonicMs(),
     };
     viewer.challenge = challenge;
     try {
@@ -490,18 +494,32 @@ export class ViewerSecurity {
     }
   }
 
+  /** Reads the Endpoint's status now. A change that arrives during a read is read again after it. */
   poll(tenant: string, viewer: ViewerSecurityState): Promise<void> {
     if (this.closed) return Promise.resolve();
     const current = this.polls.get(viewer);
-    if (current) return current;
-    const work = this.pollStatus(tenant, viewer).finally(() => this.polls.delete(viewer));
+    if (current) {
+      this.repoll.add(viewer);
+      return current;
+    }
+    const work = this.pollStatus(tenant, viewer).finally(() => {
+      this.polls.delete(viewer);
+      if (this.repoll.delete(viewer)) void this.poll(tenant, viewer);
+    });
     this.polls.set(viewer, work);
     return work;
+  }
+  /** The fallback for a lost change notification: only a challenge quiet for `quietMs` is read. */
+  pollQuiet(tenant: string, viewer: ViewerSecurityState, quietMs: number): Promise<void> {
+    const challenge = viewer.challenge;
+    if (!challenge || this.clock.monotonicMs() - challenge.polledAt < quietMs) return Promise.resolve();
+    return this.poll(tenant, viewer);
   }
   private async pollStatus(tenant: string, viewer: ViewerSecurityState) {
     const challenge = viewer.challenge;
     if (!challenge?.started || viewer.polling || !this.valid(tenant, viewer)) return;
     viewer.polling = true;
+    challenge.polledAt = this.clock.monotonicMs();
     const generation = viewer.epoch;
     try {
       let unit = this.statusRetries.get(challenge);

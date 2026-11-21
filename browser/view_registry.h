@@ -4,6 +4,7 @@
 #include <string>
 #include "browser/webview.h"
 #include "browser/page_requests.h"
+#include "browser/pdf_viewer.h"
 #include "protocol/page_viewport.hpp"
 
 namespace remotekit::browser {
@@ -11,6 +12,7 @@ struct ViewSpec {
   int width = 480, height = 360;
   std::string url;
   std::string sign_in;
+  std::optional<PdfBinding> document;
   bool visible = true;
   float page_dsf = 0;
   bool operator==(const ViewSpec&) const = default;

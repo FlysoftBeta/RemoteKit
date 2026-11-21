@@ -218,6 +218,8 @@ void UpgradeFromVersion3(const fs::path& path) {
         db.Execute("CREATE TABLE library_derivatives(asset_id TEXT NOT NULL,format TEXT NOT NULL,"
                    "derived_id TEXT NOT NULL,PRIMARY KEY(asset_id,format))"));
     Take(db.Execute("ALTER TABLE views ADD COLUMN position INTEGER NOT NULL DEFAULT 0"));
+    Take(db.Execute(
+        "ALTER TABLE coordination_state ADD COLUMN desired_revision TEXT NOT NULL DEFAULT '0'"));
     Take(db.Execute("PRAGMA user_version=3"));
     Take(db.Close());
   }
@@ -266,6 +268,8 @@ void CreateVersion4(sqlite::Database& db) {
       db.Execute("CREATE TABLE library_derivatives(asset_id TEXT NOT NULL,format TEXT NOT NULL,"
                  "derived_id TEXT NOT NULL,PRIMARY KEY(asset_id,format))"));
   Take(db.Execute("ALTER TABLE views ADD COLUMN position INTEGER NOT NULL DEFAULT 0"));
+  Take(db.Execute(
+      "ALTER TABLE coordination_state ADD COLUMN desired_revision TEXT NOT NULL DEFAULT '0'"));
   Take(db.Execute("PRAGMA user_version=4"));
 }
 void InsertVersion4(sqlite::Database& db,
@@ -520,6 +524,8 @@ void UpgradeGeometry(const fs::path& path) {
   auto second = TestView("2");
   second["signIn"] = "changyan";
   Take(db.Execute("ALTER TABLE views ADD COLUMN position INTEGER NOT NULL DEFAULT 0"));
+  Take(db.Execute(
+      "ALTER TABLE coordination_state ADD COLUMN desired_revision TEXT NOT NULL DEFAULT '0'"));
   for (const auto& config : {legacy, second}) {
     auto insert = Take(db.Prepare("INSERT INTO views VALUES(?,?,0)"));
     Take(insert.Bind(1, config.at("viewId").get<std::string>()));
@@ -561,7 +567,7 @@ void UpgradeGeometry(const fs::path& path) {
     auto query = Take(db.Prepare("SELECT config FROM views WHERE view_id='1'"));
     Check(
         Take(query.Step()) && Json::parse(query.Text(0)) == session_documents::ViewTopology(legacy),
-        "v5 migration discards geometry and retains adoption topology");
+        "v5 migration discards geometry and popup adoption");
   }
   Check(Scalar(db, "SELECT count(*) FROM pragma_table_info('views') WHERE name='position'") == 0,
         "v6 drops durable presentation order");
@@ -576,6 +582,57 @@ void UpgradeGeometry(const fs::path& path) {
   Take(db.Close());
   SessionDb invalid(path);
   Check(!invalid.Open(), "startup rejects a current record containing transient geometry");
+}
+void UpgradePopupAdoption(const fs::path& path) {
+  {
+    SessionDb initial(path);
+    Take(initial.Open());
+    Take(initial.Close());
+  }
+  sqlite::Database db;
+  Take(db.Open(path / "session.db"));
+  Take(db.Execute(
+      "ALTER TABLE coordination_state ADD COLUMN desired_revision TEXT NOT NULL DEFAULT '7'"));
+  auto adopting = session_documents::ViewTopology(TestView());
+  adopting["adopt"] = {{"browserIncarnation", "browser"}, {"provisionalId", "provisional"}};
+  const auto plain = session_documents::ViewTopology(TestView("2"));
+  for (const auto& config : {adopting, plain}) {
+    auto insert = Take(db.Prepare("INSERT INTO views VALUES(?,?)"));
+    Take(insert.Bind(1, config.at("viewId").get<std::string>()));
+    Take(insert.Bind(2, config.dump()));
+    Take(insert.Step());
+  }
+  Take(db.Execute("PRAGMA user_version=6"));
+  Take(db.Execute("UPDATE views SET config=json_set(config,'$.unknown',true) WHERE view_id='2'"));
+  const auto rejected = MigrateSessionDb(db, path, "dev");
+  Check(!rejected && rejected.error().reason == ErrorReason::kCorruptRecord &&
+            Scalar(db, "PRAGMA user_version") == 6 &&
+            Scalar(db,
+                   "SELECT count(*) FROM pragma_table_info('coordination_state') "
+                   "WHERE name='desired_revision'") == 1,
+        "corrupt v6 view is rejected before projection and rolls back");
+  Take(db.Execute("UPDATE views SET config=json_remove(config,'$.unknown') WHERE view_id='2'"));
+  Take(MigrateSessionDb(db, path, "dev"));
+  Check(Scalar(db, "PRAGMA user_version") == kSessionDbVersion &&
+            Scalar(db,
+                   "SELECT count(*) FROM pragma_table_info('coordination_state') "
+                   "WHERE name='desired_revision'") == 0,
+        "v7 drops the write-only desired revision");
+  Check(Scalar(db, "SELECT count(*) FROM views WHERE json_extract(config,'$.adopt') IS NOT NULL") ==
+            0,
+        "v7 removes persisted popup adoption");
+  {
+    auto query = Take(db.Prepare("SELECT config FROM views WHERE view_id='1'"));
+    auto expected = adopting;
+    expected.erase("adopt");
+    Check(Take(query.Step()) && Json::parse(query.Text(0)) == expected,
+          "v7 retains the rest of the topology");
+  }
+  Take(db.Close());
+  SessionDb reopened(path);
+  Take(reopened.Open());
+  Check(Take(reopened.Views().Load()).size() == 2,
+        "a migrated store opens under the current owner");
 }
 std::string AssetId(unsigned number) {
   char buffer[65];
@@ -635,13 +692,11 @@ void PresentationOrderIsVolatile(const fs::path& path) {
   Take(store.Open());
   const auto first = TestView("1");
   const auto second = TestView("2");
-  Take(store.Views().SaveDesired(Json::array({second, first}), 1, "1"));
+  Take(store.Views().SaveDesired(Json::array({second, first}), 1));
   sqlite::Database inject;
   Take(inject.Open(path / "session.db"));
   Take(inject.Execute("BEGIN IMMEDIATE"));
-  Take(store.Views().SaveDesired(Json::array({first, second}), 1, "2"));
-  Check(Scalar(inject, "SELECT desired_revision FROM coordination_state") == 1,
-        "presentation order changes bypass the persistence transaction");
+  Take(store.Views().SaveDesired(Json::array({first, second}), 1));
   Take(inject.Execute("ROLLBACK"));
 }
 void GeometryIsVolatile(const fs::path& path) {
@@ -650,7 +705,7 @@ void GeometryIsVolatile(const fs::path& path) {
   auto config = TestView();
   config["occludedBottom"] = 120;
   config["occlusionRevision"] = "7";
-  Take(store.Views().SaveDesired(Json::array({config}), 1, "1"));
+  Take(store.Views().SaveDesired(Json::array({config}), 1));
   const auto topology = session_documents::ViewTopology(config);
   sqlite::Database observer;
   Take(observer.Open(path / "session.db"));
@@ -661,15 +716,13 @@ void GeometryIsVolatile(const fs::path& path) {
   config["height"] = 600;
   config["visible"] = true;
   config["device"]["deviceScaleFactor"] = 2;
-  Take(store.Views().SaveDesired(Json::array({config}), 1, "2"));
+  Take(store.Views().SaveDesired(Json::array({config}), 1));
   {
     auto query = Take(observer.Prepare("SELECT config FROM views"));
     Check(Take(query.Step()), "persisted view exists");
     const auto saved = Json::parse(query.Text(0));
     Check(saved == topology, "geometry observations never reach the durable view configuration");
   }
-  Check(Scalar(observer, "SELECT desired_revision FROM coordination_state") == 1,
-        "geometry does not update the durable revision");
   Take(observer.Execute("ROLLBACK"));
   const auto restored = Take(store.Views().Load());
   Check(restored == Json::array({topology}), "crash recovery has no geometry");
@@ -677,17 +730,16 @@ void GeometryIsVolatile(const fs::path& path) {
       observer.Execute("CREATE TRIGGER fail_views BEFORE DELETE ON views BEGIN "
                        "SELECT RAISE(ABORT,'injected topology failure'); END"));
   config["width"] = 900;
-  Take(store.Views().SaveDesired(Json::array({config}), 1, "3"));
+  Take(store.Views().SaveDesired(Json::array({config}), 1));
   auto changed = config;
   changed["url"] = "https://example.test/new";
-  Check(!store.Views().SaveDesired(Json::array({changed}), 1, "4"),
+  Check(!store.Views().SaveDesired(Json::array({changed}), 1),
         "topology failure is returned while geometry bypasses writes");
-  Check(Take(store.Views().Load()) == restored &&
-            Scalar(observer, "SELECT desired_revision FROM coordination_state") == 1,
+  Check(Take(store.Views().Load()) == restored,
         "failed topology commit preserves the full durable desired record");
-  Check(!store.Views().SaveDesired(Json::array(), 1, "5"), "view removal requires a commit");
+  Check(!store.Views().SaveDesired(Json::array(), 1), "view removal requires a commit");
   Take(observer.Execute("DROP TRIGGER fail_views"));
-  Take(store.Views().SaveDesired(Json::array({changed}), 1, "6"));
+  Take(store.Views().SaveDesired(Json::array({changed}), 1));
   Check(Take(store.Views().Load())[0].at("url") == changed.at("url"),
         "topology commits after the fault clears");
   Take(store.Close());
@@ -883,6 +935,33 @@ void EventTransactions(const fs::path& path) {
   Check(Take(reopened.Events().State()).at("streamId") == rotated.at("streamId"),
         "process restart retains the durable event stream");
 }
+// A stored event notifies once, after its transaction commits; duplicates and rolled-back
+// transactions do not.
+void EventNotification(const fs::path& path) {
+  SessionDb store(path);
+  Take(store.Open());
+  int notified = 0;
+  store.SetEventsAppended([&] { ++notified; });
+  auto events = store.Events();
+  const Json body{{"viewId", "1"}, {"reason", "script"}};
+  Take(events.Append("view.closed", body, "first", "browser"));
+  Check(notified == 1, "append notifies after commit");
+  Take(events.Append("view.closed", body, "first", "browser"));
+  Check(notified == 1, "duplicate append does not notify");
+  Take(store.Views().Close("2", "script", "browser"));
+  Check(notified == 2, "nested append notifies once, after the outer commit");
+  sqlite::Database inject;
+  Take(inject.Open(path / "session.db"));
+  Take(inject.Execute(
+      "CREATE TRIGGER fail_retire BEFORE INSERT ON retired_views BEGIN SELECT RAISE(ABORT,'x'); "
+      "END"));
+  Check(!store.Views().Close("3", "script", "browser"), "injected failure");
+  Check(notified == 2, "rolled-back append does not notify");
+  Take(inject.Execute("DROP TRIGGER fail_retire"));
+  Take(events.Append("view.closed", {{"viewId", "4"}, {"reason", "script"}}, "again", "browser"));
+  Check(notified == 3, "flag does not leak from a failed transaction");
+  Take(inject.Close());
+}
 }  // namespace
 int wmain(int argc, wchar_t** argv) {
   if (argc != 2)
@@ -899,11 +978,13 @@ int wmain(int argc, wchar_t** argv) {
     DerivativeFailures(root / "thumbnail-failures", "thumbnail", 256);
     DerivativeFailures(root / "cache-failures", "selection-transcode", 1024);
     UpgradeGeometry(root / "upgrade-geometry");
+    UpgradePopupAdoption(root / "upgrade-adoption");
     GeometryIsVolatile(root / "geometry");
     AssetLimit(root / "asset-limit");
     PresentationOrderIsVolatile(root / "order");
     Transactions(root / "transactions");
     EventTransactions(root / "events");
+    EventNotification(root / "event-notification");
     Reads(root / "reads");
     fs::remove_all(root);
     return 0;

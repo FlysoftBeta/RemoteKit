@@ -72,6 +72,21 @@ bool RenderChannel::Wake(const RenderIdentity& identity) {
   }
   return true;
 }
+bool RenderChannel::ObservedChanged(uint64_t generation, uint64_t revision) {
+  if (!pipe_.is_valid() || generation_state_.stopping())
+    return false;
+  RenderWireMessage message;
+  message.type = RenderWireType::kObservedChanged;
+  message.begin.identity.generation = generation;
+  message.begin.identity.value = revision;
+  const auto bytes = EncodeRenderWire(message);
+  if (!bytes || mojo::WriteMessageRaw(pipe_.get(), bytes->data(), bytes->size(), nullptr, 0,
+                                      MOJO_WRITE_MESSAGE_FLAG_NONE) != MOJO_RESULT_OK) {
+    Close();
+    return false;
+  }
+  return true;
+}
 bool RenderChannel::Stopped(uint64_t generation) {
   if (!pipe_.is_valid() || !generation_state_.RecordStopped(generation))
     return false;

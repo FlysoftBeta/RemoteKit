@@ -161,8 +161,12 @@ export function SelectionUI({
               aria-label={labels[command]}
               onPointerDown={(event) => event.preventDefault()}
               onClick={() => {
-                void recover(() => Promise.resolve(target.run(command)), lifetime.current.signal, setError)
-                  .then(() => {
+                void recover(async () => target.run(command), lifetime.current.signal, setError)
+                  .then((outcome) => {
+                    if (lifetime.current.signal.aborted) return;
+                    if (outcome.kind === 'not-sent') setError(outcome.error);
+                    else setError(undefined);
+                    if (outcome.kind !== 'sent') return;
                     if (command === 'selectAll') update((value) => value + 1);
                     else close();
                   })

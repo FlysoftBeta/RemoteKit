@@ -44,6 +44,7 @@ export function FileEntryMenu({
   onSelect,
   onDetails,
   onDeleted,
+  compat,
 }: {
   entry?: LibraryEntry;
   anchor?: HTMLElement;
@@ -53,6 +54,8 @@ export function FileEntryMenu({
   onSelect?(entry: LibraryEntry): void;
   onDetails?(entry: LibraryEntry): void;
   onDeleted?(): void;
+  /** PDF documents can switch between the local reader and the remote browser. */
+  compat?: { on: boolean; toggle(): void };
 }) {
   const { snapshot, online, mutate, copySnippet, download } = useLibrary();
   const [copied, setCopied] = useState(false);
@@ -124,6 +127,12 @@ export function FileEntryMenu({
               <DownloadOutlined fontSize="small" />
             </ListItemIcon>
             <ListItemText>下载到本地</ListItemText>
+          </MenuItem>
+        )}
+        {compat && entry?.kind === 'file' && (
+          <MenuItem disabled={disabled || unavailable} onClick={() => choose(compat.toggle)}>
+            <ListItemIcon>{compat.on && <CheckBoxOutlined fontSize="small" />}</ListItemIcon>
+            <ListItemText>兼容模式（远端渲染）</ListItemText>
           </MenuItem>
         )}
         {onOpen && (

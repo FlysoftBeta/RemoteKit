@@ -123,6 +123,7 @@ Result<Json> EventStore::Append(const std::string& type,
       return CorruptState("missing event sequence");
     event = document;
     event["seq"] = std::to_string(statement.Int64(0));
+    db_.event_appended_ = true;
     return Done(statement);
   });
   if (!written)

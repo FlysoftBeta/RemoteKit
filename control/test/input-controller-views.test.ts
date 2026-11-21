@@ -125,7 +125,7 @@ test('partial release preserves the other contact without requiring a result', (
   assert.equal(view.getSnapshot().phase, 'released');
 });
 
-function editingFixture(t: import('node:test').TestContext) {
+function editingFixture(t: import('node:test').TestContext, options: { coarse?: boolean } = {}) {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let view: EditingView;
   t.after(() => view?.dispose());
@@ -133,7 +133,7 @@ function editingFixture(t: import('node:test').TestContext) {
   const document = { activeElement: body as unknown, body };
   for (const [name, value] of Object.entries({
     document,
-    window: { matchMedia: () => ({ matches: false }) },
+    window: { matchMedia: (query: string) => ({ matches: !!options.coarse && query.includes('coarse') }) },
   })) {
     const old = Object.getOwnPropertyDescriptor(globalThis, name);
     Object.defineProperty(globalThis, name, { configurable: true, value });
@@ -146,6 +146,7 @@ function editingFixture(t: import('node:test').TestContext) {
   const editor = {
     value: '',
     inputMode: 'none',
+    blurs: 0,
     addEventListener() {},
     removeEventListener() {},
     setSelectionRange() {},
@@ -153,6 +154,7 @@ function editingFixture(t: import('node:test').TestContext) {
       document.activeElement = editor;
     },
     blur() {
+      editor.blurs++;
       document.activeElement = body;
     },
   };
@@ -290,4 +292,113 @@ test('editing controller defers edits through presentation loss and expires them
   sent.length = 0;
   view.release();
   assert.deepEqual(sent, []);
+});
+
+function pointerFocusEvent(
+  view: ReturnType<typeof editingFixture>['editing'],
+  revision: string,
+  active = true,
+) {
+  view.handle({
+    type: 'input.editable',
+    version: 1,
+    revision,
+    view: surface,
+    editable: {
+      focusSource: 'pointer',
+      focusRevision: revision,
+      type: 1,
+      flags: 0,
+      active,
+      target: active ? '31' : '0',
+      selectionStart: 0,
+      selectionEnd: 0,
+      compositionStart: -1,
+      compositionEnd: -1,
+      caretX: 1,
+      caretY: 1,
+      caretWidth: 1,
+      caretHeight: 12,
+    },
+  });
+}
+
+test('a tap opens the keyboard on the observed pointer focus without waiting for frame readiness', (t) => {
+  const f = editingFixture(t, { coarse: true });
+  const { view, editing, editor } = f;
+  f.ready = false;
+  view.configure(true, false, {
+    waiting: true,
+    keyboardOpen: false,
+    keyboardDismissals: 0,
+    blocksInput: () => true,
+  });
+  view.beginPointerFocus();
+  view.focusEditor(false);
+  assert.equal(editor.inputMode, 'none');
+  view.activateKeyboard();
+  assert.equal(view.keyboardShown, false);
+  pointerFocusEvent(editing, '2');
+  view.observe();
+  assert.notEqual(editor.inputMode, 'none');
+  assert.equal(view.getSnapshot().keyboardReady, false);
+  assert.equal(editor.blurs, 0, 'the gesture focus is kept; only inputmode changes');
+  assert.equal(document.activeElement, editor);
+});
+
+test('input typed before the frame is ready is not sent to the old target', (t) => {
+  const f = editingFixture(t, { coarse: true });
+  const { view, editing, sent } = f;
+  f.ready = false;
+  view.configure(true, false, {
+    waiting: true,
+    keyboardOpen: false,
+    keyboardDismissals: 0,
+    blocksInput: () => true,
+  });
+  view.beginPointerFocus();
+  view.focusEditor(false);
+  view.activateKeyboard();
+  pointerFocusEvent(editing, '2');
+  view.observe();
+  view.sendEdit({ type: 'ime_commit', text: 'x' });
+  assert.deepEqual(sent, []);
+});
+
+for (const [name, coarse, elapse, none] of [
+  ['times out after 1500 ms', true, 1500, false],
+  ['is released by NONE that outlasts the blur grace', true, 200, true],
+  ['is kept on a precise pointer', false, 1500, false],
+] as const) {
+  test(`an unconfirmed candidate focus ${name}`, (t) => {
+    let clock = 1000;
+    t.mock.method(performance, 'now', () => clock);
+    const { view, editing, editor } = editingFixture(t, { coarse });
+    view.beginPointerFocus();
+    view.focusEditor(false);
+    assert.equal(document.activeElement, editor);
+    if (none) {
+      pointerFocusEvent(editing, '2', false);
+      view.observe();
+      assert.equal(document.activeElement, editor, 'a NONE inside the blur grace keeps the candidate');
+    }
+    clock += elapse;
+    view.observe();
+    assert.equal(document.activeElement === editor, !coarse);
+  });
+}
+
+test('a keyboard that does not appear after the inputmode switch falls back to a plain refocus', (t) => {
+  const f = editingFixture(t, { coarse: true });
+  const { view, editing, editor } = f;
+  view.beginPointerFocus();
+  view.focusEditor(false);
+  view.activateKeyboard();
+  pointerFocusEvent(editing, '2');
+  view.observe();
+  assert.equal(editor.blurs, 0);
+  t.mock.timers.tick(400);
+  assert.equal(editor.blurs, 1);
+  assert.equal(document.activeElement, editor);
+  assert.notEqual(editor.inputMode, 'none');
 });

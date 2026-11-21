@@ -9,6 +9,7 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace rk::auth {
@@ -86,6 +87,21 @@ struct Faces::Impl {
       Finish(FaceState::expired);
   }
 
+  // What Control shows of the pending challenge; a change of it is announced once.
+  using Visible =
+      std::tuple<FaceState, std::optional<float>, std::optional<std::string>, FaceOutcome, bool>;
+  Visible VisibleResult() const {
+    return {result.state, result.progress, result.hint, result.outcome, result.error.has_value()};
+  }
+  void Announce() {
+    const auto visible = VisibleResult();
+    if (visible == announced)
+      return;
+    announced = visible;
+    if (on_change)
+      on_change();
+  }
+
   void Observe(Clock::time_point received, const FaceInference& inference, uint64_t frame_hash) {
     const auto observation = policy.Observe(received, inference, frame_hash);
     if (observation.gate != FaceGate::none)
@@ -117,6 +133,7 @@ struct Faces::Impl {
       if (stop.stop_requested())
         break;
       Expire(Clock::now());
+      Announce();
       if (!latest)
         continue;
       Frame frame = std::move(*latest);
@@ -153,6 +170,7 @@ struct Faces::Impl {
       } else if (now - frame.received <= 1s) {
         Observe(frame.received, inference, frame_hash);
       }
+      Announce();
     }
   }
 
@@ -161,6 +179,7 @@ struct Faces::Impl {
     active = false;
     challenge = {};
     Finish(FaceResult{});
+    announced = VisibleResult();
   }
 
   const std::filesystem::path models;
@@ -175,6 +194,8 @@ struct Faces::Impl {
   FacePolicy policy;
   std::array<uint64_t, kFaceGateCount> gate_failures{};
   Worker worker;
+  std::function<void()> on_change;
+  Visible announced;
 };
 
 void Faces::Worker::Start(std::mutex& mutex,
@@ -213,6 +234,11 @@ Faces::~Faces() = default;
 std::array<uint64_t, kFaceGateCount> Faces::GateFailures() {
   std::lock_guard lock(impl_->mutex);
   return impl_->gate_failures;
+}
+
+void Faces::SetChanged(std::function<void()> changed) {
+  std::lock_guard lock(impl_->mutex);
+  impl_->on_change = std::move(changed);
 }
 
 FaceCapabilities Faces::Capabilities(const std::filesystem::path& models) {

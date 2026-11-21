@@ -83,6 +83,13 @@
 
 **阅读器**（`control/client/documents/`，取自 talos-ng 的阅读器与虚拟滚动）：页面虚拟化，只挂载视口附近的页并按需取资源，资源 Blob URL 有界 LRU（64 项、32MiB）；每页挂在自己的 shadow root 里，内联样式表，`data-bundle-ref` 解析为 Blob URL，其他 URL 一律去掉，页面内容不会发出网络请求；按 pdfrender 约定给多字符单词设置 `--fit-x` 对齐原始字宽。默认适应宽度，可缩放（按钮、双指、Ctrl+滚轮）。页面控制是浮在页面上方、底边居中的胶囊：页码（点开直接跳页）、缩小、缩放比例（点按回到适合宽度）、放大；内容底部留出空间让最后一页能滚出胶囊；精确指针设备上 2.5 秒无操作淡到 35%，指针移动或滚动时恢复，触屏设备上保持不透明。打开中显示文件类型图标、名称与进度条；Endpoint 报告转换中时改为"正在转换文档"，20 秒后加一行"仍在转换…"；转换失败保留阅读器的“无法转换此文档”与错误说明，仅可恢复错误提供重试；永久拒绝不替换成通用文件预览卡。阅读位置（页号与页内偏移）存在 Control（见[学习与题库 · 文档阅读进度](learning.md#文档阅读进度)）。
 
+**PDF 兼容模式**：本地阅读器（pdfrender 归档）之外，PDF 文档标签的更多菜单有"兼容模式（远端渲染）"，按标签保存（files 文档标签的可选字段 `compat: true`）。开启后由 Endpoint 上的 Chromium 用 pdf.js 渲染，经视频串流呈现在这个标签的内容区，滚动、缩放、选择、搜索都是 pdf.js 自己的交互，输入走普通远端页面的 DataChannel。
+
+- **所有权**：Control 为每个兼容模式的 PDF 文档标签维护一个归它所有的远端 ProductTab（`owner: {kind:files, windowId, filesTabId, assetId}`，`server/workspace/files-owner.ts`），在每次 `window.state` 和文件库变化时同步：切回本地、关闭标签、删除条目、条目不再是可读 PDF 时退休，资产被替换时退休旧的并以新 viewId 新建（Endpoint 上一个 view 的文档不可变）。files 窗口的 `activeTabId` 由服务端派生：当前标签是兼容模式 PDF 时指向它的 ProductTab，否则为 null，客户端不直接写。客户端对这类 Tab 的导航、命令、激活、移动与关闭一律 `forbidden`。desired、可见性、回收、viewport 与质量预算都沿用普通 ProductTab 的路径。工作区 Tab 已满时不创建，内容区显示错误与"切回本地阅读器"。
+- **字节**：desired 里这类 view 是 `url: "remotekit-pdf://viewer/"` 加 `document: {kind:pdf, assetId}`（二者同时出现，不带 signIn/adopt，否则 `invalid_request`）。Endpoint 走与原生文件选择相同的 `FileLibrary::Path` → `SessionObjects::Ensure` 链取得对象并暂存为私有文件（按 view、资产与 Browser 实例幂等，view 离开 desired、关闭或 Browser 退出时释放），在 desired 里点名资产不授予任何额外权限。`document` 不写入 `session.db`。最终失败（forbidden、not_found、limit_exceeded、空文件）经观察的 `documentErrors` 报给 Control，写到所属 Tab 上，由标签内容区统一呈现并提供"切回本地阅读器"；暂时性失败在 Endpoint 的重试单元里重试。
+- **阅读页**：Browser 注册内部 scheme `remotekit-pdf`（standard、secure），从 Browser 旁的 `pdfjs/` 目录提供 pdf.js modern 构建（固定版本与 SHA-256，由 `tools/fetch-pdfjs.py` 获取、裁剪并加入隐藏打开/下载/打印/编辑等按钮的样式），带显式 MIME、CSP 与路径白名单。PDF 在同源的 `/document.pdf` 只提供给绑定它的那个 view 的主 frame，且文件大小必须与暂存一致。这个 view 不能导航离开阅读页（`about:blank`、`data:` 在 RPC 层就拒绝），从该 origin 发起的网络请求一律失败，新窗口与弹窗被拒绝；其他 view 不能加载这个 scheme。
+- 阅读位置不与本地阅读器共享。
+
 **依赖**：`tools/fetch-document-deps.py` 按固定版本与 SHA-256 获取 LibreOffice MSI（管理安装解包，不改系统）与 pdfrender Windows 构建（GitHub Actions 产物，过期前需要刷新固定值），按确定的允许/拒绝清单裁掉词典、界面翻译、帮助、模板、Python/Java 等转换用不到的部分（约 460MiB，裁剪前后转换结果逐像素一致），开发构建复制到 `endpoint_service.exe` 旁的 `documents/`，Endpoint 运行时包里同样位置，附带两者的许可证。
 
 ## 拍照

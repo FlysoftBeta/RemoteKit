@@ -1,5 +1,6 @@
 #include "browser/device_configuration.h"
 #include "browser/diagnostic_log.h"
+#include "browser/pdf_viewer.h"
 #include "browser/signin.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
@@ -48,6 +49,9 @@ class ContentClient final : public content::ContentClient {
     schemes->standard_schemes.push_back("remotekit-signin");
     schemes->secure_schemes.push_back("remotekit-signin");
     schemes->cors_enabled_schemes.push_back("remotekit-signin");
+    schemes->standard_schemes.push_back(kPdfScheme);
+    schemes->secure_schemes.push_back(kPdfScheme);
+    schemes->cors_enabled_schemes.push_back(kPdfScheme);
   }
   blink::OriginTrialPolicy* GetOriginTrialPolicy() override {
     if (!origin_policy_logged_.exchange(true, std::memory_order_relaxed)) {
@@ -96,7 +100,7 @@ class BrowserClient final : public ServicesBrowserClient {
       content::RenderFrameHost* frame,
       int,
       URLLoaderFactoryType,
-      const url::Origin&,
+      const url::Origin& initiator,
       const net::IsolationInfo&,
       std::optional<int64_t>,
       ukm::SourceIdObj,
@@ -107,18 +111,36 @@ class BrowserClient final : public ServicesBrowserClient {
       network::mojom::URLLoaderFactoryOverridePtr*,
       scoped_refptr<base::SequencedTaskRunner>,
       bool) override {
+    DenyPdfNetworkRequests(initiator, builder);
     InstallSignInRequestObserver(content::WebContents::FromRenderFrameHost(frame), builder,
                                  headers);
   }
   void CreateThrottlesForNavigation(content::NavigationThrottleRegistry& registry) override {
     AddSignInNavigationThrottle(registry);
+    AddPdfNavigationThrottle(registry);
   }
   mojo::PendingRemote<network::mojom::URLLoaderFactory> CreateNonNetworkNavigationURLLoaderFactory(
       const std::string& scheme,
       content::FrameTreeNodeId frame) override {
     if (scheme == "remotekit-signin")
       return CreateSignInPageFactory(content::WebContents::FromFrameTreeNodeId(frame));
+    if (scheme == kPdfScheme)
+      return CreatePdfNavigationFactory(content::WebContents::FromFrameTreeNodeId(frame));
     return {};
+  }
+  void RegisterNonNetworkSubresourceURLLoaderFactories(
+      int render_process_id,
+      int render_frame_id,
+      const std::optional<url::Origin>& initiator,
+      NonNetworkURLLoaderFactoryMap* factories) override {
+    RegisterPdfSubresourceFactories(render_process_id, render_frame_id, initiator, factories);
+  }
+  void RegisterNonNetworkWorkerMainResourceURLLoaderFactories(
+      content::BrowserContext*,
+      const std::optional<url::Origin>& initiator,
+      network::mojom::RequestDestination,
+      NonNetworkURLLoaderFactoryMap* factories) override {
+    RegisterPdfWorkerFactories(initiator, factories);
   }
   bool CanCreateWindow(content::RenderFrameHost* opener,
                        const GURL&,
@@ -134,7 +156,8 @@ class BrowserClient final : public ServicesBrowserClient {
                        bool,
                        bool* no_javascript_access) override {
     *no_javascript_access = false;
-    return user_gesture && !SignIn::ForContents(content::WebContents::FromRenderFrameHost(opener));
+    auto* contents = content::WebContents::FromRenderFrameHost(opener);
+    return user_gesture && !SignIn::ForContents(contents) && !PdfDocument::ForContents(contents);
   }
   std::unique_ptr<content::BrowserMainParts> CreateBrowserMainParts(bool) override {
     return std::make_unique<RemoteKitMainParts>();

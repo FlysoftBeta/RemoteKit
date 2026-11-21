@@ -553,6 +553,7 @@ export class EndpointGateway {
       views: value.views,
       pendingPopups: value.pendingPopups,
       recovery: value.recovery,
+      documentErrors: value.documentErrors ?? {},
       rtc: { ...value.rtc, connectionId: value.rtc.connectionId ?? undefined },
       stats: value.stats,
       stopBlockers: value.blockers,

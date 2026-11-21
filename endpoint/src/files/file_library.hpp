@@ -91,7 +91,17 @@ class FileLibrary {
                               const Check&);
   Result<void> Sweep();
   ServiceJson CleanupFailures() const;
-  ServiceJson StopBlockers(const std::function<bool(uint64_t)>& current) const;
+  // How a receipt weighs on stopping the Session. A chooser still waiting for the user always
+  // does. A callback that may be in flight (dispatching) or whose reply was lost (unknown) does
+  // only while the Browser instance it was sent to can still answer: once that instance is
+  // gone nothing is running and the delivery result stays unknown.
+  enum class Activity { kSettled, kWaitingForUser, kBrowserMayAnswer, kResultUnknown };
+  static Activity ActivityOf(const Selection&, bool browser_live);
+  ServiceJson StopBlockers(const std::function<bool(uint64_t)>& current,
+                           const std::function<bool(const std::string&)>& browser_live) const;
+  // The Browser instance exited. Callbacks sent to it can no longer be answered, so their
+  // delivery result is recorded as unknown. They are never re-submitted.
+  Result<void> BrowserExited(const std::string& incarnation);
 
   Result<void> Prepare(const Selection&);
   Result<std::vector<FileUploadStore::Source>> SelectionSources(const Selection&, const Check&);

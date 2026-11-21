@@ -54,19 +54,20 @@ class DownloadImports {
       if (row.contains("retry"))
         RK_RETURN_IF_ERROR(retry.Restore(row.at("retry")));
       if (!row.contains("retry") || row.at("retry").at("buildId") != build_)
-        retry.Input(row.at("eventId").get<std::string>() +
-                    (row.contains("result") ? ":cleanup:" : ":import:") + build_ + ":" + input_);
+        retry.Input(Identity(row, {}));
     }
     return {};
   }
   void SetImport(Import import) { import_ = std::move(import); }
-  void SetInput(std::string input) { input_ = std::move(input); }
+  // Identifies the storage the import commits to (a node reconnect re-establishes quota and
+  // object access). The import stage is retried only when this changes.
+  void SetStorage(std::string storage) { storage_ = std::move(storage); }
   size_t Pending() const { return state_["records"].size(); }
   Result<void> Observe(const std::string& incarnation,
                        const Json& events,
                        const std::string& session,
                        const Rpc& rpc) {
-    persistence_retry_.Input(build_ + ":" + input_);
+    persistence_retry_.Input(build_ + ":" + storage_);
     if (!persistence_retry_.Ready())
       return *persistence_retry_.Failure();
     for (const auto& event : events) {
@@ -91,9 +92,7 @@ class DownloadImports {
       const auto& download = row.at("download");
       const auto identity = row.at("eventId").get<std::string>();
       auto& retry = retries_.try_emplace(identity, "download.import").first->second;
-      if (!input_.empty() || retry.Identity().empty())
-        retry.Input(identity + (row.contains("result") ? ":cleanup:" : ":import:") + build_ + ":" +
-                    input_);
+      retry.Input(Identity(row, incarnation));
       const auto report_fault = [&]() -> Result<void> {
         if (row.contains("retry") && row["retry"].value("reported", false) &&
             row["retry"].at("input") == retry.Identity())
@@ -178,7 +177,7 @@ class DownloadImports {
         next["records"][index] = row;
         RK_RETURN_IF_ERROR(Save(std::move(next)));
       }
-      retry.Input(identity + ":cleanup:" + build_ + ":" + input_);
+      retry.Input(Identity(row, incarnation));
       auto cleanup = rpc({{"method", "profile.downloads"},
                           {"session", session},
                           {"command", {{"action", "remove"}, {"guid", download.at("guid")}}}});
@@ -212,6 +211,15 @@ class DownloadImports {
   }
 
  private:
+  // A download is retried per stage. The import stage depends on the storage capability; the
+  // cleanup stage talks to the Browser holding the file, so it depends on that incarnation.
+  // Neither depends on the desired layout, which changes constantly.
+  std::string Identity(const Json& row, const std::string& incarnation) const {
+    const auto id = row.at("eventId").get<std::string>();
+    if (row.contains("result"))
+      return id + ":cleanup:" + build_ + ":" + incarnation;
+    return id + ":import:" + build_ + ":" + storage_;
+  }
   Result<void> Save(Json next) {
     auto saved = store_.save(next);
     if (!saved) {
@@ -224,7 +232,7 @@ class DownloadImports {
   }
   Store store_;
   Import import_;
-  std::string build_, input_;
+  std::string build_, storage_;
   std::map<std::string, RetryUnit> retries_;
   std::map<std::string, RetryUnit> failure_handoffs_;
   RetryUnit persistence_retry_{"download.persistence"};

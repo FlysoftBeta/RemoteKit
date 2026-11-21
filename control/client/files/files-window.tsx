@@ -33,6 +33,7 @@ import {
   selectFilesTab,
   updateFilesLibraryTab,
   setFilesLayout,
+  setDocumentCompat,
 } from './files-app-state';
 import type { FilesView, FilesWindowState } from '../../shared/files-state';
 import './files-window.css';
@@ -218,6 +219,7 @@ export function FilesWindow({
               call={call}
               onBack={() => write(backFilesTab(restored, active.id))}
               onClose={() => close(active.id)}
+              onCompat={(on) => write(setDocumentCompat(restored, active.id, on))}
             />
           </Suspense>
         )}

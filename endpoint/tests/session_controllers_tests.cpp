@@ -68,6 +68,19 @@ void RouterClassificationAndAdmission() {
   CHECK(!DataRouter::Classify(selection));
   selection["event"]["command"] = "contextMenu";
   CHECK(DataRouter::Classify(selection));
+  selection["event"]["command"] = "dismiss";
+  CHECK(!DataRouter::Classify(selection));
+  selection["event"]["command"] = "contextMenu";
+  selection["event"]["menu"] = "0";
+  CHECK(!DataRouter::Classify(selection));
+  selection["event"]["menu"] = "1";
+  Json selection_dismiss = {{"type", "input"},
+                            {"event", {{"type", "selection.dismiss"}, {"revision", "7"}}}};
+  CHECK(DataRouter::Classify(selection_dismiss));
+  for (const char* revision : {"0", "01", "-1"}) {
+    selection_dismiss["event"]["revision"] = revision;
+    CHECK(!DataRouter::Classify(selection_dismiss));
+  }
   Json context_command = selection;
   context_command["event"]["type"] = "context_command";
   for (const auto* command : {"undo", "redo", "cut", "copy", "paste", "selectAll",

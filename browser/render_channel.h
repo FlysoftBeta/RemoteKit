@@ -19,6 +19,9 @@ class RenderChannel final {
   bool Reject(const RenderIdentity& identity, RenderRejectReason reason);
   bool Stopped(uint64_t generation);
   bool Wake(const RenderIdentity& identity);
+  // Tells the consumer the observed Browser state changed. Never answered; carries the
+  // generation and the state revision, no frame identity.
+  bool ObservedChanged(uint64_t generation, uint64_t revision);
   void Close();
 
  private:

@@ -17,6 +17,8 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   SessionCoordinator::Hooks Hooks();
   // The coordinator's Signal(); bound once, before the first Start.
   void BindSignal(std::function<void()> signal) { signal_ = std::move(signal); }
+  // The coordinator's ObservedChanged(); bound once, before the first Start.
+  void BindObservedChanged(std::function<void()> notify) { observed_changed_ = std::move(notify); }
   void Activate(std::string connection, uint64_t generation);
   Result<Json> Stop(const Json& commit,
                     bool check_blockers = true,
@@ -54,9 +56,11 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   Result<void> Prepare(const Json&);
   Result<void> Start();
   Result<void> Views(const Json&);
+  Result<bool> Geometry(const Json&);
   Result<Json> Observe();
   void Maintain();
   void FlushSignals();
+  void PublishEvents();
   Result<void> Admit(const Json&, uint64_t);
   Result<Json> Request(const Json&, uint64_t);
   Result<void> Acknowledge(const std::string&, uint64_t);
@@ -84,12 +88,16 @@ class SessionExecution : public std::enable_shared_from_this<SessionExecution> {
   std::string connection_;
   std::unique_ptr<SessionDb> reader_;
   std::map<std::string, uint64_t> acknowledged_;
+  static constexpr auto kEventResendInterval = std::chrono::seconds(2);
   std::chrono::steady_clock::time_point last_events_sent_{};
+  // Set when an event is stored, a connection starts or a pass left events unsent.
+  std::atomic<bool> events_wanted_{true};
+  std::atomic<bool> events_outstanding_{true};
   uint64_t sent_through_ = 0;
-  std::string sent_stream_, staged_revision_;
+  std::string sent_stream_, sent_connection_, staged_revision_;
   bool starting_ = false, retired_ = false;
   uint64_t runtime_generation_ = 0;
-  std::function<void()> signal_;
+  std::function<void()> signal_, observed_changed_;
   RetryUnit sampling_retry_{"session.sample"}, events_retry_{"session.events"};
   mutable std::mutex sampling_retry_mutex_, events_retry_mutex_;
 };

@@ -9,6 +9,12 @@
 #include "base/check.h"
 
 namespace remotekit::browser {
+namespace {
+// A document view loads its viewer page; its spec URL is only the marker the Endpoint names.
+GURL NavigationUrl(const ViewSpec& spec) {
+  return spec.document ? PdfViewerStartUrl() : GURL(spec.url);
+}
+}  // namespace
 Result<ClosedAckRequest> DecodeClosedAck(const base::DictValue& wire, RequestEnvelope envelope) {
   ClosedAckRequest request;
   static_cast<RequestEnvelope&>(request) = envelope;
@@ -50,6 +56,7 @@ Result<CreateViewRequest> DecodeCreateView(const base::DictValue& wire, RequestE
   CreateViewRequest request;
   static_cast<RequestEnvelope&>(request) = envelope;
   RequestDecoder decoder(wire);
+  request.document = decoder.Optional<base::DictValue>("document");
   request.signIn = decoder.Optional<std::string>("signIn");
   if (request.signIn && !ValidSignInPurpose(*request.signIn))
     return {{}, {ErrorCode::kInvalidRequest, "Invalid sign-in purpose"}};
@@ -266,6 +273,13 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
     spec.page_dsf = static_cast<float>(*scale);
   }
   spec.url = *url;
+  if (request.document) {
+    spec.document = DecodePdfBinding(*request.document);
+    if (!spec.document || adopting || request.signIn || *url != protocol::kPdfViewerUrl)
+      return error(ErrorCode::kInvalidRequest, "invalid_view_document");
+  } else if (*url == protocol::kPdfViewerUrl) {
+    return error(ErrorCode::kInvalidRequest, "viewer_url_requires_document");
+  }
   for (auto& [i, record] : runtime_.views.records) {
     if (runtime_.views.records.at(i).webview->view_id() != view)
       continue;
@@ -276,7 +290,7 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
       return error(ErrorCode::kConflict, "view_id_configuration_conflict");
     if (request.operation) {
       const auto status =
-          runtime_.views.records.at(i).webview->Navigate(GURL(spec.url), request.operation);
+          runtime_.views.records.at(i).webview->Navigate(NavigationUrl(spec), request.operation);
       if (!status)
         return ControlResult::Failure(id, *status.error, status.message, std::move(reply));
     }
@@ -309,7 +323,7 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
   runtime_.layout_transaction.Commit(std::move(layout.value));
   runtime_.UpdateOutput();
   auto navigated =
-      adopting ? Status{} : record.webview->Navigate(GURL(spec.url), request.operation);
+      adopting ? Status{} : record.webview->Navigate(NavigationUrl(record.spec), request.operation);
   if (!navigated) {
     runtime_.RemoveView(view);
     return ControlResult::Failure(id, *navigated.error, navigated.message, std::move(reply));
@@ -375,7 +389,11 @@ ControlResult ControlDispatcher::HandleRecreateView(const RecreateViewRequest& r
   const auto* url = Ptr(request.url);
   if (!url || !GURL(*url).is_valid())
     return error(ErrorCode::kInvalidRequest, "invalid_url");
-  if (const auto existing = adapter.ExistingNavigationOperation(GURL(*url), request.operation)) {
+  // A document view can only be recreated at its viewer.
+  if (record->spec.document.has_value() != (*url == protocol::kPdfViewerUrl))
+    return error(ErrorCode::kInvalidRequest, "invalid_view_document");
+  const GURL target = record->spec.document ? PdfViewerStartUrl() : GURL(*url);
+  if (const auto existing = adapter.ExistingNavigationOperation(target, request.operation)) {
     if (!*existing)
       return ControlResult::Failure(id, *existing->error, existing->message);
     reply.Set("ok", true);
@@ -401,7 +419,7 @@ ControlResult ControlDispatcher::HandleRecreateView(const RecreateViewRequest& r
   auto plan = runtime_.layout_transaction.Prepare(runtime_.views.Specs());
   CHECK(plan);
   runtime_.layout_transaction.Commit(std::move(plan.value));
-  const auto status = record->webview->Navigate(GURL(*url), request.operation);
+  const auto status = record->webview->Navigate(target, request.operation);
   runtime_.paused_output.erase(view);
   runtime_.UpdateOutput();
   if (!status)

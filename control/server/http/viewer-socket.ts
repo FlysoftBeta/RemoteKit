@@ -424,6 +424,22 @@ export function attachViewerSocket(
         send(ws, { type: 'library', snapshot });
   };
   control.events.on('library', library);
+  const sessionImport = (tenant: string) => {
+    for (const [ws, peer] of peers)
+      if (peer.tenant === tenant && control.viewers.productAllowed(tenant, peer.lease))
+        send(ws, { type: 'sessionImport', state: control.sessionImporter.state(tenant) });
+  };
+  control.events.on('sessionImport', sessionImport);
+  // Users coming and going and node state changes reach open consoles at once; the console's own
+  // slow read is only a backstop.
+  const notifyAdmins = (keys: string[]) => {
+    for (const [ws, peer] of peers)
+      if (control.store.accounts.userForTenant(peer.tenant)?.isAdmin)
+        send(ws, { type: 'admin.changed', keys });
+  };
+  const nodesChanged = () => notifyAdmins(['admin.nodes', 'admin.overview']);
+  control.endpoint.nodes.on('ready', nodesChanged);
+  control.endpoint.nodes.on('offline', nodesChanged);
   const clipboard = (tenant: string, message: unknown) => {
     for (const [ws, peer] of peers)
       if (peer.tenant === tenant && control.viewers.productAllowed(tenant, peer.lease)) send(ws, message);
@@ -475,6 +491,10 @@ export function attachViewerSocket(
             initialUnlocked,
           ),
         );
+        void ready.then(
+          () => notifyAdmins(['admin.users', 'admin.overview']),
+          () => {},
+        );
         void ready.catch((error) => {
           log.warn('viewer.attach_failed', { tenant: peer.tenant, lease, err: error });
           ws.close(1011, 'Viewer unavailable');
@@ -487,9 +507,9 @@ export function attachViewerSocket(
           void track(peer.heartbeat.close());
           diagnosticSessions?.detachViewer(peer.tenant, lease, 'disconnected');
           if (peers.delete(ws))
-            void track(control.viewers.detachViewer(peer.tenant, lease)).catch((err) =>
-              log.warn('viewer.detach_failed', { tenant: peer.tenant, lease, err }),
-            );
+            void track(control.viewers.detachViewer(peer.tenant, lease))
+              .then(() => notifyAdmins(['admin.users', 'admin.overview']))
+              .catch((err) => log.warn('viewer.detach_failed', { tenant: peer.tenant, lease, err }));
         });
         ws.on('message', (data, binary) => {
           const received = performance.now();
@@ -647,12 +667,14 @@ export function attachViewerSocket(
       );
     }
   });
+  // The Endpoint announces face status changes; this only reads a challenge that went quiet.
+  const faceQuietPollMs = 2000;
   const faceJob = new BackgroundJob('viewer.face_poll', {});
   const facePoll = setInterval(() => {
     if (!isClosing())
       void track(
         faceJob.run(
-          () => control.viewers.pollFaceAuth(),
+          () => control.viewers.pollFaceAuth(faceQuietPollMs),
           JSON.stringify(
             [...peers.values()].map((peer) => [
               peer.lease,
@@ -706,6 +728,9 @@ export function attachViewerSocket(
       control.events.off('auth', auth);
       control.events.off('state', push);
       control.events.off('library', library);
+      control.events.off('sessionImport', sessionImport);
+      control.endpoint.nodes.off('ready', nodesChanged);
+      control.endpoint.nodes.off('offline', nodesChanged);
       control.events.off('clipboard', clipboard);
       control.events.off('rtc.signal', signal);
       for (const [ws, peer] of peers) {

@@ -1,0 +1,17 @@
+/* Controls that would leave the isolated PDF view: file open/save/print, annotation editing
+   (nothing can be saved), presentation mode, the bookmark link and the alt-text model download. */
+#viewsManagerAddFileButton,
+#editorModeButtons,
+#editorModeSeparator,
+#printButton,
+#downloadButton,
+#secondaryOpenFile,
+#secondaryPrint,
+#secondaryDownload,
+#presentationMode,
+#viewBookmark,
+#viewBookmarkSeparator,
+#imageAltTextSettings,
+#imageAltTextSettingsSeparator {
+  display: none !important;
+}

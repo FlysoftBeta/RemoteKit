@@ -17,6 +17,8 @@ import { SurfaceState, failureError } from '../failures';
 import { IdleKeepAliveNotice } from '../failures/idle-keep-alive';
 import { failureContext, ownOperation } from '../failures/operations';
 import { FilesWindow } from '../files/files-window';
+import { RemoteDocumentHost } from '../files/remote-document-host';
+import { canonicalJson } from '../util/canonical-json';
 import { SignInHost } from '../learning/sign-in-host';
 import { diagnostics } from '../media/diagnostics';
 import type { ViewerSession } from '../viewer-session';
@@ -144,6 +146,27 @@ export function WindowFrame({
     }),
     [transport, browserReady, focused, fullscreen, visible, onGeometry, win.id, action, report],
   );
+  const ownedTabs = windowTabs.filter((tab) => tab.owner);
+  const documentHost = useMemo(
+    () => ({
+      transport,
+      keyboardActive: browserReady && (focused || fullscreen) && visible,
+      autoKeyboard: state.workspace.settings.workspace.autoKeyboard,
+      tabs: ownedTabs,
+      measure: (width: number, height: number) => onGeometry(win.id, width, height),
+    }),
+    [
+      transport,
+      browserReady,
+      focused,
+      fullscreen,
+      visible,
+      state.workspace.settings.workspace.autoKeyboard,
+      canonicalJson(ownedTabs),
+      onGeometry,
+      win.id,
+    ],
+  );
   let origin = '';
   try {
     const parsed = new URL(active?.url ?? '');
@@ -190,16 +213,18 @@ export function WindowFrame({
     >
       <WindowDragDecoration windowId={win.id} frame={frame} />
       {win.appId === 'files' ? (
-        <FilesWindow
-          windowId={win.id}
-          call={call}
-          state={viewState}
-          onState={onState}
-          handle={handle}
-          launch={win.state?.launch}
-          failure={failure}
-          failureOperation={failureOperation}
-        />
+        <RemoteDocumentHost.Provider value={documentHost}>
+          <FilesWindow
+            windowId={win.id}
+            call={call}
+            state={viewState}
+            onState={onState}
+            handle={handle}
+            launch={win.state?.launch}
+            failure={failure}
+            failureOperation={failureOperation}
+          />
+        </RemoteDocumentHost.Provider>
       ) : local ? (
         <>
           <div className="app-title-bar">

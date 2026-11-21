@@ -51,10 +51,15 @@ Result<DataRouter::Kind> DataRouter::Classify(const Json& message) {
       if (event_type == "selection_command") {
         uint64_t menu = 0;
         const auto command = raw->value("command", Json());
-        if (!Number(*raw, "menu", menu) || (!menu && command != "dismiss") ||
+        if (!Number(*raw, "menu", menu) || !menu ||
             (command != "cut" && command != "copy" && command != "paste" &&
-             command != "selectAll" && command != "contextMenu" && command != "dismiss"))
+             command != "selectAll" && command != "contextMenu"))
           return Error{ErrorCode::kInvalidRequest, "invalid selection command"};
+      }
+      if (event_type == "selection.dismiss") {
+        uint64_t revision = 0;
+        if (!Number(*raw, "revision", revision) || !revision)
+          return Error{ErrorCode::kInvalidRequest, "invalid selection dismissal"};
       }
       if (event_type == "context_command") {
         uint64_t menu = 0;

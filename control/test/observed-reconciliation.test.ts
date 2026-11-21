@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DomainContext, DomainServices } from '../server/application';
 import { TenantRegistry } from '../server/tenants/tenant-registry';
+import { PageRequests } from '../server/workspace/page-requests';
 import { Reconciler } from '../server/workspace/reconciler';
 import { observedSession } from './coordination-fixture';
 import { FailingBoundary, settle } from './retry-loop-boundary';
@@ -137,4 +138,116 @@ test('a failed old observation cannot put a newer observation into its retry bac
   assert.equal(boundary.attempts.length, 2);
   assert.equal(owner.error(), undefined);
   await owner.dispose();
+});
+
+function pageRequestFixture(t: import('node:test').TestContext) {
+  const tenants = new TenantRegistry();
+  const runtime = tenants.get('tenant');
+  runtime.started = true;
+  runtime.viewer = { id: 'lease' } as typeof runtime.viewer;
+  const observation = observedSession(
+    { tenantId: 'tenant', sessionId: 'a'.repeat(32), placementEpoch: 1 },
+    'connection',
+    'endpoint',
+  );
+  observation.browser = 'running';
+  observation.browserIncarnation = 'browser-1';
+  let current: typeof observation | undefined = observation;
+  let ready = true;
+  const state = { tabs: [{ id: 'tab-1', windowId: 'window-1', webviewId: '7' }], pendingClose: null };
+  const pushes: string[] = [];
+  const context = {
+    tenants,
+    closed: false,
+    fileLimits: { maxFileBytes: 1, maxBatchBytes: 1, maxFiles: 1 },
+    endpoint: {
+      observation: () => current,
+      isReady: () => ready,
+      sessionFault: () => undefined,
+      invalidate: () => {},
+      current: () => ({
+        running: true,
+        browserIncarnation: observation.browserIncarnation,
+        views: observation.views,
+      }),
+    },
+    store: { workspaces: { workspace: () => state } },
+  } as unknown as DomainContext;
+  const services = {
+    viewers: { push: (tenant: string) => pushes.push(tenant) },
+  } as unknown as DomainServices;
+  const pageRequests = new PageRequests(context, services as never);
+  services.pageRequests = pageRequests;
+  const owner = new Reconciler(context, services);
+  t.after(async () => {
+    await owner.close();
+    await tenants.close();
+  });
+  const chooser = () => ({
+    viewId: '7',
+    instance: '3',
+    document: '4',
+    pageRequests: {
+      pending: [{ kind: 'file_chooser', request: '9', origin: 'https://example.test', multiple: false }],
+      events: [],
+    },
+  });
+  return {
+    owner,
+    observation,
+    runtime,
+    pushes,
+    chooser,
+    retire: () => {
+      current = undefined;
+    },
+    notReady: () => {
+      ready = false;
+    },
+  };
+}
+
+test('a file request is projected and pushed on observation arrival, not after the running reconciliation', async (t) => {
+  const { owner, observation, runtime, pushes, chooser } = pageRequestFixture(t);
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  t.mock.method(owner, 'reconcileProduct', async () => {
+    await hold;
+  });
+  const work = owner.observe(observation);
+  await settle();
+  assert.deepEqual(runtime.pageRequests.files ?? [], []);
+  observation.views = [chooser()] as never;
+  owner.observe(observation);
+  assert.equal(runtime.pageRequests.files?.length, 1);
+  assert.equal(runtime.pageRequests.files?.[0].binding.request, '9');
+  assert.deepEqual(pushes, ['tenant']);
+  release();
+  await work;
+});
+
+test('an observation that is no longer current projects nothing', async (t) => {
+  const { owner, observation, runtime, pushes, chooser, retire, notReady } = pageRequestFixture(t);
+  t.mock.method(owner, 'reconcileProduct', async () => {});
+  observation.views = [chooser()] as never;
+  retire();
+  owner.observe(observation);
+  assert.equal(runtime.pageRequests.files, undefined);
+  observation.views = [{ ...chooser(), loading: true }] as never;
+  notReady();
+  owner.observe(observation);
+  assert.equal(runtime.pageRequests.files, undefined);
+  assert.deepEqual(pushes, []);
+});
+
+test('projecting the same observation again does not push twice', async (t) => {
+  const { owner, observation, pushes, chooser } = pageRequestFixture(t);
+  t.mock.method(owner, 'reconcileProduct', async () => {});
+  observation.views = [chooser()] as never;
+  owner.observe(observation);
+  observation.views = [{ ...chooser(), loading: true }] as never;
+  owner.observe(observation);
+  assert.deepEqual(pushes, ['tenant']);
 });

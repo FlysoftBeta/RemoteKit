@@ -108,6 +108,7 @@ test('context revisions are exact and independent, with stale-document messages 
     handles: { start: null, end: null, insertion: null },
     version: 1,
     revision: '9999999999999999999',
+    selectionRevision: '0',
     view: null,
     menu: null,
   });

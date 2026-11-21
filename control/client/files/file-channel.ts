@@ -7,6 +7,7 @@ import type { DocumentInfo } from '../documents/document-source';
 import { diagnostics } from '../media/diagnostics';
 import type { FileMethod, Incoming } from '../rtc/protocol';
 import { RequestTracker } from '../util/request-tracker';
+import { Events } from '../util/store';
 
 export interface ProcessedPhoto extends Asset {
   type: 'image/webp';
@@ -79,12 +80,30 @@ export class FileChannel {
   private scope = new AbortController();
   private photoBursts = new Map<string, Binding>();
   private assetChunksInFlight = 0;
+  private readonly chunkSlotWaiters: (() => void)[] = [];
+  private releaseChunk() {
+    this.assetChunksInFlight--;
+    this.chunkSlotWaiters.shift()?.();
+  }
+  private chunkSlot() {
+    return new Promise<void>((resolve) => this.chunkSlotWaiters.push(resolve));
+  }
   constructor(
     private readonly getChannel: () => RTCDataChannel | null,
     private readonly getAuthEpoch = (): number | undefined => undefined,
     private readonly role: 'objects' | 'page' = 'objects',
   ) {}
+  /** The Endpoint reports a selection reached a final state; the library confirms it at once. */
+  readonly selectionResults = new Events<{ selectionId: string; state: 'selected' | 'cancelled' }>();
+  /** Whether results are pushed now; otherwise the library asks. */
+  live() {
+    return this.bindingCurrent(this.currentBinding());
+  }
   handle(message: Incoming): boolean {
+    if (message.type === 'files.selection') {
+      this.selectionResults.emit({ selectionId: message.selectionId, state: message.state });
+      return true;
+    }
     if (message.type !== 'files.result') return false;
     this.syncScope();
     if (message.ok) this.pending.resolve(message.requestId, message.result);
@@ -169,6 +188,22 @@ export class FileChannel {
     ) as Promise<T>;
     return { response };
   }
+  /** Resolves when the channel's buffer falls to its low-water mark, it closes, or the deadline passes. */
+  private buffered(channel: RTCDataChannel, signal: AbortSignal | undefined, deadline: number) {
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        channel.removeEventListener('bufferedamountlow', done);
+        channel.removeEventListener('close', done);
+        signal?.removeEventListener('abort', done);
+        resolve();
+      };
+      const timer = setTimeout(done, Math.max(0, deadline - performance.now()));
+      channel.addEventListener('bufferedamountlow', done, { once: true });
+      channel.addEventListener('close', done, { once: true });
+      signal?.addEventListener('abort', done, { once: true });
+    });
+  }
   private async send<T>(
     method: FileMethod,
     params: Record<string, unknown>,
@@ -180,7 +215,7 @@ export class FileChannel {
     while (!options.skipWhenBusy && (binding.channel?.bufferedAmount ?? 0) > maxBufferedBytes) {
       this.checkBinding(binding, options.signal);
       if (performance.now() > deadline) throw new RemoteKitError('busy', '文件发送暂时拥塞，请重试');
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await this.buffered(binding.channel!, options.signal, deadline);
     }
     const sent = this.request<T>(method, params, { ...options, binding });
     // Callers can retain the response while sending subsequent ordered chunks.
@@ -297,7 +332,7 @@ export class FileChannel {
         for (const byte of bytes) binary += String.fromCharCode(byte);
         while (this.assetChunksInFlight >= 4) {
           check();
-          await new Promise((resolve) => setTimeout(resolve, 10));
+          await Promise.race([this.chunkSlot(), aborted]);
         }
         const next = position + bytes.length;
         this.assetChunksInFlight++;
@@ -314,7 +349,7 @@ export class FileChannel {
             { binding, signal, finishSentRequest: true },
           ));
         } catch (error) {
-          this.assetChunksInFlight--;
+          this.releaseChunk();
           throw error;
         }
         const ack = response
@@ -323,9 +358,7 @@ export class FileChannel {
             completed += bytes.length;
             onProgress?.(completed, file.size);
           })
-          .finally(() => {
-            this.assetChunksInFlight--;
-          });
+          .finally(() => this.releaseChunk());
         void ack.catch(() => {
           /* error-guard: chunk-ack; the upload window awaits every original acknowledgment. */
         });

@@ -185,7 +185,7 @@ test('Session protection accrues only while eligible; every automatic stop commi
     runtime.viewer = {
       id: 'returned',
       security: { locked: false },
-      viewport: { windows: [{ windowId: 'window', visible: true }] },
+      viewport: { activeSpaceId: 'space', windows: [{ windowId: 'window', visible: true }] },
     } as any;
     control.lifecycle.observeWanted(store.workspaces.workspace(tenantId));
     const returned = store.workspaces.workspace(tenantId);

@@ -202,6 +202,7 @@ class DirectServices {
     ServiceJson value = {
         {"view", nullptr},
         {"menu", nullptr},
+        {"selectionRevision", "0"},
         {"outputGeneration", std::to_string(frame.generation)},
         {"layoutEpoch", std::to_string(layout_epoch)},
         {"handles", {{"start", nullptr}, {"end", nullptr}, {"insertion", nullptr}}}};
@@ -228,6 +229,7 @@ class DirectServices {
                 {"y", finite(bound.y)},
                 {"lineHeight", finite(bound.line_height)}};
       };
+      value["selectionRevision"] = std::to_string(menu.revision);
       value["handles"] = {{"start", handle(menu.start)},
                           {"end", handle(menu.end)},
                           {"insertion", handle(menu.insertion)}};

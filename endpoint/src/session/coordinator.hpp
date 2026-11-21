@@ -16,6 +16,10 @@ class SessionCoordinator {
     std::function<Result<void>(const Json&)> clipboard;
     std::function<Result<void>()> start;
     std::function<Result<void>(const Json&)> views;
+    // Applies only the geometry and visibility of a desired document whose identity (topology,
+    // lock, authorization, policies) equals the last fully converged one. Returns false when
+    // the document needs the full convergence pass instead.
+    std::function<Result<bool>(const Json&)> geometry;
     // An administrator's forced stop skips the stop blockers.
     std::function<Result<Json>(const Json& commit, bool force)> stop;
     std::function<Result<Json>()> observe;
@@ -46,6 +50,9 @@ class SessionCoordinator {
   // Thread-safe. Viewer input and channel events wait on this, not on the
   // maintenance cadence.
   void Signal();
+  // Thread-safe. The Browser reported a page state change: the next observation is taken and
+  // published at once, past the sample interval and a pending geometry document.
+  void ObservedChanged();
   Result<Json> Execute(const std::function<Result<Json>()>& action);
   Result<Json> Version(const std::function<Result<void>()>& capture,
                        const std::function<Result<void>()>& build,
@@ -66,7 +73,11 @@ class SessionCoordinator {
   bool Current(uint64_t generation) const;
   bool LatestRevision(const Json& desired) const;
   Result<void> Converge(const Json& desired, const Scope& scope);
-  void Observe(const Scope& scope, bool force);
+  bool GeometryOnly(const Json& desired) const;
+  void ResetConvergence();
+  // force publishes an unchanged observation; immediate publishes a changed one without waiting
+  // for the minimum send interval.
+  void Observe(const Scope& scope, bool force, bool immediate = false);
   void Run();
   const Json target_;
   const std::string incarnation_;
@@ -79,9 +90,11 @@ class SessionCoordinator {
   uint64_t desired_version_ = 0;
   Json latest_ = Json::object();
   std::deque<std::function<void()>> jobs_;
-  bool stopping_ = false, force_observation_ = true, signaled_ = false;
+  bool stopping_ = false, force_observation_ = true, signaled_ = false, observed_changed_ = false;
   std::string prepared_revision_, started_revision_, views_revision_, stopped_revision_;
   std::string browser_incarnation_, applied_clipboard_revision_ = "0";
+  // Everything but the per-view geometry of the last fully converged running document.
+  Json converged_identity_;
   std::atomic<uint64_t>& observation_sequence_;
   bool converged_ = false, observation_oversize_ = false;
   std::optional<Error> error_;
@@ -91,7 +104,10 @@ class SessionCoordinator {
   RetryUnit observation_retry_{"session.observation"};
   RetryUnit signals_retry_{"session.signals"};
   std::chrono::steady_clock::time_point last_sent_{};
+  // When a changed observation held back by the minimum send interval may go out.
+  std::optional<std::chrono::steady_clock::time_point> observe_due_;
   std::string last_encoded_;
+  std::chrono::system_clock::time_point observed_changed_at_;
   std::thread worker_;
 };
 }  // namespace remotekit

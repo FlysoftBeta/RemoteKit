@@ -6,11 +6,22 @@ import { surfaceDipSize } from '../input/coordinates';
 import { projectRootRect, type ViewportGeometry } from '../app/viewport-geometry';
 import { sameEditingDocument } from '../editing/mobile-editing-state';
 import { selectionSession } from './selection-session';
-import { clipboardCommand } from '../clipboard/device-clipboard';
-import type { HandleKind, Point, SelectionHandles, SelectionTarget } from './target';
+import { deviceClipboard } from '../clipboard/device-clipboard';
+import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import {
+  COMMAND_SENT,
+  type CommandOutcome,
+  type HandleKind,
+  type Point,
+  type SelectionHandles,
+  type SelectionTarget,
+} from './target';
+
+const notSent = (error: RemoteKitError): CommandOutcome => ({ kind: 'not-sent', error });
 
 export class RemoteSelectionTarget implements SelectionTarget {
   private consumed = false;
+  private awaitingUpdate = false;
   constructor(
     private readonly transport: Pick<ViewerSession, 'input'>,
     private message: SelectionMessage,
@@ -20,7 +31,10 @@ export class RemoteSelectionTarget implements SelectionTarget {
   ) {}
 
   update(message: SelectionMessage, surface: Surface, geometry: ViewportGeometry, canvas: HTMLCanvasElement) {
-    if (message.revision !== this.message.revision) this.consumed = false;
+    if (message.revision !== this.message.revision) {
+      this.consumed = false;
+      this.awaitingUpdate = false;
+    }
     this.message = message;
     this.surface = surface;
     this.geometry = geometry;
@@ -85,23 +99,35 @@ export class RemoteSelectionTarget implements SelectionTarget {
     return !this.consumed && menu ? [...menu.commands, ...(menu.more ? ['contextMenu' as const] : [])] : [];
   }
 
-  run(command: SelectionAction) {
+  async run(command: SelectionAction): Promise<CommandOutcome> {
     const menu = this.message.menu;
-    if (!menu || this.consumed) return;
+    if (!menu || this.consumed) return notSent(new RemoteKitError('conflict', '选区已变化'));
+    if (this.awaitingUpdate) return { kind: 'unknown' };
     const surface = this.surface;
-    clipboardCommand(command, () => {
-      if (
-        !this.alive() ||
-        this.message.menu?.id !== menu.id ||
-        !sameEditingDocument(surface, this.surface) ||
-        surface.focus !== this.surface.focus
-      )
-        return;
-      this.transport.input.ensureInputFocus(this.surface);
-      if (this.transport.input.sendInput(this.surface, { type: 'selection_command', menu: menu.id, command })) {
-        if (command !== 'selectAll') this.consumed = true;
+    if (command === 'paste') {
+      try {
+        await deviceClipboard.preparePaste();
+      } catch (cause) {
+        return notSent(toRemoteKitError(cause));
       }
-    });
+    }
+    if (
+      !this.alive() ||
+      this.message.menu?.id !== menu.id ||
+      !sameEditingDocument(surface, this.surface) ||
+      surface.focus !== this.surface.focus
+    )
+      return notSent(new RemoteKitError('conflict', '选区已变化'));
+    this.transport.input.ensureInputFocus(this.surface);
+    if (!this.transport.input.sendInput(this.surface, { type: 'selection_command', menu: menu.id, command }))
+      return notSent(new RemoteKitError('unavailable', '命令没有发出，请重试'));
+    if (command === 'selectAll') return COMMAND_SENT;
+    if (command === 'cut' || command === 'paste') {
+      this.awaitingUpdate = true;
+      return { kind: 'unknown' };
+    }
+    this.consumed = true;
+    return COMMAND_SENT;
   }
 
   dragHandle(which: HandleKind, point: Point) {
@@ -119,9 +145,8 @@ export class RemoteSelectionTarget implements SelectionTarget {
     if (this.consumed) return;
     this.consumed = true;
     this.transport.input.sendInput(this.surface, {
-      type: 'selection_command',
-      menu: this.message.menu?.id ?? '0',
-      command: 'dismiss',
+      type: 'selection.dismiss',
+      revision: this.message.selectionRevision,
     });
   }
 

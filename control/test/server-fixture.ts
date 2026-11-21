@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ProductAction, ProductOperation } from '../shared/product';
+import { occlusionRevision } from '../shared/occlusion-revision';
 import { nativeError, toRemoteKitError, wireError } from '../shared/errors';
 import { createHash } from 'node:crypto';
 import { observedSession } from './coordination-fixture';
@@ -219,8 +220,27 @@ export function requestViewer(
     services,
     { tenantId, leaseId, epoch: services.viewers.productEpoch(tenantId, leaseId)! },
     method,
-    params,
+    method === 'viewport' ? leaseViewport(services, tenantId, params) : params,
   );
+}
+
+/**
+ * Fixtures write a viewport as the Viewer would see it in its own lease: a revision below
+ * 2^32 is the sequence within the connected Viewer's generation, and the space defaults to
+ * the workspace's active one. Tests of the wire rules call dispatchViewerRequest directly.
+ */
+function leaseViewport(services: DomainServices, tenantId: string, params: any) {
+  if (!Array.isArray(params?.windows)) return params;
+  const generation = services.tenants.get(tenantId).viewer?.generation ?? 0;
+  return {
+    activeSpaceId: services.store.workspaces.workspace(tenantId).activeSpaceId,
+    ...params,
+    windows: params.windows.map((window: any) =>
+      typeof window.occlusionRevision === 'string' && /^[0-9]{1,9}$/.test(window.occlusionRevision)
+        ? { ...window, occlusionRevision: occlusionRevision(generation, Number(window.occlusionRevision)) }
+        : window,
+    ),
+  };
 }
 
 import { AccountService } from '../server/auth/accounts';
@@ -259,6 +279,7 @@ export async function observedProductAction(
 ) {
   const result = await services.operations.productAction(tenant, action, lease);
   await services.reconciler.reconcileProduct(tenant);
+  await services.reconciler.settled(tenant);
   return { ...result, state: services.viewers.productState(tenant) };
 }
 
@@ -270,5 +291,6 @@ export async function observedOperation(
 ) {
   await services.operations.submitOperation(tenant, operation, lease);
   await services.reconciler.reconcileProduct(tenant);
+  await services.reconciler.settled(tenant);
   return services.operations.operationStatus(tenant, operation);
 }

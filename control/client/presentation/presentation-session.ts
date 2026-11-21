@@ -1,6 +1,7 @@
 import type { FileRequestAnchor } from '../../shared/product';
 import { uiScale } from '../app/ui-scale';
 import { projectFileInput } from '../files/file-chooser-anchor';
+import { keyboardTimeline } from '../editing/keyboard-timeline';
 import { PresentationDiagnostics } from '../media/presentation-diagnostics';
 import { canonicalJson } from '../util/canonical-json';
 import { freezeSnapshot } from '../util/store';
@@ -900,6 +901,7 @@ export class PresentationSession {
             BigInt(message.occlusionRevision) >= BigInt(old.occlusionRevision)))
       ) {
         this.pageViewports.set(message.viewId, message);
+        keyboardTimeline.viewportObserved(message.occlusionRevision);
         this.notify();
       }
     }
@@ -935,6 +937,7 @@ export class PresentationSession {
         });
         if (this.encodedFrameSamples.length > 2400) this.encodedFrameSamples.shift();
       }
+      for (const item of message.viewports ?? []) keyboardTimeline.viewportObserved(item.occlusionRevision);
       this.frameGate.record(message.rtpTimestamp, message.layoutEpoch);
       this.matchPendingVideoObservations();
       if (message.layoutEpoch === this.layout?.epoch) this.refreshWaitingVideoPlanes();

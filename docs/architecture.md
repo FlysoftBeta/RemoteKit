@@ -50,6 +50,31 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 
 **稳态下的连接**：resize、焦点切换、导航、锁定都不销毁 RTC 连接；只有布局换代时有一次屏障。Viewer WebSocket 断开决定产品 visible=false 及回收资格；RTC 断开只决定渲染/编码需求。
 
+## 数据传递原则
+
+按数据的性质选通道，再要求所有变化**立刻触发**传递，周期只做兜底。
+
+| 类别 | 例子 | 通道 | 要求 |
+|---|---|---|---|
+| 输入 | 键鼠、触控、文本与 IME、编辑收起、选区命令与关闭、页面菜单操作 | Viewer ↔ Endpoint DataChannel，有序，绑定 view/document/布局身份 | 不经过 Control；客户端门禁只挡投递，不挡本地反馈 |
+| 输入反馈 | 编辑目标、选区手柄与菜单、焦点 | Browser → 共享帧 → Endpoint → DataChannel | 随帧或 Wake 立即送达，过期身份丢弃 |
+| 媒体与布局 | 画面帧、帧元数据、布局屏障、页面高度 | WebRTC（RTP + DataChannel） | 见[呈现](presentation.md)；几何首帧是显式需求 |
+| 产品操作 | 窗口、Tab、窗口组、设置、文件库 | Viewer → Control WS `operation.submit` | 客户端乐观投影立即显示；Control 立即执行并推送快照 |
+| 页面状态观察 | URL、标题、加载、生命周期、页面对话框、文件选择请求、下载 | Browser 快照 → Endpoint `session.observed` → Control 投影 → WS 推送 | 保留快照模型（权威、自愈、不怕丢事件），但变化必须事件唤醒：Browser 状态变化通知 Endpoint 立即强制观察并发布，Control 收到观察立即投影并推送；周期采样与对账 tick 只兜底 |
+| 期望状态 | 可见集合、几何、遮挡、view 拓扑 | Control → Endpoint `session.desired` | 产生即发布，Endpoint 立即被唤醒执行，几何走优先通道 |
+
+**观察的立即触发**：Browser 维护一个单调的已观察状态版本（`browser/observed_state.*`），页面请求与对话框、弹窗、页面关闭、导航与加载、标题、全屏、下载、剪贴板序号等任何会进入快照的变化都递增它，并经渲染管道发一条单向 `kObservedChanged`（SDK 事件 `REMOTEKIT_SDK_RENDER_OBSERVED_CHANGED`，leading + 至多一个待发）。Endpoint 协调线程收到后立即取快照，有变化就发布，不受 100ms 发送间隔限制，也不被几何优先的让路推迟；converge 进度变化与任何 RPC job 完成后同样立即发布，等观察确认的操作（导航、剪贴板、权限回复、锁定、关闭）因此只付一次快照的时间。100ms 采样保留为漏掉唤醒时的兜底，发送间隔是 leading + latest-value。Control 收到观察后先在租户锁外直接投影页面对话框与文件请求并推送（`Reconciler.observe` → `projectPageRequests`，要求该观察仍是 Endpoint 的当前观察），之后的完整对账重复同一投影是幂等的。文件选择器各段带 `page_request.timeline`（Browser、Control 日志与客户端诊断）。
+
+**其余即时路径**：
+- Session 事件（剪贴板变化、下载结果、页面自行关闭、登录结果）在写入 `session.db` 的最外层提交之后立即唤醒协调线程发送，未确认的只在连接变化、重新激活或 2 秒兜底时重发。
+- Control 对账先在租户锁内完成投影（全屏、标题与 URL、弹窗、对话框与文件请求、保存并推送），逐 Tab 的可见准备与导航确认在锁外的每租户合并队列里执行；生命周期恢复、站点身份重载与后台 Tab 维护仍按步持锁（它们把 Browser 调用与状态写入混在一步里）。剪贴板写入与变化有自己的队列，不排在租户锁后。
+- 人脸状态变化时 Endpoint 发节点事件 `service.face.changed`，Control 立即读取该挑战；500ms 读取只对 2 秒没有变化的挑战兜底。
+- 文件选择的最终结果经文件服务 DataChannel 的 `files.selection{selectionId, state}` 立即送达，文件库随即确认；定时复查只在通道不可用时以 15 秒兜底。
+- 会话导入进度经 WS `sessionImport` 推送，管理 App 的在线用户与节点状态经 `admin.changed` 推送（其余资源 30 秒兜底）。
+- 照片旋转第一次点按立即开始，之后的点按合并成携带最新累计圈数的一个后续任务；文件库可用性刷新立即执行并至多补一次；文件通道背压等 `bufferedamountlow`。
+
+正常路径上不允许等周期 tick、采样间隔、最小发送间隔或尾沿 debounce。需要合并时只用 leading + latest-value（首个变化立即发送，之后按最新值、有最大间隔），过时的值直接丢弃。用户点了以后盯着等的东西（文件篮、对话框、键盘、窗口切换）尤其如此。
+
 ## 服务参数独立于宿主
 
 服务端的渲染与输入不依赖服务器的显示器、DPI、刷新率或 RDP 会话：每个视图一块虚拟显示器（尺寸等于视图 viewport，DSF 为 Viewer 上报的 DPR，即设备 DPR × 界面缩放），主 frame 与跨进程 iframe 读到同一块屏幕；指针/触控能力与配色偏好是固定值，不读服务器硬件与 Windows 主题（见[兼容性](compatibility.md)）；节拍由 Comp 的高精度定时器和 WebRTC 反馈决定；触控惯性在客户端计算，不经过原生 fling 物理参数；剪贴板不使用系统剪贴板，由 Control 保存、Browser 缓存。客户端的 DPR、刷新能力和产品媒体策略仍作为适配输入。

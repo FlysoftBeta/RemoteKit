@@ -95,6 +95,12 @@ void Generation::PublishClipboardSequence(uint64_t sequence) {
   }
 }
 
+void Generation::ObservedChanged(uint64_t revision) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
+  if (atlas_.channel_)
+    atlas_.channel_->ObservedChanged(generation_, revision);
+}
+
 bool Atlas::RefreshCurrentWork(Work& work) {
   if (work.reads.size() != owner_.plane_pool_.order_.size())
     return false;

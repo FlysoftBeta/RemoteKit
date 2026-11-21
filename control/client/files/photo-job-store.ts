@@ -56,7 +56,9 @@ interface Task extends PhotoJob {
   burst?: CapturedBurst;
   uploads?: Map<string, { operationId: string; assetId?: string; pending?: Promise<string> }>;
   process?: () => Promise<void>;
-  rotationTimer?: ReturnType<typeof setTimeout>;
+  /** The latest call of this task; a replacing rotation starts after it settles. */
+  running?: Promise<void>;
+  after?: Promise<void>;
   resume?: () => Promise<void>;
   waiting?: () => Promise<void>;
 }
@@ -118,7 +120,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     }
     this.publish(
       [...this.tasks.values()].map(
-        ({ controller, burst, process, rotationTimer, resume, waiting, uploads, ...job }) => ({
+        ({ controller, burst, process, running, after, resume, waiting, uploads, ...job }) => ({
           ...job,
           canRetry: !!(burst || process || resume),
           origin: { ...job.origin },
@@ -132,7 +134,6 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     notices.resolve('task:photo:' + task.id);
     this.retries.get(task.id)?.cancel();
     this.retries.delete(task.id);
-    clearTimeout(task.rotationTimer);
     task.process = undefined;
     task.burst = undefined;
     task.resume = undefined;
@@ -315,7 +316,12 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     await this.save(task, asset, photo, originalId);
   }
 
-  private async execute(task: Task, action: () => Promise<void>) {
+  private execute(task: Task, action: () => Promise<void>) {
+    const running = this.executeNow(task, action);
+    task.running = running;
+    return running;
+  }
+  private async executeNow(task: Task, action: () => Promise<void>) {
     if (!this.valid(task)) return;
     let unit = this.retries.get(task.id);
     if (!unit) {
@@ -533,15 +539,19 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
       state: 'processing',
       advisory: target.photo?.advisory,
       rotationTurns,
+      after: existing?.running ?? existing?.after,
     };
     const source = target.originalAssetId ?? target.assetId!;
     const quarterTurns = (((target.photo?.quarterTurns ?? 0) + rotationTurns) % 4) as 0 | 1 | 2 | 3;
     task.process = () => this.finish(task, source, quarterTurns);
-    task.rotationTimer = setTimeout(() => {
-      task.rotationTimer = undefined;
-      void this.execute(task, task.process!);
-    }, 600);
     this.tasks.set(task.id, task);
+    // The first tap starts at once; later taps replace the task with the latest cumulative turns,
+    // and only one call is in flight: the replacement starts when the one it aborted settles.
+    const begin = () => {
+      if (this.valid(task)) void this.execute(task, task.process!);
+    };
+    if (task.after) void task.after.then(begin, begin);
+    else begin();
     this.emit();
   };
 }

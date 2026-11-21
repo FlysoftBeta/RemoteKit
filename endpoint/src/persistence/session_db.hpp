@@ -32,7 +32,7 @@ class ViewStore {
   static Result<Json> Topology(const Json& views);
   Result<Json> Load();
   Result<void> Save(const Json& views);
-  Result<void> SaveDesired(const Json& views, uint64_t epoch, const std::string& revision);
+  Result<void> SaveDesired(const Json& views, uint64_t epoch);
   Result<Json> Close(const std::string& view,
                      const std::string& reason,
                      const Json& incarnation = nullptr);
@@ -101,6 +101,9 @@ class SessionDb {
   Result<void> Open();
   Result<void> OpenReadOnly(bool immutable);
   Result<void> Close();
+  // Called after a transaction that inserted an event commits, with the store lock held; it must
+  // not block.
+  void SetEventsAppended(std::function<void()> notify) { events_appended_ = std::move(notify); }
   ViewStore Views() { return ViewStore(*this); }
   EventStore Events() { return EventStore(*this); }
   RecoveryStore Recovery() { return RecoveryStore(*this); }
@@ -124,6 +127,8 @@ class SessionDb {
   std::recursive_mutex mutex_;
   bool closed_ = false;
   bool writing_ = false;
+  bool event_appended_ = false;
+  std::function<void()> events_appended_;
 };
 Result<void> ValidateDownloadState(const Json& state);
 }  // namespace remotekit

@@ -2,6 +2,7 @@
 """Stage RemoteKit-owned sources and build against an existing Chromium output."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -61,6 +62,15 @@ def copy_if_changed(source, target):
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(source, target)
     return True
+
+def install_pdfjs(output):
+    """The Browser serves its PDF viewer from `pdfjs/` next to the executable."""
+    spec = importlib.util.spec_from_file_location('fetch_pdfjs', ROOT / 'tools/fetch-pdfjs.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.install()
+    module.install_runtime(output)
+
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -183,6 +193,7 @@ def main():
     if args.command == 'build':
         run([source.parent.parent / 'depot_tools/autoninja.bat', '-C', output,
              *targets, '-j', args.jobs], source)
+        install_pdfjs(output)
     elif args.command == 'check':
         for target in targets:
             directory = 'browser/sdk' if target == 'remotekit_sdk' else 'browser'

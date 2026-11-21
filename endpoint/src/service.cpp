@@ -370,6 +370,11 @@ Result<void> Service::Fence(const Json& desired, uint64_t generation) {
               if (const auto owner = coordinator.lock())
                 owner->Signal();
             });
+        entry.execution->BindObservedChanged(
+            [coordinator = std::weak_ptr<SessionCoordinator>(entry.coordinator)] {
+              if (const auto owner = coordinator.lock())
+                owner->ObservedChanged();
+            });
       }
       managed = entry;
     }

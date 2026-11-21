@@ -585,8 +585,6 @@ export const retryLoops: Record<string, Binding> = {
     boundary: 'ObjectIndex.available for a real persisted library entry',
     event: 'library.availability',
     create: driveFileServer('availability'),
-    startup: 250,
-    inputDelay: 250,
   },
   'selection-preparation-status-reconciliation': {
     owner: 'server/files/library.ts',
@@ -1003,8 +1001,6 @@ export const retryLoops: Record<string, Binding> = {
     boundary: 'FileChannel.processPhoto',
     event: 'retry_unit',
     create: drivePhoto,
-    startup: 600,
-    inputDelay: 600,
   },
   'automatic-presence-verification-challenge': {
     owner: 'client/auth/auth-camera-session.ts',

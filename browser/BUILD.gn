@@ -93,7 +93,11 @@ executable("remotekit_browser") {
     "osr_wake_state.h",
     "page_close_state.h",
     "page_requests.cc",
+    "observed_state.cc",
+    "observed_state.h",
     "page_requests.h",
+    "pdf_viewer.cc",
+    "pdf_viewer.h",
     "popup_registry.cc",
     "popup_registry.h",
     "profile_file.h",
@@ -107,6 +111,7 @@ executable("remotekit_browser") {
     "render_channel.h",
     "resources/signin/changyan_page.h",
     "selection_geometry.h",
+    "selection_revision.h",
     "services_binders.cc",
     "services_browser.cc",
     "services_browser.h",
@@ -232,6 +237,8 @@ executable("remotekit_view_model_probe") {
   testonly = true
   configs -= [ "//build/config/clang:find_bad_constructs" ]
   sources = [
+    "observed_state.cc",
+    "observed_state.h",
     "view_model.cc",
     "view_model.h",
     "view_model_probe.cc",
@@ -248,6 +255,7 @@ executable("remotekit_control_payload_probe") {
     "control_payload_probe.cc",
     "control_response.cc",
     "file_chooser_accept.cc",
+    "observed_state.cc",
     "view_model.cc",
   ]
   include_dirs = [ "//remotekit" ]

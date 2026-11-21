@@ -173,6 +173,7 @@ test('one-shot wrapping preserves Endpoint diagnosis IDs, reasons and hints', as
 function fakeControl() {
   return {
     events: new EventEmitter(),
+    endpoint: { nodes: new EventEmitter() },
     accounts: { identity: () => ({ tenantId: 'tenant' }) },
     store: { accounts: { userForTenant: () => ({ isAdmin: true }) } },
     viewers: {

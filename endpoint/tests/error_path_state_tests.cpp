@@ -307,7 +307,7 @@ class NativeErrorStateProbe {
     {
       SessionDb seed(directory);
       Take(seed.Open());
-      Take(seed.Views().SaveDesired(Json::array({config}), 1, "1"));
+      Take(seed.Views().SaveDesired(Json::array({config}), 1));
       Take(seed.Close());
     }
     Session session(sdk, options, "tenant", id, 1, {}, link, objects, admission);

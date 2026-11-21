@@ -235,6 +235,8 @@ export class SessionImporter {
       this.outbox.enqueue(device.publicKey, device.ack, device.events);
     }
   }
+  /** Called after a tenant's import state changed, so its Viewers see it without polling. */
+  onChanged: (tenant: string) => void = () => {};
   receiveBatch(batch: Buffer[]): Promise<MailDecision[]> {
     const pending = this.receiving.then(() => this.processBatch(batch));
     this.receiving = pending.catch((error) =>
@@ -382,7 +384,10 @@ export class SessionImporter {
         });
       }
     }
-    for (const tenant of tenants) void this.applyTenant(tenant);
+    for (const tenant of tenants) {
+      this.onChanged(tenant);
+      void this.applyTenant(tenant);
+    }
     return decisions;
   }
   private processEvent(device: DeviceRow, { event, error }: EventResult) {
@@ -448,6 +453,7 @@ export class SessionImporter {
   private recordReply(record: StoredImport, ref: number) {
     const { tenant, keyId, id } = record;
     const now = this.clock.wallMs();
+    this.onChanged(tenant);
     if (record.state === 'applied') {
       const applied = this.store.sessionImports.appliedEvent(keyId, id)!;
       this.store.sessionImports.reply(
@@ -606,6 +612,7 @@ export class SessionImporter {
               this.clock.wallMs(),
             );
           });
+          this.onChanged(tenant);
         }
       } catch (error) {
         if (this.abort.signal.aborted) return;
@@ -620,6 +627,7 @@ export class SessionImporter {
             wait === undefined ? null : this.clock.wallMs() + wait,
             record.id,
           );
+        this.onChanged(tenant);
         if (wait === undefined) {
           if (this.active(tenant, record.id, ref))
             this.store.transaction(() => {
@@ -645,6 +653,7 @@ export class SessionImporter {
                 this.clock.wallMs(),
               );
             });
+          this.onChanged(tenant);
         } else {
           continue;
         }

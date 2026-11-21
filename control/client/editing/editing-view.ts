@@ -4,9 +4,11 @@ import type { InputPipeline } from '../input/input-pipeline';
 import { keyIdentity, modifiers } from '../input/keys';
 import type { PresentationSession } from '../presentation/presentation-session';
 import { Store } from '../util/store';
+import { CandidateFocus } from './candidate-focus';
 import { EditingInput, EDITOR_SENTINEL } from './editing-input';
 import type { EditingSession } from './editing-session';
 import { EDITOR_BLUR_GRACE_MS, KeyboardSession } from './keyboard-session';
+import { keyboardTimeline } from './keyboard-timeline';
 import { DeferredEditingInput, editableInputMode } from './mobile-editing-state';
 const pointerMedia = new WeakMap<Window, { coarse: MediaQueryList; fine: MediaQueryList }>();
 function pointerQueries() {
@@ -17,6 +19,8 @@ function pointerQueries() {
   }
   return queries;
 }
+/** After an in-place inputmode switch, how long to wait for the keyboard before refocusing. */
+export const INPUTMODE_SWITCH_FALLBACK_MS = 400;
 export interface EditingViewPorts {
   input: Pick<InputPipeline, 'sendInput' | 'ensureInputFocus' | 'focus' | 'inputIdentity' | 'getSnapshot'>;
   editing: Pick<EditingSession, 'mobileEditing' | 'editingSurface' | 'editingIdentity'>;
@@ -55,6 +59,9 @@ export class EditingView extends Store<EditingViewSnapshot> {
   };
   private pointerSequence = 0;
   private readonly keyboardSession = new KeyboardSession();
+  private readonly candidate = new CandidateFocus();
+  private inputModeFallbackTimer?: ReturnType<typeof setTimeout>;
+  private focusMarked = false;
   private softInputFocused = false;
   private suppressBlur = false;
   private systemDismissalSeen = 0;
@@ -276,10 +283,29 @@ export class EditingView extends Store<EditingViewSnapshot> {
       focusRevision: this.remoteEditable?.editable.focusRevision ?? '0',
       focusSource: this.remoteEditable?.editable.focusSource ?? 'other',
       focused: this.softInputFocused,
-      ready: this.keyboardReady && !this.resize.blocksInput(),
       reconfiguring,
       now,
     });
+    if (policy.focusObserved && !this.focusMarked) {
+      this.focusMarked = true;
+      keyboardTimeline.mark('remote-focus', now);
+    }
+    if (
+      this.candidate.observe(
+        {
+          editor: this.ports.editing.mobileEditing.keyboardObservation(this.editingSurface),
+          revision: this.ports.editing.mobileEditing.current?.revision ?? '0',
+          now,
+        },
+        policy.focusObserved || this.softInputFocused || !!command.open,
+      ) &&
+      focused &&
+      !this.softInputFocused &&
+      node.inputMode === 'none' &&
+      !this.editing.composing
+    )
+      this.hideKeyboard(false);
+    if (command.open) keyboardTimeline.mark('open', now);
     const close = command.close;
     const restore = this.restoreHardwareFocus;
     this.restoreHardwareFocus = undefined;
@@ -314,6 +340,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
       deadline === undefined ? Infinity : deadline - now,
       this.candidateDeadline === undefined ? Infinity : this.candidateDeadline - Date.now(),
       this.pointerFocus?.inactiveUntil === undefined ? Infinity : this.pointerFocus.inactiveUntil - now,
+      this.candidate.deadline === undefined ? Infinity : this.candidate.deadline - now,
     );
     if (!Number.isFinite(delay) || (delay <= 0 && deadline === undefined)) return;
     this.policyTimer = setTimeout(() => this.observe(), Math.max(1, Math.ceil(delay)));
@@ -340,6 +367,8 @@ export class EditingView extends Store<EditingViewSnapshot> {
     this.release();
     clearTimeout(this.policyTimer);
     clearTimeout(this.deferredEditingTimer);
+    clearTimeout(this.inputModeFallbackTimer);
+    this.candidate.clear();
     this.deferredEditing.clear();
   }
   onFocus = () => {
@@ -462,6 +491,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
   };
   hideKeyboard = (dismiss = true) => {
     if (dismiss) this.keyboardSession.dismiss();
+    clearTimeout(this.inputModeFallbackTimer);
     this.setFocused(false);
     const node = this.editor;
     if (!node || document.activeElement !== node) {
@@ -476,16 +506,20 @@ export class EditingView extends Store<EditingViewSnapshot> {
     node.inputMode = 'none';
     this.finishLocalEditing();
   };
-  focusEditor = (allowSoftKeyboard: boolean, userRequested = false) => {
+  focusEditor = (allowSoftKeyboard: boolean, userRequested = false, refocus = false) => {
     const node = this.editor;
     if (!node || !this.editorOwner) return false;
     const wantsSoftKeyboard = allowSoftKeyboard && !!this.remoteEditable;
     const inputMode = wantsSoftKeyboard ? editableInputMode(this.remoteEditable.editable.type) : 'none';
+    const held = document.activeElement === node && inputMode !== 'none' && !this.editing.composing;
+    // A proxy already focused by the tap gesture keeps that focus: switching its inputmode is
+    // what asks the browser for the keyboard. Blur and refocus is the fallback when it does not.
+    const switchInPlace =
+      held && !refocus && !userRequested && node.inputMode === 'none' && this.coarsePointer;
     if (
-      document.activeElement === node &&
-      inputMode !== 'none' &&
-      !this.editing.composing &&
-      (node.inputMode === 'none' || (userRequested && !this.resize.keyboardOpen))
+      held &&
+      !switchInPlace &&
+      (refocus || node.inputMode === 'none' || (userRequested && !this.resize.keyboardOpen))
     ) {
       this.suppressBlur = true;
       node.blur();
@@ -493,16 +527,33 @@ export class EditingView extends Store<EditingViewSnapshot> {
       this.finishLocalEditing();
     }
     node.inputMode = inputMode;
+    if (inputMode !== 'none') keyboardTimeline.mark('inputmode');
     this.editing.focus(this.editorOwner);
     node.focus({ preventScroll: true });
+    if (!wantsSoftKeyboard && document.activeElement === node) keyboardTimeline.mark('candidate-focus');
     const focused = document.activeElement === node && wantsSoftKeyboard && inputMode !== 'none';
     this.setFocused(focused);
     if (focused) {
       this.keyboardSession.attached(userRequested);
       if (userRequested) this.keyboardTick();
+      if (switchInPlace) this.armInputModeFallback();
     }
     return focused;
   };
+  private armInputModeFallback() {
+    clearTimeout(this.inputModeFallbackTimer);
+    this.inputModeFallbackTimer = setTimeout(() => {
+      const node = this.editor;
+      if (
+        this.softInputFocused &&
+        document.activeElement === node &&
+        node.inputMode !== 'none' &&
+        !this.resize.keyboardOpen &&
+        !this.editing.composing
+      )
+        this.focusEditor(true, false, true);
+    }, INPUTMODE_SWITCH_FALLBACK_MS);
+  }
   currentEditTarget = () => {
     const current = this.ports.editing.editingSurface(this.viewId);
     if (!current || this.ports.editing.editingIdentity(current) !== this.editingIdentity) return undefined;
@@ -521,6 +572,13 @@ export class EditingView extends Store<EditingViewSnapshot> {
   beginPointerFocus = () => {
     const surface = this.surface;
     if (!surface || !this.keyboardEnabled) return;
+    this.focusMarked = false;
+    keyboardTimeline.tap();
+    this.candidate.begin(
+      this.ports.editing.mobileEditing.current?.revision ?? '0',
+      performance.now(),
+      this.coarsePointer,
+    );
     this.editing.invalidate();
     this.heldKeys.clear();
     this.deferredEditing.clear();

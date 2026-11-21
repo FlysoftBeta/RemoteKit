@@ -43,6 +43,7 @@ struct RenderSlots::State {
   uint64_t incarnation = 0;
   uint32_t producer_pid = 0;
   RenderEventQueue events;
+  std::function<void()> observed_changed;
   StatsSnapshot* counters = nullptr;
   bool unknown_counted = false;
   bool fatal = false, untracked = false, closing = false, stop_requested = false;
@@ -84,7 +85,14 @@ struct RenderSlots::State {
       TraceAdmission("admission_return", id, reason);
   }
   static void Event(void* ptr, const remotekit_sdk_render_event* event) {
-    static_cast<State*>(ptr)->events.Push(*event);
+    auto* state = static_cast<State*>(ptr);
+    if (event->type == REMOTEKIT_SDK_RENDER_OBSERVED_CHANGED) {
+      // Not a render event: it needs no frame pacing, only an immediate observation.
+      if (state->observed_changed && event->generation == state->setup.generation)
+        state->observed_changed();
+      return;
+    }
+    state->events.Push(*event);
   }
   static void Retain(void* ptr, uint64_t cookie) {
     auto* slot = static_cast<Slot*>(ptr);
@@ -325,6 +333,7 @@ remotekit::Result<void> RenderSlots::Open(remotekit_sdk_render_setup setup,
   s->counters = &counters_;
   s->clock = clock_;
   s->trace = trace_;
+  s->observed_changed = observed_changed_;
   const auto adapter_key =
       (uint64_t(static_cast<uint32_t>(adapter.HighPart)) << 32) | adapter.LowPart;
   if (!admission_client_ || admission_adapter_ != adapter_key) {

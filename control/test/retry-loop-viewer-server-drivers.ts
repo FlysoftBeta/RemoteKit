@@ -31,6 +31,8 @@ export function driveViewerServer(path: 'face' | 'heartbeat'): OwnerFactory {
     let armed = false;
     const control = {
       events: new EventEmitter(),
+      endpoint: { nodes: new EventEmitter() },
+      store: { accounts: { userForTenant: () => undefined } },
       accounts: {
         identity: () =>
           armed && path === 'heartbeat'

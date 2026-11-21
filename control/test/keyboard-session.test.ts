@@ -10,7 +10,6 @@ const initial: KeyboardContext = {
   focusRevision: '1',
   focusSource: 'pointer',
   focused: false,
-  ready: true,
   reconfiguring: false,
   now: 0,
 };
@@ -26,9 +25,9 @@ test('Android opening: remote focus, DOM focus, resize and output gaps do not fo
   assert.deepEqual(observe({ editor: 'active' }), { open: true });
   keyboard.attached(false);
   for (let n = 0; n < 20; n++) {
-    assert.deepEqual(observe({ focused: true, ready: false, editor: 'unknown', now: n * 300 }), {});
+    assert.deepEqual(observe({ focused: true, editor: 'unknown', now: n * 300 }), {});
     assert.equal(keyboard.deadline, undefined);
-    assert.deepEqual(observe({ editor: 'active', ready: true }), {});
+    assert.deepEqual(observe({ editor: 'active' }), {});
   }
 });
 test('Android Back keeps DOM focus; geometry and target changes cannot reopen it', () => {
@@ -37,8 +36,8 @@ test('Android Back keeps DOM focus; geometry and target changes cannot reopen it
   keyboard.attached(false);
   keyboard.systemDismissed();
   assert.equal(keyboard.shown(true, false, true), false);
-  assert.deepEqual(observe({ focused: true, ready: false }), {});
-  assert.deepEqual(observe({ ready: true }), {});
+  assert.deepEqual(observe({ focused: true }), {});
+  assert.deepEqual(observe({}), {});
   assert.deepEqual(keyboard.activate(), { open: true });
   keyboard.attached(true);
   assert.equal(keyboard.shown(true, false, true), true, 'floating IME needs no resize');
@@ -65,7 +64,7 @@ test('explicit NONE during a media gap is still authoritative', () => {
   const { keyboard, observe } = session();
   observe({ editor: 'active' });
   keyboard.attached(false);
-  observe({ editor: 'unknown', focused: true, ready: false, now: 5 });
+  observe({ editor: 'unknown', focused: true, now: 5 });
   observe({ editor: 'inactive', now: 10 });
   assert.deepEqual(observe({ now: 210 }), { close: 'editor-lost' });
 });
@@ -74,12 +73,12 @@ test('an editor replacement retains keyboard attachment until layout settles', (
   const { keyboard, observe } = session();
   observe({ editor: 'active' });
   keyboard.attached(false);
-  observe({ focused: true, editor: 'inactive', ready: false, reconfiguring: true, now: 10 });
+  observe({ focused: true, editor: 'inactive', reconfiguring: true, now: 10 });
   assert.deepEqual(observe({ now: 1000 }), {});
   assert.equal(keyboard.deadline, undefined);
   assert.deepEqual(observe({ reconfiguring: false, now: 1100 }), {});
   assert.equal(keyboard.deadline, 1300);
-  assert.deepEqual(observe({ editor: 'active', ready: true, now: 1200 }), {});
+  assert.deepEqual(observe({ editor: 'active', now: 1200 }), {});
   assert.equal(keyboard.deadline, undefined);
 });
 test('document and lock are boundaries; disabling auto-open keeps an attached keyboard', () => {
@@ -92,8 +91,7 @@ test('document and lock are boundaries; disabling auto-open keeps an attached ke
   assert.deepEqual(observe({ focused: false }), { open: true });
   keyboard.attached(false);
   assert.deepEqual(observe({ autoOpen: false, focused: true }), {});
-  assert.deepEqual(observe({ ready: false }), {});
-  assert.deepEqual(observe({ ready: true }), {});
+  assert.deepEqual(observe({}), {});
 });
 
 test('document entry opens only with auto-open enabled', () => {
@@ -106,9 +104,8 @@ test('document entry opens only with auto-open enabled', () => {
 
 test('enabling auto-open arms the current document; disabling dismisses an automatic arm', () => {
   const { observe } = session({ autoOpen: false });
-  assert.deepEqual(observe({ editor: 'active', ready: false }), {});
-  assert.deepEqual(observe({ autoOpen: true }), {});
-  assert.deepEqual(observe({ ready: true }), { open: true });
+  assert.deepEqual(observe({ editor: 'active' }), {});
+  assert.deepEqual(observe({ autoOpen: true }), { open: true });
   observe({ document: 'new', editor: 'inactive' });
   observe({ autoOpen: false });
   assert.deepEqual(observe({ editor: 'active' }), {});
@@ -146,13 +143,23 @@ test('an active editor first observed after the tap deadline cannot open', () =>
   assert.deepEqual(observe({ now: 1601, editor: 'active' }), {});
 });
 
-test('an active editor inside the tap window can wait for frame and resize readiness', () => {
-  const { keyboard, observe } = session({ autoOpen: false, ready: false });
+test('opening does not wait for frame or resize readiness', () => {
+  const { keyboard, observe } = session({ autoOpen: false });
   keyboard.activate(false, 100);
-  assert.deepEqual(observe({ now: 1599, editor: 'active', revision: '2', focusRevision: '2' }), {});
+  assert.deepEqual(observe({ now: 120, editor: 'active', revision: '2', focusRevision: '2' }), {
+    open: true,
+  });
   assert.equal(keyboard.deadline, undefined);
-  assert.deepEqual(observe({ now: 5000, ready: true }), { open: true });
   assert.deepEqual(observe({ now: 5100 }), {});
+});
+
+test('a stale pointer focus does not open before the tap is observed', () => {
+  const { keyboard, observe } = session({ autoOpen: false, editor: 'active' });
+  keyboard.activate(false, 100);
+  assert.deepEqual(observe({ now: 120 }), {});
+  assert.equal(keyboard.focusObserved, false);
+  assert.deepEqual(observe({ now: 140, revision: '2', focusRevision: '2' }), { open: true });
+  assert.equal(keyboard.focusObserved, true);
 });
 
 test('tap arms do not lapse with auto-open enabled', () => {
@@ -164,22 +171,21 @@ test('tap arms do not lapse with auto-open enabled', () => {
 });
 
 test('disabling auto-open preserves a tap arm', () => {
-  const { keyboard, observe } = session({ ready: false });
+  const { keyboard, observe } = session();
   keyboard.activate(false, 100);
   assert.deepEqual(
     observe({ now: 200, autoOpen: false, editor: 'active', revision: '2', focusRevision: '2' }),
-    {},
+    { open: true },
   );
-  assert.deepEqual(observe({ now: 5000, ready: true }), { open: true });
 });
 
 test('enabling auto-open replaces consumed tap intent with an automatic arm', () => {
   const { keyboard, observe } = session({ autoOpen: false, editor: 'active' });
   assert.deepEqual(keyboard.activate(true, 100), { open: true });
   keyboard.attached(false);
-  observe({ ready: false, autoOpen: true });
+  observe({ autoOpen: true });
   observe({ autoOpen: false });
-  assert.deepEqual(observe({ ready: true }), {});
+  assert.deepEqual(observe({}), {});
 });
 
 test('entering another document clears a pending tap arm', () => {

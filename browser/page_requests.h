@@ -187,6 +187,12 @@ class PageRequests final : public content::WebContentsDelegate,
                   const char*,
                   const Pending& request,
                   const std::string& reason = {});
+  void DidStartLoading() override;
+  void DidStopLoading() override;
+  void TitleWasSet(content::NavigationEntry*) override;
+  void OnAudioStateChanged(bool audible) override;
+  void PrimaryPageChanged(content::Page&) override;
+  void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override;
   void DidStartNavigation(content::NavigationHandle*) override;
   void DidFinishNavigation(content::NavigationHandle*) override;
   void RenderFrameDeleted(content::RenderFrameHost*) override;

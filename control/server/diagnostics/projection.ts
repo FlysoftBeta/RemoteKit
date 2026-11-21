@@ -30,6 +30,9 @@ const labels: Record<string, ReadonlySet<string>> = {
     stale_surface stale_layout endpoint_backpressure`),
   sourceClock: words('source arrival-fallback'),
   type: words('focus input.result'),
+  step: words(
+    'tap remote-focus candidate-focus open inputmode visual-viewport keyboard-detected occlusion-sent frame-height',
+  ),
   clock: words('endpoint-webrtc-report browser-rtc-stats'),
   clientClock: words('browser-performance'),
   connectionTimingOrigin: words('endpoint-offer-monotonic'),
@@ -100,6 +103,7 @@ const clientFields = words(`
   codecMaxFps adaptRequests adaptDrops adaptErrors adaptSizeChanges presentationRefreshPending presentationRefreshAttempts
   presentationRefreshForcedBegins presentationRefreshSuccesses
   receive profile probeSource probes level52 level51 level50 level42 required probeDurationMs
+  keyboard tapAtMs steps step pageRequests stateAtMs stateWallMs renderedAtMs renderedWallMs
 `);
 
 // Only the tenant's diagnostic subtrees enter this projection. Identity, raw
@@ -137,10 +141,17 @@ function project(
     if (!item || typeof item !== 'object') return undefined;
     if (Array.isArray(item)) {
       if (item.length > 64) mark();
-      return item
-        .slice(0, 64)
-        .map((child) => walk(child, key, depth + 1))
-        .filter((child) => child !== undefined);
+      return (
+        item
+          .slice(0, 64)
+          .map((child) => walk(child, key, depth + 1))
+          // A keyboard step with an unknown name is dropped whole, not kept as a bare timestamp.
+          .filter(
+            (child) =>
+              child !== undefined &&
+              (key !== 'steps' || (child as Record<string, unknown>).step !== undefined),
+          )
+      );
     }
     const entries = Object.entries(item);
     if (entries.length > 256) mark();

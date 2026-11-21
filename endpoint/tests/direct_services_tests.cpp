@@ -16,7 +16,7 @@ void Check(bool value, const char* message) {
 }
 void ContextMenuTests() {
   using namespace remotekit;
-  static_assert(kSharedRenderVersion == 9);
+  static_assert(kSharedRenderVersion == 10);
   static_assert(sizeof(SharedAtlasView) == 256);
   static_assert(offsetof(SharedAtlasView, context_menu) == 224);
   static_assert(sizeof(SharedAtlasFrame) == 16456);
@@ -311,17 +311,16 @@ int main() {
         "suspended output clears stale authority");
   services.Bind(3);
   view.selection_menu = {UINT64_MAX,
+                         17,
                          remotekit::kAtlasSelectionMenuVisible | remotekit::kAtlasSelectionCanCopy |
                              remotekit::kAtlasSelectionCanCut |
                              remotekit::kAtlasSelectionCanSelectAll |
                              remotekit::kAtlasSelectionCanContextMenu,
-                         0,
                          10,
                          20,
                          30,
                          40,
-                         24,
-                         0};
+                         24};
   view.selection_menu.start = {10, 60, 40, 1};
   view.selection_menu.end = {40, 60, 40, 1};
   services.Selection(3, frame, 1);
@@ -333,8 +332,9 @@ int main() {
     return 0;
   });
   Check(sent.size() == 1 && sent[0]["type"] == "input.selection" && sent[0]["revision"] == "2" &&
-            sent[0]["view"]["document"] == "4" && !sent[0]["view"].contains("focus") &&
-            sent[0]["menu"]["id"] == "18446744073709551615" && sent[0]["menu"]["x"] == 11 &&
+            sent[0]["selectionRevision"] == "17" && sent[0]["view"]["document"] == "4" &&
+            !sent[0]["view"].contains("focus") && sent[0]["menu"]["id"] == "18446744073709551615" &&
+            sent[0]["menu"]["x"] == 11 &&
             sent[0]["menu"]["commands"] == Json::array({"cut", "copy", "selectAll"}) &&
             sent[0]["menu"]["more"] == true,
         "selection publishes latest anchor, identity, uint64 id and fixed command order");
@@ -358,7 +358,7 @@ int main() {
     return 0;
   });
   Check(sent.size() == 1 && sent[0]["view"].is_null() && sent[0]["menu"].is_null() &&
-            sent[0]["revision"] == "3",
+            sent[0]["selectionRevision"] == "0" && sent[0]["revision"] == "3",
         "suspension clears selection and failed sends retry");
   services.RefreshEditable();
   services.Selection(3, frame, 1);

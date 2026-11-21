@@ -88,11 +88,58 @@ Result<void> UpgradeToVersion6(sqlite::Database& db) {
   }
   return db.Execute("ALTER TABLE views DROP COLUMN position");
 }
+// The v6 view record: topology plus the popup adoption that v7 no longer persists.
+void DecodeViewV6(const Json& value) {
+  using namespace persisted;
+  Keys(value, {"viewId", "presence", "url"}, {"signIn", "adopt"});
+  session_documents::Counter(value.at("viewId"), true);
+  Enum(value.at("presence"), {"ensure", "ifPresent"});
+  Text(value.at("url"), 0, 32768);
+  if (value.contains("signIn"))
+    Enum(value.at("signIn"), {"changyan", "xinjiaoyu"});
+  if (value.contains("adopt")) {
+    Require(!value.contains("signIn"), "sign-in view cannot adopt");
+    Keys(value.at("adopt"), {"browserIncarnation", "provisionalId"});
+    Text(value.at("adopt").at("browserIncarnation"), 1, 128);
+    Text(value.at("adopt").at("provisionalId"), 1, 128);
+  }
+}
+Result<void> UpgradeToVersion7(sqlite::Database& db) {
+  RK_ASSIGN_OR_RETURN(query, db.Prepare("SELECT view_id,config FROM views"));
+  std::vector<std::pair<std::string, Json>> views;
+  for (;;) {
+    RK_ASSIGN_OR_RETURN(row, query.Step());
+    if (!row)
+      break;
+    auto config = Json::parse(query.Text(1), nullptr, false);
+    if (config.is_discarded())
+      return CorruptRecord("invalid views.config");
+    try {
+      DecodeViewV6(config);
+    } catch (const std::exception& error) {
+      return CorruptRecord(std::string("v6 views.config: ") + error.what());
+    }
+    if (config.at("viewId") != query.Text(0))
+      return CorruptRecord("mismatched views.view_id");
+    config.erase("adopt");
+    views.emplace_back(query.Text(0), std::move(config));
+  }
+  for (const auto& [id, config] : views) {
+    RK_ASSIGN_OR_RETURN(update, db.Prepare("UPDATE views SET config=? WHERE view_id=?"));
+    RK_RETURN_IF_ERROR(update.Bind(1, config.dump()));
+    RK_RETURN_IF_ERROR(update.Bind(2, id));
+    RK_ASSIGN_OR_RETURN(row, update.Step());
+    if (row)
+      return CorruptState("unexpected view migration row");
+  }
+  return db.Execute("ALTER TABLE coordination_state DROP COLUMN desired_revision");
+}
 // The baseline creates the latest schema directly; these steps upgrade existing stores.
-constexpr std::array<SessionMigration, 3> kMigrations{{
+constexpr std::array<SessionMigration, 4> kMigrations{{
     {4, "retry_state_and_uncertain_selections", UpgradeToVersion4},
     {5, "unified_file_derivatives", UpgradeToVersion5},
     {6, "transient_view_geometry", UpgradeToVersion6},
+    {7, "transient_popup_adoption", UpgradeToVersion7},
 }};
 constexpr auto kBaseline = R"sql(
 CREATE TABLE views(view_id TEXT PRIMARY KEY, config TEXT NOT NULL);
@@ -102,15 +149,15 @@ INSERT INTO event_state VALUES(1,lower(hex(randomblob(4)))||'-'||lower(hex(rando
 CREATE TABLE retired_views(view_id TEXT PRIMARY KEY,event_id TEXT NOT NULL);
 CREATE TABLE download_imports(event_id TEXT PRIMARY KEY, incarnation TEXT NOT NULL, download TEXT NOT NULL,
  result TEXT, attempt INTEGER, error TEXT, retry_at INTEGER, retry TEXT);
-CREATE TABLE coordination_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),placement_epoch INTEGER NOT NULL,desired_revision TEXT NOT NULL);
-INSERT INTO coordination_state VALUES(1,0,'0');
+CREATE TABLE coordination_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),placement_epoch INTEGER NOT NULL);
+INSERT INTO coordination_state VALUES(1,0);
 CREATE TABLE view_runtime(view_id TEXT PRIMARY KEY,resume_url TEXT,original_browser TEXT);
 CREATE TABLE navigation_recovery(view_id TEXT PRIMARY KEY, navigation_revision INTEGER NOT NULL, state BLOB NOT NULL);
 CREATE TABLE library_assets(asset_id TEXT PRIMARY KEY, size INTEGER NOT NULL, type TEXT, width INTEGER, height INTEGER);
 CREATE TABLE library_drafts(upload_id TEXT PRIMARY KEY, operation TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
  size INTEGER NOT NULL, expires INTEGER NOT NULL, sealed TEXT NOT NULL);
 CREATE TABLE library_selections(selection_id TEXT PRIMARY KEY, state TEXT NOT NULL, document TEXT NOT NULL);
-PRAGMA user_version=6;
+PRAGMA user_version=7;
 )sql";
 Result<int64_t> Version(sqlite::Database& db) {
   RK_ASSIGN_OR_RETURN(query, db.Prepare("PRAGMA user_version"));

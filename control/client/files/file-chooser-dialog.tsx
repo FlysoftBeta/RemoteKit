@@ -48,6 +48,7 @@ import { useFileView } from './file-view';
 import { useImportQueue } from './import-state';
 import { BasketPartitionMenu } from './partition-menu';
 import { PhotoCapture } from './photo-library-capture';
+import { pageRequestTimeline } from './page-request-timeline';
 
 const MAX_BASKET = 64;
 
@@ -60,6 +61,11 @@ export function FileChooserDialog(props: {
   viewId?: string;
   transport: ViewerSession;
 }) {
+  const id = props.request.id;
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => pageRequestTimeline.rendered(id));
+    return () => cancelAnimationFrame(frame);
+  }, [id]);
   return <FileBasketDialog {...props} />;
 }
 

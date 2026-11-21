@@ -37,7 +37,8 @@ export interface InputSnapshot {
 function isDismiss(event: Record<string, unknown>) {
   return (
     event.type === 'editing.dismiss' ||
-    ((event.type === 'selection_command' || event.type === 'context_command') && event.command === 'dismiss')
+    event.type === 'selection.dismiss' ||
+    (event.type === 'context_command' && event.command === 'dismiss')
   );
 }
 export class InputPipeline {

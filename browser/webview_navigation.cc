@@ -2,6 +2,7 @@
 #include "browser/signin.h"
 #include "browser/signin_result.h"
 #include "browser/page_requests.h"
+#include "browser/observed_state.h"
 #include "browser/webview_internal.h"
 #include "browser/webview_execution.h"
 #include "browser/device_configuration.h"
@@ -303,6 +304,7 @@ void NavigationCoordinator::FinishNavigationCollection(
                                       &NavigationCoordinator::PollNavigationOperations);
 }
 void NavigationCoordinator::BindNavigation(content::NavigationHandle* navigation, bool started) {
+  ObservedState::Changed();
   auto* record = navigation_operations_.ByNavigation(navigation->GetNavigationId());
   if (!record && issuing_navigation_ && !navigation->IsRendererInitiated()) {
     record = navigation_operations_.Find(*issuing_navigation_);
@@ -316,6 +318,7 @@ void NavigationCoordinator::BindNavigation(content::NavigationHandle* navigation
                               SignInNavigationUrl(navigation->GetURL()));
 }
 void NavigationCoordinator::PollNavigationOperations() {
+  ObservedState::Changed();
   for (auto it = navigation_handles_.begin(); it != navigation_handles_.end();) {
     auto* record = navigation_operations_.ByNavigation(it->first);
     if (!record || !it->second) {
@@ -340,17 +343,21 @@ void NavigationCoordinator::DidRedirectNavigation(content::NavigationHandle* nav
 }
 void NavigationCoordinator::NavigationEntryCommitted(const content::LoadCommittedDetails&) {
   ++navigation_revision_;
+  ObservedState::Changed();
 }
 void NavigationCoordinator::NavigationEntryChanged(const content::EntryChangedDetails&) {
   ++navigation_revision_;
+  ObservedState::Changed();
 }
 void NavigationCoordinator::NavigationListPruned(const content::PrunedDetails&) {
   ++navigation_revision_;
+  ObservedState::Changed();
 }
 void NavigationCoordinator::DidStartNavigation(content::NavigationHandle* navigation) {
   BindNavigation(navigation, true);
 }
 void NavigationCoordinator::DidFinishNavigation(content::NavigationHandle* navigation) {
+  ObservedState::Changed();
   if (auto* operation = navigation_operations_.ByNavigation(navigation->GetNavigationId())) {
     if (navigation->IsInPrimaryMainFrame())
       operation->url = SignInNavigationUrl(navigation->GetURL());
@@ -372,6 +379,7 @@ void NavigationCoordinator::DidFinishNavigation(content::NavigationHandle* navig
   navigation_handles_.erase(navigation->GetNavigationId());
 }
 void NavigationCoordinator::PrimaryMainFrameRenderProcessGone() {
+  ObservedState::Changed();
   for (const auto& [key, record] : navigation_operations_.records())
     if (auto* operation = navigation_operations_.Find(record.identity))
       navigation_operations_.Finish(*operation, "failed", "renderer_exited");

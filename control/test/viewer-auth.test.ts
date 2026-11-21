@@ -70,6 +70,9 @@ class AuthEndpoint implements EndpointLink {
   authGate?: ReturnType<typeof defer>;
   private readonly signals = new Set<Parameters<NonNullable<EndpointLink['onSignal']>>[0]>();
   private signal?: Parameters<NonNullable<EndpointLink['onSignal']>>[0];
+  onFaceChanged() {
+    return () => {};
+  }
   onSignal(listener: Parameters<NonNullable<EndpointLink['onSignal']>>[0]) {
     this.signals.add(listener);
     return () => {

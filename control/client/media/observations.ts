@@ -18,6 +18,8 @@ import { MediaFeedbackSampler } from './media-feedback';
 import { configureReceiverPlayout, negotiatedReceiverPlayout } from './receiver-playout';
 import { type Diagnostics } from './types';
 
+import { keyboardTimeline } from '../editing/keyboard-timeline';
+import { pageRequestTimeline } from '../files/page-request-timeline';
 import { diagnostics } from '../media/diagnostics';
 import { type Incoming } from '../rtc/protocol';
 
@@ -231,7 +233,11 @@ export class MediaObservations {
             keyframe: frame.keyframe,
           })),
       },
-      input: collectionInputSample(this.ports.input.inputTrace, this.ports.input.inputResults, since),
+      input: {
+        ...collectionInputSample(this.ports.input.inputTrace, this.ports.input.inputResults, since),
+        keyboard: keyboardTimeline.export(since),
+        pageRequests: pageRequestTimeline.export(since),
+      },
     };
   }
 

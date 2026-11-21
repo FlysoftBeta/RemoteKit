@@ -421,8 +421,9 @@ Status InputController::DispatchInput(const InputEvent& original, bool* admitted
       ReleaseKeyboard(true, true);
       editable_target_.reset();
       owner_.contents()->ClearFocusedElement();
-    } else if (const auto* command = std::get_if<SelectionCommand>(&input.payload)) {
-      RemoteTouchSelectionMenuRunner::Get().Dismiss(owner_.session_, owner_.view_, command->menu);
+    } else if (const auto* selection = std::get_if<SelectionDismiss>(&input.payload)) {
+      RemoteTouchSelectionMenuRunner::Get().Dismiss(owner_.session_, owner_.view_,
+                                                    selection->revision);
     } else if (const auto* context = std::get_if<ContextCommand>(&input.payload)) {
       return RemoteContextMenu::Get().Execute(owner_.session_, owner_.view_, *context);
     }

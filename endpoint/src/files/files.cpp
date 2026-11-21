@@ -96,6 +96,14 @@ void FileController::Admit(const RtcEvent& event) {
     file_services.Admit(event.peer, event.message);
 }
 
+void FileController::NotifySelection(const std::string& selection_id, const std::string& state) {
+  file_services.QueueNotice({{"type", "files.selection"},
+                             {"version", 1},
+                             {"selectionId", selection_id},
+                             {"state", state}});
+  if (notify_)
+    notify_();
+}
 void FileController::Flush(uint64_t handle, const std::function<int(const std::string&)>& send) {
   file_services.Flush(handle, send);
 }
@@ -193,8 +201,13 @@ Result<std::string> LibraryController::RetireUnsubmittedSelection(const std::str
   RK_ASSIGN_OR_RETURN(
       state, file_library.Finish(selection_id, LibraryState::cancelled, LibraryState::pending));
   if (state == LibraryState::selected)
-    return std::string("selected");
-  return std::string(state == LibraryState::cancelled ? "cancelled" : "unknown");
+    return Announced(selection_id, "selected");
+  return state == LibraryState::cancelled ? Announced(selection_id, "cancelled")
+                                          : std::string("unknown");
+}
+std::string LibraryController::Announced(const std::string& selection_id, const char* state) {
+  files.NotifySelection(selection_id, state);
+  return state;
 }
 
 Result<std::string> LibraryController::ObserveSelection(const LibrarySelection& selection,
@@ -214,11 +227,11 @@ Result<std::string> LibraryController::ObserveSelection(const LibrarySelection& 
       current->state == LibraryState::dispatching || current->state == LibraryState::unknown;
   if (state == "selected" && matched && dispatched) {
     RK_ASSIGN_OR_RETURN(finished, file_library.Finish(selection.id, LibraryState::selected));
-    return std::string(finished == LibraryState::selected ? "selected" : "cancelled");
+    return Announced(selection.id, finished == LibraryState::selected ? "selected" : "cancelled");
   }
   if (state == "cancelled" && matched && dispatched) {
     RK_ASSIGN_OR_RETURN(finished, file_library.Finish(selection.id, LibraryState::cancelled));
-    return std::string(finished == LibraryState::cancelled ? "cancelled" : "selected");
+    return Announced(selection.id, finished == LibraryState::cancelled ? "cancelled" : "selected");
   }
   if (state == "cancelled" || (state == "selected" && !matched))
     return RetireUnsubmittedSelection(selection.id);
@@ -413,7 +426,7 @@ Result<Json> LibraryController::LibraryCommand(const std::string& method, const 
         state = "cancelled";
       else if (selection->state == LibraryState::pending &&
                (!views.Contains(selection->binding.view) ||
-                selection->binding.browser_incarnation == last_confirmed_browser_exit ||
+                selection->binding.browser_incarnation == ConfirmedExit() ||
                 (browser.Exited() &&
                  selection->binding.browser_incarnation == browser.ProcessIncarnation()) ||
                 (!browser.Incarnation().empty() &&
@@ -447,10 +460,70 @@ Result<Json> LibraryController::LibraryCommand(const std::string& method, const 
   return Error{ErrorCode::kInvalidRequest, "unknown_library_method"};
 }
 
+Result<StagedDocument> LibraryController::StageViewDocument(const std::string& view,
+                                                            const std::string& asset) {
+  const auto incarnation = browser.Incarnation();
+  {
+    std::lock_guard lock(file_store_mutex);
+    const auto found = view_documents_.find(view);
+    if (found != view_documents_.end() && found->second.asset == asset &&
+        found->second.incarnation == incarnation)
+      return found->second.file;
+  }
+  // Authorization, Ensure and the plaintext copy are the same chain a native selection uses.
+  RK_ASSIGN_OR_RETURN(source, file_library.Path(asset));
+  RK_ASSIGN_OR_RETURN(described, file_library.Describe(asset));
+  if (described.size == 0)
+    return Error{ErrorCode::kInvalidRequest, "empty_document"};
+  std::lock_guard lock(file_store_mutex);
+  if (const auto stale = view_documents_.find(view); stale != view_documents_.end()) {
+    // The old batch is released through the store's retiring state, which Sweep retries.
+    auto released = file_uploads.AbortSubmission(stale->second.batch);
+    if (!released)
+      cleanup_failures_["documents"] = WireError(released.error());
+    view_documents_.erase(stale);
+  }
+  const FileBinding binding{incarnation, view, "document", asset, "pdf"};
+  RK_ASSIGN_OR_RETURN(
+      batch,
+      file_uploads.Stage(binding, {{{"document.pdf", "application/pdf", described.size}, source}},
+                         [] { return Result<void>{}; }));
+  ViewDocument staged{
+      asset, batch.id, incarnation, {Utf8(batch.files.front().path), described.size}};
+  const auto file = staged.file;
+  view_documents_.emplace(view, std::move(staged));
+  return file;
+}
+void LibraryController::RetainViewDocuments(const std::map<std::string, std::string>& wanted) {
+  std::lock_guard lock(file_store_mutex);
+  bool failed = false;
+  for (auto item = view_documents_.begin(); item != view_documents_.end();) {
+    const auto keep = wanted.find(item->first);
+    if (keep != wanted.end() && keep->second == item->second.asset) {
+      ++item;
+      continue;
+    }
+    auto released = file_uploads.AbortSubmission(item->second.batch);
+    if (!released) {
+      // The batch stays retiring in the store; Sweep retries its removal.
+      cleanup_failures_["documents"] = WireError(released.error());
+      failed = true;
+    }
+    item = view_documents_.erase(item);
+  }
+  if (!failed)
+    cleanup_failures_.erase("documents");
+}
 Result<void> LibraryController::BrowserStopped(const std::string& incarnation) {
   std::lock_guard lock(file_store_mutex);
   RK_RETURN_IF_ERROR(file_uploads.ConfirmBrowserStopped(incarnation));
-  last_confirmed_browser_exit = incarnation;
+  std::erase_if(view_documents_,
+                [&](const auto& item) { return item.second.incarnation == incarnation; });
+  RK_RETURN_IF_ERROR(file_library.BrowserExited(incarnation));
+  {
+    std::lock_guard exit_lock(exit_mutex_);
+    last_confirmed_browser_exit = incarnation;
+  }
 
   return {};
 }

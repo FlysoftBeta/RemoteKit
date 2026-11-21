@@ -9,7 +9,6 @@ export interface KeyboardContext {
   focusRevision: string;
   focusSource: 'pointer' | 'keyboard' | 'script' | 'other';
   focused: boolean;
-  ready: boolean;
   reconfiguring: boolean;
   now: number;
 }
@@ -19,8 +18,8 @@ export interface KeyboardCommand {
 }
 
 /** Document entry and enabling auto-open arm automatic focus; media recovery never does.
- * Taps always arm. With auto-open off, a tap has 1500 ms to observe fresh pointer focus;
- * after that observation it can wait indefinitely for frame and resize readiness.
+ * Taps always arm. With auto-open off, a tap has 1500 ms to observe fresh pointer focus.
+ * Opening never waits for frame or resize readiness; those only gate input delivery.
  * Disabling auto-open dismisses only automatic arms and never closes an attachment.
  * Unknown remote state is not a blur; authoritative NONE allows a short visual grace
  * for same-document editor replacement. Document changes and disabling input close it.
@@ -35,6 +34,9 @@ export class KeyboardSession {
   private pointerObserved = false;
   private explicitlyRequested = false;
   private systemHidden = false;
+  get focusObserved() {
+    return this.pointerObserved;
+  }
   get deadline() {
     const deadlines = [this.missingUntil, this.tapArmedUntil].filter((value) => value !== undefined);
     return deadlines.length ? Math.min(...deadlines) : undefined;
@@ -101,7 +103,7 @@ export class KeyboardSession {
   }
   private openIfReady(): KeyboardCommand {
     const c = this.context;
-    if (!c?.enabled || c.editor !== 'active' || !c.ready || this.intent !== 'armed') return {};
+    if (!c?.enabled || c.editor !== 'active' || this.intent !== 'armed') return {};
     if (
       !c.autoOpen &&
       !this.explicitlyRequested &&

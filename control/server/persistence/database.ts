@@ -10,6 +10,7 @@ import { AnnouncementsRepository } from './announcements';
 import { ClipboardsRepository } from './clipboards';
 import { LibraryRepository } from './library';
 import { OperationsRepository } from './operations';
+import { ViewerGenerations } from './viewer-generations';
 import { migrate } from './migrations';
 import { dirname, join } from 'node:path';
 import { checkIntegrity, type IntegrityResult } from './integrity';
@@ -35,6 +36,7 @@ export class ControlDatabase {
   readonly sessionImports: SessionImportsRepository;
   readonly announcements: AnnouncementsRepository;
   readonly clipboards: ClipboardsRepository;
+  readonly viewerGenerations: ViewerGenerations;
   constructor(path: string, options: DatabaseOptions) {
     this.buildId = options.buildId;
     const clock = options.clock ?? systemClock;
@@ -64,6 +66,7 @@ export class ControlDatabase {
     this.sessionImports = new SessionImportsRepository(this.db, this.atRestKey, options.buildId);
     this.announcements = new AnnouncementsRepository(this.db);
     this.clipboards = new ClipboardsRepository(this.db, clock);
+    this.viewerGenerations = new ViewerGenerations(this.db);
     try {
       this.integrity = checkIntegrity(this.db, this.atRestKey, clock.wallMs());
     } catch (error) {

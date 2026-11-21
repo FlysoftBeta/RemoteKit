@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { ProductState } from '../../shared/product';
-import type { SessionImportSocketMethods } from '../../shared/session-import';
+import type { SessionImportSocketMethods, SessionImportState } from '../../shared/session-import';
+import { sessionImportFeed } from '../control/session-import-feed';
 import { RemoteKitError } from '../../shared/errors';
 import { notices } from './notices';
 import { presentFailure } from './present';
@@ -18,14 +19,9 @@ export function useBackgroundNotices(state: ProductState | null, online: boolean
     let active = true;
     let pending = false;
     const unit = new RetryUnit();
-    const update = async () => {
-      if (!active || pending || !unit.ready()) return;
-      pending = true;
-      try {
-        const result = await call('sessionImport.state', {});
-        unit.succeed();
-        notices.resolve('poll:session-import');
-        if (!active) return;
+    const show = (result: SessionImportState) => {
+      if (!active) return;
+      {
         const visible = !!document.querySelector('[data-session-import]');
         for (const entry of result.timeline) {
           const record = entry.record;
@@ -62,8 +58,19 @@ export function useBackgroundNotices(state: ProductState | null, online: boolean
             );
           else notices.post(key, { class: 'B', text: '手机会话已导入' });
         }
+      }
+    };
+    const update = async () => {
+      if (!active || pending || !unit.ready()) return;
+      pending = true;
+      try {
+        const result = await call('sessionImport.state', {});
+        unit.succeed();
+        notices.resolve('poll:session-import');
+        show(result);
       } catch (error) {
         const failure = unit.fail(error);
+        unit.schedule(() => void update());
         if (failure.first)
           notices.post(
             'poll:session-import',
@@ -74,11 +81,14 @@ export function useBackgroundNotices(state: ProductState | null, online: boolean
       }
     };
     void update();
-    const timer = setInterval(() => void update(), 5000);
+    const unsubscribe = sessionImportFeed.subscribe((pushed) => {
+      if (pushed) show(pushed);
+      else void update();
+    });
     return () => {
       active = false;
       unit.close();
-      clearInterval(timer);
+      unsubscribe();
     };
   }, [online, call]);
   useEffect(() => {

@@ -48,7 +48,10 @@ export class ServicePeers {
   ) {
     this.subscriptions = context.endpoint.nodes
       .all()
-      .map((node) => node.onSignal((event) => this.signal(node, event)));
+      .flatMap((node) => [
+        node.onSignal((event) => this.signal(node, event)),
+        node.onFaceChanged((event) => this.faceChanged(node, event)),
+      ]);
   }
 
   chooseNode(tenant: string) {
@@ -133,6 +136,20 @@ export class ServicePeers {
     connection.failure = failure;
     viewer.security.face.error = failure;
     this.changed(connection);
+  }
+
+  /** The node's face challenge changed: read its status now instead of at the next fallback poll. */
+  private faceChanged(node: NodeLink, event: { tenantId: string; connectionId: string }) {
+    const connection = this.connections.get(event.tenantId);
+    if (
+      !connection ||
+      connection.node !== node ||
+      connection.connectionId !== event.connectionId ||
+      !this.current(connection)
+    )
+      return;
+    const viewer = this.context.tenants.get(connection.tenant).viewer;
+    if (viewer?.id === connection.lease) void this.services.security.poll(connection.tenant, viewer.security);
   }
 
   private signal(node: NodeLink, event: RtcSignal) {

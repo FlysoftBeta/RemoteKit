@@ -58,6 +58,7 @@ export function driveSecurity(
       expires: Infinity,
       modelVersion: 'test',
       started: true,
+      polledAt: 0,
     };
     const result = operation();
     const run = () => {

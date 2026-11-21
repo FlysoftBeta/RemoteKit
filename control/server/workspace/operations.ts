@@ -21,7 +21,7 @@ export class OperationPipeline {
     private readonly context: DomainContext,
     private readonly services: Pick<
       DomainServices,
-      'navigation' | 'pageRequests' | 'policy' | 'reconciler' | 'viewers' | 'workspace'
+      'filesOwner' | 'navigation' | 'pageRequests' | 'policy' | 'reconciler' | 'viewers' | 'workspace'
     >,
   ) {}
 
@@ -245,6 +245,7 @@ export class OperationPipeline {
           : '',
     });
     const state = plan.workspace;
+    if (body.type === 'window.state') this.services.filesOwner.apply(state);
     let application = plan.application;
     if (receipt && plan.effects.length === 0) settle(receipt, { status: 'committed', application });
     this.context.store.transaction(() => {

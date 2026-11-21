@@ -118,9 +118,18 @@ void ControlContract() {
   wire.FindDict("event")->Set("command", "contextMenu");
   CHECK(DecodeControlInput(wire, 1, 1));
   wire.FindDict("event")->Set("command", "dismiss");
-  CHECK(DecodeControlInput(wire, 1, 1));
+  CHECK(!DecodeControlInput(wire, 1, 1));
+  wire.FindDict("event")->Set("command", "copy");
   wire.FindDict("event")->Set("menu", "0");
+  CHECK(!DecodeControlInput(wire, 1, 1));
+  wire.Set("event", base::DictValue().Set("type", "selection.dismiss").Set("revision", "7"));
   CHECK(DecodeControlInput(wire, 1, 1));
+  for (const auto* invalid : {"0", "01", "-1", "18446744073709551616"}) {
+    wire.FindDict("event")->Set("revision", invalid);
+    CHECK(!DecodeControlInput(wire, 1, 1));
+  }
+  wire.Set("event", base::DictValue().Set("type", "selection.dismiss"));
+  CHECK(!DecodeControlInput(wire, 1, 1));
   for (const auto* which : {"start", "end", "insertion"}) {
     wire.Set("event", base::DictValue()
                           .Set("type", "selection.extent")

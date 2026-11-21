@@ -211,6 +211,13 @@ def document_runtime_trees():
     return module.runtime_trees()
 
 
+def pdfjs_runtime_tree():
+    spec = importlib.util.spec_from_file_location('fetch_pdfjs', ROOT / 'tools/fetch-pdfjs.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.runtime_tree()
+
+
 def copy_imaging_runtime(files, package):
     """Copy only the verified, enumerated release assets."""
     for source, relative in files:
@@ -440,6 +447,8 @@ def package_runtime(args, node_runtime):
         shutil.copy2(endpoint.parent / name, binary / name)
     for source, relative in document_runtime_trees():
         shutil.copytree(source, binary / relative)
+    pdfjs_source, pdfjs_relative = pdfjs_runtime_tree()
+    shutil.copytree(pdfjs_source, binary / pdfjs_relative)
     shutil.copy2(endpoint.parent / 'remotekit_node.exe', binary / 'remotekit_node.exe')
     shutil.copy2(endpoint.parent / 'remotekit_snapshot.exe', binary / 'remotekit_snapshot.exe')
     vpl = endpoint.parent / 'libvpl.dll'
@@ -515,6 +524,7 @@ def package_runtime(args, node_runtime):
     shutil.copy2(
         ROOT / 'build/dependencies/json-LICENSE.MIT', licenses / 'nlohmann-json-LICENSE.MIT'
     )
+    shutil.copy2(pdfjs_source / 'LICENSE', licenses / 'pdfjs-LICENSE')
     header = (ROOT / 'build/dependencies/nvEncodeAPI.h').read_text(encoding='utf-8')
     (licenses / 'NVENC-header-notice.txt').write_text(
         header[: header.index('*/') + 2], encoding='utf-8'

@@ -115,6 +115,7 @@ void RemoteTouchSelectionMenuRunner::CloseMenu() {
 void RemoteTouchSelectionMenuRunner::CloseFor(SessionId session, WebViewId view) {
   if (open_ && open_->session == session && (!view || open_->view == view))
     CloseMenu();
+  revisions_.Forget(session, view);
   for (const auto& [id, record] : views_.records) {
     auto& candidate = *record.webview;
     if (candidate.session_id() != session || (view && candidate.view_id() != view))
@@ -123,16 +124,15 @@ void RemoteTouchSelectionMenuRunner::CloseFor(SessionId session, WebViewId view)
         candidate.contents() ? candidate.contents()->GetRenderWidgetHostView() : nullptr));
   }
 }
-void RemoteTouchSelectionMenuRunner::Dismiss(SessionId session, WebViewId view, uint64_t menu) {
-  if (!menu ||
-      (open_ && open_->session == session && open_->view == view && open_->menu.menu_id == menu))
+void RemoteTouchSelectionMenuRunner::Dismiss(SessionId session, WebViewId view, uint64_t revision) {
+  if (revision && StateFor(session, view).revision == revision)
     CloseFor(session, view);
 }
 bool RemoteTouchSelectionMenuRunner::IsRunning() const {
   return open_ && open_->client;
 }
 SharedAtlasSelectionMenu RemoteTouchSelectionMenuRunner::StateFor(SessionId session,
-                                                                  WebViewId view) const {
+                                                                  WebViewId view) {
   SharedAtlasSelectionMenu state{};
   if (IsRunning() && open_->session == session && open_->view == view) {
     state = open_->menu;
@@ -154,6 +154,11 @@ SharedAtlasSelectionMenu RemoteTouchSelectionMenuRunner::StateFor(SessionId sess
       }
     }
   }
+  const bool menu_visible = (state.flags & kAtlasSelectionMenuVisible) && state.menu_id;
+  state.revision = revisions_.Observe(
+      {session, view},
+      {menu_visible || state.start.visible || state.end.visible || state.insertion.visible,
+       menu_visible ? state.menu_id : 0, state.insertion.visible != 0});
   return state;
 }
 Status DragSelectionHandle(input::RenderWidgetHostViewInput* view, const SelectionExtent& extent) {

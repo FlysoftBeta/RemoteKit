@@ -30,6 +30,7 @@ export function compileDesired(
       !!tab.navigation && !tab.navigation.resolved && ['applying', 'unknown'].includes(tab.navigation.status);
     if (isLocalTab(tab) && !current && !navigating) continue;
     if (tab.popup?.status === 'failed') continue;
+    const document = tab.owner ? ({ kind: 'pdf', assetId: tab.owner.assetId } as const) : undefined;
     const lifecycleBlocked =
       current?.lifecycle_uncertain === true || !!tab.lifecycleRecovery || !!tab.lifecycleRecoveryError;
     const visible =
@@ -66,6 +67,7 @@ export function compileDesired(
       occludedBottom: visible ? (region?.occludedBottom ?? 0) : 0,
       occlusionRevision: region?.occlusionRevision ?? '1',
       ...(tab.signIn ? { signIn: tab.signIn } : {}),
+      ...(document ? { document } : {}),
       ...(provisional ? { adopt: provisional } : {}),
     });
   }

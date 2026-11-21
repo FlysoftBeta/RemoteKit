@@ -49,7 +49,7 @@ test('every supported starting version migrates partition ID ownership exactly o
         db.prepare('UPDATE schema_version SET version=?').run(step.version);
       }
       migrate(db, options);
-      assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 31 });
+      assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 32 });
       assert.deepEqual(db.prepare('SELECT * FROM library_partition_ids').all(), [{ tenant: 'tenant', id }]);
       const schemaVersion = db.pragma('schema_version', { simple: true });
       migrate(db, options);
@@ -83,7 +83,7 @@ test('v28 reserves existing partition IDs and keeps operation hashes unchanged i
       'opaque-hash',
     );
     migrate(db, options);
-    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 31 });
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 32 });
     assert.deepEqual(db.prepare('SELECT * FROM library_partition_ids').all(), [{ tenant: 'tenant', id }]);
     assert.deepEqual(db.prepare('SELECT payload FROM file_library_operations').get(), {
       payload: 'opaque-hash',
@@ -198,7 +198,7 @@ test('v25 migrates bindings as an empty table and rejects malformed schema versi
       "CREATE TABLE object_derivations (id TEXT NOT NULL,source_id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('thumbnail','document')),PRIMARY KEY(id,source_id,kind))",
     );
     migrate(db, options);
-    assert.deepEqual(db.prepare('SELECT version FROM schema_version').all(), [{ version: 31 }]);
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').all(), [{ version: 32 }]);
     assert.deepEqual(db.prepare('SELECT * FROM session_node_bindings').all(), []);
     db.prepare('UPDATE schema_version SET version=?').run('26bad');
     assert.throws(() => migrate(db, options), { reason: 'corrupt_state' });
@@ -219,9 +219,9 @@ test('release v23 migrates durable retry state and keeps a verified backup', () 
     const store = new ControlDatabase(path, { buildId: 'test' });
     try {
       assert(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='retry_units'").get());
-      assert.equal(schema(store.db).length, before.length + 4);
+      assert.equal(schema(store.db).length, before.length + 5);
       assert(Number(store.db.pragma('schema_version', { simple: true })) > Number(version));
-      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 31n }]);
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 32n }]);
       assert.equal(existsSync(join(directory, 'backups')), true);
     } finally {
       store.db.close();
@@ -246,7 +246,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
   }
   writeFileSync(join(backupDirectory, 'keep.txt'), 'keep');
   migrations.push({
-    version: 32,
+    version: 33,
     name: 'future-test',
     up(database) {
       database.exec('CREATE TABLE future_step(id TEXT)');
@@ -263,7 +263,7 @@ test('numbered runner backs up, retains three copies, and rolls back a failed fu
     const copy = new Sqlite(
       join(
         backupDirectory,
-        readdirSync(backupDirectory).find((name) => /^control-v23-to-v32-test-.*T.*Z\.db$/.test(name))!,
+        readdirSync(backupDirectory).find((name) => /^control-v23-to-v33-test-.*T.*Z\.db$/.test(name))!,
       ),
       { readonly: true },
     );
@@ -371,5 +371,41 @@ test('v31 retains ambiguous thumbnails and admits each current derivative kind',
     );
   } finally {
     db.close();
+  }
+});
+
+test('a failed post-step check rolls back the version and data of every step, and a retry succeeds', () => {
+  const options = { backupDirectory: '', buildId: 'test', atRestKey: new AtRestKey(null) };
+  const violate = (db: Sqlite.Database) => {
+    db.pragma('defer_foreign_keys=ON');
+    db.prepare('INSERT INTO user_security(user_id,settings) VALUES (?,?)').run('missing', '{}');
+  };
+  for (const step of migrations) {
+    const db = new Sqlite(':memory:');
+    const original = step.up;
+    try {
+      db.exec(fixture);
+      for (const earlier of migrations.filter((candidate) => candidate.version < step.version)) {
+        earlier.up(db, options);
+        db.prepare('UPDATE schema_version SET version=?').run(earlier.version);
+      }
+      const before = schema(db);
+      const users = db.prepare('SELECT * FROM user_security').all();
+      step.up = (database, context) => {
+        original(database, context);
+        violate(database);
+      };
+      assert.throws(() => migrate(db, options), { reason: 'corrupt_state' });
+      assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: step.version - 1 });
+      assert.deepEqual(schema(db), before);
+      assert.deepEqual(db.prepare('SELECT * FROM user_security').all(), users);
+      assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
+      step.up = original;
+      migrate(db, options);
+      assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 32 });
+    } finally {
+      step.up = original;
+      db.close();
+    }
   }
 });

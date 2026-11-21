@@ -20,6 +20,7 @@ import { SessionImporter } from './session-import/importer';
 import type { EndpointGateway } from './endpoint/gateway';
 import type { NodeRegistry } from './cluster/node-link';
 import { FileLibrary } from './files/library';
+import { FilesOwner } from './workspace/files-owner';
 import type { createHttp } from './http/server';
 import type { ControlDatabase } from './persistence/database';
 import { ClipboardService } from './clipboard';
@@ -68,6 +69,7 @@ export interface DomainServices extends DomainContext {
   library: FileLibrary;
   clipboard: ClipboardService;
   workspace: Workspace;
+  filesOwner: FilesOwner;
   learning: LearningService;
   accounts: AccountService;
   close(): Promise<void>;
@@ -99,6 +101,7 @@ export function createApplication(
     undefined,
     clock,
   );
+  services.sessionImporter.onChanged = (tenant) => context.events.emit('sessionImport', tenant);
   services.servicePeers = new ServicePeers(context, services);
   services.objects = new ObjectIndex(
     store,
@@ -135,6 +138,21 @@ export function createApplication(
   );
   services.objects.onAvailabilityChanged = (ids) => services.library.objectsChanged(ids);
   services.learning = new LearningService(context, services);
+  services.filesOwner = new FilesOwner(context, services);
+  const learningChanged = services.library.onChanged;
+  services.library.onChanged = (tenant, snapshot) => {
+    learningChanged?.(tenant, snapshot);
+    void services.filesOwner
+      .resync(tenant)
+      .catch((err) => log.warn('files.owner_resync_failed', { tenant, err }));
+  };
+  const learningDeleted = services.library.onDeleted;
+  services.library.onDeleted = (tenant, ids) => {
+    learningDeleted?.(tenant, ids);
+    void services.filesOwner
+      .resync(tenant)
+      .catch((err) => log.warn('files.owner_resync_failed', { tenant, err }));
+  };
   services.clipboard = new ClipboardService(context, services);
   endpoint.setDesiredSource(
     (tenant) => compileDesired(context, services, tenant),

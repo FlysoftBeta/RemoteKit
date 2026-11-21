@@ -405,7 +405,7 @@ Result<void> NavigationRecovery::CaptureNavigation(const Json& browser_view) try
   const auto revision = browser_view.value("navigationRevision", std::string());
   const auto saved = recovery_revisions.find(view);
   navigation_export.Observe(browser_view, browser.Incarnation(),
-                            views.Contains(view) && !Recovering(view) &&
+                            views.Contains(view) && !views.IsDocument(view) && !Recovering(view) &&
                                 (saved == recovery_revisions.end() || saved->second != revision));
   return {};
 } catch (const std::exception& error) {

@@ -18,3 +18,45 @@
   place-items: center;
   color: var(--text-secondary);
 }
+
+.remote-document {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.remote-document-opening {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+.remote-document {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.remote-document-opening {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+.remote-document-failed {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+}

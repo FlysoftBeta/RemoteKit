@@ -26,6 +26,7 @@ import { FailureNote } from '../../failures';
 import { RetryUnit } from '../../../shared/retry-unit';
 import { diagnostics } from '../../media/diagnostics';
 import { AdminResourceStore } from './resource-store';
+import { adminFeed } from '../../control/admin-feed';
 export type { ErrorSearchResult } from '../../control/socket-methods';
 
 type AdminMethods = AdminSocketMethods & ErrorSearchMethods;
@@ -77,13 +78,30 @@ export function AdminResourceProvider({ children }: { children: ReactNode }) {
   const [resources] = useState(() => new Map<string, AdminResourceStore<unknown>>());
   useEffect(() => {
     resources.forEach((store) => store.activate());
-    return () => resources.forEach((store) => store.dispose());
+    const unsubscribe = adminFeed.subscribe((keys) =>
+      keys.forEach(
+        (key) =>
+          void resources
+            .get(key)
+            ?.refresh()
+            .catch((error) => diagnostics.record('admin_push_refresh', error)),
+      ),
+    );
+    return () => {
+      unsubscribe();
+      resources.forEach((store) => store.dispose());
+    };
   }, [resources]);
   return <AdminResources.Provider value={resources}>{children}</AdminResources.Provider>;
 }
 
 /** Sections share each resource's snapshot and pending changes for the lifetime of the console. */
-export function useAdminResource<T>(online: boolean, key: string, load: () => Promise<T>, intervalMs = 5000) {
+export function useAdminResource<T>(
+  online: boolean,
+  key: string,
+  load: () => Promise<T>,
+  intervalMs = 30000,
+) {
   const resources = useContext(AdminResources);
   const [store] = useState(() => {
     const existing = resources?.get(key) as AdminResourceStore<T> | undefined;

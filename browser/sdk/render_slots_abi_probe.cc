@@ -3,7 +3,9 @@
 #include "protocol/shared_render_slots.h"
 #include <cstddef>
 #include <type_traits>
-static_assert(REMOTEKIT_SDK_ABI_VERSION == 5);
+static_assert(REMOTEKIT_SDK_ABI_VERSION == 6);
+static_assert(REMOTEKIT_SDK_RENDER_OBSERVED_CHANGED == 5);
+static_assert(static_cast<uint32_t>(remotekit::RenderWireType::kObservedChanged) == 6);
 static_assert(REMOTEKIT_SDK_RENDER_SLOT_COUNT == remotekit::kRenderSlotCount);
 static_assert(sizeof(remotekit_sdk_render_identity) == 24);
 static_assert(sizeof(remotekit_sdk_render_request) == 32);

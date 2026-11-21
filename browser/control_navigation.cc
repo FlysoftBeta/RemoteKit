@@ -202,7 +202,11 @@ ControlResult ControlDispatcher::HandleNavigate(const NavigateRequest& request) 
   const auto* url = Ptr(request.url);
   if (!url)
     return error(ErrorCode::kInvalidRequest, "url_required");
-  status = adapter.Navigate(GURL(*url), request.operation);
+  // about:blank and data: commit without a throttled request, so a document view refuses here.
+  if (record->spec.document && *url != protocol::kPdfViewerUrl)
+    return error(ErrorCode::kForbidden, "document_view_navigation");
+  status =
+      adapter.Navigate(record->spec.document ? PdfViewerStartUrl() : GURL(*url), request.operation);
 
   reply.Set("token", TokenValue(runtime_.view_model.Token(session, view).value));
   runtime_.UpdateOutput();

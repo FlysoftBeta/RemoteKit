@@ -25,6 +25,8 @@ class FaceController {
   void Start(uint64_t peer);
   void Stop();
   void Cancel();
+  // See Faces::SetChanged.
+  void SetChanged(std::function<void()> changed) { faces.SetChanged(std::move(changed)); }
   void Receive(const RtcEvent& event);
   static fs::path FaceModels();
   static int64_t CameraNow();

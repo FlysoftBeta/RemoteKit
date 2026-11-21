@@ -26,6 +26,8 @@ import {
   type PendingLibraryChange,
 } from './library-operations';
 
+/** How long a pushed selection result may be missing before the library asks. */
+const selectionBackstopMs = 15_000;
 type ClientMethods = LibraryMethods & Pick<SocketMethods, 'usage.record'>;
 export type LibraryRequest = <K extends keyof ClientMethods>(
   method: K,
@@ -83,6 +85,13 @@ export class LibraryStore extends Store<LibraryState> {
     this.thumbnails = new FileThumbnails((id, signal) => rpc.photoThumbnail(id, signal));
     this.photos = new PhotoJobStore({ mutate: this.mutate, rpc, latestSnapshot: () => this.librarySnapshot });
   }
+  /** The Endpoint pushed a final selection state: confirm that checkout now. */
+  selectionResolved = (selectionId: string) => {
+    if ([...this.checkouts.values()].some((checkout) => checkout.selectionId === selectionId))
+      this.reconcile(true);
+  };
+  /** Whether selection results are pushed right now; the owner of the channel sets it. */
+  pushing: () => boolean = () => false;
   private imports = new Map<string, ImportQueue>();
   private taskAbort = new AbortController();
   private loadAbort?: AbortController;
@@ -427,7 +436,7 @@ export class LibraryStore extends Store<LibraryState> {
         transaction.retry.state.phase === 'waiting'
           ? transaction.retry.state.until
           : transaction.retry.state.phase === 'idle'
-            ? Date.now() + 1500
+            ? Date.now() + (this.pushing() ? selectionBackstopMs : 1500)
             : Infinity;
       if (this.current(epoch)) this.emit();
       if (this.current(epoch) && transaction.recheck) {

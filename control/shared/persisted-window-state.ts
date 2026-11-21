@@ -38,7 +38,7 @@ const filesTab: Codec<FilesTab> = union(
   object({ id: tabId, kind: literal('library'), view: filesView, query: string({ max: 256 }) }),
   object(
     { id: tabId, kind: literal('document'), entryId: identifier },
-    { from: filesView, fromQuery: string({ max: 256 }) },
+    { from: filesView, fromQuery: string({ max: 256 }), compat: literal(true) },
   ),
   object(
     { id: tabId, kind: literal('photos'), entryId: identifier, from: filesView },

@@ -38,6 +38,8 @@ class OsrRenderer final {
   static bool IsGpuFaultSealed();
   void SetViews(std::vector<View> views, uint32_t layout_revision);
   void PublishClipboardSequence(uint64_t sequence);
+  // Wakes the consumer to observe a Browser state change now instead of at its next sample.
+  void ObservedChanged(uint64_t revision);
   void StopView(uint64_t webview_id);
   base::DictValue DescribeForConsumer(uint32_t pid);
   mojo::ScopedMessagePipeHandle TakeRenderEndpoint(std::string_view token, uint32_t consumer_pid);

@@ -29,13 +29,28 @@
 #include "util/file_io.hpp"
 
 namespace remotekit {
-ServiceJson FileLibrary::StopBlockers(const std::function<bool(uint64_t)>& current) const {
+FileLibrary::Activity FileLibrary::ActivityOf(const Selection& selection, bool browser_live) {
+  switch (selection.state) {
+    case Selection::State::pending:
+      return Activity::kWaitingForUser;
+    case Selection::State::dispatching:
+    case Selection::State::unknown:
+      return browser_live ? Activity::kBrowserMayAnswer : Activity::kResultUnknown;
+    case Selection::State::selected:
+    case Selection::State::cancelled:
+      return Activity::kSettled;
+  }
+  std::terminate();
+}
+ServiceJson FileLibrary::StopBlockers(
+    const std::function<bool(uint64_t)>& current,
+    const std::function<bool(const std::string&)>& browser_live) const {
   std::lock_guard lock(mutex_);
   const auto selections =
-      std::count_if(selections_.begin(), selections_.end(), [](const auto& item) {
-        return item.second.state == Selection::State::pending ||
-               item.second.state == Selection::State::dispatching ||
-               item.second.state == Selection::State::unknown;
+      std::count_if(selections_.begin(), selections_.end(), [&](const auto& item) {
+        const auto activity =
+            ActivityOf(item.second, browser_live(item.second.binding.browser_incarnation));
+        return activity == Activity::kWaitingForUser || activity == Activity::kBrowserMayAnswer;
       });
   const auto uploads = std::count_if(drafts_.begin(), drafts_.end(), [&](const auto& item) {
     return item.second.sealed.empty() && current(item.second.grant);
@@ -1168,6 +1183,24 @@ Result<void> FileLibrary::Unknown(const std::string& id) {
   RK_RETURN_IF_ERROR(SaveSelection(unknown));
   selection = std::move(unknown);
   return {};
+}
+Result<void> FileLibrary::BrowserExited(const std::string& incarnation) {
+  std::lock_guard lock(mutex_);
+  std::optional<Error> failure;
+  for (auto& [id, selection] : selections_) {
+    if (selection.binding.browser_incarnation != incarnation ||
+        selection.state != State::dispatching)
+      continue;
+    auto unknown = selection;
+    unknown.state = State::unknown;
+    auto saved = SaveSelection(unknown);
+    if (!saved) {
+      failure = saved.error();
+      continue;
+    }
+    selection = std::move(unknown);
+  }
+  return failure ? Result<void>{*failure} : Result<void>{};
 }
 Result<std::optional<State>> FileLibrary::CancelPendingSelections(
     const FileUploadStore::Binding& binding,

@@ -1,5 +1,13 @@
 import type { SelectionAction } from '../rtc/protocol';
-import { wordAt, type HandleKind, type Point, type SelectionClipboard, type SelectionTarget } from './target';
+import {
+  COMMAND_SENT,
+  wordAt,
+  type CommandOutcome,
+  type HandleKind,
+  type Point,
+  type SelectionClipboard,
+  type SelectionTarget,
+} from './target';
 import { applySelection } from './selection-session';
 
 export function textCaretAt(content: HTMLElement, point: Point): Range | undefined {
@@ -113,7 +121,12 @@ export class LocalTextTarget implements SelectionTarget {
     return this.range?.collapsed === false ? ['copy', 'selectAll'] : ['selectAll'];
   }
 
-  async run(command: SelectionAction) {
+  async run(command: SelectionAction): Promise<CommandOutcome> {
+    await this.execute(command);
+    return COMMAND_SENT;
+  }
+
+  private async execute(command: SelectionAction) {
     if (command === 'copy') await this.clipboard.write(this.range?.toString() ?? '');
     if (command === 'selectAll') {
       const range = document.createRange();

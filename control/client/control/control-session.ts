@@ -15,6 +15,9 @@ import { Events } from '../util/store';
 import { request as httpRequest } from './http-request';
 import { snapshotNewer } from './product-operations';
 import type { SocketMethods } from './socket-methods';
+import { pageRequestTimeline } from '../files/page-request-timeline';
+import { sessionImportFeed } from './session-import-feed';
+import { adminFeed } from './admin-feed';
 
 const stableConnectionMs = 10_000;
 
@@ -103,6 +106,7 @@ export class ControlSession {
       }, stableConnectionMs);
     };
     let snapshotIncarnation: string | undefined;
+    let announced = false;
     ws.onopen = () => mark('open');
     ws.onmessage = (event) => {
       if (ws !== this.socket || this.stopped) return;
@@ -116,6 +120,10 @@ export class ControlSession {
       if (message.type === 'rtc.signal') {
         this.signal(message);
       } else if (message.type === 'auth') {
+        if (!announced) {
+          announced = true;
+          sessionImportFeed.emit(null);
+        }
         if (message.auth.locked) this.latestState = null;
         mark('firstAuth');
         stable();
@@ -130,10 +138,15 @@ export class ControlSession {
         this.status('online');
         if (snapshotNewer(message.state, this.latestState)) {
           this.latestState = message.state;
+          pageRequestTimeline.stateReceived((message.state.fileRequests ?? []).map((request) => request.id));
           this.state(message.state);
         }
       } else if (message.type === 'library') {
         this.library.emit(message.snapshot);
+      } else if (message.type === 'admin.changed') {
+        adminFeed.emit(message.keys);
+      } else if (message.type === 'sessionImport') {
+        sessionImportFeed.emit(message.state);
       } else if (message.type === 'clipboard') {
         appClipboard.receive(message);
         deviceClipboard.receive(message);

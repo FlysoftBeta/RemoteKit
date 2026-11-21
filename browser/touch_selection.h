@@ -1,6 +1,7 @@
 #pragma once
 #include <optional>
 
+#include "browser/selection_revision.h"
 #include "browser/view_model.h"
 #include "protocol/shared_render_slots.h"
 #include "ui/touch_selection/touch_selection_menu_runner.h"
@@ -33,10 +34,11 @@ class RemoteTouchSelectionMenuRunner final : public ui::TouchSelectionMenuRunner
                 bool can_paste) override;
   void CloseMenu() override;
   void CloseFor(SessionId, WebViewId = 0);
-  void Dismiss(SessionId, WebViewId, uint64_t menu);
+  // Closes the view's selection presentation only if `revision` is still its current one.
+  void Dismiss(SessionId, WebViewId, uint64_t revision);
   bool IsRunning() const override;
 
-  SharedAtlasSelectionMenu StateFor(SessionId, WebViewId) const;
+  SharedAtlasSelectionMenu StateFor(SessionId, WebViewId);
   Status Execute(SessionId, WebViewId, const SelectionCommand&);
 
  private:
@@ -49,6 +51,7 @@ class RemoteTouchSelectionMenuRunner final : public ui::TouchSelectionMenuRunner
   };
   ViewRegistry& views_;
   std::optional<OpenState> open_;
+  SelectionRevisionTracker revisions_;
   uint64_t next_id_{};
 };
 bool HandleSelectionTouch(input::RenderWidgetHostViewInput*, const ui::MotionEvent&);

@@ -8,7 +8,7 @@ Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、�
 
 **基线与迁移**：`persistence/baseline.ts` 是当前版本的完整 schema。空库直接执行基线；已有库读出版本，依次执行 `persistence/migrations.ts` 中编号大于它的步骤（目前为空），最后版本必须等于当前版本，否则拒绝启动（`internal` + `corrupt_state`）。所有建表、改表都在基线或某个编号步骤里，正常启动不执行任何 DDL。格式变化只能新增编号步骤，同时更新基线；`control/test/fixtures/control-v23.sql` 是当前发布写出的库，测试它不经迁移、不做备份即可打开且记录原样可读。
 
-**迁移前备份**：有待执行的步骤时，先 `VACUUM INTO` 到数据库所在目录的 `backups/control-v<from>-to-v<to>-<buildId>-<UTC>.db`，以只读方式打开做 `quick_check` 并核对版本，通过后才迁移；只保留最新 3 份。全部步骤与版本更新在一个事务里，任一步失败整体回滚，错误带步骤编号与原始异常（`corrupt_state`）。迁移后跑 `integrity_check`。备份不含 `.key`：静态密钥从不改变，恢复时把备份复制回 `control.db`（删除 `-wal`/`-shm`）即可。
+**迁移前备份**：有待执行的步骤时，先 `VACUUM INTO` 到数据库所在目录的 `backups/control-v<from>-to-v<to>-<buildId>-<UTC>.db`，以只读方式打开做 `quick_check` 并核对版本，通过后才迁移；只保留最新 3 份。全部步骤与版本更新在一个事务里，任一步失败整体回滚，错误带步骤编号与原始异常（`corrupt_state`）。每一步写入新版本后，在同一事务内运行 `integrity_check` 与 `foreign_key_check`，校验失败同样整体回滚，版本与数据都不变；外键检查只拦截迁移开始后新增的违规（迁移前已有的违规由启动自检记录，拒绝它们会让已有库打不开）。迁移后跑 `integrity_check`。备份不含 `.key`：静态密钥从不改变，恢复时把备份复制回 `control.db`（删除 `-wal`/`-shm`）即可。
 
 **存储的文档有类型**：SQLite 里不透明的 JSON 值（Tab、Space、窗口状态、设置、站点偏好、App、收藏、操作收据与动作、认证设置、文件库条目与分区、选择清单、会话导入各列、加密的学习会话与人脸模板等）只经 `persistence/codec.ts` 的解码器与编码器读写，定义在 `persistence/documents.ts`（加密载荷在 `sealed-documents.ts`）：键集合封闭、类型与取值范围固定，可选字段在定义里声明；解码器的推断类型必须可赋给 `shared/` 里的类型，漂移是编译错误。编码器写之前同样校验，写不出解码器不接受的值。`persistence/` 之外不解析也不序列化存储数据。原生 SQL 列的类型由 `persistence/sqlite.ts` 校验。解码失败是 `internal` + `reason: corrupt_record`（`detail` 指出表、键、路径与期望），只让需要这一行的请求失败，数据原样保留——读路径从不补默认值、不删除、不改写。必需的行（账户的设置、安全设置、文件库状态）由创建账户的代码写入，读取处不代造。
 

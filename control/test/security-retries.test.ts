@@ -113,6 +113,7 @@ test('presence query failure preserves the challenge and lock state', async (t) 
     expires: Infinity,
     modelVersion: 'test',
     started: true,
+    polledAt: 0,
   };
   f.fail(true);
   await f.security.poll('tenant', f.viewer);

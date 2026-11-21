@@ -140,17 +140,17 @@ Control 与 Endpoint 之间只有三种交互，没有逐方法的恢复路径�
 
 ## Session 存储
 
-Endpoint 自己的 Session 状态在 Session 目录的 `session.db`（SQLite，WAL，`synchronous=FULL`，版本记在 `user_version`，当前为 3）里，随目录进 checkpoint、随 Profile 搬迁。它只保存 Control 重建不出来、而 Endpoint 执行或恢复需要的东西：
+Endpoint 自己的 Session 状态在 Session 目录的 `session.db`（SQLite，WAL，`synchronous=FULL`，版本记在 `user_version`，当前为 7）里，随目录进 checkpoint、随 Profile 搬迁。它只保存 Control 重建不出来、而 Endpoint 执行或恢复需要的东西：
 
 | 表 | 内容 |
 |---|---|
-| `views` | Control 下发的期望 view 配置的执行副本；checkpoint 恢复后据此以恢复模式重建 view 并导入导航历史。冲突时以 Control 对账为准 |
+| `views` | Control 下发的期望 view 集合与拓扑的执行副本（不含几何：尺寸、DPR、可见性、遮挡与展示顺序是瞬态的，恢复后等 Viewer 重报；不含弹窗接管的 `adopt`，它只在创建弹窗的 Browser 实例内有效，实例不匹配时按 view 结算为冲突）；checkpoint 恢复后据此以恢复模式重建 view 并导入导航历史。冲突时以 Control 对账为准 |
 | `closed_events` | 页面自行关闭、等 Control 确认的事件；没有它，Control 会把已关闭的标签当成丢失而重建。未确认事件阻止停止 |
 | `navigation_recovery` | 每个 view 的导航历史与 PageState（Browser 导出的字节） |
-| `download_imports` | Browser 下载 → 对象 → 文件库之间的交接记录 |
-| `library_assets`、`library_derivatives` | 资产大小、尺寸与格式转换结果的缓存，可从对象重建；媒体类型以 Control 文件库为准 |
+| `download_imports` | Browser 下载 → 对象 → 文件库之间的交接记录。重试按记录与阶段区分：导入以（eventId、构建、存储连接代次）、清理以（eventId、构建、Browser 实例）为身份，布局与可见性变化不会重新触发；失败事件 ID 由该身份派生，同一失败只报告一次 |
+| `library_assets`、`file_derivatives` | 资产大小、尺寸与派生（缩略图、预览、照片处理、交付转码）的缓存，可从对象重建；媒体类型以 Control 文件库为准 |
 | `library_drafts` | 上传草稿（字节在 `file-library/incoming/`，先落盘再提交行）；提交前删除，从不进 checkpoint |
-| `library_selections` | 原生文件选择回执 |
+| `library_selections` | 原生文件选择回执。状态区分"等待用户""Browser 可能回答"与"结果未知"：派发中 Browser 退出时回执转为结果未知并持久化，仍可查询，从不重新派发；结果未知或派发中的回执只在其 Browser 实例存活时阻止停止 |
 
 站点偏好不落盘：Control 在启动 Browser 前推送，Endpoint 只放内存。每个组件只通过自己的窄接口操作自己的表。一个逻辑变更是一个事务——关闭 view（删期望配置、记关闭事件、删恢复数据）、显式导航（改 URL、删旧恢复数据）、确认事件（删事件、更新下载交接）、批量取消选择——不再有跨文件的中间状态和启动时的修复重放。各列的文档格式定义在 `persistence/session_documents.hpp` 与 `files/library_records.hpp`，读写都经同一份定义；库的格式变化只在 `persistence/session_migrations.cpp` 里按编号进行，迁移前与 Control 数据库一样先 `VACUUM INTO` 备份并校验，失败整体回滚。SQLite 结果码映射到错误模型：`BUSY`/`LOCKED` → `busy`，IO、打不开、磁盘满、权限 → `unavailable`，`CORRUPT`/`NOTADB` 和不支持的 `user_version` → `internal` + `corrupt_state`。
 

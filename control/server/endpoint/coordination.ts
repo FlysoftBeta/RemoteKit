@@ -16,6 +16,7 @@ export interface NodeDesired {
   revision: string;
   sessions: (SessionTarget & { dataState: 'clean' | 'dirty' })[];
 }
+export const PDF_VIEWER_URL = 'remotekit-pdf://viewer/';
 export interface DesiredView {
   viewId: string;
   presence: 'ensure' | 'ifPresent';
@@ -28,6 +29,8 @@ export interface DesiredView {
   occlusionRevision: string;
   signIn?: 'changyan' | 'xinjiaoyu';
   adopt?: { browserIncarnation: string; provisionalId: string };
+  /** Names the library asset the built-in reader shows; Endpoint authorizes and stages it. */
+  document?: { kind: 'pdf'; assetId: string };
 }
 export interface SessionDesired extends SessionTarget {
   method: 'session.desired';
@@ -249,6 +252,8 @@ export interface SessionObserved extends SessionTarget {
   views: ObservedView[];
   pendingPopups: PendingPopup[];
   recovery: { pending: boolean; views: Record<string, RecoveryStatus>; exportPending: boolean };
+  /** Final document failures by view; transient staging failures are retried on the Endpoint. */
+  documentErrors?: Record<string, NativeError>;
   rtc: { active: boolean; connectionId: string | null; avSync: boolean | null };
   blockers: StopBlockers;
   events: { streamId: string | null; ackedThrough: string; lastSeq: string };
@@ -461,6 +466,16 @@ export function validateDesired(value: SessionDesired): void {
       'device',
     );
     invalid(!!view.signIn && !!view.adopt, 'adopt');
+    if (view.document)
+      invalid(
+        view.document.kind !== 'pdf' ||
+          typeof view.document.assetId !== 'string' ||
+          !/^[0-9a-f]{64}$/.test(view.document.assetId) ||
+          view.url !== PDF_VIEWER_URL ||
+          !!view.signIn ||
+          !!view.adopt,
+        'document',
+      );
   }
   invalid(
     !Number.isInteger(value.mediaPolicy.maxFps) ||
@@ -629,6 +644,16 @@ export function validateSessionObserved(value: unknown): asserts value is Sessio
       !['running', 'stopped'].includes(value.checkpoint.kind) ||
       !Number.isSafeInteger(value.checkpoint.takenAt) ||
       value.checkpoint.takenAt < 0)
+  )
+    return invalid();
+  if (
+    value.documentErrors !== undefined &&
+    (!record(value.documentErrors) ||
+      Object.keys(value.documentErrors).length > coordinationLimits.views ||
+      Object.entries(value.documentErrors).some(
+        ([viewId, error]) =>
+          !counter(viewId, true) || !record(error) || typeof error.code !== 'string' || !error.code,
+      ))
   )
     return invalid();
   for (const view of value.views) {

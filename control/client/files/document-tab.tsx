@@ -14,6 +14,7 @@ import { formatFileSize } from './file-format';
 import { basketEntries } from './file-library-controls';
 import { useLibrary } from './file-library-state';
 import { FilePreview } from './file-preview';
+import { RemoteDocument } from './remote-document';
 import { FileTypeIcon } from './file-thumbnail';
 import { sourceAppName, sourceChannelName } from './files-app-state';
 import type { FilesTab } from '../../shared/files-state';
@@ -25,12 +26,14 @@ export function DocumentTab({
   call,
   onBack,
   onClose,
+  onCompat,
 }: {
   tab: Extract<FilesTab, { kind: 'document' }>;
   windowId: string;
   call?: LearningCall;
   onBack(): void;
   onClose(): void;
+  onCompat(on: boolean): void;
 }) {
   const { snapshot, online, mutate, apps, error: libraryError } = useLibrary();
   const entry = snapshot?.entries.find((entry) => entry.id === tab.entryId);
@@ -73,6 +76,7 @@ export function DocumentTab({
         {snapshot && <Button onClick={onClose}>关闭标签页</Button>}
       </div>
     );
+  const pdf = entry.kind === 'file' && entry.type === 'application/pdf';
   const secondary = [
     entry.kind === 'snippet' ? snippetOriginLabel(entry.origin, apps) : '',
     entry.source
@@ -126,6 +130,8 @@ export function DocumentTab({
         />
         {entry.kind === 'snippet' ? (
           <SnippetDocument id={entry.id} />
+        ) : tab.compat && pdf ? (
+          <RemoteDocument filesTabId={tab.id} onLocal={() => onCompat(false)} />
         ) : (
           <FilePreview entry={entry} call={call} />
         )}
@@ -136,6 +142,7 @@ export function DocumentTab({
         windowId={windowId}
         onClose={() => setMenu(undefined)}
         onDeleted={onBack}
+        compat={pdf ? { on: !!tab.compat, toggle: () => onCompat(!tab.compat) } : undefined}
       />
     </div>
   );

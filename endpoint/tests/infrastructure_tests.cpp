@@ -458,8 +458,11 @@ void StoppedVersion5Read() {
   {
     sqlite::Database raw;
     Check(bool(raw.Open(session_directory / "session.db")), "open raw database");
-    Check(bool(raw.Execute("ALTER TABLE views ADD COLUMN position INTEGER NOT NULL DEFAULT 0")),
-          "add v5 position column");
+    Check(
+        bool(raw.Execute("ALTER TABLE views ADD COLUMN position INTEGER NOT NULL DEFAULT 0")) &&
+            bool(raw.Execute("ALTER TABLE coordination_state ADD COLUMN desired_revision TEXT NOT "
+                             "NULL DEFAULT '0'")),
+        "add v5 position and revision columns");
     {
       auto insert = raw.Prepare("INSERT INTO views VALUES(?,?,0)");
       Check(bool(insert) && bool(insert.value().Bind(1, std::string("1"))) &&

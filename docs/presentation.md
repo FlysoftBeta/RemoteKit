@@ -62,6 +62,8 @@ Client:   每个 video 观察到自己的真实 RTP 并匹配当前 epoch → �
 
 atlas 计划和规范化布局身份只由稳定窗口尺寸、DPR、采样规划、成员顺序、矩形、padding 与对齐决定。`occludedBottom / occlusionRevision` 位于该身份之外；同一平面的矩形不因键盘缩小或移动，其他窗口也不重新打包。Viewer 的 video 保持稳定尺寸，编辑窗口的页面 viewport 在平面顶部原地缩短，下方传白色空带。
 
+**遮挡版本**：`occlusionRevision` 是十进制 u64，值为 `(viewerGeneration << 32) | seq`（`control/shared/occlusion-revision.ts`）。`viewerGeneration` 由 Control 在每次 Viewer 接入时为该租户分配（`viewer_generations` 表持久计数，1..2^32-1，用尽返回 `limit_exceeded`，不回绕），随 `ProductState.viewer.generation` 下发；`seq` 是 Viewer 在该代次内从 1 开始的单调序号，不持久化，用尽同样报 `limit_exceeded`。Control 拒绝高 32 位不等于当前代次或同代次倒退的上报（`conflict` + `stale_generation`）。换设备接管后新代次的值一定大于同一 WebView 上前一个 Viewer 留下的版本，Endpoint 与 Browser 的 u64 比较因此不受设备时钟影响。
+
 仅遮挡变化时 Endpoint 保持输出与编码管线，Browser 原地 resize WebContents；不更新 generation/layoutEpoch、不重发 layout、不触发 prepare/ready，也不为遮挡请求关键帧。`view.viewport` 只更新页面高度和输入边界，不改变呈现 ready。逐帧 `viewports` 将页面高度/revision 绑定真实 RTP，用于判断哪一帧已反映新高度。
 
 窗口 resize、旋转、DPR/UI scale、可见成员或 atlas 规划变化仍按完整布局身份建立新代次和屏障；同时携带当前遮挡，让新代次首帧使用正确的页面高度。
@@ -69,6 +71,8 @@ atlas 计划和规范化布局身份只由稳定窗口尺寸、DPR、采样规�
 **布局与输出 extent 分开**：编码 extent 在首个可见 atlas 时确定，只有 DPR 变化才重算。extent 不变的布局变化（resize、分栏、切换窗口、可见成员变化）不关闭输出、不重配编码器、不重建共享输出纹理：Browser 收到原地布局事务，只为尺寸变化的 view 换 plane，旧 plane 按 GPU Fence 退休；Endpoint 建立新的 layoutEpoch 与屏障。extent 真变化才完整重配。几何事务的首帧是显式呈现需求：新几何已应用、还没有匹配像素时按身份投递优先 Begin，直到成功，不受低 FPS 节拍留下的旧截止时间约束（见[节拍 · 呈现刷新](pacing.md#呈现刷新首帧与布局补帧)）。纯遮挡更新同样带 revision 级刷新需求。
 
 **几何是瞬态的**：窗口尺寸、DPR、可见性、展示顺序与遮挡都不写入 `session.db`，直接应用、不经持久化事务；只有 view 集合与需要崩溃恢复的拓扑才提交。Endpoint 重启后 view 先用隐藏的 1×1 占位，等 Viewer 重报几何。
+
+**几何优先**：协调线程记住上一次完整收敛的运行中文档的身份（除 revision、quality 与每个 view 的宽高、可见性、遮挡外的全部字段）。新 desired 与它身份相同、Session 运行中且未锁定、Browser 状态允许时，直接把几何应用到已暂存的 view 并走现有输出调和，跳过 prepare、start、完整观察与 `ConvergeDesired`；拓扑、身份、锁定、授权、策略或剪贴板变化，以及几何应用被拒绝（布局冲突、状态不允许）时走完整收敛。协调循环在执行任务后与维护后都检查是否有更新的 desired，有就跳过本轮维护与观察发布让几何先走（最多让出 100ms，防止维护被饿死）；只应用最新的 desired，过时几何自然合并。正在执行的慢步骤不会被打断。
 
 **冲突立即重规划**：`view_transaction_identity_mismatch`、view 正在关闭、页面 viewport 未被接受这类能确定原因的冲突，按最新快照立即重规划，最多 3 次，之后才进入共享重试单元的退避；真正的 unavailable/outcome_unknown 才指数退避。
 

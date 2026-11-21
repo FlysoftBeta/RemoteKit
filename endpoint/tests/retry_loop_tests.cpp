@@ -433,6 +433,101 @@ void LayoutConflictReplanning(const fs::path& root) {
   Check(!blocked && configures == before + kImmediateLayoutAttempts,
         "the shared retry deadline gates another burst");
 }
+// A document view stages its PDF before the Browser creates it, and a document that cannot be
+// staged never holds back the Session's other views.
+void DocumentViews(const fs::path& root) {
+  NativeRetryClock clock;
+  SessionFixture fixture(root, "output.reconcile");
+  auto& views = fixture.owner.Views();
+  const std::string good(64, 'a'), forbidden(64, 'b'), flaky(64, 'c');
+  std::vector<Json> created;
+  std::vector<std::string> staged;
+  std::vector<std::map<std::string, std::string>> retained;
+  views.SetDocuments(
+      {[&](const std::string& view, const std::string& asset) -> Result<StagedDocument> {
+         staged.push_back(view + ":" + asset);
+         if (asset == forbidden)
+           return Error{ErrorCode::kForbidden, "asset_not_referenced"};
+         if (asset == flaky)
+           return Error{ErrorCode::kUnavailable, "replica_offline"};
+         return StagedDocument{"C:\\staged\\" + view + ".file", 1234};
+       },
+       [&](const std::map<std::string, std::string>& wanted) { retained.push_back(wanted); }});
+  browser_dispatch = [&](Json request) -> Result<Json> {
+    const auto method = request.at("method");
+    if (method == "snapshot")
+      return Json{{"sessions", Json::array({{{"views", Json::array()}}})}};
+    if (method == "view.create")
+      created.push_back(request);
+    if (method == "output.configure")
+      return Json{{"layoutRevision", 1}};
+    return Json::object();
+  };
+  const auto view = [](const std::string& id, const std::string& asset) {
+    Json value{{"viewId", id},
+               {"presence", "ensure"},
+               {"url", asset.empty() ? "about:blank" : "remotekit-pdf://viewer/"},
+               {"width", 800},
+               {"height", 600},
+               {"visible", false},
+               {"device", {{"mode", "desktop"}, {"deviceScaleFactor", 1}}},
+               {"occludedBottom", 0},
+               {"occlusionRevision", "1"}};
+    if (!asset.empty())
+      value["document"] = {{"kind", "pdf"}, {"assetId", asset}};
+    return value;
+  };
+  const auto document = [&](std::vector<Json> items, const std::string& revision) {
+    return Json{{"views", Json(items)},
+                {"placementEpoch", 1},
+                {"revision", revision},
+                {"connectionEpoch", "1"},
+                {"lock", {{"state", "unlocked"}}}};
+  };
+  const auto created_view = [&](const std::string& id) -> const Json* {
+    for (const auto& request : created)
+      if (request.at("view") == id)
+        return &request;
+    return nullptr;
+  };
+
+  Take(views.StageDesired(document({view("1", ""), view("2", good)}, "2")));
+  Take(views.ConvergeDesired());
+  const auto* plain = created_view("1");
+  const auto* bound = created_view("2");
+  Check(plain && !plain->contains("document"), "a normal view carries no document");
+  Check(bound && bound->at("url") == "remotekit-pdf://viewer/" &&
+            bound->at("document") == Json({{"path", "C:\\staged\\2.file"}, {"size", "1234"}}),
+        "a document view is created with its staged file and the viewer URL");
+  Check(!retained.empty() && retained.back() == std::map<std::string, std::string>{{"2", good}},
+        "only the wanted document stays staged");
+
+  created.clear();
+  Take(views.StageDesired(document({view("1", ""), view("3", forbidden)}, "3")));
+  Take(views.ConvergeDesired());
+  Check(created_view("1") && !created_view("3"),
+        "a final staging failure leaves the view uncreated and the others untouched");
+  const auto errors = Take(views.Snapshot()).at("documentErrors");
+  Check(errors.size() == 1 && errors.at("3").at("code") == "forbidden",
+        "the failure is reported on the view with its error code");
+  Check(!retained.back().contains("2"), "a view that left the desired set releases its document");
+
+  created.clear();
+  Take(views.StageDesired(document({view("1", ""), view("4", flaky)}, "4")));
+  const auto transient = views.ConvergeDesired();
+  Check(!transient && transient.error().code == ErrorCode::kUnavailable,
+        "a transient staging failure is returned to the coordinator's retry");
+  Check(created_view("1") && !created_view("4"), "a transient failure still creates other views");
+  Check(Take(views.Snapshot()).at("documentErrors").empty(),
+        "a transient failure is not reported as a final view failure");
+
+  const auto conflict = views.StageDesired(document({view("1", ""), view("4", good)}, "5"));
+  Check(!conflict && conflict.error().code == ErrorCode::kConflict,
+        "a view cannot switch to another document");
+  const auto removed = views.StageDesired(document({view("1", ""), view("4", "")}, "6"));
+  Check(!removed && removed.error().code == ErrorCode::kConflict,
+        "a document view cannot become an ordinary view");
+}
 void PreviousDocumentJob() {
   const Json previous{{"version", 1},
                       {"buildId", "build"},
@@ -493,6 +588,7 @@ int main(int argc, char** argv) try {
   PreviousDocumentJob();
   if (selected.empty() || selected == "output.reconcile")
     LayoutConflictReplanning(root / "layout-conflicts");
+  DocumentViews(root / "document-views");
   if (selected.empty() || selected == "browser.health")
     BrowserHealthReplies(root / "health-replies");
   for (const auto code : {ErrorCode::kBusy, ErrorCode::kRateLimited, ErrorCode::kUnavailable,

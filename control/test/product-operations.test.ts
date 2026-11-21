@@ -239,6 +239,7 @@ test('a returning Viewer restores a frozen view before publishing it visible', a
       ],
     });
     await f.control.reconciler.reconcileProduct(f.tenant);
+    await f.control.reconciler.settled(f.tenant);
     assert(restored);
     assert.equal(view.visible, true);
   } finally {

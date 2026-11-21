@@ -1,4 +1,5 @@
 #include "browser/popup_registry.h"
+#include "browser/observed_state.h"
 #include "base/unguessable_token.h"
 namespace remotekit::browser {
 void PopupRegistry::Prune() {
@@ -9,13 +10,16 @@ void PopupRegistry::Prune() {
     if (!closed && base::TimeTicks::Now() < popup.deadline)
       continue;
     popup.status = closed ? "closed" : "timed_out";
+    ObservedState::Changed();
     popup.requests.reset();
     popup.contents.reset();
     popup.deadline = base::TimeTicks::Now() + base::Seconds(30);
   }
-  std::erase_if(pending, [](const auto& entry) {
+  const auto erased = std::erase_if(pending, [](const auto& entry) {
     return entry.second.status != "pending" && base::TimeTicks::Now() >= entry.second.deadline;
   });
+  if (erased)
+    ObservedState::Changed();
 }
 void PopupRegistry::Wire(PageRequests* requests, SessionId session, WebViewId opener) {
   requests->SetPopupHandler([this, session, opener](std::unique_ptr<content::WebContents> page,
@@ -36,6 +40,7 @@ void PopupRegistry::Wire(PageRequests* requests, SessionId session, WebViewId op
     popup.requests->Bind(popup.contents.get());
     auto* result = popup.contents.get();
     pending.emplace(key, std::move(popup));
+    ObservedState::Changed();
     return result;
   });
 }
@@ -55,6 +60,7 @@ std::unique_ptr<content::WebContents> PopupRegistry::TakeContents(const std::str
 void PopupRegistry::CompleteAdoption(const std::string& key, WebViewId view) {
   adopted[key] = view;
   pending.erase(key);
+  ObservedState::Changed();
 }
 void PopupRegistry::Clear() {
   for (auto& [key, popup] : pending) {

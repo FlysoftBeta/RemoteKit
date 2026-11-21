@@ -2851,6 +2851,7 @@ test('chunk commits do no library recomputes and last replica loss refreshes onl
       h.store.workspaces.writeWorkspace(emptyWorkspace(tenant));
       h.control.tenants.get(tenant).viewer = {
         id: tenant,
+        generation: 1,
         revoke() {},
         authentication: { identity: tenant, valid: () => true },
         security: h.control.security.create({ id: tenant } as any, true),
@@ -2903,8 +2904,9 @@ test('chunk commits do no library recomputes and last replica loss refreshes onl
     alpha.close();
     await offline;
     for (let i = 0; i < 10; ++i) h.control.library.objectsChanged([id(1)]);
-    await new Promise((resolve) => setTimeout(resolve, 275));
-    assert.deepEqual(recomputed.sort(), ['online-19', 'online-2']);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The first change refreshes at once; the other nine collapse into one more pass.
+    assert.deepEqual(recomputed.sort(), ['online-19', 'online-19', 'online-2', 'online-2']);
     assert.equal(h.control.objects.available(id(1)), false);
   } finally {
     await h.close();

@@ -17,6 +17,10 @@ export function useFileLibrary(
   product?: Pick<ProductState, 'workspace' | 'fileRequests'> | null,
 ) {
   const [store] = useState(() => new LibraryStore(request, rpc));
+  useEffect(() => {
+    store.pushing = () => rpc.live();
+    return rpc.selectionResults.subscribe(({ selectionId }) => store.selectionResolved(selectionId));
+  }, [store, rpc]);
   const requestVersion = canonicalJson(product?.fileRequests ?? requestIds);
   useEffect(() => {
     store.configure(online, enabled, identity, requestIds, requestVersion);

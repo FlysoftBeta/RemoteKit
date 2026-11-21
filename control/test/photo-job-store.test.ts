@@ -302,62 +302,67 @@ test('uncertain retakes retain candidate jobs without changing the saved entry',
   assert.equal(f.mutations[0].params.originalAssetId, alternative);
 });
 
-test('rotation accumulates taps and debounces one absolute derivation from the original', async (t) => {
+test('rotation starts at once and later taps collapse into one follow-up from the original', async (t) => {
   const f = fixture(t, entry);
+  const pending: ((asset: ProcessedPhoto) => void)[] = [];
+  f.setProcess(() => new Promise((resolve) => pending.push(resolve)));
   f.store.rotate(entry, 'basket');
-  t.mock.timers.tick(500);
-  f.store.rotate(entry, 'basket');
-  assert.equal(f.store.getSnapshot()[0].rotationTurns, 2);
-  t.mock.timers.tick(599);
-  await flush();
-  assert.equal(f.calls.length, 0);
-  t.mock.timers.tick(1);
-  await flush();
   assert.equal(f.calls.length, 1);
-  assert.equal(f.calls[0].source, originalId);
-  assert.equal(f.calls[0].mode, 'scan');
-  assert.equal(f.calls[0].turns, 1);
-  assert.equal(f.mutations[0].method, 'library.replace');
+  assert.equal(f.calls[0].turns, 0);
+  f.store.rotate(entry, 'basket');
+  f.store.rotate(entry, 'basket');
+  assert.equal(f.store.getSnapshot()[0].rotationTurns, 3);
+  assert.equal(f.calls[0].signal?.aborted, true);
+  assert.equal(f.calls.length, 1);
+  pending[0]({ ...result, quarterTurns: 0 });
+  await flush();
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.calls[1].source, originalId);
+  assert.equal(f.calls[1].mode, 'scan');
+  assert.equal(f.calls[1].turns, 2);
+  pending[1]({ ...result, quarterTurns: 2 });
+  await flush();
+  assert.equal(f.mutations.length, 1);
   const params = f.mutations[0].params as LibraryMethods['library.replace']['params'];
+  assert.equal(f.mutations[0].method, 'library.replace');
   assert.equal(params.entryId, entry.id);
   assert.equal(params.expectedRevision, 7);
   assert.equal(params.originalAssetId, originalId);
-  assert.equal(params.photo?.quarterTurns, 1);
+  assert.equal(params.photo?.quarterTurns, 2);
   assert.deepEqual(f.store.getSnapshot(), []);
 });
 
-test('a tap aborts in-flight rotation and restarts even before its late result arrives', async (t) => {
+test('a tap aborts in-flight rotation and its replacement starts when the aborted call settles', async (t) => {
   const target = { ...entry, photo: { mode: 'photo' as const, quarterTurns: 2 as const } };
   const f = fixture(t, target);
   const pending: ((asset: ProcessedPhoto) => void)[] = [];
   f.setProcess(() => new Promise((resolve) => pending.push(resolve)));
   f.store.rotate(target, 'basket');
-  t.mock.timers.tick(600);
   f.store.rotate(target, 'basket');
   assert.equal(f.calls[0].signal?.aborted, true);
-  t.mock.timers.tick(600);
+  assert.equal(f.calls.length, 1);
+  pending[0]({ ...result, quarterTurns: 3 });
+  await flush();
   assert.equal(f.calls.length, 2);
   assert.equal(f.calls[1].turns, 0);
   pending[1](result);
-  await flush();
-  pending[0]({ ...result, quarterTurns: 3 });
   await flush();
   assert.equal(f.mutations.length, 1);
   assert.equal('quarterTurns' in f.mutations[0].params.photo!, false);
   assert.deepEqual(f.store.getSnapshot(), []);
 });
 
-test('four taps cancel a no-op rotation without a request and cancel reverts feedback', async (t) => {
+test('four taps leave no rotation task and cancel reverts feedback', async (t) => {
   const f = fixture(t, entry);
+  f.setProcess(() => new Promise(() => {}));
   for (let tap = 0; tap < 4; tap++) f.store.rotate(entry, 'basket');
   assert.deepEqual(f.store.getSnapshot(), []);
-  t.mock.timers.tick(600);
-  assert.equal(f.calls.length, 0);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].signal?.aborted, true);
   f.store.rotate(entry, 'basket');
   f.store.cancel(f.store.getSnapshot()[0].id);
   assert.deepEqual(f.store.getSnapshot(), []);
-  t.mock.timers.tick(600);
-  assert.equal(f.calls.length, 0);
+  assert.equal(f.calls[0].signal?.aborted, true);
 });
 
 test('rotation failures use retry and cancel and keep the original source', async (t) => {

@@ -122,6 +122,8 @@ export class ViewerSession {
       processPhoto: files.processPhoto.bind(files),
       commitSelection: pageFiles.commitSelection.bind(pageFiles),
       cancelSelection: pageFiles.cancelSelection.bind(pageFiles),
+      selectionResults: pageFiles.selectionResults,
+      live: pageFiles.live.bind(pageFiles),
     });
     let workspace: WorkspaceSession;
     const control = (this.control = new ControlSession(

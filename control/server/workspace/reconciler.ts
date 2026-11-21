@@ -1,16 +1,18 @@
 import { BackgroundJob } from '../background';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import { wireError } from '../../shared/errors';
 import { EndpointSnapshotError, endpointError } from '../endpoint/gateway';
 import { log } from '../log';
 import { normalizedUsagePage } from '../navigation-url';
 import { settle } from './operations';
 import { pageUsageIdentity } from './workspace';
 
-import type { ProductTab } from '../../shared/product';
+import type { ProductTab, ProductWorkspace } from '../../shared/product';
 import { isLocalTab } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 import { canonical, type SessionObserved } from '../endpoint/coordination';
 import { KeyedSerialQueue } from '../util/serial-queue';
+import type { NavigationAck } from './navigation';
 
 export class Reconciler {
   private closed = false;
@@ -18,6 +20,10 @@ export class Reconciler {
   private readonly requested = new Map<string, { dirty: boolean; work: Promise<void> }>();
   private readonly observations = new WeakMap<object, string>();
   private readonly products = new KeyedSerialQueue();
+  private readonly maintenanceWork = new Map<
+    string,
+    { dirty: boolean; acks: NavigationAck[]; work: Promise<void> }
+  >();
 
   observe(message: SessionObserved) {
     const runtime = this.context.tenants.get(message.tenantId);
@@ -37,6 +43,7 @@ export class Reconciler {
       views: message.views.map(({ compositor, renderer_pids, ...view }) => view),
       pendingPopups: message.pendingPopups,
       recovery: message.recovery,
+      documentErrors: message.documentErrors,
       blockers: message.blockers,
       rtc: { active: message.rtc.active, connectionId: message.rtc.connectionId },
       mediaPolicy: message.stats.mediaPolicy,
@@ -45,8 +52,46 @@ export class Reconciler {
     });
     if (this.observations.get(runtime) === key) return;
     this.observations.set(runtime, key);
+    this.projectPageRequests(message);
     if (!runtime.viewer && !runtime.started && !runtime.pendingRtcCheck) return;
     return this.requestProduct(message.tenantId);
+  }
+
+  /**
+   * Dialogs and file requests are projected straight from the observation, not through the
+   * full reconciliation: that queue may be busy for a second, and the file basket is something
+   * the user is waiting for. Only an observation that is still the tenant's current one is
+   * projected; the reconciliation repeats the projection from the same data.
+   */
+  private projectPageRequests(message: SessionObserved) {
+    const tenant = message.tenantId;
+    if (this.closed || this.context.closed) return;
+    const runtime = this.context.tenants.get(tenant);
+    const endpoint = this.context.endpoint;
+    if (
+      !runtime.viewer ||
+      endpoint.observation(tenant) !== message ||
+      !endpoint.isReady(tenant) ||
+      endpoint.sessionFault(tenant)
+    )
+      return;
+    const receivedAt = Date.now();
+    const known = new Set((runtime.pageRequests.files ?? []).map((file) => file.id));
+    this.services.pageRequests.collectDialogs(
+      tenant,
+      this.context.store.workspaces.workspace(tenant),
+      endpoint.current(tenant),
+    );
+    const projectedAt = Date.now();
+    for (const file of runtime.pageRequests.files ?? [])
+      if (!known.has(file.id))
+        log.info('page_request.timeline', {
+          tenant,
+          request: file.binding.request,
+          observationSeq: message.seq,
+          observationReceivedAt: receivedAt,
+          projectedAt,
+        });
   }
 
   publishDesired(tenant: string) {
@@ -79,8 +124,11 @@ export class Reconciler {
         }
       } finally {
         this.requested.delete(tenant);
-        if (tracking.inflight === request.work) delete tracking.inflight;
       }
+      // Maintenance runs outside the tenant lock and the request queue: a new request starts its
+      // projection while it is still going. Waiting here only lets callers see its result.
+      await this.maintenanceWork.get(tenant)?.work;
+      if (tracking.inflight === request.work) delete tracking.inflight;
     });
     this.requested.set(tenant, request);
     tracking.inflight = request.work;
@@ -298,6 +346,14 @@ export class Reconciler {
       if (!writtenTitles) this.writtenTitles.set(runtime, (writtenTitles = new Map()));
       const tabIds = new Set(state.tabs.map((tab) => tab.id));
       for (const id of writtenTitles.keys()) if (!tabIds.has(id)) writtenTitles.delete(id);
+      const documentErrors = (snapshot.documentErrors ?? {}) as Record<string, unknown>;
+      for (const t of state.tabs) {
+        if (!t.owner) continue;
+        const failed = documentErrors[t.webviewId];
+        if (failed) t.documentError = wireError(endpointError(failed));
+        else delete t.documentError;
+      }
+      const acks: NavigationAck[] = [];
       for (const t of [...state.tabs]) {
         const current = actual.find((v) => v.viewId === t.webviewId);
         if (!current) {
@@ -309,7 +365,7 @@ export class Reconciler {
           if (current.close_state === 'closed') this.services.pageRequests.removeProductTab(state, t);
           continue;
         }
-        await this.services.navigation.observe(state, t, current, snapshot);
+        acks.push(...this.services.navigation.observe(state, t, current, snapshot));
         // A provisional failure restored a local product tab. Do not project
         // the retained Browser view's URL/title over that local product state.
         if (isLocalTab(t)) continue;
@@ -379,121 +435,67 @@ export class Reconciler {
         t.restoring =
           !t.lifecycleRecoveryError && (recovering || (!!current.pending && current.desired === 0));
       }
-      await this.services.pageRequests.continueWindowClose(state);
-      for (const pending of this.context.store.operations.pendingOperations(tenant)) {
-        if (pending.receipt.resolved) continue;
-        const a = pending.action;
-        if (
-          !pending.receipt.resolved &&
-          pending.receipt.browserIncarnation &&
-          (snapshot.running === false ||
-            (typeof snapshot.browserIncarnation === 'string' &&
-              snapshot.browserIncarnation !== pending.receipt.browserIncarnation))
-        ) {
-          settle(pending.receipt, { status: 'unknown' });
-          pending.receipt.resolved = true;
-          pending.receipt.resolution = 'target-retired';
-          pending.receipt.error = { code: 'outcome_unknown', message: '原页面实例已结束，操作执行结果未知' };
-          delete pending.receipt.application;
-          this.context.store.operations.saveOperation(state, pending.receipt);
+      const settlePending = () => {
+        for (const pending of this.context.store.operations.pendingOperations(tenant)) {
+          if (pending.receipt.resolved) continue;
+          const a = pending.action;
+          if (
+            !pending.receipt.resolved &&
+            pending.receipt.browserIncarnation &&
+            (snapshot.running === false ||
+              (typeof snapshot.browserIncarnation === 'string' &&
+                snapshot.browserIncarnation !== pending.receipt.browserIncarnation))
+          ) {
+            settle(pending.receipt, { status: 'unknown' });
+            pending.receipt.resolved = true;
+            pending.receipt.resolution = 'target-retired';
+            pending.receipt.error = {
+              code: 'outcome_unknown',
+              message: '原页面实例已结束，操作执行结果未知',
+            };
+            delete pending.receipt.application;
+            this.context.store.operations.saveOperation(state, pending.receipt);
+          }
+          if (
+            ['tab.navigate', 'tab.command'].includes(a.type) &&
+            !state.tabs.some((tab) => tab.id === a.tabId) &&
+            !pending.receipt.resolved
+          ) {
+            settle(pending.receipt, { status: 'unknown' });
+            pending.receipt.resolved = true;
+            pending.receipt.resolution = 'target-retired';
+            pending.receipt.error = {
+              code: 'outcome_unknown',
+              message: '页面已关闭，之前的导航结果无法确认',
+            };
+            delete pending.receipt.application;
+            this.context.store.operations.saveOperation(state, pending.receipt);
+          }
+          const removed =
+            (a.type === 'tab.close' && !state.tabs.some((tab) => tab.id === a.tabId)) ||
+            (a.type === 'window.close' && !state.windows.some((window) => window.id === a.windowId)) ||
+            (a.type === 'space.close' && !state.spaces.some((space) => a.spaceIds.includes(space.id))) ||
+            (a.type === 'app.uninstall' && !state.apps.some((app) => 'web:' + app.id === a.appId));
+          if (removed) {
+            settle(pending.receipt, { status: 'committed' });
+            delete pending.receipt.application;
+            this.context.store.operations.saveOperation(state, pending.receipt);
+          }
         }
-        if (
-          ['tab.navigate', 'tab.command'].includes(a.type) &&
-          !state.tabs.some((tab) => tab.id === a.tabId) &&
-          !pending.receipt.resolved
-        ) {
-          settle(pending.receipt, { status: 'unknown' });
-          pending.receipt.resolved = true;
-          pending.receipt.resolution = 'target-retired';
-          pending.receipt.error = { code: 'outcome_unknown', message: '页面已关闭，之前的导航结果无法确认' };
-          delete pending.receipt.application;
-          this.context.store.operations.saveOperation(state, pending.receipt);
-        }
-        const removed =
-          (a.type === 'tab.close' && !state.tabs.some((tab) => tab.id === a.tabId)) ||
-          (a.type === 'window.close' && !state.windows.some((window) => window.id === a.windowId)) ||
-          (a.type === 'space.close' && !state.spaces.some((space) => a.spaceIds.includes(space.id))) ||
-          (a.type === 'app.uninstall' && !state.apps.some((app) => 'web:' + app.id === a.appId));
-        if (removed) {
-          settle(pending.receipt, { status: 'committed' });
-          delete pending.receipt.application;
-          this.context.store.operations.saveOperation(state, pending.receipt);
-        }
-      }
+      };
+      settlePending();
       const fullscreenChanged = this.services.pageRequests.observeFullscreen(state, snapshot, actual);
       this.services.operations.saveWorkspace(state);
       this.services.pageRequests.collectDialogs(tenant, state, snapshot);
       if (fullscreenChanged) this.services.viewers.push(tenant);
+      await this.services.pageRequests.continueWindowClose(state);
+      settlePending();
       resourceLimitation = this.services.policy.qualityFor(tenant, state).resourceLimitation;
       if (snapshot.status)
         throw new EndpointSnapshotError(endpointError(snapshot.status), snapshot.browserRestart);
       if (snapshot.running === false && !resourceLimitation)
         throw new RemoteKitError('unavailable', 'Browser已离线，页面保留并等待恢复');
-      const viewer = runtime.viewer,
-        viewport = viewer?.viewport ?? runtime.lastViewport;
-      const visibilityChanged = () =>
-        (runtime.viewer?.viewport ?? runtime.lastViewport) !== viewport ||
-        this.context.store.workspaces.workspace(tenant).revision !== state.revision;
       this.services.lifecycle.observeWanted(state);
-      const wanted = (tab: ProductTab) => this.services.lifecycle.wantedVisible(state, tab);
-      const ordered = [...state.tabs]
-        .filter((t) => !isLocalTab(t))
-        .sort((a, b) => Number(wanted(a)) - Number(wanted(b)));
-      for (const t of resourceLimitation ? [] : ordered) {
-        if (visibilityChanged()) {
-          this.publishDesired(tenant);
-          return;
-        }
-        if (!(runtime.viewer !== undefined)) {
-          await this.observeOffline(tenant);
-          return;
-        }
-        const current = actual.find((v) => v.viewId === t.webviewId),
-          key = tenant + '/' + t.webviewId,
-          visible = wanted(t),
-          region = viewport?.windows.find((w) => w.windowId === t.windowId),
-          dpr = this.services.policy.qualityFor(tenant, state).effectiveDpr;
-        if (t.popup?.status === 'failed') continue;
-        if (visible) this.services.lifecycle.forget(tenant, key);
-        const recovering = current?.recovery?.pending === true;
-        const lifecycleBlocked =
-          current?.lifecycle_uncertain === true || !!t.lifecycleRecovery || !!t.lifecycleRecoveryError;
-        const readyToShow = await this.services.lifecycle.prepareVisible(
-          tenant,
-          t.webviewId,
-          visible,
-          current,
-          lifecycleBlocked,
-        );
-        if (visibilityChanged()) {
-          this.publishDesired(tenant);
-          return;
-        }
-        if (lifecycleBlocked) {
-          await this.services.lifecycle.advanceLifecycleRecovery(
-            state,
-            t,
-            current,
-            snapshot.browserIncarnation,
-            visible && viewer === runtime.viewer && !viewer?.security?.locked,
-          );
-          continue;
-        }
-        if (t.pendingUaReloadOrigin && readyToShow)
-          await this.services.navigation.reloadForSiteIdentity(
-            state,
-            t,
-            current,
-            snapshot.browserIncarnation!,
-          );
-        await this.services.lifecycle.maintainBackgroundTab(
-          state,
-          t,
-          current,
-          visible,
-          snapshot.browserIncarnation,
-        );
-      }
       this.context.endpoint.invalidate(tenant);
       if (resourceLimitation) {
         const changed = runtime.lastErrorKey !== 'resource_limit';
@@ -501,9 +503,8 @@ export class Reconciler {
         runtime.lastError = new RemoteKitError('limit_exceeded', resourceLimitation, { capacity: 'windows' });
         if (changed) this.services.viewers.push(tenant);
       } else {
-        tracking.retry.succeed();
-        const previousError = runtime.clearError();
-        if (previousError) this.services.viewers.push(tenant);
+        // The reconciliation succeeds when its maintenance does; failures share this tenant's retry.
+        this.requestMaintenance(tenant, acks);
       }
     } catch (error) {
       this.services.pageRequests.clear(tenant);
@@ -515,6 +516,142 @@ export class Reconciler {
       runtime.lastError = failure;
       this.services.viewers.push(tenant);
       throw error;
+    }
+  }
+  /** Maintenance is the Browser calls that follow a projection; the latest request wins. */
+  private requestMaintenance(tenant: string, acks: NavigationAck[]) {
+    if (this.closed || this.context.closed) return;
+    const existing = this.maintenanceWork.get(tenant);
+    if (existing) {
+      existing.dirty = true;
+      existing.acks.push(...acks);
+      return;
+    }
+    const entry = { dirty: true, acks: [...acks], work: Promise.resolve() };
+    entry.work = Promise.resolve().then(async () => {
+      try {
+        while (entry.dirty && !this.closed && !this.context.closed) {
+          entry.dirty = false;
+          await this.maintain(tenant, entry.acks.splice(0));
+        }
+      } finally {
+        this.maintenanceWork.delete(tenant);
+      }
+    });
+    this.maintenanceWork.set(tenant, entry);
+    this.pending.add(entry.work);
+    const release = () => this.pending.delete(entry.work);
+    void entry.work.then(release, release);
+  }
+  private async maintain(tenant: string, acks: NavigationAck[]) {
+    const runtime = this.context.tenants.get(tenant);
+    const tracking = runtime.reconciliation;
+    try {
+      await this.maintainTabs(tenant, runtime, acks);
+      tracking.retry.succeed();
+      const previousError = runtime.clearError();
+      if (previousError) this.services.viewers.push(tenant);
+    } catch (error) {
+      const failure = toRemoteKitError(error);
+      tracking.retry.ready(this.productInput(tenant, this.observations.get(runtime)));
+      tracking.retry.fail(failure);
+      runtime.lastErrorKey = 'endpoint';
+      runtime.lastError = failure;
+      this.services.viewers.push(tenant);
+    }
+  }
+  /** Resolves when the tenant has no reconciliation or maintenance in flight. */
+  async settled(tenant: string) {
+    for (;;) {
+      const work = this.requested.get(tenant)?.work ?? this.maintenanceWork.get(tenant)?.work;
+      if (!work) return;
+      await work;
+    }
+  }
+  /** Runs one step with the tenant's current product state, under the lock. */
+  private withTab(
+    tenant: string,
+    tabId: string,
+    work: (state: ProductWorkspace, tab: ProductTab) => Promise<void>,
+  ) {
+    return this.context.tenants.serial(tenant, async () => {
+      if (this.closed || this.context.closed) return;
+      const state = this.context.store.workspaces.workspace(tenant);
+      const tab = state.tabs.find((candidate) => candidate.id === tabId);
+      if (tab) await work(state, tab);
+    });
+  }
+  private async maintainTabs(
+    tenant: string,
+    runtime: ReturnType<DomainContext['tenants']['get']>,
+    acks: NavigationAck[],
+  ) {
+    const message = this.context.endpoint.observation(tenant);
+    if (!message || !runtime.viewer || !this.context.endpoint.isReady(tenant)) return;
+    const snapshot = this.context.endpoint.current(tenant);
+    if (acks.length) await this.services.navigation.acknowledge(tenant, acks);
+    if (snapshot.running === false || snapshot.status) return;
+    const state = this.context.store.workspaces.workspace(tenant);
+    if (this.services.policy.qualityFor(tenant, state).resourceLimitation) return;
+    const actual: any[] = Array.isArray(snapshot.views) ? snapshot.views : [];
+    const viewer = runtime.viewer,
+      viewportKey = JSON.stringify(viewer.viewport ?? runtime.lastViewport);
+    // A viewport change ends this pass and starts another. The observation is not rechecked: a
+    // newer one has its own projection, and the Endpoint rejects lifecycle requests for a view
+    // generation that moved on. Product revisions are not checked either; an operation requests
+    // its own reconciliation.
+    const superseded = () => {
+      if (JSON.stringify(runtime.viewer?.viewport ?? runtime.lastViewport) === viewportKey) return false;
+      this.requestMaintenance(tenant, []);
+      return true;
+    };
+    const wanted = (tab: ProductTab) => this.services.lifecycle.wantedVisible(state, tab);
+    const ordered = [...state.tabs]
+      .filter((t) => !isLocalTab(t))
+      .sort((a, b) => Number(wanted(a)) - Number(wanted(b)));
+    for (const t of ordered) {
+      if (superseded() || !runtime.viewer) return;
+      const current = actual.find((v) => v.viewId === t.webviewId),
+        key = tenant + '/' + t.webviewId,
+        visible = wanted(t);
+      if (t.popup?.status === 'failed') continue;
+      if (visible) this.services.lifecycle.forget(tenant, key);
+      const lifecycleBlocked =
+        current?.lifecycle_uncertain === true || !!t.lifecycleRecovery || !!t.lifecycleRecoveryError;
+      // No product state is read after this call starts, so the Browser call runs outside the lock.
+      const readyToShow = await this.services.lifecycle.prepareVisible(
+        tenant,
+        t.webviewId,
+        visible,
+        current,
+        lifecycleBlocked,
+      );
+      if (superseded()) return;
+      if (lifecycleBlocked) {
+        await this.withTab(tenant, t.id, (fresh, tab) =>
+          this.services.lifecycle.advanceLifecycleRecovery(
+            fresh,
+            tab,
+            current,
+            snapshot.browserIncarnation,
+            visible && viewer === runtime.viewer && !viewer.security?.locked,
+          ),
+        );
+        continue;
+      }
+      if (t.pendingUaReloadOrigin && readyToShow)
+        await this.withTab(tenant, t.id, (fresh, tab) =>
+          this.services.navigation.reloadForSiteIdentity(fresh, tab, current, snapshot.browserIncarnation!),
+        );
+      await this.withTab(tenant, t.id, (fresh, tab) =>
+        this.services.lifecycle.maintainBackgroundTab(
+          fresh,
+          tab,
+          current,
+          visible,
+          snapshot.browserIncarnation,
+        ),
+      );
     }
   }
   private productInput(tenant: string, observation: string | undefined) {

@@ -1,4 +1,5 @@
 #include "browser/selection_geometry.h"
+#include "browser/selection_revision.h"
 
 #include <cstdio>
 #include "base/at_exit.h"
@@ -42,8 +43,34 @@ gfx::SelectionBound Bound(gfx::SelectionBound::Type type, float x) {
   bound.set_visible(true);
   return bound;
 }
+
+void CheckSelectionRevisions() {
+  remotekit::browser::SelectionRevisionTracker tracker;
+  using Presentation = remotekit::browser::SelectionRevisionTracker::Presentation;
+  const auto handles = Presentation{true, 0, false};
+  const auto first = tracker.Observe({1, 2}, handles);
+  CHECK(first);
+  CHECK(tracker.Observe({1, 2}, handles) == first);
+  // Handles moving within the same presentation keep the revision.
+  CHECK(tracker.Observe({1, 2}, Presentation{true, 0, false}) == first);
+  // A menu opening over the handles is a new presentation.
+  const auto menu = tracker.Observe({1, 2}, Presentation{true, 5, false});
+  CHECK(menu > first);
+  CHECK(tracker.Observe({1, 2}, Presentation{true, 5, false}) == menu);
+  CHECK(tracker.Observe({1, 2}, Presentation{true, 6, false}) > menu);
+  // Views are independent and the counter never repeats.
+  const auto other = tracker.Observe({1, 3}, handles);
+  CHECK(other > menu);
+  CHECK(tracker.Observe({1, 2}, Presentation{}) == 0);
+  CHECK(tracker.Observe({1, 2}, handles) > other);
+  const auto insertion = tracker.Observe({1, 3}, Presentation{true, 0, true});
+  CHECK(insertion > other);
+  tracker.Forget(1, 3);
+  CHECK(tracker.Observe({1, 3}, Presentation{true, 0, true}) > insertion);
+}
 }  // namespace
 int main() {
+  CheckSelectionRevisions();
   base::AtExitManager exit;
   using namespace remotekit::browser;
   using remotekit::SelectionExtent;

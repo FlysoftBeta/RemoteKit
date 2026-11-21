@@ -111,6 +111,16 @@ export function openFilesEntry(state: FilesWindowState, tabId: string, entryId: 
     state,
   );
 }
+export function setDocumentCompat(state: FilesWindowState, tabId: string, on: boolean): FilesWindowState {
+  return {
+    ...state,
+    tabs: state.tabs.map((tab) => {
+      if (tab.id !== tabId || tab.kind !== 'document') return tab;
+      const { compat: _, ...rest } = tab;
+      return on ? { ...rest, compat: true } : rest;
+    }),
+  };
+}
 export function backFilesTab(state: FilesWindowState, tabId: string): FilesWindowState {
   return {
     ...state,

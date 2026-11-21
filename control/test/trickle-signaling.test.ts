@@ -14,6 +14,9 @@ class SignalEndpoint implements EndpointLink {
   readonly state = { state: 'ready' as const, incarnation: 'test', connectionEpoch: 'test' };
   listener?: (event: RtcSignal) => void;
   calls: { method: string; tenant: string; args: any }[] = [];
+  onFaceChanged() {
+    return () => {};
+  }
   onSignal(listener: (event: RtcSignal) => void) {
     this.listener = listener;
     return () => {

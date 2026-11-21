@@ -73,7 +73,7 @@ function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
     },
     endpointGeneration: 1,
     endpointError: null,
-    viewer: { connected: true },
+    viewer: { connected: true, generation: 1 },
     integrations: { siteUa: false, lifecycle: false, popupAdoption: false },
   };
 }

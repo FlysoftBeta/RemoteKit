@@ -8,7 +8,7 @@
 |---|---|---|
 | 文档身份 | 非零 generation 布局里的 session/view/instance/document；连接、授权、组件生命周期 | 换文档、view 移除、Tab/Window 失活、锁定时结束旧会话 |
 | 远端编辑目标 | 有序的 `input.editable` + 精确的焦点 ACK | active 授予编辑资格；NONE 立即撤销；未知不等于 NONE |
-| 键盘意图 | `KeyboardSession`：armed / attached / dismissed | 点按等待新的 pointer focus，显式键盘按钮直接授予一次打开；开启聚焦时自动打开键盘后，进入新文档与打开这项设置也能授予；媒体 ready 只执行已有的请求 |
+| 键盘意图 | `KeyboardSession`：armed / attached / dismissed | 点按等待新的 pointer focus，显式键盘按钮直接授予一次打开；开启聚焦时自动打开键盘后，进入新文档与打开这项设置也能授予；打开不等媒体/布局就绪，就绪只门禁输入投递 |
 | 本地输入连接 | textarea 的实际 DOM 焦点和 composition 事件 | 保持同一个代理；真实 blur 结束本地输入；窗口 blur 只释放按住的键、指针和触点 |
 
 另有两个观测量：可视区域（visualViewport、innerHeight、ResizeObserver）只更新稳定内容 bounds 和遮挡量，从不调用 focus/blur；画面与输入坐标由[布局屏障](presentation.md#布局屏障)决定，旧布局和过渡快照永远不授予输入。
@@ -55,7 +55,13 @@ grace     → dismissed 200ms 到期
 - 目标替换、焦点 token 或布局轮换、状态重发都不能重新授权，也不能撤销用户的手动隐藏。媒体恢复本身永远不会重新打开被收起的键盘。
 - 窗口 blur 而代理仍聚焦时不结束 IME（输入法自己的窗口可能暂时拿走窗口焦点）；页面真正 hidden 或代理 DOM blur 仍按失焦处理。
 
-**自动打开设置**：设置 → 输入 →"聚焦输入框时自动打开键盘"（`autoKeyboard`，默认关闭，Control 保存，对所有站点生效）。关闭时点按记录当前 revision 水位，必须在 1500ms 内观察到 active、`focusSource:pointer` 且 `focusRevision` 高于水位；按钮触发的脚本 focus 不满足条件。满足后可以等待媒体就绪。开启时恢复按文档进入自动打开。改这项设置不收起已打开的键盘，关闭只撤销尚未执行的自动意图。当前 Window 有编辑目标时始终提供"显示键盘 / 隐藏键盘"悬浮按钮。手动隐藏优先使用本地 compositionend 完成组合；没收到时以同目标最后的组合文本完成一次提交；目标或文档失效则取消。
+**自动打开设置**：设置 → 输入 →"聚焦输入框时自动打开键盘"（`autoKeyboard`，默认关闭，Control 保存，对所有站点生效）。关闭时点按记录当前 revision 水位，必须在 1500ms 内观察到 active、`focusSource:pointer` 且 `focusRevision` 高于水位；按钮触发的脚本 focus 不满足条件。满足后立即打开键盘，不等帧与 resize 就绪：就绪只门禁输入投递（未就绪时的输入进 `DeferredEditingInput`，从不发给旧目标或旧布局）。开启时恢复按文档进入自动打开。改这项设置不收起已打开的键盘，关闭只撤销尚未执行的自动意图。当前 Window 有编辑目标时始终提供"显示键盘 / 隐藏键盘"悬浮按钮。手动隐藏优先使用本地 compositionend 完成组合；没收到时以同目标最后的组合文本完成一次提交；目标或文档失效则取消。
+
+**手势内的候选焦点**：粗指针设备上点按远端画面时，pointerdown 在同一手势内把代理 textarea 以 `inputmode="none"` 聚焦为候选（`client/editing/candidate-focus.ts`），不弹键盘、不滚动。远端确认是可编辑目标且满足打开条件时原地把 inputmode 切回正常值，由于焦点本身来自手势，移动浏览器通常直接弹出键盘，省掉一次手势外的 blur+focus；400ms 内仍没观察到键盘时回退为一次 blur+refocus。1500ms 内没有确认、或新的 NONE 超过 200ms 宽限时撤销候选。精确指针设备不使用候选焦点。
+
+**键盘时间线**：每次点按记录 tap、远端焦点、候选焦点、打开命令、inputmode 切换、visualViewport 首次变化、识别为键盘、首次发出遮挡、首个反映新高度的帧（相对毫秒，保留最近 8 次、10 秒内），随诊断采集的 `input.keyboard` 上传，用来在真机上定位慢在哪一段。
+
+**键盘归属**（`client/editing/keyboard-ownership.ts`）：`remote | shell | none`，由当前焦点决定。归属远端时键盘只更新所属 view 的遮挡；归属外壳（开始屏幕搜索、文件篮、设置等外壳输入框）时只调整本地外壳可用区域（`--shell-keyboard-inset`，悬浮按钮随之上移），远端窗口的稳定几何与遮挡都不变，分屏时旁边的远端窗口不再跟着缩放。识别到键盘打开的第一个遮挡值立即发出，不经合并窗口。
 
 **外壳自己的输入框**（开始屏幕搜索、对话框、设置、我的文件、文档跳页、锁屏）统一用 `useAutoFocus`（`client/editing/local-autofocus.ts`）代替 `autoFocus`：仍然在出现时获得焦点，硬件键盘可以直接输入；设置关闭且是粗指针设备时先把 `inputmode` 设为 none 再聚焦，第一次 pointerdown（点按处理之前）或 blur 时恢复原 inputmode，因此点按输入框才弹出软键盘。
 
@@ -65,7 +71,9 @@ grace     → dismissed 200ms 到期
 
 普通文本长按选词；空输入框长按显示可用的粘贴，已有文本还可全选；按住插入手柄不移动时也能打开快捷菜单。“更多”进入 Browser 页面上下文菜单。选区高亮由网页绘制，水滴手柄和按钮由 Viewer 绘制，见[统一文本选择](input.md#统一文本选择)。
 
-命令、点外部、Escape、切 view 或失活都要关闭远端菜单：`selection_command {command:dismiss}` 或 `context_command {command:dismiss}` 走有序输入；过期菜单的 dismiss 成功但不操作。关闭同时清理 selection controller 的拖动/触控状态和页面 context-menu 状态。Endpoint 在 DataChannel 关闭、授权撤销和 peer 清理时发 Session 级 `menus.close` 并释放远端输入。收尾仍校验连接与授权，允许跨媒体屏障送达；旧文档请求不操作新页面。
+选区命令返回明确的提交结果：已发出则关闭菜单；未发出（通道关闭、表面过期、粘贴准备失败）保留菜单并显示错误，不自动重试；剪切、粘贴发出后的结果视为未知，保留菜单且不允许重发，直到下一次选区更新。
+
+命令、点外部、Escape、切 view 或失活都要关闭远端菜单：选区用 `selection.dismiss{revision}`，页面上下文菜单用 `context_command {command:dismiss}`，走有序输入。Browser 为每个 view 的选区呈现（手柄与菜单共用）维护单调的 `selectionRevision`，随 `input.selection` 下发；dismiss 只在 revision 等于当前值时关闭，所以迟到的关闭不会关掉刚打开的新菜单。`selection_command` 的 menu 必须非零。关闭同时清理 selection controller 的拖动/触控状态和页面 context-menu 状态。Endpoint 在 DataChannel 关闭、授权撤销和 peer 清理时发 Session 级 `menus.close` 并释放远端输入。收尾仍校验连接与授权，允许跨媒体屏障送达；旧文档请求不操作新页面。
 
 ## 键盘遮挡
 

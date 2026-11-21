@@ -130,7 +130,7 @@ test('wanted-visible dwell excludes locked viewers, hidden windows, background t
     runtime.viewer = {
       id: 'viewer',
       security: { locked: false },
-      viewport: { windows: [{ windowId: 'window', visible: true }] },
+      viewport: { activeSpaceId: 'space', windows: [{ windowId: 'window', visible: true }] },
     } as any;
     const state = store.workspaces.workspace(tenantId);
     state.tabs = [0, 1].map((index) => ({
@@ -164,10 +164,10 @@ test('wanted-visible dwell excludes locked viewers, hidden windows, background t
     control.lifecycle.observeWanted(state);
     clock.advance(2000);
     runtime.viewer!.viewport!.windows[0].visible = true;
-    state.activeSpaceId = null;
+    runtime.viewer!.viewport!.activeSpaceId = 'elsewhere';
     control.lifecycle.observeWanted(state);
     clock.advance(2000);
-    state.activeSpaceId = 'space';
+    runtime.viewer!.viewport!.activeSpaceId = 'space';
     state.windows[0].activeTabId = 'tab-1';
     control.lifecycle.observeWanted(state);
     clock.advance(2000);

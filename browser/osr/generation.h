@@ -52,6 +52,7 @@ class Generation : public std::enable_shared_from_this<Generation> {
   void SchedulePump() { scheduler_.SchedulePump(); }
   void PublishLayout() { atlas_.PublishLayout(); }
   void PublishClipboardSequence(uint64_t sequence);
+  void ObservedChanged(uint64_t revision);
   void StopView(uint64_t id) { plane_pool_.StopView(id); }
   void Fatal(std::string error) { retirement_.Fatal(std::move(error)); }
   void Disconnected() { scheduler_.Disconnected(); }

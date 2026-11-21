@@ -99,7 +99,7 @@ REMOTEKIT_SDK_API int remotekit_sdk_control_request(uint64_t handle,
                                                     uint32_t timeout_ms);
 REMOTEKIT_SDK_API int remotekit_sdk_control_close(uint64_t handle);
 
-#define REMOTEKIT_SDK_ABI_VERSION 5
+#define REMOTEKIT_SDK_ABI_VERSION 6
 #define REMOTEKIT_SDK_RENDER_SLOT_COUNT 4
 struct remotekit_sdk_render_setup {
   uint32_t struct_size, width, height, mapping_size;
@@ -121,7 +121,8 @@ enum remotekit_sdk_render_event_type {
   REMOTEKIT_SDK_RENDER_REJECT = 1,
   REMOTEKIT_SDK_RENDER_FATAL = 2,
   REMOTEKIT_SDK_RENDER_STOPPED = 3,
-  REMOTEKIT_SDK_RENDER_WAKE = 4
+  REMOTEKIT_SDK_RENDER_WAKE = 4,
+  REMOTEKIT_SDK_RENDER_OBSERVED_CHANGED = 5
 };
 enum remotekit_sdk_render_reject_reason {
   REMOTEKIT_SDK_RENDER_IDLE = 1,
@@ -151,6 +152,10 @@ typedef void (*remotekit_sdk_render_callback)(void* context,
  * WAKE is low-frequency idle demand, carrying the last Idle Reject identity.
  * It is neither a request terminal event nor GPU completion and clears no pending
  * request. Duplicate Wake is ignored; no Wake callback is delivered after Stop.
+ * OBSERVED_CHANGED carries the render generation and, in value, the Browser observed-state
+ * revision: the Browser state a snapshot observes changed and the consumer should take a fresh
+ * observation. It is not a request terminal event, clears no
+ * pending request and is not delivered after Stop.
  * close is a callback barrier. No callback may run after it returns. */
 REMOTEKIT_SDK_API int remotekit_sdk_render_connect(const char* name_utf8,
                                                    remotekit_sdk_render_callback callback,

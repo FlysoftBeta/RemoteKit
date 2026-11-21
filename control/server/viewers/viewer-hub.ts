@@ -1,6 +1,7 @@
 import { browserAvailability } from '../workspace/browser-availability';
 import { reportError } from '../log';
-import { RemoteKitError, wireError } from '../../shared/errors';
+import { RemoteKitError, STALE_GENERATION_DETAIL, wireError } from '../../shared/errors';
+import { OCCLUSION_SEQUENCE_MAX, splitOcclusionRevision } from '../../shared/occlusion-revision';
 import { canonicalJson } from '../config';
 import { log } from '../log';
 
@@ -50,6 +51,7 @@ export class ViewerHub {
       browserRestart: runtime.browserRestart,
       viewer: {
         connected: runtime.viewer !== undefined,
+        generation: runtime.viewer?.generation ?? null,
       },
       announcements: user ? this.context.store.announcements.forUser(user.id) : [],
       integrations: { siteUa: true, lifecycle: true, popupAdoption: true },
@@ -103,13 +105,17 @@ export class ViewerHub {
     if (security?.locked || (epoch !== undefined && security?.epoch !== epoch))
       throw new RemoteKitError('locked', 'Viewer 已锁定');
   }
-  async pollFaceAuth() {
+  /** Face status changes arrive as node events; only a challenge quiet for `quietMs` is read here. */
+  async pollFaceAuth(quietMs = 0) {
     await this.services.security.retryRevocations();
     await Promise.all(
       this.context.tenants
         .withViewers()
         .filter(([, viewer]) => !!viewer.security?.challenge)
-        .map(([tenant, viewer]) => viewer.security && this.services.security.poll(tenant, viewer.security)),
+        .map(
+          ([tenant, viewer]) =>
+            viewer.security && this.services.security.pollQuiet(tenant, viewer.security, quietMs),
+        ),
     );
   }
   async attachViewer(
@@ -119,6 +125,8 @@ export class ViewerHub {
     authentication: { identity: string; valid: () => boolean },
     initialUnlocked = false,
   ) {
+    // Allocated first: an exhausted counter must fail the attach before anything changes.
+    const generation = this.context.store.viewerGenerations.next(tenant);
     this.context.endpoint.attachViewer(tenant);
     const runtime = this.context.tenants.get(tenant);
     this.services.policy.qualityState(tenant).resetFeedback();
@@ -133,7 +141,7 @@ export class ViewerHub {
     const security = this.services.security.create(user, initialUnlocked);
     this.services.pageRequests.clearFullscreen(tenant);
     this.context.store.reclaim.attach(tenant);
-    runtime.viewer = { id, revoke, authentication, security };
+    runtime.viewer = { id, generation, revoke, authentication, security };
     old?.revoke('another-viewer');
     this.context.events.emit('auth', tenant, id, this.authState(tenant, security));
     const previous = runtime.connectionId;
@@ -191,6 +199,12 @@ export class ViewerHub {
       !Number.isFinite(body.devicePixelRatio) ||
       body.devicePixelRatio < 0.5 ||
       body.devicePixelRatio > 8 ||
+      !(
+        body.activeSpaceId === null ||
+        (typeof body.activeSpaceId === 'string' &&
+          body.activeSpaceId.length > 0 &&
+          body.activeSpaceId.length <= 128)
+      ) ||
       !Array.isArray(body.windows) ||
       body.windows.length > WORKSPACE_LIMITS.windows ||
       (body.refreshHz !== undefined &&
@@ -218,6 +232,13 @@ export class ViewerHub {
         w.height > 8192
       )
         throw new RemoteKitError('invalid_request', '无效的窗口显示区域');
+      const { generation, sequence } = splitOcclusionRevision(w.occlusionRevision);
+      if (sequence < 1 || sequence > OCCLUSION_SEQUENCE_MAX)
+        throw new RemoteKitError('invalid_request', '无效的窗口显示区域');
+      if (generation !== runtime.viewer!.generation)
+        throw new RemoteKitError('conflict', '显示区域属于已过期的 Viewer 代次', {
+          detail: STALE_GENERATION_DETAIL,
+        });
       ids.add(w.windowId);
     }
     const previous = runtime.viewer!.viewport;
@@ -228,7 +249,7 @@ export class ViewerHub {
         return old && BigInt(w.occlusionRevision) < BigInt(old.occlusionRevision);
       })
     )
-      return this.productState(tenant);
+      throw new RemoteKitError('conflict', '遮挡版本不能倒退', { detail: STALE_GENERATION_DETAIL });
     // Preflight cannot mutate live observations or replace a valid viewport.
     const feasibility = new QualityState().snapshot(state, body);
     if (feasibility.resourceLimitation)
@@ -236,6 +257,7 @@ export class ViewerHub {
     const viewport = {
       devicePixelRatio: body.devicePixelRatio,
       refreshHz: body.refreshHz,
+      activeSpaceId: body.activeSpaceId as string | null,
       windows: body.windows.map((w: any) => ({
         windowId: w.windowId,
         width: w.width,
@@ -286,7 +308,7 @@ export class ViewerHub {
               !state.tabs.some((tab) => tab.id === window.activeTabId && isLocalTab(tab)),
           ) &&
           state.spaces.some(
-            (space) => space.id === state.activeSpaceId && space.windowIds.includes(region.windowId),
+            (space) => space.id === viewport.activeSpaceId && space.windowIds.includes(region.windowId),
           ),
       );
       const accepted = this.services.policy

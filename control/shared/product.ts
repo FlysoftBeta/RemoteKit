@@ -107,11 +107,22 @@ export interface IdleKeepAliveOutcome {
   reason: 'statistics' | 'pressure' | 'exhaustion';
   returnedAt?: number;
 }
+export interface FilesTabOwner {
+  kind: 'files';
+  windowId: string;
+  filesTabId: string;
+  /** The asset this tab's view was created for; a view's document never changes. */
+  assetId: string;
+}
 export interface ProductTab {
   idleKeepAlive: boolean;
   idleKeepAliveState?: { enabledAt: number; eligibleSince?: number; leftAt?: number };
   idleKeepAliveOutcome?: IdleKeepAliveOutcome;
   signIn?: LearningProvider;
+  /** Set on a tab that exists only to render one Files document tab remotely. */
+  owner?: FilesTabOwner;
+  /** Final failure of the owned tab's document, reported by the Endpoint. */
+  documentError?: WireError;
   usageDocument?: string;
   usageSource?: 'launcher';
   navigation?: {
@@ -384,7 +395,8 @@ export interface ProductState {
   endpointActivity?: 'saving-session';
   endpointErrorKind?: 'runtime' | 'output-capacity';
   browserRestart?: 'ready' | 'waiting' | 'exhausted';
-  viewer: { connected: boolean };
+  /** `generation` is the high half of the connected Viewer's occlusion revisions. */
+  viewer: { connected: boolean; generation: number | null };
   /** Newest first. */
   announcements: Announcement[];
   integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean };
@@ -486,6 +498,8 @@ export function creationIdFields(action: {
 export interface ViewerViewport {
   devicePixelRatio: number;
   refreshHz?: number;
+  /** The space whose windows `windows[].visible` was computed for. */
+  activeSpaceId: string | null;
   windows: {
     windowId: string;
     width: number;
@@ -606,6 +620,8 @@ export type SocketMessage =
   | RtcServerSignal
   | { type: 'state'; revision: number; state: ProductState }
   | { type: 'library'; snapshot: import('./file-library').LibrarySnapshot }
+  | { type: 'admin.changed'; keys: string[] }
+  | { type: 'sessionImport'; state: import('./session-import').SessionImportState }
   | { type: 'result'; id: string; result: unknown }
   | { type: 'error'; id: string; error: WireError }
   | { type: 'lease'; outcome: 'replaced' | 'logged_out' };

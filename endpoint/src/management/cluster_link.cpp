@@ -484,8 +484,11 @@ bool ClusterLink::Queue(const Json& message,
     return false;
   }
   std::string observation;
+  // A newer value of a state notification replaces the queued one.
   if (message.value("event", Json()) == "session.observed")
     observation = Json::array({message.at("tenantId"), message.at("sessionId")}).dump();
+  else if (message.value("event", Json()) == "service.face.changed")
+    observation = Json::array({"face", message.at("tenantId")}).dump();
   auto replaced = impl_->outgoing.end();
   if (!observation.empty())
     replaced = std::find_if(impl_->outgoing.begin(), impl_->outgoing.end(),

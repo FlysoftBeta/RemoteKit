@@ -220,9 +220,18 @@ export const migrations: Migration[] = [
         CREATE INDEX object_derivations_source ON object_derivations(source_id,kind);`);
     },
   },
+  {
+    version: 32,
+    name: 'viewer occlusion generations',
+    up(db) {
+      db.exec(`CREATE TABLE viewer_generations (
+        tenant TEXT PRIMARY KEY,
+        generation INTEGER NOT NULL CHECK(generation BETWEEN 1 AND 4294967295));`);
+    },
+  },
 ];
 
-export const currentVersion = 31;
+export const currentVersion = 32;
 export interface MigrationOptions extends MigrationContext {
   backupDirectory: string;
   buildId: string;
@@ -263,6 +272,27 @@ function backup(db: Database.Database, from: number, options: MigrationOptions) 
   for (const file of files.slice(3)) unlinkSync(file.path);
 }
 
+function foreignKeyViolations(db: Database.Database) {
+  const counts = new Map<string, number>();
+  for (const row of db.pragma('foreign_key_check') as { table: string; parent: string; fkid: number }[]) {
+    const key = `${row.table}\0${row.parent}\0${row.fkid}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+// Runs inside the step's transaction so a failed check rolls the version back too.
+// Violations already present before migrating are reported by the startup integrity
+// scan; a step may only not add to them. No step disables foreign_keys, which SQLite
+// cannot toggle inside a transaction.
+function verify(db: Database.Database, existing: Map<string, number>) {
+  if (db.pragma('integrity_check', { simple: true }) !== 'ok')
+    throw new Error('Database integrity check failed');
+  for (const [key, count] of foreignKeyViolations(db))
+    if (count > (existing.get(key) ?? 0))
+      throw new Error(`Foreign key check failed: ${key.split('\0').join(' -> ')}`);
+}
+
 export function migrate(db: Database.Database, options: MigrationOptions) {
   const target = migrations[migrations.length - 1]?.version ?? currentVersion;
   try {
@@ -276,12 +306,16 @@ export function migrate(db: Database.Database, options: MigrationOptions) {
     let version = Number(rows[0].version);
     if (!Number.isSafeInteger(version)) throw new Error('schema_version must be a safe integer');
     const pending = migrations.filter((step) => step.version > version);
-    if (pending.length) backup(db, version, options);
+    // A database created a moment ago holds nothing worth a backup.
+    if (pending.length && !empty) backup(db, version, options);
     db.transaction(() => {
+      const existingViolations = foreignKeyViolations(db);
       for (const step of pending) {
         if (step.version !== version + 1) throw new Error('Migration numbers must be consecutive');
         try {
           step.up(db, options);
+          db.prepare('UPDATE schema_version SET version=?').run(step.version);
+          verify(db, existingViolations);
         } catch (cause) {
           throw new RemoteKitError('internal', 'Database migration failed', {
             reason: 'corrupt_state',
@@ -291,12 +325,9 @@ export function migrate(db: Database.Database, options: MigrationOptions) {
           });
         }
         version = step.version;
-        db.prepare('UPDATE schema_version SET version=?').run(version);
       }
       if (version !== target) throw new Error('Invalid schema_version');
     })();
-    if (db.pragma('integrity_check', { simple: true }) !== 'ok')
-      throw new Error('Database integrity check failed');
   } catch (cause) {
     if (cause instanceof RemoteKitError) throw cause;
     throw corruptState('control.db', cause);

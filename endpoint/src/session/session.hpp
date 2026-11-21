@@ -80,7 +80,14 @@ class Session {
     checkpoint_cache.MaybeStage(context.objects, config.tenant);
   }
   void FlushSignals() { channel.FlushSignals(); }
-  void SetSignal(std::function<void()> signal) { channel.SetSignal(std::move(signal)); }
+  void SetSignal(std::function<void()> signal) {
+    store.SetEventsAppended(signal);
+    files.SetNotify(signal);
+    channel.SetSignal(std::move(signal));
+  }
+  void SetObservedChanged(std::function<void()> notify) {
+    output.Slots().SetObservedChanged(std::move(notify));
+  }
   ViewController& Views() { return views; }
   FileController& Files() { return files; }
   MediaPipeline& Media() { return pipeline; }

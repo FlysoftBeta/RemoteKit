@@ -118,6 +118,8 @@ test('HTTP and socket boundaries expose code and message without diagnostic deta
   let failure: unknown = new RemoteKitError('forbidden', '需要权限', { detail: 'private detail' });
   const control = {
     events: new EventEmitter(),
+    endpoint: { nodes: new EventEmitter() },
+    store: { accounts: { userForTenant: () => undefined } },
     accounts: {
       setupStatus() {
         throw failure;

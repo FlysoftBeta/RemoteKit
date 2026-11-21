@@ -4,7 +4,7 @@
 #include <string>
 
 namespace remotekit {
-inline constexpr int64_t kSessionDbVersion = 6;
+inline constexpr int64_t kSessionDbVersion = 7;
 struct SessionMigration {
   int64_t version;
   const char* name;

@@ -304,8 +304,8 @@ Result<InputPayload> DecodeSelectionCommand(const base::DictValue* event) {
   SelectionCommand value;
   const auto* menu = event->FindString("menu");
   const auto* command = event->FindString("command");
-  if (!menu || !base::StringToUint64(*menu, &value.menu) ||
-      *menu != base::NumberToString(value.menu) || !command)
+  if (!menu || !ReadId(*event, "menu", &value.menu) || *menu != base::NumberToString(value.menu) ||
+      !command)
     return PayloadError("invalid_selection_command");
   if (*command == "cut")
     value.command = SelectionCommand::Command::cut;
@@ -315,12 +315,17 @@ Result<InputPayload> DecodeSelectionCommand(const base::DictValue* event) {
     value.command = SelectionCommand::Command::paste;
   else if (*command == "selectAll")
     value.command = SelectionCommand::Command::select_all;
-  else if (*command == "dismiss")
-    value.command = SelectionCommand::Command::dismiss;
   else if (*command == "contextMenu")
     value.command = SelectionCommand::Command::context_menu;
   else
     return PayloadError("invalid_selection_command");
+  return {value, {}};
+}
+Result<InputPayload> DecodeSelectionDismiss(const base::DictValue* event) {
+  SelectionDismiss value;
+  if (!ReadId(*event, "revision", &value.revision) ||
+      *event->FindString("revision") != base::NumberToString(value.revision))
+    return PayloadError("invalid_selection_dismiss");
   return {value, {}};
 }
 Result<InputPayload> DecodeSelectionExtent(const base::DictValue* event) {
@@ -389,6 +394,7 @@ Result<InputPayload> DecodePayload(const base::DictValue* event, std::string_vie
       {"key", DecodeKey},
       {"touch", DecodeTouch},
       {"selection_command", DecodeSelectionCommand},
+      {"selection.dismiss", DecodeSelectionDismiss},
       {"selection.extent", DecodeSelectionExtent},
       {"context_command", DecodeContextCommand},
       {"gesture", DecodeGesture},

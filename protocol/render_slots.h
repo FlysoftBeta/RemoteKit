@@ -27,7 +27,11 @@ enum class RenderWireType : std::uint32_t {
   kReject = 2,
   kStop = 3,
   kStopped = 4,
-  kWake = 5
+  kWake = 5,
+  // Rend to Comp: the Browser state a snapshot observes changed; Comp should observe now.
+  // Carries the render generation and the Browser's observed-state revision (strictly
+  // increasing, nonzero). It grants nothing and has no reply.
+  kObservedChanged = 6
 };
 struct RenderWireMessage {
   std::uint32_t magic = kRenderWireMagic;
@@ -56,6 +60,13 @@ inline constexpr bool ValidRenderWake(const RenderWireMessage& message) {
          message.type == RenderWireType::kWake && !message.reason &&
          ValidRenderIdentity(message.begin.identity) && !message.begin.interval_us &&
          !message.begin.force;
+}
+inline constexpr bool ValidRenderObservedChanged(const RenderWireMessage& message) {
+  return message.magic == kRenderWireMagic && message.version == kRenderWireVersion &&
+         message.type == RenderWireType::kObservedChanged && !message.reason &&
+         message.begin.identity.generation && message.begin.identity.value &&
+         message.begin.identity.value != UINT64_MAX && !message.begin.identity.slot &&
+         !message.begin.identity.reserved && !message.begin.interval_us && !message.begin.force;
 }
 enum class RenderWakeResult { kInvalid, kFirst, kDuplicate };
 // A Wake references the latest Idle Reject, never a successful frame. It grants

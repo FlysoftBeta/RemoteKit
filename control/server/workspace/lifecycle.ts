@@ -84,7 +84,11 @@ export class UncertainRecovery {
       !viewer.security?.locked &&
       !!viewer.viewport?.windows.some((window) => window.windowId === tab.windowId && window.visible) &&
       state.windows.some((window) => window.id === tab.windowId && window.activeTabId === tab.id) &&
-      state.spaces.some((space) => space.id === state.activeSpaceId && space.windowIds.includes(tab.windowId))
+      // The Viewer's own space, not the workspace's: while a switch is in flight the last
+      // reported layout stays in force instead of collapsing to an empty one.
+      state.spaces.some(
+        (space) => space.id === viewer.viewport?.activeSpaceId && space.windowIds.includes(tab.windowId),
+      )
     );
   }
   observeWanted(state: ProductWorkspace, presentationReady = true) {

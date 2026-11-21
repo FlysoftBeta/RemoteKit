@@ -16,6 +16,12 @@ import type { DomainContext, DomainServices } from '../application';
 import type { CommandEffect } from './commands';
 import { settle } from './operations';
 import { pageUsageIdentity } from './workspace';
+export interface NavigationAck {
+  browserIncarnation: string;
+  viewId: string;
+  operationId: string;
+  operationGeneration: string;
+}
 export class Navigation {
   private readonly acknowledgments = new Map<string, RetryUnit>();
   failures() {
@@ -195,8 +201,10 @@ export class Navigation {
       }
     }
   }
-  async observe(state: ProductWorkspace, t: ProductTab, current: any, snapshot: any) {
+  /** Projects terminal navigation results into the product; returns what the Browser must be told. */
+  observe(state: ProductWorkspace, t: ProductTab, current: any, snapshot: any): NavigationAck[] {
     const tenant = state.tenantId;
+    const acks: NavigationAck[] = [];
     if (t.navigation && !t.navigation.resolved && ['applying', 'unknown'].includes(t.navigation.status)) {
       const nav = t.navigation,
         terminal = (current.navigationOperations ?? []).find(
@@ -284,30 +292,36 @@ export class Navigation {
           );
           this.context.store.operations.saveOperation(state, saved.receipt);
         }
-        const key = JSON.stringify([tenant, terminal.operationGeneration, terminal.operationId]);
-        let unit = this.acknowledgments.get(key);
-        if (!unit) {
-          unit = new RetryUnit({
-            failed: (error) =>
-              reportError(error, 'navigation.ack_failed', { tenant, operation: terminal.operationId }),
-            recovered: () =>
-              log.info('navigation.ack_recovered', { tenant, operation: terminal.operationId }),
-          });
-          this.acknowledgments.set(key, unit);
-        }
-        if (!unit.ready(snapshot.browserIncarnation)) continue;
-        try {
-          await this.context.endpoint.ackNavigation(tenant, {
-            browserIncarnation: snapshot.browserIncarnation,
-            viewId: t.webviewId,
-            operationId: terminal.operationId,
-            operationGeneration: terminal.operationGeneration,
-          });
-          unit.succeed();
-          this.acknowledgments.delete(key);
-        } catch (cause) {
-          unit.fail(endpointError(cause));
-        }
+        acks.push({
+          browserIncarnation: snapshot.browserIncarnation,
+          viewId: t.webviewId,
+          operationId: terminal.operationId,
+          operationGeneration: terminal.operationGeneration,
+        });
       }
+    return acks;
+  }
+  /** Sends the acknowledgments `observe` returned; it holds no product state, so it runs outside the tenant lock. */
+  async acknowledge(tenant: string, acks: NavigationAck[]) {
+    for (const ack of acks) {
+      const key = JSON.stringify([tenant, ack.operationGeneration, ack.operationId]);
+      let unit = this.acknowledgments.get(key);
+      if (!unit) {
+        unit = new RetryUnit({
+          failed: (error) =>
+            reportError(error, 'navigation.ack_failed', { tenant, operation: ack.operationId }),
+          recovered: () => log.info('navigation.ack_recovered', { tenant, operation: ack.operationId }),
+        });
+        this.acknowledgments.set(key, unit);
+      }
+      if (!unit.ready(ack.browserIncarnation)) continue;
+      try {
+        await this.context.endpoint.ackNavigation(tenant, ack);
+        unit.succeed();
+        this.acknowledgments.delete(key);
+      } catch (cause) {
+        unit.fail(endpointError(cause));
+      }
+    }
   }
 }

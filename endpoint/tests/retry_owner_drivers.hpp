@@ -465,7 +465,9 @@ inline OwnerDriver DownloadDriver(const fs::path& path, bool cleanup) {
     DownloadImports owner;
     Boundary boundary;
     bool cleanup;
-    bool completed = false;
+    bool delivered = false;
+    // The import stage retries on a storage change, the cleanup stage on a Browser change.
+    std::string incarnation = "browser";
     explicit Fixture(const fs::path& path, bool cleaning)
         : db(path), owner(db.Downloads(), "build"), cleanup(cleaning) {
       Take(db.Open());
@@ -479,20 +481,21 @@ inline OwnerDriver DownloadDriver(const fs::path& path, bool cleanup) {
       const Json event{{"type", "download.completed"},   {"guid", "guid"}, {"eventId", "event"},
                        {"fileReference", "downloads/a"}, {"name", "a"},    {"size", "1"},
                        {"mimeType", "text/plain"},       {"origin", ""}};
-      owner.Observe("browser", completed ? Json::array() : Json::array({event}), "session",
+      owner.Observe(incarnation, delivered ? Json::array() : Json::array({event}), "session",
                     [&](Json request) -> Result<Json> {
-                      auto result = cleanup ? boundary.Call(request) : Result<Json>{Json::object()};
-                      if (result && request.at("method") == "view.closed.ack")
-                        completed = true;
-                      return result;
+                      return cleanup ? boundary.Call(request) : Result<Json>{Json::object()};
                     });
+      delivered = true;
     }
   };
   auto f = std::make_shared<Fixture>(path, cleanup);
   return {f,
           std::shared_ptr<Boundary>(f, &f->boundary),
           [f] { f->Tick(); },
-          [f] { f->owner.SetInput("changed"); },
+          [f] {
+            f->owner.SetStorage("changed");
+            f->incarnation = "changed";
+          },
           [f]() -> const RetryUnit& { return NativeRetryOwnerProbe::Download(f->owner); },
           [f] {
             const auto rows = Take(f->db.Downloads().Load()).at("records");
@@ -562,7 +565,7 @@ inline OwnerDriver DownloadPersistenceDriver(bool handoff) {
   return {f,
           std::shared_ptr<Boundary>(f, &f->boundary),
           [f] { f->Tick(); },
-          [f] { f->owner.SetInput("changed"); },
+          [f] { f->owner.SetStorage("changed"); },
           [f]() -> const RetryUnit& {
             return NativeRetryOwnerProbe::DownloadPersistence(f->owner, f->handoff);
           },
