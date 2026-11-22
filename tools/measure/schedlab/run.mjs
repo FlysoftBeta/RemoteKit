@@ -22,6 +22,7 @@ import { createInterface } from 'node:readline';
 import { launchTestBrowser } from '../../../tests/e2e/kit/browser.mjs';
 import { trackCleanupPid } from '../../../tests/e2e/kit/cleanup.mjs';
 import { summarize } from './summarize.mjs';
+import { Relay, parseSchedule } from './relay.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const root = resolve(here, '../../..');
@@ -205,6 +206,10 @@ export async function run(options = {}) {
   )
     throw Error('Invalid workload mix');
   if (options.tenants && Number(options.tenants) !== count) throw Error('Tenant count and mix differ');
+  const schedule = options.network ? parseSchedule(options.network) : undefined;
+  if (options.probe && options.probe !== 'black') throw Error('Invalid probe');
+  const probe = options.probe ? `&probe=${options.probe}` : '';
+  const relays = new Map();
   const warmup = Number(options.warmup ?? 10),
     duration = Number(options.duration ?? 60);
   if (!Number.isFinite(warmup) || !Number.isFinite(duration) || warmup < 0 || duration <= 0)
@@ -232,9 +237,14 @@ export async function run(options = {}) {
     await generateVideo(exe, video);
   }
   const streams = Object.fromEntries(
-    ['receiver.jsonl', 'fixtures.jsonl', 'bench.jsonl', 'bench.stderr.log', 'receiver.stderr.log'].map(
-      (name) => [name, createWriteStream(join(out, name))],
-    ),
+    [
+      'receiver.jsonl',
+      'fixtures.jsonl',
+      'bench.jsonl',
+      'bench.stderr.log',
+      'receiver.stderr.log',
+      'network.jsonl',
+    ].map((name) => [name, createWriteStream(join(out, name))]),
   );
   const server = createServer((request, response) => {
     const url = new URL(request.url, 'http://localhost');
@@ -342,7 +352,10 @@ export async function run(options = {}) {
         const message = { ...JSON.parse(bytes), tenant };
         if (url.pathname === '/receiver') {
           streams['receiver.jsonl'].write(JSON.stringify(message) + '\n');
-          if (message.type === 'offer') send(message);
+          if (message.type === 'offer') {
+            const relay = relays.get(tenant);
+            send(relay ? { ...message, sdp: relay.offer(message.sdp) } : message);
+          }
           if (message.type === 'frames' && message.frames.length) delivered.add(tenant);
           if (message.type === 'receiverError' && !shuttingDown) fail(message.message);
           if (message.type === 'flushed') flushed.add(tenant);
@@ -381,6 +394,16 @@ export async function run(options = {}) {
     await new Promise((done) => server.listen(0, '127.0.0.1', done));
     const origin = `http://127.0.0.1:${server.address().port}`;
     metadata.origin = origin;
+    if (schedule) {
+      metadata.network = schedule;
+      for (let tenant = 0; tenant < count; ++tenant) {
+        const relay = new Relay(schedule, (value) =>
+          streams['network.jsonl'].write(JSON.stringify({ ...value, tenant }) + '\n'),
+        );
+        await relay.listen();
+        relays.set(tenant, relay);
+      }
+    }
     metadata.tenants = kinds.map((kind, tenant) => ({
       tenant,
       kind,
@@ -420,7 +443,12 @@ export async function run(options = {}) {
         if (message.type === 'epoch') epochReady = true;
         if (message.type === 'stopped') stopped = true;
         if (message.type === 'fatal' || message.type === 'shutdown_error') fail(message.message);
-        if (message.type === 'answer') receivers.get(message.tenant)?.send(JSON.stringify(message));
+        if (message.type === 'answer') {
+          const relay = relays.get(message.tenant);
+          receivers
+            .get(message.tenant)
+            ?.send(JSON.stringify(relay ? { ...message, sdp: relay.answer(message.sdp) } : message));
+        }
         if (message.type === 'resources' && ready && !gate.passed) {
           const sample = gateSample(message, ready.adapter);
           gate.samples.push(sample);
@@ -475,7 +503,7 @@ export async function run(options = {}) {
       '--no-first-run',
       '--no-default-browser-check',
       '--remote-debugging-port=0',
-      `${origin}/${receiverPage}?tenant=0`,
+      `${origin}/${receiverPage}?tenant=0${probe}`,
     ];
     metadata.receiverFlags = receiverFlags;
     receiver = await launchTestBrowser({
@@ -523,7 +551,7 @@ export async function run(options = {}) {
     metadata.receiverPid = receiverPid;
     send({ type: 'receiver', pid: receiverPid });
     for (let tenant = 1; tenant < count; ++tenant)
-      await cdp.send('Target.createTarget', { url: `${origin}/${receiverPage}?tenant=${tenant}` });
+      await cdp.send('Target.createTarget', { url: `${origin}/${receiverPage}?tenant=${tenant}${probe}` });
     await until(
       () => delivered.size === count,
       60000,
@@ -553,6 +581,7 @@ export async function run(options = {}) {
       measurementEnd: t0 + (warmup + duration) * 1000,
     });
     send({ type: 't0', t0 });
+    for (const relay of relays.values()) relay.begin(t0);
     for (const socket of receivers.values()) socket.send(JSON.stringify({ type: 't0', t0 }));
     await until(
       () => epochReady && [...fixtures.values()].filter((value) => value === t0).length === count,
@@ -626,6 +655,7 @@ export async function run(options = {}) {
     await cleanup(async () => {
       for (const path of ownedDirectories()) await removeProfile(out, path);
     });
+    for (const relay of relays.values()) relay.close();
     for (const client of wss.clients) client.terminate();
     await new Promise((done) => wss.close(done));
     server.closeAllConnections();

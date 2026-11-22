@@ -162,6 +162,8 @@ Control 在关键路径上打点（`server/util/perf.ts`）：
 
 **接收端**：同机的一个无头 Edge（或 Chrome 89），每租户一页，经 `kit/browser.mjs` 启动，关闭硬件视频解码，避免与被测的编码争用视频引擎。Worker 里的 encoded transform（Chrome 89 用 encoded insertable streams）记录每个编码帧的到达时间与 RTP。
 
+**网络整形与黑帧探针**：`--network "0:rate=0;5:rate=1000,loss=3;25:rate=0"` 按 t0 起的秒数切换瓶颈带宽（kbit/s，0 为不限）、随机丢包（%）与瓶颈队列（`queue`，毫秒，默认 200，超出尾丢）。实现是 `relay.mjs` 的 UDP 中继：改写双方 SDP，让各自唯一的远端候选都是中继的端口，只对发送端的 SRTP/SRTCP（首字节 128–191）整形，STUN 与 DTLS 原样通过，ICE 与握手不受影响；每秒计数写 `network.jsonl`。`--probe black` 让接收页把 track 放进 `<video>`，每个呈现帧（rVFC）缩到 96×54 记录平均亮度与近黑像素比例；`black-frames.mjs <运行目录>` 按租户列出近黑像素 ≥98% 的连续段、所在 RTP、是否关键帧与前后的解码尺寸。夹具没有大面积黑色，任何命中都是异常。两者都是工况参数，不改变被测代码。
+
 **指标**（`summarize.mjs`）：
 - 延迟 = 接收端编码帧到达 − Comp Begin，按 wire RTP 关联同一帧；同机同一时钟，不含解码与显示。分全部、滚动、视频、更新给 L50/95/99/max。
 - 滚动起点：每次滚动开始后第一个 Begin 的帧的延迟；滚动期间的运动 FPS；视频 FPS；更新内容延迟。
@@ -178,4 +180,4 @@ node tools/measure/schedlab/compare.mjs <run 或 matrix 目录> <run 或 matrix 
 
 `--geometry` 取 `F`（1920×1080@1）、`T`（1280×800@2）或 `<宽>x<高>@<DPR>`；`--tenants N` 用默认组合；默认预热 10 秒。开始前等所选适配器空闲（3D < 0.5%、视频解码/处理 < 0.1%，连续 3 个 1 秒样本；计数缺失不算空闲），所以一次运行的总时长是空闲门禁、启动、预热、测量、收尾与汇总之和，明显长于 `--duration`。输出在 `develop/tmp/schedlab/<UTC 时间>-<标签>/`（`run.json`、`summary.json`、`summary.md`）；结束时无论成败都关闭自己启动的进程、删除接收端 Profile 与各 Browser 数据目录，运行与汇总都成功后才删除原始 trace（`--keep-traces` 保留），失败的运行保留全部原始记录。`compare.mjs` 只比较工况键（geometry、租户数、workload mix）一致的记录，找不到匹配的基线即报错。浏览器会自我重启（启动的 msedge.exe 拉起真正的浏览器后退出），所以清理按本次运行自己的 Profile 目录在命令行里找进程树并结束，不只按启动时的 PID；整个运行另有一个按预热与测量时长加 15 分钟算出的看门狗，超时即结束自己拥有的进程并以非零退出，结束后进程显式退出，不会因为子进程遗留的句柄一直挂着。计时测量独占 GPU，不与构建或其他实验并行。
 
-**局限**：没有 Viewer 解码与呈现、没有网络整形、接收端与被测服务同机；跨机器的结论仍要用真实栈确认。
+**局限**：没有 Viewer 外壳与布局屏障，网络整形只有本机中继的带宽、丢包与队列（没有真实链路的时延抖动与乱序），接收端与被测服务同机；跨机器的结论仍要用真实栈确认。

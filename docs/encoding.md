@@ -84,7 +84,7 @@ QSV 的名义时基固定为 60/1，整个编码器生命周期不变；每帧 Q
 
 **QP 模型**：I、P 分开维护复杂度，bits ≈ C / 2^((QP−4)/6)，QP 取 [10, 51] 内预测不超过目标的最小整数。P 帧每帧最多变 ±4；上一帧预测偏差超过 2 倍时视为场景切换，重置复杂度并放开一帧的限制。首个 IDR 用 QP 26。
 
-**超限**：编码结果超过帧上限且尚未重编时，`Update` 返回 `MFX_BRC_BIG_FRAME`，QP 提高 ceil(6·log2(实际/上限))（至少 +2），重编一次；第二次超限照收。保活帧可以用 `PANIC_BIG_FRAME`。不使用 `PANIC_SMALL_FRAME` 和填充。
+**超限**：编码结果超过帧上限且尚未重编时，`Update` 返回 `MFX_BRC_BIG_FRAME`，QP 提高 ceil(6·log2(实际/上限))（至少 +2，封顶 51），重编一次；第二次超限照收。QP 已是 51 的超限帧直接照收，不请求重编：QP 无法再升时返回 `BIG_FRAME`，Intel 运行时会把这一帧换成退化的最小帧，解码为纯黑（带宽骤降时目标码率很低，IDR 一开始就是 QP 51，于是每个 PLI 触发的 IDR 都黑一下，随后的 P 帧在 QP 51 附近，画面发糊）。只用 `MFX_BRC_OK` 与 `MFX_BRC_BIG_FRAME`，不使用 `PANIC_*` 状态和填充。schedlab 的 `--network` + `--probe black` 能复现这一路径（见[诊断 · schedlab](diagnostics.md#调度实验台-schedlab)）。
 
 **保活帧**（见[节奏 · 静止保活帧](pacing.md#静止保活帧)）：QP = 上一个 P 帧 + 6，不更新模型和节奏，字节计入漏桶。
 

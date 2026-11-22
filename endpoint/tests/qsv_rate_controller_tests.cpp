@@ -194,6 +194,20 @@ int main() {
     step_limit.Prepare(2, {3, 33334, false, false});
     Require(step_limit.GetFrameCtrl(2, 0, false).qp > missed.qp + 4,
             "greater-than-twofold miss did not lift the P QP limit");
+    remotekit::media::QsvRateController saturated(200000, 48000000);
+    saturated.Prepare(0, {1, 0, false, false});
+    saturated.GetFrameCtrl(0, 0, false);
+    saturated.Update(0, 0, 10000000);
+    saturated.GetFrameCtrl(0, 1, false);
+    saturated.Update(0, 1, 10000000);
+    saturated.Complete(0);
+    saturated.Prepare(1, {2, 1000000, false, true});
+    const auto oversized_idr = saturated.GetFrameCtrl(1, 0, true);
+    Require(oversized_idr.qp == 51, "starved IDR did not start at the maximum QP");
+    const auto accepted = saturated.Update(1, 0, 7457);
+    Require(!accepted.recode && accepted.telemetry.qp == 51 && accepted.telemetry.cap_hits == 1,
+            "a cap miss at QP 51 requested a recode that cannot raise the QP");
+    saturated.Complete(1);
     remotekit::media::QsvRateController handoff(1000000, 2000000);
     std::thread writer([&] {
       for (uint32_t index = 1; index <= 10000; ++index)

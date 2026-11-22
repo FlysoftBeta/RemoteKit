@@ -119,7 +119,9 @@ QsvRateController::Feedback QsvRateController::Update(uint32_t order,
   sample.recodes = recode;
   if (sample.actual_bits > sample.cap) {
     sample.cap_hits = 1;
-    if (recode == 0) {
+    // A BIG_FRAME without a higher QP makes the Intel runtime replace the valid frame with a
+    // degenerate one that decodes as solid black, so a frame already at QP 51 is accepted.
+    if (recode == 0 && sample.qp < 51) {
       const int increase =
           std::max(2, int(std::ceil(6 * std::log2(sample.actual_bits / sample.cap))));
       sample.qp = std::min(51, sample.qp + increase);

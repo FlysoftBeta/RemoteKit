@@ -1,3 +1,4 @@
+import { startBlackProbe } from '/black-probe.mjs';
 const tenant = Number(new URLSearchParams(location.search).get('tenant'));
 const socket = new WebSocket(`${location.origin.replace('http', 'ws')}/receiver?tenant=${tenant}`);
 const worker = new Worker('/receiver-worker.mjs', { type: 'module' });
@@ -15,6 +16,7 @@ const codecs = RTCRtpReceiver.getCapabilities('video').codecs.filter(
 );
 if (!codecs.length) throw new Error('Constrained baseline H264 mode 1 unavailable');
 transceiver.setCodecPreferences(codecs);
+if (new URLSearchParams(location.search).get('probe') === 'black') startBlackProbe(peer, send);
 transceiver.receiver.transform = new RTCRtpScriptTransform(worker, { operation: 'decode' });
 function iceComplete() {
   if (peer.iceGatheringState === 'complete') return Promise.resolve();
