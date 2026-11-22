@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <deque>
 #include <limits>
 #include <map>
 #include <memory>
@@ -65,6 +66,8 @@ struct RenderConnection {
   std::recursive_mutex callback_lock;
   std::atomic<bool> closed{false};
   mojo::ScopedMessagePipeHandle pipe;
+  // Messages queued before the claim; only the reader thread consumes them.
+  std::deque<std::vector<uint8_t>> early;
   std::thread reader;
   std::thread::id reader_id;
   uint64_t last_value = 0;

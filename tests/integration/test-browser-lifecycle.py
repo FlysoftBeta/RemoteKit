@@ -207,9 +207,10 @@ def main():
                 assert 'timed out' in uncertain['last_lifecycle']['error']['message'], uncertain
                 late = wait_for(lambda: view('3'), lambda v: v['title'] == 'late freeze acknowledgement', 'late renderer completion')
                 assert late['lifecycle_uncertain'] and late['lifecycle_generation'] == uncertain['lifecycle_generation'], late
-                rejected = rpc('lifecycle', ok=False, view='3', action='unload',
-                               expected_lifecycle_generation=timeout['lifecycle_generation'])
-                assert rejected['error']['code'] == 'conflict', rejected
+                # Generation 0 is no identity on the wire (zero is absent), so a guard naming it is malformed.
+                malformed = rpc('lifecycle', ok=False, view='3', action='unload',
+                                expected_lifecycle_generation=timeout['lifecycle_generation'])
+                assert malformed['error']['code'] == 'invalid_request', malformed
                 assert view('3')['instance'] == timeout['instance']
                 unloaded = rpc('lifecycle', view='3', action='unload',
                                expected_lifecycle_generation=uncertain['lifecycle_generation'])
@@ -221,6 +222,10 @@ def main():
                 assert ready['last_lifecycle']['generation'] == restored['lifecycleGeneration'] and ready['last_lifecycle']['succeeded'], ready
                 assert ready['url'] == timeout['url'] and ready['instance'] != timeout['instance'], ready
                 assert hits['/timeout'] == 2, hits
+                stale = rpc('lifecycle', ok=False, view='3', action='unload',
+                            expected_lifecycle_generation=uncertain['lifecycle_generation'])
+                assert stale['error']['code'] == 'conflict', stale
+                assert view('3')['instance'] == ready['instance']
             if args.case != 'frozen-crash':
                 kept = view('1')
                 assert kept['visible'] and kept['instance'] == foreground['instance'], kept

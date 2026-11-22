@@ -8,10 +8,16 @@ void RenderReader(std::shared_ptr<RenderConnection> channel) {
   while (!channel->closed.load(std::memory_order_acquire)) {
     std::vector<uint8_t> bytes;
     std::vector<mojo::ScopedHandle> handles;
-    const auto result = channel->failed.load(std::memory_order_acquire)
-                            ? MOJO_RESULT_FAILED_PRECONDITION
-                            : mojo::ReadMessageRaw(channel->pipe.get(), &bytes, &handles,
-                                                   MOJO_READ_MESSAGE_FLAG_NONE);
+    MojoResult result = MOJO_RESULT_OK;
+    if (channel->failed.load(std::memory_order_acquire)) {
+      result = MOJO_RESULT_FAILED_PRECONDITION;
+    } else if (!channel->early.empty()) {
+      bytes = std::move(channel->early.front());
+      channel->early.pop_front();
+    } else {
+      result =
+          mojo::ReadMessageRaw(channel->pipe.get(), &bytes, &handles, MOJO_READ_MESSAGE_FLAG_NONE);
+    }
     if (result == MOJO_RESULT_SHOULD_WAIT) {
       base::PlatformThread::Sleep(base::Milliseconds(1));
       continue;
@@ -128,7 +134,9 @@ int remotekit_sdk_render_connect(const char* name_utf8,
   for (auto& [control_id, control] : state.channels) {
     if (!control->closed.load(std::memory_order_acquire) &&
         control->pending_render.Matches(token)) {
-      channel->pipe = control->pending_render.Claim(token);
+      auto claimed = control->pending_render.Claim(token);
+      channel->pipe = std::move(claimed.pipe);
+      channel->early = std::move(claimed.early);
       break;
     }
   }

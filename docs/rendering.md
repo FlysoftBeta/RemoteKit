@@ -92,8 +92,11 @@ Begin/Reject/Stop/Stopped/Wake 走一条独立的 Mojo message pipe（编解码�
 | Stop=3 | Comp→Rend | 该代次的接纳边界 |
 | Stopped=4 | Rend→Comp | Stop 之前的请求全部已 Reject 或已排 Signal |
 | Wake=5 | Rend→Comp | 以最后一次 Idle 的身份报告新的渲染需求 |
+| ObservedChanged=6 | Browser→Endpoint | 已观察状态版本递增（见[架构 · 观察的立即触发](architecture.md)），不带身份，不参与 Slot 记账 |
 
 身份 `RenderIdentity{generation u64, value u64, slot u32, reserved u32}`：generation、value 非零，value 小于 `UINT64_MAX`，slot < 4，reserved = 0；Begin 另要求 interval > 0、force ∈ {0, 1}。
+
+Browser 在代次建立后即可发 ObservedChanged，可能早于 Endpoint 经 `output.describe` 认领管道。SDK 安装待认领端点时把已排队的消息按序取出暂存（最多 64 条；携带句柄、对端关闭或超量仍拒绝），认领后 reader 线程先消费暂存再读管道，早到的消息既不丢失也不使握手失败。
 
 每个 Begin 恰有一个终态：Reject，或者 ready Fence 被 Signal。成功没有逐帧的 ready/present/release 消息。SDK 的 `render_observe_signal` 只关闭本地的待完成记账，既不是跨进程消息，也不是复用许可。
 

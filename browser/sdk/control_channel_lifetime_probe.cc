@@ -207,9 +207,10 @@ void PendingEndpointOwnership() {
   CHECK(!pending.Claim("once").is_valid());
   // Reset must not own or close an endpoint after its one-use claim.
   pending.Reset();
-  Reply(claimed.get(), {9});
+  CHECK(claimed.early.empty());
+  Reply(claimed.pipe.get(), {9});
   CHECK_EQ(Read(peer.get()).front(), 9);
-  claimed.reset();
+  claimed.pipe.reset();
   CHECK_EQ(mojo::CreateMessagePipe(nullptr, &endpoint, &peer), MOJO_RESULT_OK);
   one.emplace_back(endpoint.release());
   CHECK(pending.Install("close", std::move(one)));
@@ -217,6 +218,39 @@ void PendingEndpointOwnership() {
   std::vector<uint8_t> bytes;
   CHECK_EQ(mojo::ReadMessageRaw(peer.get(), &bytes, nullptr, MOJO_READ_MESSAGE_FLAG_NONE),
            MOJO_RESULT_FAILED_PRECONDITION);
+}
+// Browser queues ObservedChanged on the render pipe before this side claims it.
+void PendingEndpointKeepsEarlyMessages() {
+  remotekit::sdk::PendingRenderEndpoint pending;
+  mojo::ScopedMessagePipeHandle endpoint, peer;
+  CHECK_EQ(mojo::CreateMessagePipe(nullptr, &endpoint, &peer), MOJO_RESULT_OK);
+  Reply(peer.get(), {1});
+  Reply(peer.get(), {2, 3});
+  std::vector<mojo::ScopedHandle> one;
+  one.emplace_back(endpoint.release());
+  CHECK(pending.Install("early", std::move(one)));
+  auto claimed = pending.Claim("early");
+  CHECK(claimed.is_valid());
+  CHECK_EQ(claimed.early.size(), 2u);
+  CHECK(claimed.early[0] == std::vector<uint8_t>({1}));
+  CHECK(claimed.early[1] == std::vector<uint8_t>({2, 3}));
+  // Anything queued after Install stays on the pipe for the reader.
+  Reply(peer.get(), {4});
+  CHECK_EQ(Read(claimed.pipe.get()).front(), 4);
+  // A peer that closed after queueing a message is gone, not claimable.
+  CHECK_EQ(mojo::CreateMessagePipe(nullptr, &endpoint, &peer), MOJO_RESULT_OK);
+  Reply(peer.get(), {5});
+  peer.reset();
+  one.clear();
+  one.emplace_back(endpoint.release());
+  CHECK(!pending.Install("closed", std::move(one)));
+  // A flood of unclaimed messages is bounded.
+  CHECK_EQ(mojo::CreateMessagePipe(nullptr, &endpoint, &peer), MOJO_RESULT_OK);
+  for (size_t i = 0; i <= remotekit::sdk::PendingRenderEndpoint::kMaxEarlyMessages; ++i)
+    Reply(peer.get(), {6});
+  one.clear();
+  one.emplace_back(endpoint.release());
+  CHECK(!pending.Install("flood", std::move(one)));
 }
 void ReplyWithEndpoints(mojo::MessagePipeHandle pipe,
                         const base::DictValue& reply,
@@ -735,6 +769,7 @@ int main() {
   ParallelChannelsAndClose();
   SameChannelSerializationAndQueuedClose();
   PendingEndpointOwnership();
+  PendingEndpointKeepsEarlyMessages();
   OpenRenderAttachmentContract(0);
   OpenRenderAttachmentContract(2);
   OpenRenderAttachmentContract(1);
