@@ -80,8 +80,10 @@ class Session {
     checkpoint_cache.MaybeStage(context.objects, config.tenant);
   }
   void FlushSignals() { channel.FlushSignals(); }
+  void SetEventsAppended(std::function<void()> notify) {
+    store.SetEventsAppended(std::move(notify));
+  }
   void SetSignal(std::function<void()> signal) {
-    store.SetEventsAppended(signal);
     files.SetNotify(signal);
     channel.SetSignal(std::move(signal));
   }

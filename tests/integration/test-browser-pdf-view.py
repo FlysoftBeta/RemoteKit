@@ -14,6 +14,7 @@ from browser_key import spawn_browser
 ROOT = Path(__file__).resolve().parents[2]
 VIEWER = 'remotekit-pdf://viewer/'
 PAGES = 3
+VIEWER_TITLES = ('PDF.js viewer', 'document.pdf')
 
 
 def make_pdf(path, port):
@@ -158,7 +159,8 @@ def main():
         try:
             wait_for(lambda: sdk.remotekit_sdk_control_connect(channel.encode(), c.byref(handle)),
                      lambda status: status == 0)
-            binding = dict(path=str(pdf), size=size)
+            # The Endpoint names staged files with extended-length paths.
+            binding = dict(path='\\\\?\\' + str(pdf), size=size)
             # Contract of view.create: a document needs the marker URL, and only it takes one.
             for fields in (dict(url='about:blank', document=binding),
                            dict(url=VIEWER),
@@ -182,7 +184,10 @@ def main():
 
             # Rendering needs Endpoint begin frames, which this probe does not drive; the viewer
             # page itself must be the pdf.js page.
-            assert loaded['title'] == 'PDF.js viewer', loaded['title']
+            assert loaded['title'] in VIEWER_TITLES, loaded['title']
+            # pdf.js replaces its static title with the document's once its scripts have loaded the
+            # file, so this fails when the viewer's own subresources or the document are refused.
+            wait_for(lambda: state('1'), lambda v: v.get('title') == 'document.pdf')
 
             # The viewer cannot leave its page or open windows.
             for target in ('http://127.0.0.1:%d/navigate' % server.server_port, 'about:blank',
@@ -201,7 +206,7 @@ def main():
                 time.sleep(1)
                 other = state('2')
                 assert not other['url'].startswith('remotekit-pdf:'), other
-                assert other.get('title') != 'PDF.js viewer', other.get('title')
+                assert other.get('title') not in VIEWER_TITLES, other.get('title')
             evidence['otherViewUrl'] = state('2')['url']
 
             # Recreating a document view keeps its binding; the viewer URL is the only target.
@@ -210,7 +215,7 @@ def main():
             rpc('view.recreate', view='1', url=VIEWER)
             wait_for(lambda: state('1'), lambda v: not v.get('loading', True) and v.get('title'))
             evidence['afterRecreate'] = wait_for(
-                lambda: state('1'), lambda v: v.get('title') == 'PDF.js viewer')['url']
+                lambda: state('1'), lambda v: v.get('title') == 'document.pdf')['url']
 
             rpc('view.close', view='1', force=True)
         finally:

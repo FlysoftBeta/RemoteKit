@@ -456,6 +456,9 @@ export function stageProductRuntime(endpoint, browser, destination) {
     const target = join(destination, name);
     if (existsSync(source) && !existsSync(target)) symlinkSync(source, target, 'junction');
   }
+  const pdfjs = join(dirname(resolve(browser)), 'pdfjs');
+  const pdfjsTarget = join(destination, 'pdfjs');
+  if (existsSync(pdfjs) && !existsSync(pdfjsTarget)) symlinkSync(pdfjs, pdfjsTarget, 'junction');
   return executable;
 }
 

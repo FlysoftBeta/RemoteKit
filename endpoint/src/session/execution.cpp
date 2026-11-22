@@ -157,6 +157,11 @@ Result<void> SessionExecution::Prepare(const Json& document) try {
     session = std::make_shared<Session>(sdk_, options_, tenant_, id_, epoch_, key.value(),
                                         management_, objects_, frame_admission_, access);
     session->SetSignal(signal_);
+    // A committed event is published at once; PublishEvents sends only when it is wanted.
+    session->SetEventsAppended([this] {
+      events_wanted_ = true;
+      signal_();
+    });
     session->SetObservedChanged(observed_changed_);
     RK_RETURN_IF_ERROR(session->Initialize());
     events_wanted_ = true;

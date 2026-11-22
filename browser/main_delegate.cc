@@ -110,8 +110,11 @@ class BrowserClient final : public ServicesBrowserClient {
       bool*,
       network::mojom::URLLoaderFactoryOverridePtr*,
       scoped_refptr<base::SequencedTaskRunner>,
-      bool) override {
-    DenyPdfNetworkRequests(initiator, builder);
+      bool is_for_network_service) override {
+    // The viewer's own scheme loads through non-network factories that are wrapped by this hook
+    // too; only the network path is denied.
+    if (is_for_network_service)
+      DenyPdfNetworkRequests(initiator, builder);
     InstallSignInRequestObserver(content::WebContents::FromRenderFrameHost(frame), builder,
                                  headers);
   }

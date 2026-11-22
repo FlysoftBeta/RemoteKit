@@ -4,6 +4,8 @@ import { showFailureScene } from './failures/test-scenes';
 import { installLearningMock } from './test-hooks-learning';
 import { geometryTest } from './test-hooks-geometry';
 import type { ProductAction } from '../shared/product';
+import { keyboardTimeline } from './editing/keyboard-timeline';
+import { pageRequestTimeline } from './files/page-request-timeline';
 
 if (import.meta.env.DEV && new URLSearchParams(location.search).has('learningMock')) installLearningMock();
 
@@ -15,6 +17,7 @@ declare global {
       failures: typeof showFailureScene;
       geometry: typeof geometryTest;
       action(action: ProductAction): Promise<unknown>;
+      timelines(): { pageRequests: unknown; keyboard: unknown };
     };
   }
 }
@@ -29,6 +32,7 @@ OperationsStore.prototype.acceptSnapshot = function (state) {
 window.__remotekitTest = {
   geometry: geometryTest,
   action: (action) => operations!.action(action),
+  timelines: () => ({ pageRequests: pageRequestTimeline.export(0), keyboard: keyboardTimeline.export(0) }),
   failures: showFailureScene,
   state: () => JSON.parse(JSON.stringify(operations?.getSnapshot().authoritative ?? null)),
   async unlock() {

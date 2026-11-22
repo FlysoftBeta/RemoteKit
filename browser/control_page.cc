@@ -90,8 +90,22 @@ ControlResult ControlDispatcher::HandlePageRequest(const PageControlRequest& req
   const auto session = request.session.value_or(0);
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
-  if (!record || !runtime_.view_model.FindWebView(session, view))
+  if (!record || !runtime_.view_model.FindWebView(session, view)) {
+    // A page can close between a snapshot and the per-view request that follows it; its
+    // tombstone is in the next snapshot, so the closed view has nothing pending.
+    const auto closed = runtime_.closed.tombstones.find(view);
+    if (*method == "page.requests" && closed != runtime_.closed.tombstones.end() &&
+        *closed->second.FindString("session") == base::NumberToString(session)) {
+      base::DictValue empty;
+      empty.Set("pending", base::ListValue());
+      empty.Set("events", base::ListValue());
+      empty.Set("version", protocol::kControlVersion);
+      empty.Set("id", id);
+      empty.Set("ok", true);
+      return empty;
+    }
     return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
+  }
   auto& adapter = *record->webview;
 
   if (*method == "page.contextMenu") {

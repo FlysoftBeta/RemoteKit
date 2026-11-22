@@ -253,6 +253,15 @@ class PdfNavigationThrottle final : public content::NavigationThrottle {
     return url.GetWithoutRef() == PdfViewerStartUrl() ? PROCEED : CANCEL_AND_IGNORE;
   }
 };
+// The Endpoint names files with extended-length paths (`\\?\C:\...`), which
+// net::FilePathToFileURL turns into an invalid URL; the plain drive-letter form loads.
+std::string DriveLetterPath(const std::string& path) {
+  constexpr std::string_view kExtended = R"(\\?\)";
+  if (path.size() > kExtended.size() + 2 && std::string_view(path).starts_with(kExtended) &&
+      base::IsAsciiAlpha(path[kExtended.size()]) && path[kExtended.size() + 1] == ':')
+    return path.substr(kExtended.size());
+  return path;
+}
 }  // namespace
 
 std::optional<PdfBinding> DecodePdfBinding(const base::DictValue& wire) {
@@ -262,7 +271,7 @@ std::optional<PdfBinding> DecodePdfBinding(const base::DictValue& wire) {
   if (wire.size() != 2 || !path || !size || path->empty() || !base::StringToUint64(*size, &bytes) ||
       bytes > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
     return std::nullopt;
-  const auto file = base::FilePath::FromUTF8Unsafe(*path);
+  const auto file = base::FilePath::FromUTF8Unsafe(DriveLetterPath(*path));
   if (!file.IsAbsolute() || file.ReferencesParent())
     return std::nullopt;
   return PdfBinding{file, static_cast<int64_t>(bytes)};
