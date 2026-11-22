@@ -41,7 +41,6 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
   private keyboardOpen = false;
   private keyboardDismissals = 0;
   private surface?: Surface;
-  private frameReady = false;
   private owner?: string;
   private remove?: () => void;
   private measure = () => {};
@@ -51,7 +50,9 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
       | 'layout'
       | 'getLastPresentation'
       | 'getPresentedPlane'
+      | 'planeReady'
       | 'recordResizeFreezeCopy'
+      | 'subscribeFrames'
       | 'subscribePresentationInvalidation'
       | 'setTransitionBlocked'
     >,
@@ -94,9 +95,8 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
     this.style = value;
   };
   blocksInput = () => this.blocked;
-  configure(surface: Surface | undefined, frameReady: boolean, owner: string | undefined) {
+  configure(surface: Surface | undefined, owner: string | undefined) {
     this.surface = surface;
-    this.frameReady = frameReady;
     if (owner !== this.owner) {
       this.owner = owner;
       this.transition.clear();
@@ -137,6 +137,7 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
         bounds = state.desired;
       this.blocked = true;
       this.setWaiting(true);
+      this.changed();
       if (!this.owner || !bounds || this.bitmap) return;
       const frame = this.presentation.getLastPresentation(this.viewId);
       const source = frame && this.presentation.getPresentedPlane(this.viewId, frame.rtpTimestamp);
@@ -249,10 +250,18 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
     const unsubscribe = this.presentation.subscribePresentationInvalidation((id) => {
       if (id === this.viewId) suspend(true);
     });
+    // The freeze ends on the first presented frame of the new layout, not on a re-render.
+    const unsubscribeFrames = this.presentation.subscribeFrames(() => {
+      if (this.blocked || this.transition.freeze) {
+        this.confirm();
+        this.changed();
+      }
+    }, this.viewId);
     measure();
     return () => {
       observer.disconnect();
       unsubscribe();
+      unsubscribeFrames();
       clearTimeout(timer);
       visual?.removeEventListener('resize', measure);
       visual?.removeEventListener('scroll', measure);
@@ -263,7 +272,10 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
     const state = this.transition,
       bounds = state.desired,
       layout = this.presentation.layout;
-    if (!this.owner || !this.surface || !this.frameReady || !layout || !bounds) return;
+    // Read readiness from the presentation itself: React's frame-ready state can lag behind a
+    // layout message, and releasing the freeze then exposes an empty viewport until the new frame.
+    if (!this.owner || !this.surface || !layout || !bounds || !this.presentation.planeReady(this.viewId))
+      return;
     if (!surfaceMatchesViewport(this.surface, bounds)) {
       this.blocked = true;
       this.setWaiting(true);

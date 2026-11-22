@@ -7,7 +7,6 @@ export function useViewportTransition(
   session: ViewerSession,
   viewId: string,
   surface: Surface | undefined,
-  frameReady: boolean,
   owner: string | undefined,
   editor: RefObject<HTMLTextAreaElement | null>,
 ) {
@@ -18,10 +17,7 @@ export function useViewportTransition(
     setAdapter(value);
     return () => value.detach();
   }, [session, viewId, host, editor]);
-  useLayoutEffect(
-    () => adapter?.configure(surface, frameReady, owner),
-    [adapter, surface, frameReady, owner],
-  );
+  useLayoutEffect(() => adapter?.configure(surface, owner), [adapter, surface, owner]);
   const snapshot = useSyncExternalStore(
     adapter?.subscribe ?? emptySubscribe,
     adapter?.getSnapshot ?? initialSnapshot,

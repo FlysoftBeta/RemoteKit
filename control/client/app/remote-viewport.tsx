@@ -66,7 +66,7 @@ export function RemoteViewport({
   const owner =
     editingSurface &&
     `${snapshot.attempt}:${editingSurface.session}:${editingSurface.id}:${editingSurface.instance}:${editingSurface.document}`;
-  const resize = useViewportTransition(viewport, transport, viewId, surface, frameReady, owner, editor);
+  const resize = useViewportTransition(viewport, transport, viewId, surface, owner, editor);
   useLayoutEffect(() => {
     if (!canvas.current || !editor.current) return;
     const value = new ViewportInput(transport, viewId, canvas.current, editor.current, () =>

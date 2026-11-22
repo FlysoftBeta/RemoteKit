@@ -78,6 +78,8 @@ atlas 计划和规范化布局身份只由稳定窗口尺寸、DPR、采样规�
 
 每个布局事务在 Endpoint 日志写一条 `layout.timeline`（desired 收到、converge、Browser RPC 发出/回执与锁等待、plane 重建、首个匹配 CompositorFrame、prepare、ready、首个匹配帧发送，相对毫秒），Browser 日志带同一关联键；Control 对 viewport 请求写 `viewport.timeline`。都只在几何变化时记录。焦点、文档与授权边界保留各自的输入/呈现门禁。普通尺寸变化使用过渡快照，键盘遮挡直接使用稳定视频。
 
+**过渡快照的释放**：平面被布局换代隐藏时，`ViewportPreviewAdapter` 从该平面最后呈现的帧拷出模糊快照盖住内容区，并立即发布等待状态。快照只在该 view 的 video 真正呈现了当前布局的帧之后释放：它直接查询 `PresentationSession.planeReady`，并订阅该 view 的帧回调来重新确认。不能用 React 传下来的 frame-ready 状态判断：外部 store 的布局更新与普通 setState 不在同一个渲染批次，组件可能先拿到新布局、仍带着旧的 ready=true，提前释放快照，平面已隐藏而新帧未到，内容区会露出底色（深色主题下近似黑屏）闪一下。
+
 ## 帧与 RTP 匹配
 
 - Endpoint 对每个成功发布的帧发 `frame{rtp, layoutEpoch, 编码信息}`，rtp 取自发布回调的实际 wire RTP 时间戳，不是调用方设定的值。

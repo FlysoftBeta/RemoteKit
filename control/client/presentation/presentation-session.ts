@@ -840,6 +840,11 @@ export class PresentationSession {
     return current?.plane.ready && current.plane.rtp === frame?.rtpTimestamp ? frame : undefined;
   }
 
+  /** Whether this view's video shows pixels of the current layout right now. */
+  planeReady(viewId: string) {
+    return !!this.videoPlaneFor(viewId)?.plane.ready;
+  }
+
   getPresentedPlane(viewId: string, rtpTimestamp: number): PresentedPlaneSource | undefined {
     const current = this.videoPlaneFor(viewId),
       layout = this.layout;
