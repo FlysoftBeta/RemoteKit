@@ -12,20 +12,10 @@ export interface PlaneIdentity {
   layoutEpoch: string;
   layoutGeneration: string;
 }
-/** Consume synchronously: the image may be reused after the current presentation. */
-export interface PresentedPlaneSource {
+/** Consume synchronously: the image keeps advancing with the video. */
+export interface FreezeSource {
   image: CanvasImageSource;
   sourceRect: PixelRect;
-  kind: 'atlas';
-  viewId: string;
-  rtpTimestamp: number;
-  layoutEpoch: string;
-  /** Encoded plane dimensions, independent of image/atlas extent and page DIP. */
-  encodedWidth: number;
-  encodedHeight: number;
-  pixelsPerDip: number;
-  /** Present only when the displayed ROI's vertical scale differs from its horizontal scale. */
-  pixelsPerDipY?: number;
 }
 
 export function samePlane(a: Surface, b: Surface) {

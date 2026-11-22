@@ -55,8 +55,7 @@ test('a layout barrier keeps the viewport waiting until the new layout presents 
   const presentation = {
     layout: layout('1') as Layout | null,
     planeReady: () => ready,
-    getLastPresentation: () => undefined,
-    getPresentedPlane: () => undefined,
+    getFreezeSource: () => undefined,
     recordResizeFreezeCopy() {},
     setTransitionBlocked() {},
     subscribePresentationInvalidation(listener: (viewId: string) => void) {

@@ -6,7 +6,7 @@ import { PresentationDiagnostics } from '../media/presentation-diagnostics';
 import { canonicalJson } from '../util/canonical-json';
 import { freezeSnapshot } from '../util/store';
 import { FrameEpochGate } from './frame-epoch';
-import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneSource } from './plane-source';
+import { planeMatchesLayout, samePlane, type PlaneIdentity, type FreezeSource } from './plane-source';
 import { type Layout, type Surface, type VideoPresentation } from './types';
 import { VideoPlane } from './video-plane';
 import { barrierMatchesLayout, presentationBarrier, type PresentationBarrier } from './video-presentation';
@@ -845,11 +845,8 @@ export class PresentationSession {
     return !!this.videoPlaneFor(viewId)?.plane.ready;
   }
 
-  getPresentedPlane(viewId: string, rtpTimestamp: number): PresentedPlaneSource | undefined {
-    const current = this.videoPlaneFor(viewId),
-      layout = this.layout;
-    if (!current || !current.plane.ready || current.plane.rtp !== rtpTimestamp || !layout) return undefined;
-    return current.plane.presentedSource(layout, rtpTimestamp);
+  getFreezeSource(viewId: string): FreezeSource | undefined {
+    return this.videoPlaneFor(viewId)?.plane.freezeSource();
   }
 
   canInput(viewId: string): InputAuthority | null {

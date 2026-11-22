@@ -1,7 +1,6 @@
 import type { Layout } from './types';
 import { uiScale } from '../app/ui-scale';
-import { surfacePixelScale } from '../input/coordinates';
-import type { PresentedPlaneSource } from './plane-source';
+import type { FreezeSource } from './plane-source';
 import type { PlaneRenderer, VideoObservation } from './types';
 import { configurePresentationVideo, VideoCompositorStats, videoPlaneGeometry } from './video-presentation';
 
@@ -139,20 +138,17 @@ export class VideoPlane {
   sampleWindow(at: number, current: boolean) {
     return this.stats.sampleWindow(at, this.ready && current, this.video.getVideoPlaybackQuality?.());
   }
-  presentedSource(layout: Layout, rtpTimestamp: number): PresentedPlaneSource | undefined {
-    if (!this.ready || this.rtp !== rtpTimestamp) return;
+  /**
+   * Pixels for a transition freeze. An authorized plane shows only frames of its acknowledged
+   * barrier (the Endpoint gate admits no newer layout before the next ACK), so this needs no
+   * exact RTP: frame metadata trails the video under congestion.
+   */
+  freezeSource(): FreezeSource | undefined {
+    if (!this.ready) return;
     const view = this.renderer.view;
     return {
       image: this.video,
       sourceRect: { x: view.x, y: view.y, width: view.width, height: view.height },
-      kind: 'atlas',
-      viewId: view.id,
-      rtpTimestamp,
-      layoutEpoch: layout.epoch,
-      encodedWidth: view.width,
-      encodedHeight: view.height,
-      pixelsPerDip: surfacePixelScale(view),
-      pixelsPerDipY: surfacePixelScale(view, 'y'),
     };
   }
 

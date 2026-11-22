@@ -48,8 +48,7 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
     private readonly presentation: Pick<
       PresentationSession,
       | 'layout'
-      | 'getLastPresentation'
-      | 'getPresentedPlane'
+      | 'getFreezeSource'
       | 'planeReady'
       | 'recordResizeFreezeCopy'
       | 'subscribeFrames'
@@ -139,8 +138,7 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
       this.setWaiting(true);
       this.changed();
       if (!this.owner || !bounds || this.bitmap) return;
-      const frame = this.presentation.getLastPresentation(this.viewId);
-      const source = frame && this.presentation.getPresentedPlane(this.viewId, frame.rtpTimestamp);
+      const source = this.presentation.getFreezeSource(this.viewId);
       const size = source && resizeSnapshotSize(source.sourceRect.width, source.sourceRect.height);
       if (!source || !size || !state.begin(this.owner, bounds, size.width * size.height, true, mediaBarrier))
         return;

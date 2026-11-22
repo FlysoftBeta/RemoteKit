@@ -78,7 +78,9 @@ atlas 计划和规范化布局身份只由稳定窗口尺寸、DPR、采样规�
 
 每个布局事务在 Endpoint 日志写一条 `layout.timeline`（desired 收到、converge、Browser RPC 发出/回执与锁等待、plane 重建、首个匹配 CompositorFrame、prepare、ready、首个匹配帧发送，相对毫秒），Browser 日志带同一关联键；Control 对 viewport 请求写 `viewport.timeline`。都只在几何变化时记录。焦点、文档与授权边界保留各自的输入/呈现门禁。普通尺寸变化使用过渡快照，键盘遮挡直接使用稳定视频。
 
-**过渡快照的释放**：平面被布局换代隐藏时，`ViewportPreviewAdapter` 从该平面最后呈现的帧拷出模糊快照盖住内容区，并立即发布等待状态。快照只在该 view 的 video 真正呈现了当前布局的帧之后释放：它直接查询 `PresentationSession.planeReady`，并订阅该 view 的帧回调来重新确认。不能用 React 传下来的 frame-ready 状态判断：外部 store 的布局更新与普通 setState 不在同一个渲染批次，组件可能先拿到新布局、仍带着旧的 ready=true，提前释放快照，平面已隐藏而新帧未到，内容区会露出底色（深色主题下近似黑屏）闪一下。
+**过渡快照的来源**：网络降级时 `AdaptFrame` 改变编码尺寸，也会产生新的 layoutEpoch 和完整屏障，所以没有任何 resize 也会走这条路径。平面被布局换代隐藏时，`ViewportPreviewAdapter` 从该平面当前显示的像素（`PresentationSession.getFreezeSource`）拷出模糊快照盖住内容区，并立即发布等待状态。快照只要求平面在当前已确认屏障内已获授权，不要求当前 RTP 已有匹配的 `frame` 元数据：Endpoint 的发布门保证下一次 ACK 之前不会有新布局的帧进入，已授权平面上显示的一定是旧布局的像素；而拥塞时 DataChannel 元数据落后于视频，若要求精确 RTP，降级恰好拿不到快照，隐藏后露出底色。快照只保留旧像素，不提供输入或呈现资格。
+
+**过渡快照的释放**：快照只在该 view 的 video 真正呈现了当前布局的帧之后释放：它直接查询 `PresentationSession.planeReady`，并订阅该 view 的帧回调来重新确认。不能用 React 传下来的 frame-ready 状态判断：外部 store 的布局更新与普通 setState 不在同一个渲染批次，组件可能先拿到新布局、仍带着旧的 ready=true，提前释放快照，平面已隐藏而新帧未到，内容区会露出底色（深色主题下近似黑屏）闪一下。
 
 ## 帧与 RTP 匹配
 

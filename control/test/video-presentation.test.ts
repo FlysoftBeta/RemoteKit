@@ -311,18 +311,32 @@ test('each mounted viewport needs its own RTP observation before acquiring input
   assert.equal(s.videos.length, 3);
   s.videos[2].frame(10);
   assert.ok(s.presentation.canInput('2'));
-  assert.equal(s.presentation.getPresentedPlane('1', 10)?.image, s.videos[1]);
+  assert.equal(s.presentation.getFreezeSource('1')?.image, s.videos[1]);
 });
 test('invalidation exposes the last ROI before retiring its authority', (t) => {
   const s = environment(t);
   s.authorize();
   let captured = false;
   s.presentation.subscribePresentationInvalidation((id) => {
-    if (id === '1') captured = !!s.presentation.getPresentedPlane(id, 10);
+    if (id === '1') captured = !!s.presentation.getFreezeSource(id);
   });
   s.message({ ...layout, epoch: '21' });
   assert.equal(captured, true);
   assert.equal(s.presentation.canInput('1'), null);
+});
+test('a layout change while frame metadata trails the video still freezes the last ROI', (t) => {
+  const s = environment(t);
+  s.authorize();
+  // Congestion: the newest decoded frame's metadata has not arrived yet.
+  s.videos[1].frame(99);
+  assert.equal(s.presentation.getLastPresentation('1'), undefined);
+  let captured = false;
+  s.presentation.subscribePresentationInvalidation((id) => {
+    if (id === '1') captured = (s.presentation.getFreezeSource(id)?.image as unknown) === s.videos[1];
+  });
+  s.message({ ...layout, epoch: '21' });
+  assert.equal(captured, true);
+  assert.equal(s.presentation.getFreezeSource('1'), undefined);
 });
 test('duplicate prepares preserve ready views and cannot restart a completed barrier', (t) => {
   const s = environment(t);
@@ -352,7 +366,8 @@ test('late frame metadata restores layout readiness without inventing current RT
   s.message({ type: 'frame', rtpTimestamp: 42, layoutEpoch: '20' });
   assert.ok(s.presentation.canInput('1'));
   assert.equal(s.presentation.getLastPresentation('1'), undefined);
-  assert.equal(s.presentation.getPresentedPlane('1', 42), undefined);
+  // Authorized pixels of this barrier still feed a transition freeze while metadata trails video.
+  assert.equal(s.presentation.getFreezeSource('1')?.image, s.videos[1]);
   s.videos[1].frame(42);
   assert.equal(s.presentation.getLastPresentation('1')?.rtpTimestamp, 42);
 });
