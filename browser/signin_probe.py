@@ -98,7 +98,8 @@ def main():
                                dom_key=str(sdk.remotekit_sdk_windows_dom_key(virtual_key, 0, 0))))
 
     def pending(view_id):
-        return rpc('page.requests', view=view_id)['pending']
+        return next(v for v in rpc('snapshot', pageRequests=True)['sessions'][0]['views']
+                    if v['view'] == view_id)['pageRequests']['pending']
 
     def navigate_page(view_id, page):
         previous = view_state(view_id)['document']

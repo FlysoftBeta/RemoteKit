@@ -79,7 +79,13 @@ class BrowserRuntime {
   const std::string& ProcessIncarnation() const { return process_incarnation_; }
   BrowserRpc& Rpc() { return rpc_; }
   const BrowserRpc& Rpc() const { return rpc_; }
-  Result<Json> Snapshot() { return rpc_.Request(Json{{"method", "snapshot"}}); }
+  // Page requests are drained from the Browser, so only the observation snapshot takes them.
+  Result<Json> Snapshot(bool page_requests = false) {
+    Json request{{"method", "snapshot"}};
+    if (page_requests)
+      request["pageRequests"] = true;
+    return rpc_.Request(std::move(request));
+  }
 
  private:
   friend class NativeErrorStateProbe;

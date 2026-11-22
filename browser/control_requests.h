@@ -65,7 +65,10 @@ struct ClosedAckRequest : RequestEnvelope {
   std::optional<base::ListValue> eventIds;
   std::optional<uint64_t> session;
 };
-struct SnapshotRequest : RequestEnvelope {};
+struct SnapshotRequest : RequestEnvelope {
+  // Taking a view's page requests drains its event queue, so only the one observer asks.
+  bool page_requests = false;
+};
 struct SitePreferencesRequest : RequestEnvelope {
   std::optional<base::DictValue> sites;
   std::optional<uint64_t> session;

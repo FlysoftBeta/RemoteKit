@@ -498,7 +498,7 @@ Result<Json> ViewController::Snapshot(bool output_diagnostics) {
   if (!browser.Alive() || browser.Stopping())
     return InactiveSnapshot();
   {
-    auto browser_snapshot_result_2 = browser.Snapshot();
+    auto browser_snapshot_result_2 = browser.Snapshot(true);
     if (!browser_snapshot_result_2) {
       const Error operation_error = browser_snapshot_result_2.error();
       // A producer can exit between the liveness check and any snapshot RPC.
@@ -545,17 +545,9 @@ Result<Json> ViewController::Snapshot(bool output_diagnostics) {
         item.erase("session");
         item.erase("tenant");
         navigation.Annotate(view_id, item);
-        auto page_requests_result = browser.Rpc().Request(
-            {{"method", "page.requests"}, {"session", id}, {"view", view_id}});
-        if (!page_requests_result) {
-          const Error operation_error = page_requests_result.error();
-          // A producer can exit between the liveness check and any snapshot RPC.
-          // Preserve desired views and confirmed events; an exit is not window.close.
-          if (!browser.Rpc().Control() || browser.Exited())
-            return InactiveSnapshot();
-          return operation_error;
-        }
-        auto requests = std::move(page_requests_result).value();
+        if (!view.contains("pageRequests"))
+          return Error{ErrorCode::kNotFound, "View is not in session"};
+        const auto requests = view.at("pageRequests");
         if (view.value("close_state", std::string()) == "closing")
           AddCloseRequest(item, requests);
         item["pageRequests"] = {{"pending", requests.at("pending")},

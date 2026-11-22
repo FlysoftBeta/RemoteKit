@@ -192,7 +192,9 @@ Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, o
 回复  {version:1, id, ok:true, ...} | {version:1, id, ok:false, error:{code, message, reason?, retryAfterMs?}}
 ```
 
-`code` 是 `protocol/errors.h` 中错误码的名称。方法包括 `snapshot`、`shutdown`、`session.sitePreferences`、`view.create/adopt/configure/recreate/close/closed.ack`、`focus`、`visible`、`navigate`、`lifecycle`、`input`、`page.requests/reply/fileStatus/command/exitFullscreen/contextMenu`、`clipboard.read/write`、`profile.downloads`、`navigation.ack`、`navigation.export.begin/chunk`、`navigation.import.begin/chunk/commit`、`navigation.transfer.cancel`、`output.open/describe/configure/status/close`、`audio.open/close`。`profile.downloads` 把参数放在 `command` 对象里，避免与 envelope 的 `id` 冲突。
+`code` 是 `protocol/errors.h` 中错误码的名称。方法包括 `snapshot`、`shutdown`、`session.sitePreferences`、`view.create/adopt/configure/recreate/close/closed.ack`、`focus`、`visible`、`navigate`、`lifecycle`、`input`、`page.reply/fileStatus/command/exitFullscreen/contextMenu`、`clipboard.read/write`、`profile.downloads`、`navigation.ack`、`navigation.export.begin/chunk`、`navigation.import.begin/chunk/commit`、`navigation.transfer.cancel`、`output.open/describe/configure/status/close`、`audio.open/close`。`profile.downloads` 把参数放在 `command` 对象里，避免与 envelope 的 `id` 冲突。
+
+`snapshot` 可带可选的 `pageRequests: true`，此时每个 view 附带 `pageRequests{pending, events}` 并取走该 view 已累积的页面请求事件；只有 Endpoint 的观察采样这样请求，健康检查与导航恢复等其他调用不带它，以免抢走事件。没有单独的逐 view 页面请求方法：一次快照一次 RPC，view 再多也不在协调线程上逐个往返（原来每 view 约 12ms，4 个 view 时一次快照 60–75ms，挡住几何收敛与 `presentation.ready`）。
 
 请求解码严格：可选字段存在但类型错误、出现方法未声明的字段，都返回 `invalid_request`（`samples` 存在但不是数组同样拒绝）；只有缺失的可选字段才取缺省。焦点与生命周期请求先判断目标是否可执行，被拒绝的请求不改变任何 view 的焦点，也不取消页面请求。文件选择状态查询（`page.fileStatus`）的回复始终是成功包络：`state`（`pending`/`validating`/`selected`/`cancelled`）与 `selection_id`，取消或文件校验失败的原因在 `reason`，没有字符串 `error` 字段——取消是被查询对象的状态，不是 RPC 错误。页面关闭状态是 `open`/`closing`/`closed`，用户拒绝 beforeunload 后回到 `open`。
 

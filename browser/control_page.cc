@@ -91,19 +91,6 @@ ControlResult ControlDispatcher::HandlePageRequest(const PageControlRequest& req
   const auto view = request.view.value_or(0);
   auto* record = runtime_.views.Find(session, view);
   if (!record || !runtime_.view_model.FindWebView(session, view)) {
-    // A page can close between a snapshot and the per-view request that follows it; its
-    // tombstone is in the next snapshot, so the closed view has nothing pending.
-    const auto closed = runtime_.closed.tombstones.find(view);
-    if (*method == "page.requests" && closed != runtime_.closed.tombstones.end() &&
-        *closed->second.FindString("session") == base::NumberToString(session)) {
-      base::DictValue empty;
-      empty.Set("pending", base::ListValue());
-      empty.Set("events", base::ListValue());
-      empty.Set("version", protocol::kControlVersion);
-      empty.Set("id", id);
-      empty.Set("ok", true);
-      return empty;
-    }
     return ControlResult::Failure(request.id, ErrorCode::kNotFound, "View is not in session");
   }
   auto& adapter = *record->webview;
@@ -158,22 +145,10 @@ ControlResult ControlDispatcher::HandlePageRequest(const PageControlRequest& req
       return result;
     }
   }
-  base::DictValue result;
-  if (*method == "page.requests") {
-    const auto& spec = record->spec;
-    const PageRequests::AnchorLayout layout{
-        spec.width,     spec.height,    runtime_.layout_transaction.PageScale(spec),
-        token.instance, token.document, runtime_.output_generation};
-    result = record->requests->Snapshot(
-        runtime_.output && spec.visible && token.instance && token.document ? &layout : nullptr);
-  } else {
-    result = *method == "page.reply" ? record->requests->Reply(request.payload, binding)
-                                     : record->requests->Command(request.payload);
-  }
+  auto result = *method == "page.reply" ? record->requests->Reply(request.payload, binding)
+                                        : record->requests->Command(request.payload);
   result.Set("version", protocol::kControlVersion);
   result.Set("id", id);
-  if (*method == "page.requests" && !result.contains("ok"))
-    result.Set("ok", true);
   return result;
 }
 

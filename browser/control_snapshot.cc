@@ -17,6 +17,7 @@ Result<SnapshotRequest> DecodeSnapshot(const base::DictValue& wire, RequestEnvel
   SnapshotRequest request;
   static_cast<RequestEnvelope&>(request) = envelope;
   RequestDecoder decoder(wire);
+  request.page_requests = decoder.Optional<bool>("pageRequests").value_or(false);
   return decoder.Finish(std::move(request));
 }
 
@@ -99,6 +100,20 @@ ControlResult ControlDispatcher::HandleSnapshot(const SnapshotRequest& request) 
                                      .Set("message", touch.message));
       value.Set("pending_page_requests",
                 static_cast<int>(runtime_.views.records.at(i).requests->pending_count()));
+      if (request.page_requests) {
+        // The snapshot that asks is the whole per-view observation; a request per view cost a
+        // Browser round trip each.
+        const auto& spec = runtime_.views.records.at(i).spec;
+        const auto token = runtime_.view_model.Token(runtime_.session_id, view_id).value;
+        const PageRequests::AnchorLayout layout{
+            spec.width,     spec.height,    runtime_.layout_transaction.PageScale(spec),
+            token.instance, token.document, runtime_.output_generation};
+        value.Set(
+            "pageRequests",
+            runtime_.views.records.at(i).requests->Snapshot(
+                runtime_.output && spec.visible && token.instance && token.document ? &layout
+                                                                                    : nullptr));
+      }
       if (auto* page = adapter->contents()) {
         value.Set("url", page->GetLastCommittedURL().spec());
         value.Set("title", base::UTF16ToUTF8(page->GetTitle()));
