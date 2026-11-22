@@ -22,6 +22,14 @@ export interface NavigationAck {
   operationId: string;
   operationGeneration: string;
 }
+export interface SiteReloadStep {
+  tenant: string;
+  tabId: string;
+  /** The tab's reload marker as this step wrote it; a different marker means the tab moved on. */
+  identity: NonNullable<ProductTab['pendingUaReloadIdentity']>;
+  receipt: OperationReceipt;
+  request: Parameters<DomainContext['endpoint']['command']>[1];
+}
 export class Navigation {
   private readonly acknowledgments = new Map<string, RetryUnit>();
   failures() {
@@ -91,22 +99,24 @@ export class Navigation {
   }
 
   /**
-   * Reloads a tab after its site's UA changed. The reload is a receipt-backed tab.command, so
-   * its Browser navigation record has a sequence and is settled and acknowledged by `observe`.
-   * Only retryable failures are rethrown; anything else ends the reload, never the tenant.
+   * Reloads a tab after its site's UA changed, in three parts for the reconciler: the plan, under
+   * the tenant lock, validates and reserves the receipt-backed tab.command; the Browser call runs
+   * outside the lock; the commit settles the result under it. The reload's Browser navigation
+   * record has a sequence and is settled and acknowledged by `observe`. Only retryable failures
+   * are rethrown; anything else ends the reload, never the tenant.
    */
   async reloadForSiteIdentity(state: ProductWorkspace, t: ProductTab, current: unknown, browser: string) {
+    const step = this.planSiteIdentityReload(state, t, current, browser);
+    if (step) this.commitSiteIdentityReload(state, t, step, await this.callSiteIdentityReload(step));
+  }
+  planSiteIdentityReload(
+    state: ProductWorkspace,
+    t: ProductTab,
+    current: unknown,
+    browser: string,
+  ): SiteReloadStep | undefined {
     const tenant = state.tenantId;
     const operations = this.context.store.operations;
-    const finish = (cause?: unknown) => {
-      delete t.pendingUaReloadOrigin;
-      delete t.pendingUaReloadIdentity;
-      const error = cause === undefined ? undefined : endpointError(cause);
-      if (error && error.code !== 'canceled')
-        reportError(error, 'site.ua_reload_failed', { tenant, tab: t.id });
-      this.context.store.workspaces.saveWorkspace(state);
-      this.services.viewers.push(tenant);
-    };
     // A replacement Browser creates its views with the current site identity already applied.
     if (
       !current ||
@@ -114,7 +124,7 @@ export class Navigation {
       new URL(t.url).origin !== t.pendingUaReloadOrigin ||
       (t.pendingUaReloadIdentity && t.pendingUaReloadIdentity.browserIncarnation !== browser)
     )
-      return finish();
+      return this.finishSiteIdentityReload(state, t);
     let receipt = t.pendingUaReloadIdentity
       ? operations.operation(tenant, t.pendingUaReloadIdentity.operationId)?.receipt
       : undefined;
@@ -137,9 +147,9 @@ export class Navigation {
             minted,
           )
         )
-          return finish(new RemoteKitError('conflict', '操作收据已轮换'));
+          return this.finishSiteIdentityReload(state, t, new RemoteKitError('conflict', '操作收据已轮换'));
       } catch (cause) {
-        return finish(cause);
+        return this.finishSiteIdentityReload(state, t, cause);
       }
       settle(minted, { status: 'applying' });
       t.pendingUaReloadIdentity = {
@@ -150,24 +160,60 @@ export class Navigation {
       operations.saveOperation(state, minted);
       receipt = minted;
     }
-    try {
-      await this.context.endpoint.command(tenant, {
+    return {
+      tenant,
+      tabId: t.id,
+      identity: t.pendingUaReloadIdentity!,
+      receipt,
+      request: {
         viewId: t.webviewId,
         command: 'reload',
         browserIncarnation: browser,
         operationId: receipt.operationId,
         operationGeneration: receipt.operationGeneration,
         operationSequence: receipt.operationSequence,
-      });
-    } catch (cause) {
-      const error = endpointError(cause);
-      if (['retry-soon', 'retry-after', 'backoff', 'reconcile'].includes(errorHandling(error.code)))
-        throw error;
-      settle(receipt, { status: 'failed', error: wireError(error) });
-      operations.saveOperation(state, receipt);
-      return finish(error);
+      },
+    };
+  }
+  /** The Browser call of a reload. Needs no product state, so it runs outside the tenant lock. */
+  async callSiteIdentityReload(step: SiteReloadStep): Promise<{ failure?: unknown }> {
+    try {
+      await this.context.endpoint.command(step.tenant, step.request);
+      return {};
+    } catch (failure) {
+      return { failure };
     }
-    finish();
+  }
+  /**
+   * Settles a reload under the tenant lock. The tab's reload marker is cleared only while it is
+   * still the one this step sent; the receipt is settled either way.
+   */
+  commitSiteIdentityReload(
+    state: ProductWorkspace,
+    t: ProductTab | undefined,
+    step: SiteReloadStep,
+    outcome: { failure?: unknown },
+  ) {
+    const owned = !!t && t.pendingUaReloadIdentity?.operationId === step.identity.operationId;
+    if (outcome.failure === undefined) {
+      if (owned) this.finishSiteIdentityReload(state, t);
+      return;
+    }
+    const error = endpointError(outcome.failure);
+    if (['retry-soon', 'retry-after', 'backoff', 'reconcile'].includes(errorHandling(error.code)))
+      throw error;
+    settle(step.receipt, { status: 'failed', error: wireError(error) });
+    this.context.store.operations.saveOperation(state, step.receipt);
+    if (owned) this.finishSiteIdentityReload(state, t, error);
+  }
+  private finishSiteIdentityReload(state: ProductWorkspace, t: ProductTab, cause?: unknown): undefined {
+    delete t.pendingUaReloadOrigin;
+    delete t.pendingUaReloadIdentity;
+    const error = cause === undefined ? undefined : endpointError(cause);
+    if (error && error.code !== 'canceled')
+      reportError(error, 'site.ua_reload_failed', { tenant: state.tenantId, tab: t.id });
+    this.context.store.workspaces.saveWorkspace(state);
+    this.services.viewers.push(state.tenantId);
   }
 
   observeRetired(state: ProductWorkspace, snapshot: any) {

@@ -99,7 +99,9 @@ export function driveReconciler(path: 'product' | 'observed' | 'reconnect' | 'ua
         wantedVisible: () => true,
         forget: noop,
         prepareVisible: async () => true,
-        maintainBackgroundTab: async () => {},
+        planBackgroundTab: () => undefined,
+        callBackgroundTab: async () => false,
+        commitBackgroundTab: noop,
       },
       operations: { saveWorkspace: store.workspaces.saveWorkspace.bind(store.workspaces) },
       navigation: { observeRetired: noop, observe: () => [], acknowledge: async () => {} },
@@ -117,7 +119,12 @@ export function driveReconciler(path: 'product' | 'observed' | 'reconnect' | 'ua
     } as unknown as DomainServices;
     if (path === 'ua') {
       const navigation = new Navigation(context, services);
-      services.navigation.reloadForSiteIdentity = navigation.reloadForSiteIdentity.bind(navigation);
+      for (const step of [
+        'planSiteIdentityReload',
+        'callSiteIdentityReload',
+        'commitSiteIdentityReload',
+      ] as const)
+        (services.navigation as any)[step] = navigation[step].bind(navigation);
     }
     const owner = new Reconciler(context, services);
     const result = operation();

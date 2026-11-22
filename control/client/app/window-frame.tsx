@@ -1,21 +1,13 @@
 import { Typography } from '@mui/material';
-import React, {
-  Suspense,
-  lazy,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import { isBeingCreated } from '../control/product-operations';
-import type { ProductState, ProductWindow } from '../../shared/product';
+import type { FileRequest, ProductState, ProductWindow } from '../../shared/product';
 import { BUILTIN_APP_TITLES, SEARCH_ENGINES, isBuiltinApp, isLocalApp } from '../../shared/product';
 import { SurfaceState, failureError } from '../failures';
 import { IdleKeepAliveNotice } from '../failures/idle-keep-alive';
 import { failureContext, ownOperation } from '../failures/operations';
+import { FileChooserDialog } from '../files/file-chooser-dialog';
 import { FilesWindow } from '../files/files-window';
 import { RemoteDocumentHost } from '../files/remote-document-host';
 import { canonicalJson } from '../util/canonical-json';
@@ -29,7 +21,8 @@ import { PermissionPrompt } from './permission-prompt';
 import type { Action } from './product-dialogs';
 import { RemoteViewport } from './remote-viewport';
 import { StartPage } from './start-page';
-import { useViewerSessionSelector } from './use-viewer-session';
+import { useOperationsSelector, useViewerSessionSelector } from './use-viewer-session';
+import { sameWindowScope } from './window-scope';
 import { useDropRegistration, WindowDragDecoration } from './window-drag';
 import './window-frame.css';
 import { SpaceHandle } from './space-handle';
@@ -39,28 +32,13 @@ import { useWindowState, type WorkspaceCall } from './window-state';
 const LearningApp = lazy(() =>
   import('../learning/learning-app').then((module) => ({ default: module.LearningApp })),
 );
-export function WindowFrame({
-  win,
-  state,
-  transport,
-  action: dispatchAction,
-  shellReady,
-  appContent,
-  fileChooser,
-  call,
-  weight,
-  onGeometry,
-  visible,
-  fullscreen,
-  groupHandle,
-  surfaceFailure,
-}: {
+type WindowFrameProps = {
   win: ProductWindow;
   state: ProductState;
   transport: ViewerSession;
   action: Action;
   shellReady: boolean;
-  fileChooser?: React.ReactNode;
+  fileRequest?: FileRequest;
   appContent: (
     appId: 'settings' | 'admin',
     viewState: Record<string, unknown>,
@@ -70,10 +48,46 @@ export function WindowFrame({
   weight: number;
   onGeometry: (id: string, width: number, height: number) => void;
   visible: boolean;
+  focused: boolean;
   fullscreen: boolean;
   groupHandle: boolean;
-  surfaceFailure?: { error: RemoteKitError; operation: string };
-}) {
+  surfaceError?: RemoteKitError;
+  surfaceOperation?: string;
+};
+/**
+ * A window renders again only when something it shows changed: switching groups or moving focus
+ * touches the windows involved, not every window. `appContent` closes over the whole product
+ * state, so only the local apps that use it follow it.
+ */
+export const WindowFrame = React.memo(WindowFrameView, (previous, next) => {
+  for (const key of Object.keys(next) as (keyof WindowFrameProps)[]) {
+    if (
+      key === 'state' ||
+      (key === 'appContent' && next.win.appId !== 'settings' && next.win.appId !== 'admin')
+    )
+      continue;
+    if (!Object.is(previous[key], next[key])) return false;
+  }
+  return sameWindowScope(previous.state, next.state, next.win.id);
+});
+function WindowFrameView({
+  win,
+  state,
+  transport,
+  action: dispatchAction,
+  shellReady,
+  appContent,
+  fileRequest,
+  call,
+  weight,
+  onGeometry,
+  visible,
+  focused,
+  fullscreen,
+  groupHandle,
+  surfaceError,
+  surfaceOperation,
+}: WindowFrameProps) {
   const [windowFailure, setWindowFailure] = useState<RemoteKitError>();
   const report = useCallback(
     (error: unknown) => setWindowFailure(error === undefined ? undefined : failureError(error)),
@@ -86,17 +100,12 @@ export function WindowFrame({
     },
     [dispatchAction, win.id],
   );
-  const operations = useSyncExternalStore(
-    transport.operations.subscribe,
-    transport.operations.getSnapshot,
-    transport.operations.getSnapshot,
+  const receiptFailure = useOperationsSelector(transport.operations, ({ error }) =>
+    error && failureContext(error)?.ownerKey === win.id ? error : undefined,
   );
-  const operationFailure = operations.error;
-  const receiptFailure =
-    operationFailure && failureContext(operationFailure)?.ownerKey === win.id ? operationFailure : undefined;
-  const failure = windowFailure ?? receiptFailure ?? surfaceFailure?.error;
+  const failure = windowFailure ?? receiptFailure ?? surfaceError;
   const failureOperation =
-    windowFailure || receiptFailure ? '完成页面操作' : (surfaceFailure?.operation ?? '完成页面操作');
+    windowFailure || receiptFailure ? '完成页面操作' : (surfaceOperation ?? '完成页面操作');
   const productLocked = useViewerSessionSelector(transport, (snapshot) => snapshot.authorization.locked);
   const browserReady = useViewerSessionSelector(transport, (snapshot) => snapshot.authorization.browserReady);
   const presentationError = useViewerSessionSelector(transport, (snapshot) => snapshot.presentation.error);
@@ -111,10 +120,7 @@ export function WindowFrame({
   );
   const windowTabs = state.workspace.tabs.filter((t) => t.windowId === win.id),
     tabs = windowTabs.filter((tab) => !tab.signIn),
-    active = windowTabs.find((t) => t.id === win.activeTabId),
-    focused =
-      state.workspace.spaces.find((space) => space.id === state.workspace.activeSpaceId)?.focusedWindowId ===
-      win.id;
+    active = windowTabs.find((t) => t.id === win.activeTabId);
   const [viewState, onState] = useWindowState(win, action, report);
   const app = state.workspace.apps.find((app) => `web:${app.id}` === win.appId);
   const browser = win.appId === 'browser';
@@ -122,9 +128,12 @@ export function WindowFrame({
   const title = isBuiltinApp(win.appId)
     ? BUILTIN_APP_TITLES[win.appId]
     : (app?.name ?? BUILTIN_APP_TITLES.browser);
-  const creatingTab =
-    isBeingCreated(operations.authoritative, operations.pending, win.id) ||
-    isBeingCreated(operations.authoritative, operations.pending, win.activeTabId);
+  const creatingTab = useOperationsSelector(
+    transport.operations,
+    ({ authoritative, pending }) =>
+      isBeingCreated(authoritative, pending, win.id) ||
+      isBeingCreated(authoritative, pending, win.activeTabId),
+  );
   const navigationReady = shellReady;
   const content = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -393,7 +402,14 @@ export function WindowFrame({
           />
         </>
       )}
-      {fileChooser}
+      {fileRequest && (
+        <FileChooserDialog
+          key={fileRequest.id}
+          request={fileRequest}
+          transport={transport}
+          viewId={state.workspace.tabs.find((tab) => tab.id === fileRequest.tabId)?.webviewId}
+        />
+      )}
     </section>
   );
 }

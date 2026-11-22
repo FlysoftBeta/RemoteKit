@@ -120,6 +120,7 @@ function Frame({
       weight: 1,
       onGeometry: unexpected,
       visible: true,
+      focused: true,
       groupHandle: true,
       fullscreen: false,
     }),

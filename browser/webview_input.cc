@@ -91,7 +91,11 @@ void InputController::InvalidateLayoutInput(bool remains_visible) {
 content::RenderWidgetHostImpl* InputController::FocusedWidget() const {
   if (!owner_.contents())
     return nullptr;
+  // The browser-side focused frame is recorded when the renderer reports it, a round trip after
+  // Focus(true). Until then the main frame owns input, as it does for Chromium's own key routing.
   auto* frame = owner_.contents()->GetFocusedFrame();
+  if (!frame)
+    frame = owner_.contents()->GetPrimaryMainFrame();
   if (!InputFrameReady(frame))
     return nullptr;
   return content::RenderWidgetHostImpl::From(frame->GetRenderWidgetHost());

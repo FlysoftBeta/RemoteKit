@@ -154,8 +154,17 @@ function pageRequestFixture(t: import('node:test').TestContext) {
   observation.browserIncarnation = 'browser-1';
   let current: typeof observation | undefined = observation;
   let ready = true;
-  const state = { tabs: [{ id: 'tab-1', windowId: 'window-1', webviewId: '7' }], pendingClose: null };
+  const tab: Record<string, unknown> = {
+    id: 'tab-1',
+    windowId: 'window-1',
+    webviewId: '7',
+    kind: 'remote',
+    title: '',
+    url: 'about:blank',
+  };
+  const state = { tenantId: 'tenant', tabs: [tab], pendingClose: null };
   const pushes: string[] = [];
+  const saves: string[] = [];
   const context = {
     tenants,
     closed: false,
@@ -175,6 +184,12 @@ function pageRequestFixture(t: import('node:test').TestContext) {
   } as unknown as DomainContext;
   const services = {
     viewers: { push: (tenant: string) => pushes.push(tenant) },
+    operations: {
+      saveWorkspace: (workspace: { tenantId: string }) => {
+        saves.push(workspace.tenantId);
+        pushes.push(workspace.tenantId);
+      },
+    },
   } as unknown as DomainServices;
   const pageRequests = new PageRequests(context, services as never);
   services.pageRequests = pageRequests;
@@ -197,6 +212,8 @@ function pageRequestFixture(t: import('node:test').TestContext) {
     observation,
     runtime,
     pushes,
+    saves,
+    tab,
     chooser,
     retire: () => {
       current = undefined;
@@ -247,7 +264,116 @@ test('projecting the same observation again does not push twice', async (t) => {
   t.mock.method(owner, 'reconcileProduct', async () => {});
   observation.views = [chooser()] as never;
   owner.observe(observation);
-  observation.views = [{ ...chooser(), loading: true }] as never;
+  observation.views = [{ ...chooser(), actual: 0 }] as never;
   owner.observe(observation);
   assert.deepEqual(pushes, ['tenant']);
+});
+
+const page = (fields: Record<string, unknown> = {}) => ({
+  viewId: '7',
+  instance: '3',
+  document: '4',
+  title: 'Docs',
+  url: 'https://example.test/a',
+  loading: false,
+  canGoBack: true,
+  canGoForward: false,
+  ...fields,
+});
+
+test('title, load state, history and address are projected on arrival, not after the running reconciliation', async (t) => {
+  const { owner, observation, pushes, saves, tab } = pageRequestFixture(t);
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  t.mock.method(owner, 'reconcileProduct', async () => {
+    await hold;
+  });
+  const work = owner.observe(observation);
+  await settle();
+  observation.views = [page()] as never;
+  owner.observe(observation);
+  assert.deepEqual(
+    { ...tab },
+    {
+      id: 'tab-1',
+      windowId: 'window-1',
+      webviewId: '7',
+      kind: 'remote',
+      title: 'Docs',
+      url: 'https://example.test/a',
+      loading: false,
+      canGoBack: true,
+      canGoForward: false,
+    },
+  );
+  assert.deepEqual(saves, ['tenant']);
+  assert.deepEqual(pushes, ['tenant']);
+  // Nothing about the tab changed: the new observation is not saved again.
+  observation.views = [page({ actual: 0 })] as never;
+  owner.observe(observation);
+  assert.deepEqual(saves, ['tenant']);
+  observation.views = [page({ title: 'Next', loading: true })] as never;
+  owner.observe(observation);
+  assert.equal(tab.title, 'Next');
+  assert.equal(tab.loading, true);
+  assert.equal(saves.length, 2);
+  release();
+  await work;
+});
+
+test('a page being recovered, restored or opened as a popup is left to the reconciliation', async (t) => {
+  const { owner, observation, saves, tab } = pageRequestFixture(t);
+  t.mock.method(owner, 'reconcileProduct', async () => {});
+  const cases: [string, () => void, Record<string, unknown>][] = [
+    ['restoring tab', () => (tab.restoring = true), {}],
+    ['recovery attempt', () => (tab.lifecycleRecovery = { phase: 'restoring' }), {}],
+    ['recovery failure', () => (tab.lifecycleRecoveryError = { code: 'internal', message: '' }), {}],
+    ['pending popup', () => (tab.popup = { provisionalId: 'p', status: 'pending' }), {}],
+    ['recovering view', () => {}, { recovery: { pending: true } }],
+    ['uncertain lifecycle', () => {}, { lifecycle_uncertain: true }],
+    ['lifecycle request in flight', () => {}, { pending: true }],
+    ['closing view', () => {}, { close_state: 'closing' }],
+  ];
+  let sequence = 0;
+  for (const [name, arrange, view] of cases) {
+    for (const key of ['restoring', 'lifecycleRecovery', 'lifecycleRecoveryError', 'popup']) delete tab[key];
+    arrange();
+    observation.views = [page({ title: `T${sequence++}`, ...view })] as never;
+    owner.observe(observation);
+    assert.equal(tab.title, '', name);
+  }
+  assert.deepEqual(saves, []);
+});
+
+test('an address waits for the terminal result of a navigation that is still applying', async (t) => {
+  const { owner, observation, saves, tab } = pageRequestFixture(t);
+  t.mock.method(owner, 'reconcileProduct', async () => {});
+  tab.navigation = { status: 'applying', operationId: 'op', operationGeneration: '1' };
+  observation.views = [page({ url: 'https://example.test/typed', loading: true })] as never;
+  owner.observe(observation);
+  assert.equal(tab.url, 'about:blank');
+  assert.equal(tab.title, 'Docs');
+  assert.equal(tab.loading, true);
+  assert.equal(saves.length, 1);
+  tab.pendingUrl = 'https://example.test/typed';
+  tab.navigation = { status: 'committed', resolved: true, operationId: 'op', operationGeneration: '1' };
+  observation.views = [page({ url: 'https://example.test/other', loading: false })] as never;
+  owner.observe(observation);
+  assert.equal(tab.url, 'about:blank', 'a different address does not satisfy the pending one');
+  observation.views = [page({ url: 'https://example.test/typed' })] as never;
+  owner.observe(observation);
+  assert.equal(tab.url, 'https://example.test/typed');
+  assert.equal(tab.pendingUrl, undefined);
+});
+
+test('a page fact of an observation that is no longer current projects nothing', async (t) => {
+  const { owner, observation, saves, tab, retire } = pageRequestFixture(t);
+  t.mock.method(owner, 'reconcileProduct', async () => {});
+  retire();
+  observation.views = [page()] as never;
+  owner.observe(observation);
+  assert.equal(tab.title, '');
+  assert.deepEqual(saves, []);
 });

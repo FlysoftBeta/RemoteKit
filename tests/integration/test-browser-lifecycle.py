@@ -109,7 +109,8 @@ def main():
     transcript = []
 
     def rpc(method, *, ok=True, **fields):
-        request = dict(version=1, id=len(transcript) + 1, method=method, session='1', **fields)
+        session = {} if method == 'snapshot' else {'session': '1'}
+        request = dict(version=1, id=len(transcript) + 1, method=method, **session, **fields)
         data = json.dumps(request).encode()
         out = ctypes.create_string_buffer(1024 * 1024)
         length = ctypes.c_size_t()

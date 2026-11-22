@@ -29,6 +29,8 @@ export function requireAcceptedReceipt(receipt: OperationReceipt): OperationRece
 }
 export interface PendingOperation extends ProductOperation {
   receipt?: OperationReceipt;
+  /** When the intent was made. Projecting the same intent again stamps the same time. */
+  at?: number;
 }
 export function createdIds(action: RecordedAction): string[] {
   const fields = action as unknown as Record<string, unknown>;
@@ -103,6 +105,7 @@ export function projectOperations(
     w = next.workspace;
   for (const operation of pending) {
     const a = operation.action;
+    const now = operation.at ?? Date.now();
     if (operation.receipt && ['failed'].includes(operation.receipt.status)) continue;
     if (
       operation.receipt &&
@@ -116,13 +119,13 @@ export function projectOperations(
         if (w.windows.some((win) => win.id === id)) break;
         const existing = isSingletonApp(a.appId) && w.windows.find((win) => win.appId === a.appId);
         if (existing) {
-          focusWindow(w, existing.id);
+          focusWindow(w, existing.id, now);
           break;
         }
         if (w.windows.length >= 16 || !canPlace(w, id, a.placement)) break;
-        w.windows.push({ id, appId: a.appId, activeTabId: null, lastActiveAt: Date.now() });
-        if (a.placement.mode === 'replace') replaceWindow(w, id, a.placement.windowId, a.spaceId!);
-        else placeWindow(w, id, a.placement, a.spaceId!);
+        w.windows.push({ id, appId: a.appId, activeTabId: null, lastActiveAt: now });
+        if (a.placement.mode === 'replace') replaceWindow(w, id, a.placement.windowId, a.spaceId!, now);
+        else placeWindow(w, id, a.placement, a.spaceId!, now);
         if (creationIdFields(a).includes('tabId')) {
           const url = a.url ?? w.apps.find((app) => `web:${app.id}` === a.appId)?.startUrl;
           w.tabs.push({
@@ -140,15 +143,15 @@ export function projectOperations(
         break;
       }
       case 'window.focus':
-        if (w.windows.some((win) => win.id === a.windowId)) focusWindow(w, a.windowId);
+        if (w.windows.some((win) => win.id === a.windowId)) focusWindow(w, a.windowId, now);
         break;
       case 'window.place':
         if (w.windows.some((win) => win.id === a.windowId) && canPlace(w, a.windowId, a.placement))
-          placeWindow(w, a.windowId, a.placement, a.spaceId!);
+          placeWindow(w, a.windowId, a.placement, a.spaceId!, now);
         break;
       case 'space.activate': {
         const space = w.spaces.find((space) => space.id === a.spaceId);
-        if (space) focusWindow(w, space.focusedWindowId);
+        if (space) focusWindow(w, space.focusedWindowId, now);
         break;
       }
       case 'space.layout': {
@@ -170,7 +173,7 @@ export function projectOperations(
         break;
       case 'favorite.add':
         if (!w.favorites.some((favorite) => favorite.url === a.url))
-          w.favorites.push({ id: a.favoriteId, title: a.title, url: a.url, createdAt: Date.now() });
+          w.favorites.push({ id: a.favoriteId, title: a.title, url: a.url, createdAt: now });
         break;
       case 'favorite.remove':
         w.favorites = w.favorites.filter((favorite) => favorite.id !== a.id);
@@ -193,8 +196,8 @@ export function projectOperations(
           scope: a.scope ?? a.startUrl,
           display: a.display ?? 'standalone',
           themeColor: a.themeColor,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
+          createdAt: now,
+          updatedAt: now,
         });
         break;
       case 'site.set':
@@ -218,14 +221,14 @@ export function projectOperations(
             pendingUrl: a.url,
           });
           win.activeTabId = a.tabId;
-          focusWindow(w, win.id);
+          focusWindow(w, win.id, now);
         }
         break;
       }
       case 'tab.activate': {
         const tab = w.tabs.find((t) => t.id === a.tabId);
         if (tab) {
-          focusWindow(w, tab.windowId);
+          focusWindow(w, tab.windowId, now);
           w.windows.find((x) => x.id === tab.windowId)!.activeTabId = tab.id;
         }
         break;
@@ -239,7 +242,7 @@ export function projectOperations(
           if (source && source !== target && source.activeTabId === tab.id)
             source.activeTabId = w.tabs.find((t) => t.windowId === source.id)?.id ?? null;
           target.activeTabId = tab.id;
-          focusWindow(w, target.id);
+          focusWindow(w, target.id, now);
         }
         break;
       }

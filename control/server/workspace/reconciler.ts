@@ -5,6 +5,7 @@ import { EndpointSnapshotError, endpointError } from '../endpoint/gateway';
 import { log } from '../log';
 import { normalizedUsagePage } from '../navigation-url';
 import { settle } from './operations';
+import { pageFactsProjectable, projectPageFacts } from './page-facts';
 import { pageUsageIdentity } from './workspace';
 
 import type { ProductTab, ProductWorkspace } from '../../shared/product';
@@ -52,18 +53,19 @@ export class Reconciler {
     });
     if (this.observations.get(runtime) === key) return;
     this.observations.set(runtime, key);
-    this.projectPageRequests(message);
+    this.projectObserved(message);
     if (!runtime.viewer && !runtime.started && !runtime.pendingRtcCheck) return;
     return this.requestProduct(message.tenantId);
   }
 
   /**
-   * Dialogs and file requests are projected straight from the observation, not through the
-   * full reconciliation: that queue may be busy for a second, and the file basket is something
-   * the user is waiting for. Only an observation that is still the tenant's current one is
-   * projected; the reconciliation repeats the projection from the same data.
+   * What users wait for after acting on a page is projected straight from the observation, not
+   * through the full reconciliation: that queue may be busy for a second. Dialogs and file
+   * requests, then the title, load state, history availability and address of the pages. Only an
+   * observation that is still the tenant's current one is projected; the reconciliation repeats
+   * the projection from the same data.
    */
-  private projectPageRequests(message: SessionObserved) {
+  private projectObserved(message: SessionObserved) {
     const tenant = message.tenantId;
     if (this.closed || this.context.closed) return;
     const runtime = this.context.tenants.get(tenant);
@@ -76,12 +78,10 @@ export class Reconciler {
     )
       return;
     const receivedAt = Date.now();
+    const state = this.context.store.workspaces.workspace(tenant);
     const known = new Set((runtime.pageRequests.files ?? []).map((file) => file.id));
-    this.services.pageRequests.collectDialogs(
-      tenant,
-      this.context.store.workspaces.workspace(tenant),
-      endpoint.current(tenant),
-    );
+    const snapshot = endpoint.current(tenant);
+    this.services.pageRequests.collectDialogs(tenant, state, snapshot);
     const projectedAt = Date.now();
     for (const file of runtime.pageRequests.files ?? [])
       if (!known.has(file.id))
@@ -92,6 +92,17 @@ export class Reconciler {
           observationReceivedAt: receivedAt,
           projectedAt,
         });
+    this.projectPages(state, snapshot);
+  }
+
+  private projectPages(state: ProductWorkspace, snapshot: any) {
+    if (snapshot.running === false || !Array.isArray(snapshot.views)) return;
+    let changed = false;
+    for (const tab of state.tabs) {
+      const current = snapshot.views.find((view: any) => view.viewId === tab.webviewId);
+      if (current && pageFactsProjectable(tab, current) && projectPageFacts(tab, current)) changed = true;
+    }
+    if (changed) this.services.operations.saveWorkspace(state);
   }
 
   publishDesired(tenant: string) {
@@ -391,20 +402,7 @@ export class Reconciler {
         }
         const recovering = current.recovery?.pending === true || lifecycleBlocked;
         if (!recovering) {
-          for (const key of ['title', 'loading', 'canGoBack', 'canGoForward'] as const)
-            if (typeof current[key] === (key === 'title' ? 'string' : 'boolean'))
-              (t as any)[key] = key === 'title' ? current[key].slice(0, 120) : current[key];
-          if (
-            (!t.navigation ||
-              t.navigation.resolved ||
-              !['applying', 'unknown'].includes(t.navigation.status)) &&
-            typeof current.url === 'string' &&
-            /^(https?:\/\/|about:blank$)/.test(current.url) &&
-            (!t.pendingUrl || current.url === t.pendingUrl)
-          ) {
-            t.url = current.url;
-            delete t.pendingUrl;
-          }
+          projectPageFacts(t, current);
           const document = pageUsageIdentity(t, current, snapshot.browserIncarnation);
           if (
             document &&
@@ -568,17 +566,38 @@ export class Reconciler {
       await work;
     }
   }
-  /** Runs one step with the tenant's current product state, under the lock. */
-  private withTab(
+  /**
+   * One Browser-calling step of a tab in three parts. `plan` reads the tenant's current state and
+   * registers the step's intent under the lock; `call` runs outside it, so a slow Browser delays
+   * neither projection nor unrelated operations; `commit` settles the outcome under the lock
+   * against the latest state, with no tab when it was removed in the meantime.
+   */
+  private async stepTab<Plan, Outcome>(
     tenant: string,
     tabId: string,
-    work: (state: ProductWorkspace, tab: ProductTab) => Promise<void>,
+    step: {
+      plan(state: ProductWorkspace, tab: ProductTab): Plan | undefined;
+      call(plan: Plan): Promise<Outcome>;
+      commit(state: ProductWorkspace, tab: ProductTab | undefined, plan: Plan, outcome: Outcome): void;
+    },
   ) {
-    return this.context.tenants.serial(tenant, async () => {
+    const plan = await this.context.tenants.serial(tenant, async () => {
       if (this.closed || this.context.closed) return;
       const state = this.context.store.workspaces.workspace(tenant);
       const tab = state.tabs.find((candidate) => candidate.id === tabId);
-      if (tab) await work(state, tab);
+      return tab ? step.plan(state, tab) : undefined;
+    });
+    if (plan === undefined) return;
+    const outcome = await step.call(plan);
+    await this.context.tenants.serial(tenant, async () => {
+      if (this.closed || this.context.closed) return;
+      const state = this.context.store.workspaces.workspace(tenant);
+      step.commit(
+        state,
+        state.tabs.find((candidate) => candidate.id === tabId),
+        plan,
+        outcome,
+      );
     });
   }
   private async maintainTabs(
@@ -627,31 +646,38 @@ export class Reconciler {
         lifecycleBlocked,
       );
       if (superseded()) return;
+      const lifecycle = this.services.lifecycle;
       if (lifecycleBlocked) {
-        await this.withTab(tenant, t.id, (fresh, tab) =>
-          this.services.lifecycle.advanceLifecycleRecovery(
-            fresh,
-            tab,
-            current,
-            snapshot.browserIncarnation,
-            visible && viewer === runtime.viewer && !viewer.security?.locked,
-          ),
-        );
+        await this.stepTab(tenant, t.id, {
+          plan: (fresh, tab) =>
+            lifecycle.planLifecycleRecovery(
+              fresh,
+              tab,
+              current,
+              snapshot.browserIncarnation,
+              visible && viewer === runtime.viewer && !viewer.security?.locked,
+            ),
+          call: (step) => lifecycle.callLifecycleRecovery(step),
+          commit: (fresh, tab, step, outcome) => lifecycle.commitLifecycleRecovery(fresh, tab, step, outcome),
+        });
         continue;
       }
-      if (t.pendingUaReloadOrigin && readyToShow)
-        await this.withTab(tenant, t.id, (fresh, tab) =>
-          this.services.navigation.reloadForSiteIdentity(fresh, tab, current, snapshot.browserIncarnation!),
-        );
-      await this.withTab(tenant, t.id, (fresh, tab) =>
-        this.services.lifecycle.maintainBackgroundTab(
-          fresh,
-          tab,
-          current,
-          visible,
-          snapshot.browserIncarnation,
-        ),
-      );
+      if (t.pendingUaReloadOrigin && readyToShow) {
+        const navigation = this.services.navigation;
+        await this.stepTab(tenant, t.id, {
+          plan: (fresh, tab) =>
+            navigation.planSiteIdentityReload(fresh, tab, current, snapshot.browserIncarnation!),
+          call: (step) => navigation.callSiteIdentityReload(step),
+          commit: (fresh, tab, step, outcome) =>
+            navigation.commitSiteIdentityReload(fresh, tab, step, outcome),
+        });
+      }
+      await this.stepTab(tenant, t.id, {
+        plan: (fresh, tab) =>
+          lifecycle.planBackgroundTab(fresh, tab, current, visible, snapshot.browserIncarnation),
+        call: (step) => lifecycle.callBackgroundTab(step),
+        commit: (fresh, tab, step, applied) => lifecycle.commitBackgroundTab(fresh, tab, step, applied),
+      });
     }
   }
   private productInput(tenant: string, observation: string | undefined) {

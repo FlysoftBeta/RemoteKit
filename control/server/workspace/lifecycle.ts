@@ -608,6 +608,7 @@ export class UncertainRecovery {
   lifecycleError(error: unknown) {
     return wireError(toRemoteKitError(error));
   }
+  /** The three parts of one lifecycle recovery step, for callers that hold the tenant lock throughout. */
   async advanceLifecycleRecovery(
     workspace: ProductWorkspace,
     tab: ProductTab,
@@ -615,6 +616,20 @@ export class UncertainRecovery {
     browserIncarnation: unknown,
     visible: boolean,
   ) {
+    const step = this.planLifecycleRecovery(workspace, tab, current, browserIncarnation, visible);
+    if (step) this.commitLifecycleRecovery(workspace, tab, step, await this.callLifecycleRecovery(step));
+  }
+  /**
+   * Decides the next recovery step of a tab and registers it as the tab's recovery attempt. Runs
+   * under the tenant lock and makes no Browser call.
+   */
+  planLifecycleRecovery(
+    workspace: ProductWorkspace,
+    tab: ProductTab,
+    current: any,
+    browserIncarnation: unknown,
+    visible: boolean,
+  ): RecoveryStep | undefined {
     if (
       !current ||
       current.pending !== false ||
@@ -704,32 +719,73 @@ export class UncertainRecovery {
     transitionRecovery(tab, attempt);
     tab.restoring = true;
     this.services.operations.saveWorkspace(workspace);
-    try {
-      const result = await this.context.endpoint.lifecycle(workspace.tenantId, {
+    return {
+      tenant: workspace.tenantId,
+      tabId: tab.id,
+      viewId: tab.webviewId,
+      retry,
+      retryKey,
+      previous,
+      attempt,
+      registered: { ...tab.lifecycleRecovery! },
+      request: {
         viewId: tab.webviewId,
         action,
         requireRunning: true,
         browserIncarnation,
         lifecycleGeneration: generation,
-      });
+      },
+    };
+  }
+  /** The Browser call of a recovery step. Needs no product state, so it runs outside the tenant lock. */
+  async callLifecycleRecovery(step: RecoveryStep): Promise<{ failure?: RemoteKitError }> {
+    try {
+      const result = await this.context.endpoint.lifecycle(step.tenant, step.request);
       if (result?.accepted !== true) throw new RemoteKitError('outcome_unknown', 'Endpoint 未确认请求');
-      retry.succeed();
-      this.recoveryRetries.delete(retryKey);
+      return {};
     } catch (error) {
-      const failure = toRemoteKitError(error);
-      const { delay } = retry.fail(failure);
-      if (delay !== undefined && failure.code !== 'outcome_unknown') {
-        transitionRecovery(tab, previous);
+      return { failure: toRemoteKitError(error) };
+    }
+  }
+  /**
+   * Settles a recovery step under the tenant lock. The tab's recovery state changes only while it
+   * is still the attempt this step registered; the retry accounting is settled either way.
+   */
+  commitLifecycleRecovery(
+    workspace: ProductWorkspace,
+    tab: ProductTab | undefined,
+    step: RecoveryStep,
+    outcome: { failure?: RemoteKitError },
+  ) {
+    const owned =
+      !!tab && tab.webviewId === step.viewId && sameRecoveryRecord(tab.lifecycleRecovery, step.registered);
+    const failure = outcome.failure;
+    if (!failure) {
+      step.retry.succeed();
+      this.recoveryRetries.delete(step.retryKey);
+      return;
+    }
+    const { delay } = step.retry.fail(failure);
+    if (delay !== undefined && failure.code !== 'outcome_unknown') {
+      if (owned) {
+        transitionRecovery(tab, step.previous);
         tab.restoring = false;
         this.services.operations.saveWorkspace(workspace);
-        return;
       }
-      if (errorHandling(failure.code) === 'reconcile') return;
-      transitionRecovery(tab, { phase: 'failed', reason: this.lifecycleError(failure), attempt });
+      return;
+    }
+    if (errorHandling(failure.code) === 'reconcile') return;
+    if (owned) {
+      transitionRecovery(tab, {
+        phase: 'failed',
+        reason: this.lifecycleError(failure),
+        attempt: step.attempt,
+      });
       tab.restoring = false;
       this.services.operations.saveWorkspace(workspace);
     }
   }
+  /** The three parts of one background-tab step, for callers that hold the tenant lock throughout. */
   async maintainBackgroundTab(
     state: ProductWorkspace,
     tab: ProductTab,
@@ -737,6 +793,20 @@ export class UncertainRecovery {
     visible: boolean,
     browserIncarnation: unknown,
   ) {
+    const step = this.planBackgroundTab(state, tab, current, visible, browserIncarnation);
+    if (step) this.commitBackgroundTab(state, tab, step, await this.callBackgroundTab(step));
+  }
+  /**
+   * Records what the background observation says about a tab and decides whether the Browser is
+   * asked to freeze, discard or restore it. Runs under the tenant lock and makes no Browser call.
+   */
+  planBackgroundTab(
+    state: ProductWorkspace,
+    tab: ProductTab,
+    current: any,
+    visible: boolean,
+    browserIncarnation: unknown,
+  ): BackgroundStep | undefined {
     const tenant = state.tenantId,
       key = tenant + '/' + tab.webviewId;
     const node = this.nodeFor(tenant);
@@ -789,26 +859,65 @@ export class UncertainRecovery {
     if (!action) return;
     const attempt = this.context.tenants.get(tenant).lifecycle.transitions.get(key);
     if (attempt?.action === action && this.context.clock.monotonicMs() - attempt.at <= 12000) return;
-    const applied = await this.applyLifecycle(
+    return {
       tenant,
-      {
+      tabId: tab.id,
+      viewId: tab.webviewId,
+      key,
+      action,
+      exhaustion,
+      generation: current.lifecycle_generation,
+      request: {
         viewId: tab.webviewId,
         action,
         requireRunning: true,
         browserIncarnation: typeof browserIncarnation === 'string' ? browserIncarnation : undefined,
       },
-      current.lifecycle_generation,
-    );
-    if (!applied) return;
-    if (tab.idleKeepAliveOutcome && exhaustion) {
+    };
+  }
+  /** The Browser call of a background step. Needs no product state, so it runs outside the tenant lock. */
+  callBackgroundTab(step: BackgroundStep) {
+    return this.applyLifecycle(step.tenant, step.request, step.generation);
+  }
+  /** Records an applied background step while the tab it was decided for still exists. */
+  commitBackgroundTab(
+    state: ProductWorkspace,
+    tab: ProductTab | undefined,
+    step: BackgroundStep,
+    applied: boolean,
+  ) {
+    if (!applied || !tab || tab.webviewId !== step.viewId) return;
+    if (tab.idleKeepAliveOutcome && step.exhaustion) {
       tab.idleKeepAliveOutcome.reason = 'exhaustion';
       this.services.operations.saveWorkspace(state);
     }
-    this.context.tenants
-      .get(tenant)
-      .lifecycle.transitions.set(key, { action, at: this.context.clock.monotonicMs() });
-    if (action === 'freeze') this.context.tenants.get(tenant).lifecycle.background.freezeRequested(key);
+    const lifecycle = this.context.tenants.get(step.tenant).lifecycle;
+    lifecycle.transitions.set(step.key, { action: step.action, at: this.context.clock.monotonicMs() });
+    if (step.action === 'freeze') lifecycle.background.freezeRequested(step.key);
   }
+}
+
+export interface RecoveryStep {
+  tenant: string;
+  tabId: string;
+  viewId: string;
+  retry: RetryUnit;
+  retryKey: string;
+  previous: UncertainRecoveryState | undefined;
+  attempt: RecoveryAttempt;
+  /** The tab's recovery record as this step wrote it; a different record means the tab moved on. */
+  registered: NonNullable<ProductTab['lifecycleRecovery']>;
+  request: Parameters<DomainContext['endpoint']['lifecycle']>[1];
+}
+export interface BackgroundStep {
+  tenant: string;
+  tabId: string;
+  viewId: string;
+  key: string;
+  action: ReclaimAction;
+  exhaustion: boolean;
+  generation: string;
+  request: Parameters<DomainContext['endpoint']['lifecycle']>[1];
 }
 
 type BackgroundView = {
@@ -944,6 +1053,17 @@ export type RecoveryAttempt =
   | (RecoveryIdentity & { phase: 'restoring' });
 export type UncertainRecoveryState =
   RecoveryAttempt | { phase: 'failed'; reason: WireError; attempt?: RecoveryAttempt };
+function sameRecoveryRecord(
+  left: ProductTab['lifecycleRecovery'],
+  right: NonNullable<ProductTab['lifecycleRecovery']>,
+) {
+  return (
+    left?.phase === right.phase &&
+    left.generation === right.generation &&
+    left.browserIncarnation === right.browserIncarnation &&
+    left.submittedAt === right.submittedAt
+  );
+}
 function readRecovery(tab: ProductTab): UncertainRecoveryState | undefined {
   const saved = tab.lifecycleRecovery;
   const attempt: RecoveryAttempt | undefined = saved

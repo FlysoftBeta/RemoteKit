@@ -14,6 +14,7 @@ import { operationFailure, resolvedFailure } from '../failures/operations';
 import { waitForRecovery } from '../failures/recovery';
 import { diagnostics } from '../media/diagnostics';
 import { canonicalJson } from '../util/canonical-json';
+import { shareStructure } from '../util/share-structure';
 import { RequestTracker } from '../util/request-tracker';
 import { Store } from '../util/store';
 import {
@@ -141,7 +142,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
         return receipt ? { ...entry, receipt, phase: receipt.status } : entry;
       })
       .filter((entry) => this.retain(entry, state));
-    this.update(pending, state, error);
+    this.update(pending, shareStructure(previous.authoritative, state), error);
     for (const waiter of [...this.generationWaiters])
       if (state.operationGeneration && state.operationGeneration !== waiter.generation) {
         this.generationWaiters.delete(waiter);
@@ -192,6 +193,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
       operationId: operationId(),
       operationGeneration: source.operationGeneration!,
       action: recordedAction(command),
+      at: Date.now(),
       phase: 'unsent',
     };
     this.commands.set(operation.operationId, command);
@@ -405,6 +407,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
       operationId: operationId(),
       operationGeneration: state.operationGeneration!,
       action: operation.action,
+      at: operation.at,
       phase: 'unsent',
     };
     const acknowledgment = this.acknowledgments.get(operation.operationId) ?? {};
@@ -495,7 +498,10 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     const projections = pending.filter(
       (entry): entry is OperationIntent & PendingOperation => entry.action.type !== 'page.reply',
     );
-    this.publish({ authoritative, pending, state: projectOperations(authoritative, projections), error });
+    // Unchanged parts keep their references, so a projection the authoritative state confirms
+    // renders nothing again.
+    const state = shareStructure(this.getSnapshot().state, projectOperations(authoritative, projections));
+    this.publish({ authoritative, pending, state, error });
     this.cleanCommands();
     this.schedule();
   }

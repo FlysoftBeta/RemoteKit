@@ -63,15 +63,17 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 | 页面状态观察 | URL、标题、加载、生命周期、页面对话框、文件选择请求、下载 | Browser 快照 → Endpoint `session.observed` → Control 投影 → WS 推送 | 保留快照模型（权威、自愈、不怕丢事件），但变化必须事件唤醒：Browser 状态变化通知 Endpoint 立即强制观察并发布，Control 收到观察立即投影并推送；周期采样与对账 tick 只兜底 |
 | 期望状态 | 可见集合、几何、遮挡、view 拓扑 | Control → Endpoint `session.desired` | 产生即发布，Endpoint 立即被唤醒执行，几何走优先通道 |
 
-**观察的立即触发**：Browser 维护一个单调的已观察状态版本（`browser/observed_state.*`），页面请求与对话框、弹窗、页面关闭、导航与加载、标题、全屏、下载、剪贴板序号等任何会进入快照的变化都递增它，并经渲染管道发一条单向 `kObservedChanged`（SDK 事件 `REMOTEKIT_SDK_RENDER_OBSERVED_CHANGED`，leading + 至多一个待发）。Endpoint 协调线程收到后立即取快照，有变化就发布，不受 100ms 发送间隔限制，也不被几何优先的让路推迟；converge 进度变化与任何 RPC job 完成后同样立即发布，等观察确认的操作（导航、剪贴板、权限回复、锁定、关闭）因此只付一次快照的时间。100ms 采样保留为漏掉唤醒时的兜底，发送间隔是 leading + latest-value。Control 收到观察后先在租户锁外直接投影页面对话框与文件请求并推送（`Reconciler.observe` → `projectPageRequests`，要求该观察仍是 Endpoint 的当前观察），之后的完整对账重复同一投影是幂等的。文件选择器各段带 `page_request.timeline`（Browser、Control 日志与客户端诊断）。
+**观察的立即触发**：Browser 维护一个单调的已观察状态版本（`browser/observed_state.*`），页面请求与对话框、弹窗、页面关闭、导航与加载、标题、全屏、下载、剪贴板序号等任何会进入快照的变化都递增它，并经渲染管道发一条单向 `kObservedChanged`（SDK 事件 `REMOTEKIT_SDK_RENDER_OBSERVED_CHANGED`，leading + 至多一个待发）。Endpoint 协调线程收到后立即取快照，有变化就发布，不受 100ms 发送间隔限制，也不被几何优先的让路推迟；converge 进度变化与任何 RPC job 完成后同样立即发布，等观察确认的操作（导航、剪贴板、权限回复、锁定、关闭）因此只付一次快照的时间。100ms 采样保留为漏掉唤醒时的兜底，发送间隔是 leading + latest-value。Control 收到观察后先在租户锁外直接投影页面事实（对话框与文件请求、标题、URL、加载状态、前进后退可用性，`workspace/page-facts.ts`）并推送（`Reconciler.observe` → `projectObserved`，要求该观察仍是 Endpoint 的当前观察；恢复中、正在关闭、待接管弹窗与正在应用导航的 Tab 留给完整对账），完整对账用同一个投影函数，重复执行是幂等的。文件选择器各段带 `page_request.timeline`（Browser、Control 日志与客户端诊断）。
 
 **其余即时路径**：
 - Session 事件（剪贴板变化、下载结果、页面自行关闭、登录结果）在写入 `session.db` 的最外层提交之后立即唤醒协调线程发送，未确认的只在连接变化、重新激活或 2 秒兜底时重发。
-- Control 对账先在租户锁内完成投影（全屏、标题与 URL、弹窗、对话框与文件请求、保存并推送），逐 Tab 的可见准备与导航确认在锁外的每租户合并队列里执行；生命周期恢复、站点身份重载与后台 Tab 维护仍按步持锁（它们把 Browser 调用与状态写入混在一步里）。剪贴板写入与变化有自己的队列，不排在租户锁后。
+- Control 对账先在租户锁内完成投影（全屏、标题与 URL、弹窗、对话框与文件请求、保存并推送），逐 Tab 的可见准备与导航确认在锁外的每租户合并队列里执行；生命周期恢复、站点身份重载与后台 Tab 维护各拆成三段：锁内登记意图 → 锁外调用 Browser → 锁内按最新状态提交（Tab 已消失或恢复/重载标记不再匹配时不改产品状态，重试记账照常结算）。剪贴板写入与变化有自己的队列，不排在租户锁后。
 - 人脸状态变化时 Endpoint 发节点事件 `service.face.changed`，Control 立即读取该挑战；500ms 读取只对 2 秒没有变化的挑战兜底。
 - 文件选择的最终结果经文件服务 DataChannel 的 `files.selection{selectionId, state}` 立即送达，文件库随即确认；定时复查只在通道不可用时以 15 秒兜底。
 - 会话导入进度经 WS `sessionImport` 推送，管理 App 的在线用户与节点状态经 `admin.changed` 推送（其余资源 30 秒兜底）。
 - 照片旋转第一次点按立即开始，之后的点按合并成携带最新累计圈数的一个后续任务；文件库可用性刷新立即执行并至多补一次；文件通道背压等 `bufferedamountlow`。
+
+**客户端渲染**：权威快照与乐观投影都经结构共享（`client/util/share-structure.ts`），未变的窗口、Tab、窗口组保持引用相等；乐观投影用操作意图自己的时间戳，确认推送与投影一致时不产生新引用。`WindowFrame` 按窗口作用域 memo（`window-scope.ts`，忽略其他窗口的最近使用时间、活动组与计数器），切换窗口组只重渲染受影响的窗口，布局与 prepare 消息不再排在整舞台的重渲染后面。
 
 正常路径上不允许等周期 tick、采样间隔、最小发送间隔或尾沿 debounce。需要合并时只用 leading + latest-value（首个变化立即发送，之后按最新值、有最大间隔），过时的值直接丢弃。用户点了以后盯着等的东西（文件篮、对话框、键盘、窗口切换）尤其如此。
 

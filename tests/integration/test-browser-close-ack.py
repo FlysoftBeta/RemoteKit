@@ -26,7 +26,7 @@ def main():
                 time.sleep(.05)
             assert handle.value
             def rpc(method,ok=True,**kwargs):
-                request=dict(version=1,id=len(evidence)+1,method=method,session='1',**kwargs)
+                request=dict(version=1,id=len(evidence)+1,method=method,**({} if method=='snapshot' else dict(session='1')),**kwargs)
                 data=json.dumps(request).encode();out=c.create_string_buffer(1024*1024);size=c.c_size_t()
                 status=sdk.remotekit_sdk_control_request(handle,data,len(data),out,len(out),c.byref(size),10000)
                 assert status==0,status

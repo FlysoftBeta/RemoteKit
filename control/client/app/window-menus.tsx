@@ -102,8 +102,10 @@ export function WindowMenus({
     setInstall,
   } = controls;
   const [siteSettings, setSiteSettings] = useState<{ origin: string; tabId?: string }>();
+  // A window does not render again for the recency of other windows, so the latest is read here.
+  const latestWorkspace = () => transport.operations.getSnapshot().state?.workspace ?? state.workspace;
   const openBrowser = () => {
-    const target = [...state.workspace.windows]
+    const target = [...latestWorkspace().windows]
       .filter((window) => window.appId === 'browser')
       .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
     if (target) run(buildAction({ type: 'tab.create', windowId: target.id, url: active?.url }));
@@ -242,7 +244,7 @@ export function WindowMenus({
                   .then(async (receipt) => {
                     const workspace = await waitForWorkspaceRevision(
                       transport,
-                      receipt.revision ?? state.workspace.revision,
+                      receipt.revision ?? latestWorkspace().revision,
                     );
                     const settings = workspace.windows.find((window) => window.appId === 'settings');
                     if (settings)

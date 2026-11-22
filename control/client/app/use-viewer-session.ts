@@ -1,4 +1,5 @@
 import { useMemo, useRef, useSyncExternalStore } from 'react';
+import type { OperationsSnapshot } from '../control/operations-store';
 import type { ViewerSession } from '../viewer-session';
 interface SessionSource {
   subscribe(listener: () => void): () => void;
@@ -26,6 +27,14 @@ function sessionSnapshot(session: ViewerSession, observe: (source: SessionSource
       return session.rtc.getSnapshot();
     },
   };
+}
+/** Reads a part of the operations state; the component renders again only when that part changes. */
+export function useOperationsSelector<T>(
+  operations: ViewerSession['operations'],
+  select: (snapshot: OperationsSnapshot) => T,
+): T {
+  const read = () => select(operations.getSnapshot());
+  return useSyncExternalStore(operations.subscribe, read, read);
 }
 export function shallowEqual<T>(left: T, right: T): boolean {
   if (Object.is(left, right)) return true;

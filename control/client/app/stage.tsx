@@ -11,7 +11,6 @@ import { keyboardTimeline } from '../editing/keyboard-timeline';
 import { KeyboardViewport } from '../editing/keyboard-viewport';
 import { ShellKeyboard } from '../editing/shell-keyboard';
 import { NoticeCenter, SurfaceState, failureError, notices, presentFailure } from '../failures';
-import { FileChooserDialog } from '../files/file-chooser-dialog';
 import type { ViewerSession } from '../viewer-session';
 import { appName } from './app-icon';
 import { DiagnosticCollectionView } from './diagnostic-collection-view';
@@ -354,29 +353,18 @@ export function Stage({
                 call={call}
                 weight={sideBySide && position >= 0 ? activeSpace!.weights[position] : 1}
                 appContent={appContent}
-                fileChooser={
-                  controls.browserReady && fileRequest?.windowId === w.id ? (
-                    <FileChooserDialog
-                      key={fileRequest.id}
-                      request={fileRequest}
-                      transport={media}
-                      viewId={workspace.tabs.find((tab) => tab.id === fileRequest.tabId)?.webviewId}
-                    />
-                  ) : undefined
+                fileRequest={
+                  controls.browserReady && fileRequest?.windowId === w.id ? fileRequest : undefined
                 }
-
                 onGeometry={onGeometry}
                 visible={visibility.visibleWindowIds.includes(w.id)}
+                focused={w.id === activeSpace?.focusedWindowId}
                 groupHandle={visibility.visibleWindowIds[0] === w.id}
                 fullscreen={fullscreen?.windowId === w.id}
-                surfaceFailure={
-                  w.id === activeSpace?.focusedWindowId && (interactionFailure ?? surfaceFailure)
-                    ? {
-                        error: (interactionFailure ?? surfaceFailure)!,
-                        operation: interactionFailure ? '保存拖动结果' : '更新窗口布局',
-                      }
-                    : undefined
+                surfaceError={
+                  w.id === activeSpace?.focusedWindowId ? (interactionFailure ?? surfaceFailure) : undefined
                 }
+                surfaceOperation={interactionFailure ? '保存拖动结果' : '更新窗口布局'}
               />
             </React.Fragment>
           );
