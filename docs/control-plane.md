@@ -4,9 +4,9 @@ Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、�
 
 ## 存储与迁移
 
-持久化格式的通用规则见[架构 · 持久化格式](architecture.md#持久化格式)。Control 数据库是一个存储，版本记在 `schema_version` 里（当前 23），库里的 JSON 文档随库的版本走，不单独带版本。
+持久化格式的通用规则见[架构 · 持久化格式](architecture.md#持久化格式)。Control 数据库是一个存储，版本记在 `schema_version` 里（当前 33），库里的 JSON 文档随库的版本走，不单独带版本。
 
-**基线与迁移**：`persistence/baseline.ts` 是当前版本的完整 schema。空库直接执行基线；已有库读出版本，依次执行 `persistence/migrations.ts` 中编号大于它的步骤（目前为空），最后版本必须等于当前版本，否则拒绝启动（`internal` + `corrupt_state`）。所有建表、改表都在基线或某个编号步骤里，正常启动不执行任何 DDL。格式变化只能新增编号步骤，同时更新基线；`control/test/fixtures/control-v23.sql` 是当前发布写出的库，测试它不经迁移、不做备份即可打开且记录原样可读。
+**基线与迁移**：`persistence/baseline.ts` 是当前版本的完整 schema。空库直接执行基线；已有库读出版本，依次执行 `persistence/migrations.ts` 中编号大于它的步骤，最后版本必须等于当前版本，否则拒绝启动（`internal` + `corrupt_state`）。所有建表、改表都在基线或某个编号步骤里，正常启动不执行任何 DDL。格式变化只能新增编号步骤，同时更新基线；`control/test/fixtures/control-v23.sql` 是当前发布写出的库，测试它不经迁移、不做备份即可打开且记录原样可读。
 
 **迁移前备份**：有待执行的步骤时，先 `VACUUM INTO` 到数据库所在目录的 `backups/control-v<from>-to-v<to>-<buildId>-<UTC>.db`，以只读方式打开做 `quick_check` 并核对版本，通过后才迁移；只保留最新 3 份。全部步骤与版本更新在一个事务里，任一步失败整体回滚，错误带步骤编号与原始异常（`corrupt_state`）。每一步写入新版本后，在同一事务内运行 `integrity_check` 与 `foreign_key_check`，校验失败同样整体回滚，版本与数据都不变；外键检查只拦截迁移开始后新增的违规（迁移前已有的违规由启动自检记录，拒绝它们会让已有库打不开）。迁移后跑 `integrity_check`。备份不含 `.key`：静态密钥从不改变，恢复时把备份复制回 `control.db`（删除 `-wal`/`-shm`）即可。
 
@@ -15,6 +15,16 @@ Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、�
 **启动自检**：每次打开都运行 `quick_check`（失败拒绝启动）、`foreign_key_check`，并把每一行存储文档解码一遍；外键与解码问题逐条记 `store.integrity_problem`（error），保留运行，结果（最多 200 条）显示在管理 App → 概览。
 
 **文件库是关系表**：`library_state`（revision、篮子目标分区）、`library_entries`（每条目一行，条目文档经解码器）、`library_entry_objects`（条目引用的对象：当前/原始资产、照片候选，供 GC 与配额直接查询）、`library_partitions`、`library_basket`（有序）、`library_excluded_sources`。业务逻辑仍在 `LibrarySnapshot` 对象上修改，`save()` 只写与已读行不同的部分，一次变更一个事务。
+
+## 进程与连接
+
+**主线程是唯一写者**：Control 是一个 Node 进程。主线程持有全部产品状态和唯一的可写 SQLite 连接（WAL），处理 Viewer WebSocket、节点链路、HTTP、信令、期望文档发布与所有写入。每个状态只有这一个所有者，写入没有并发者。
+
+**读 worker**：`server/workers/` 在 worker_threads 上运行整库级的只读分析（`read-tasks.ts`：对象 GC 候选、副本不足的对象、存储统计）。worker 最多 2 个（逻辑 CPU 少时 1 个），首次使用时启动；每个 worker 有自己的只读连接，`strictSqlite` 校验与主连接相同。WAL 给它一个一致的快照，既不阻塞主线程写入，也不被写入阻塞。任务的输入和输出是普通结构化数据，结果只是计划：主线程逐项用当前索引做廉价的精确复核，然后才发节点请求、写库，所以快照过期不会造成误删或误复制。worker 异常退出时，它在途的任务以 `unavailable` 失败，由调用方的重试单元处理，下一个任务会启动新的 worker；任务内部的错误（如 `corrupt_record`）按错误码原样返回。内存数据库（测试）只有它自己的连接能读，同一组任务函数改在主线程内联执行。发布包里 worker 是 `dist/read-worker.mjs`，与 `server.mjs` 并列。
+
+**时间片**：主线程上的长循环（GC 复核、补副本、磁盘压力腾挪）每 8ms 用 `setImmediate` 让出一次事件循环，Viewer 与节点消息不会排在维护后面。
+
+**被否决：按 Tenant 拆进程**。一条节点链路同时承载多个 Tenant，对象存储跨 Tenant 去重，管理、放置与回收都需要全局视图；按 Tenant 拆分就要把这些状态分给多个所有者，再做进程间协调。多个写者还会在 SQLite 上互相等待，而 better-sqlite3 的等待是同步的，会把事件循环一起卡住。实际观测到的饱和来自全表计算，不是单个 Tenant 的请求处理，所以做法是把全表计算移出主线程、改为增量，主线程保持唯一写者。
 
 ## 数据归属
 

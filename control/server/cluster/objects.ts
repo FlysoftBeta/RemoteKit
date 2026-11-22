@@ -18,11 +18,18 @@ import type { NodeLink, NodeRegistry } from './node-link';
 import { clusterObjectKeys } from './keys';
 import {
   tenantObjects,
+  tenantReferences,
+  tenantObjectUsage,
+  objectReferenced,
+  referenceRoots,
   syncObjectReferences,
-  retainedCheckpoints,
+  configuredReplicaNodes,
   pruneCheckpoints,
+  type ReferenceRoots,
   OBJECT_GRACE_MS as GRACE_MS,
 } from '../persistence/object-references';
+import type { IndexedObject } from '../workers/read-tasks';
+import { perf } from '../util/perf';
 
 const objectId = (id: unknown): id is string => typeof id === 'string' && /^[a-f0-9]{64}$/.test(id);
 const retirements = new WeakMap<ControlDatabase, Set<string>>();
@@ -34,13 +41,27 @@ export function retiringObjects(store: ControlDatabase) {
   }
   return objects;
 }
-interface IndexedObject {
-  id: string;
-  size: bigint;
-  stored_size: bigint;
-  stored_sha256: string;
-  created_at: bigint;
+// Maintenance runs when something it acts on changed, at most this often; the sweep catches
+// what only time changes (grace periods, claim expiry).
+const MAINTENANCE_MIN_INTERVAL_MS = 5_000;
+const MAINTENANCE_SWEEP_MS = 60_000;
+// Bounds one pass; a full batch leaves the index dirty so the next pass continues.
+const MAINTENANCE_BATCH = 512;
+// Long loops give the event loop back this often so Viewer and node traffic is not starved.
+const SLICE_MS = 8;
+// Rows written per transaction when applying a reference diff.
+const GC_APPLY_BATCH = 2000;
+
+class TimeSlice {
+  private started = performance.now();
+  async yield() {
+    if (performance.now() - this.started < SLICE_MS) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    this.started = performance.now();
+  }
 }
+
+type DiskBand = 'low' | 'draining' | 'ok';
 type CommitStatements = Record<
   | 'object'
   | 'replica'
@@ -86,6 +107,9 @@ export class ObjectIndex {
   private maintenance?: Promise<void>;
   private readonly maintenanceJob = new BackgroundJob('objects.background', { job: 'maintenance' });
   private maintenanceInput = 0;
+  private maintenanceDirty = true;
+  private maintenanceStartedAt = -Infinity;
+  private readonly diskBands = new Map<string, DiskBand>();
   private readonly reconciliationJobs = new Map<string, BackgroundJob>();
   private closed = false;
   private readonly availableObjects = new Set<string>();
@@ -152,7 +176,9 @@ export class ObjectIndex {
   }
   private readonly offline = (nodeId: string) => {
     this.readFetches.delete(nodeId);
+    this.diskBands.delete(nodeId);
     this.nodeAvailabilityChanged(nodeId);
+    this.invalidate();
   };
   private track(work: Promise<unknown>) {
     this.jobs.add(work);
@@ -163,6 +189,7 @@ export class ObjectIndex {
   private readonly ready = ({ nodeId }: { nodeId: string }) => {
     this.readFetches.delete(nodeId);
     this.nodeAvailabilityChanged(nodeId);
+    this.invalidate();
     this.store.db
       .prepare("UPDATE object_render_failures SET retry_at=0 WHERE reason='unavailable' AND build_id=?")
       .run(this.nodes.options.buildId);
@@ -174,22 +201,36 @@ export class ObjectIndex {
     const node = this.nodes.get(nodeId)!;
     this.track(job.run(() => this.reconcile(node).then(() => this.tick()), JSON.stringify(node.state)));
   };
-  private readonly metrics = () => {
-    this.track(this.tick());
+  // Metrics arrive every few seconds; only a change of disk band changes what maintenance does.
+  private readonly metrics = (nodeId: string) => {
+    const node = this.nodes.get(nodeId);
+    const sample = node?.metrics.latest();
+    if (!node || !sample) return;
+    const floor = diskFloor(node, sample);
+    const band: DiskBand = sample.value.disk.free < floor ? 'low' : node.diskDraining ? 'draining' : 'ok';
+    if (this.diskBands.get(nodeId) === band) return;
+    this.diskBands.set(nodeId, band);
+    this.invalidate();
   };
+  /** Marks the index changed; the next scheduled pass runs maintenance. */
+  invalidate() {
+    this.maintenanceInput++;
+    this.maintenanceDirty = true;
+  }
   bytes(tenant: string) {
-    let bytes = 0;
-    const lookup = this.store.db.prepare('SELECT size FROM objects WHERE id=?');
-    for (const id of tenantObjects(this.store.db).get(tenant) ?? [])
-      bytes += Number((lookup.get(id) as { size: bigint } | undefined)?.size ?? 0);
-    return bytes;
+    return tenantObjectUsage(this.store.db, tenant, Date.now()).bytes;
   }
   require(tenant: string, id: string, references?: ReadonlySet<string>) {
     if (!objectId(id))
       throw new RemoteKitError('invalid_request', '文件标识格式无效', {
         detail: 'Asset id must be an object id',
       });
-    if (this.retired.has(id) || !(references ?? tenantObjects(this.store.db).get(tenant))?.has(id))
+    if (
+      this.retired.has(id) ||
+      !(references
+        ? references.has(id)
+        : objectReferenced(this.store.db, id, { tenant, since: Date.now() - GRACE_MS }))
+    )
       throw new RemoteKitError('forbidden', '无权访问该文件', {
         detail: 'Tenant has no object reference or claim',
       });
@@ -376,7 +417,7 @@ export class ObjectIndex {
     });
     for (const effect of effects) effect();
     this.refreshObjectAvailability([message.objectId]);
-    this.maintenanceInput++;
+    this.invalidate();
     return { accepted: true };
   }
   committedBatch(node: NodeLink, message: Record<string, any>) {
@@ -425,7 +466,7 @@ export class ObjectIndex {
     }
     for (const effect of effects) effect();
     this.refreshObjectAvailability(message.objects.map((item: { objectId: string }) => item.objectId));
-    this.maintenanceInput++;
+    this.invalidate();
     return { ok: true };
   }
   private commitObject(
@@ -502,7 +543,9 @@ export class ObjectIndex {
     if (kind === 'document') this.commitSql.clearRender.run(derivedFrom);
     if (tenant) {
       this.commitSql.claim.run(tenant, id, Date.now());
-      const affected = derivedFrom ? tenantObjects(this.store.db).keys() : [tenant];
+      // A shared derivative is charged to every tenant referencing its source.
+      const affected =
+        derivedFrom && this.tenantObjectBytes !== null ? tenantObjects(this.store.db).keys() : [tenant];
       for (const owner of affected) quotas.add(owner);
       this.commitSql.refreshGc.run(Date.now(), id);
     }
@@ -526,9 +569,7 @@ export class ObjectIndex {
       message.ids.some((id: unknown) => !objectId(id))
     )
       throw new RemoteKitError('invalid_request', '文件标识格式无效', { detail: 'Invalid object ids' });
-    const references = render
-      ? undefined
-      : (tenantObjects(this.store.db).get(message.tenantId) ?? new Set<string>());
+    const references = render ? undefined : tenantReferences(this.store.db, message.tenantId, Date.now());
     for (const id of message.ids) {
       if (!render) this.require(message.tenantId, id, references);
       else if (
@@ -600,6 +641,7 @@ export class ObjectIndex {
   private removeReplica(id: string, nodeId: string) {
     this.store.db.prepare('DELETE FROM object_replicas WHERE id=? AND node_id=?').run(id, nodeId);
     this.refreshObjectAvailability([id]);
+    this.invalidate();
   }
   private sources(id: string) {
     return (
@@ -847,66 +889,87 @@ export class ObjectIndex {
     return true;
   }
   async gc(now = Date.now()) {
-    const durable = tenantObjects(this.store.db, false, now);
-    const claims = this.store.db.prepare('SELECT tenant,id,claimed_at FROM object_claims').all() as {
-      tenant: string;
-      id: string;
-      claimed_at: bigint;
-    }[];
-    const claimed = new Set(
-      claims
-        .filter((c) => Number(c.claimed_at) >= now - GRACE_MS || this.checkpointing(c.tenant))
-        .map((c) => c.id),
+    const db = this.store.db;
+    const cutoff = now - GRACE_MS;
+    const protectedTenants = (
+      db.prepare('SELECT DISTINCT tenant FROM object_claims').all() as { tenant: string }[]
+    )
+      .map((row) => row.tenant)
+      .filter((tenant) => this.checkpointing(tenant));
+    const diff = await this.store.readers.run('objects.referenceDiff', {
+      now,
+      replicaNodes: configuredReplicaNodes(db),
+      protectedTenants,
+    });
+    const deleteClaim = db.prepare('DELETE FROM object_claims WHERE tenant=? AND id=? AND claimed_at<?');
+    const pin = db.prepare(
+      'INSERT INTO object_gc VALUES (?,-1) ON CONFLICT(id) DO UPDATE SET unreferenced_at=-1',
     );
-    for (const c of claims)
-      if (
-        !durable.get(c.tenant)?.has(c.id) &&
-        !this.checkpointing(c.tenant) &&
-        Number(c.claimed_at) < now - GRACE_MS
-      )
-        this.store.db.prepare('DELETE FROM object_claims WHERE tenant=? AND id=?').run(c.tenant, c.id);
-    let references: { durable: Set<string>; all: Set<string> } | undefined;
-    const currentReferences = () =>
-      (references ??= {
-        durable: new Set([...tenantObjects(this.store.db, false, now).values()].flatMap((ids) => [...ids])),
-        all: new Set([...tenantObjects(this.store.db, true, now).values()].flatMap((ids) => [...ids])),
+    const release = db.prepare('UPDATE object_gc SET unreferenced_at=? WHERE id=? AND unreferenced_at=-1');
+    // The diff is a snapshot: pinning a stale entry only delays its grace, but a release or a
+    // claim deletion is rechecked against the current index first.
+    const apply = (work: (roots: ReferenceRoots) => void) =>
+      perf.sync('objects.gc.apply', () => this.store.transaction(() => work(referenceRoots(db))));
+    const slice = new TimeSlice();
+    for (let start = 0; start < diff.staleClaims.length; start += GC_APPLY_BATCH) {
+      await slice.yield();
+      apply((roots) => {
+        for (const [tenant, id] of diff.staleClaims.slice(start, start + GC_APPLY_BATCH))
+          if (!this.checkpointing(tenant) && !objectReferenced(db, id, { tenant, since: null, roots }))
+            deleteClaim.run(tenant, id, cutoff);
       });
-    const lastClaims = new Map<string, number>();
-    for (const claim of claims)
-      lastClaims.set(claim.id, Math.max(lastClaims.get(claim.id) ?? 0, Number(claim.claimed_at)));
-    for (const object of this.store.db.prepare('SELECT * FROM objects').all() as IndexedObject[]) {
-      if (this.retired.has(object.id)) continue;
-      const current = currentReferences();
-      if (this.renders.has(object.id) || current.durable.has(object.id)) {
-        this.store.db
-          .prepare('INSERT INTO object_gc VALUES (?,-1) ON CONFLICT(id) DO UPDATE SET unreferenced_at=-1')
-          .run(object.id);
-        continue;
-      }
-      const lastClaim = Math.max(Number(object.created_at), lastClaims.get(object.id) ?? 0);
-      this.store.db
-        .prepare('INSERT OR IGNORE INTO object_gc VALUES (?,?)')
-        .run(object.id, Math.min(now, lastClaim));
-      this.store.db
-        .prepare('UPDATE object_gc SET unreferenced_at=? WHERE id=? AND unreferenced_at=-1')
-        .run(now, object.id);
-      const since = this.store.db
-        .prepare('SELECT unreferenced_at FROM object_gc WHERE id=?')
-        .get(object.id) as { unreferenced_at: bigint };
-      if (
-        claimed.has(object.id) ||
-        current.all.has(object.id) ||
-        // A copy still arriving would outlive the deletion of every known replica.
-        [...this.inflight.keys()].some((pair) => JSON.parse(pair)[1] === object.id) ||
-        Number(since.unreferenced_at) >= now - GRACE_MS
-      )
+    }
+    for (let start = 0; start < diff.pin.length; start += GC_APPLY_BATCH) {
+      await slice.yield();
+      apply(() => {
+        for (const id of diff.pin.slice(start, start + GC_APPLY_BATCH)) pin.run(id);
+      });
+    }
+    for (let start = 0; start < diff.release.length; start += GC_APPLY_BATCH) {
+      await slice.yield();
+      apply((roots) => {
+        for (const id of diff.release.slice(start, start + GC_APPLY_BATCH))
+          if (!this.renders.has(id) && !objectReferenced(db, id, { since: null, roots }))
+            release.run(now, id);
+      });
+    }
+    apply(() => {
+      for (const id of this.renders.keys()) if (this.commitSql.source.get(id)) pin.run(id);
+      // An object first seen unreferenced starts its grace at its last claim or its creation.
+      db.prepare(
+        `INSERT OR IGNORE INTO object_gc SELECT o.id, min(@now, max(o.created_at,
+          coalesce((SELECT max(c.claimed_at) FROM object_claims c WHERE c.id=o.id),0)))
+        FROM objects o WHERE NOT EXISTS (SELECT 1 FROM object_gc g WHERE g.id=o.id)`,
+      ).run({ now });
+    });
+    const candidates = await this.store.readers.run('objects.expired', {
+      now,
+      replicaNodes: configuredReplicaNodes(db),
+      protectedTenants,
+      limit: MAINTENANCE_BATCH,
+    });
+    if (candidates.length === MAINTENANCE_BATCH) this.maintenanceDirty = true;
+    // -1 (a live reference) is outside the column's validated range, so compare in SQL.
+    const graceEnded = db.prepare(
+      'SELECT unreferenced_at>=0 AND unreferenced_at<? AS ended FROM object_gc WHERE id=?',
+    );
+    const claimTenants = db.prepare('SELECT tenant FROM object_claims WHERE id=?');
+    const replicasOf = db.prepare('SELECT node_id FROM object_replicas WHERE id=?');
+    const anyReplica = db.prepare('SELECT 1 FROM object_replicas WHERE id=?');
+    let roots = referenceRoots(db);
+    for (const object of candidates) {
+      await slice.yield();
+      if (this.closed) return;
+      if (this.retired.has(object.id) || this.renders.has(object.id) || this.fetching(object.id)) continue;
+      // The candidates are a snapshot: recheck each against the current index before deleting.
+      if (!(graceEnded.get(cutoff, object.id) as { ended: bigint } | undefined)?.ended) continue;
+      if (objectReferenced(db, object.id, { since: cutoff, roots })) continue;
+      if ((claimTenants.all(object.id) as { tenant: string }[]).some((row) => this.checkpointing(row.tenant)))
         continue;
       this.retired.add(object.id);
-      this.store.db.prepare('DELETE FROM object_render_failures WHERE source_id=?').run(object.id);
+      db.prepare('DELETE FROM object_render_failures WHERE source_id=?').run(object.id);
       try {
-        for (const replica of this.store.db
-          .prepare('SELECT node_id FROM object_replicas WHERE id=?')
-          .all(object.id) as { node_id: string }[]) {
+        for (const replica of replicasOf.all(object.id) as { node_id: string }[]) {
           const node = this.nodes.get(replica.node_id);
           if (node?.state.state !== 'ready') continue;
           const deleted = await this.cleanup(
@@ -915,29 +978,31 @@ export class ObjectIndex {
             (opId) => node.request('object.delete', '', { ids: [object.id] }, undefined, opId),
           );
           if (!deleted) continue;
-          references = undefined;
           this.removeReplica(object.id, node.nodeId);
+          // Retention counts replicas, so a removed copy can change which versions are kept.
+          roots = referenceRoots(db);
         }
-        if (!this.store.db.prepare('SELECT 1 FROM object_replicas WHERE id=?').get(object.id))
+        if (!anyReplica.get(object.id))
           this.store.transaction(() => {
-            this.store.db.prepare('DELETE FROM objects WHERE id=?').run(object.id);
-            this.store.db
-              .prepare('DELETE FROM object_derivations WHERE id=? OR source_id=?')
-              .run(object.id, object.id);
-            this.store.db.prepare('DELETE FROM object_gc WHERE id=?').run(object.id);
-            this.store.db.prepare('DELETE FROM object_claims WHERE id=?').run(object.id);
+            db.prepare('DELETE FROM objects WHERE id=?').run(object.id);
+            db.prepare('DELETE FROM object_derivations WHERE id=? OR source_id=?').run(object.id, object.id);
+            db.prepare('DELETE FROM object_gc WHERE id=?').run(object.id);
+            db.prepare('DELETE FROM object_claims WHERE id=?').run(object.id);
           });
       } finally {
         this.retired.delete(object.id);
       }
     }
-    for (const orphan of this.store.db
+    const indexed = db.prepare('SELECT 1 FROM objects WHERE id=?');
+    const clearOrphan = db.prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND id=?');
+    for (const orphan of db
       .prepare('SELECT * FROM object_inventory_orphans WHERE first_seen<?')
       .all(now - GRACE_MS) as { node_id: string; id: string }[]) {
+      await slice.yield();
       const node = this.nodes.get(orphan.node_id);
       if (node?.state.state !== 'ready') continue;
       if (this.retired.has(orphan.id)) continue;
-      if (!this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(orphan.id)) {
+      if (!indexed.get(orphan.id)) {
         this.retired.add(orphan.id);
         try {
           const deleted = await this.cleanup(
@@ -950,10 +1015,14 @@ export class ObjectIndex {
           this.retired.delete(orphan.id);
         }
       }
-      this.store.db
-        .prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND id=?')
-        .run(orphan.node_id, orphan.id);
+      clearOrphan.run(orphan.node_id, orphan.id);
     }
+  }
+  // A copy still arriving would outlive the deletion of every known replica.
+  private fetching(id: string) {
+    const suffix = `,${JSON.stringify(id)}]`;
+    for (const pair of this.inflight.keys()) if (pair.endsWith(suffix)) return true;
+    return false;
   }
   private fetch(node: NodeLink, object: IndexedObject) {
     const pair = JSON.stringify([node.nodeId, object.id]);
@@ -1003,31 +1072,27 @@ export class ObjectIndex {
     }
   }
   async replicate() {
-    const ready = this.nodes
-      .all()
-      .filter((node) => node.state.state === 'ready' && !this.nodes.isRemoved(node.nodeId));
+    const readyNodes = () =>
+      this.nodes.all().filter((node) => node.state.state === 'ready' && !this.nodes.isRemoved(node.nodeId));
+    const jobs: Promise<unknown>[] = [...this.inflight.values()];
+    const planned = readyNodes();
+    const candidates = planned.length
+      ? await this.store.readers.run('objects.underReplicated', {
+          now: Date.now(),
+          replicaNodes: configuredReplicaNodes(this.store.db),
+          readyNodes: planned.map((node) => node.nodeId),
+          target: Math.min(2, planned.length),
+          limit: MAINTENANCE_BATCH,
+        })
+      : [];
+    if (candidates.length === MAINTENANCE_BATCH) this.maintenanceDirty = true;
+    const ready = readyNodes();
     const target = Math.min(2, ready.length);
-    const referenced = new Set([...tenantObjects(this.store.db).values()].flatMap((ids) => [...ids]));
-    const retained = retainedCheckpoints(this.store.db);
-    const current = retained.filter((version, index) => version.tenant !== retained[index - 1]?.tenant);
-    const jobs: Promise<unknown>[] = [];
-    for (const object of this.store.db
-      .prepare(
-        `SELECT o.* FROM json_each(@referenced) ref JOIN objects o ON o.id=ref.value ORDER BY EXISTS (
-        SELECT 1 FROM json_each(@current) c JOIN checkpoint_objects co
-          ON co.tenant=json_extract(c.value,'$.tenant') AND co.manifest_id=json_extract(c.value,'$.manifestId')
-        WHERE co.id=o.id
-      ) DESC,o.created_at DESC,o.id`,
-      )
-      .all({
-        referenced: JSON.stringify([...referenced]),
-        current: JSON.stringify(current),
-      }) as IndexedObject[]) {
+    const slice = new TimeSlice();
+    for (const object of candidates) {
+      await slice.yield();
+      if (this.closed) break;
       if (this.retired.has(object.id)) continue;
-      for (const node of ready) {
-        const running = this.inflight.get(JSON.stringify([node.nodeId, object.id]));
-        if (running) jobs.push(running);
-      }
       const sources = this.sources(object.id);
       if (!sources.length) continue;
       let missing =
@@ -1055,12 +1120,16 @@ export class ObjectIndex {
           );
         })) {
         if (missing <= 0) break;
+        if ((this.busy.get(node.nodeId) ?? 0) >= 4) {
+          // Held back by the per-node fetch limit; the next pass plans this copy again.
+          this.maintenanceDirty = true;
+          continue;
+        }
         if (
-          (this.busy.get(node.nodeId) ?? 0) >= 4 ||
           node.metrics.latest()!.value.disk.free -
             (this.reserved.get(node.nodeId) ?? 0) -
             Number(object.stored_size) <
-            diskFloor(node, node.metrics.latest()!)
+          diskFloor(node, node.metrics.latest()!)
         )
           continue;
         missing--;
@@ -1096,7 +1165,9 @@ export class ObjectIndex {
         ON r.id=o.id WHERE r.node_id=? ORDER BY o.created_at`,
         )
         .all(node.nodeId) as IndexedObject[];
+      const slice = new TimeSlice();
       for (const object of copies) {
+        await slice.yield();
         if (free >= 2 * diskFloor(node, node.metrics.latest() ?? sample)) break;
         let elsewhere = this.sources(object.id).filter((source) => source.nodeId !== node.nodeId);
         const target = Math.min(
@@ -1134,6 +1205,7 @@ export class ObjectIndex {
       }
     }
   }
+  /** Runs a maintenance pass now, or joins the running one. */
   tick() {
     if (this.closed) return Promise.resolve();
     if (this.maintenance) return this.maintenance;
@@ -1143,18 +1215,38 @@ export class ObjectIndex {
     ]);
     this.maintenance = this.maintenanceJob
       .run(async () => {
-        pruneCheckpoints(this.store.db);
-        await this.gc();
-        await this.diskPressure();
-        await this.replicate();
+        this.maintenanceDirty = false;
+        this.maintenanceStartedAt = this.now();
+        try {
+          perf.sync('objects.prune', () => pruneCheckpoints(this.store.db));
+          await perf.async('objects.gc', () => this.gc());
+          await perf.async('objects.disk_pressure', () => this.diskPressure());
+          await perf.async('objects.replicate', () => this.replicate());
+        } catch (error) {
+          this.maintenanceDirty = true;
+          throw error;
+        }
       }, input)
       .finally(() => {
         this.maintenance = undefined;
       });
     return this.maintenance;
   }
+  /**
+   * Called on the background cadence: a pass runs when the index changed (at most every
+   * MAINTENANCE_MIN_INTERVAL_MS) or when the sweep for time-based expiry is due.
+   */
+  scheduled() {
+    const elapsed = this.now() - this.maintenanceStartedAt;
+    if (
+      this.maintenance ||
+      !(elapsed >= MAINTENANCE_SWEEP_MS || (this.maintenanceDirty && elapsed >= MAINTENANCE_MIN_INTERVAL_MS))
+    )
+      return Promise.resolve();
+    return this.tick();
+  }
   forgetTenant(tenant: string) {
-    this.maintenanceInput++;
+    this.invalidate();
     this.store.transaction(() => {
       for (const table of ['object_claims', 'checkpoints', 'checkpoint_objects'])
         this.store.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
@@ -1162,8 +1254,7 @@ export class ObjectIndex {
     });
   }
   tenantUsage(tenant: string) {
-    const ids = tenantObjects(this.store.db).get(tenant) ?? new Set<string>();
-    return { objects: ids.size, bytes: this.bytes(tenant), quotaBytes: this.tenantObjectBytes };
+    return { ...tenantObjectUsage(this.store.db, tenant, Date.now()), quotaBytes: this.tenantObjectBytes };
   }
   failures() {
     return [
@@ -1184,31 +1275,17 @@ export class ObjectIndex {
       .get(nodeId) as { bytes: bigint };
     return Number(row.bytes);
   }
-  usage() {
+  /** Index totals and, with `perTenant`, each tenant's referenced objects; computed off the event loop. */
+  storage(perTenant: boolean) {
     const ready = this.nodes
       .all()
       .filter((node) => node.state.state === 'ready' && !this.nodes.isRemoved(node.nodeId)).length;
-    const totals = this.store.db
-      .prepare(
-        'SELECT count(*) AS count, coalesce(sum(size),0) AS bytes, coalesce(sum(stored_size),0) AS stored FROM objects',
-      )
-      .get() as { count: bigint; bytes: bigint; stored: bigint };
-    const under = this.store.db
-      .prepare(
-        `SELECT count(*) AS count FROM objects o WHERE
-        (SELECT count(*) FROM object_replicas r WHERE r.id=o.id) < ?`,
-      )
-      .get(Math.min(2, ready)) as { count: bigint };
-    const orphans = this.store.db.prepare('SELECT count(*) AS count FROM object_inventory_orphans').get() as {
-      count: bigint;
-    };
-    return {
-      objects: Number(totals.count),
-      bytes: Number(totals.bytes),
-      storedBytes: Number(totals.stored),
-      underReplicated: Number(under.count),
-      orphans: Number(orphans.count),
-    };
+    return this.store.readers.run('objects.storage', {
+      now: Date.now(),
+      replicaNodes: configuredReplicaNodes(this.store.db),
+      target: Math.min(2, ready),
+      perTenant,
+    });
   }
   forgetNode(nodeId: string) {
     this.nodeAvailabilityChanged(nodeId, true);

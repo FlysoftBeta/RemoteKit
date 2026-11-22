@@ -10,6 +10,7 @@ import {
 } from '../endpoint/coordination';
 import { RpcResults, rpcId } from '../endpoint/rpc-results';
 import { diskFloor } from './disk';
+import { perf, SLOW_ASYNC_MS } from '../util/perf';
 import { RetryUnit } from '../../shared/retry-unit';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -348,11 +349,17 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         }),
     );
   }
-  async invoke(message: OneShotRequest, timeoutMs?: number): Promise<any> {
-    await this.coordinate();
-    if (this.state.state !== 'ready' || this.state.incarnation !== message.endpointIncarnation)
-      throw new RemoteKitError('conflict', 'RPC Endpoint target is retired');
-    return this.exchange(message, timeoutMs);
+  invoke(message: OneShotRequest, timeoutMs?: number): Promise<any> {
+    return perf.async(
+      `endpoint.${message.method}`,
+      async () => {
+        await this.coordinate();
+        if (this.state.state !== 'ready' || this.state.incarnation !== message.endpointIncarnation)
+          throw new RemoteKitError('conflict', 'RPC Endpoint target is retired');
+        return this.exchange(message, timeoutMs);
+      },
+      () => ({ nodeId: this.nodeId, tenant: message.tenantId }),
+    );
   }
   start() {
     const launch = this.configured.local;
@@ -509,6 +516,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         return;
       }
       this.incoming++;
+      const started = performance.now();
       let timer: NodeJS.Timeout;
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(
@@ -542,6 +550,10 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         .finally(() => {
           clearTimeout(timer);
           this.incoming--;
+          perf.record(`node.rpc.${message.request}`, performance.now() - started, SLOW_ASYNC_MS, () => ({
+            nodeId: this.nodeId,
+            tenant: message.tenantId,
+          }));
         });
       return;
     }
@@ -1112,7 +1124,12 @@ export class NodeRegistry extends EventEmitter {
             .finally(() => {
               downloading = false;
             });
-        } else link!.receive(connection, message);
+        } else
+          perf.sync(
+            `node.${message.event ?? (message.request ? 'request' : 'reply')}`,
+            () => link!.receive(connection!, message),
+            () => ({ nodeId: link!.nodeId, method: message.request ?? message.event }),
+          );
       } catch (error) {
         carrier.closeWithCause(failureReason, errorDetail(error));
       }

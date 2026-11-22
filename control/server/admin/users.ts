@@ -65,13 +65,16 @@ export class UserAdmin {
       };
     });
   }
-  storage(): AdminStorage {
-    const usage = this.services.objects.usage();
+  async storage(): Promise<AdminStorage> {
+    const { tenants, ...usage } = await this.services.objects.storage(true);
     return {
       ...usage,
       pendingSessionDeletions: this.services.sessionPurge.pending(),
       users: this.context.store.accounts.users().map((user) => {
-        const objects = this.services.objects.tenantUsage(user.tenant);
+        const objects = {
+          ...(tenants[user.tenant] ?? { objects: 0, bytes: 0 }),
+          quotaBytes: this.services.objects.tenantObjectBytes,
+        };
         const checkpoints = this.context.endpoint.placement.checkpoints(user.tenant);
         return {
           username: user.username,

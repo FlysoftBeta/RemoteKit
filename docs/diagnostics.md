@@ -69,6 +69,17 @@ Control 读取节点日志只用三个节点级方法（不属于任何 Session�
 - 节点 RPC 失败时 Control 收到的是线上错误对象，打包、检索与采集都用 `endpointError` 转换，保留节点给出的 code、消息与错误 ID；用 `toRemoteKitError` 会把它变成 `internal` 与 `[object Object]`。
 - `node.logs.read{path, offset, length ≤ 512 KiB}` → 二进制帧 `{path, offset, size}` + 字节：`path` 必须是 `<date>/<文件>` 或 `crashes/<目录>/<文件>` 形式，不接受 `..`、绝对路径与日志根之下任何一级的 reparse point（日志根本身是配置值，可以位于联接之后）；`size` 是读取时的文件大小，调用者据此从尾部或头部分段读取，并发追加不影响已读部分。
 
+### Control 计时
+
+Control 在关键路径上打点（`server/util/perf.ts`）：
+
+- `perf.sync` 包住占用事件循环的同步工作：节点消息分发 `node.<event>`、Viewer 请求的同步前缀 `viewer.<method>`、期望文档编译 `desired.compile`、引用同步 `objects.gc.references`、checkpoint 裁剪 `objects.prune`、内联读任务 `read.<task>`。
+- `perf.async` 包住整段操作：`viewer.<method>.total`、Control 发往 Endpoint 的请求往返 `endpoint.<method>`、处理节点请求 `node.rpc.<request>`、`desired.publish`、后台作业 `background.<job>`、对象维护各阶段 `objects.gc` / `objects.disk_pressure` / `objects.replicate`、读 worker 任务 `read.<task>`（含排队），以及 worker 内的执行时间 `read.<task>.run`。
+- 单次同步 ≥50ms、异步 ≥1s 时，记一条 `perf.slow{op, ms, sync, …}`（info），带 tenant 或 nodeId 等字段。
+- 事件循环延迟每秒采样一次；窗口最大值 ≥200ms 时，记 `control.event_loop_stall{maxMs, p99Ms, meanMs, ops}`（warn）。`ops` 是该窗口里累计耗时最长的 8 项同步工作，用来定位是谁卡住了事件循环。
+
+诊断包里每个 Control 样本都带 `perf`：各操作自启动以来的次数、总时长、最大值与慢次数（前 40 项），以及最近 10 个事件循环窗口。
+
 ## 诊断包
 
 诊断数据有两种来源，结果都是一个 tar.zst **诊断包**，由管理员保存到自己的"我的文件"里；保存后它就是普通文件，不受日志保留天数影响，由用户自己管理。"我的文件"里它们的来源是**诊断信息**（`source:{app:"diagnostics", channel:"logs"|"collection"}`）。"我的文件"里的每个文件都有"下载到本地"按钮（和预览一样经 WebRTC 文件通道读出，由浏览器保存）。
@@ -88,7 +99,7 @@ Control 读取节点日志只用三个节点级方法（不属于任何 Session�
 **内容**：
 
 - 客户端约每秒提交一次结构化观测（getStats、呈现、输入），同时只有一个请求在途，停止前等待最后一次提交。
-- Control 每 2 秒采样一次进程/事件循环/产品投影，以及 Endpoint 快照（`session.snapshot{outputDiagnostics:true}`：本 Tenant 的编码器、Comp、Browser 输出状态，经已有的管理连接）。一个慢的 Endpoint 请求不会堆积更多请求，也不阻塞归档停止（采集期限 1800ms）。
+- Control 每 2 秒采样一次进程/事件循环/计时汇总（见 [Control 计时](#control-计时)）/产品投影，以及 Endpoint 快照（`session.snapshot{outputDiagnostics:true}`：本 Tenant 的编码器、Comp、Browser 输出状态，经已有的管理连接）。一个慢的 Endpoint 请求不会堆积更多请求，也不阻塞归档停止（采集期限 1800ms）。
 - 每份数据保留自己的时钟域，记录缺测与终止原因。
 - 采样数据（JSONL）不包含：凭据、SDP/候选 IP、Profile、用户文件、页面像素、输入文本。投影使用字段白名单和遍历预算。
 - **原始日志**在停止时原样收录，不做脱敏，都从尾部向前读，因此包含开始诊断之前的历史——"先出问题、再开诊断"也能看到现场：本 Session 的 Browser 日志（最新的 `browser-<sessionId>` 文件，不足时向前一个文件补足）共 16 MiB；节点的 `endpoint` 日志同样共 8 MiB；Control 的 `control` 日志共 4 MiB；该 Session 的 `process.crashed` 记录与最新 3 个 dump（每个最多 16 MiB）。节点文件经 `node.logs.list`/`node.logs.read` 读取；整个读取有 15 秒期限（Control 关闭时 3 秒），超时或失败记入 manifest 的 `logs`，包照常写出。

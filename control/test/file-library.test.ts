@@ -12,6 +12,7 @@ import type { ControlDatabase } from '../server/persistence/database';
 import { FileLibrary } from '../server/files/library';
 import type { InternalFileRequest } from '../server/workspace/page-requests';
 import type { LibrarySnapshot, LibrarySource, SelectionState } from '../shared/file-library';
+import { createReadPool } from '../server/workers/read-pool';
 
 const ASSETS = {
   photo: 'a'.repeat(64),
@@ -893,6 +894,7 @@ test('object GC follows live entry assets, originals, candidates, and pending se
     db: f.db,
     atRestKey: new AtRestKey(null),
     transaction: <T>(work: () => T) => f.db.transaction(work)(),
+    readers: createReadPool(':memory:', f.db),
   } as ControlDatabase;
   const objects = new ObjectIndex(
     store,

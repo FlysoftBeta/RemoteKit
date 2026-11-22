@@ -86,7 +86,7 @@ try {
   const first = await control.objects.put('first', chunks(), { maxBytes: 1024 });
   const second = await control.objects.put('second', chunks(), { maxBytes: 1024 });
   assert.deepEqual(second, first);
-  assert.equal(control.objects.usage().objects, 1);
+  assert.equal((await control.objects.storage(false)).objects, 1);
   assert.equal((store.db.prepare('SELECT count(*) AS n FROM object_claims').get() as { n: bigint }).n, 2n);
   const entries = new Map<string, string>();
   for (const tenant of ['first', 'second']) {
@@ -114,13 +114,13 @@ try {
   await control.objects.gc();
   await library('first', 'delete', { operationId: randomUUID(), ids: [entries.get('first')] });
   await control.objects.gc();
-  assert.equal(control.objects.usage().objects, 1);
+  assert.equal((await control.objects.storage(false)).objects, 1);
   await library('second', 'delete', { operationId: randomUUID(), ids: [entries.get('second')] });
   const now = Date.now();
   await control.objects.gc(now);
-  assert.equal(control.objects.usage().objects, 1);
+  assert.equal((await control.objects.storage(false)).objects, 1);
   await control.objects.gc(now + 2 * 60 * 60 * 1000 + 1);
-  assert.equal(control.objects.usage().objects, 0);
+  assert.equal((await control.objects.storage(false)).objects, 0);
 
   await endpoint.published('first');
   await endpoint.stop('first');

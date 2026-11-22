@@ -1,38 +1,48 @@
-import { createRequire } from 'node:module';
-import { cp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
-import { dirname, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '../control');
-const { build } = createRequire(resolve(root, 'package.json'))('esbuild');
+import { createRequire } from "node:module";
+import { cp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
+import { dirname, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "../control");
+const { build } = createRequire(resolve(root, "package.json"))("esbuild");
 // Node loads CommonJS runtime packages directly, preserving their builtin requires.
 await build({
   entryPoints: {
-    server: resolve(root, 'server/main.ts'),
-    'recover-credentials': resolve(root, 'server/recover-credentials.ts'),
+    server: resolve(root, "server/main.ts"),
+    "recover-credentials": resolve(root, "server/recover-credentials.ts"),
+    "read-worker": resolve(root, "server/workers/read-worker.ts"),
   },
-  outdir: resolve(root, 'dist'),
-  outExtension: { '.js': '.mjs' },
+  outdir: resolve(root, "dist"),
+  outExtension: { ".js": ".mjs" },
   bundle: true,
-  platform: 'node',
-  format: 'esm',
-  target: 'node22',
-  define: { 'process.env.NODE_ENV': '"production"' },
+  platform: "node",
+  format: "esm",
+  target: "node22",
+  define: {
+    "process.env.NODE_ENV": '"production"',
+    // The read pool starts workers from the bundle next to server.mjs.
+    __REMOTEKIT_READ_WORKER__: '"./read-worker.mjs"',
+  },
   minifySyntax: true,
   banner: {
     js: "import { createRequire as bundledCreateRequire } from 'node:module'; const require = bundledCreateRequire(import.meta.url);",
   },
-  external: ['better-sqlite3', 'ws'],
+  external: ["better-sqlite3", "ws"],
   sourcemap: false,
 });
-const runtime = resolve(root, 'dist/runtime');
-if (!runtime.startsWith(resolve(root, 'dist') + sep))
-  throw new Error('Runtime destination escaped build directory');
+const runtime = resolve(root, "dist/runtime");
+if (!runtime.startsWith(resolve(root, "dist") + sep))
+  throw new Error("Runtime destination escaped build directory");
 await rm(runtime, { recursive: true, force: true });
 const packages = {
-  'better-sqlite3': ['package.json', 'LICENSE', 'lib', 'build/Release/better_sqlite3.node'],
-  bindings: ['package.json', 'LICENSE.md', 'bindings.js'],
-  'file-uri-to-path': ['package.json', 'LICENSE', 'index.js'],
-  ws: ['package.json', 'LICENSE', 'index.js', 'wrapper.mjs', 'lib'],
+  "better-sqlite3": [
+    "package.json",
+    "LICENSE",
+    "lib",
+    "build/Release/better_sqlite3.node",
+  ],
+  bindings: ["package.json", "LICENSE.md", "bindings.js"],
+  "file-uri-to-path": ["package.json", "LICENSE", "index.js"],
+  ws: ["package.json", "LICENSE", "index.js", "wrapper.mjs", "lib"],
 };
 const manifest = {
   node: process.version,
@@ -42,14 +52,23 @@ const manifest = {
   packages: {},
 };
 for (const [name, files] of Object.entries(packages)) {
-  const source = resolve(root, 'node_modules', name),
-    destination = resolve(runtime, 'node_modules', name);
+  const source = resolve(root, "node_modules", name),
+    destination = resolve(runtime, "node_modules", name);
   await mkdir(destination, { recursive: true });
   for (const file of files) {
     await mkdir(dirname(resolve(destination, file)), { recursive: true });
-    await cp(resolve(source, file), resolve(destination, file), { recursive: true });
+    await cp(resolve(source, file), resolve(destination, file), {
+      recursive: true,
+    });
   }
-  manifest.packages[name] = JSON.parse(await readFile(resolve(source, 'package.json'), 'utf8')).version;
+  manifest.packages[name] = JSON.parse(
+    await readFile(resolve(source, "package.json"), "utf8"),
+  ).version;
 }
-await writeFile(resolve(runtime, 'manifest.json'), JSON.stringify(manifest, null, 2));
-console.log(`Server bundle and minimal runtime ready (${manifest.node}, ABI ${manifest.nodeModuleAbi})`);
+await writeFile(
+  resolve(runtime, "manifest.json"),
+  JSON.stringify(manifest, null, 2),
+);
+console.log(
+  `Server bundle and minimal runtime ready (${manifest.node}, ABI ${manifest.nodeModuleAbi})`,
+);

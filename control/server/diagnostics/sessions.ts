@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { perf } from '../util/perf';
 import type { AdminDiagnostic } from '../../shared/admin';
 import {
   endpointError,
@@ -273,6 +274,7 @@ export class DiagnosticSessions {
             uptimeSeconds: process.uptime(),
             eventLoopDelayMs,
           },
+          perf: perf.snapshot(),
           workspace: this.sources.control(tenant),
         });
         session.controlRetry.succeed();

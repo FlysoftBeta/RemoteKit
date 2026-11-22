@@ -2610,7 +2610,7 @@ test('streamed Control puts deduplicate across tenants, authorize references, ch
     const first = await h.control.objects.put('first', chunks(), { maxBytes: 100 });
     const second = await h.control.objects.put('second', chunks(), { maxBytes: 100 });
     assert.deepEqual(second, first);
-    assert.equal(h.control.objects.usage().objects, 1);
+    assert.equal((await h.control.objects.storage(false)).objects, 1);
     assert.equal(h.control.objects.tenantUsage('first').bytes, first.size);
     assert.equal(h.control.objects.tenantUsage('second').bytes, first.size);
     assert.equal(
@@ -2649,15 +2649,15 @@ test('streamed Control puts deduplicate across tenants, authorize references, ch
     await h.control.objects.gc();
     await call('first', 'delete', { operationId: 'delete', ids: [imported[0].entries[0].id] });
     await h.control.objects.gc();
-    assert.equal(h.control.objects.usage().objects, 1);
+    assert.equal((await h.control.objects.storage(false)).objects, 1);
     assert.equal(h.control.objects.bytes('first'), 0);
     assert.equal(h.control.objects.bytes('second'), first.size);
     await call('second', 'delete', { operationId: 'delete', ids: [imported[1].entries[0].id] });
     const now = Date.now();
     await h.control.objects.gc(now);
-    assert.equal(h.control.objects.usage().objects, 1);
+    assert.equal((await h.control.objects.storage(false)).objects, 1);
     await h.control.objects.gc(now + 2 * 60 * 60 * 1000 + 1);
-    assert.equal(h.control.objects.usage().objects, 0);
+    assert.equal((await h.control.objects.storage(false)).objects, 0);
     assert.equal(alpha.objects.has(first.id), false);
   } finally {
     await h.close();
@@ -2754,9 +2754,9 @@ test('durable reference removal starts its own grace even without a GC tick whil
     h.store.library.save('tenant', { ...snapshot, entries: [] });
     const now = Date.now();
     await h.control.objects.gc(now);
-    assert.equal(h.control.objects.usage().objects, 1);
+    assert.equal((await h.control.objects.storage(false)).objects, 1);
     await h.control.objects.gc(now + 2 * 60 * 60 * 1000 + 1);
-    assert.equal(h.control.objects.usage().objects, 0);
+    assert.equal((await h.control.objects.storage(false)).objects, 0);
   } finally {
     await h.close();
   }

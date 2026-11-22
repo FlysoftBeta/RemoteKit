@@ -1,5 +1,6 @@
 import { ServicePeers } from './viewers/service-peers';
 import { BackgroundJob } from './background';
+import { perf } from './util/perf';
 import { SessionEvents } from './workspace/session-events';
 import { compileDesired } from './workspace/desired';
 import { log } from './log';
@@ -251,13 +252,13 @@ export class ApplicationBackground {
       job = new BackgroundJob('background.run', { job: name });
       this.jobs.set(name, job);
     }
-    return job.run(work, input);
+    return job.run(() => perf.async(`background.${name}`, work), input);
   }
   tick() {
     const input = JSON.stringify(this.nodes.all().map((node) => [node.nodeId, node.state]));
     return Promise.all([
       this.run('reconciler', () => this.control.reconciler.tick(), input),
-      this.run('objects', () => this.control.objects.tick(), input),
+      this.run('objects', () => this.control.objects.scheduled(), input),
       this.run('servicePeers', () => this.control.servicePeers.tick(), input),
     ]).then(() => undefined);
   }
@@ -344,7 +345,7 @@ export function startApplication(
       await background.close();
       await control.close();
       await nodes.stop();
-      store.db.close();
+      await store.close();
     })();
     return closePromise;
   }

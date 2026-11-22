@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { perf } from '../util/perf';
 import { RetryUnit } from '../../shared/retry-unit';
 import {
   canonical,
@@ -251,7 +252,13 @@ export class EndpointGateway {
         let latest: SessionDesired | undefined;
         while (this.stale.has(tenant) && this.desiredSource) {
           if (!this.isReady(tenant)) return;
-          let desired = this.desiredSource(tenant);
+          const compile = () =>
+            perf.sync(
+              'desired.compile',
+              () => this.desiredSource!(tenant),
+              () => ({ tenant }),
+            );
+          let desired = compile();
           const unit = this.publicationRetry(tenant);
           if (!unit.ready(canonical(desired))) return;
           this.stale.delete(tenant);
@@ -263,7 +270,7 @@ export class EndpointGateway {
           }
           await node.coordinate();
           if (!this.desiredSource) return;
-          desired = this.desiredSource(tenant);
+          desired = compile();
           validateDesired(desired);
           const clipboardKey = canonical([
             node.nodeId,
@@ -297,7 +304,11 @@ export class EndpointGateway {
             desired.revision,
           ]);
           if (this.sent.get(tenant) !== key) {
-            await node.publish(desired);
+            await perf.async(
+              'desired.publish',
+              () => node.publish(desired),
+              () => ({ tenant }),
+            );
             this.sent.set(tenant, key);
           }
           unit.succeed();

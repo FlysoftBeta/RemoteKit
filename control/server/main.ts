@@ -10,6 +10,7 @@ import { open } from './persistence/database';
 import { createApplication, startApplication } from './application';
 import { createHttp } from './http/server';
 import { configureLog, FileLogSink, log } from './log';
+import { startLoopMonitor } from './util/perf';
 // Monitor only: Node's default crash on uncaught errors and unhandled rejections stays.
 process.on('uncaughtExceptionMonitor', (err, origin) => {
   log.error('process.fatal', { origin, pid: process.pid, err });
@@ -19,6 +20,7 @@ process.on('uncaughtExceptionMonitor', (err, origin) => {
 });
 const config = runtimeConfig();
 configureLog(new FileLogSink(config.logDir));
+startLoopMonitor();
 mkdirSync(dirname(config.dbPath), { recursive: true });
 const database = open(config.dbPath, { buildId: config.buildId });
 const nodes = new NodeRegistry({

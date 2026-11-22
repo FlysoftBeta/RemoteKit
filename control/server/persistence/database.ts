@@ -17,6 +17,7 @@ import { checkIntegrity, type IntegrityResult } from './integrity';
 import { SecurityRepository } from './security';
 import { WorkspacesRepository } from './workspaces';
 import { SessionImportsRepository } from './session-imports';
+import { createReadPool, type ReadPool } from '../workers/read-pool';
 export interface DatabaseOptions {
   clock?: Clock;
   buildId: string;
@@ -37,6 +38,8 @@ export class ControlDatabase {
   readonly announcements: AnnouncementsRepository;
   readonly clipboards: ClipboardsRepository;
   readonly viewerGenerations: ViewerGenerations;
+  /** Read-only connections on worker threads for whole-database analyses. */
+  readonly readers: ReadPool;
   constructor(path: string, options: DatabaseOptions) {
     this.buildId = options.buildId;
     const clock = options.clock ?? systemClock;
@@ -73,6 +76,11 @@ export class ControlDatabase {
       this.db.close();
       throw error;
     }
+    this.readers = createReadPool(path, this.db);
+  }
+  async close() {
+    await this.readers.close();
+    this.db.close();
   }
   transaction<T>(fn: () => T): T {
     return transaction(this.db, fn);

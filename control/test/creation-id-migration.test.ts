@@ -48,7 +48,7 @@ test('v27 creation receipts migrate explicitly to the strict client id action fo
     const receipts = db.prepare('SELECT receipt FROM operation_receipts ORDER BY id').all();
     const options = { backupDirectory: '', buildId: 'test', atRestKey: new AtRestKey(null) };
     migrate(db, options);
-    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 32 });
+    assert.deepEqual(db.prepare('SELECT version FROM schema_version').get(), { version: 33 });
     const rows = db.prepare('SELECT payload FROM operation_receipts ORDER BY id').all() as {
       payload: string;
     }[];

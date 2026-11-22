@@ -11,7 +11,7 @@ export function driveApplication(
     const node = { nodeId: 'node', state: { state: 'ready', connectionEpoch: 1 } };
     const control = {
       reconciler: { tick: () => work('reconciler'), endpointReady: () => work('endpointReady') },
-      objects: { tick: () => work('objects') },
+      objects: { scheduled: () => work('objects') },
       servicePeers: { tick: () => work('servicePeers') },
       library: { endpointReady: () => {} },
     };

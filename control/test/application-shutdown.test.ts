@@ -26,7 +26,7 @@ const source = `
     async shutdown() { console.log('server stopped'); },
   };
   startApplication({host: 'localhost', port: 0},
-    {db: {close() { console.log('database closed'); }}}, nodes, control, server);
+    {async close() { console.log('database closed'); }}, nodes, control, server);
 `;
 
 for (const stdin of ['pipe', 'ignore'] as const) {

@@ -237,13 +237,14 @@ export class LibraryRepository {
             snapshot.basket = snapshot.basket.filter((entryId) => !selected.has(entryId));
           const pruned = this.prune(tenant, snapshot);
           if (state === 'selected' || pruned) this.save(tenant, snapshot);
+          // A settled selection no longer pins its manifest's assets.
+          syncObjectReferences(this.db);
         }
       } else {
         this.db
           .prepare('UPDATE file_library_selections SET checked=? WHERE tenant=? AND id=?')
           .run(Date.now(), tenant, selectionId);
       }
-      syncObjectReferences(this.db);
     });
   }
   pending(tenant: string, limit: number): Selection[] {

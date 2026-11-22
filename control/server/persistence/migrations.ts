@@ -229,9 +229,18 @@ export const migrations: Migration[] = [
         generation INTEGER NOT NULL CHECK(generation BETWEEN 1 AND 4294967295));`);
     },
   },
+  {
+    version: 33,
+    name: 'object reference lookups by id',
+    up(db) {
+      db.exec(`CREATE INDEX checkpoint_objects_object ON checkpoint_objects(id);
+        CREATE INDEX object_claims_object ON object_claims(id);
+        CREATE INDEX object_gc_unreferenced ON object_gc(unreferenced_at);`);
+    },
+  },
 ];
 
-export const currentVersion = 32;
+export const currentVersion = 33;
 export interface MigrationOptions extends MigrationContext {
   backupDirectory: string;
   buildId: string;

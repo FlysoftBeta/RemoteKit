@@ -69,6 +69,7 @@ def check_control_freshness():
     for relative in (
         'server.mjs',
         'recover-credentials.mjs',
+        'read-worker.mjs',
         'client/index.html',
         'runtime/manifest.json',
     ):
@@ -487,6 +488,7 @@ def package_runtime(args, node_runtime):
     for source in [
         dist / 'server.mjs',
         dist / 'recover-credentials.mjs',
+        dist / 'read-worker.mjs',
         dist / 'client',
         dist / 'runtime/node_modules',
     ]:
@@ -495,6 +497,7 @@ def package_runtime(args, node_runtime):
     (control / 'dist').mkdir()
     shutil.copy2(dist / 'server.mjs', control / 'dist/server.mjs')
     shutil.copy2(dist / 'recover-credentials.mjs', control / 'dist/recover-credentials.mjs')
+    shutil.copy2(dist / 'read-worker.mjs', control / 'dist/read-worker.mjs')
     shutil.copytree(
         dist / 'client', control / 'dist/client', ignore=shutil.ignore_patterns('*.ts', '*.tsx')
     )

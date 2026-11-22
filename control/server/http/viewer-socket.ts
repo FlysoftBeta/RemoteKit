@@ -13,6 +13,7 @@ import { DiagnosticSessions, diagnosticMessageLimit } from '../diagnostics/sessi
 import { viewerErrorReports } from '../diagnostics/viewer-errors';
 import { learningMethods } from '../learning/service';
 import { log, reportError } from '../log';
+import { perf, SLOW_ASYNC_MS } from '../util/perf';
 import type { ViewerAuthority, ViewportTimeline } from '../viewers/viewer-hub';
 
 type DiagnosticAuthority = {
@@ -177,7 +178,7 @@ Object.assign(handlers, {
     const { services } = ctx;
     const nodes = services.nodeAdmin.list(),
       users = services.userAdmin.list(),
-      storage = services.objects.usage(),
+      { tenants: _tenants, ...storage } = await services.objects.storage(false),
       release = services.endpoint.nodes.options.release?.descriptor;
     return {
       integrity: {
@@ -358,10 +359,20 @@ export async function dispatchViewerRequest(
     throw new RemoteKitError('invalid_request', '客户端不能指定用户或租户');
   const handler = Object.prototype.hasOwnProperty.call(handlers, method) ? handlers[method] : undefined;
   if (!handler) throw new RemoteKitError('invalid_request', '未知 WebSocket 方法');
+  const started = performance.now();
   try {
-    return await handler({ services, authority, diagnostics, host, logs, viewportTimeline }, params);
+    // The synchronous prefix holds the event loop; the total includes queueing and remote work.
+    return await perf.sync(
+      `viewer.${method}`,
+      () => handler({ services, authority, diagnostics, host, logs, viewportTimeline }, params),
+      () => ({ tenant: authority.tenantId }),
+    );
   } catch (error) {
     throw toRemoteKitError(error);
+  } finally {
+    perf.record(`viewer.${method}.total`, performance.now() - started, SLOW_ASYNC_MS, () => ({
+      tenant: authority.tenantId,
+    }));
   }
 }
 

@@ -120,6 +120,7 @@ control/
     recovery/      损坏数据库的凭据恢复（入口 recover-credentials.ts，单独打包）
     cluster/       集群通道（Noise、帧、节点链路）、放置、密钥派生、对象索引、指标、更新包、节点管理、Session 清理队列
     endpoint/      类型化网关（按 Tenant 路由到所在节点）与管理消息类型
+    workers/       读 worker：只读 SQLite 连接上的整库分析（worker_threads，见 control-plane.md#进程与连接）
     tenants/       每租户运行时状态
     viewers/       Viewer 租约与 RTC 信令
     workspace/     纯命令、操作管线、对账、导航、生命周期与自动回收、页面请求、弹窗、站点策略

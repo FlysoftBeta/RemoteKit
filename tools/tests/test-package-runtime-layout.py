@@ -109,7 +109,7 @@ try {
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('source')
                 os.utime(path, ns=(1000000000, 1000000000))
-            for name in ['server.mjs', 'recover-credentials.mjs', 'client/index.html', 'runtime/manifest.json']:
+            for name in ['server.mjs', 'recover-credentials.mjs', 'read-worker.mjs', 'client/index.html', 'runtime/manifest.json']:
                 path = root / 'control/dist' / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('artifact')
@@ -179,7 +179,7 @@ try {
                          'libvpl-2.17.0/third-party-programs.txt', 'json-LICENSE.MIT'):
                 put(repo / 'build/dependencies' / name)
             put(repo / 'build/dependencies/nvEncodeAPI.h', b'/* notice */')
-            for name in ('server.mjs', 'recover-credentials.mjs', 'client/index.html',
+            for name in ('server.mjs', 'recover-credentials.mjs', 'read-worker.mjs', 'client/index.html',
                          'runtime/node_modules/native/binding.node'):
                 put(repo / 'control/dist' / name)
             put(repo / 'control/dist/runtime/manifest.json',

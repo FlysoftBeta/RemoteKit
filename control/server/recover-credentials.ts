@@ -94,7 +94,7 @@ function report(plan: RecoveryPlan, dryRun: boolean) {
     console.log(`  ${user.username}${user.isAdmin ? ' [管理员]' : ''}${user.disabledAt ? ' [已停用]' : ''}`);
 }
 
-function main() {
+async function main() {
   const options = parse(process.argv.slice(2));
   const config = parseConfig(process.env, []);
   const database = config.dbPath;
@@ -119,14 +119,14 @@ function main() {
   } catch (error) {
     failure = error as Error;
   }
-  store.db.close();
+  await store.close();
   if (failure) fail(`${failure.message}；旧库在 ${source}，可用 --from 重试`);
   report(plan, false);
   console.log(`新库: ${database}`);
 }
 
 try {
-  main();
+  await main();
 } catch (error) {
   fail((error as Error).message);
 }

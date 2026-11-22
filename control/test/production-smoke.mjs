@@ -23,6 +23,7 @@ const scratch = await mkdtemp(resolve(scratchRoot, 'control-production-')),
   deployment = resolve(scratch, 'control');
 await mkdir(resolve(deployment, 'dist'), { recursive: true });
 await cp(resolve(root, 'dist/server.mjs'), resolve(deployment, 'dist/server.mjs'));
+await cp(resolve(root, 'dist/read-worker.mjs'), resolve(deployment, 'dist/read-worker.mjs'));
 await cp(resolve(root, 'dist/client'), resolve(deployment, 'dist/client'), { recursive: true });
 await cp(resolve(root, 'dist/runtime/node_modules'), resolve(deployment, 'node_modules'), {
   recursive: true,
