@@ -122,10 +122,11 @@ test('read workers answer from their own connection and report failures by code'
     // The worker validates rows as strictly as the main connection.
     store.db.prepare("UPDATE objects SET size='broken' WHERE id=?").run(id(1));
     await assert.rejects(store.readers.run('objects.storage', input), { code: 'internal' });
-    await store.readers.close();
-    await assert.rejects(store.readers.run('objects.storage', input), { code: 'unavailable' });
   } finally {
-    store.db.close();
+    // Workers hold the database files open; they must be gone before the directory is removed.
+    await store.close();
     rmSync(directory, { recursive: true, force: true });
   }
+  const input = { now: Date.now(), replicaNodes: [], target: 0, perTenant: true };
+  await assert.rejects(store.readers.run('objects.storage', input), { code: 'unavailable' });
 });

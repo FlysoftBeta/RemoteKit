@@ -87,7 +87,6 @@ class WorkerReadPool implements ReadPool {
     const worker = new Worker(entry, { workerData: { path: this.path } });
     const slot: Slot = { worker, pending: new Map() };
     this.slots.push(slot);
-    worker.unref();
     worker.on('message', (reply: Reply) => {
       const pending = slot.pending.get(reply.id);
       if (!pending) return;
