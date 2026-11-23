@@ -12,6 +12,8 @@ Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、�
 
 **存储的文档有类型**：SQLite 里不透明的 JSON 值（Tab、Space、窗口状态、设置、站点偏好、App、收藏、操作收据与动作、认证设置、文件库条目与分区、选择清单、会话导入各列、加密的学习会话与人脸模板等）只经 `persistence/codec.ts` 的解码器与编码器读写，定义在 `persistence/documents.ts`（加密载荷在 `sealed-documents.ts`）：键集合封闭、类型与取值范围固定，可选字段在定义里声明；解码器的推断类型必须可赋给 `shared/` 里的类型，漂移是编译错误。编码器写之前同样校验，写不出解码器不接受的值。`persistence/` 之外不解析也不序列化存储数据。原生 SQL 列的类型由 `persistence/sqlite.ts` 校验。解码失败是 `internal` + `reason: corrupt_record`（`detail` 指出表、键、路径与期望），只让需要这一行的请求失败，数据原样保留——读路径从不补默认值、不删除、不改写。必需的行（账户的设置、安全设置、文件库状态）由创建账户的代码写入，读取处不代造。
 
+解码在热路径上（每次对账都要读未结算的操作），所以失败路径也要便宜：`union` 先用各对象分支必需的 literal 字段（如 `type`、`status`、`kind`）排除不可能的分支，不进入解码；解码错误不采集调用栈，只用消息。按 SQL 预筛数据时，只排除能确定无关的行（例如状态明确为 committed/failed 的收据），其余行——包括 SQL 读不出状态的畸形行——仍完整解码，畸形行照样以 `corrupt_record` 失败。
+
 **启动自检**：每次打开都运行 `quick_check`（失败拒绝启动）、`foreign_key_check`，并把每一行存储文档解码一遍；外键与解码问题逐条记 `store.integrity_problem`（error），保留运行，结果（最多 200 条）显示在管理 App → 概览。
 
 **文件库是关系表**：`library_state`（revision、篮子目标分区）、`library_entries`（每条目一行，条目文档经解码器）、`library_entry_objects`（条目引用的对象：当前/原始资产、照片候选，供 GC 与配额直接查询）、`library_partitions`、`library_basket`（有序）、`library_excluded_sources`。业务逻辑仍在 `LibrarySnapshot` 对象上修改，`save()` 只写与已读行不同的部分，一次变更一个事务。

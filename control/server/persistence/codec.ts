@@ -2,14 +2,30 @@ import { RemoteKitError } from '../../shared/errors';
 
 export interface Codec<T> {
   read(value: unknown, path: string): T;
+  /** Values a literal accepts. */
+  readonly values?: readonly unknown[];
+  /** An object's required literal fields, which let a union rule a choice out without decoding it. */
+  readonly tags?: ReadonlyMap<string, readonly unknown[]>;
 }
 export type Decoded<C> = C extends Codec<infer T> ? T : never;
 type Fields = Record<string, Codec<unknown>>;
 type RequiredFields<F extends Fields> = { [K in keyof F]: Decoded<F[K]> };
 type OptionalFields<F extends Fields> = { [K in keyof F]?: Decoded<F[K]> };
 
+// Decoding fails often inside unions and is reported by message only, so it skips stack capture.
+class DecodeError extends Error {
+  constructor(message: string) {
+    const limit = Error.stackTraceLimit;
+    Error.stackTraceLimit = 0;
+    try {
+      super(message);
+    } finally {
+      Error.stackTraceLimit = limit;
+    }
+  }
+}
 function fail(path: string, expected: string): never {
-  throw new Error(`${path} expected ${expected}`);
+  throw new DecodeError(`${path} expected ${expected}`);
 }
 export function string(options: { pattern?: RegExp; min?: number; max?: number } = {}): Codec<string> {
   return {
@@ -51,6 +67,7 @@ export function literal<const T extends readonly (string | number | boolean | nu
   ...values: T
 ): Codec<T[number]> {
   return {
+    values,
     read: (value, path) =>
       values.includes(value as T[number]) ? (value as T[number]) : fail(path, values.map(String).join('|')),
   };
@@ -74,7 +91,10 @@ export function object<R extends Fields, O extends Fields>(
   optional: O,
 ): Codec<RequiredFields<R> & OptionalFields<O>>;
 export function object(required: Fields, optional: Fields = {}): Codec<Record<string, unknown>> {
+  const tags = new Map<string, readonly unknown[]>();
+  for (const [key, codec] of Object.entries(required)) if (codec.values) tags.set(key, codec.values);
   return {
+    tags,
     read(value, path) {
       if (value === null || typeof value !== 'object' || Array.isArray(value)) return fail(path, 'object');
       const input = value as Record<string, unknown>;
@@ -115,18 +135,28 @@ export function record<T>(
 export function nullable<T>(of: Codec<T>): Codec<T | null> {
   return union(literal(null), of);
 }
+function tagMismatch(choice: Codec<unknown>, value: unknown) {
+  if (!choice.tags?.size || value === null || typeof value !== 'object' || Array.isArray(value)) return;
+  for (const [key, values] of choice.tags)
+    if (!values.includes((value as Record<string, unknown>)[key])) return key;
+}
 export function union<const C extends readonly Codec<unknown>[]>(...choices: C): Codec<Decoded<C[number]>> {
   return {
     read(value, path) {
       const failures: string[] = [];
       for (const choice of choices) {
+        const mismatch = tagMismatch(choice, value);
+        if (mismatch !== undefined) {
+          failures.push(`${path}.${mismatch} expected ${choice.tags!.get(mismatch)!.map(String).join('|')}`);
+          continue;
+        }
         try {
           return choice.read(value, path) as Decoded<C[number]>;
         } catch (error) {
           failures.push((error as Error).message);
         }
       }
-      throw new Error(failures.join('; '));
+      throw new DecodeError(failures.join('; '));
     },
   };
 }

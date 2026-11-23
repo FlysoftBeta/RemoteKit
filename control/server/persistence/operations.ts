@@ -114,18 +114,19 @@ export class OperationsRepository {
     ).map((row) => this.decodeReceipt(row.receipt, tenant, row.id));
   }
   pendingOperations(tenant: string): { action: any; receipt: OperationReceipt }[] {
+    // Settled receipts are most of the table; every other row, malformed ones included, is decoded.
     return (
-      this.db.prepare('SELECT id,payload,receipt FROM operation_receipts WHERE tenant=?').all(tenant) as {
-        id: string;
-        payload: string;
-        receipt: string;
-      }[]
-    )
-      .map((row) => ({
-        action: decodeJson(row.payload, codecs.action, `operation_receipts.payload ${tenant}/${row.id}`),
-        receipt: this.decodeReceipt(row.receipt, tenant, row.id),
-      }))
-      .filter((item) => ['accepted', 'applying', 'unknown'].includes(item.receipt.status));
+      this.db
+        .prepare(
+          `SELECT id,payload,receipt FROM operation_receipts WHERE tenant=? AND CASE
+            WHEN json_valid(receipt) THEN coalesce(json_extract(receipt,'$.status') NOT IN ('committed','failed'),1)
+            ELSE 1 END`,
+        )
+        .all(tenant) as { id: string; payload: string; receipt: string }[]
+    ).map((row) => ({
+      action: decodeJson(row.payload, codecs.action, `operation_receipts.payload ${tenant}/${row.id}`),
+      receipt: this.decodeReceipt(row.receipt, tenant, row.id),
+    }));
   }
   reserveOperation(tenant: string, action: RecordedAction, receipt: OperationReceipt): boolean {
     const payload = operationPayload(action, `operation_receipts.payload ${tenant}/${receipt.operationId}`);
