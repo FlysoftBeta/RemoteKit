@@ -8,6 +8,7 @@ import { RemoteKitError } from '../../shared/errors';
 import type { ProductWorkspace } from '../../shared/product';
 import { transaction } from './database';
 import { WorkspaceItemsRepository } from './workspace-items';
+import { perf } from '../util/perf';
 export const defaultSettings = () => ({
   workspace: {
     qualityPreference: 'auto' as const,
@@ -45,6 +46,9 @@ export class WorkspacesRepository {
     this.items = new WorkspaceItemsRepository(db);
   }
   workspace(tenant: string): ProductWorkspace {
+    return perf.sync('workspace.read', () => this.readWorkspace(tenant));
+  }
+  private readWorkspace(tenant: string): ProductWorkspace {
     const row = this.db.prepare('SELECT * FROM workspaces WHERE tenant=?').get(tenant) as
       | {
           revision: bigint;

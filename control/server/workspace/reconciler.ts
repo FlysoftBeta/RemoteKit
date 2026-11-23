@@ -13,6 +13,7 @@ import { isLocalTab } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 import { canonical, type SessionObserved } from '../endpoint/coordination';
 import { KeyedSerialQueue } from '../util/serial-queue';
+import { perf } from '../util/perf';
 import type { NavigationAck } from './navigation';
 
 export class Reconciler {
@@ -193,14 +194,14 @@ export class Reconciler {
       this.context.store.buildId,
     );
     const relief = this.services.lifecycle.relieve();
-    const active = this.context.store.db
-      .prepare(
-        "SELECT tenant FROM session_placements WHERE run_state='running' OR pending_commit IS NOT NULL",
-      )
-      .all() as { tenant: string }[];
-    for (const { tenant } of active) this.context.tenants.get(tenant).started = true;
-    const work = this.context.tenants.activeTenants().map((tenant) => {
-      return this.requestProduct(tenant);
+    const work = perf.sync('reconciler.tick', () => {
+      const active = this.context.store.db
+        .prepare(
+          "SELECT tenant FROM session_placements WHERE run_state='running' OR pending_commit IS NOT NULL",
+        )
+        .all() as { tenant: string }[];
+      for (const { tenant } of active) this.context.tenants.get(tenant).started = true;
+      return this.context.tenants.activeTenants().map((tenant) => this.requestProduct(tenant));
     });
     await Promise.all([...work, relief, reclaim]);
   }
@@ -272,7 +273,13 @@ export class Reconciler {
     this.services.viewers.push(tenant);
   }
   reconcileProduct(tenant: string): Promise<void> {
-    return this.products.run(tenant, () => this.reconcileLatest(tenant));
+    return this.products.run(tenant, () =>
+      perf.async(
+        'reconciler.product',
+        () => this.reconcileLatest(tenant),
+        () => ({ tenant }),
+      ),
+    );
   }
   private async reconcileLatest(tenant: string) {
     if (this.closed || this.context.closed) return;

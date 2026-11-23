@@ -827,43 +827,55 @@ export class ObjectIndex {
               detail: 'Invalid inventory object',
             });
           present.add(item.id);
-          const indexed = this.store.db.prepare('SELECT * FROM objects WHERE id=?').get(item.id) as
-            IndexedObject | undefined;
-          if (
-            indexed &&
-            indexed.stored_sha256 === item.storedSha256 &&
-            Number(indexed.stored_size) === item.storedSize
-          )
-            this.store.db
-              .prepare('INSERT OR IGNORE INTO object_replicas VALUES (?,?)')
-              .run(item.id, node.nodeId);
-          else if (indexed) {
+          const mismatched = perf.sync('objects.inventory.item', () => {
+            const indexed = this.store.db.prepare('SELECT * FROM objects WHERE id=?').get(item.id) as
+              IndexedObject | undefined;
+            const matches =
+              !!indexed &&
+              indexed.stored_sha256 === item.storedSha256 &&
+              Number(indexed.stored_size) === item.storedSize;
+            if (matches)
+              this.store.db
+                .prepare('INSERT OR IGNORE INTO object_replicas VALUES (?,?)')
+                .run(item.id, node.nodeId);
+            else if (!indexed)
+              this.store.db
+                .prepare('INSERT OR IGNORE INTO object_inventory_orphans VALUES (?,?,?)')
+                .run(node.nodeId, item.id, Date.now());
+            return !!indexed && !matches;
+          });
+          if (mismatched) {
             await node.request('object.delete', '', { ids: [item.id] });
             this.removeReplica(item.id, node.nodeId);
-          } else
-            this.store.db
-              .prepare('INSERT OR IGNORE INTO object_inventory_orphans VALUES (?,?,?)')
-              .run(node.nodeId, item.id, Date.now());
+          }
         }
-        this.refreshObjectAvailability(page.objects.map((item: { id: string }) => item.id));
+        perf.sync('objects.inventory.availability', () =>
+          this.refreshObjectAvailability(page.objects.map((item: { id: string }) => item.id)),
+        );
         cursor = page.next;
         if (cursor !== null && seen.has(cursor))
           throw new RemoteKitError('internal', '文件清单游标重复', { detail: 'Inventory cursor repeated' });
         if (cursor !== null) seen.add(cursor);
       } while (cursor !== null);
       if (node.state.state !== 'ready' || node.state.connectionEpoch !== epoch) return;
-      for (const item of this.store.db
-        .prepare('SELECT id FROM object_replicas WHERE node_id=?')
-        .all(node.nodeId) as { id: string }[])
-        if (!present.has(item.id) && !this.fetches.get(node.nodeId)?.has(item.id))
-          this.removeReplica(item.id, node.nodeId);
-      for (const item of this.store.db
-        .prepare('SELECT id FROM object_inventory_orphans WHERE node_id=?')
-        .all(node.nodeId) as { id: string }[])
-        if (!present.has(item.id))
-          this.store.db
-            .prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND id=?')
-            .run(node.nodeId, item.id);
+      perf.sync(
+        'objects.inventory.sweep',
+        () => {
+          for (const item of this.store.db
+            .prepare('SELECT id FROM object_replicas WHERE node_id=?')
+            .all(node.nodeId) as { id: string }[])
+            if (!present.has(item.id) && !this.fetches.get(node.nodeId)?.has(item.id))
+              this.removeReplica(item.id, node.nodeId);
+          for (const item of this.store.db
+            .prepare('SELECT id FROM object_inventory_orphans WHERE node_id=?')
+            .all(node.nodeId) as { id: string }[])
+            if (!present.has(item.id))
+              this.store.db
+                .prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND id=?')
+                .run(node.nodeId, item.id);
+        },
+        () => ({ nodeId: node.nodeId }),
+      );
     } finally {
       this.reconciling.delete(node.nodeId);
       this.inventoryCommits.delete(node.nodeId);
@@ -891,11 +903,11 @@ export class ObjectIndex {
   async gc(now = Date.now()) {
     const db = this.store.db;
     const cutoff = now - GRACE_MS;
-    const protectedTenants = (
-      db.prepare('SELECT DISTINCT tenant FROM object_claims').all() as { tenant: string }[]
-    )
-      .map((row) => row.tenant)
-      .filter((tenant) => this.checkpointing(tenant));
+    const protectedTenants = perf.sync('objects.gc.protected', () =>
+      (db.prepare('SELECT DISTINCT tenant FROM object_claims').all() as { tenant: string }[])
+        .map((row) => row.tenant)
+        .filter((tenant) => this.checkpointing(tenant)),
+    );
     const diff = await this.store.readers.run('objects.referenceDiff', {
       now,
       replicaNodes: configuredReplicaNodes(db),
@@ -956,16 +968,24 @@ export class ObjectIndex {
     const claimTenants = db.prepare('SELECT tenant FROM object_claims WHERE id=?');
     const replicasOf = db.prepare('SELECT node_id FROM object_replicas WHERE id=?');
     const anyReplica = db.prepare('SELECT 1 FROM object_replicas WHERE id=?');
-    let roots = referenceRoots(db);
+    let roots = perf.sync('objects.gc.roots', () => referenceRoots(db));
     for (const object of candidates) {
       await slice.yield();
       if (this.closed) return;
-      if (this.retired.has(object.id) || this.renders.has(object.id) || this.fetching(object.id)) continue;
       // The candidates are a snapshot: recheck each against the current index before deleting.
-      if (!(graceEnded.get(cutoff, object.id) as { ended: bigint } | undefined)?.ended) continue;
-      if (objectReferenced(db, object.id, { since: cutoff, roots })) continue;
-      if ((claimTenants.all(object.id) as { tenant: string }[]).some((row) => this.checkpointing(row.tenant)))
-        continue;
+      const expired = perf.sync(
+        'objects.gc.recheck',
+        () =>
+          !this.retired.has(object.id) &&
+          !this.renders.has(object.id) &&
+          !this.fetching(object.id) &&
+          !!(graceEnded.get(cutoff, object.id) as { ended: bigint } | undefined)?.ended &&
+          !objectReferenced(db, object.id, { since: cutoff, roots }) &&
+          !(claimTenants.all(object.id) as { tenant: string }[]).some((row) =>
+            this.checkpointing(row.tenant),
+          ),
+      );
+      if (!expired) continue;
       this.retired.add(object.id);
       db.prepare('DELETE FROM object_render_failures WHERE source_id=?').run(object.id);
       try {
@@ -980,24 +1000,35 @@ export class ObjectIndex {
           if (!deleted) continue;
           this.removeReplica(object.id, node.nodeId);
           // Retention counts replicas, so a removed copy can change which versions are kept.
-          roots = referenceRoots(db);
+          roots = perf.sync('objects.gc.roots', () => referenceRoots(db));
         }
         if (!anyReplica.get(object.id))
-          this.store.transaction(() => {
-            db.prepare('DELETE FROM objects WHERE id=?').run(object.id);
-            db.prepare('DELETE FROM object_derivations WHERE id=? OR source_id=?').run(object.id, object.id);
-            db.prepare('DELETE FROM object_gc WHERE id=?').run(object.id);
-            db.prepare('DELETE FROM object_claims WHERE id=?').run(object.id);
-          });
+          perf.sync('objects.gc.delete', () =>
+            this.store.transaction(() => {
+              db.prepare('DELETE FROM objects WHERE id=?').run(object.id);
+              db.prepare('DELETE FROM object_derivations WHERE id=? OR source_id=?').run(
+                object.id,
+                object.id,
+              );
+              db.prepare('DELETE FROM object_gc WHERE id=?').run(object.id);
+              db.prepare('DELETE FROM object_claims WHERE id=?').run(object.id);
+            }),
+          );
       } finally {
         this.retired.delete(object.id);
       }
     }
     const indexed = db.prepare('SELECT 1 FROM objects WHERE id=?');
     const clearOrphan = db.prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND id=?');
-    for (const orphan of db
-      .prepare('SELECT * FROM object_inventory_orphans WHERE first_seen<?')
-      .all(now - GRACE_MS) as { node_id: string; id: string }[]) {
+    const orphans = perf.sync(
+      'objects.gc.orphans',
+      () =>
+        db.prepare('SELECT * FROM object_inventory_orphans WHERE first_seen<?').all(now - GRACE_MS) as {
+          node_id: string;
+          id: string;
+        }[],
+    );
+    for (const orphan of orphans) {
       await slice.yield();
       const node = this.nodes.get(orphan.node_id);
       if (node?.state.state !== 'ready') continue;
@@ -1092,53 +1123,54 @@ export class ObjectIndex {
     for (const object of candidates) {
       await slice.yield();
       if (this.closed) break;
-      if (this.retired.has(object.id)) continue;
-      const sources = this.sources(object.id);
-      if (!sources.length) continue;
-      let missing =
-        target -
-        sources.length -
-        ready.filter((node) => this.fetches.get(node.nodeId)?.has(object.id)).length;
-      for (const node of ready
-        .filter((node) => {
-          const sample = node.metrics.latest();
-          return (
-            sample &&
-            sample.value.disk.free - (this.reserved.get(node.nodeId) ?? 0) - Number(object.stored_size) >=
-              diskFloor(node, sample) &&
-            !node.diskDraining &&
-            !this.reconciling.has(node.nodeId) &&
-            !this.inflight.has(JSON.stringify([node.nodeId, object.id])) &&
-            !sources.some((source) => source.nodeId === node.nodeId)
-          );
-        })
-        .sort((a, b) => {
-          const aDisk = a.metrics.latest()!.value.disk,
-            bDisk = b.metrics.latest()!.value.disk;
-          return (
-            1 - aDisk.free / aDisk.total - (1 - bDisk.free / bDisk.total) || a.nodeId.localeCompare(b.nodeId)
-          );
-        })) {
-        if (missing <= 0) break;
-        if ((this.busy.get(node.nodeId) ?? 0) >= 4) {
-          // Held back by the per-node fetch limit; the next pass plans this copy again.
-          this.maintenanceDirty = true;
-          continue;
-        }
-        if (
-          node.metrics.latest()!.value.disk.free -
-            (this.reserved.get(node.nodeId) ?? 0) -
-            Number(object.stored_size) <
-          diskFloor(node, node.metrics.latest()!)
-        )
-          continue;
-        missing--;
-        jobs.push(this.fetch(node, object));
-      }
+      perf.sync('objects.replicate.plan', () => this.planReplicas(object, ready, target, jobs));
     }
     const results = await Promise.allSettled(jobs);
     for (const result of results) if (result.status === 'rejected') throw result.reason;
-    pruneCheckpoints(this.store.db);
+    perf.sync('objects.prune', () => pruneCheckpoints(this.store.db));
+  }
+  private planReplicas(object: IndexedObject, ready: NodeLink[], target: number, jobs: Promise<unknown>[]) {
+    if (this.retired.has(object.id)) return;
+    const sources = this.sources(object.id);
+    if (!sources.length) return;
+    let missing =
+      target - sources.length - ready.filter((node) => this.fetches.get(node.nodeId)?.has(object.id)).length;
+    for (const node of ready
+      .filter((node) => {
+        const sample = node.metrics.latest();
+        return (
+          sample &&
+          sample.value.disk.free - (this.reserved.get(node.nodeId) ?? 0) - Number(object.stored_size) >=
+            diskFloor(node, sample) &&
+          !node.diskDraining &&
+          !this.reconciling.has(node.nodeId) &&
+          !this.inflight.has(JSON.stringify([node.nodeId, object.id])) &&
+          !sources.some((source) => source.nodeId === node.nodeId)
+        );
+      })
+      .sort((a, b) => {
+        const aDisk = a.metrics.latest()!.value.disk,
+          bDisk = b.metrics.latest()!.value.disk;
+        return (
+          1 - aDisk.free / aDisk.total - (1 - bDisk.free / bDisk.total) || a.nodeId.localeCompare(b.nodeId)
+        );
+      })) {
+      if (missing <= 0) break;
+      if ((this.busy.get(node.nodeId) ?? 0) >= 4) {
+        // Held back by the per-node fetch limit; the next pass plans this copy again.
+        this.maintenanceDirty = true;
+        continue;
+      }
+      if (
+        node.metrics.latest()!.value.disk.free -
+          (this.reserved.get(node.nodeId) ?? 0) -
+          Number(object.stored_size) <
+        diskFloor(node, node.metrics.latest()!)
+      )
+        continue;
+      missing--;
+      jobs.push(this.fetch(node, object));
+    }
   }
   private async diskPressure() {
     for (const node of this.nodes.all()) {
@@ -1159,12 +1191,16 @@ export class ObjectIndex {
           )
           .run(node.nodeId, node.nodeId);
       let free = node.metrics.latest()?.value.disk.free ?? sample.value.disk.free;
-      const copies = this.store.db
-        .prepare(
-          `SELECT o.* FROM objects o JOIN object_replicas r
-        ON r.id=o.id WHERE r.node_id=? ORDER BY o.created_at`,
-        )
-        .all(node.nodeId) as IndexedObject[];
+      const copies = perf.sync(
+        'objects.disk_pressure.copies',
+        () =>
+          this.store.db
+            .prepare(
+              `SELECT o.* FROM objects o JOIN object_replicas r
+            ON r.id=o.id WHERE r.node_id=? ORDER BY o.created_at`,
+            )
+            .all(node.nodeId) as IndexedObject[],
+      );
       const slice = new TimeSlice();
       for (const object of copies) {
         await slice.yield();

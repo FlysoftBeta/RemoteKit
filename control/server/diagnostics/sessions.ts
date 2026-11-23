@@ -21,6 +21,7 @@ import { readHostFile, retentionBound, type LogFile } from './host-logs';
 import { log, reportError, localDate } from '../log';
 import { writeDiagnosticArchive, type ArchiveEntry } from './archive';
 import { diagnosticClientSample, diagnosticEndpointSnapshot, diagnosticEnvironment } from './projection';
+import { CpuProfile, cpuProfileMaxBytes, cpuProfileSamplingUs, type CpuProfileResult } from './cpu-profile';
 
 const intervalMs = 2000;
 const maxDurationMs = 10 * 60 * 1000;
@@ -58,6 +59,10 @@ interface CollectedLogs {
   files: Map<ArchiveEntry, Buffer[]>;
   summary: Record<string, unknown>;
 }
+interface CollectedProfile {
+  data?: Buffer;
+  summary: { bytes: number; samplingIntervalUs: number } | { error: string };
+}
 export interface DiagnosticViewer {
   tenant: string;
   identity: string;
@@ -78,10 +83,17 @@ interface Session {
   interval?: NodeJS.Timeout;
   expiry?: NodeJS.Timeout;
   eventLoop: ReturnType<typeof monitorEventLoopDelay>;
+  cpuProfile: CpuProfile;
   controlRetry: RetryUnit;
   endpointRetry: RetryUnit;
   finalization?: Promise<Status>;
-  finalizeWork?: { reason: StopReason; endedAt: number; elapsedMs: number; logs?: CollectedLogs };
+  finalizeWork?: {
+    reason: StopReason;
+    endedAt: number;
+    elapsedMs: number;
+    profile: Promise<CollectedProfile>;
+    logs?: CollectedLogs;
+  };
   finalizeRetry?: RetryUnit;
   unavailable: { control: number; endpoint: number; browserOutput: number; endpointPending: number };
   truncated: Set<string>;
@@ -148,6 +160,7 @@ export class DiagnosticSessions {
       controlRetry: new RetryUnit({ name: 'diagnostics.control_sample' }),
       endpointRetry: new RetryUnit({ name: 'diagnostics.endpoint_sample' }),
       eventLoop: monitorEventLoopDelay({ resolution: 20 }),
+      cpuProfile: new CpuProfile(),
       unavailable: { control: 0, endpoint: 0, browserOutput: 0, endpointPending: 0 },
       truncated: new Set(),
     };
@@ -336,6 +349,7 @@ export class DiagnosticSessions {
         reason,
         endedAt: Date.now(),
         elapsedMs: performance.now() - session.startedMonotonicMs,
+        profile: session.cpuProfile.stop().then((result) => this.profileSummary(id, result)),
       };
       clearInterval(session.interval);
       clearTimeout(session.expiry);
@@ -367,7 +381,8 @@ export class DiagnosticSessions {
     session.finalization = Promise.resolve()
       .then(async () => {
         work.logs ??= await this.collectLogs(session, work.reason);
-        return this.write(session, work.reason, work.endedAt, work.elapsedMs, work.logs);
+        const profile = await work.profile;
+        return this.write(session, work.reason, work.endedAt, work.elapsedMs, work.logs, profile);
       })
       .then((status) => {
         unit.succeed();
@@ -407,10 +422,11 @@ export class DiagnosticSessions {
     endedAt: number,
     elapsedMs: number,
     logs: CollectedLogs,
+    profile: CollectedProfile,
   ): Promise<Status> {
     const { id } = session.status;
     const manifest = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       id,
       startedAt: session.startedAt,
       endedAt,
@@ -425,8 +441,10 @@ export class DiagnosticSessions {
         sampleIntervalMs: intervalMs,
         messageBytes: diagnosticMessageLimit,
         logBytes: logBudgets,
+        cpuProfileBytes: cpuProfileMaxBytes,
       },
       logs: logs.summary,
+      cpuProfile: profile.summary,
       sources: Object.fromEntries(
         Object.entries(session.entries).map(([source, rows]) => [
           source,
@@ -452,6 +470,7 @@ export class DiagnosticSessions {
     ]);
     for (const source of ['client', 'control', 'endpoint', 'events'] as const)
       if (session.entries[source].length) entries.set(`${source}.jsonl`, session.entries[source]);
+    if (profile.data) entries.set('control.cpuprofile', [profile.data]);
     for (const [name, chunks] of logs.files) entries.set(name, chunks);
     return writeDiagnosticArchive(
       this.ownerDirectory(session.viewer.tenant),
@@ -460,6 +479,19 @@ export class DiagnosticSessions {
       endedAt,
       reason,
     ).then((bytes) => ({ id, status: 'complete' as const, bytes, reason }));
+  }
+
+  private profileSummary(diagnosticId: string, result: CpuProfileResult): CollectedProfile {
+    if ('data' in result)
+      return {
+        data: result.data,
+        summary: { bytes: result.data.length, samplingIntervalUs: cpuProfileSamplingUs },
+      };
+    const error = reportError(toRemoteKitError(result.error), 'diagnostics.cpu_profile_failed', {
+      diagnosticId,
+    });
+    const text = `${error.code}: ${(error.detail ?? error.message).split(/\r?\n/)[0]}`;
+    return { summary: { error: error.errorId ? `${text} (${error.errorId})` : text } };
   }
 
   private async collectLogs(session: Session, reason: StopReason): Promise<CollectedLogs> {

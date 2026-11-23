@@ -52,7 +52,7 @@ const logSummary = union(
 );
 const source = object({ records: count(), available: boolean() });
 export const diagnosticManifest = object({
-  schemaVersion: literal(2),
+  schemaVersion: literal(3),
   id: string({ pattern: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/ }),
   startedAt: count(),
   endedAt: count(),
@@ -90,8 +90,10 @@ export const diagnosticManifest = object({
       dump: count(),
       dumpCount: count(),
     }),
+    cpuProfileBytes: count(),
   }),
   logs: record(logSummary, { key: /^[a-zA-Z0-9_./-]+$/, max: 10000 }),
+  cpuProfile: union(object({ bytes: count(), samplingIntervalUs: count() }), object({ error: text() })),
   sources: object({ client: source, control: source, endpoint: source, events: source }),
   unavailable: object({
     control: count(),

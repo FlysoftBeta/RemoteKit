@@ -260,7 +260,12 @@ export class EndpointGateway {
             );
           let desired = compile();
           const unit = this.publicationRetry(tenant);
-          if (!unit.ready(canonical(desired))) return;
+          const input = perf.sync(
+            'desired.prepare',
+            () => canonical(desired),
+            () => ({ tenant }),
+          );
+          if (!unit.ready(input)) return;
           this.stale.delete(tenant);
           const placed = this.placement.peek(tenant)!;
           const node = this.nodes.get(placed.nodeId);
@@ -271,7 +276,11 @@ export class EndpointGateway {
           await node.coordinate();
           if (!this.desiredSource) return;
           desired = compile();
-          validateDesired(desired);
+          perf.sync(
+            'desired.prepare',
+            () => validateDesired(desired),
+            () => ({ tenant }),
+          );
           const clipboardKey = canonical([
             node.nodeId,
             desired.connectionEpoch,

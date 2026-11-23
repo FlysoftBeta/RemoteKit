@@ -694,7 +694,14 @@ export class NodeLink extends EventEmitter implements EndpointLink {
   send(message: object) {
     const connection = this.current;
     if (!connection) return;
-    this.sendFrame(connection, encodeJson(message));
+    this.sendFrame(
+      connection,
+      perf.sync(
+        'node.frame.encode',
+        () => encodeJson(message),
+        () => ({ nodeId: this.nodeId, type: (message as { type?: unknown }).type }),
+      ),
+    );
   }
   private sendFrame(connection: Connection, bytes: Buffer) {
     try {
@@ -770,7 +777,11 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     const id = randomUUID();
     let message: Buffer;
     try {
-      message = encodeJson({ ...envelope, id });
+      message = perf.sync(
+        'node.frame.encode',
+        () => encodeJson({ ...envelope, id }),
+        () => ({ nodeId: this.nodeId, method: (envelope as { method?: unknown }).method }),
+      );
     } catch (error) {
       return Promise.reject(
         error instanceof RemoteKitError
@@ -1062,14 +1073,24 @@ export class NodeRegistry extends EventEmitter {
             .catch((error) => carrier.closeWithCause('write_failed', errorDetail(error)));
           return;
         }
-        failureReason = 'decrypt_failed';
-        const plaintext = connection.transport.receive.decrypt(bytes);
-        failureReason = 'frame_decode_error';
-        const frame = decodeFrame(plaintext);
+        const frame = perf.sync(
+          'node.frame.decode',
+          () => {
+            failureReason = 'decrypt_failed';
+            const plaintext = connection!.transport.receive.decrypt(bytes);
+            failureReason = 'frame_decode_error';
+            return decodeFrame(plaintext);
+          },
+          () => ({ nodeId: link?.nodeId, bytes: bytes.length }),
+        );
         failureReason = 'protocol_violation';
         if (frame.kind === 'binary') {
           if (role !== 'endpoint') throw new Error('Unexpected binary message');
-          link!.receiveBinary(connection, frame.header, frame.bytes);
+          perf.sync(
+            'node.binary',
+            () => link!.receiveBinary(connection!, frame.header, frame.bytes),
+            () => ({ nodeId: link!.nodeId, bytes: frame.bytes.length }),
+          );
           return;
         }
         const message = frame.message;

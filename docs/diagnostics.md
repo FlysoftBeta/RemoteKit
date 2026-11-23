@@ -73,12 +73,22 @@ Control 读取节点日志只用三个节点级方法（不属于任何 Session�
 
 Control 在关键路径上打点（`server/util/perf.ts`）：
 
-- `perf.sync` 包住占用事件循环的同步工作：节点消息分发 `node.<event>`、Viewer 请求的同步前缀 `viewer.<method>`、期望文档编译 `desired.compile`、引用同步 `objects.gc.references`、checkpoint 裁剪 `objects.prune`、内联读任务 `read.<task>`。
-- `perf.async` 包住整段操作：`viewer.<method>.total`、Control 发往 Endpoint 的请求往返 `endpoint.<method>`、处理节点请求 `node.rpc.<request>`、`desired.publish`、后台作业 `background.<job>`、对象维护各阶段 `objects.gc` / `objects.disk_pressure` / `objects.replicate`、读 worker 任务 `read.<task>`（含排队），以及 worker 内的执行时间 `read.<task>.run`。
+- `perf.sync` 包住占用事件循环的同步工作：
+  - 节点链路：帧解密与解码 `node.frame.decode`、编码 `node.frame.encode`、消息分发 `node.<event>`、二进制帧 `node.binary`；
+  - Viewer：请求的同步前缀 `viewer.<method>`、产品状态投影 `viewer.state`、WebSocket 序列化与发送 `viewer.send`；
+  - 工作区与发布：工作区读取解码 `workspace.read`、期望文档编译 `desired.compile`、规范化与校验 `desired.prepare`、reconciler 周期的同步前缀 `reconciler.tick`；
+  - 对象维护：checkpoint 裁剪 `objects.prune`、GC 的受保护租户 `objects.gc.protected`、引用根 `objects.gc.roots`、批量应用 `objects.gc.apply`、逐项复核 `objects.gc.recheck`、删除 `objects.gc.delete`、孤儿列表 `objects.gc.orphans`，复制规划 `objects.replicate.plan`，磁盘压力的副本列表 `objects.disk_pressure.copies`，节点清单对账的逐项 `objects.inventory.item`、可用性刷新 `objects.inventory.availability` 与收尾 `objects.inventory.sweep`；
+  - 内联读任务 `read.<task>`。
+  - 外层与内层可以同时计时（例如 `viewer.state` 内含 `workspace.read`），窗口里的各项耗时因此可能重叠，不能相加。
+- `perf.async` 包住整段操作：`viewer.<method>.total`、Control 发往 Endpoint 的请求往返 `endpoint.<method>`、处理节点请求 `node.rpc.<request>`、`desired.publish`、单个租户的产品对账 `reconciler.product`、后台作业 `background.<job>`、对象维护各阶段 `objects.gc` / `objects.disk_pressure` / `objects.replicate`、读 worker 任务 `read.<task>`（含排队），以及 worker 内的执行时间 `read.<task>.run`。
 - 单次同步 ≥50ms、异步 ≥1s 时，记一条 `perf.slow{op, ms, sync, …}`（info），带 tenant 或 nodeId 等字段。
 - 事件循环延迟每秒采样一次；窗口最大值 ≥200ms 时，记 `control.event_loop_stall{maxMs, p99Ms, meanMs, ops}`（warn）。`ops` 是该窗口里累计耗时最长的 8 项同步工作，用来定位是谁卡住了事件循环。
 
 诊断包里每个 Control 样本都带 `perf`：各操作自启动以来的次数、总时长、最大值与慢次数（前 40 项），以及最近 10 个事件循环窗口。
+
+异步耗时包含等待事件循环的时间：主线程饱和时，`read.<task>`、`endpoint.<method>` 等会一起变长，而 worker 内的 `read.<task>.run` 仍然很短。这种情况下要找的是同步工作，不是这些被拖慢的异步操作。
+
+计时只覆盖打点过的路径。为了看到未打点的同步工作，每次用户侧诊断收集同时对 Control 主线程做 V8 CPU 采样（`server/diagnostics/cpu-profile.ts`）：每次收集通过 `node:inspector` 开一个自己的 inspector 会话，采样间隔 1ms，并发收集的 profile 互相独立；收集结束（任何原因）时停止，结果作为 `control.cpuprofile`（DevTools 格式，可直接在 Chrome DevTools 的 Performance 面板或 speedscope 打开）放进诊断包。停止时序列化 profile 会占用主线程一小段时间。profile 超过 24 MiB 或采样失败时不写这个成员，原因记在 manifest 的 `cpuProfile.error`；成功时 `cpuProfile` 是 `{bytes, samplingIntervalUs}`。read worker 不在采样范围内，它们的耗时看 `read.<task>.run`。
 
 ## 诊断包
 
@@ -104,7 +114,7 @@ Control 在关键路径上打点（`server/util/perf.ts`）：
 - 采样数据（JSONL）不包含：凭据、SDP/候选 IP、Profile、用户文件、页面像素、输入文本。投影使用字段白名单和遍历预算。
 - **原始日志**在停止时原样收录，不做脱敏，都从尾部向前读，因此包含开始诊断之前的历史——"先出问题、再开诊断"也能看到现场：本 Session 的 Browser 日志（最新的 `browser-<sessionId>` 文件，不足时向前一个文件补足）共 16 MiB；节点的 `endpoint` 日志同样共 8 MiB；Control 的 `control` 日志共 4 MiB；该 Session 的 `process.crashed` 记录与最新 3 个 dump（每个最多 16 MiB）。节点文件经 `node.logs.list`/`node.logs.read` 读取；整个读取有 15 秒期限（Control 关闭时 3 秒），超时或失败记入 manifest 的 `logs`，包照常写出。
 
-**限制与生命周期**：每次最长 10 分钟，采样数据 32MiB 未压缩（日志另计上述预算），单个请求 128KiB；全局并发 4 个；最近 1024 个状态记录。锁定、授权变化、断线、时长/大小上限、正常关闭都会以对应原因结束；重复 stop/status 幂等。包是 USTAR + Zstandard（Node 内置），包含 manifest、非空的 client/control/endpoint/events JSONL 成员与 `logs/` 下的原始日志，先写部分文件再发布，路径 `<db目录>/diagnostics/<SHA256(tenant)>/<id>.tar.zst`，旁边的 `.reason` 是 `{version, reason}`；manifest 带 `schemaVersion`，两者的格式定义在 `control/server/diagnostics/formats.ts`，重启后仍可按 ID 查询。强制终止 Control 会丢失进行中的内存数据。
+**限制与生命周期**：每次最长 10 分钟，采样数据 32MiB 未压缩（日志另计上述预算），单个请求 128KiB；全局并发 4 个；最近 1024 个状态记录。锁定、授权变化、断线、时长/大小上限、正常关闭都会以对应原因结束；重复 stop/status 幂等。包是 USTAR + Zstandard（Node 内置），包含 manifest、非空的 client/control/endpoint/events JSONL 成员、Control 的 `control.cpuprofile`（见 [Control 计时](#control-计时)）与 `logs/` 下的原始日志，先写部分文件再发布，路径 `<db目录>/diagnostics/<SHA256(tenant)>/<id>.tar.zst`，旁边的 `.reason` 是 `{version, reason}`；manifest 带 `schemaVersion`，两者的格式定义在 `control/server/diagnostics/formats.ts`，重启后仍可按 ID 查询。强制终止 Control 会丢失进行中的内存数据。
 
 ## 开发侧追踪
 

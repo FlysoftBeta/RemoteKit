@@ -420,7 +420,12 @@ export function attachViewerSocket(
           bufferedAmount: ws.bufferedAmount,
         });
         ws.terminate();
-      } else ws.send(JSON.stringify(message));
+      } else
+        perf.sync(
+          'viewer.send',
+          () => ws.send(JSON.stringify(message)),
+          () => ({ tenant: peers.get(ws)?.tenant, type: (message as { type?: unknown }).type }),
+        );
     }
   };
   const push = (tenant: string, state: ProductState) => {

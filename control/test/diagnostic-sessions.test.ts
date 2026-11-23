@@ -254,6 +254,7 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
       'control.jsonl',
       'endpoint.jsonl',
       'events.jsonl',
+      'control.cpuprofile',
       `logs/control/${day}/control.1.jsonl`,
       `logs/control/${day}/control.jsonl`,
       `logs/node/${browserPath}`,
@@ -291,7 +292,14 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
     start: 0,
     bytes: browserLog.length,
   });
-  assert.equal(manifest.schemaVersion, 2);
+  assert.equal(manifest.schemaVersion, 3);
+  const profile = JSON.parse(files.get('control.cpuprofile')!);
+  assert.ok(Array.isArray(profile.nodes) && profile.nodes.length > 0);
+  assert.ok(Array.isArray(profile.samples) && profile.samples.length === profile.timeDeltas.length);
+  assert.deepEqual(manifest.cpuProfile, {
+    bytes: Buffer.byteLength(files.get('control.cpuprofile')!),
+    samplingIntervalUs: 1000,
+  });
   assert.deepEqual(manifest.environment, { platform: 'android', browserVersion: '139.0.1.2' });
   assert.equal(manifest.sources.client.records, 1);
   assert.equal(manifest.interrupted, false);

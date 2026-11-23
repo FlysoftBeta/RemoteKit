@@ -4,6 +4,7 @@ import { RemoteKitError, STALE_GENERATION_DETAIL, wireError } from '../../shared
 import { OCCLUSION_SEQUENCE_MAX, splitOcclusionRevision } from '../../shared/occlusion-revision';
 import { canonicalJson } from '../config';
 import { log } from '../log';
+import { perf } from '../util/perf';
 
 import type { ProductState, ViewerViewport } from '../../shared/product';
 import { isLocalTab } from '../../shared/product';
@@ -23,6 +24,13 @@ export class ViewerHub {
     >,
   ) {}
   productState(tenant: string): ProductState {
+    return perf.sync(
+      'viewer.state',
+      () => this.buildProductState(tenant),
+      () => ({ tenant }),
+    );
+  }
+  private buildProductState(tenant: string): ProductState {
     const runtime = this.context.tenants.get(tenant);
     const workspace = this.context.store.workspaces.workspace(tenant);
     const user = this.context.store.accounts.userForTenant(tenant);
